@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[workspace.dependencies]
+clackatoo-term = { path = "crates/term" }
+clackatoo-protocol = { path = "crates/protocol" }
+clackatoo-daemon = { path = "crates/daemon" }
+
+bitflags = "2.13"
+log = "0.4"
+thiserror = "2.0"
+unicode-width = "0.2"
+vte = { version = "0.15", default-features = false, features = ["std"] }
+
+insta = "1.49"
+proptest = "1.11"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
