@@ -1,0 +1,21 @@
+[package]
+name = "clackatoo-term"
+description = "Terminal emulation core: escape-sequence dispatch onto clackatoo's own grid. Performs no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+bitflags.workspace = true
+log.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true
+vte.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

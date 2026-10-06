@@ -1,0 +1,35 @@
+//! clackatoo's terminal emulation core.
+//!
+//! Feed a [`Terminal`] the bytes a program writes to its terminal, and it
+//! keeps the screen those bytes describe: a [`Grid`] of [`Row`]s of
+//! [`Cell`]s, with scrollback, a cursor and the modes apps switch on.
+//!
+//! The crate does no I/O and uses no OS APIs. The daemon owns the PTYs and
+//! feeds the bytes in. Keeping this crate pure means it also builds for
+//! `wasm32-unknown-unknown`, for a future browser client.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+mod cell;
+mod charset;
+mod dispatch;
+mod grid;
+pub mod recording;
+mod row;
+mod sgr;
+mod size;
+mod style;
+mod tabs;
+mod terminal;
+mod utf8;
+
+#[cfg(test)]
+mod tests;
+
+pub use cell::{Cell, CellFlags};
+pub use grid::Grid;
+pub use row::Row;
+pub use size::{InvalidSize, Size};
+pub use style::{Attributes, Color, Style, Underline};
+pub use terminal::{Config, Cursor, Terminal};
