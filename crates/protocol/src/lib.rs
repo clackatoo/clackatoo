@@ -109,6 +109,13 @@ pub enum Error {
     /// No terminal has this ID. It may have been closed.
     #[error("no terminal {0}")]
     NoSuchTerminal(TerminalId),
+    /// The terminal's program has exited, so it takes no more input.
+    #[error("terminal {0} has exited")]
+    TerminalExited(TerminalId),
+    /// The terminal's program isn't reading its input, and too much is
+    /// already queued for it.
+    #[error("terminal {0} is not reading its input; too much is already queued")]
+    InputBacklogFull(TerminalId),
     /// The terminal could not be started.
     #[error("could not start the terminal: {0}")]
     SpawnFailed(String),

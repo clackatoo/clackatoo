@@ -1,0 +1,359 @@
+//! End-to-end tests: a real daemon, real PTYs, real programs.
+
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle};
+use clackatoo_protocol::frame::{self, FrameDecoder};
+use clackatoo_protocol::{
+    Error, NewTerminal, PROTOCOL_VERSION, Request, Response, Screen, Size, TerminalId,
+    TerminalStatus,
+};
+use clackatoo_term::Terminal;
+use clackatoo_term::recording::Recording;
+
+/// A daemon running on its own thread, in its own temporary directory.
+struct TestDaemon {
+    dir: tempfile::TempDir,
+    shutdown: ShutdownHandle,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl TestDaemon {
+    fn start() -> Self {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = DaemonConfig {
+            terminal: clackatoo_term::Config::default(),
+            shell: "/bin/sh".into(),
+            home: dir.path().to_owned(),
+        };
+        let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
+        let shutdown = daemon.shutdown_handle();
+        let thread = std::thread::spawn(move || daemon.run().expect("daemon failed"));
+        Self {
+            dir,
+            shutdown,
+            thread: Some(thread),
+        }
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.dir.path().join("daemon.sock")
+    }
+
+    fn client(&self) -> Client {
+        Client::connect(&self.socket()).expect("connect")
+    }
+}
+
+impl Drop for TestDaemon {
+    fn drop(&mut self) {
+        self.shutdown.shutdown();
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("daemon thread panicked");
+        }
+    }
+}
+
+fn spawn(client: &mut Client, command: &[&str]) -> TerminalId {
+    client
+        .new_terminal(NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(command.iter().map(|&arg| arg.to_owned()).collect()),
+            cwd: None,
+            record_to: None,
+        })
+        .expect("new terminal")
+}
+
+fn screen_text(screen: &Screen) -> String {
+    screen.lines.iter().map(|line| line.text() + "\n").collect()
+}
+
+/// Captures `terminal` until its text satisfies `done`, failing after a few
+/// seconds.
+fn wait_for_screen(
+    client: &mut Client,
+    terminal: TerminalId,
+    done: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = screen_text(&client.capture(terminal).expect("capture"));
+        if done(&text) {
+            return text;
+        }
+        assert!(Instant::now() < deadline, "timed out; screen was:\n{text}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_status(client: &mut Client, terminal: TerminalId) -> TerminalStatus {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let info = client
+            .list_terminals()
+            .expect("list")
+            .into_iter()
+            .find(|info| info.id == terminal)
+            .expect("terminal is listed");
+        if info.status != TerminalStatus::Running {
+            return info.status;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn output_reaches_the_grid() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["printf", r"hello\r\n\033[1mworld"]);
+    let text = wait_for_screen(&mut client, terminal, |text| text.contains("world"));
+    assert!(text.starts_with("hello\nworld\n"), "{text}");
+    assert_eq!(
+        wait_for_status(&mut client, terminal),
+        TerminalStatus::Exited(0)
+    );
+}
+
+#[test]
+fn input_reaches_the_program() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(
+        &mut client,
+        &["sh", "-c", r#"read line; printf 'got:%s' "$line"; sleep 5"#],
+    );
+    client.send_input(terminal, b"abc\r").expect("send");
+    wait_for_screen(&mut client, terminal, |text| text.contains("got:abc"));
+}
+
+#[test]
+fn replies_to_queries_reach_the_program() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    // Ask "are you OK?" (DSR 5) with echo off, and show the four reply bytes.
+    let script = r"stty raw -echo; printf '\033[5n'; head -c 4 | od -An -c; sleep 5";
+    let terminal = spawn(&mut client, &["sh", "-c", script]);
+    let text = wait_for_screen(&mut client, terminal, |text| text.contains('n'));
+    assert!(text.contains("033   [   0   n"), "{text}");
+}
+
+#[test]
+fn programs_get_the_terminal_size_and_environment() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(
+        &mut client,
+        &["sh", "-c", "stty size; echo $TERM $COLORTERM; sleep 5"],
+    );
+    wait_for_screen(&mut client, terminal, |text| {
+        text.contains("10 40") && text.contains("xterm-256color truecolor")
+    });
+}
+
+#[test]
+fn exit_codes_and_signals_are_reported() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let exited = spawn(&mut client, &["sh", "-c", "exit 3"]);
+    let killed = spawn(&mut client, &["sh", "-c", "kill -9 $$"]);
+    assert_eq!(
+        wait_for_status(&mut client, exited),
+        TerminalStatus::Exited(3)
+    );
+    assert_eq!(
+        wait_for_status(&mut client, killed),
+        TerminalStatus::Killed(9)
+    );
+}
+
+#[test]
+fn a_background_job_holding_the_pty_does_not_hide_the_exit() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["sh", "-c", "sleep 5 & exit 0"]);
+    assert_eq!(
+        wait_for_status(&mut client, terminal),
+        TerminalStatus::Exited(0)
+    );
+}
+
+#[test]
+fn input_to_an_exited_terminal_is_refused() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["true"]);
+    wait_for_status(&mut client, terminal);
+    // The PTY closes when the program does, give or take a moment.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match client.send_input(terminal, b"x") {
+            Err(ClientError::Daemon(Error::TerminalExited(id))) => {
+                assert_eq!(id, terminal);
+                break;
+            }
+            Ok(()) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn closing_removes_the_terminal() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["sleep", "30"]);
+    client.close_terminal(terminal).expect("close");
+    assert!(client.list_terminals().expect("list").is_empty());
+    assert!(matches!(
+        client.capture(terminal),
+        Err(ClientError::Daemon(Error::NoSuchTerminal(_)))
+    ));
+}
+
+#[test]
+fn bad_commands_are_reported() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let result = client.new_terminal(NewTerminal {
+        size: Size::new(40, 10).unwrap(),
+        command: Some(vec!["/nonexistent/program".to_owned()]),
+        cwd: None,
+        record_to: None,
+    });
+    assert!(matches!(
+        result,
+        Err(ClientError::Daemon(Error::SpawnFailed(_)))
+    ));
+    assert!(client.list_terminals().expect("list").is_empty());
+}
+
+#[test]
+fn a_flood_of_output_does_not_starve_other_clients() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let flood = spawn(
+        &mut client,
+        &[
+            "sh",
+            "-c",
+            "yes flood | head -c 20000000; echo; echo done; sleep 5",
+        ],
+    );
+
+    let mut other = daemon.client();
+    let started = Instant::now();
+    other.list_terminals().expect("list during flood");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "answer took {:?}",
+        started.elapsed()
+    );
+
+    wait_for_screen(&mut client, flood, |text| text.contains("done"));
+}
+
+#[test]
+fn recordings_replay_to_the_same_screen() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let path = daemon.dir.path().join("out.rec");
+    let terminal = client
+        .new_terminal(NewTerminal {
+            size: Size::new(20, 5).unwrap(),
+            command: Some(vec![
+                "printf".into(),
+                r"\033[2J\033[3;5Hred \033[31mtext\033[0m".into(),
+            ]),
+            cwd: None,
+            record_to: Some(path.to_str().unwrap().to_owned()),
+        })
+        .expect("new terminal");
+    wait_for_status(&mut client, terminal);
+    let live = wait_for_screen(&mut client, terminal, |text| text.contains("text"));
+
+    let bytes = std::fs::read(&path).expect("recording written");
+    let recording = Recording::parse(&bytes).expect("valid recording");
+    let mut replay = Terminal::new(recording.size, &clackatoo_term::Config::default());
+    replay.advance(recording.output);
+    assert_eq!(screen_text(&Screen::capture(&replay)), live);
+}
+
+/// Reads everything the daemon sends until it hangs up.
+fn read_until_hangup(stream: &mut UnixStream) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return bytes,
+            Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+            // The daemon hangs up on clients that break the protocol. If some
+            // of what we sent was still unread then, the kernel reports the
+            // hangup as a reset, after the responses that were sent.
+            Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => return bytes,
+            Err(err) => panic!("read failed: {err}"),
+        }
+    }
+}
+
+/// Sends raw frames, to test what the typed client never sends.
+fn raw_exchange(socket: &Path, requests: &[Request]) -> Vec<Response> {
+    let mut stream = UnixStream::connect(socket).expect("connect");
+    for request in requests {
+        stream.write_all(&frame::encode(request).unwrap()).unwrap();
+    }
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let bytes = read_until_hangup(&mut stream);
+    let mut decoder = FrameDecoder::new();
+    decoder.push(&bytes);
+    std::iter::from_fn(|| decoder.decode().unwrap()).collect()
+}
+
+#[test]
+fn requests_before_hello_are_refused() {
+    let daemon = TestDaemon::start();
+    let responses = raw_exchange(
+        &daemon.socket(),
+        &[Request::ListTerminals, Request::ListTerminals],
+    );
+    assert_eq!(responses, [Response::Error(Error::HelloRequired)]);
+}
+
+#[test]
+fn a_version_mismatch_gets_our_version_then_a_hangup() {
+    let daemon = TestDaemon::start();
+    let responses = raw_exchange(
+        &daemon.socket(),
+        &[
+            Request::Hello {
+                protocol_version: PROTOCOL_VERSION + 1,
+            },
+            Request::ListTerminals,
+        ],
+    );
+    assert_eq!(
+        responses,
+        [Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }]
+    );
+}
+
+#[test]
+fn garbage_drops_only_that_client() {
+    let daemon = TestDaemon::start();
+    let mut stream = UnixStream::connect(daemon.socket()).unwrap();
+    stream.write_all(&[255, 255, 255, 255, 1, 2, 3]).unwrap();
+    assert!(read_until_hangup(&mut stream).is_empty());
+
+    daemon
+        .client()
+        .list_terminals()
+        .expect("daemon still serves others");
+}
