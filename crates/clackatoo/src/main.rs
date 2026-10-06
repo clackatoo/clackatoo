@@ -1,5 +1,7 @@
 //! The `clackatoo` command: runs the daemon, and drives it from the shell.
 
+#![forbid(unsafe_code)]
+
 mod render;
 
 use std::io::{self, Write};

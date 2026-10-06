@@ -63,6 +63,7 @@ pub(crate) struct Program<'a> {
 }
 
 /// Starts `program` on a new PTY of `size`.
+#[allow(unsafe_code)]
 pub(crate) fn spawn(program: &Program<'_>, size: Size) -> io::Result<Spawned> {
     let master =
         rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
