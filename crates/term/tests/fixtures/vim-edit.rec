@@ -1,0 +1,60 @@
+clackatoo-recording v1 cols=60 rows=12
+[?1049h[22;0;0t[?1h=[H[2J[?2004h[?2026$p[?2027$p[?2031$p[?2048$p[0m[4:3mP$qm\[?u[c[?25h]11;?P+q5463;524742;73657472676266;73657472676262\[0m[48;2;1;2;3mP$qm\[?25l[>4;2m(B[m[H                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            [12;1H(B[m[91mE303: Unable to create directory "/nonexistent" for swap fil[8;12r[8;1H(B[m[4M[r[7;1H                                                            
+
+[91me, recovery impossible: permission denied(B[m                   
+[91mE303: Unable to open swap file for "numbers.txt", recovery i
+mpossible(B[m                                                   
+[96mPress ENTER or type command to continue(B[m                     [2 q[2 q[H[K
+[K
+[K
+[K
+[K
+[K
+[K
+[91mE303: Unable to create directory "/nonexistent" for swap fil
+e, recovery impossible: permission denied(B[m[K
+[91mE303: Unable to open swap file for "numbers.txt", recovery i
+mpossible(B[m[K
+[96mPress ENTER or type command to continue(B[m[K[?25h[?25l[?1004h[?25h[?25l[H1[K
+2[K
+3[K
+4[K
+5[K
+6[K
+7[K
+8[K
+9[K
+10[K
+(B[0;7mnumbers.txt                               1,1            Top(B[m
+[J[H46
+47
+48[4;2H9[5;2H0
+51
+52
+53
+54
+55[11;43H(B[0;7m50,1           50%[12;50H(B[mzt[?1002h[?1006h[7A[?25h[?25l[12;50H  [1;10r[H[4M[r[7;1H56[K
+57[K
+58[K
+59[K[11;59H(B[0;7m4[H[?25h[?25l[11B(B[m[92m-- INSERT --(B[m[12;1H[12X[2;10r[2;1H[L[r[2;1Hhello from clackatoo[K[11;13H(B[0;7m[+]                           51,20          53
+(B[m:set[Cnu[2 q[?1002l[?1006l[12;1H[?25h[?25l[H 50 50
+ 51 hello from clackatoo
+ 52 51
+ 53 52
+ 54 53
+ 55 54
+ 56 55
+ 57 56
+ 58 57
+ 59 58[2 q[?1002h[?1006h[2;24H[?25h

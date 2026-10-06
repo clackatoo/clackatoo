@@ -1,0 +1,19 @@
+---
+source: crates/term/tests/recordings.rs
+expression: "replay(\"ls-color\")"
+---
+cursor: line 2, col 0
+title: ""
+alternate screen: false
+
+|link     notes.txt    run.sh|
+|main.rs  numbers.txt  src|
+||
+||
+||
+||
+
+styles:
+  0:0..4 "link" Style { fg: Indexed(6), bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None }
+  0:22..28 "run.sh" Style { fg: Indexed(2), bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None }
+  1:22..25 "src" Style { fg: Indexed(4), bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None }

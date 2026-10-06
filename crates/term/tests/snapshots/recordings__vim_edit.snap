@@ -1,0 +1,23 @@
+---
+source: crates/term/tests/recordings.rs
+expression: "replay(\"vim-edit\")"
+---
+cursor: line 1, col 23
+title: ""
+alternate screen: true
+
+| 50 50|
+| 51 hello from clackatoo|
+| 52 51|
+| 53 52|
+| 54 53|
+| 55 54|
+| 56 55|
+| 57 56|
+| 58 57|
+| 59 58|
+|numbers.txt [+]                           51,20          53%|
+|:set nu|
+
+styles:
+  10:0..60 "numbers.txt [+]                           51,20          53%" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(INVERSE), underline: None }
