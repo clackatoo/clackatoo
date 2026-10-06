@@ -5,9 +5,31 @@
 /// Both dimensions are between 1 and [`Size::MAX`]. The cap stops a client
 /// asking for a terminal that would need gigabytes of grid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(try_from = "UncheckedSize")
+)]
 pub struct Size {
     cols: u16,
     rows: u16,
+}
+
+/// A size as it arrives over the wire, before its range is checked.
+#[cfg(feature = "serde")]
+#[derive(serde::Deserialize)]
+struct UncheckedSize {
+    cols: u16,
+    rows: u16,
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<UncheckedSize> for Size {
+    type Error = InvalidSize;
+
+    fn try_from(size: UncheckedSize) -> Result<Self, InvalidSize> {
+        Self::new(size.cols, size.rows)
+    }
 }
 
 impl Size {

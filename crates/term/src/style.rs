@@ -8,6 +8,7 @@ use bitflags::bitflags;
 /// the renderer resolves it against the current theme. A theme change then
 /// recolours existing output instead of only new output.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Color {
     /// The theme's default foreground or background, depending on use.
     #[default]
@@ -22,6 +23,7 @@ pub enum Color {
 bitflags! {
     /// On/off text attributes set by SGR (Select Graphic Rendition).
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct Attributes: u16 {
         /// SGR 1.
         const BOLD = 1 << 0;
@@ -44,6 +46,7 @@ bitflags! {
 ///
 /// Kept apart from [`Attributes`] because the kinds are mutually exclusive.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Underline {
     /// No underline.
     #[default]
@@ -62,6 +65,7 @@ pub enum Underline {
 
 /// Everything about how a cell is drawn apart from its text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Style {
     /// Text colour.
     pub fg: Color,

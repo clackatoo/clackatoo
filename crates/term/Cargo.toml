@@ -9,9 +9,15 @@ publish.workspace = true
 [dependencies]
 bitflags.workspace = true
 log.workspace = true
+serde = { workspace = true, optional = true }
 thiserror.workspace = true
 unicode-width.workspace = true
 vte.workspace = true
+
+[features]
+## Serialize and deserialize the public value types (Size, Style and its
+## parts), for the wire protocol.
+serde = ["dep:serde", "bitflags/serde"]
 
 [dev-dependencies]
 insta.workspace = true
