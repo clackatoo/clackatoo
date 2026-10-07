@@ -9,8 +9,9 @@ use crate::damage::Damage;
 use crate::grid::Grid;
 use crate::parser::Parser;
 use crate::row::Row;
-use crate::scrollback::Compaction;
+use crate::scrollback::{Compaction, Scrollback};
 use crate::size::Size;
+use crate::snapshot::{Line, RestoreError, Snapshot, position};
 use crate::style::Style;
 use crate::tabs::TabStops;
 use crate::width;
@@ -183,6 +184,105 @@ impl Terminal {
         &self.emulator.title
     }
 
+    /// The terminal's whole state, to carry into another process. See
+    /// [`Snapshot`] for what isn't kept.
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot {
+        let emulator = &self.emulator;
+        let (primary, history) = emulator.primary.lines();
+        Snapshot {
+            cols: emulator.size.cols(),
+            rows: emulator.size.rows(),
+            title: emulator.title.clone(),
+            primary,
+            history,
+            history_end: emulator.primary.scrollback_end(),
+            alternate: emulator.alternate.as_ref().map(|grid| grid.lines().0),
+            alternate_shown: emulator.screen == Screen::Alternate,
+            cursor: emulator.cursor.into(),
+            saved_primary: emulator.saved_primary.into(),
+            saved_alternate: emulator.saved_alternate.into(),
+            modes: emulator.modes.into(),
+            scroll_region: (
+                position(emulator.scroll_region.start),
+                position(emulator.scroll_region.end),
+            ),
+            tab_stops: emulator.tabs.columns().map(position).collect(),
+            cursor_shape: emulator.cursor_shape.into(),
+            last_printed: emulator.last_printed,
+        }
+    }
+
+    /// The terminal a [`snapshot`](Self::snapshot) was taken of, with
+    /// `config`'s settings: history beyond its line limit is dropped.
+    ///
+    /// # Errors
+    ///
+    /// If the snapshot is inconsistent, so can't have come from a terminal.
+    pub fn restore(snapshot: &Snapshot, config: &Config) -> Result<Self, RestoreError> {
+        let size = Size::new(snapshot.cols, snapshot.rows)
+            .map_err(|_| RestoreError("its size is out of range"))?;
+        let (width, height) = (usize::from(size.cols()), usize::from(size.rows()));
+        let fits = |lines: &[Line]| lines.len() == height;
+        if !fits(&snapshot.primary)
+            || snapshot
+                .alternate
+                .as_deref()
+                .is_some_and(|lines| !fits(lines))
+        {
+            return Err(RestoreError("a screen has the wrong number of lines"));
+        }
+        if snapshot.alternate_shown && snapshot.alternate.is_none() {
+            return Err(RestoreError("the alternate screen is shown but missing"));
+        }
+        let region = usize::from(snapshot.scroll_region.0)..usize::from(snapshot.scroll_region.1);
+        if region.is_empty() || region.end > height {
+            return Err(RestoreError("the scroll region is off the screen"));
+        }
+        if usize::from(snapshot.cursor.line) >= height || usize::from(snapshot.cursor.col) >= width
+        {
+            return Err(RestoreError("the cursor is off the screen"));
+        }
+
+        let history = snapshot
+            .history
+            .iter()
+            .map(Line::to_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let history = Scrollback::restored(
+            config.scrollback_lines,
+            config.scrollback_compaction,
+            history,
+            snapshot.history_end,
+        );
+        let mut emulator = Emulator::new(size, config);
+        emulator.primary = Grid::restored(width, &snapshot.primary, history)?;
+        emulator.alternate = snapshot
+            .alternate
+            .as_deref()
+            .map(|lines| Grid::restored(width, lines, Scrollback::new(0, Compaction::Off)))
+            .transpose()?;
+        if snapshot.alternate_shown {
+            emulator.screen = Screen::Alternate;
+        }
+        emulator.cursor = snapshot.cursor.into();
+        emulator.saved_primary = snapshot.saved_primary.into();
+        emulator.saved_alternate = snapshot.saved_alternate.into();
+        emulator.modes = snapshot.modes.into();
+        emulator.scroll_region = region;
+        emulator.tabs = TabStops::at(
+            width,
+            snapshot.tab_stops.iter().map(|&col| usize::from(col)),
+        );
+        emulator.title.clone_from(&snapshot.title);
+        emulator.cursor_shape = snapshot.cursor_shape.into();
+        emulator.last_printed = snapshot.last_printed;
+        Ok(Self {
+            parser: Parser::new(),
+            emulator,
+        })
+    }
+
     /// The printing state the screen doesn't show: the cursor's position and
     /// pending wrap, and the character REP would repeat.
     #[cfg(test)]
@@ -194,6 +294,12 @@ impl Terminal {
             cursor.pending_wrap,
             self.emulator.last_printed,
         )
+    }
+
+    /// Whether no escape sequence or character is cut off part way.
+    #[cfg(test)]
+    pub(crate) fn parser_is_idle(&self) -> bool {
+        self.parser.is_idle()
     }
 
     /// Makes this terminal print through the simple per-character path.
@@ -409,8 +515,8 @@ pub(crate) struct CursorState {
 /// What DECSC (save cursor) saves.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SavedCursor {
-    cursor: CursorState,
-    origin: bool,
+    pub(crate) cursor: CursorState,
+    pub(crate) origin: bool,
 }
 
 /// All of a terminal's state apart from the parser.

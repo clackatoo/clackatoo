@@ -48,6 +48,15 @@ pub(crate) struct Charsets {
 }
 
 impl Charsets {
+    pub(crate) fn from_parts(g0: Charset, g1: Charset, active: Slot) -> Self {
+        Self { g0, g1, active }
+    }
+
+    /// G0, G1 and the active slot.
+    pub(crate) fn parts(self) -> (Charset, Charset, Slot) {
+        (self.g0, self.g1, self.active)
+    }
+
     pub(crate) fn designate(&mut self, slot: Slot, charset: Charset) {
         match slot {
             Slot::G0 => self.g0 = charset,

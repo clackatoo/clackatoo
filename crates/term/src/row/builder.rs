@@ -60,6 +60,11 @@ impl RowBuilder {
         }
     }
 
+    /// How many columns the text so far fills.
+    pub(crate) fn filled(&self) -> usize {
+        self.col
+    }
+
     /// The finished row, marked as continuing on the next one if `wrapped`.
     #[must_use]
     pub fn finish(mut self, wrapped: bool) -> Row {

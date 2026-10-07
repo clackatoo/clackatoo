@@ -16,6 +16,22 @@ impl TabStops {
         }
     }
 
+    /// Stops at exactly `stops` (in a row `width` wide); others are dropped.
+    pub(crate) fn at(width: usize, stops: impl IntoIterator<Item = usize>) -> Self {
+        let mut tabs = Self {
+            stops: vec![false; width],
+        };
+        for col in stops {
+            tabs.set(col);
+        }
+        tabs
+    }
+
+    /// The columns with stops, in order.
+    pub(crate) fn columns(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.stops.len()).filter(|&col| self.stops[col])
+    }
+
     /// Fits the stops to a new width: existing columns keep theirs, and new
     /// ones get the default stops.
     pub(crate) fn resize(&mut self, width: usize) {

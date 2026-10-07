@@ -25,6 +25,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::cell::{Cell, StyleIndex};
 use crate::row::{Row, RowBuilder};
+use crate::snapshot::{self, Line};
 use crate::style::Style;
 use crate::terminal::ZWJ;
 
@@ -220,6 +221,39 @@ impl Scrollback {
         }
     }
 
+    /// Every line, oldest first, for a snapshot.
+    pub(crate) fn lines(&self) -> Vec<Line> {
+        let records = self
+            .pages
+            .iter()
+            .flat_map(|page| (page.first..page.records.len()).map(move |index| page.line(index)));
+        let raw = self
+            .raw
+            .iter()
+            .map(|raw| Line::of_row(&raw.row, raw.padded));
+        records.chain(raw).collect()
+    }
+
+    /// History holding `rows`, oldest first, each with whether it ends in
+    /// padding, the newest numbered `end - 1`.
+    pub(crate) fn restored(
+        limit: usize,
+        compaction: Compaction,
+        rows: impl IntoIterator<Item = (Row, bool)>,
+        end: u64,
+    ) -> Self {
+        let mut history = Self::new(limit, compaction);
+        for (row, padded) in rows {
+            history.push(row, padded);
+        }
+        // Nothing is printing, so there is no reason to wait.
+        if compaction == Compaction::Lazy {
+            history.compact();
+        }
+        history.stored = end.max(history.stored);
+        history
+    }
+
     /// The number the next line stored will get: one past the newest.
     pub(crate) fn end(&self) -> u64 {
         self.stored
@@ -409,6 +443,34 @@ impl Page {
             self.styles.push(*style);
             u16::try_from(self.styles.len()).expect("pages are sealed before their palette fills")
         })
+    }
+
+    /// Record `index` as a snapshot's line.
+    fn line(&self, index: usize) -> Line {
+        let record = self.records[index];
+        let (text_start, runs_start) = match index.checked_sub(1) {
+            Some(previous) => {
+                let previous = self.records[previous];
+                (previous.text_end, previous.runs_end)
+            }
+            None => (0, 0),
+        };
+        let text = std::str::from_utf8(&self.text[span(text_start, record.text_end)])
+            .expect("pages hold valid UTF-8");
+        let runs = self.runs[span(runs_start, record.runs_end)]
+            .iter()
+            .map(|run| snapshot::Run {
+                start: run.start - text_start,
+                style: (*self.style(run.style)).into(),
+                separate: run.separate,
+            })
+            .collect();
+        Line {
+            text: text.to_owned(),
+            runs,
+            width: record.width,
+            continues: record.continues,
+        }
     }
 
     /// Record `index` as a row.

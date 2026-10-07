@@ -887,3 +887,70 @@ proptest! {
         prop_assert_eq!(observe(&mut whole), observe(&mut pieces));
     }
 }
+
+mod snapshots {
+    use super::*;
+
+    fn config() -> Config {
+        Config {
+            scrollback_lines: 100,
+            ..Config::default()
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn a_restored_terminal_carries_on_as_the_original_would(
+            before in output(),
+            after in output(),
+            cols in 1u16..12,
+            rows in 1u16..6,
+        ) {
+            let mut original = terminal(cols, rows);
+            original.advance(&before);
+            // A sequence cut off part way is the one thing not kept.
+            prop_assume!(original.parser_is_idle());
+            original.take_replies();
+
+            let snapshot = original.snapshot();
+            let mut restored = Terminal::restore(&snapshot, &config()).unwrap();
+            restored.assert_invariants();
+            prop_assert_eq!(&restored.snapshot(), &snapshot);
+            prop_assert_eq!(cells(&restored), cells(&original));
+
+            // What the screen doesn't show (modes, character sets, tab
+            // stops, saved cursors, the pen) shows in what comes next.
+            original.advance(&after);
+            restored.advance(&after);
+            restored.assert_invariants();
+            prop_assert_eq!(observe(&mut restored), observe(&mut original));
+            prop_assert_eq!(cells(&restored), cells(&original));
+            prop_assert_eq!(restored.cursor(), original.cursor());
+            prop_assert_eq!(restored.input_modes(), original.input_modes());
+            prop_assert_eq!(restored.emulator_state(), original.emulator_state());
+        }
+    }
+
+    #[test]
+    fn history_beyond_the_new_limit_is_dropped() {
+        let mut original = terminal(10, 2);
+        for line in 0..50 {
+            original.advance(format!("line {line}\r\n").as_bytes());
+        }
+        let config = Config {
+            scrollback_lines: 5,
+            ..Config::default()
+        };
+        let restored = Terminal::restore(&original.snapshot(), &config).unwrap();
+        let history: Vec<String> = restored.grid().scrollback().map(|row| row.text()).collect();
+        assert_eq!(
+            history,
+            ["line 44", "line 45", "line 46", "line 47", "line 48"]
+        );
+        // Lines keep their numbers.
+        assert_eq!(
+            restored.grid().scrollback_end(),
+            original.grid().scrollback_end()
+        );
+    }
+}

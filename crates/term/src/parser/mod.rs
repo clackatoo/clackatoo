@@ -126,6 +126,13 @@ impl Parser {
         Self::default()
     }
 
+    /// Whether the parser is between sequences and characters, so a fresh
+    /// one would carry on the same.
+    #[cfg(test)]
+    pub(crate) fn is_idle(&self) -> bool {
+        self.state == State::Ground && self.partial_len == 0
+    }
+
     /// Parses `bytes`, reporting what it finds to `performer`.
     pub(crate) fn advance(&mut self, performer: &mut impl Perform, bytes: &[u8]) {
         let mut i = 0;

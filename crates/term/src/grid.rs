@@ -6,6 +6,7 @@ use std::ops::Range;
 use crate::damage::Damage;
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
+use crate::snapshot::{Line, RestoreError};
 use crate::style::Style;
 
 /// A screen of rows and the history above it.
@@ -38,6 +39,42 @@ impl Grid {
             width,
             height,
         }
+    }
+
+    /// The screen's rows and its history's, oldest first, for a snapshot.
+    pub(crate) fn lines(&self) -> (Vec<Line>, Vec<Line>) {
+        let screen = (0..self.height)
+            .map(|line| {
+                let row = &self.rows[line];
+                Line::of_row(row, is_padded(row, self.rows.get(line + 1)))
+            })
+            .collect();
+        (screen, self.scrollback.lines())
+    }
+
+    /// A grid showing `screen`, `width` × `screen.len()`, over `history`.
+    pub(crate) fn restored(
+        width: usize,
+        screen: &[Line],
+        history: Scrollback,
+    ) -> Result<Self, RestoreError> {
+        let rows = screen
+            .iter()
+            .map(|line| {
+                if usize::from(line.width) == width {
+                    Ok(line.to_row()?.0)
+                } else {
+                    Err(RestoreError("a screen line isn't as wide as the screen"))
+                }
+            })
+            .collect::<Result<VecDeque<_>, _>>()?;
+        Ok(Self {
+            height: rows.len(),
+            rows,
+            scrollback: history,
+            damage: Self::all_damaged(),
+            width,
+        })
     }
 
     /// Damage covering the whole screen: a new screen hasn't been seen.
