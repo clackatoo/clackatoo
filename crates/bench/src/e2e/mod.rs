@@ -87,11 +87,14 @@ const USAGE: &str = "\
 usage: cargo bench -p clackatoo --bench e2e -- [OPTIONS] [GROUP...]
 
 Measures the release clackatoo binary end to end. Without GROUPs, runs
-every group: size, startup, latency, throughput, memory, idle.
+every group: size, startup, latency, throughput (with cpu), memory,
+idle.
 
 options:
   --save-baseline NAME  compare with baseline NAME, then replace it
   --baseline NAME       compare with baseline NAME, without saving
+  --binary PATH         measure another clackatoo binary, such as one
+                        built from a different branch
   -h, --help            show this help
 
 Without either option, compares with the previous run and replaces it.";
@@ -100,6 +103,8 @@ Without either option, compares with the previous run and replaces it.";
 struct Options {
     save: Option<String>,
     compare: Option<String>,
+    /// A different `clackatoo` binary to measure, such as another branch's.
+    binary: Option<PathBuf>,
     groups: Vec<String>,
 }
 
@@ -125,6 +130,10 @@ impl Options {
                 "--bench" => {}
                 "--save-baseline" => options.save = Some(value("--save-baseline")?),
                 "--baseline" => options.compare = Some(value("--baseline")?),
+                "--binary" => {
+                    let path = args.next().context("--binary needs a path")?;
+                    options.binary = Some(PathBuf::from(path));
+                }
                 "-h" | "--help" => return Ok(None),
                 option if option.starts_with('-') => {
                     anyhow::bail!("unknown option {option}\n\n{USAGE}")
@@ -145,7 +154,11 @@ fn run(paths: &Paths<'_>) -> anyhow::Result<()> {
         println!("{USAGE}");
         return Ok(());
     };
-    let binary = paths.binary;
+    let binary = options.binary.as_deref().unwrap_or(paths.binary);
+    let measured = match &options.binary {
+        Some(path) => format!("binary {}", path.display()),
+        None => commit(paths.repo),
+    };
     println!("clackatoo end-to-end benchmarks");
     println!("binary: {}", binary.display());
     let baselines = Baselines::new(
@@ -153,7 +166,7 @@ fn run(paths: &Paths<'_>) -> anyhow::Result<()> {
         options.save.as_deref(),
         options.compare.as_deref(),
     );
-    let mut report = Report::start(baselines, commit(paths.repo))?;
+    let mut report = Report::start(baselines, measured)?;
 
     if options.wants("size") {
         let size = std::fs::metadata(binary)?.len();
@@ -303,17 +316,24 @@ fn throughput(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
     let (daemon, _) = DaemonProcess::start(binary)?;
     let mut client = daemon.connect()?;
     let mut ceiling_file = None;
+    let mut cpu = Vec::new();
     for workload in workloads::generated(FLOOD_LEN) {
         let file = write_workload(dir.path(), &workload)?;
-        let len = workload.bytes.len() as f64;
-        let samples = repeat(FLOOD_RUNS, || flood(&mut client, &workload, &file))?;
-        let rates: Vec<f64> = samples.iter().map(|secs| len / secs).collect();
+        let mib = workload.bytes.len() as f64 / f64::from(1 << 20);
+        let mut rates = Vec::new();
+        let mut cpu_per_mib = Vec::new();
+        for _ in 0..FLOOD_RUNS {
+            let run = flood(&daemon, &mut client, &workload, &file)?;
+            rates.push(workload.bytes.len() as f64 / run.elapsed.as_secs_f64());
+            cpu_per_mib.push(run.cpu.as_secs_f64() / mib);
+        }
         report.record(
             &format!("throughput/{}", workload.name),
             workload.name,
             Unit::BytesPerSecond,
             &rates,
         );
+        cpu.push((workload.name, cpu_per_mib));
         if ceiling_file.is_none() {
             ceiling_file = Some((file, workload.bytes.len(), workload.size));
         }
@@ -328,12 +348,35 @@ fn throughput(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
         Unit::BytesPerSecond,
         &rates,
     );
+
+    // Throughput is capped by the PTY, so this is where the daemon's own
+    // speed shows: what each MiB costs it.
+    for (name, cpu_per_mib) in cpu {
+        report.record(
+            &format!("cpu/{name}"),
+            &format!("{name}, daemon CPU per MiB"),
+            Unit::Seconds,
+            &cpu_per_mib,
+        );
+    }
     Ok(())
+}
+
+/// One run of [`FLOOD_SCRIPT`]: how long it took, and how much CPU time the
+/// daemon spent on it.
+struct Flood {
+    elapsed: Duration,
+    cpu: Duration,
 }
 
 /// Times one run of [`FLOOD_SCRIPT`] printing `file`, from pressing Enter
 /// until the daemon has processed everything.
-fn flood(client: &mut Client, workload: &Workload, file: &Path) -> anyhow::Result<Duration> {
+fn flood(
+    daemon: &DaemonProcess,
+    client: &mut Client,
+    workload: &Workload,
+    file: &Path,
+) -> anyhow::Result<Flood> {
     let file = file.to_str().context("temporary paths are UTF-8")?;
     let terminal = new_terminal(
         client,
@@ -341,12 +384,14 @@ fn flood(client: &mut Client, workload: &Workload, file: &Path) -> anyhow::Resul
         &["sh", "-c", FLOOD_SCRIPT, "sh", file],
     )?;
     wait_for_title(client, terminal, READY_TITLE)?;
+    let cpu_before = daemon.cpu_time()?;
     let started = Instant::now();
     client.send_input(terminal, b"\r")?;
     wait_for_title(client, terminal, DONE_TITLE)?;
-    let took = started.elapsed();
+    let elapsed = started.elapsed();
+    let cpu = daemon.cpu_time()?.saturating_sub(cpu_before);
     client.close_terminal(terminal)?;
-    Ok(took)
+    Ok(Flood { elapsed, cpu })
 }
 
 fn memory(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
@@ -554,6 +599,9 @@ mod tests {
         assert_eq!(options.compare, None);
         assert!(options.wants("memory"));
         assert!(!options.wants("startup"));
+
+        let options = parse(&["--binary", "/tmp/other"]).unwrap().unwrap();
+        assert_eq!(options.binary.as_deref(), Some(Path::new("/tmp/other")));
 
         assert!(parse(&["--help"]).unwrap().is_none());
         assert!(parse(&["--frobnicate"]).is_err());

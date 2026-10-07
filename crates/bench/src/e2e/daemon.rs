@@ -104,6 +104,24 @@ impl DaemonProcess {
         Ok(total)
     }
 
+    /// How much CPU time the daemon has used, across all its threads, to the
+    /// nanosecond (from `/proc/<pid>/task/*/schedstat`, unlike the 10ms
+    /// ticks of `/proc/<pid>/stat`).
+    pub(crate) fn cpu_time(&self) -> anyhow::Result<Duration> {
+        let tasks = self.proc_path("task");
+        let mut total = 0;
+        for task in std::fs::read_dir(&tasks).context("could not list the daemon's threads")? {
+            let schedstat = std::fs::read_to_string(task?.path().join("schedstat"))?;
+            let on_cpu: u64 = schedstat
+                .split_whitespace()
+                .next()
+                .and_then(|field| field.parse().ok())
+                .context("malformed schedstat")?;
+            total += on_cpu;
+        }
+        Ok(Duration::from_nanos(total))
+    }
+
     fn proc_path(&self, file: &str) -> PathBuf {
         Path::new("/proc")
             .join(self.child.id().to_string())
