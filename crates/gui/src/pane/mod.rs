@@ -145,10 +145,11 @@ impl Pane {
         self.prompt.is_some()
     }
 
-    /// Back to insert mode, as the window's commands leave a pane.
-    pub(crate) fn leave(&mut self) {
-        if self.mode != Mode::Insert {
-            self.insert();
+    /// Switches to normal mode, if in insert mode, as when the focus
+    /// arrives from a pane in normal mode.
+    pub(crate) fn enter_normal_mode(&mut self) {
+        if self.mode == Mode::Insert {
+            self.enter_normal();
         }
     }
 
@@ -202,6 +203,10 @@ impl Pane {
             _ => {}
         }
         self.scroll = self.scroll.min(self.max_scroll());
+        // Normal mode began before there was a screen to put its cursor on.
+        if self.mode == Mode::Normal && self.cursor.is_none() {
+            self.enter_normal();
+        }
         self.keep_cursor_in_bounds();
         self.unacknowledged = true;
         self.fetch_history();
@@ -847,6 +852,19 @@ mod tests {
         press(&mut pane);
         assert_eq!(pane.mode, Mode::Normal);
         assert!(pane.take_outbox().is_empty());
+    }
+
+    #[test]
+    fn normal_mode_entered_before_the_screen_arrives_starts_on_its_cursor() {
+        // A new pane, focused from one in normal mode before its terminal's
+        // first snapshot.
+        let mut pane = Pane::new(TerminalId(1));
+        pane.enter_normal_mode();
+        assert_eq!(pane.mode, Mode::Normal);
+        pane.view_changed(&ViewUpdate::Snapshot(View::capture(&terminal(
+            "one\r\ntwo",
+        ))));
+        assert_eq!(cursor(&pane), ("two".into(), 1, 3));
     }
 
     #[test]

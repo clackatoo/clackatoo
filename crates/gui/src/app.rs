@@ -256,27 +256,6 @@ enum Asked {
     Quiet,
 }
 
-/// The first key of a two-key window command, in normal mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WindowPrefix {
-    /// Ctrl+W, then a direction to move to the pane there.
-    CtrlW,
-    /// `g`, then `t` or `T` for the next or last tab, `w` or `W` for the
-    /// next or last workspace. Anything else is the pane's, such as `gg`.
-    G,
-}
-
-/// What a key in normal mode means to the window.
-enum WindowKey {
-    /// The window took it.
-    Taken,
-    /// A held `g` wasn't the window's after all: the pane gets it, then
-    /// this key.
-    ReleaseG,
-    /// It's the pane's.
-    Pane,
-}
-
 /// The window's whole state.
 #[derive(Debug)]
 pub(crate) struct App {
@@ -299,7 +278,6 @@ pub(crate) struct App {
     /// A message for the focused pane's label, until the next key, such as
     /// why a command failed.
     message: Option<String>,
-    prefix: Option<WindowPrefix>,
     /// Where messages to the daemon go, once connected.
     sender: Option<Sender>,
     /// The modifier keys held now.
@@ -340,7 +318,6 @@ impl App {
             asked: VecDeque::new(),
             command: None,
             message: None,
-            prefix: None,
             sender: None,
             modifiers: input::Modifiers::default(),
             focused: true,
@@ -474,8 +451,9 @@ impl App {
         });
     }
 
-    /// Switches to `pane`, wherever it is. The pane left goes back to
-    /// insert mode, as every window command ends there.
+    /// Switches to `pane`, wherever it is. The mode comes along: from a
+    /// pane in normal mode, it arrives in normal mode too. The pane left
+    /// stays as it was, in its mode and scrolled where it was.
     fn show_pane(&mut self, pane: PaneId) {
         let Some((workspace, tab, _)) = self.workspaces.find_pane(pane) else {
             return;
@@ -488,39 +466,15 @@ impl App {
         if self.shown == Some(shown) {
             return;
         }
-        if let Some(left) = self.focused_pane() {
-            left.leave();
-        }
+        let normal = self
+            .focused_pane()
+            .is_some_and(|left| left.mode != Mode::Insert);
         self.shown = Some(shown);
+        if normal && let Some(arrived) = self.focused_pane() {
+            arrived.enter_normal_mode();
+        }
         self.request(Request::Focus { pane }, Asked::Quiet);
         self.shown_changed();
-    }
-
-    /// Moves to the tab `step` along from the one shown, round the ends.
-    fn step_tab(&mut self, step: isize) {
-        let Some(shown) = self.shown else { return };
-        let Some(workspace) = self.workspaces.get(shown.workspace) else {
-            return;
-        };
-        let tabs = &workspace.tabs;
-        let Some(index) = tabs.iter().position(|tab| tab.id == shown.tab) else {
-            return;
-        };
-        let next = &tabs[step_index(index, step, tabs.len())];
-        self.show_pane(next.focused);
-    }
-
-    /// Moves to the workspace `step` along from the one shown, round the
-    /// ends.
-    fn step_workspace(&mut self, step: isize) {
-        let Some(shown) = self.shown else { return };
-        let list = &self.workspaces.list;
-        let Some(index) = list.iter().position(|w| w.id == shown.workspace) else {
-            return;
-        };
-        let next = &list[step_index(index, step, list.len())];
-        let pane = next.tab(next.active_tab).unwrap_or(&next.tabs[0]).focused;
-        self.show_pane(pane);
     }
 
     /// Follows a change in what's shown: attaches to the terminals now
@@ -690,7 +644,7 @@ impl App {
             Some(pane) if !paste && pane.mode != Mode::Insert && !pane.prompting() => {
                 self.window_key(event)
             }
-            _ => WindowKey::Pane,
+            _ => false,
         };
         let press = input::KeyPress {
             key: &event.logical_key,
@@ -704,21 +658,8 @@ impl App {
         };
         let mut redraw = had_message;
         match window_key {
-            WindowKey::Taken => redraw = true,
-            WindowKey::ReleaseG => {
-                if let Some(pane) = self.focused_pane() {
-                    let g = Key::Character("g".into());
-                    pane.key(&input::KeyPress {
-                        key: &g,
-                        text: Some("g"),
-                        location: winit::keyboard::KeyLocation::Standard,
-                        code: None,
-                        modifiers: input::Modifiers::default(),
-                    });
-                    redraw |= pane.key(&press);
-                }
-            }
-            WindowKey::Pane if paste => {
+            true => redraw = true,
+            false if paste => {
                 match paste_text(&mut self.clipboard) {
                     Ok(text) => {
                         if let Some(pane) = self.focused_pane() {
@@ -729,7 +670,7 @@ impl App {
                 }
                 redraw = true;
             }
-            WindowKey::Pane => {
+            false => {
                 if let Some(pane) = self.focused_pane() {
                     redraw |= pane.key(&press);
                 }
@@ -740,55 +681,35 @@ impl App {
         }
     }
 
-    /// What a key in the focused pane's normal mode means to the window.
-    fn window_key(&mut self, event: &winit::event::KeyEvent) -> WindowKey {
-        let key = &event.logical_key;
-        let character = match key {
+    /// Takes a key in the focused pane's normal mode if it's the window's:
+    /// `:` opens the command line, and Ctrl with `h`, `j`, `k` or `l` moves
+    /// to the pane to the left, below, above or right. Returns whether it
+    /// took it.
+    fn window_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        let character = match &event.logical_key {
             Key::Character(text) => text.chars().next(),
             _ => None,
         };
-        let ctrl = self.modifiers.ctrl;
-        match self.prefix.take() {
-            Some(WindowPrefix::CtrlW) => {
-                let direction = match (key, character) {
-                    (Key::Named(NamedKey::ArrowLeft), _) | (_, Some('h')) => Direction::Left,
-                    (Key::Named(NamedKey::ArrowDown), _) | (_, Some('j')) => Direction::Down,
-                    (Key::Named(NamedKey::ArrowUp), _) | (_, Some('k')) => Direction::Up,
-                    (Key::Named(NamedKey::ArrowRight), _) | (_, Some('l')) => Direction::Right,
-                    (_, Some('c' | 'q')) => {
-                        self.run(Command::Close);
-                        return WindowKey::Taken;
-                    }
-                    _ => return WindowKey::Taken,
-                };
-                if let Some(shown) = self.shown
-                    && let Some(next) = self
-                        .placement()
-                        .and_then(|placement| placement.neighbour(shown.pane, direction))
-                {
-                    self.show_pane(next);
-                }
-                return WindowKey::Taken;
+        let ctrl = self.modifiers.ctrl && !self.modifiers.alt;
+        let direction = match character {
+            Some(':') if !ctrl => {
+                self.command = Some(String::new());
+                return true;
             }
-            Some(WindowPrefix::G) => {
-                match character {
-                    Some('t') => self.step_tab(1),
-                    Some('T') => self.step_tab(-1),
-                    Some('w') => self.step_workspace(1),
-                    Some('W') => self.step_workspace(-1),
-                    _ => return WindowKey::ReleaseG,
-                }
-                return WindowKey::Taken;
-            }
-            None => {}
+            Some('h') if ctrl => Direction::Left,
+            Some('j') if ctrl => Direction::Down,
+            Some('k') if ctrl => Direction::Up,
+            Some('l') if ctrl => Direction::Right,
+            _ => return false,
+        };
+        if let Some(shown) = self.shown
+            && let Some(next) = self
+                .placement()
+                .and_then(|placement| placement.neighbour(shown.pane, direction))
+        {
+            self.show_pane(next);
         }
-        match character {
-            Some(':') if !ctrl => self.command = Some(String::new()),
-            Some('w' | 'W') if ctrl => self.prefix = Some(WindowPrefix::CtrlW),
-            Some('g') if !ctrl => self.prefix = Some(WindowPrefix::G),
-            _ => return WindowKey::Pane,
-        }
-        WindowKey::Taken
+        true
     }
 
     /// Handles a key while the command line is open.
@@ -825,8 +746,7 @@ impl App {
         }
     }
 
-    /// Carries out a command. Like every window command, it leaves the
-    /// focused pane in insert mode.
+    /// Carries out a command.
     fn run(&mut self, command: Command) {
         let Some(shown) = self.shown else { return };
         if let Command::Open {
@@ -838,9 +758,6 @@ impl App {
                 "panes on {daemon} come with :connect, which isn't built yet"
             ));
             return;
-        }
-        if let Some(pane) = self.focused_pane() {
-            pane.leave();
         }
         let new = |size| {
             PaneTerminal::New(NewTerminal {
@@ -896,6 +813,21 @@ impl App {
                 } else {
                     let terminal = new(self.new_pane_size(None));
                     self.request(Request::NewWorkspace { name, terminal }, Asked::Pane);
+                }
+            }
+            Command::Tab(number) => {
+                let tabs = self
+                    .workspaces
+                    .get(shown.workspace)
+                    .map_or(&[][..], |workspace| &workspace.tabs[..]);
+                match number.checked_sub(1).and_then(|index| tabs.get(index)) {
+                    Some(tab) => self.show_pane(tab.focused),
+                    None => {
+                        self.message = Some(match tabs.len() {
+                            1 => format!("there's no tab {number}; this workspace has one"),
+                            count => format!("there's no tab {number}; this workspace has {count}"),
+                        });
+                    }
                 }
             }
             Command::Rename(name) => self.request(
@@ -1094,7 +1026,8 @@ impl App {
                 cursor,
                 label,
                 highlights: state.highlights(height),
-                normal_mode: state.mode != Mode::Insert,
+                // Only the focused pane's mode matters, as only it gets keys.
+                normal_mode: focused && state.mode != Mode::Insert,
             });
         }
         let scenes: Vec<Scene<'_>> = drawings
@@ -1222,13 +1155,6 @@ fn draw_notice(frame: &mut Frame, lines: &[String], geometry: &Geometry) {
             dividers: &[],
         },
     );
-}
-
-/// `index` moved `step` along a list `len` long, round the ends.
-fn step_index(index: usize, step: isize, len: usize) -> usize {
-    let len = isize::try_from(len).expect("lists are shorter than isize::MAX");
-    let index = isize::try_from(index).expect("indices are shorter than isize::MAX");
-    usize::try_from((index + step).rem_euclid(len)).expect("rem_euclid is never negative")
 }
 
 /// One pane, ready to draw.

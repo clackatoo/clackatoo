@@ -4,8 +4,8 @@
 //! Capitalised words are kinds of pane, and open one: `Terminal` in a new
 //! tab, and with a mark before it, beside the focused pane (`|` right,
 //! `|<` left, `-` below, `-^` above). `Terminal@host` asks for it on
-//! another machine's daemon. Lowercase words are the window's own
-//! commands.
+//! another machine's daemon. A number moves to that tab. Lowercase words
+//! are the window's own commands.
 
 use clackatoo_protocol::Side;
 
@@ -22,6 +22,8 @@ pub(crate) enum Command {
     /// Switch to the workspace with this name, making it if there's none,
     /// or with no name, make a new one.
     Workspace(Option<String>),
+    /// Move to this tab of the workspace shown, counting from 1.
+    Tab(usize),
     /// Rename the workspace shown.
     Rename(String),
     /// Close the focused pane.
@@ -47,7 +49,7 @@ pub(crate) enum Kind {
 const KINDS: [(&str, Kind); 1] = [("Terminal", Kind::Terminal)];
 
 /// The window's own commands, for messages.
-const COMMANDS: &str = "workspace, rename and close";
+const COMMANDS: &str = "a tab's number, workspace, rename and close";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -71,6 +73,12 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         return Err(format!(
             "{word} takes nothing after it, but has {argument:?}"
         ));
+    }
+    if !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit()) {
+        return match word.parse() {
+            Ok(0) | Err(_) => Err(format!("there's no tab {word}; tabs count from 1")),
+            Ok(number) => Ok(Command::Tab(number)),
+        };
     }
     let (place, rest) = if let Some(rest) = word.strip_prefix("|<") {
         (Place::Beside(Side::Left), rest)
@@ -182,6 +190,15 @@ mod tests {
         assert!(parse("rename").is_err());
         assert_eq!(parse("q"), Ok(Command::Close));
         assert_eq!(parse("close"), Ok(Command::Close));
+    }
+
+    #[test]
+    fn numbers_are_tabs() {
+        assert_eq!(parse("1"), Ok(Command::Tab(1)));
+        assert_eq!(parse(" 14 "), Ok(Command::Tab(14)));
+        assert!(parse("0").is_err());
+        assert!(parse("99999999999999999999999").is_err());
+        assert!(parse("2 3").is_err());
     }
 
     #[test]
