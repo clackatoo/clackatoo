@@ -96,6 +96,13 @@ impl Terminal {
         self.emulator.resize(size);
     }
 
+    /// The primary screen, whose history the terminal keeps, whichever
+    /// screen is showing.
+    #[must_use]
+    pub fn primary(&self) -> &Grid {
+        &self.emulator.primary
+    }
+
     /// Whether scrollback holds rows waiting for
     /// [`compact_scrollback`](Self::compact_scrollback). Only ever true with
     /// [`Compaction::Lazy`].

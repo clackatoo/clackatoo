@@ -91,6 +91,23 @@ impl Grid {
     /// Screen row `line`, for changing. Every change to the screen goes
     /// through this or another method of the grid, so each can record what
     /// it damaged.
+    /// The number the next line scrolled into history will get. Lines are
+    /// numbered from 0 as they arrive, so numbers stay put while new lines
+    /// push old ones out.
+    #[must_use]
+    pub fn scrollback_end(&self) -> u64 {
+        self.scrollback.end()
+    }
+
+    /// The history lines numbered within `numbers` that are still held,
+    /// oldest first, each with its number and at the width it had.
+    pub fn scrollback_lines(
+        &self,
+        numbers: std::ops::Range<u64>,
+    ) -> impl Iterator<Item = (u64, Row)> + '_ {
+        self.scrollback.numbered_rows(numbers)
+    }
+
     pub(crate) fn row_mut(&mut self, line: usize) -> &mut Row {
         self.damage.mark(line);
         &mut self.rows[line]

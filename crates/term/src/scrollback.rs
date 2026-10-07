@@ -74,6 +74,9 @@ pub(crate) struct Scrollback {
     raw: VecDeque<RawRow>,
     /// Cells across `raw`.
     raw_cells: usize,
+    /// Lines ever stored. Lines are numbered from 0 as they arrive, so the
+    /// newest held is `stored - 1` and the oldest `stored - len()`.
+    stored: u64,
     /// The most lines held; older ones are evicted.
     limit: usize,
     compaction: Compaction,
@@ -140,6 +143,7 @@ impl Scrollback {
             records: 0,
             raw: VecDeque::new(),
             raw_cells: 0,
+            stored: 0,
             limit,
             compaction,
             style_indices: StyleIndices::default(),
@@ -163,6 +167,7 @@ impl Scrollback {
         if self.limit == 0 {
             return Some(row);
         }
+        self.stored += 1;
         let mut spare = None;
         if self.compaction == Compaction::Eager {
             self.compact_row(&row, padded);
@@ -213,6 +218,39 @@ impl Scrollback {
             inner: records.chain(self.raw.iter().map(|raw| raw.row.clone())),
             remaining: self.len(),
         }
+    }
+
+    /// The number the next line stored will get: one past the newest.
+    pub(crate) fn end(&self) -> u64 {
+        self.stored
+    }
+
+    /// The held lines numbered within `numbers`, oldest first, each with
+    /// its number. Lines evicted or not stored yet are left out.
+    pub(crate) fn numbered_rows(
+        &self,
+        numbers: std::ops::Range<u64>,
+    ) -> impl Iterator<Item = (u64, Row)> + '_ {
+        let first = self.stored - self.len() as u64;
+        let start = numbers.start.clamp(first, self.stored);
+        let end = numbers.end.clamp(start, self.stored);
+        // Offsets from the oldest held line, which fit: they're below len().
+        let offset = |number: u64| usize::try_from(number - first).expect("below len()");
+        let (start, end) = (offset(start), offset(end));
+
+        let records = start.min(self.records)..end.min(self.records);
+        let mut skipped = 0;
+        let compacted = self.pages.iter().flat_map(move |page| {
+            let held = page.records.len() - page.first;
+            let page_start = skipped;
+            skipped += held;
+            let wanted = records.start.max(page_start)..records.end.min(page_start + held);
+            wanted.map(move |offset| page.decode(page.first + offset - page_start))
+        });
+        let raw = start.saturating_sub(self.records)..end.saturating_sub(self.records);
+        let raw = self.raw.range(raw).map(|raw| raw.row.clone());
+        let first_number = first + start as u64;
+        (first_number..).zip(compacted.chain(raw))
     }
 
     /// Compacts the oldest raw row, returning it for reuse.
@@ -553,6 +591,55 @@ mod tests {
         assert!(history.raw_cells <= RAW_CELLS_MAX);
         assert!(history.records > 1);
         history.assert_invariants();
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn numbered_lines_match_what_was_stored(
+            ops in proptest::collection::vec(0u8..10, 0..80),
+            limit in 0usize..12,
+            compaction in proptest::sample::select(vec![Compaction::Off, Compaction::Lazy, Compaction::Eager]),
+            ranges in proptest::collection::vec((0u64..90, 0u64..90), 1..6),
+        ) {
+            let mut history = Scrollback::new(limit, compaction);
+            // The lines a correct history holds: (number, text).
+            let mut model: VecDeque<(u64, String)> = VecDeque::new();
+            let mut next = 0u64;
+            for op in ops {
+                match op {
+                    0 => history.compact(),
+                    1 => {
+                        history.clear();
+                        model.clear();
+                    }
+                    _ => {
+                        let text = format!("line {next}");
+                        history.push(row(&text, 12), false);
+                        if limit > 0 {
+                            model.push_back((next, text));
+                            next += 1;
+                            if model.len() > limit {
+                                model.pop_front();
+                            }
+                        }
+                    }
+                }
+            }
+            proptest::prop_assert_eq!(history.end(), next);
+            for (a, b) in ranges {
+                let range = a.min(b)..a.max(b);
+                let got: Vec<(u64, String)> = history
+                    .numbered_rows(range.clone())
+                    .map(|(number, row)| (number, row.text()))
+                    .collect();
+                let want: Vec<(u64, String)> = model
+                    .iter()
+                    .filter(|(number, _)| range.contains(number))
+                    .cloned()
+                    .collect();
+                proptest::prop_assert_eq!(got, want);
+            }
+        }
     }
 
     #[test]
