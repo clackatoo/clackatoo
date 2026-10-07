@@ -412,8 +412,11 @@ fn memory(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
     let mut per_line = Vec::new();
     let dir = tempfile::tempdir()?;
     let scrollback = clackatoo_term::Config::default().scrollback_lines;
-    let lines = scrollback_workload(scrollback);
+    let lines = scrollback_workload(scrollback, true);
     let lines_file = write_workload(dir.path(), &lines)?;
+    let typical = scrollback_workload(scrollback, false);
+    let typical_file = write_workload(dir.path(), &typical)?;
+    let mut per_typical_line = Vec::new();
 
     for _ in 0..MEMORY_RUNS {
         let (daemon, _) = DaemonProcess::start(binary)?;
@@ -431,23 +434,13 @@ fn memory(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
         let after = daemon.resident_memory()?;
         per_terminal.push(after.saturating_sub(before) as f64 / MEMORY_TERMINALS as f64);
 
-        let terminal = new_terminal(
-            &mut client,
-            lines.size,
-            &[
-                "sh",
-                "-c",
-                FLOOD_SCRIPT,
-                "sh",
-                lines_file.to_str().context("UTF-8 path")?,
-            ],
-        )?;
-        wait_for_title(&mut client, terminal, READY_TITLE)?;
-        let before = daemon.resident_memory()?;
-        client.send_input(terminal, b"\r")?;
-        wait_for_title(&mut client, terminal, DONE_TITLE)?;
-        let after = daemon.resident_memory()?;
-        per_line.push(after.saturating_sub(before) as f64 / scrollback as f64);
+        for (file, samples) in [
+            (&lines_file, &mut per_line),
+            (&typical_file, &mut per_typical_line),
+        ] {
+            let growth = scrollback_growth(&daemon, &mut client, lines.size, file)?;
+            samples.push(growth as f64 / scrollback as f64);
+        }
     }
 
     report.record("memory/daemon", "daemon at rest", Unit::Bytes, &at_rest);
@@ -463,23 +456,54 @@ fn memory(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
         Unit::Bytes,
         &per_line,
     );
+    report.record(
+        "memory/scrollback-typical",
+        &format!("per scrollback line ({} cols, typical)", lines.size.cols()),
+        Unit::Bytes,
+        &per_typical_line,
+    );
     Ok(())
 }
 
-/// Exactly enough full-width lines to fill an 80x24 terminal's scrollback.
-fn scrollback_workload(scrollback: usize) -> Workload {
+/// How much the daemon's memory grows while a new terminal fills its
+/// scrollback with `file`.
+fn scrollback_growth(
+    daemon: &DaemonProcess,
+    client: &mut Client,
+    size: Size,
+    file: &Path,
+) -> anyhow::Result<u64> {
+    let file = file.to_str().context("temporary paths are UTF-8")?;
+    let terminal = new_terminal(client, size, &["sh", "-c", FLOOD_SCRIPT, "sh", file])?;
+    wait_for_title(client, terminal, READY_TITLE)?;
+    let before = daemon.resident_memory()?;
+    client.send_input(terminal, b"\r")?;
+    wait_for_title(client, terminal, DONE_TITLE)?;
+    let after = daemon.resident_memory()?;
+    Ok(after.saturating_sub(before))
+}
+
+/// Exactly enough lines to fill an 80x24 terminal's scrollback: all full
+/// width, the worst case, or of varying length, averaging half the width.
+fn scrollback_workload(scrollback: usize, full: bool) -> Workload {
     let size = Size::new(80, 24).expect("80x24 is a valid size");
+    let cols = usize::from(size.cols());
     let line_count = scrollback + usize::from(size.rows());
-    let mut bytes = Vec::with_capacity(line_count * 82);
+    let mut bytes = Vec::with_capacity(line_count * (cols + 2));
     for line in 0..line_count {
         // Vary the text a little, so nothing could share rows.
         let letter = b'a' + u8::try_from(line % 26).expect("below 26");
-        bytes.extend(std::iter::repeat_n(letter, usize::from(size.cols())));
+        let len = if full { cols } else { line * 7919 % (cols + 1) };
+        bytes.extend(std::iter::repeat_n(letter, len));
         bytes.extend_from_slice(b"\r\n");
     }
     Workload {
-        name: "scrollback",
-        description: "full lines filling the scrollback",
+        name: if full {
+            "scrollback"
+        } else {
+            "scrollback-typical"
+        },
+        description: "lines filling the scrollback",
         size,
         bytes,
     }
@@ -623,9 +647,22 @@ mod tests {
 
     #[test]
     fn the_scrollback_workload_fills_the_scrollback_exactly() {
-        let workload = scrollback_workload(100);
+        let workload = scrollback_workload(100, true);
         let text = std::str::from_utf8(&workload.bytes).unwrap();
         assert_eq!(text.lines().count(), 124);
         assert!(text.lines().all(|line| line.trim_end().len() == 80));
+
+        let typical = scrollback_workload(100, false);
+        let text = std::str::from_utf8(&typical.bytes).unwrap();
+        assert_eq!(text.lines().count(), 124);
+        let average = text
+            .lines()
+            .map(|line| line.trim_end().len())
+            .sum::<usize>()
+            / 124;
+        assert!(
+            (30..=50).contains(&average),
+            "average line length {average}"
+        );
     }
 }
