@@ -6,7 +6,7 @@ use std::path::Path;
 
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
 use clackatoo_protocol::{
-    Error, NewTerminal, PROTOCOL_VERSION, Request, Response, Screen, TerminalId, TerminalInfo,
+    Error, NewTerminal, PROTOCOL_VERSION, Request, Response, Screen, Size, TerminalId, TerminalInfo,
 };
 
 /// A connection to the daemon that sends one request at a time and waits for
@@ -126,6 +126,18 @@ impl Client {
     /// See [`ClientError`].
     pub fn close_terminal(&mut self, terminal: TerminalId) -> Result<(), ClientError> {
         match self.request(&Request::CloseTerminal { terminal })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Changes a terminal's size.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn resize(&mut self, terminal: TerminalId, size: Size) -> Result<(), ClientError> {
+        match self.request(&Request::Resize { terminal, size })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
         }

@@ -218,6 +218,29 @@ fn closing_removes_the_terminal() {
 }
 
 #[test]
+fn resizing_tells_the_program_and_rewraps_the_screen() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    // Prints a line that wraps at 40 columns, then the size it sees each
+    // time it's told the window changed.
+    let script = r"trap 'stty size' WINCH; printf '%050d\n' 0; while :; do sleep 0.05; done";
+    let terminal = spawn(&mut client, &["sh", "-c", script]);
+    wait_for_screen(&mut client, terminal, |text| {
+        text.lines().nth(1).is_some_and(|l| l == "0".repeat(10))
+    });
+
+    client
+        .resize(terminal, Size::new(60, 12).unwrap())
+        .expect("resize");
+    let text = wait_for_screen(&mut client, terminal, |text| text.contains("12 60"));
+    assert!(text.starts_with(&format!("{}\n", "0".repeat(50))), "{text}");
+    assert_eq!(
+        client.capture(terminal).unwrap().size,
+        Size::new(60, 12).unwrap()
+    );
+}
+
+#[test]
 fn bad_commands_are_reported() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();

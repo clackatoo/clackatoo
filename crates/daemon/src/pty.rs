@@ -140,6 +140,11 @@ impl Pty {
     pub(crate) fn write(&self, bytes: &[u8]) -> io::Result<usize> {
         Ok(rustix::io::write(&self.master, bytes)?)
     }
+
+    /// Sets the window size the program sees. The kernel sends it SIGWINCH.
+    pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
+        Ok(rustix::termios::tcsetwinsize(&self.master, winsize(size))?)
+    }
 }
 
 impl AsRawFd for Pty {

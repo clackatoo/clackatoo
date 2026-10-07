@@ -38,6 +38,9 @@ enum Command {
     Capture(Capture),
     /// Close a terminal, hanging up its program.
     Close(Target),
+    /// Change a terminal's size. Its program is told, and lines on screen
+    /// are rewrapped to the new width.
+    Resize(Resize),
 }
 
 #[derive(Debug, Args)]
@@ -94,6 +97,15 @@ struct Send {
 }
 
 #[derive(Debug, Args)]
+struct Resize {
+    #[command(flatten)]
+    target: Target,
+    /// The new size in columns and rows, like 120x40.
+    #[arg(value_parser = parse_size)]
+    size: Size,
+}
+
+#[derive(Debug, Args)]
 struct Capture {
     #[command(flatten)]
     target: Target,
@@ -127,6 +139,11 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::Capture(capture_args) => capture(&capture_args),
         Command::Close(target) => {
             connect(&target.connection)?.close_terminal(TerminalId(target.terminal))?;
+            Ok(())
+        }
+        Command::Resize(resize) => {
+            let target = &resize.target;
+            connect(&target.connection)?.resize(TerminalId(target.terminal), resize.size)?;
             Ok(())
         }
     }

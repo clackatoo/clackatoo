@@ -30,7 +30,7 @@ pub use screen::{CursorState, Line, Run, Screen};
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// A message from a client to the daemon.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +63,14 @@ pub enum Request {
     CloseTerminal {
         /// The terminal to close.
         terminal: TerminalId,
+    },
+    /// Changes a terminal's size. Its program is told, and the screen's
+    /// lines are rewrapped to the new width.
+    Resize {
+        /// The terminal to resize.
+        terminal: TerminalId,
+        /// The new size.
+        size: Size,
     },
 }
 

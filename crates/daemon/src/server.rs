@@ -507,6 +507,14 @@ impl Daemon {
             Request::CloseTerminal { terminal } => {
                 self.close_terminal(terminal).map(|()| Response::Done)
             }
+            Request::Resize { terminal, size } => self
+                .terminals
+                .get_mut(&terminal)
+                .map(|slot| {
+                    slot.terminal.resize(size);
+                    Response::Done
+                })
+                .ok_or(Error::NoSuchTerminal(terminal)),
         };
         (response.unwrap_or_else(Response::Error), false)
     }

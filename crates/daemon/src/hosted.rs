@@ -8,7 +8,9 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::Child;
 
-use clackatoo_protocol::{Error, NewTerminal, Screen, TerminalId, TerminalInfo, TerminalStatus};
+use clackatoo_protocol::{
+    Error, NewTerminal, Screen, Size, TerminalId, TerminalInfo, TerminalStatus,
+};
 use clackatoo_term::{Terminal, recording};
 
 use crate::DaemonConfig;
@@ -178,6 +180,30 @@ impl HostedTerminal {
     }
 
     /// Queues input for the program and writes as much as the PTY accepts.
+    /// Changes the terminal's size: the emulator's, and the one its program
+    /// sees.
+    pub(crate) fn resize(&mut self, size: Size) {
+        if size == self.emulator.size() {
+            return;
+        }
+        // Resize the emulator first, so output written for the new size
+        // after SIGWINCH lands on a screen of that size.
+        self.emulator.resize(size);
+        if let Some(pty) = &self.pty
+            && let Err(err) = pty.resize(size)
+        {
+            log::warn!(
+                "terminal {}: setting the window size failed: {err}",
+                self.id
+            );
+        }
+        // Recordings have one size, in their header, so a replay of what
+        // follows would be wrong.
+        if self.recording.take().is_some() {
+            log::info!("terminal {}: recording stopped by a resize", self.id);
+        }
+    }
+
     pub(crate) fn send_input(&mut self, bytes: &[u8]) -> Result<(), Error> {
         if self.pty.is_none() {
             return Err(Error::TerminalExited(self.id));
