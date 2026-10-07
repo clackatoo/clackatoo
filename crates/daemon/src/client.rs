@@ -9,11 +9,11 @@ use std::path::Path;
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
 use clackatoo_protocol::{
     ClientMessage, Error, Event, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal,
-    Request, Response, ServerMessage, Side, Size, TerminalId, TerminalInfo, View, WorkspaceId,
+    Request, Response, ServerMessage, Side, Size, TerminalId, TerminalInfo, Udp, View, WorkspaceId,
     Workspaces,
 };
 
-use crate::quic::{self, Carried, Route};
+use crate::quic::{self, Carried, Contact, Route};
 use crate::remote::Ssh;
 
 /// How long the daemon may take to answer a new connection's hello.
@@ -103,12 +103,22 @@ impl Client {
         daemon_ip: Option<IpAddr>,
         ssh: Option<Ssh>,
     ) -> Result<Self, ClientError> {
-        let (certificate, udp_port) = open_carrier(&mut stream)?;
-        let udp = daemon_ip.zip(udp_port).map(SocketAddr::from);
+        let (certificate, udp) = open_carrier(&mut stream)?;
+        let udp = daemon_ip
+            .zip(udp)
+            .map(|(ip, udp)| (SocketAddr::new(ip, udp.port), udp.probe_key));
         let (local, carried) = quic::carry(stream, certificate, udp, ssh)?;
         let mut client = Self::over(local)?;
         client.carried = Some(carried);
         Ok(client)
+    }
+
+    /// Whether a daemon on another machine is in contact, for showing when
+    /// it isn't. `None` for a daemon on this one. The handle outlives a
+    /// [`split`](Self::split).
+    #[must_use]
+    pub fn contact(&self) -> Option<Contact> {
+        self.carried.as_ref().map(Carried::contact)
     }
 
     /// How the connection reaches a daemon on another machine: through
@@ -462,13 +472,13 @@ impl Receiver {
 /// Greets the daemon on the other end of `stream`, checking that it speaks
 /// our protocol version, then turns the connection into a carrier of QUIC
 /// packets. Returns the certificate the daemon's QUIC endpoint presents,
-/// and the UDP port it takes packets on, if it has one.
+/// and where it takes packets over UDP, if it does.
 ///
 /// The request waits for the greeting's answer: a daemon from an older
 /// build may hang up on a request it can't decode before answering a
 /// greeting that came with it, and then couldn't say which version it
 /// speaks.
-fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<u16>), ClientError> {
+fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<Udp>), ClientError> {
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
     stream.write_all(&frame::encode(&ClientMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
@@ -486,10 +496,7 @@ fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<u16>), Clien
     }
     stream.write_all(&frame::encode(&ClientMessage::Request(Request::CarryQuic))?)?;
     let carrying = match receive(stream, &mut decoder)? {
-        ServerMessage::Response(Response::Carrying {
-            certificate,
-            udp_port,
-        }) => (certificate, udp_port),
+        ServerMessage::Response(Response::Carrying { certificate, udp }) => (certificate, udp),
         ServerMessage::Response(response) => return Err(unexpected(response)),
         other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
     };

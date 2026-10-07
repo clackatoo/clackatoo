@@ -15,6 +15,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -31,7 +32,7 @@ use rustls::crypto::{self, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{self, DigitallySignedStruct, SignatureScheme};
 
-use super::path::{Action, Path, Route, Send};
+use super::path::{Action, Path, Route, Sending};
 use super::{KEEP_ALIVE, SERVER_NAME, carrier_address, frame_packet, transport};
 use crate::remote::Ssh;
 
@@ -57,9 +58,74 @@ pub(crate) struct Carried {
     thread: Option<JoinHandle<()>>,
     /// Whether the connection has moved onto UDP.
     on_udp: Arc<AtomicBool>,
+    contact: Contact,
+}
+
+/// Whether a daemon on another machine is in contact, for a window to show
+/// when it isn't. Clones are handles to the same.
+#[derive(Clone, Default)]
+pub struct Contact(Arc<ContactState>);
+
+#[derive(Default)]
+struct ContactState {
+    silent_since: Mutex<Option<Instant>>,
+    notify: Mutex<Option<Box<dyn Fn() + Send>>>,
+}
+
+impl Contact {
+    /// Since when the daemon has been out of contact: what was sent has
+    /// gone unanswered, despite a ping, for a few seconds. `None` while it
+    /// answers.
+    #[must_use]
+    pub fn silent_since(&self) -> Option<Instant> {
+        *self
+            .0
+            .silent_since
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Calls `notify`, on the connection's thread, whenever
+    /// [`silent_since`](Self::silent_since) changes, in place of anything
+    /// set before.
+    pub fn on_change(&self, notify: impl Fn() + Send + 'static) {
+        *self.0.notify.lock().unwrap_or_else(PoisonError::into_inner) = Some(Box::new(notify));
+    }
+
+    /// Records `silent_since`, telling whoever asked, and returning
+    /// whether it changed.
+    fn set(&self, silent_since: Option<Instant>) -> bool {
+        let changed = {
+            let mut current = self
+                .0
+                .silent_since
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut *current, silent_since) != silent_since
+        };
+        if changed
+            && let Some(notify) = &*self.0.notify.lock().unwrap_or_else(PoisonError::into_inner)
+        {
+            notify();
+        }
+        changed
+    }
+}
+
+impl std::fmt::Debug for Contact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Contact")
+            .field("silent_since", &self.silent_since())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Carried {
+    /// Whether the daemon is in contact.
+    pub(crate) fn contact(&self) -> Contact {
+        self.contact.clone()
+    }
+
     /// How the client's packets are reaching the daemon.
     pub(crate) fn route(&self) -> Route {
         if self.on_udp.load(Ordering::Relaxed) {
@@ -84,8 +150,8 @@ impl Drop for Carried {
 /// Opens a QUIC connection to the daemon through `carrier`, which it
 /// presents `certificate` on, and starts a thread relaying between it and
 /// the returned socket, for a [`Client`](crate::Client) to talk over. With
-/// `udp`, the daemon's UDP address, the connection moves there if packets
-/// get through. The thread keeps `ssh`, which carries `carrier`, until the
+/// `udp`, the daemon's UDP address and probe key, the connection moves
+/// there if probes get through. The thread keeps `ssh`, which carries `carrier`, until the
 /// connection ends.
 ///
 /// # Errors
@@ -94,7 +160,7 @@ impl Drop for Carried {
 pub(crate) fn carry(
     carrier: UnixStream,
     certificate: Vec<u8>,
-    udp: Option<SocketAddr>,
+    udp: Option<(SocketAddr, [u8; 16])>,
     ssh: Option<Ssh>,
 ) -> io::Result<(UnixStream, Carried)> {
     let (client, local) = UnixStream::pair()?;
@@ -102,6 +168,7 @@ pub(crate) fn carry(
     local.set_nonblocking(true)?;
     let mut driver = Driver::new(carrier, local, certificate, udp)?;
     let on_udp = Arc::clone(&driver.on_udp);
+    let contact = driver.contact.clone();
     let thread = std::thread::Builder::new()
         .name("quic".into())
         .spawn(move || {
@@ -118,6 +185,7 @@ pub(crate) fn carry(
             local,
             thread: Some(thread),
             on_udp,
+            contact,
         },
     ))
 }
@@ -225,12 +293,24 @@ struct Driver {
     buffer: Vec<u8>,
     /// Where the sockets are read into.
     read_buffer: Box<[u8]>,
-    /// A socket for UDP, and the daemon's address there, if it has one.
-    udp: Option<(mio::net::UdpSocket, SocketAddr)>,
+    /// The way over UDP, if the daemon has one.
+    udp: Option<UdpWay>,
     /// Which way packets go.
     path: Path,
     /// Whether they go over UDP, for [`Carried::route`].
     on_udp: Arc<AtomicBool>,
+    /// Whether the daemon is in contact, for [`Carried::contact`].
+    contact: Contact,
+}
+
+/// A client's socket for UDP, and where the daemon takes packets.
+#[derive(Debug)]
+struct UdpWay {
+    socket: mio::net::UdpSocket,
+    daemon: SocketAddr,
+    probe_key: [u8; 16],
+    /// Probes sent so far, which tells them apart.
+    probes: u64,
 }
 
 impl Driver {
@@ -238,7 +318,7 @@ impl Driver {
         carrier: UnixStream,
         local: UnixStream,
         certificate: Vec<u8>,
-        udp: Option<SocketAddr>,
+        udp: Option<(SocketAddr, [u8; 16])>,
     ) -> io::Result<Self> {
         let poll = Poll::new()?;
         let mut carrier = mio::net::UnixStream::from_std(carrier);
@@ -250,7 +330,7 @@ impl Driver {
         poll.registry().register(&mut local, LOCAL, both)?;
         // Unconnected, so each packet leaves from whatever address the
         // network has now.
-        let udp = udp.and_then(|daemon| {
+        let udp = udp.and_then(|(daemon, probe_key)| {
             let any = match daemon.ip() {
                 IpAddr::V4(_) => IpAddr::from(Ipv4Addr::UNSPECIFIED),
                 IpAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
@@ -263,7 +343,12 @@ impl Driver {
             bound
                 .inspect_err(|err| log::warn!("no UDP socket for QUIC: {err}"))
                 .ok()
-                .map(|udp| (udp, daemon))
+                .map(|socket| UdpWay {
+                    socket,
+                    daemon,
+                    probe_key,
+                    probes: 0,
+                })
         });
 
         let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None, true, None);
@@ -295,6 +380,7 @@ impl Driver {
             path: Path::new(udp.is_some()),
             udp,
             on_udp: Arc::new(AtomicBool::new(false)),
+            contact: Contact::default(),
         })
     }
 
@@ -322,6 +408,16 @@ impl Driver {
                     if on_udp { "onto UDP" } else { "back into SSH" }
                 );
             }
+            let silent_since = self.path.silent_since();
+            if self.contact.set(silent_since) {
+                match silent_since {
+                    Some(since) => log::info!(
+                        "the daemon is out of contact: nothing back for {:.1?}",
+                        since.elapsed()
+                    ),
+                    None => log::info!("the daemon is back in contact"),
+                }
+            }
             // Once the client has hung up, the packet closing the
             // connection is on its way, and there's nothing to wait for.
             if self.local_closed || self.connection.is_drained() {
@@ -347,6 +443,16 @@ impl Driver {
             Action::Nothing => Ok(()),
             Action::Ping => {
                 self.connection.ping();
+                Ok(())
+            }
+            Action::Probe => {
+                if let Some(udp) = &mut self.udp {
+                    udp.probes += 1;
+                    let probe = super::probe(&udp.probe_key, udp.probes);
+                    if let Err(err) = udp.socket.send_to(&probe, udp.daemon) {
+                        log::debug!("probing UDP failed: {err}");
+                    }
+                }
                 Ok(())
             }
             Action::Lost => Err(io::Error::other("the carrier closed")),
@@ -383,6 +489,7 @@ impl Driver {
                     &mut self.buffer,
                 );
                 if let Some(DatagramEvent::ConnectionEvent(_, event)) = event {
+                    self.path.received(false);
                     self.connection.handle_event(event);
                 }
             }
@@ -393,12 +500,18 @@ impl Driver {
                 self.act(action)?;
             }
         }
-        if let Some((udp, daemon)) = &self.udp {
+        if let Some(udp) = &self.udp {
             loop {
-                match udp.recv_from(&mut self.read_buffer) {
+                match udp.socket.recv_from(&mut self.read_buffer) {
+                    // A probe come back: UDP gets through.
+                    Ok((n, from))
+                        if from == udp.daemon
+                            && super::is_probe(&self.read_buffer[..n], &udp.probe_key) =>
+                    {
+                        self.path.received(true);
+                    }
                     // To QUIC, it's from where the daemon always is.
-                    Ok((n, from)) if from == *daemon => {
-                        self.path.received_over_udp();
+                    Ok((n, from)) if from == udp.daemon => {
                         let event = self.endpoint.handle(
                             now,
                             carrier_address(0),
@@ -408,14 +521,20 @@ impl Driver {
                             &mut self.buffer,
                         );
                         if let Some(DatagramEvent::ConnectionEvent(_, event)) = event {
+                            self.path.received(true);
                             self.connection.handle_event(event);
                         }
                     }
                     Ok(_) => {}
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                     Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                    // Such as an ICMP error for an earlier packet.
-                    Err(err) => log::debug!("UDP read failed: {err}"),
+                    Err(err) => {
+                        // Such as an ICMP error for an earlier packet.
+                        // Whatever else is waiting brings another event.
+                        if err.kind() != io::ErrorKind::WouldBlock {
+                            log::debug!("UDP read failed: {err}");
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -540,20 +659,21 @@ impl Driver {
                 break;
             };
             let packet = &self.buffer[..transmit.size];
-            let send = self.path.send();
-            if matches!(send, Send::Carrier | Send::Both) && self.carrier.is_some() {
-                frame_packet(packet, &mut self.to_carrier);
-            }
-            if matches!(send, Send::Udp | Send::Both)
-                && let Some((udp, daemon)) = &self.udp
-            {
-                match udp.send_to(packet, *daemon) {
-                    Ok(_) => self.path.sent_over_udp(now),
+            self.path.sent(now);
+            match (self.path.send(), &self.udp) {
+                (Sending::Carrier, _) => {
+                    if self.carrier.is_some() {
+                        frame_packet(packet, &mut self.to_carrier);
+                    }
+                }
+                (Sending::Udp, Some(udp)) => match udp.socket.send_to(packet, udp.daemon) {
                     // No room is as good as lost, and QUIC sends it again;
                     // nor is there while the network is down.
+                    Ok(_) => {}
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
                     Err(err) => log::debug!("UDP send failed: {err}"),
-                }
+                },
+                (Sending::Udp, None) => {}
             }
         }
         if let Some(carrier) = &mut self.carrier

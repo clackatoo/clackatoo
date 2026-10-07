@@ -295,12 +295,25 @@ pub enum Response {
         /// for the client to accept and no other. The client learned it
         /// over SSH, which logged it in to this machine.
         certificate: Vec<u8>,
-        /// The UDP port the daemon's QUIC endpoint takes packets on, if it
-        /// has one. A client that reaches it there may move its connection
-        /// off the carrier onto UDP, where it survives the client's network
+        /// Where the daemon's QUIC endpoint takes packets over UDP, if it
+        /// does. A client that reaches it there may move its connection off
+        /// the carrier onto UDP, where it survives the client's network
         /// changing. New connections only ever come through a carrier.
-        udp_port: Option<u16>,
+        udp: Option<Udp>,
     },
+}
+
+/// Where a daemon takes QUIC packets over UDP, and how a client finds out
+/// whether they get through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Udp {
+    /// The port, at whatever address SSH reached the daemon's machine.
+    pub port: u16,
+    /// What a client puts in a probe, a datagram that isn't QUIC, for the
+    /// daemon to send it straight back: proof that UDP gets through both
+    /// ways before any of the connection's packets go that way. A probe
+    /// without it gets no answer, so the port gives nothing away to a scan.
+    pub probe_key: [u8; 16],
 }
 
 /// Why the daemon refused or failed a request.

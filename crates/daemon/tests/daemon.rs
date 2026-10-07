@@ -959,3 +959,64 @@ fn quic_stays_in_ssh_when_udp_doesnt_get_through() {
         .unwrap();
     assert!(client.list_terminals().is_err());
 }
+
+#[test]
+fn a_daemon_that_stops_answering_is_out_of_contact_until_it_answers_again() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // The carrier passes through here, where it can be cut, as when the
+    // network goes away.
+    let daemon = TestDaemon::start();
+    let (ours, relayed) = UnixStream::pair().unwrap();
+    let to_daemon = UnixStream::connect(daemon.socket()).unwrap();
+    let cut = Arc::new(AtomicBool::new(false));
+    let relay = |mut from: UnixStream, mut to: UnixStream, cut: Arc<AtomicBool>| {
+        std::thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            loop {
+                if cut.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                match from.read(&mut buffer) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => {
+                        if to.write_all(&buffer[..n]).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+    };
+    relay(
+        relayed.try_clone().unwrap(),
+        to_daemon.try_clone().unwrap(),
+        Arc::clone(&cut),
+    );
+    relay(to_daemon, relayed, Arc::clone(&cut));
+
+    let mut client = Client::over_quic(ours).unwrap();
+    client.list_terminals().unwrap();
+    let contact = client.contact().expect("a remote connection has contact");
+    assert_eq!(contact.silent_since(), None);
+    let (notify, notified) = std::sync::mpsc::channel();
+    contact.on_change(move || {
+        let _ = notify.send(());
+    });
+
+    cut.store(true, Ordering::Relaxed);
+    // Something that wants an answer, without waiting for one.
+    let cut_at = Instant::now();
+    client.frame_done(TerminalId(1)).unwrap();
+    notified.recv_timeout(Duration::from_secs(6)).unwrap();
+    let silent_since = contact.silent_since().expect("out of contact");
+    assert!(silent_since >= cut_at);
+    assert!(cut_at.elapsed() >= Duration::from_secs(3));
+
+    cut.store(false, Ordering::Relaxed);
+    notified.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(contact.silent_since(), None);
+    client.list_terminals().unwrap();
+}

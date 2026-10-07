@@ -28,7 +28,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 pub use client::{Client, ClientError, Receiver, Sender};
-pub use quic::Route;
+pub use quic::{Contact, Route};
 pub use runtime::{DaemonLock, LockError, RuntimeDir};
 pub use server::{Daemon, ShutdownHandle};
 

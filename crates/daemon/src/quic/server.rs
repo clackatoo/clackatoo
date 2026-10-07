@@ -52,6 +52,8 @@ pub(crate) struct QuicServer {
     connections: HashMap<ConnectionHandle, Remote>,
     /// The certificate the endpoint presents, DER-encoded.
     certificate: Vec<u8>,
+    /// What clients put in probes over UDP, for them to be answered.
+    probe_key: [u8; 16],
     /// Connections that may have events, from being handed packets or
     /// timeouts.
     touched: Vec<ConnectionHandle>,
@@ -77,6 +79,8 @@ pub(crate) enum SetupError {
     Certificate(#[from] rcgen::Error),
     #[error("couldn't set up TLS: {0}")]
     Tls(#[from] rustls::Error),
+    #[error("no randomness for the probe key")]
+    Random,
 }
 
 impl QuicServer {
@@ -94,10 +98,16 @@ impl QuicServer {
             true,
             None,
         );
+        let mut probe_key = [0; 16];
+        rustls::crypto::ring::default_provider()
+            .secure_random
+            .fill(&mut probe_key)
+            .map_err(|_| SetupError::Random)?;
         Ok(Self {
             endpoint,
             connections: HashMap::new(),
             certificate: certificate.to_vec(),
+            probe_key,
             touched: Vec::new(),
             answers: Vec::new(),
             buffer: Vec::new(),
@@ -107,6 +117,11 @@ impl QuicServer {
     /// The certificate the endpoint presents, DER-encoded.
     pub(crate) fn certificate(&self) -> &[u8] {
         &self.certificate
+    }
+
+    /// What clients put in probes over UDP, for them to be answered.
+    pub(crate) fn probe_key(&self) -> [u8; 16] {
+        self.probe_key
     }
 
     /// Takes a packet received from `from`, by a carrier or over UDP. Only

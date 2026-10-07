@@ -18,6 +18,8 @@ pub(crate) struct Theme {
     pub(crate) muted: Rgba,
     /// The lines between panes.
     pub(crate) divider: Rgba,
+    /// Behind what's gone wrong, such as the daemon being out of contact.
+    pub(crate) warning: Rgba,
     /// The 256 indexed colours: 16 named ones, a 6×6×6 cube, and 24 greys.
     palette: [Rgba; 256],
 }
@@ -60,6 +62,7 @@ impl Default for Theme {
             accent: hex_rgba(0xf8_ce_57),
             muted: hex_rgba(0x80_84_88),
             divider: hex_rgba(0x3c_40_44),
+            warning: hex_rgba(0xcc_66_66),
             palette,
         }
     }

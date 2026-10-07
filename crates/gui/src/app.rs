@@ -6,13 +6,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
-use clackatoo_daemon::Sender;
+use clackatoo_daemon::{Contact, Sender};
 use clackatoo_protocol::{Axis, Content, Event, PROTOCOL_VERSION, ServerMessage, Size, TerminalId};
 use clackatoo_term::Row;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, OwnedDisplayHandle};
+use winit::event::{MouseScrollDelta, StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -245,6 +245,8 @@ pub(crate) struct App {
     session: Session,
     /// Shown instead of the panes, while there's no connection.
     notice: Option<Notice>,
+    /// Whether a daemon on another machine is in contact.
+    contact: Option<Contact>,
     /// Whether a frame has shown a terminal, rather than a notice.
     first_frame_drawn: bool,
     /// Why the window closed, if something went wrong.
@@ -273,6 +275,7 @@ impl App {
             // Shown from the first frame, so the window appears at once:
             // on Wayland, a window that hasn't drawn isn't shown at all.
             notice: Some(Notice::Connecting),
+            contact: None,
             first_frame_drawn: false,
             result: Ok(()),
         }
@@ -577,11 +580,13 @@ impl App {
             .map(|divider| geometry.divider(divider))
             .collect();
         let (left, right) = desk.bar_items();
+        let alert = self.out_of_contact();
         let bar = Bar {
             origin: [geometry.padding; 2],
             width: geometry.grid_pixels()[0],
             left: &left,
             right: &right,
+            alert: alert.as_deref(),
         };
         let picture = Picture {
             scenes: &scenes,
@@ -593,6 +598,19 @@ impl App {
             return None;
         }
         Some(drawings.iter().map(|drawing| drawing.terminal).collect())
+    }
+}
+
+impl App {
+    /// What the bar says while a daemon on another machine is out of
+    /// contact: since when, to the second.
+    fn out_of_contact(&self) -> Option<String> {
+        let since = self.contact.as_ref()?.silent_since()?;
+        let host = self.session.location().host().unwrap_or("the daemon");
+        Some(format!(
+            "no contact with {host} for {} s",
+            since.elapsed().as_secs()
+        ))
     }
 }
 
@@ -981,6 +999,25 @@ impl ApplicationHandler<SessionEvent> for App {
             event_loop.exit();
         }
     }
+
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        if let StartCause::ResumeTimeReached { .. } = cause {
+            self.request_redraw();
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // While the daemon is out of contact, the bar counts the seconds;
+        // otherwise, nothing wakes the window but events.
+        let flow = match self.contact.as_ref().and_then(Contact::silent_since) {
+            Some(since) => {
+                let seconds = since.elapsed().as_secs() + 1;
+                ControlFlow::WaitUntil(since + Duration::from_secs(seconds))
+            }
+            None => ControlFlow::Wait,
+        };
+        event_loop.set_control_flow(flow);
+    }
 }
 
 impl App {
@@ -1037,13 +1074,19 @@ impl App {
 
     fn handle_session_event(&mut self, event: SessionEvent) {
         match event {
-            SessionEvent::Connected { sender, workspaces } => {
+            SessionEvent::Connected {
+                sender,
+                workspaces,
+                contact,
+            } => {
                 self.notice = None;
+                self.contact = contact;
                 self.sender = Some(sender);
                 self.desk.connected(workspaces);
                 self.update_title();
                 self.request_redraw();
             }
+            SessionEvent::Contact => self.request_redraw(),
             SessionEvent::OtherDaemon { protocol } => {
                 self.notice = Some(Notice::OtherDaemon { protocol });
                 self.request_redraw();
@@ -1087,6 +1130,7 @@ impl App {
                 log::warn!("lost the daemon: {reason}");
                 self.sender = None;
                 self.desk.lost();
+                self.contact = None;
                 self.notice = Some(Notice::Lost { reason });
                 self.request_redraw();
             }

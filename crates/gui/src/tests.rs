@@ -277,6 +277,7 @@ fn panes_are_drawn_side_by_side_under_the_bar_with_a_divider() {
             width: 41.0 * cell_width,
             left: &[item("clackatoo", true), item("peios", false)],
             right: &[item("1 zsh", true), item("2 htop", false)],
+            alert: None,
         }),
         dividers: &[[divider_left, top, 2.0, pane_size[1]]],
     };
@@ -299,4 +300,54 @@ fn panes_are_drawn_side_by_side_under_the_bar_with_a_divider() {
         !text_beside_divider,
         "the cut-off line spilled into the divider's cell"
     );
+}
+
+#[test]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn an_alert_sits_in_the_middle_of_the_bar_in_the_warning_colour() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut fonts = fonts(2.0);
+    let (cell_width, cell_height) = (fonts.cell.width as f32, fonts.cell.height as f32);
+    let padding = 8.0;
+    let size = [
+        (60.0 * cell_width + 2.0 * padding) as u32,
+        (cell_height + 2.0 * padding) as u32,
+    ];
+    let item = |text: &str, active| BarItem {
+        text: text.into(),
+        active,
+    };
+    let alert = "no contact with box for 4 s";
+    let picture = Picture {
+        scenes: &[],
+        bar: Some(Bar {
+            origin: [padding; 2],
+            width: 60.0 * cell_width,
+            left: &[item("clackatoo", true)],
+            right: &[item("1 zsh", true)],
+            alert: Some(alert),
+        }),
+        dividers: &[],
+    };
+    let pixels = draw(&gpu, size, &picture, &mut fonts);
+    save("alert", size, &pixels);
+
+    let pixel = |x: f32, y: f32| {
+        let index = (y as usize * size[0] as usize + x as usize) * 4;
+        &pixels[index..index + 3]
+    };
+    // The alert's first cell is space, so it shows the colour behind it.
+    let alert_left = padding + (60.0 - (alert.len() as f32 + 2.0)) / 2.0 * cell_width;
+    assert_eq!(pixel(alert_left + 2.0, padding + 1.0), [0xcc, 0x66, 0x66]);
+    // The items either side are still there.
+    assert_eq!(pixel(padding + 1.0, padding + 1.0), [0xf8, 0xce, 0x57]);
+    let right_left = padding + 60.0 * cell_width - 7.0 * cell_width;
+    assert_eq!(pixel(right_left + 1.0, padding + 1.0), [0xf8, 0xce, 0x57]);
 }

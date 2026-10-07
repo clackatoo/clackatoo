@@ -37,6 +37,7 @@ use clackatoo_protocol::frame;
 use quinn_proto::congestion::BbrConfig;
 use quinn_proto::{TransportConfig, VarInt};
 
+pub use client::Contact;
 pub(crate) use client::{Carried, carry};
 pub use path::Route;
 pub(crate) use server::{QuicEvent, QuicServer, Received};
@@ -97,6 +98,30 @@ pub(crate) fn carrier_key(address: SocketAddr) -> Option<usize> {
     }
 }
 
+/// What begins a probe: a datagram a client sends the daemon's UDP port,
+/// for the daemon to send straight back, to find out whether UDP gets
+/// through. Then come the daemon's probe key and 8 bytes of the client's
+/// own, to tell its probes apart.
+const PROBE: &[u8; 8] = b"clackprb";
+
+/// How long a probe is.
+const PROBE_LEN: usize = PROBE.len() + 16 + 8;
+
+/// A probe with `key`, the daemon's, and `nonce`, the client's.
+pub(crate) fn probe(key: &[u8; 16], nonce: u64) -> [u8; PROBE_LEN] {
+    let mut probe = [0; PROBE_LEN];
+    probe[..8].copy_from_slice(PROBE);
+    probe[8..24].copy_from_slice(key);
+    probe[24..].copy_from_slice(&nonce.to_le_bytes());
+    probe
+}
+
+/// Whether `datagram` is a probe with `key`. No QUIC packet is: its first
+/// 24 bytes would have to match by chance.
+pub(crate) fn is_probe(datagram: &[u8], key: &[u8; 16]) -> bool {
+    datagram.len() == PROBE_LEN && datagram[..8] == *PROBE && datagram[8..24] == *key
+}
+
 /// Appends `packet` to `out`, framed for a carrier.
 pub(crate) fn frame_packet(packet: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(&frame::header(packet.len()));
@@ -106,6 +131,15 @@ pub(crate) fn frame_packet(packet: &[u8], out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probes_need_the_key() {
+        let key = [7; 16];
+        let probe = probe(&key, 42);
+        assert!(is_probe(&probe, &key));
+        assert!(!is_probe(&probe, &[8; 16]));
+        assert!(!is_probe(&probe[..PROBE_LEN - 1], &key));
+    }
 
     #[test]
     fn carrier_addresses_lead_back_to_their_carrier() {

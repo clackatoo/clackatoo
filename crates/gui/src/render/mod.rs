@@ -39,6 +39,9 @@ pub(crate) struct Bar<'a> {
     pub(crate) width: f32,
     pub(crate) left: &'a [BarItem],
     pub(crate) right: &'a [BarItem],
+    /// Something gone wrong, such as the daemon being out of contact, in
+    /// the middle, picked out in the warning colour.
+    pub(crate) alert: Option<&'a str>,
 }
 
 /// One name in the bar.
@@ -612,24 +615,35 @@ impl Renderer {
         // A cell's width of space either side of the text.
         let width = (text.chars().count() as f32 + 2.0) * cell_width;
         let left = (scene.origin[0] + scene.size[0] - width).max(scene.origin[0]);
-        self.push_tag(text, fonts, [left, scene.origin[1]], true);
+        self.push_tag(
+            text,
+            fonts,
+            [left, scene.origin[1]],
+            Some(self.theme.accent),
+        );
     }
 
-    /// `text` with a cell's space either side, at `origin`: dark on the
-    /// accent colour if `picked`, or else in a muted colour. Drawn after
+    /// `text` with a cell's space either side, at `origin`: dark on `fill`,
+    /// if it has one, or else in a muted colour. Drawn after
     /// the grid's glyphs, so it sits on top of them: the overlay pass comes
     /// last, and these glyphs go to their own list. Returns how wide it is.
     #[allow(clippy::cast_precision_loss)]
-    fn push_tag(&mut self, text: &str, fonts: &mut Fonts, origin: [f32; 2], picked: bool) -> f32 {
+    fn push_tag(
+        &mut self,
+        text: &str,
+        fonts: &mut Fonts,
+        origin: [f32; 2],
+        fill: Option<Rgba>,
+    ) -> f32 {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
         let width = (text.chars().count() as f32 + 2.0) * cell_width;
         let [left, top] = origin;
-        let (color, variant) = if picked {
+        let (color, variant) = if let Some(fill) = fill {
             self.overlays.push(Rect {
                 origin,
                 size: [width, cell_height],
-                color: self.theme.accent,
+                color: fill,
             });
             (self.theme.background, Variant::Bold)
         } else {
@@ -655,15 +669,24 @@ impl Renderer {
         width
     }
 
-    /// The bar: its items on the left from the left edge, and on the right
-    /// up to the right edge, with the right's dropped if they'd overlap.
+    /// The bar: its items on the left from the left edge, any alert in the
+    /// middle, or as near as it fits, and the items on the right up to the
+    /// right edge, dropped if they'd overlap.
     #[allow(clippy::cast_precision_loss)]
     fn push_bar(&mut self, bar: &Bar<'_>, fonts: &mut Fonts) {
         let cell_width = fonts.cell.width as f32;
-        let width = |item: &BarItem| (item.text.chars().count() as f32 + 2.0) * cell_width;
+        let tag_width = |text: &str| (text.chars().count() as f32 + 2.0) * cell_width;
+        let width = |item: &BarItem| tag_width(&item.text);
+        let accent = self.theme.accent;
+        let picked = |active: bool| active.then_some(accent);
         let [mut left, top] = bar.origin;
         for item in bar.left {
-            left += self.push_tag(&item.text, fonts, [left, top], item.active);
+            left += self.push_tag(&item.text, fonts, [left, top], picked(item.active));
+        }
+        if let Some(alert) = bar.alert {
+            let middle = bar.origin[0] + (bar.width - tag_width(alert)) / 2.0;
+            let x = middle.max(left + cell_width);
+            left = x + self.push_tag(alert, fonts, [x, top], Some(self.theme.warning));
         }
         let right_width: f32 = bar.right.iter().map(width).sum();
         let mut x = bar.origin[0] + bar.width - right_width;
@@ -671,7 +694,7 @@ impl Renderer {
             return;
         }
         for item in bar.right {
-            x += self.push_tag(&item.text, fonts, [x, top], item.active);
+            x += self.push_tag(&item.text, fonts, [x, top], picked(item.active));
         }
     }
 

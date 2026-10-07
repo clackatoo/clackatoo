@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use clackatoo_daemon::launch::{self, LaunchError};
 use clackatoo_daemon::remote::{self, Askpass, Remote, RemoteError};
-use clackatoo_daemon::{Client, ClientError, Receiver, RuntimeDir, Sender};
+use clackatoo_daemon::{Client, ClientError, Contact, Receiver, RuntimeDir, Sender};
 use clackatoo_protocol::{
     NewTerminal, PROTOCOL_VERSION, PaneTerminal, ServerMessage, Size, TerminalStatus, Workspaces,
 };
@@ -53,7 +53,12 @@ pub(crate) enum SessionEvent {
     Connected {
         sender: Sender,
         workspaces: Workspaces,
+        /// Whether a daemon on another machine is in contact. Changes to it
+        /// arrive as [`SessionEvent::Contact`].
+        contact: Option<Contact>,
     },
+    /// A daemon on another machine went out of contact, or came back.
+    Contact,
     /// A daemon speaking another protocol is running. The thread waits
     /// for a [`SessionCommand`].
     OtherDaemon {
@@ -217,12 +222,19 @@ fn run(
             Connected::Failed(reason) => return lost(reason),
         }
     };
+    let contact = client.contact();
+    if let Some(contact) = &contact {
+        let proxy = proxy.clone();
+        contact.on_change(move || drop(proxy.send_event(SessionEvent::Contact)));
+    }
     let mut receiver = match open(client) {
         Ok((sender, receiver, workspaces)) => {
-            if proxy
-                .send_event(SessionEvent::Connected { sender, workspaces })
-                .is_err()
-            {
+            let connected = SessionEvent::Connected {
+                sender,
+                workspaces,
+                contact,
+            };
+            if proxy.send_event(connected).is_err() {
                 return;
             }
             receiver

@@ -30,7 +30,7 @@ use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     ClientMessage, Error, GridState, HistoryLine, HistoryLines, Line, NodeId, PROTOCOL_VERSION,
     PaneId, PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size, TerminalId,
-    TerminalStatus, View, ViewUpdate, WorkspaceId,
+    TerminalStatus, Udp, View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_term::{Damage, Terminal};
 use mio::event::Event;
@@ -1196,34 +1196,44 @@ impl Daemon {
             });
         }
         client.carrying = true;
+        let quic = self.quic.as_ref();
+        let udp = self.udp.as_ref().and_then(|udp| udp.local_addr().ok());
         Ok(Response::Carrying {
-            certificate: self
-                .quic
-                .as_ref()
+            certificate: quic
                 .map(|quic| quic.certificate().to_vec())
                 .unwrap_or_default(),
-            udp_port: self
-                .udp
-                .as_ref()
-                .and_then(|udp| udp.local_addr().ok())
-                .map(|address| address.port()),
+            udp: udp.zip(quic).map(|(address, quic)| Udp {
+                port: address.port(),
+                probe_key: quic.probe_key(),
+            }),
         })
     }
 
-    /// Hands the QUIC endpoint every packet that has arrived over UDP.
+    /// Hands the QUIC endpoint every packet that has arrived over UDP, and
+    /// sends probes straight back.
     fn receive_udp(&mut self) {
         let (Some(udp), Some(quic)) = (&self.udp, self.quic.as_mut()) else {
             return;
         };
         let now = Instant::now();
+        let key = quic.probe_key();
         loop {
             match udp.recv_from(&mut self.buffer) {
+                Ok((n, from)) if quic::is_probe(&self.buffer[..n], &key) => {
+                    if let Err(err) = udp.send_to(&self.buffer[..n], from) {
+                        log::debug!("answering a probe from {from} failed: {err}");
+                    }
+                }
                 Ok((n, from)) => quic.receive(now, from, &self.buffer[..n]),
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                // Such as an ICMP error for an earlier packet: the next
-                // read gets on with the rest.
-                Err(err) => log::debug!("UDP read failed: {err}"),
+                Err(err) => {
+                    // Such as an ICMP error for an earlier packet. Whatever
+                    // else is waiting brings another event.
+                    if err.kind() != io::ErrorKind::WouldBlock {
+                        log::debug!("UDP read failed: {err}");
+                    }
+                    return;
+                }
             }
         }
     }
