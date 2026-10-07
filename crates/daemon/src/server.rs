@@ -636,11 +636,12 @@ impl Daemon {
     }
 
     /// Puts off compacting the terminal's scrollback until its output has
-    /// paused, if it has rows to compact.
+    /// paused, if it has rows to compact. Memory freed by history being
+    /// cleared is handed back then too.
     fn schedule_compaction(&mut self, id: TerminalId) {
         if self
             .terminals
-            .get(&id)
+            .get_mut(&id)
             .is_some_and(|slot| slot.terminal.scrollback_needs_compaction())
         {
             self.compactions.insert(id, Instant::now() + COMPACT_AFTER);

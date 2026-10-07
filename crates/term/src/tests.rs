@@ -978,3 +978,13 @@ mod snapshots {
         );
     }
 }
+
+#[test]
+fn clearing_history_is_reported_once_and_only_when_there_was_some() {
+    let mut t = terminal(10, 2);
+    t.advance(b"\x1b[3J");
+    assert!(!t.take_history_cleared(), "there was no history");
+    t.advance(b"a\r\nb\r\nc\r\n\x1b[3J");
+    assert!(t.take_history_cleared());
+    assert!(!t.take_history_cleared());
+}

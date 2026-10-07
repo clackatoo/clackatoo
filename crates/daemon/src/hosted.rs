@@ -184,8 +184,11 @@ impl HostedTerminal {
         !self.input.is_empty()
     }
 
-    pub(crate) fn scrollback_needs_compaction(&self) -> bool {
-        self.emulator.scrollback_needs_compaction()
+    /// Whether scrollback has rows to compact, or memory freed by history
+    /// being cleared to hand back.
+    pub(crate) fn scrollback_needs_compaction(&mut self) -> bool {
+        // Both or-ed, so the flag is always taken.
+        self.emulator.take_history_cleared() | self.emulator.scrollback_needs_compaction()
     }
 
     pub(crate) fn compact_scrollback(&mut self) {

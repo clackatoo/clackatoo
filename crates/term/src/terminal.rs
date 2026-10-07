@@ -96,6 +96,12 @@ impl Terminal {
         self.parser.advance(&mut self.emulator, bytes);
     }
 
+    /// Whether a program cleared the history (`CSI 3J`, which `clear` sends)
+    /// since the last call, freeing the memory it held.
+    pub fn take_history_cleared(&mut self) -> bool {
+        std::mem::take(&mut self.emulator.history_cleared)
+    }
+
     /// Takes the replies to queries seen so far. These must be written back to
     /// the program, which may be waiting for them.
     pub fn take_replies(&mut self) -> Vec<u8> {
@@ -568,6 +574,9 @@ pub(crate) struct Emulator {
     pub(crate) replies: Vec<u8>,
     /// The last character printed, for REP (repeat).
     last_printed: Option<char>,
+    /// History was cleared since [`Terminal::take_history_cleared`] last
+    /// asked, freeing the memory it held.
+    history_cleared: bool,
     /// Prints everything through the simple per-character path, so tests can
     /// check the fast path against it.
     #[cfg(test)]
@@ -600,6 +609,7 @@ impl Emulator {
             cursor_shape: CursorShape::Default,
             replies: Vec::new(),
             last_printed: None,
+            history_cleared: false,
             #[cfg(test)]
             simple_print: false,
         }
@@ -1086,7 +1096,11 @@ impl Emulator {
                 grid.row_mut(line).fill(0..col + 1, &blank);
             }
             2 => grid.clear(&blank),
-            3 => grid.clear_scrollback(),
+            3 => {
+                let had_history = grid.scrollback_len() > 0;
+                grid.clear_scrollback();
+                self.history_cleared |= had_history;
+            }
             _ => log::trace!("unhandled ED mode {mode}"),
         }
     }
