@@ -15,6 +15,7 @@ bench = false
 bitflags.workspace = true
 log.workspace = true
 serde = { workspace = true, optional = true }
+simdutf8.workspace = true
 thiserror.workspace = true
 unicode-width.workspace = true
 

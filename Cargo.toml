@@ -23,6 +23,7 @@ mio = { version = "1.2", features = ["os-poll", "os-ext", "net"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 rustix = { version = "1.1", features = ["fs", "process", "pty", "std", "termios"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+simdutf8 = "0.1"
 slab = "0.4"
 thiserror = "2.0"
 unicode-width = "0.2"

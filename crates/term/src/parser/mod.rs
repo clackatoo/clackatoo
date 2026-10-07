@@ -195,7 +195,8 @@ impl Parser {
     fn advance_utf8(&mut self, performer: &mut impl Perform, bytes: &[u8]) -> usize {
         let end = scan::text_len(bytes);
         let text = &bytes[..end];
-        match std::str::from_utf8(text) {
+        // simdutf8 validates with SIMD and reports errors exactly as std does.
+        match simdutf8::compat::from_utf8(text) {
             Ok(text) => {
                 print_text(performer, text);
                 end
