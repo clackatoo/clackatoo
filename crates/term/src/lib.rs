@@ -13,6 +13,7 @@
 
 mod cell;
 mod charset;
+mod damage;
 mod dispatch;
 mod grid;
 mod parser;
@@ -30,6 +31,7 @@ mod width;
 mod tests;
 
 pub use cell::{Cell, CellFlags};
+pub use damage::Damage;
 pub use grid::Grid;
 pub use row::Row;
 pub use scrollback::Compaction;

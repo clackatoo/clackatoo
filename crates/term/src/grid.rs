@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
+use crate::damage::Damage;
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
 use crate::style::Style;
@@ -17,6 +18,8 @@ pub struct Grid {
     /// Exactly `height` rows, top first.
     rows: VecDeque<Row>,
     scrollback: Scrollback,
+    /// Lines changed since the damage was last taken.
+    damage: Damage,
     width: usize,
     height: usize,
 }
@@ -31,9 +34,17 @@ impl Grid {
         Self {
             rows: (0..height).map(|_| Row::new(width)).collect(),
             scrollback: Scrollback::new(scrollback_limit, compaction),
+            damage: Self::all_damaged(),
             width,
             height,
         }
+    }
+
+    /// Damage covering the whole screen: a new screen hasn't been seen.
+    fn all_damaged() -> Damage {
+        let mut damage = Damage::new();
+        damage.mark_all();
+        damage
     }
 
     /// Columns per row.
@@ -77,13 +88,31 @@ impl Grid {
         self.scrollback.rows()
     }
 
+    /// Screen row `line`, for changing. Every change to the screen goes
+    /// through this or another method of the grid, so each can record what
+    /// it damaged.
     pub(crate) fn row_mut(&mut self, line: usize) -> &mut Row {
+        self.damage.mark(line);
         &mut self.rows[line]
+    }
+
+    /// Adds the lines changed since the last call to `into`.
+    pub(crate) fn take_damage(&mut self, into: &mut Damage) {
+        into.merge(&self.damage);
+        self.damage.clear();
+    }
+
+    /// Records that every line changed.
+    pub(crate) fn damage_all(&mut self) {
+        self.damage.mark_all();
     }
 
     /// Scrolls the whole screen up by `count` lines. The top lines move into
     /// scrollback, and blank lines in `blank` appear at the bottom.
     pub(crate) fn scroll_up_into_scrollback(&mut self, count: usize, blank: &Style) {
+        if count > 0 {
+            self.damage.mark_all();
+        }
         for _ in 0..count.min(self.height) {
             let row = self.rows.pop_front().expect("a grid always has rows");
             let padded = is_padded(&row, self.rows.front());
@@ -102,6 +131,9 @@ impl Grid {
     pub(crate) fn scroll_up(&mut self, region: Range<usize>, count: usize, blank: &Style) {
         let count = count.min(region.len());
         let rows = self.absolute(region);
+        if count > 0 {
+            self.damage.mark_range(rows.clone());
+        }
         self.rotate_left(rows.clone(), count);
         for index in rows.end - count..rows.end {
             self.rows[index].reset(blank);
@@ -114,6 +146,9 @@ impl Grid {
     pub(crate) fn scroll_down(&mut self, region: Range<usize>, count: usize, blank: &Style) {
         let count = count.min(region.len());
         let rows = self.absolute(region);
+        if count > 0 {
+            self.damage.mark_range(rows.clone());
+        }
         self.rotate_left(rows.clone(), rows.len() - count);
         for index in rows.start..rows.start + count {
             self.rows[index].reset(blank);
@@ -197,6 +232,7 @@ impl Grid {
         self.rows = rows.into();
         self.width = width;
         self.height = height;
+        self.damage.mark_all();
         (moved.0 - overflow, moved.1)
     }
 
@@ -227,10 +263,12 @@ impl Grid {
         self.rows = rows.into();
         self.width = width;
         self.height = height;
+        self.damage.mark_all();
     }
 
     /// Blanks every screen row in `blank`.
     pub(crate) fn clear(&mut self, blank: &Style) {
+        self.damage.mark_all();
         for row in &mut self.rows {
             row.reset(blank);
         }

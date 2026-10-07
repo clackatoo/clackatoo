@@ -765,6 +765,52 @@ proptest! {
     }
 
     #[test]
+    fn redrawing_damaged_lines_keeps_a_viewer_in_sync(
+        bytes in output(),
+        cuts in prop::collection::vec(
+            (any::<prop::sample::Index>(), prop::option::weighted(0.1, (1u16..12, 1u16..6))),
+            0..40,
+        ),
+        cols in 1u16..12,
+        rows in 1u16..6,
+    ) {
+        // Checked often, because a missed change can be hidden by the next:
+        // rotating blank lines changes nothing visible.
+        let mut t = terminal(cols, rows);
+        let mut damage = crate::Damage::new();
+        // What a viewer shows: every line it was told about, as it was then.
+        let mut viewer: Vec<RowContents> = Vec::new();
+        let mut sync = |t: &mut Terminal, viewer: &mut Vec<RowContents>| {
+            damage.clear();
+            t.take_damage(&mut damage);
+            let grid = t.grid();
+            if viewer.len() == grid.height() {
+                for line in damage.lines(grid.height()) {
+                    viewer[line] = row_contents(grid.row(line));
+                }
+            } else {
+                // A viewer is sent the whole screen when its size changes.
+                *viewer = grid.rows().map(row_contents).collect();
+            }
+            let screen: Vec<RowContents> = grid.rows().map(row_contents).collect();
+            assert_eq!(*viewer, screen);
+        };
+
+        let mut cuts: Vec<_> = cuts.iter().map(|(cut, size)| (cut.index(bytes.len() + 1), *size)).collect();
+        cuts.sort_unstable();
+        let mut start = 0;
+        for (cut, size) in cuts.into_iter().chain([(bytes.len(), None)]) {
+            t.advance(&bytes[start..cut]);
+            sync(&mut t, &mut viewer);
+            if let Some((cols, rows)) = size {
+                t.resize(Size::new(cols, rows).expect("test sizes are valid"));
+                sync(&mut t, &mut viewer);
+            }
+            start = cut;
+        }
+    }
+
+    #[test]
     fn the_fast_print_path_matches_the_simple_one(
         bytes in output(),
         cols in 1u16..12,

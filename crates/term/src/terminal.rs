@@ -5,6 +5,7 @@ use std::ops::Range;
 use bitflags::bitflags;
 
 use crate::charset::Charsets;
+use crate::damage::Damage;
 use crate::grid::Grid;
 use crate::parser::Parser;
 use crate::row::Row;
@@ -101,6 +102,12 @@ impl Terminal {
     #[must_use]
     pub fn scrollback_needs_compaction(&self) -> bool {
         self.emulator.primary.scrollback_needs_compaction()
+    }
+
+    /// Adds the screen lines that changed since the last call to `into`.
+    /// A viewer that redraws those lines stays in sync with the screen.
+    pub fn take_damage(&mut self, into: &mut Damage) {
+        self.emulator.grid_mut().take_damage(into);
     }
 
     /// Compacts the scrollback rows that aren't yet, to save memory. With
@@ -1016,14 +1023,22 @@ impl Emulator {
     }
 
     fn switch_screen(&mut self, alternate: bool) {
+        let screen = if alternate {
+            Screen::Alternate
+        } else {
+            Screen::Primary
+        };
+        if screen == self.screen {
+            return;
+        }
         if alternate {
             let (width, height) = (self.width(), self.height());
             self.alternate
                 .get_or_insert_with(|| Grid::new(width, height, 0, Compaction::Off));
-            self.screen = Screen::Alternate;
-        } else {
-            self.screen = Screen::Primary;
         }
+        self.screen = screen;
+        // A viewer was showing the other screen.
+        self.grid_mut().damage_all();
     }
 
     // --- Cursor save and restore, resets ----------------------------------
