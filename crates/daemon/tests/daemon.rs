@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    Error, NewTerminal, PROTOCOL_VERSION, Request, Response, Screen, Size, TerminalId,
-    TerminalStatus,
+    ClientMessage, Error, Event, NewTerminal, PROTOCOL_VERSION, Patch, Request, Response,
+    ServerMessage, Size, TerminalId, TerminalStatus, View, ViewUpdate,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -69,8 +69,9 @@ fn spawn(client: &mut Client, command: &[&str]) -> TerminalId {
         .expect("new terminal")
 }
 
-fn screen_text(screen: &Screen) -> String {
-    screen.lines.iter().map(|line| line.text() + "\n").collect()
+fn screen_text(view: &View) -> String {
+    let grid = view.grid().expect("terminals show a grid");
+    grid.lines.iter().map(|line| line.text() + "\n").collect()
 }
 
 /// Captures `terminal` until its text satisfies `done`, failing after a few
@@ -235,7 +236,7 @@ fn resizing_tells_the_program_and_rewraps_the_screen() {
     let text = wait_for_screen(&mut client, terminal, |text| text.contains("12 60"));
     assert!(text.starts_with(&format!("{}\n", "0".repeat(50))), "{text}");
     assert_eq!(
-        client.capture(terminal).unwrap().size,
+        client.capture(terminal).unwrap().grid().unwrap().size,
         Size::new(60, 12).unwrap()
     );
 }
@@ -305,7 +306,7 @@ fn recordings_replay_to_the_same_screen() {
     let recording = Recording::parse(&bytes).expect("valid recording");
     let mut replay = Terminal::new(recording.size, &clackatoo_term::Config::default());
     replay.advance(recording.output);
-    assert_eq!(screen_text(&Screen::capture(&replay)), live);
+    assert_eq!(screen_text(&View::capture(&replay)), live);
 }
 
 /// Reads everything the daemon sends until it hangs up.
@@ -326,10 +327,10 @@ fn read_until_hangup(stream: &mut UnixStream) -> Vec<u8> {
 }
 
 /// Sends raw frames, to test what the typed client never sends.
-fn raw_exchange(socket: &Path, requests: &[Request]) -> Vec<Response> {
+fn raw_exchange(socket: &Path, messages: &[ClientMessage]) -> Vec<ServerMessage> {
     let mut stream = UnixStream::connect(socket).expect("connect");
-    for request in requests {
-        stream.write_all(&frame::encode(request).unwrap()).unwrap();
+    for message in messages {
+        stream.write_all(&frame::encode(message).unwrap()).unwrap();
     }
     stream.shutdown(std::net::Shutdown::Write).unwrap();
     let bytes = read_until_hangup(&mut stream);
@@ -341,11 +342,14 @@ fn raw_exchange(socket: &Path, requests: &[Request]) -> Vec<Response> {
 #[test]
 fn requests_before_hello_are_refused() {
     let daemon = TestDaemon::start();
-    let responses = raw_exchange(
-        &daemon.socket(),
-        &[Request::ListTerminals, Request::ListTerminals],
+    let list = || ClientMessage::Request(Request::ListTerminals);
+    let responses = raw_exchange(&daemon.socket(), &[list(), list()]);
+    assert_eq!(
+        responses,
+        [ServerMessage::Response(Response::Error(
+            Error::HelloRequired
+        ))]
     );
-    assert_eq!(responses, [Response::Error(Error::HelloRequired)]);
 }
 
 #[test]
@@ -354,15 +358,15 @@ fn a_version_mismatch_gets_our_version_then_a_hangup() {
     let responses = raw_exchange(
         &daemon.socket(),
         &[
-            Request::Hello {
+            ClientMessage::Hello {
                 protocol_version: PROTOCOL_VERSION + 1,
             },
-            Request::ListTerminals,
+            ClientMessage::Request(Request::ListTerminals),
         ],
     );
     assert_eq!(
         responses,
-        [Response::Hello {
+        [ServerMessage::Hello {
             protocol_version: PROTOCOL_VERSION
         }]
     );
@@ -379,4 +383,150 @@ fn garbage_drops_only_that_client() {
         .client()
         .list_terminals()
         .expect("daemon still serves others");
+}
+
+// --- Views ---------------------------------------------------------------
+
+/// The next view update for `terminal`, failing after a few seconds.
+fn next_update(client: &mut Client, terminal: TerminalId) -> ViewUpdate {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    match client.next_event().expect("a view update") {
+        Event::View {
+            terminal: from,
+            update,
+        } => {
+            assert_eq!(from, terminal);
+            update
+        }
+    }
+}
+
+/// Asserts no event arrives for a little while.
+fn assert_quiet(client: &mut Client) {
+    client
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    match client.next_event() {
+        Err(ClientError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("expected silence, got {other:?}"),
+    }
+}
+
+/// Attaches to `terminal` and returns the first snapshot.
+fn attach(client: &mut Client, terminal: TerminalId) -> View {
+    client.attach(terminal).expect("attach");
+    match next_update(client, terminal) {
+        ViewUpdate::Snapshot(view) => view,
+        ViewUpdate::Patch(patch) => panic!("expected a snapshot, got {patch:?}"),
+    }
+}
+
+/// Lines changed by a patch.
+fn changed_lines(update: &ViewUpdate) -> Vec<u16> {
+    let ViewUpdate::Patch(patches) = update else {
+        panic!("expected a patch, got {update:?}");
+    };
+    patches
+        .iter()
+        .flat_map(|patch| match patch {
+            Patch::Grid { lines, .. } => lines.iter().map(|(line, _)| *line).collect(),
+            Patch::Title(_) => Vec::new(),
+        })
+        .collect()
+}
+
+#[test]
+fn attaching_sends_a_snapshot_then_patches() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["sh", "-c", "printf ready; exec cat"]);
+    wait_for_screen(&mut client, terminal, |text| text.starts_with("ready"));
+
+    let mut view = attach(&mut client, terminal);
+    assert_eq!(view, client.capture(terminal).unwrap());
+
+    client.frame_done(terminal).unwrap();
+    client.send_input(terminal, b"x").unwrap();
+    let update = next_update(&mut client, terminal);
+    // cat's terminal echoes the key on line 0.
+    assert_eq!(changed_lines(&update), [0]);
+    view.apply(update);
+    assert_eq!(view, client.capture(terminal).unwrap());
+}
+
+#[test]
+fn updates_wait_for_the_last_one_to_be_drawn() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["cat"]);
+    let mut view = attach(&mut client, terminal);
+
+    // Not acknowledged yet, so these changes are held back...
+    client.send_input(terminal, b"a\r").unwrap();
+    client.send_input(terminal, b"b\r").unwrap();
+    // Each line shows twice: the terminal's echo, then cat's copy.
+    wait_for_screen(&mut client, terminal, |text| text.matches('b').count() == 2);
+    assert_quiet(&mut client);
+
+    // ...and arrive together once it is.
+    client.frame_done(terminal).unwrap();
+    let update = next_update(&mut client, terminal);
+    view.apply(update);
+    assert_eq!(view, client.capture(terminal).unwrap());
+    client.frame_done(terminal).unwrap();
+    assert_quiet(&mut client);
+}
+
+#[test]
+fn a_resize_sends_a_new_snapshot() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["cat"]);
+    attach(&mut client, terminal);
+    client.frame_done(terminal).unwrap();
+
+    let size = Size::new(20, 5).unwrap();
+    daemon.client().resize(terminal, size).unwrap();
+    match next_update(&mut client, terminal) {
+        ViewUpdate::Snapshot(view) => assert_eq!(view.grid().unwrap().size, size),
+        ViewUpdate::Patch(patch) => panic!("expected a snapshot, got {patch:?}"),
+    }
+}
+
+#[test]
+fn detaching_stops_updates() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["cat"]);
+    attach(&mut client, terminal);
+    client.detach(terminal).unwrap();
+    client.frame_done(terminal).unwrap();
+    client.send_input(terminal, b"x").unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.starts_with('x'));
+    assert_quiet(&mut client);
+}
+
+#[test]
+fn a_view_kept_by_patches_matches_the_screen_through_a_flood() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    // Scrolling, colours, wide characters and the alternate screen, then a
+    // title to show it's all been printed. It starts on Enter, once attached.
+    let script = r"read go; for i in $(seq 1 300); do printf '\033[3%dm%d 字 \033[0mline\n' $((i % 8)) $i; done; printf '\033[?1049hfull screen\033[?1049l\033[2;5Hend\033]2;done\007'; exec cat";
+    let terminal = spawn(&mut client, &["sh", "-c", script]);
+    let mut view = attach(&mut client, terminal);
+    client.frame_done(terminal).unwrap();
+    client.send_input(terminal, b"\r").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        view.apply(next_update(&mut client, terminal));
+        client.frame_done(terminal).unwrap();
+        if view.title == "done" && view == client.capture(terminal).unwrap() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the view never caught up");
+    }
 }

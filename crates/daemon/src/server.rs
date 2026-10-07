@@ -20,7 +20,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
-use clackatoo_protocol::{Error, PROTOCOL_VERSION, Request, Response, TerminalId};
+use clackatoo_protocol::{
+    ClientMessage, CursorState, Error, InputModes, Line, NodeId, PROTOCOL_VERSION, Patch, Request,
+    Response, ServerMessage, Size, TerminalId, View, ViewUpdate,
+};
+use clackatoo_term::{Damage, Terminal};
 use mio::event::Event;
 use mio::net::{UnixListener, UnixStream};
 use mio::unix::SourceFd;
@@ -70,6 +74,8 @@ struct Slot {
     /// Whether the PTY is registered for writability, which it only is while
     /// input is queued.
     wants_writable: bool,
+    /// The clients following this terminal's view.
+    viewers: Vec<Token>,
 }
 
 /// A connected client.
@@ -84,6 +90,83 @@ struct Client {
     /// broke the protocol.
     finished: bool,
     wants_writable: bool,
+    /// The terminals whose views the client follows.
+    views: BTreeMap<TerminalId, Subscription>,
+}
+
+/// A client following one terminal's view, and what it was last sent.
+#[derive(Debug)]
+struct Subscription {
+    /// Lines changed since the last update was sent.
+    damage: Damage,
+    /// The size last sent. `None` until the first snapshot is sent, and
+    /// after a re-attach, which asks for a fresh one.
+    size: Option<Size>,
+    title: String,
+    cursor: CursorState,
+    modes: InputModes,
+    /// An update was sent and not yet acknowledged with `FrameDone`.
+    awaiting_ack: bool,
+}
+
+impl Subscription {
+    fn new() -> Self {
+        Self {
+            damage: Damage::new(),
+            size: None,
+            title: String::new(),
+            cursor: CursorState {
+                line: 0,
+                col: 0,
+                visible: false,
+            },
+            modes: InputModes::default(),
+            awaiting_ack: false,
+        }
+    }
+
+    /// The update that brings the client from what it was last sent to what
+    /// `terminal` shows now, recorded as sent. `None` if nothing changed.
+    fn update(&mut self, terminal: &Terminal) -> Option<ViewUpdate> {
+        let size = terminal.size();
+        let cursor = CursorState::of(terminal);
+        let modes = terminal.input_modes();
+        if self.size != Some(size) {
+            self.size = Some(size);
+            terminal.title().clone_into(&mut self.title);
+            self.cursor = cursor;
+            self.modes = modes;
+            self.damage.clear();
+            return Some(ViewUpdate::Snapshot(View::capture(terminal)));
+        }
+
+        let mut patches = Vec::new();
+        if terminal.title() != self.title {
+            terminal.title().clone_into(&mut self.title);
+            patches.push(Patch::Title(self.title.clone()));
+        }
+        let grid = terminal.grid();
+        let lines: Vec<(u16, Line)> = self
+            .damage
+            .lines(grid.height())
+            .map(|line| {
+                let index = u16::try_from(line).expect("screen lines are bounded by Size::MAX");
+                (index, Line::from_row(grid.row(line)))
+            })
+            .collect();
+        self.damage.clear();
+        if !lines.is_empty() || cursor != self.cursor || modes != self.modes {
+            self.cursor = cursor;
+            self.modes = modes;
+            patches.push(Patch::Grid {
+                node: NodeId::ROOT,
+                cursor,
+                modes,
+                lines,
+            });
+        }
+        (!patches.is_empty()).then_some(ViewUpdate::Patch(patches))
+    }
 }
 
 /// The clackatoo daemon: owns every terminal and serves clients.
@@ -100,6 +183,10 @@ pub struct Daemon {
     unread: VecDeque<TerminalId>,
     /// When each terminal with uncompacted scrollback should compact it.
     compactions: BTreeMap<TerminalId, Instant>,
+    /// Some view may have an update to send.
+    views_pending: bool,
+    /// Where a terminal's damage is collected before it goes to each viewer.
+    damage: Damage,
     config: DaemonConfig,
     buffer: Box<[u8]>,
 }
@@ -150,6 +237,8 @@ impl Daemon {
             next_id: 1,
             unread: VecDeque::new(),
             compactions: BTreeMap::new(),
+            views_pending: false,
+            damage: Damage::new(),
             config,
             buffer: vec![0; READ_BUFFER_LEN].into_boxed_slice(),
         })
@@ -194,6 +283,7 @@ impl Daemon {
                 self.read_output(id);
             }
             self.compact_scrollbacks();
+            self.send_view_updates();
         }
         log::info!("shutting down");
         Ok(())
@@ -244,6 +334,70 @@ impl Daemon {
         // Replies to the program's queries may have queued input.
         self.update_pty_interest(id);
         self.schedule_compaction(id);
+        self.collect_damage(id);
+    }
+
+    /// Hands the lines the terminal changed to each client following it.
+    fn collect_damage(&mut self, id: TerminalId) {
+        let Some(slot) = self.terminals.get_mut(&id) else {
+            return;
+        };
+        self.damage.clear();
+        slot.terminal.take_damage(&mut self.damage);
+        // The cursor or title may have changed without damage, so viewers
+        // are checked even then.
+        for &token in &slot.viewers {
+            if let Some(Source::Client(client)) = self.sources.get_mut(token.0)
+                && let Some(subscription) = client.views.get_mut(&id)
+            {
+                subscription.damage.merge(&self.damage);
+                self.views_pending = true;
+            }
+        }
+    }
+
+    /// Sends each view update that's due: one per subscription that has
+    /// changes, has had its last update acknowledged, and whose client has
+    /// written everything queued before. Holding back for slow clients means
+    /// changes pile up into one update instead of a backlog.
+    fn send_view_updates(&mut self) {
+        if !std::mem::take(&mut self.views_pending) {
+            return;
+        }
+        let mut ready = Vec::new();
+        for (key, source) in &mut self.sources {
+            let Source::Client(client) = source else {
+                continue;
+            };
+            if !client.outgoing.is_empty() || client.finished {
+                continue;
+            }
+            for (&id, subscription) in &mut client.views {
+                if subscription.awaiting_ack {
+                    continue;
+                }
+                let Some(slot) = self.terminals.get(&id) else {
+                    continue;
+                };
+                if let Some(update) = subscription.update(slot.terminal.emulator()) {
+                    subscription.awaiting_ack = true;
+                    let event = ServerMessage::Event(clackatoo_protocol::Event::View {
+                        terminal: id,
+                        update,
+                    });
+                    match frame::encode(&event) {
+                        Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
+                        Err(err) => log::error!("encoding a view update failed: {err}"),
+                    }
+                }
+            }
+            if !client.outgoing.is_empty() {
+                ready.push(Token(key));
+            }
+        }
+        for token in ready {
+            self.flush_client(token);
+        }
     }
 
     /// Puts off compacting the terminal's scrollback until its output has
@@ -355,6 +509,7 @@ impl Daemon {
                         output,
                         exit,
                         wants_writable: false,
+                        viewers: Vec::new(),
                     },
                 );
                 Ok(id)
@@ -378,6 +533,11 @@ impl Daemon {
             .ok_or(Error::NoSuchTerminal(id))?;
         self.unread.retain(|&unread| unread != id);
         self.compactions.remove(&id);
+        for token in &slot.viewers {
+            if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
+                client.views.remove(&id);
+            }
+        }
         for token in [slot.output, slot.exit].into_iter().flatten() {
             self.sources.remove(token.0);
         }
@@ -441,6 +601,7 @@ impl Daemon {
                         greeted: false,
                         finished: false,
                         wants_writable: false,
+                        views: BTreeMap::new(),
                     }));
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
@@ -456,22 +617,48 @@ impl Daemon {
     /// Reads whatever a client sent, answers its requests, and writes what
     /// it can of the answers.
     fn serve_client(&mut self, token: Token) {
-        let Some(requests) = self.receive_requests(token) else {
+        let Some(messages) = self.receive_messages(token) else {
             return;
         };
-        for request in requests {
+        for message in messages {
             let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
                 return;
             };
             let greeted = client.greeted;
-            let (response, finish) = self.respond(request, greeted);
+            let reply = match message {
+                ClientMessage::Hello { protocol_version } => {
+                    let compatible = protocol_version == PROTOCOL_VERSION;
+                    if !compatible {
+                        log::warn!(
+                            "client speaks protocol {protocol_version}, we speak {PROTOCOL_VERSION}"
+                        );
+                    }
+                    client.greeted = compatible;
+                    client.finished |= !compatible;
+                    ServerMessage::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                    }
+                }
+                _ if !greeted => {
+                    client.finished = true;
+                    ServerMessage::Response(Response::Error(Error::HelloRequired))
+                }
+                ClientMessage::FrameDone { terminal } => {
+                    if let Some(subscription) = client.views.get_mut(&terminal) {
+                        subscription.awaiting_ack = false;
+                        self.views_pending = true;
+                    }
+                    continue;
+                }
+                ClientMessage::Request(request) => {
+                    ServerMessage::Response(self.respond(request, token))
+                }
+            };
 
             let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
                 return;
             };
-            client.greeted |= matches!(response, Response::Hello { .. });
-            client.finished |= finish;
-            match frame::encode(&response) {
+            match frame::encode(&reply) {
                 Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
                 Err(err) => {
                     log::error!("encoding a response failed: {err}");
@@ -487,7 +674,7 @@ impl Daemon {
 
     /// Reads and decodes everything a client has sent. Returns `None` if the
     /// client was dropped.
-    fn receive_requests(&mut self, token: Token) -> Option<Vec<Request>> {
+    fn receive_messages(&mut self, token: Token) -> Option<Vec<ClientMessage>> {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return None;
         };
@@ -508,10 +695,10 @@ impl Daemon {
             }
         }
 
-        let mut requests = Vec::new();
+        let mut messages = Vec::new();
         loop {
-            match client.decoder.decode::<Request>() {
-                Ok(Some(request)) => requests.push(request),
+            match client.decoder.decode::<ClientMessage>() {
+                Ok(Some(message)) => messages.push(message),
                 Ok(None) => break,
                 Err(err) => {
                     log::warn!("dropping a client that sent a bad frame: {err}");
@@ -520,28 +707,12 @@ impl Daemon {
                 }
             }
         }
-        Some(requests)
+        Some(messages)
     }
 
-    /// Answers one request. Also returns whether to end the connection after
-    /// sending the answer.
-    fn respond(&mut self, request: Request, greeted: bool) -> (Response, bool) {
+    /// Answers one request from the client at `token`.
+    fn respond(&mut self, request: Request, token: Token) -> Response {
         let response = match request {
-            Request::Hello { protocol_version } => {
-                let compatible = protocol_version == PROTOCOL_VERSION;
-                if !compatible {
-                    log::warn!(
-                        "client speaks protocol {protocol_version}, we speak {PROTOCOL_VERSION}"
-                    );
-                }
-                return (
-                    Response::Hello {
-                        protocol_version: PROTOCOL_VERSION,
-                    },
-                    !compatible,
-                );
-            }
-            _ if !greeted => return (Response::Error(Error::HelloRequired), true),
             Request::ListTerminals => Ok(Response::Terminals(
                 self.terminals
                     .values()
@@ -557,7 +728,7 @@ impl Daemon {
             Request::Capture { terminal } => self
                 .terminals
                 .get(&terminal)
-                .map(|slot| Response::Screen(slot.terminal.screen()))
+                .map(|slot| Response::View(slot.terminal.view()))
                 .ok_or(Error::NoSuchTerminal(terminal)),
             Request::CloseTerminal { terminal } => {
                 self.close_terminal(terminal).map(|()| Response::Done)
@@ -567,12 +738,45 @@ impl Daemon {
                     slot.terminal.resize(size);
                     // Rewrapping may have pushed rows into scrollback.
                     self.schedule_compaction(terminal);
+                    self.collect_damage(terminal);
                     Ok(Response::Done)
                 }
                 None => Err(Error::NoSuchTerminal(terminal)),
             },
+            Request::Attach { terminal } => self.attach(token, terminal).map(|()| Response::Done),
+            Request::Detach { terminal } => {
+                self.detach(token, terminal);
+                Ok(Response::Done)
+            }
         };
-        (response.unwrap_or_else(Response::Error), false)
+        response.unwrap_or_else(Response::Error)
+    }
+
+    /// Starts sending `id`'s view to the client at `token`, beginning with a
+    /// snapshot.
+    fn attach(&mut self, token: Token, id: TerminalId) -> Result<(), Error> {
+        let slot = self
+            .terminals
+            .get_mut(&id)
+            .ok_or(Error::NoSuchTerminal(id))?;
+        if !slot.viewers.contains(&token) {
+            slot.viewers.push(token);
+        }
+        if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
+            client.views.insert(id, Subscription::new());
+        }
+        self.views_pending = true;
+        Ok(())
+    }
+
+    /// Stops sending `id`'s view to the client at `token`.
+    fn detach(&mut self, token: Token, id: TerminalId) {
+        if let Some(slot) = self.terminals.get_mut(&id) {
+            slot.viewers.retain(|&viewer| viewer != token);
+        }
+        if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
+            client.views.remove(&id);
+        }
     }
 
     fn send_input(&mut self, id: TerminalId, bytes: &[u8]) -> Result<(), Error> {
@@ -611,6 +815,10 @@ impl Daemon {
             self.drop_client(token);
             return;
         }
+        // View updates wait for a client to catch up.
+        if flushed && written > 0 && !client.views.is_empty() {
+            self.views_pending = true;
+        }
         // Ask to hear about writability only while responses are queued.
         let wants_writable = !flushed;
         if wants_writable != client.wants_writable {
@@ -635,6 +843,12 @@ impl Daemon {
     /// Forgets a client. Dropping its stream closes the socket, which also
     /// removes it from epoll.
     fn drop_client(&mut self, token: Token) {
-        self.sources.remove(token.0);
+        if let Some(Source::Client(client)) = self.sources.try_remove(token.0) {
+            for id in client.views.keys() {
+                if let Some(slot) = self.terminals.get_mut(id) {
+                    slot.viewers.retain(|&viewer| viewer != token);
+                }
+            }
+        }
     }
 }

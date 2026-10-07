@@ -242,11 +242,10 @@ fn startup(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
             record_to: None,
         })?;
         poll(|| {
-            let screen = client.capture(terminal)?;
-            Ok(screen
-                .lines
-                .iter()
-                .any(|line| !line.text().trim().is_empty()))
+            let view = client.capture(terminal)?;
+            Ok(view
+                .grid()
+                .is_some_and(|grid| grid.lines.iter().any(|line| !line.text().trim().is_empty())))
         })?;
         let took = started.elapsed();
         client.close_terminal(terminal)?;
@@ -281,10 +280,10 @@ fn latency(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
         let started = Instant::now();
         client.send_input(terminal, format!("\r{letter}").as_bytes())?;
         poll_busy(|| {
-            let screen = client.capture(terminal)?;
-            Ok(screen
-                .lines
-                .first()
+            let view = client.capture(terminal)?;
+            Ok(view
+                .grid()
+                .and_then(|grid| grid.lines.first())
                 .is_some_and(|line| line.text().starts_with(letter)))
         })?;
         keypresses.push(started.elapsed());

@@ -1,10 +1,10 @@
 //! Turning a captured screen back into text for a terminal or a file.
 
-use clackatoo_protocol::{Attributes, Color, Screen, Style, Underline};
+use clackatoo_protocol::{Attributes, Color, GridNode, Style, Underline};
 
 /// The screen's text, one line per row, without trailing blank lines.
-pub(crate) fn plain(screen: &Screen) -> String {
-    let lines: Vec<String> = screen
+pub(crate) fn plain(grid: &GridNode) -> String {
+    let lines: Vec<String> = grid
         .lines
         .iter()
         .map(|line| line.text().trim_end().to_owned())
@@ -14,8 +14,8 @@ pub(crate) fn plain(screen: &Screen) -> String {
 
 /// The screen's text with SGR escape sequences, so colours and attributes
 /// survive being printed to another terminal.
-pub(crate) fn ansi(screen: &Screen) -> String {
-    let lines: Vec<String> = screen
+pub(crate) fn ansi(grid: &GridNode) -> String {
+    let lines: Vec<String> = grid
         .lines
         .iter()
         .map(|line| {
@@ -102,19 +102,19 @@ fn color(color: Color, base: u8, bright_base: u8, extended: &str) -> Option<Stri
 
 #[cfg(test)]
 mod tests {
-    use clackatoo_protocol::{CursorState, Line, Run, Size};
+    use clackatoo_protocol::{CursorState, InputModes, Line, Run, Size};
 
     use super::*;
 
-    fn screen(lines: Vec<Line>) -> Screen {
-        Screen {
+    fn screen(lines: Vec<Line>) -> GridNode {
+        GridNode {
             size: Size::new(10, u16::try_from(lines.len()).unwrap()).unwrap(),
             cursor: CursorState {
                 line: 0,
                 col: 0,
                 visible: true,
             },
-            title: String::new(),
+            modes: InputModes::default(),
             lines,
         }
     }
@@ -126,6 +126,7 @@ mod tests {
                 .map(|(style, text)| Run {
                     style: *style,
                     text: (*text).to_owned(),
+                    separate: false,
                 })
                 .collect(),
             wrapped: false,

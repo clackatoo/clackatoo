@@ -9,9 +9,9 @@ use std::path::Path;
 use std::process::Child;
 
 use clackatoo_protocol::{
-    Error, NewTerminal, Screen, Size, TerminalId, TerminalInfo, TerminalStatus,
+    Error, NewTerminal, Size, TerminalId, TerminalInfo, TerminalStatus, View,
 };
-use clackatoo_term::{Terminal, recording};
+use clackatoo_term::{Damage, Terminal, recording};
 
 use crate::DaemonConfig;
 use crate::pty::{self, Program, Pty};
@@ -102,8 +102,16 @@ impl HostedTerminal {
         }
     }
 
-    pub(crate) fn screen(&self) -> Screen {
-        Screen::capture(&self.emulator)
+    pub(crate) fn view(&self) -> View {
+        View::capture(&self.emulator)
+    }
+
+    pub(crate) fn emulator(&self) -> &Terminal {
+        &self.emulator
+    }
+
+    pub(crate) fn take_damage(&mut self, into: &mut Damage) {
+        self.emulator.take_damage(into);
     }
 
     pub(crate) fn pty_fd(&self) -> Option<RawFd> {

@@ -21,7 +21,7 @@ mod server;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub use client::{Client, ClientError};
+pub use client::{Client, ClientError, Receiver, Sender};
 pub use runtime::{DaemonLock, LockError, RuntimeDir};
 pub use server::{Daemon, ShutdownHandle};
 

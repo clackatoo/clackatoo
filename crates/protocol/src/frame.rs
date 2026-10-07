@@ -116,18 +116,21 @@ pub enum FrameError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PROTOCOL_VERSION, Request, Response};
+    use crate::{ClientMessage, PROTOCOL_VERSION, Request, ServerMessage};
 
     #[test]
     fn frames_survive_arbitrary_splitting() {
         let messages = [
-            Request::Hello {
+            ClientMessage::Hello {
                 protocol_version: PROTOCOL_VERSION,
             },
-            Request::ListTerminals,
-            Request::SendInput {
+            ClientMessage::Request(Request::ListTerminals),
+            ClientMessage::Request(Request::SendInput {
                 terminal: crate::TerminalId(7),
                 bytes: b"ls\r".to_vec(),
+            }),
+            ClientMessage::FrameDone {
+                terminal: crate::TerminalId(7),
             },
         ];
         let stream: Vec<u8> = messages.iter().flat_map(|m| encode(m).unwrap()).collect();
@@ -137,7 +140,7 @@ mod tests {
             let mut received = Vec::new();
             for piece in stream.chunks(piece_len) {
                 decoder.push(piece);
-                while let Some(message) = decoder.decode::<Request>().unwrap() {
+                while let Some(message) = decoder.decode::<ClientMessage>().unwrap() {
                     received.push(message);
                 }
             }
@@ -191,8 +194,6 @@ mod tests {
         #[derive(Serialize)]
         enum Forged {
             #[allow(dead_code)]
-            Hello,
-            #[allow(dead_code)]
             ListTerminals,
             NewTerminal(BadSize, Option<()>, Option<()>, Option<()>),
         }
@@ -213,13 +214,14 @@ mod tests {
 
     #[test]
     fn hello_stays_variant_zero() {
-        // Version negotiation depends on this encoding never changing.
-        let hello = encode(&Response::Hello {
+        // Version negotiation depends on this encoding never changing: it is
+        // the same in every protocol version so far.
+        let hello = encode(&ServerMessage::Hello {
             protocol_version: 1,
         })
         .unwrap();
         assert_eq!(hello, [2, 0, 0, 0, 0, 1]);
-        let hello = encode(&Request::Hello {
+        let hello = encode(&ClientMessage::Hello {
             protocol_version: 1,
         })
         .unwrap();

@@ -2,15 +2,24 @@
 //!
 //! A connection is a byte stream (a Unix socket today, other transports
 //! later) carrying [frames](frame): a length prefix, then one message
-//! serialized with `postcard`. The client sends [`Request`]s, and the daemon
-//! answers each one, in order, with exactly one [`Response`].
+//! serialized with `postcard`. The client sends [`ClientMessage`]s and the
+//! daemon sends [`ServerMessage`]s.
 //!
-//! The first request on every connection must be [`Request::Hello`]. The
-//! daemon answers with [`Response::Hello`], giving its own
+//! The client's first message must be [`ClientMessage::Hello`]. The daemon
+//! answers with [`ServerMessage::Hello`], giving its own
 //! [`PROTOCOL_VERSION`], and closes the connection if the versions differ.
 //! Both `Hello`s are variant 0 of their enums and must stay that way. That
 //! keeps them decodable across versions, so a version mismatch is always
 //! reported as one, not as a garbled message.
+//!
+//! After that, the daemon answers each [`Request`], in order, with exactly
+//! one [`Response`]. In between, it sends [`Event`]s: changes to the views
+//! the client has attached to. A client acknowledges each view update with
+//! [`ClientMessage::FrameDone`] once it has drawn it, and the daemon sends
+//! no more updates for that view until then. Changes in the meantime are
+//! merged into the next update, so a client gets updates as fast as it can
+//! draw them and no faster, and a flood of output costs it one update per
+//! frame.
 //!
 //! The crate does no I/O, so a browser client compiled to WebAssembly can
 //! use it as-is.
@@ -19,28 +28,68 @@
 #![warn(missing_docs)]
 
 pub mod frame;
-mod screen;
+mod view;
 
 use std::fmt;
 
-pub use clackatoo_term::{Attributes, Color, Size, Style, Underline};
+pub use clackatoo_term::{Attributes, Color, InputModes, Size, Style, Underline};
 use serde::{Deserialize, Serialize};
 
-pub use screen::{CursorState, Line, Run, Screen};
+pub use view::{CursorState, GridNode, Line, Node, NodeId, Patch, Run, View, ViewUpdate};
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
-/// A message from a client to the daemon.
+/// Everything a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Request {
-    /// Opens the conversation. Must be the first request, and must stay
+pub enum ClientMessage {
+    /// Opens the conversation. Must be the first message, and must stay
     /// variant 0 (see the crate docs).
     Hello {
         /// The client's [`PROTOCOL_VERSION`].
         protocol_version: u32,
     },
+    /// A request, which the daemon answers with one [`Response`].
+    Request(Request),
+    /// The client has drawn the last view update for `terminal`, and is
+    /// ready for the next. Not answered.
+    FrameDone {
+        /// The terminal whose view was drawn.
+        terminal: TerminalId,
+    },
+}
+
+/// Everything the daemon sends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerMessage {
+    /// Answers [`ClientMessage::Hello`]. Must stay variant 0 (see the crate
+    /// docs).
+    Hello {
+        /// The daemon's [`PROTOCOL_VERSION`].
+        protocol_version: u32,
+    },
+    /// The answer to the oldest unanswered request.
+    Response(Response),
+    /// Something the client attached to changed.
+    Event(Event),
+}
+
+/// Something the daemon tells a client without being asked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Event {
+    /// The view of a terminal the client attached to changed.
+    View {
+        /// The terminal.
+        terminal: TerminalId,
+        /// The change.
+        update: ViewUpdate,
+    },
+}
+
+/// A message from a client to the daemon that expects an answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Request {
     /// Lists every terminal.
     ListTerminals,
     /// Starts a terminal. Answered with [`Response::TerminalCreated`].
@@ -53,7 +102,7 @@ pub enum Request {
         /// Enter, `\x1b[A` for Up…).
         bytes: Vec<u8>,
     },
-    /// Asks for what a terminal is showing. Answered with [`Response::Screen`].
+    /// Asks for what a terminal is showing. Answered with [`Response::View`].
     Capture {
         /// The terminal to capture.
         terminal: TerminalId,
@@ -72,6 +121,18 @@ pub enum Request {
         /// The new size.
         size: Size,
     },
+    /// Starts sending the terminal's view: a snapshot, then a patch
+    /// whenever it changes (see the crate docs). Attaching twice is
+    /// harmless and sends a fresh snapshot.
+    Attach {
+        /// The terminal to follow.
+        terminal: TerminalId,
+    },
+    /// Stops sending the terminal's view.
+    Detach {
+        /// The terminal to stop following.
+        terminal: TerminalId,
+    },
 }
 
 /// How to start a terminal.
@@ -88,14 +149,9 @@ pub struct NewTerminal {
     pub record_to: Option<String>,
 }
 
-/// A message from the daemon to a client.
+/// The daemon's answer to a [`Request`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
-    /// Answers [`Request::Hello`]. Must stay variant 0 (see the crate docs).
-    Hello {
-        /// The daemon's [`PROTOCOL_VERSION`].
-        protocol_version: u32,
-    },
     /// The request failed.
     Error(Error),
     /// The request succeeded and has nothing to return.
@@ -105,14 +161,14 @@ pub enum Response {
     /// Answers [`Request::NewTerminal`].
     TerminalCreated(TerminalId),
     /// Answers [`Request::Capture`].
-    Screen(Screen),
+    View(View),
 }
 
 /// Why the daemon refused or failed a request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum Error {
-    /// The connection's first request wasn't [`Request::Hello`].
-    #[error("the first request must be Hello")]
+    /// The connection's first message wasn't [`ClientMessage::Hello`].
+    #[error("the first message must be Hello")]
     HelloRequired,
     /// No terminal has this ID. It may have been closed.
     #[error("no terminal {0}")]

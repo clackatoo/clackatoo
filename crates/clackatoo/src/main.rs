@@ -258,11 +258,14 @@ fn send(target: &Target, bytes: &[u8]) -> anyhow::Result<()> {
 
 fn capture(capture: &Capture) -> anyhow::Result<()> {
     let target = &capture.target;
-    let screen = connect(&target.connection)?.capture(TerminalId(target.terminal))?;
+    let view = connect(&target.connection)?.capture(TerminalId(target.terminal))?;
+    let grid = view
+        .grid()
+        .context("the terminal shows something other than a grid")?;
     let text = if capture.ansi {
-        render::ansi(&screen)
+        render::ansi(grid)
     } else {
-        render::plain(&screen)
+        render::plain(grid)
     };
     io::stdout().lock().write_all(text.as_bytes())?;
     Ok(())
