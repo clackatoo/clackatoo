@@ -32,7 +32,7 @@ mod view;
 
 use std::fmt;
 
-pub use clackatoo_term::{Attributes, Color, InputModes, Size, Style, Underline};
+pub use clackatoo_term::{Attributes, Color, CursorShape, InputModes, Size, Style, Underline};
 use serde::{Deserialize, Serialize};
 
 pub use view::{
@@ -42,7 +42,7 @@ pub use view::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Everything a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

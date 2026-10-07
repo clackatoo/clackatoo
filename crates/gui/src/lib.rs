@@ -19,6 +19,7 @@ mod fonts;
 mod glyphs;
 mod history;
 mod input;
+mod motion;
 mod pane;
 mod render;
 mod screen;

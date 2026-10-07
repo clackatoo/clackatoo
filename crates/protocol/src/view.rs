@@ -5,7 +5,7 @@
 //! a terminal, so every view is a single grid. Other nodes (text, lists,
 //! images…) will join it as panes other than terminals need them.
 
-use clackatoo_term::{InputModes, Row, RowBuilder, Size, Style, Terminal};
+use clackatoo_term::{CursorShape, InputModes, Row, RowBuilder, Size, Style, Terminal};
 use serde::{Deserialize, Serialize};
 
 /// What a pane shows at one moment.
@@ -88,6 +88,8 @@ pub struct CursorState {
     pub col: u16,
     /// Whether the program wants the cursor drawn.
     pub visible: bool,
+    /// The shape the program asked for.
+    pub shape: CursorShape,
 }
 
 /// One line of a grid, as runs of identically styled text.
@@ -228,6 +230,7 @@ impl CursorState {
             line: to_u16(cursor.line),
             col: to_u16(cursor.col),
             visible: cursor.visible,
+            shape: cursor.shape,
         }
     }
 }
@@ -357,7 +360,11 @@ mod tests {
 
     #[test]
     fn cursor_title_modes_and_wrapping() {
-        let view = View::capture(&terminal(3, 2, "\x1b]2;hi\x07\x1b[?2004habcd\x1b[?25l"));
+        let view = View::capture(&terminal(
+            3,
+            2,
+            "\x1b]2;hi\x07\x1b[?2004habcd\x1b[?25l\x1b[6 q",
+        ));
         assert_eq!(view.title, "hi");
         let grid = view.grid().unwrap();
         assert_eq!(
@@ -365,7 +372,8 @@ mod tests {
             CursorState {
                 line: 1,
                 col: 1,
-                visible: false
+                visible: false,
+                shape: CursorShape::Bar,
             }
         );
         assert!(grid.state.modes.bracketed_paste);

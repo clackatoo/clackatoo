@@ -6,6 +6,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use anyhow::{Context, anyhow};
+use clackatoo_daemon::Sender;
 use clackatoo_protocol::{Event, ServerMessage, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -17,7 +18,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 use crate::fonts::Fonts;
 use crate::input;
 use crate::pane::{Mode, Pane};
-use crate::render::{PADDING, Renderer, Scene};
+use crate::render::{CursorStyle, PADDING, Renderer, Scene};
 use crate::session::SessionEvent;
 
 /// Lines scrolled per notch of a mouse wheel.
@@ -146,6 +147,8 @@ pub(crate) struct App {
     frame: Option<Frame>,
     /// The terminal shown, once attached.
     pane: Option<Pane>,
+    /// Where messages to the daemon go, once attached.
+    sender: Option<Sender>,
     /// The modifier keys held now.
     modifiers: input::Modifiers,
     focused: bool,
@@ -170,6 +173,7 @@ impl App {
             startup: Some(Startup { fonts, gpu }),
             frame: None,
             pane: None,
+            sender: None,
             modifiers: input::Modifiers::default(),
             focused: true,
             wheel_remainder: 0.0,
@@ -304,6 +308,18 @@ impl App {
         }
     }
 
+    /// Sends what the pane has for the daemon.
+    fn send_outbox(&mut self) {
+        let (Some(pane), Some(sender)) = (&mut self.pane, &mut self.sender) else {
+            return;
+        };
+        for message in pane.take_outbox() {
+            if let Err(err) = sender.send(&message) {
+                log::warn!("sending to the daemon failed: {err}");
+            }
+        }
+    }
+
     fn request_redraw(&self) {
         if let Some(frame) = &self.frame {
             frame.window.request_redraw();
@@ -339,8 +355,10 @@ impl App {
         #[allow(clippy::cast_precision_loss)]
         let padding = padding(&frame.window) as f32;
         let (rows, mut cursor) = pane.scene(screen.rows.len());
-        if let Some(cursor) = &mut cursor {
-            cursor.hollow = !self.focused;
+        if let Some(cursor) = &mut cursor
+            && !self.focused
+        {
+            cursor.style = CursorStyle::Hollow;
         }
         let label = pane.label();
         let scene = Scene {
@@ -427,6 +445,18 @@ impl ApplicationHandler<SessionEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        self.handle_window_event(event_loop, event);
+        self.send_outbox();
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
+        self.handle_session_event(event_loop, event);
+        self.send_outbox();
+    }
+}
+
+impl App {
+    fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -472,10 +502,11 @@ impl ApplicationHandler<SessionEvent> for App {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
+    fn handle_session_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
         match event {
             SessionEvent::Attached { sender, terminal } => {
-                self.pane = Some(Pane::new(sender, terminal));
+                self.pane = Some(Pane::new(terminal));
+                self.sender = Some(sender);
                 self.fit_terminal();
             }
             SessionEvent::Message(ServerMessage::Event(Event::View { update, .. })) => {

@@ -589,6 +589,26 @@ mod other_sequences {
     }
 
     #[test]
+    fn programs_choose_the_cursor_shape() {
+        use crate::CursorShape;
+        assert_eq!(after(4, 2, "").cursor().shape, CursorShape::Default);
+        assert_eq!(after(4, 2, "\x1b[6 q").cursor().shape, CursorShape::Bar);
+        assert_eq!(
+            after(4, 2, "\x1b[3 q").cursor().shape,
+            CursorShape::Underline
+        );
+        assert_eq!(after(4, 2, "\x1b[2 q").cursor().shape, CursorShape::Block);
+        assert_eq!(
+            after(4, 2, "\x1b[2 q\x1b[0 q").cursor().shape,
+            CursorShape::Default
+        );
+        assert_eq!(
+            after(4, 2, "\x1b[5 q\x1bc").cursor().shape,
+            CursorShape::Default
+        );
+    }
+
+    #[test]
     fn hiding_the_cursor() {
         assert!(!after(5, 1, "\x1b[?25l").cursor().visible);
         assert!(after(5, 1, "\x1b[?25l\x1b[?25h").cursor().visible);

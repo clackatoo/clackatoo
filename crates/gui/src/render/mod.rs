@@ -27,13 +27,26 @@ pub(crate) struct Scene<'a> {
     pub(crate) label: Option<&'a str>,
 }
 
-/// Where the cursor is drawn.
+/// Where the cursor is drawn, and how.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SceneCursor {
     pub(crate) line: usize,
     pub(crate) col: usize,
-    /// An outline rather than a block, while the window isn't focused.
-    pub(crate) hollow: bool,
+    pub(crate) style: CursorStyle,
+}
+
+/// How the cursor is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CursorStyle {
+    /// Covering the cell, with its character drawn in the background
+    /// colour.
+    Block,
+    /// A line under the cell.
+    Underline,
+    /// A bar at the cell's left edge.
+    Bar,
+    /// An outline of the cell, while the window isn't focused.
+    Hollow,
 }
 
 /// Space between the window's edge and the grid, in physical pixels per
@@ -311,34 +324,19 @@ impl Renderer {
                 let left = padding + col as f32 * cell_width;
                 let style = row.style(cell_value);
                 let mut colors = self.theme.cell(style);
-                let cursor_here = cursor.filter(|cursor| cursor.line == line && cursor.col == col);
-                let cursor_color = if scene.normal_mode {
-                    self.theme.accent
-                } else {
-                    self.theme.cursor
-                };
-                match cursor_here {
-                    Some(SceneCursor { hollow: false, .. }) => {
-                        colors.background = Some(cursor_color);
+                if let Some(cursor) =
+                    cursor.filter(|cursor| cursor.line == line && cursor.col == col)
+                {
+                    let color = if scene.normal_mode {
+                        self.theme.accent
+                    } else {
+                        self.theme.cursor
+                    };
+                    let bounds = ([left, top], [cells * cell_width, cell_height]);
+                    if self.push_cursor(cursor.style, bounds, color, cell.stroke) {
+                        colors.background = Some(color);
                         colors.foreground = self.theme.background;
                     }
-                    Some(SceneCursor { hollow: true, .. }) => {
-                        let thickness = cell.stroke;
-                        let (w, h) = (cells * cell_width, cell_height);
-                        for (origin, size) in [
-                            ([left, top], [w, thickness]),
-                            ([left, top + h - thickness], [w, thickness]),
-                            ([left, top], [thickness, h]),
-                            ([left + w - thickness, top], [thickness, h]),
-                        ] {
-                            self.overlays.push(Rect {
-                                origin,
-                                size,
-                                color: cursor_color,
-                            });
-                        }
-                    }
-                    None => {}
                 }
                 if let Some(background) = colors.background {
                     self.rects.push(Rect {
@@ -384,6 +382,40 @@ impl Renderer {
         if let Some(label) = scene.label {
             self.push_label(label, fonts, padding, size);
         }
+    }
+
+    /// Draws a cursor of `style` over the cell at `origin` of `size`.
+    /// Returns whether it's a block, which the cell's own colours show by
+    /// swapping instead.
+    fn push_cursor(
+        &mut self,
+        style: CursorStyle,
+        ([left, top], [width, height]): ([f32; 2], [f32; 2]),
+        color: Rgba,
+        stroke: f32,
+    ) -> bool {
+        // Bars and underlines are a little thicker than lines of text, so
+        // they're easy to find.
+        let thick = (width / 8.0).round().max(stroke).max(1.0);
+        let rects: &[([f32; 2], [f32; 2])] = match style {
+            CursorStyle::Block => return true,
+            CursorStyle::Bar => &[([left, top], [thick, height])],
+            CursorStyle::Underline => &[([left, top + height - thick], [width, thick])],
+            CursorStyle::Hollow => &[
+                ([left, top], [width, stroke]),
+                ([left, top + height - stroke], [width, stroke]),
+                ([left, top], [stroke, height]),
+                ([left + width - stroke, top], [stroke, height]),
+            ],
+        };
+        for &(origin, size) in rects {
+            self.overlays.push(Rect {
+                origin,
+                size,
+                color,
+            });
+        }
+        false
     }
 
     /// A border around the window in the accent colour, inside the padding.

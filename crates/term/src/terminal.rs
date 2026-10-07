@@ -42,6 +42,24 @@ pub struct Cursor {
     pub col: usize,
     /// Whether the application wants the cursor drawn (DECTCEM).
     pub visible: bool,
+    /// The shape the application asked for (DECSCUSR).
+    pub shape: CursorShape,
+}
+
+/// The cursor shapes a program can ask for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CursorShape {
+    /// Whatever the user prefers: the program hasn't asked, or asked for
+    /// the default.
+    #[default]
+    Default,
+    /// A block covering the cell.
+    Block,
+    /// A line under the cell.
+    Underline,
+    /// A bar at the cell's left edge.
+    Bar,
 }
 
 /// A terminal emulator, minus everything that touches the outside world.
@@ -144,6 +162,7 @@ impl Terminal {
             line: self.emulator.cursor.line,
             col: self.emulator.cursor.col,
             visible: self.emulator.modes.contains(Modes::CURSOR_VISIBLE),
+            shape: self.emulator.cursor_shape,
         }
     }
 
@@ -418,6 +437,8 @@ pub(crate) struct Emulator {
     scroll_region: Range<usize>,
     tabs: TabStops,
     pub(crate) title: String,
+    /// The cursor shape the program asked for.
+    cursor_shape: CursorShape,
     pub(crate) replies: Vec<u8>,
     /// The last character printed, for REP (repeat).
     last_printed: Option<char>,
@@ -448,6 +469,7 @@ impl Emulator {
             scroll_region: 0..height,
             tabs: TabStops::new(width),
             title: String::new(),
+            cursor_shape: CursorShape::Default,
             replies: Vec::new(),
             last_printed: None,
             #[cfg(test)]
@@ -1109,6 +1131,19 @@ impl Emulator {
             Screen::Primary => &mut self.saved_primary,
             Screen::Alternate => &mut self.saved_alternate,
         }
+    }
+
+    /// DECSCUSR: the cursor's shape. 0 asks for the user's default; 1 and
+    /// 2 are a block, 3 and 4 an underline, 5 and 6 a bar, each blinking or
+    /// steady. Blinking isn't drawn, so the pairs are the same.
+    pub(crate) fn set_cursor_shape(&mut self, style: u16) {
+        self.cursor_shape = match style {
+            0 => CursorShape::Default,
+            1 | 2 => CursorShape::Block,
+            3 | 4 => CursorShape::Underline,
+            5 | 6 => CursorShape::Bar,
+            _ => return,
+        };
     }
 
     /// DECKPAM and DECKPNM: the keypad sends application sequences, or

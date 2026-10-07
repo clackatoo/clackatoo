@@ -4,7 +4,7 @@ use clackatoo_protocol::{Size, View};
 use clackatoo_term::{Config, Terminal};
 
 use crate::fonts::{FontOptions, Fonts};
-use crate::render::{Renderer, Scene, SceneCursor};
+use crate::render::{CursorStyle, Renderer, Scene, SceneCursor};
 use crate::screen::Screen;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -65,7 +65,7 @@ fn render(
         cursor: Some(SceneCursor {
             line: usize::from(cursor.line),
             col: usize::from(cursor.col),
-            hollow: false,
+            style: CursorStyle::Block,
         }),
         normal_mode,
         label,

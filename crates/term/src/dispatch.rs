@@ -110,6 +110,7 @@ impl Perform for Emulator {
             ([b'?'], 'n') => self.device_status_report(arg(0).unwrap_or(0), true),
             ([b'>'], 'q') if arg(0).unwrap_or(0) == 0 => self.report_version(),
             ([b'!'], 'p') => self.soft_reset(),
+            ([b' '], 'q') => self.set_cursor_shape(arg(0).unwrap_or(0)),
             _ => log::trace!("unhandled CSI {intermediates:?} {params:?} {action}"),
         }
     }

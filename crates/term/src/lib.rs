@@ -37,4 +37,4 @@ pub use row::{Row, RowBuilder};
 pub use scrollback::Compaction;
 pub use size::{InvalidSize, Size};
 pub use style::{Attributes, Color, Style, Underline};
-pub use terminal::{Config, Cursor, InputModes, Terminal};
+pub use terminal::{Config, Cursor, CursorShape, InputModes, Terminal};

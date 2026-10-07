@@ -2,21 +2,27 @@
 //! scrolling drive it.
 //!
 //! A pane is in insert mode, where keys go to the program, or normal mode,
-//! where they drive clackatoo: scrolling history for now, panes and tabs
-//! later. Shift+Esc or Ctrl+\ switches to normal mode, and `i` back; Ctrl+\
-//! pressed twice sends a real Ctrl+\ to the program.
+//! where they drive clackatoo. Shift+Esc or Ctrl+\ switches to normal
+//! mode, and `i` back; Ctrl+\ pressed twice sends a real Ctrl+\ to the
+//! program.
+//!
+//! Normal mode has a cursor of its own, moved with Vim's motions over the
+//! whole document: history, then the screen. The view follows it, and
+//! stays put while output arrives, so the text being read doesn't move.
 
 use std::collections::VecDeque;
 use std::ops::Range;
 
-use clackatoo_daemon::Sender;
-use clackatoo_protocol::{ClientMessage, Request, Response, Size, TerminalId, ViewUpdate};
+use clackatoo_protocol::{
+    ClientMessage, CursorShape, Request, Response, Size, TerminalId, ViewUpdate,
+};
 use clackatoo_term::{Row, RowBuilder};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::history::History;
 use crate::input::{self, KeyPress};
-use crate::render::SceneCursor;
+use crate::motion::{Cursor, Lines, Motion, Point};
+use crate::render::{CursorStyle, SceneCursor};
 use crate::screen::Screen;
 
 /// Whether keys go to the program or drive clackatoo.
@@ -37,10 +43,14 @@ enum Pending {
 }
 
 /// A terminal shown in the window.
+///
+/// The pane does no I/O: messages for the daemon wait in its outbox, which
+/// the window sends.
 #[derive(Debug)]
 pub(crate) struct Pane {
-    sender: Sender,
     terminal: TerminalId,
+    /// Messages for the daemon, oldest first.
+    outbox: Vec<ClientMessage>,
     /// The size last asked of the daemon.
     requested_size: Option<Size>,
     screen: Option<Screen>,
@@ -49,6 +59,8 @@ pub(crate) struct Pane {
     /// screen as the program draws it.
     scroll: u64,
     pub(crate) mode: Mode,
+    /// The normal-mode cursor, while in normal mode.
+    cursor: Option<Cursor>,
     pending: VecDeque<Pending>,
     /// A view update was applied but not yet drawn and acknowledged.
     unacknowledged: bool,
@@ -62,15 +74,16 @@ pub(crate) struct Pane {
 }
 
 impl Pane {
-    pub(crate) fn new(sender: Sender, terminal: TerminalId) -> Self {
+    pub(crate) fn new(terminal: TerminalId) -> Self {
         Self {
-            sender,
             terminal,
+            outbox: Vec::new(),
             requested_size: None,
             screen: None,
             history: History::default(),
             scroll: 0,
             mode: Mode::Insert,
+            cursor: None,
             pending: VecDeque::new(),
             unacknowledged: false,
             after_g: false,
@@ -114,10 +127,15 @@ impl Pane {
                 self.history.clear();
                 self.scroll = 0;
             }
-            // New lines scrolled into history: stay on the lines being read.
-            Some(old) if self.scroll > 0 => self.scroll += end - old,
+            // New lines scrolled into history: stay on the lines being read,
+            // and in normal mode, on the lines around the cursor.
+            Some(old) if self.scroll > 0 || self.mode == Mode::Normal => {
+                self.scroll += end - old;
+            }
             _ => {}
         }
+        self.scroll = self.scroll.min(self.max_scroll());
+        self.keep_cursor_in_bounds();
         self.unacknowledged = true;
         self.fetch_history();
         true
@@ -145,7 +163,7 @@ impl Pane {
     /// Tells the daemon the last update is on screen, so it sends the next.
     pub(crate) fn drawn(&mut self) {
         if std::mem::take(&mut self.unacknowledged) {
-            self.send(&ClientMessage::FrameDone {
+            self.send(ClientMessage::FrameDone {
                 terminal: self.terminal,
             });
         }
@@ -161,7 +179,7 @@ impl Pane {
         let after_ctrl_backslash = std::mem::take(&mut self.after_ctrl_backslash);
         match self.mode {
             Mode::Insert if ctrl_backslash || shift_escape => {
-                self.mode = Mode::Normal;
+                self.enter_normal();
                 self.after_ctrl_backslash = ctrl_backslash;
                 true
             }
@@ -224,7 +242,9 @@ impl Pane {
             self.send_input(bytes);
             return false;
         }
-        self.scroll_by(lines)
+        let scrolled = self.scroll_by(lines);
+        self.keep_cursor_in_view();
+        scrolled
     }
 
     /// The rows to show `height` lines tall, top first, and the cursor if
@@ -234,25 +254,34 @@ impl Pane {
             return (Vec::new(), None);
         };
         let end = self.history_end();
-        let top = end.saturating_sub(self.scroll);
-        let rows = (0..height as u64)
-            .map(|offset| {
-                let number = top + offset;
-                if number < end {
-                    self.history.get(number).unwrap_or(&self.blank)
-                } else {
-                    let line = usize::try_from(number - end).unwrap_or(usize::MAX);
-                    screen.rows.get(line).unwrap_or(&self.blank)
-                }
-            })
+        let top = self.view_top();
+        let document = Document(self);
+        let rows = (top..top + height as u64)
+            .map(|line| document.line(line).unwrap_or(&self.blank))
             .collect();
-        let cursor = screen.state.cursor;
-        let line = usize::from(cursor.line) + usize::try_from(self.scroll).unwrap_or(usize::MAX);
-        let cursor = (cursor.visible && line < height).then_some(SceneCursor {
-            line,
-            col: usize::from(cursor.col),
-            hollow: false,
-        });
+        // In normal mode, only clackatoo's cursor shows.
+        let (at, style) = if let Some(cursor) = self.cursor {
+            (Some(cursor.at), CursorStyle::Block)
+        } else {
+            let cursor = screen.state.cursor;
+            let style = match cursor.shape {
+                CursorShape::Block => CursorStyle::Block,
+                CursorShape::Underline => CursorStyle::Underline,
+                CursorShape::Default | CursorShape::Bar => CursorStyle::Bar,
+            };
+            let at = cursor.visible.then_some(Point {
+                line: end + u64::from(cursor.line),
+                col: usize::from(cursor.col),
+            });
+            (at, style)
+        };
+        let cursor = at
+            .filter(|at| at.line >= top && at.line - top < height as u64)
+            .map(|at| SceneCursor {
+                line: usize::try_from(at.line - top).expect("within the height"),
+                col: at.col,
+                style,
+            });
         (rows, cursor)
     }
 
@@ -269,44 +298,195 @@ impl Pane {
     fn normal_key(&mut self, press: &KeyPress<'_>) -> bool {
         let modifiers = press.modifiers;
         let after_g = std::mem::take(&mut self.after_g);
-        let page = self
-            .screen
-            .as_ref()
-            .map_or(1, |screen| i64::from(screen.size.rows()));
+        let height = self.height();
+        let half = (height / 2).max(1);
         let character = match press.key {
             Key::Character(text) => text.chars().next(),
             _ => None,
         };
-        match (press.key, character) {
+        let ctrl = modifiers.ctrl;
+        let motion = match (press.key, character) {
             // Ctrl+C always reaches the program.
-            (_, Some('c')) if modifiers.ctrl => {
+            (_, Some('c')) if ctrl => {
                 self.send_input(vec![0x03]);
-                false
+                return false;
             }
-            (_, Some('i')) if !modifiers.ctrl => self.insert(),
-            (_, Some('d')) if modifiers.ctrl => self.scroll_by(-page / 2),
-            (_, Some('u')) if modifiers.ctrl => self.scroll_by(page / 2),
-            (_, Some('f')) if modifiers.ctrl => self.scroll_by(-page),
-            (_, Some('b')) if modifiers.ctrl => self.scroll_by(page),
-            (Key::Named(NamedKey::PageDown), _) => self.scroll_by(-page),
-            (Key::Named(NamedKey::PageUp), _) => self.scroll_by(page),
-            (Key::Named(NamedKey::ArrowDown), _) | (_, Some('j')) => self.scroll_by(-1),
-            (Key::Named(NamedKey::ArrowUp), _) | (_, Some('k')) => self.scroll_by(1),
-            (_, Some('G')) => self.scroll_by(i64::MIN),
-            (_, Some('g')) if after_g => self.scroll_by(i64::MAX),
+            (_, Some('i')) if !ctrl => return self.insert(),
+            // Half and whole pages move the view and the cursor together.
+            (_, Some('d')) if ctrl => return self.page(i64::try_from(half).unwrap_or(1)),
+            (_, Some('u')) if ctrl => return self.page(-i64::try_from(half).unwrap_or(1)),
+            (Key::Named(NamedKey::PageDown), _) | (_, Some('f')) if ctrl || character.is_none() => {
+                return self.page(i64::try_from(height).unwrap_or(1));
+            }
+            (Key::Named(NamedKey::PageUp), _) | (_, Some('b')) if ctrl || character.is_none() => {
+                return self.page(-i64::try_from(height).unwrap_or(1));
+            }
+            // A line of view, keeping the cursor in it.
+            (_, Some('e')) if ctrl => {
+                self.scroll_by(-1);
+                self.keep_cursor_in_view();
+                return true;
+            }
+            (_, Some('y')) if ctrl => {
+                self.scroll_by(1);
+                self.keep_cursor_in_view();
+                return true;
+            }
+            (Key::Named(NamedKey::ArrowLeft), _) | (_, Some('h')) => Motion::Left,
+            (Key::Named(NamedKey::ArrowRight), _) | (_, Some('l')) => Motion::Right,
+            (Key::Named(NamedKey::ArrowDown), _) | (_, Some('j')) => Motion::Down(1),
+            (Key::Named(NamedKey::ArrowUp), _) | (_, Some('k')) => Motion::Up(1),
+            (Key::Named(NamedKey::Home), _) | (_, Some('0')) => Motion::LineStart,
+            (Key::Named(NamedKey::End), _) | (_, Some('$')) => Motion::LineEnd,
+            (_, Some('w')) => Motion::WordStart,
+            (_, Some('b')) => Motion::WordBack,
+            (_, Some('e')) => Motion::WordEnd,
+            (_, Some('G')) => Motion::Last,
+            (_, Some('g')) if after_g => Motion::First,
             (_, Some('g')) => {
                 self.after_g = true;
-                false
+                return false;
             }
-            _ => false,
+            // The top, middle and bottom of the view.
+            (_, Some(view @ ('H' | 'M' | 'L'))) => {
+                let top = self.view_top();
+                let line = match view {
+                    'H' => top,
+                    'M' => top + height.saturating_sub(1) / 2,
+                    _ => top + height.saturating_sub(1),
+                };
+                return self.move_to_line(line);
+            }
+            _ => return false,
+        };
+        self.move_cursor(motion);
+        true
+    }
+
+    /// Enters normal mode, with the cursor where the program's is, or on
+    /// the bottom line in view if that's out of view.
+    fn enter_normal(&mut self) {
+        self.mode = Mode::Normal;
+        let Some(screen) = &self.screen else {
+            return;
+        };
+        let program = screen.state.cursor;
+        let top = self.view_top();
+        let bottom = top + self.height().saturating_sub(1);
+        let line = self.history_end() + u64::from(program.line);
+        let at = if (top..=bottom).contains(&line) {
+            Point {
+                line,
+                col: usize::from(program.col),
+            }
+        } else {
+            Point {
+                line: bottom,
+                col: 0,
+            }
+        };
+        self.cursor = Some(Cursor::new(at));
+    }
+
+    /// Moves the normal-mode cursor, and the view to keep it in sight.
+    fn move_cursor(&mut self, motion: Motion) {
+        let Some(mut cursor) = self.cursor.take() else {
+            return;
+        };
+        cursor.apply(motion, &Document(self));
+        self.cursor = Some(cursor);
+        self.follow_cursor();
+    }
+
+    /// Moves the cursor up or down to `line`.
+    fn move_to_line(&mut self, line: u64) -> bool {
+        let Some(cursor) = self.cursor else {
+            return false;
+        };
+        let from = cursor.at.line;
+        if line < from {
+            self.move_cursor(Motion::Up(from - line));
+        } else if line > from {
+            self.move_cursor(Motion::Down(line - from));
+        }
+        true
+    }
+
+    /// Ctrl+D, Ctrl+U and their kin: moves the view and the cursor `lines`
+    /// down (or up, if negative).
+    fn page(&mut self, lines: i64) -> bool {
+        self.scroll_by(-lines);
+        let motion = if lines > 0 {
+            Motion::Down(lines.unsigned_abs())
+        } else {
+            Motion::Up(lines.unsigned_abs())
+        };
+        self.move_cursor(motion);
+        true
+    }
+
+    /// Scrolls the view so the cursor is in it.
+    fn follow_cursor(&mut self) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let end = self.history_end();
+        let top = self.view_top();
+        let height = self.height().max(1);
+        let line = cursor.at.line;
+        let new_top = if line < top {
+            line
+        } else if line >= top + height {
+            line + 1 - height
+        } else {
+            return;
+        };
+        self.scroll = end.saturating_sub(new_top).min(self.max_scroll());
+        self.fetch_history();
+    }
+
+    /// Moves the cursor into the view, after the view moved without it.
+    fn keep_cursor_in_view(&mut self) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let top = self.view_top();
+        let bottom = top + self.height().saturating_sub(1);
+        let line = cursor.at.line.clamp(top, bottom);
+        if line != cursor.at.line {
+            self.move_to_line(line);
+        }
+    }
+
+    /// Moves the cursor back within the document, after it shrank: a reset,
+    /// or a smaller screen.
+    fn keep_cursor_in_bounds(&mut self) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let (first, last) = Document(self).bounds();
+        let line = cursor.at.line.clamp(first, last);
+        if line != cursor.at.line {
+            self.move_to_line(line);
         }
     }
 
     /// Back to insert mode, at the live screen.
     fn insert(&mut self) -> bool {
         self.mode = Mode::Insert;
+        self.cursor = None;
         self.scroll = 0;
         true
+    }
+
+    fn view_top(&self) -> u64 {
+        self.history_end().saturating_sub(self.scroll)
+    }
+
+    fn height(&self) -> u64 {
+        self.screen
+            .as_ref()
+            .map_or(0, |screen| u64::from(screen.size.rows()))
     }
 
     /// Sends a key to the program. Returns whether it sent anything.
@@ -397,12 +577,247 @@ impl Pane {
 
     fn request(&mut self, request: Request, pending: Pending) {
         self.pending.push_back(pending);
-        self.send(&ClientMessage::Request(request));
+        self.send(ClientMessage::Request(request));
     }
 
-    fn send(&mut self, message: &ClientMessage) {
-        if let Err(err) = self.sender.send(message) {
-            log::warn!("sending to the daemon failed: {err}");
+    fn send(&mut self, message: ClientMessage) {
+        self.outbox.push(message);
+    }
+
+    /// Takes the messages waiting for the daemon.
+    pub(crate) fn take_outbox(&mut self) -> Vec<ClientMessage> {
+        std::mem::take(&mut self.outbox)
+    }
+}
+
+/// History and screen as one document, for the normal-mode cursor: history
+/// lines by number, then the screen's rows numbered on from the history's
+/// end.
+#[derive(Clone, Copy)]
+struct Document<'a>(&'a Pane);
+
+impl<'a> Document<'a> {
+    /// Line `line`, if it's to hand.
+    fn line(self, line: u64) -> Option<&'a Row> {
+        let pane = self.0;
+        let end = pane.history_end();
+        if line < end {
+            pane.history.get(line)
+        } else {
+            let row = usize::try_from(line - end).ok()?;
+            pane.screen.as_ref()?.rows.get(row)
         }
+    }
+}
+
+impl Lines for Document<'_> {
+    fn row(&self, line: u64) -> Option<&Row> {
+        self.line(line)
+    }
+
+    fn bounds(&self) -> (u64, u64) {
+        let pane = self.0;
+        let end = pane.history_end();
+        let last = end + pane.height().saturating_sub(1);
+        // The alternate screen has no history to move into.
+        let alternate = pane
+            .screen
+            .as_ref()
+            .is_some_and(|screen| screen.state.alternate);
+        let first = if alternate {
+            end
+        } else {
+            end - pane.max_scroll()
+        };
+        (first, last)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clackatoo_protocol::{HistoryLine, HistoryLines, Line, View};
+    use clackatoo_term::{Config, Terminal};
+    use winit::keyboard::KeyLocation;
+
+    use super::*;
+    use crate::input::Modifiers;
+
+    /// A 12 × 5 terminal after `output`.
+    fn terminal(output: &str) -> Terminal {
+        let mut terminal = Terminal::new(Size::new(12, 5).unwrap(), &Config::default());
+        terminal.advance(output.as_bytes());
+        terminal
+    }
+
+    fn pane(terminal: &Terminal) -> Pane {
+        let mut pane = Pane::new(TerminalId(1));
+        pane.view_changed(&ViewUpdate::Snapshot(View::capture(terminal)));
+        pane.take_outbox();
+        pane
+    }
+
+    /// Answers the pane's requests as the daemon would.
+    fn serve(pane: &mut Pane, terminal: &Terminal) {
+        for message in pane.take_outbox() {
+            let response = match message {
+                ClientMessage::Request(Request::History { end, count, .. }) => {
+                    let start = end.saturating_sub(u64::from(count));
+                    let mut first = None;
+                    let lines = terminal
+                        .primary()
+                        .scrollback_lines(start..end)
+                        .map(|(number, row)| {
+                            first.get_or_insert(number);
+                            HistoryLine {
+                                width: u16::try_from(row.width()).unwrap(),
+                                line: Line::from_row(&row),
+                            }
+                        })
+                        .collect();
+                    Response::History(HistoryLines {
+                        first: first.unwrap_or(end),
+                        lines,
+                    })
+                }
+                ClientMessage::Request(_) => Response::Done,
+                _ => continue,
+            };
+            pane.answered(response);
+        }
+    }
+
+    /// Twelve lines, `{prefix}1` to `{prefix}12`.
+    fn numbered_lines(prefix: &str) -> String {
+        use std::fmt::Write;
+        let mut output = String::new();
+        for n in 1..=12 {
+            write!(output, "{prefix}{n}\r\n").expect("writing to a String");
+        }
+        output
+    }
+
+    // By value, so call sites can build the key inline.
+    #[allow(clippy::needless_pass_by_value)]
+    fn press(pane: &mut Pane, key: Key, modifiers: Modifiers) {
+        let text = match &key {
+            Key::Character(text) => Some(text.to_string()),
+            _ => None,
+        };
+        pane.key(&KeyPress {
+            key: &key,
+            text: text.as_deref(),
+            location: KeyLocation::Standard,
+            modifiers,
+        });
+    }
+
+    fn keys(pane: &mut Pane, keys: &str) {
+        for ch in keys.chars() {
+            press(
+                pane,
+                Key::Character(ch.to_string().into()),
+                Modifiers::default(),
+            );
+        }
+    }
+
+    fn normal_mode(pane: &mut Pane) {
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        press(pane, Key::Named(NamedKey::Escape), shift);
+    }
+
+    /// The text under the cursor's line, and the cursor's place in view.
+    fn cursor(pane: &Pane) -> (String, usize, usize) {
+        let (rows, cursor) = pane.scene(5);
+        let cursor = cursor.expect("a cursor in view");
+        (rows[cursor.line].text(), cursor.line, cursor.col)
+    }
+
+    #[test]
+    fn normal_mode_starts_on_the_program_cursor_and_hjkl_move_it() {
+        let terminal = terminal("one\r\ntwo\r\nthree");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        assert_eq!(pane.label().as_deref(), Some("NORMAL"));
+        assert_eq!(cursor(&pane), ("three".into(), 2, 5));
+        keys(&mut pane, "k");
+        assert_eq!(cursor(&pane), ("two".into(), 1, 2));
+        keys(&mut pane, "hk");
+        assert_eq!(cursor(&pane), ("one".into(), 0, 1));
+    }
+
+    #[test]
+    fn moving_above_the_view_scrolls_into_history() {
+        let output = numbered_lines("line ");
+        let terminal = terminal(&output);
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        assert_eq!(cursor(&pane).0, "");
+        // From the screen's bottom line to its top, then two lines above.
+        keys(&mut pane, "kkkkkk");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 7".into(), 0, 0));
+        assert_eq!(pane.label().as_deref(), Some("NORMAL  ↑2"));
+        keys(&mut pane, "gg");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 1".into(), 0, 0));
+        keys(&mut pane, "G");
+        assert_eq!(cursor(&pane).1, 4);
+        assert_eq!(pane.label().as_deref(), Some("NORMAL"));
+    }
+
+    #[test]
+    fn output_in_normal_mode_leaves_the_cursor_on_its_text() {
+        let mut terminal = terminal("a\r\nb\r\nc\r\n");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "kk");
+        assert_eq!(cursor(&pane).0, "b");
+        terminal.advance(b"d\r\ne\r\nf\r\n");
+        pane.view_changed(&ViewUpdate::Snapshot(View::capture(&terminal)));
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).0, "b");
+    }
+
+    #[test]
+    fn ctrl_backslash_twice_reaches_the_program() {
+        let terminal = terminal("");
+        let mut pane = pane(&terminal);
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        press(&mut pane, Key::Character("\\".into()), ctrl);
+        assert_eq!(pane.mode, Mode::Normal);
+        press(&mut pane, Key::Character("\\".into()), ctrl);
+        assert_eq!(pane.mode, Mode::Insert);
+        // Ctrl+C reaches it from normal mode too.
+        normal_mode(&mut pane);
+        press(&mut pane, Key::Character("c".into()), ctrl);
+        let sent: Vec<Vec<u8>> = pane
+            .take_outbox()
+            .into_iter()
+            .filter_map(|message| match message {
+                ClientMessage::Request(Request::SendInput { bytes, .. }) => Some(bytes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [vec![0x1c], vec![0x03]]);
+    }
+
+    #[test]
+    fn insert_mode_returns_to_the_live_screen() {
+        let output = numbered_lines("");
+        let terminal = terminal(&output);
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg");
+        assert!(pane.label().is_some_and(|label| label.contains('↑')));
+        keys(&mut pane, "i");
+        assert_eq!(pane.mode, Mode::Insert);
+        assert_eq!(pane.label(), None);
     }
 }
