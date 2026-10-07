@@ -97,14 +97,7 @@ impl Gpu {
             anyhow::bail!("{} can't draw to this window", self.adapter.get_info().name);
         }
         let capabilities = surface.get_capabilities(&self.adapter);
-        // Colours are blended in sRGB, as other terminals do, so text has
-        // its usual weight. That needs a format that doesn't convert.
-        let format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(|format| !format.is_srgb())
-            .or_else(|| capabilities.formats.first().copied())
+        let format = surface_format(&capabilities.formats)
             .context("the window supports no texture format")?;
         let present_mode = if capabilities
             .present_modes
@@ -475,6 +468,21 @@ impl App {
         )
         .ok()
     }
+}
+
+/// The format to draw the window in, from those it supports. Colours are
+/// blended in sRGB, as other terminals do, so text has its usual weight:
+/// that needs a format that stores the shader's values as they are, so not
+/// an `…Srgb` one, which converts them. And not a floating-point one
+/// either, which some GPUs (Intel's) list first: the compositor takes its
+/// values as linear light, so the colours come out washed out.
+fn surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
+    use wgpu::TextureFormat::{Bgra8Unorm, Rgb10a2Unorm, Rgba8Unorm};
+    [Bgra8Unorm, Rgba8Unorm, Rgb10a2Unorm]
+        .into_iter()
+        .find(|format| formats.contains(format))
+        .or_else(|| formats.iter().copied().find(|format| !format.is_srgb()))
+        .or_else(|| formats.first().copied())
 }
 
 /// Draws `scene` into the window and shows it. Returns whether a frame
@@ -865,6 +873,19 @@ mod tests {
         assert_eq!(wrap("", 9, "  "), ["  "]);
         // A word longer than a line gets a line of its own.
         assert_eq!(wrap("a abcdefghijk b", 5, ""), ["a", "abcdefghijk", "b"]);
+    }
+
+    #[test]
+    fn the_window_is_drawn_in_an_eight_bit_format_that_doesnt_convert() {
+        use wgpu::TextureFormat::{Bgra8Unorm, Bgra8UnormSrgb, Rgba8Unorm, Rgba16Float};
+        // As Intel's Vulkan driver lists them.
+        assert_eq!(
+            surface_format(&[Rgba16Float, Bgra8UnormSrgb, Bgra8Unorm]),
+            Some(Bgra8Unorm)
+        );
+        assert_eq!(surface_format(&[Rgba8Unorm]), Some(Rgba8Unorm));
+        assert_eq!(surface_format(&[Rgba16Float]), Some(Rgba16Float));
+        assert_eq!(surface_format(&[]), None);
     }
 
     #[test]
