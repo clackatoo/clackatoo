@@ -102,33 +102,32 @@ pub(crate) enum Paint {
     Backdrop,
     /// ...and at the bottom right.
     BackdropEnd,
+    /// The faint line round the window.
+    WindowEdge,
     /// A soft shadow, under something raised.
     Shadow,
-    /// A pane's card: a neutral grey, the colour its terminal's background
-    /// is.
+    /// A pane's card, the colour its terminal's background is.
     Card,
     /// A card's edge.
     Edge,
-    /// The focused card's edge, while typing goes to its program.
+    /// The focused card's edge, while typing goes to its program...
     Focus,
-    /// clackatoo's own colour: the focused card's edge in normal mode.
+    /// ...and the glow around it.
+    FocusGlow,
+    /// clackatoo's own colour: the focused card's edge in normal mode...
     Accent,
-    /// Glass, as names in the bars are: faint at the bottom...
-    Glass,
-    /// ...and brighter at the top.
-    GlassTop,
-    /// Glass for what's picked or under the mouse: at the bottom...
-    BrightGlass,
-    /// ...and at the top.
-    BrightGlassTop,
-    /// Glass's edge.
-    GlassEdge,
-    /// Bright glass's edge.
-    BrightGlassEdge,
-    /// The text colour, for drawn icons.
-    Ink,
-    /// The command palette.
+    /// ...and the glow around it.
+    AccentGlow,
+    /// Behind what's picked, such as the workspace shown.
+    Picked,
+    /// Under the mouse.
+    Hover,
+    /// Drawn icons.
+    Icon,
+    /// The command palette...
     Palette,
+    /// ...and its edge.
+    PaletteEdge,
 }
 
 /// A line of text of the window's own.

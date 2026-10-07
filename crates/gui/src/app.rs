@@ -695,15 +695,19 @@ impl App {
     fn window_fill(&self, geometry: &Geometry) -> Option<Fill> {
         let frame = self.frame.as_ref()?;
         let [width, height] = geometry.size;
-        let radius = if frame.transparent && !frame.window.is_maximized() {
-            geometry.window_radius
-        } else {
-            0.0
-        };
-        Some(
-            Fill::rounded([0.0, 0.0, width, height], Paint::Backdrop, radius)
-                .fading(Paint::BackdropEnd, [1.0, 1.0]),
+        let rounded = frame.transparent && !frame.window.is_maximized();
+        let backdrop = Fill::rounded(
+            [0.0, 0.0, width, height],
+            Paint::Backdrop,
+            if rounded { geometry.window_radius } else { 0.0 },
         )
+        .fading(Paint::BackdropEnd, [1.0, 1.0]);
+        // A faint line round the window, where it has corners of its own.
+        Some(if rounded {
+            backdrop.bordered(geometry.edge, Paint::WindowEdge)
+        } else {
+            backdrop
+        })
     }
 
     /// Draws the notice on a card filling the space between the bars.
@@ -729,7 +733,7 @@ impl App {
         let painted = chrome.paint(self.hover);
         let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
         fills.extend(painted.fills);
-        fills.push(card_fill(geometry, &card, Paint::Edge));
+        push_card(&mut fills, geometry, &card, Paint::Edge, None);
         let mut texts = painted.texts;
         texts.extend(painted.over_texts);
         if let Some(frame) = &mut self.frame {
@@ -768,14 +772,14 @@ impl App {
             let state = desk.pane(terminal);
             let focused = id == shown.pane;
             let normal = state.is_some_and(|state| state.mode != Mode::Insert);
-            // The focused card's edge shows where typing goes, and in what
-            // mode.
-            let edge = match (focused, normal) {
-                (false, _) => Paint::Edge,
-                (true, false) => Paint::Focus,
-                (true, true) => Paint::Accent,
+            // The focused card's edge, and its glow, show where typing
+            // goes, and in what mode.
+            let (edge, glow) = match (focused, normal) {
+                (false, _) => (Paint::Edge, None),
+                (true, false) => (Paint::Focus, Some(Paint::FocusGlow)),
+                (true, true) => (Paint::Accent, Some(Paint::AccentGlow)),
             };
-            fills.push(card_fill(geometry, &card, edge));
+            push_card(&mut fills, geometry, &card, edge, glow);
             let Some(state) = state.filter(|state| state.screen().is_some()) else {
                 continue;
             };
@@ -843,9 +847,35 @@ fn single_pane() -> Layout {
     })
 }
 
-/// A card's rounded rectangle, with its edge in `edge`.
-fn card_fill(geometry: &Geometry, card: &Card, edge: Paint) -> Fill {
-    Fill::rounded(card.rect.to_array(), Paint::Card, geometry.radius).bordered(geometry.edge, edge)
+/// Adds a card's rounded rectangle, with its edge in `edge`, and around
+/// it, if given, a soft `glow`, fading over a few pixels.
+fn push_card(
+    fills: &mut Vec<Fill>,
+    geometry: &Geometry,
+    card: &Card,
+    edge: Paint,
+    glow: Option<Paint>,
+) {
+    if let Some(glow) = glow {
+        for spread in [3.0, 1.5] {
+            let outset = (spread * geometry.edge).round();
+            let rect = card.rect;
+            fills.push(Fill::rounded(
+                [
+                    rect.x - outset,
+                    rect.y - outset,
+                    rect.width + 2.0 * outset,
+                    rect.height + 2.0 * outset,
+                ],
+                glow,
+                geometry.radius + outset,
+            ));
+        }
+    }
+    fills.push(
+        Fill::rounded(card.rect.to_array(), Paint::Card, geometry.radius)
+            .bordered(geometry.edge, edge),
+    );
 }
 
 /// The cursor for resizing the window towards `direction`.

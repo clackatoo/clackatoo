@@ -5,7 +5,7 @@ use clackatoo_protocol::{Attributes, Color, Style};
 /// A colour as red, green, blue and alpha, each from 0 to 1, in sRGB.
 pub(crate) type Rgba = [f32; 4];
 
-/// White, `alpha` opaque: for glass, which lightens what's behind it.
+/// White, `alpha` opaque, for faint lines that lighten what's behind them.
 const fn white(alpha: f32) -> Rgba {
     [1.0, 1.0, 1.0, alpha]
 }
@@ -27,8 +27,16 @@ pub(crate) struct Theme {
     pub(crate) edge: Rgba,
     /// The focused card's edge, while typing goes to its program.
     pub(crate) focus: Rgba,
+    /// Behind what's picked, such as the workspace shown.
+    pub(crate) picked: Rgba,
+    /// Under the mouse.
+    pub(crate) hover: Rgba,
     /// Text that matters less, such as the names in the bars not shown.
     pub(crate) muted: Rgba,
+    /// The command palette's background.
+    pub(crate) palette_background: Rgba,
+    /// The command palette's edge.
+    pub(crate) palette_edge: Rgba,
     /// The 256 indexed colours: 16 named ones, a 6×6×6 cube, and 24 greys.
     palette: [Rgba; 256],
 }
@@ -65,15 +73,19 @@ impl Default for Theme {
             palette[232 + n as usize] = hex_rgba(grey << 16 | grey << 8 | grey);
         }
         Self {
-            foreground: hex_rgba(0xe4_e4_e7),
-            background: hex_rgba(0x1b_1c_1f),
-            cursor: hex_rgba(0xe4_e4_e7),
-            accent: hex_rgba(0xf8_ce_57),
-            backdrop: hex_rgba(0x24_1d_45),
-            backdrop_end: hex_rgba(0x0b_30_38),
-            edge: white(0.07),
-            focus: hex_rgba(0x2d_d4_bf),
-            muted: hex_rgba(0xa1_a1_aa),
+            foreground: hex_rgba(0xc8_d0_da),
+            background: hex_rgba(0x11_15_1b),
+            cursor: hex_rgba(0xc8_d0_da),
+            accent: hex_rgba(0xd9_b2_4a),
+            backdrop: hex_rgba(0x0a_0d_12),
+            backdrop_end: hex_rgba(0x0d_15_21),
+            edge: hex_rgba(0x1d_23_2c),
+            focus: hex_rgba(0x2f_86_a8),
+            picked: hex_rgba(0x1b_21_2a),
+            hover: hex_rgba(0x15_1a_22),
+            muted: hex_rgba(0x7c_86_96),
+            palette_background: hex_rgba(0x14_19_20),
+            palette_edge: hex_rgba(0x2a_32_3f),
             palette,
         }
     }
@@ -83,25 +95,24 @@ impl Theme {
     /// The colour of `paint`.
     pub(crate) fn paint(&self, paint: crate::render::Paint) -> Rgba {
         use crate::render::Paint;
-        let [r, g, b, _] = self.background;
+        let faint = |[r, g, b, _]: Rgba, alpha: f32| [r, g, b, alpha];
         match paint {
             Paint::Clear => [0.0; 4],
             Paint::Backdrop => self.backdrop,
             Paint::BackdropEnd => self.backdrop_end,
-            Paint::Shadow => [0.0, 0.0, 0.0, 0.22],
-            // A hint of the backdrop shows through.
-            Paint::Card => [r, g, b, 0.94],
+            Paint::WindowEdge => white(0.08),
+            Paint::Shadow => [0.0, 0.0, 0.0, 0.25],
+            Paint::Card => self.background,
             Paint::Edge => self.edge,
             Paint::Focus => self.focus,
+            Paint::FocusGlow => faint(self.focus, 0.16),
             Paint::Accent => self.accent,
-            Paint::Glass => white(0.035),
-            Paint::GlassTop => white(0.07),
-            Paint::BrightGlass => white(0.09),
-            Paint::BrightGlassTop => white(0.18),
-            Paint::GlassEdge => white(0.1),
-            Paint::BrightGlassEdge => white(0.22),
-            Paint::Ink => self.foreground,
-            Paint::Palette => [r, g, b, 0.97],
+            Paint::AccentGlow => faint(self.accent, 0.14),
+            Paint::Picked => self.picked,
+            Paint::Hover => self.hover,
+            Paint::Icon => self.muted,
+            Paint::Palette => self.palette_background,
+            Paint::PaletteEdge => self.palette_edge,
         }
     }
 

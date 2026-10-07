@@ -47,7 +47,7 @@ impl Metrics {
 
     /// How far in from a card's edges its cells start.
     fn inset(self) -> f32 {
-        2.0 * self.padding
+        3.0 * self.padding
     }
 }
 
@@ -374,7 +374,7 @@ impl Chrome {
             }
             painted.over.push(
                 Fill::rounded(rect.to_array(), Paint::Palette, self.geometry.radius)
-                    .bordered(self.geometry.edge, Paint::Focus),
+                    .bordered(self.geometry.edge, Paint::PaletteEdge),
             );
             painted.over_texts.push(Text {
                 origin: [
@@ -389,25 +389,30 @@ impl Chrome {
         painted
     }
 
-    /// A round button with its icon: a line for minimise, a square for
-    /// maximise and a cross for close.
+    /// A button: its icon alone, a line for minimise, a square for
+    /// maximise and a cross for close, on a soft circle while the mouse is
+    /// over it.
     fn paint_button(&self, button: Button, rect: Rect, hovered: bool, painted: &mut Painted<'_>) {
         let metrics = self.geometry.metrics;
         let stroke = self.geometry.edge;
-        painted
-            .fills
-            .push(glass(rect, rect.width / 2.0, hovered, stroke));
+        if hovered {
+            painted.fills.push(Fill::rounded(
+                rect.to_array(),
+                Paint::Picked,
+                rect.width / 2.0,
+            ));
+        }
         let side = (rect.width * 0.36).round();
         let left = (rect.x + (rect.width - side) / 2.0).round();
         let top = (rect.y + (rect.height - side) / 2.0).round();
         match button {
             Button::Minimise => painted.fills.push(Fill::solid(
                 [left, top + side - stroke, side, stroke],
-                Paint::Ink,
+                Paint::Icon,
             )),
             Button::Maximise => painted.fills.push(
                 Fill::rounded([left, top, side, side], Paint::Clear, stroke)
-                    .bordered(stroke, Paint::Ink),
+                    .bordered(stroke, Paint::Icon),
             ),
             Button::Close => painted.texts.push(Text {
                 origin: [
@@ -415,7 +420,7 @@ impl Chrome {
                     (rect.y + (rect.height - metrics.ui_line) / 2.0).round(),
                 ],
                 content: "×",
-                ink: Ink::Plain,
+                ink: if hovered { Ink::Plain } else { Ink::Muted },
                 font: TextFont::Ui,
             }),
         }
@@ -432,8 +437,8 @@ pub(crate) struct Painted<'a> {
     pub(crate) over_texts: Vec<Text<'a>>,
 }
 
-/// Draws a name: picked out if it's the one shown, lit up if the mouse is
-/// over it, and quieter otherwise.
+/// Draws a name: on a soft background if it's the one shown, a fainter
+/// one if the mouse is over it, and in quieter text otherwise.
 fn paint_item<'a, T>(
     item: &'a Item<T>,
     hovered: bool,
@@ -441,43 +446,29 @@ fn paint_item<'a, T>(
     painted: &mut Painted<'a>,
 ) {
     let radius = (1.5 * metrics.padding).round();
-    let edge = (metrics.padding / 4.0).round().max(1.0);
-    painted
-        .fills
-        .push(glass(item.rect, radius, item.active || hovered, edge));
-    let ink = match (item.active, hovered) {
-        (true, _) => Ink::Strong,
-        (false, true) => Ink::Plain,
-        (false, false) => Ink::Muted,
+    let background = match (item.active, hovered) {
+        (true, _) => Some(Paint::Picked),
+        (false, true) => Some(Paint::Hover),
+        (false, false) => None,
     };
+    if let Some(paint) = background {
+        painted
+            .fills
+            .push(Fill::rounded(item.rect.to_array(), paint, radius));
+    }
     painted.texts.push(Text {
         origin: [
             item.rect.x + 3.0 * metrics.padding,
             (item.rect.y + (item.rect.height - metrics.ui_line) / 2.0).round(),
         ],
         content: &item.text,
-        ink,
+        ink: if item.active || hovered {
+            Ink::Plain
+        } else {
+            Ink::Muted
+        },
         font: TextFont::Ui,
     });
-}
-
-/// A pane of glass over the backdrop: brighter at the top than the
-/// bottom, with a bright edge, and brighter still if `bright`. Real glass
-/// would blur what's behind it, but behind it is a smooth fade, which
-/// blurring leaves as it is.
-fn glass(rect: Rect, radius: f32, bright: bool, edge: f32) -> Fill {
-    let (top, bottom, rim) = if bright {
-        (
-            Paint::BrightGlassTop,
-            Paint::BrightGlass,
-            Paint::BrightGlassEdge,
-        )
-    } else {
-        (Paint::GlassTop, Paint::Glass, Paint::GlassEdge)
-    };
-    Fill::rounded(rect.to_array(), top, radius)
-        .fading(bottom, [0.0, 1.0])
-        .bordered(edge, rim)
 }
 
 /// A row of names in a bar.
@@ -593,8 +584,8 @@ mod tests {
                 height: 532.0
             }
         );
-        // 100 × 30 cells, inset 8 in a card, with gaps of 8 either side.
-        assert_eq!(Geometry::window_size(100, 30, METRICS), [1032.0, 684.0]);
+        // 100 × 30 cells, inset 12 in a card, with gaps of 8 either side.
+        assert_eq!(Geometry::window_size(100, 30, METRICS), [1040.0, 692.0]);
     }
 
     #[test]

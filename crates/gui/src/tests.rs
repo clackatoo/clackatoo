@@ -358,14 +358,14 @@ fn panes_are_drawn_on_cards_between_the_bars() {
         &pixels[index..index + 3]
     };
     let brightness = |rgb: &[u8]| rgb.iter().map(|&c| u32::from(c)).sum::<u32>();
-    // Glass lightens the backdrop behind it: the workspace shown, and the
-    // one under the mouse, most.
+    // The workspace shown, and the one under the mouse, sit on soft
+    // backgrounds, lighter than the backdrop.
     for item in &chrome.workspaces {
         let inside = pixel([item.rect.x + 6.0, item.rect.y + item.rect.height - 4.0]);
         let beside = pixel([item.rect.x - 3.0, item.rect.y + item.rect.height - 4.0]);
         assert!(
             brightness(inside) > brightness(beside) + 20,
-            "{} is glass",
+            "{} has a background",
             item.text
         );
     }
@@ -378,7 +378,7 @@ fn panes_are_drawn_on_cards_between_the_bars() {
     // The focused card's edge is in the accent colour, for normal mode.
     assert_eq!(
         pixel([right_card.x + 0.5, right_card.y + right_card.height / 2.0]),
-        [0xf8, 0xce, 0x57]
+        [0xd9, 0xb2, 0x4a]
     );
     // Between the cards, only the dark backdrop shows: the long line
     // stopped at its card's edge.
