@@ -1,6 +1,7 @@
 //! The daemon's QUIC endpoint, driven by its event loop.
 //!
 //! Each connection is one client, talking over the first stream it opens.
+//! The daemon opens more, one-way, to send it each terminal's view on.
 //! The event loop hands this the packets its carriers receive, and the
 //! timeouts it waited for. In return, it gets [`QuicEvent`]s to act on, and
 //! packets to send, each addressed to a carrier.
@@ -28,7 +29,7 @@ pub(crate) enum QuicEvent {
     Opened(ConnectionHandle),
     /// The client may have sent more.
     Readable(Token),
-    /// The client may be sent more.
+    /// The client may be sent more, on some stream.
     Writable(Token),
     /// The client's connection closed.
     Closed(Token),
@@ -246,19 +247,44 @@ impl QuicServer {
         received
     }
 
-    /// Sends what it can of `bytes` to the client on `handle`, returning
-    /// how much. `None` if the client can't be sent anything more.
-    pub(crate) fn write(&mut self, handle: ConnectionHandle, bytes: &[u8]) -> Option<usize> {
+    /// Sends what it can of `outgoing` to the client on `handle`, on
+    /// `stream`, or the one it talks over, and returns how much, removing
+    /// it from `outgoing`. `None` if the client can't be sent anything
+    /// more.
+    pub(crate) fn write(
+        &mut self,
+        handle: ConnectionHandle,
+        stream: Option<StreamId>,
+        outgoing: &mut Vec<u8>,
+    ) -> Option<usize> {
         let remote = self.connections.get_mut(&handle)?;
-        let stream = remote.stream?;
-        match remote.connection.send_stream(stream).write(bytes) {
-            Ok(written) => Some(written),
+        let stream = stream.or(remote.stream)?;
+        if outgoing.is_empty() {
+            return Some(0);
+        }
+        let written = match remote.connection.send_stream(stream).write(outgoing) {
+            Ok(written) => written,
             // A Writable event follows when there's room.
-            Err(WriteError::Blocked) => Some(0),
+            Err(WriteError::Blocked) => 0,
             Err(err) => {
                 log::debug!("writing to a QUIC client failed: {err}");
-                None
+                return None;
             }
+        };
+        outgoing.drain(..written);
+        Some(written)
+    }
+
+    /// Opens another stream to the client on `handle`, if it allows one.
+    pub(crate) fn open_stream(&mut self, handle: ConnectionHandle) -> Option<StreamId> {
+        let remote = self.connections.get_mut(&handle)?;
+        remote.connection.streams().open(Dir::Uni)
+    }
+
+    /// Ends `stream`, once what was written to it has gone.
+    pub(crate) fn finish(&mut self, handle: ConnectionHandle, stream: StreamId) {
+        if let Some(remote) = self.connections.get_mut(&handle) {
+            let _ = remote.connection.send_stream(stream).finish();
         }
     }
 
@@ -331,7 +357,7 @@ impl Remote {
             Event::Stream(StreamEvent::Readable { id }) if Some(id) == self.stream => {
                 events.extend(self.client.map(QuicEvent::Readable));
             }
-            Event::Stream(StreamEvent::Writable { id }) if Some(id) == self.stream => {
+            Event::Stream(StreamEvent::Writable { .. }) => {
                 events.extend(self.client.map(QuicEvent::Writable));
             }
             Event::ConnectionLost { reason } => {

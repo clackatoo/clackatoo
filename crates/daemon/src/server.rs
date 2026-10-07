@@ -16,7 +16,7 @@
 //! early. Handlers must also tolerate spurious events, because a token freed
 //! and reused within one batch of events can receive the old one.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque, btree_map};
 use std::io::{self, Read, Write};
 use std::os::fd::RawFd;
 use std::path::Path;
@@ -35,7 +35,7 @@ use mio::event::Event;
 use mio::net::{UnixListener, UnixStream};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Registry, Token, Waker};
-use quinn_proto::ConnectionHandle;
+use quinn_proto::{ConnectionHandle, StreamId};
 use slab::Slab;
 
 use crate::DaemonConfig;
@@ -108,6 +108,20 @@ struct Client {
     watching_workspaces: bool,
     /// The connection is to become a carrier, once its answer is queued.
     carrying: bool,
+    /// Over QUIC, the stream each terminal's view updates go on, so one
+    /// terminal's never wait behind another's, or behind answers. Kept
+    /// while the terminal lives, even when the client stops following it:
+    /// a new stream could deliver a fresh snapshot ahead of the old
+    /// stream's last patch.
+    streams: BTreeMap<TerminalId, ViewStream>,
+}
+
+/// A stream a QUIC client is sent one terminal's view updates on.
+#[derive(Debug)]
+struct ViewStream {
+    id: StreamId,
+    /// Encoded updates not yet taken by the stream.
+    outgoing: Vec<u8>,
 }
 
 impl Client {
@@ -122,6 +136,7 @@ impl Client {
             views: BTreeMap::new(),
             watching_workspaces: false,
             carrying: false,
+            streams: BTreeMap::new(),
         }
     }
 }
@@ -414,8 +429,9 @@ impl Daemon {
 
     /// Sends each view update that's due: one per subscription that has
     /// changes, has had its last update acknowledged, and whose client has
-    /// written everything queued before. Holding back for slow clients means
-    /// changes pile up into one update instead of a backlog.
+    /// written everything queued before it: on the socket, everything; over
+    /// QUIC, everything on that terminal's stream. Holding back for slow
+    /// clients means changes pile up into one update instead of a backlog.
     fn send_view_updates(&mut self) {
         if !std::mem::take(&mut self.views_pending) {
             return;
@@ -425,7 +441,11 @@ impl Daemon {
             let Source::Client(client) = source else {
                 continue;
             };
-            if !client.outgoing.is_empty() || client.finished {
+            let quic = match client.link {
+                Link::Unix(_) => None,
+                Link::Quic(handle) => Some(handle),
+            };
+            if client.finished || (quic.is_none() && !client.outgoing.is_empty()) {
                 continue;
             }
             for (&id, subscription) in &mut client.views {
@@ -435,6 +455,24 @@ impl Daemon {
                 let Some(slot) = self.terminals.get(&id) else {
                     continue;
                 };
+                // Its own stream, if the connection allows another.
+                let stream = quic.and_then(|handle| {
+                    let quic = self.quic.as_mut()?;
+                    let stream = match client.streams.entry(id) {
+                        btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                        btree_map::Entry::Vacant(entry) => entry.insert(ViewStream {
+                            id: quic.open_stream(handle)?,
+                            outgoing: Vec::new(),
+                        }),
+                    };
+                    Some(&mut stream.outgoing)
+                });
+                let outgoing = match stream {
+                    Some(outgoing) if !outgoing.is_empty() => continue,
+                    Some(outgoing) => outgoing,
+                    None if quic.is_some() && !client.outgoing.is_empty() => continue,
+                    None => &mut client.outgoing,
+                };
                 if let Some(update) = subscription.update(slot.terminal.emulator()) {
                     subscription.awaiting_ack = true;
                     let event = ServerMessage::Event(clackatoo_protocol::Event::View {
@@ -442,15 +480,16 @@ impl Daemon {
                         update,
                     });
                     match frame::encode(&event) {
-                        Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
+                        Ok(bytes) => {
+                            outgoing.extend_from_slice(&bytes);
+                            ready.push(Token(key));
+                        }
                         Err(err) => log::error!("encoding a view update failed: {err}"),
                     }
                 }
             }
-            if !client.outgoing.is_empty() {
-                ready.push(Token(key));
-            }
         }
+        ready.dedup();
         for token in ready {
             self.flush_client(token);
         }
@@ -598,6 +637,17 @@ impl Daemon {
         for token in &slot.viewers {
             if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
                 client.views.remove(&id);
+            }
+        }
+        // Clients over QUIC keep a stream for each terminal they've
+        // followed, until it closes.
+        for (_, source) in &mut self.sources {
+            if let Source::Client(client) = source
+                && let Link::Quic(handle) = client.link
+                && let Some(stream) = client.streams.remove(&id)
+                && let Some(quic) = self.quic.as_mut()
+            {
+                quic.finish(handle, stream.id);
             }
         }
         for token in [slot.output, slot.exit].into_iter().flatten() {
@@ -1058,17 +1108,17 @@ impl Daemon {
                 &mut client.outgoing,
                 &mut client.wants_writable,
             ),
-            Link::Quic(handle) => {
-                let written = self
-                    .quic
-                    .as_mut()
-                    .and_then(|quic| quic.write(*handle, &client.outgoing))
-                    .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe));
-                if let Ok(written) = written {
-                    client.outgoing.drain(..written);
-                }
-                written
-            }
+            Link::Quic(handle) => self
+                .quic
+                .as_mut()
+                .and_then(|quic| {
+                    let mut written = quic.write(*handle, None, &mut client.outgoing)?;
+                    for stream in client.streams.values_mut() {
+                        written += quic.write(*handle, Some(stream.id), &mut stream.outgoing)?;
+                    }
+                    Some(written)
+                })
+                .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe)),
         };
         let written = match written {
             Ok(written) => written,
@@ -1085,8 +1135,10 @@ impl Daemon {
             self.drop_client(token);
             return;
         }
-        // View updates wait for a client to catch up.
-        if flushed && written > 0 && !client.views.is_empty() {
+        // View updates wait for a client to catch up: on the socket, with
+        // everything; over QUIC, with each terminal's stream, which may
+        // have drained even if answers are still waiting.
+        if written > 0 && !client.views.is_empty() {
             self.views_pending = true;
         }
     }

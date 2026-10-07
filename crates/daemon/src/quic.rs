@@ -6,11 +6,12 @@
 //! ([`Request::CarryQuic`](clackatoo_protocol::Request::CarryQuic)), then
 //! opens a QUIC connection through it, each packet framed like a message.
 //! Its messages go on the connection's first stream, just as they would on
-//! the Unix socket.
+//! the Unix socket, and so do the daemon's answers. Each terminal's view
+//! updates come on a stream of their own, so a flood of output in one never
+//! holds up another, or the answers.
 //!
 //! QUIC inside SSH gives every remote client one way in, whether or not UDP
-//! gets through to the machine, and several streams that don't hold each
-//! other up. Later, when UDP does get through, the same connection moves
+//! gets through to the machine, and streams that don't hold each other up. Later, when UDP does get through, the same connection moves
 //! onto it, to survive the client's network changing.
 //!
 //! SSH is what authenticates. The daemon takes new QUIC connections only
@@ -28,8 +29,8 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use clackatoo_protocol::frame;
-use quinn_proto::TransportConfig;
 use quinn_proto::congestion::BbrConfig;
+use quinn_proto::{TransportConfig, VarInt};
 
 pub(crate) use client::{Carried, carry};
 pub(crate) use server::{QuicEvent, QuicServer, Received};
@@ -50,7 +51,9 @@ fn transport() -> Arc<TransportConfig> {
         // paces to the measured rate and round trip instead.
         .congestion_controller_factory(Arc::new(BbrConfig::default()))
         // One packet per frame on a carrier.
-        .enable_segmentation_offload(false);
+        .enable_segmentation_offload(false)
+        // A stream for each terminal a client follows.
+        .max_concurrent_uni_streams(VarInt::from_u32(1024));
     Arc::new(transport)
 }
 

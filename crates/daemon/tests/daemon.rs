@@ -810,3 +810,56 @@ fn only_the_socket_can_carry_quic() {
     // Still talking.
     client.list_terminals().unwrap();
 }
+
+#[test]
+fn quic_clients_follow_several_terminals_on_their_own_streams() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.quic_client();
+    let first = spawn(&mut client, &["cat"]);
+    let second = spawn(&mut client, &["cat"]);
+    let mut views = [attach(&mut client, first), attach(&mut client, second)];
+    let terminals = [first, second];
+    for &terminal in &terminals {
+        client.frame_done(terminal).unwrap();
+        client.send_input(terminal, b"x").unwrap();
+    }
+    // Both echo, in whichever order their streams deliver.
+    let mut caught_up = [false, false];
+    while caught_up != [true, true] {
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let Event::View { terminal, update } = client.next_event().unwrap() else {
+            continue;
+        };
+        let at = terminals.iter().position(|&id| id == terminal).unwrap();
+        views[at].apply(update);
+        client.frame_done(terminal).unwrap();
+        caught_up[at] = views[at] == client.capture(terminal).unwrap();
+    }
+
+    // Following again starts from a fresh snapshot, on the same stream.
+    client.detach(first).unwrap();
+    client.send_input(first, b"y").unwrap();
+    wait_for_screen(&mut client, first, |text| text.starts_with("xy"));
+    let view = attach(&mut client, first);
+    assert_eq!(view, client.capture(first).unwrap());
+
+    // A terminal closing ends its stream, and the rest carry on.
+    client.close_terminal(first).unwrap();
+    client.send_input(second, b"z").unwrap();
+    client.frame_done(second).unwrap();
+    wait_for_screen(&mut client, second, |text| text.starts_with("xz"));
+    let third = spawn(&mut client, &["cat"]);
+    client.attach(third).unwrap();
+    loop {
+        if let Event::View {
+            terminal,
+            update: ViewUpdate::Snapshot(_),
+        } = client.next_event().unwrap()
+            && terminal == third
+        {
+            break;
+        }
+    }
+}
