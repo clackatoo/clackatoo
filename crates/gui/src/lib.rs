@@ -62,12 +62,15 @@ pub fn run(options: Options) -> anyhow::Result<()> {
             .name("fonts".into())
             .spawn(move || fonts::Fonts::load(&options, 1.0))?
     };
+    let (display, display_received) = std::sync::mpsc::channel();
     let gpu = std::thread::Builder::new()
         .name("gpu".into())
-        .spawn(app::Gpu::new)?;
+        .spawn(move || app::Gpu::new(&display_received))?;
     let event_loop = EventLoop::with_user_event()
         .build()
         .context("could not open a window")?;
+    // The GPU thread has finished without it if this fails.
+    let _ = display.send(event_loop.owned_display_handle());
     let location = match options.remote {
         Some(remote) => session::Location::Remote(remote),
         None => session::Location::Local(options.runtime.clone()),

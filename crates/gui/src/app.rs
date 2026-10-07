@@ -11,7 +11,7 @@ use clackatoo_protocol::{Event, PROTOCOL_VERSION, ServerMessage, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{MouseScrollDelta, WindowEvent};
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -38,19 +38,52 @@ pub(crate) struct Gpu {
 }
 
 impl Gpu {
-    pub(crate) fn new() -> anyhow::Result<Self> {
+    /// Opens a GPU to draw the window with. `WGPU_BACKEND` (`vulkan`,
+    /// `gl`…) chooses the graphics API.
+    ///
+    /// OpenGL on Wayland draws only on the display it started with, which
+    /// arrives through `display` once the event loop has connected to it.
+    /// Vulkan doesn't need it, so it starts without waiting.
+    pub(crate) fn new(display: &mpsc::Receiver<OwnedDisplayHandle>) -> anyhow::Result<Self> {
+        let open = |backends: wgpu::Backends| -> anyhow::Result<Self> {
+            let display = if backends.contains(wgpu::Backends::GL) {
+                Some(
+                    display
+                        .recv()
+                        .context("the window's display never arrived")?,
+                )
+            } else {
+                None
+            };
+            Self::with_backends(backends, display)
+        };
+        if let Some(backends) = wgpu::Backends::from_env() {
+            return open(backends);
+        }
         // The native APIs first (Vulkan, Metal, DirectX 12). Setting up
         // OpenGL as well costs ~45 ms on Linux, for a backend only machines
         // without the others need.
-        Self::with_backends(wgpu::Backends::PRIMARY).or_else(|err| {
+        open(wgpu::Backends::PRIMARY).or_else(|err| {
             log::info!("{err:#}; trying OpenGL too");
-            Self::with_backends(wgpu::Backends::all())
+            open(wgpu::Backends::all())
         })
     }
 
-    fn with_backends(backends: wgpu::Backends) -> anyhow::Result<Self> {
-        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    fn with_backends(
+        backends: wgpu::Backends,
+        display: Option<OwnedDisplayHandle>,
+    ) -> anyhow::Result<Self> {
+        let mut descriptor = match display {
+            Some(display) => wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display)),
+            None => wgpu::InstanceDescriptor::new_without_display_handle(),
+        };
         descriptor.backends = backends;
+        // Checks on indirect draws, which we don't make. Setting them up
+        // needs compute shaders, which OpenGL 3.3 (NVIDIA's on Wayland)
+        // lacks, and without them the device can't be opened at all.
+        descriptor
+            .flags
+            .remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
         let instance = wgpu::Instance::new(descriptor);
         // The window doesn't exist yet, so the adapter can't be chosen by
         // the screen it draws on. Without a preference, wgpu takes the
