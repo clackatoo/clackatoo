@@ -65,6 +65,16 @@ pub(crate) struct Process {
 }
 
 impl Process {
+    /// A child process this one started, which a handover carried across
+    /// an upgrade.
+    pub(crate) fn from_parts(pid: Pid, pidfd: OwnedFd) -> Self {
+        Self { pid, pidfd }
+    }
+
+    pub(crate) fn into_parts(self) -> (Pid, OwnedFd) {
+        (self.pid, self.pidfd)
+    }
+
     pub(crate) fn pid(&self) -> Pid {
         self.pid
     }
@@ -163,6 +173,15 @@ pub(crate) struct Pty {
 }
 
 impl Pty {
+    /// A PTY a handover carried across an upgrade, still non-blocking.
+    pub(crate) fn from_fd(master: OwnedFd) -> Self {
+        Self { master }
+    }
+
+    pub(crate) fn into_fd(self) -> OwnedFd {
+        self.master
+    }
+
     /// Reads the program's output. On Linux, once the program and everything
     /// else holding the slave have closed it, this fails with `EIO`, not 0.
     pub(crate) fn read(&self, buf: &mut [u8]) -> io::Result<usize> {

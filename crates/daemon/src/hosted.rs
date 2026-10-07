@@ -12,6 +12,7 @@ use clackatoo_protocol::{
 use clackatoo_term::{Damage, Terminal, recording};
 
 use crate::DaemonConfig;
+use crate::handover::{self, Fds, HandoverError};
 use crate::pty::{self, Process, Program, Pty};
 
 /// How much input may wait for a program that isn't reading it. Pastes far
@@ -88,6 +89,64 @@ impl HostedTerminal {
             status: TerminalStatus::Running,
             input: Vec::new(),
             recording,
+        })
+    }
+
+    /// Hands the terminal over to the next build, adding its fds to `fds`.
+    /// A recording stops: the next build can't know where it was.
+    pub(crate) fn hand_over(self, fds: &mut Fds) -> handover::Terminal {
+        if self.recording.is_some() {
+            log::info!("terminal {}: recording stopped by the upgrade", self.id);
+        }
+        handover::Terminal {
+            id: self.id.0,
+            process: self.process.map(|process| {
+                let (pid, pidfd) = process.into_parts();
+                handover::Process {
+                    pid: pid.as_raw_pid(),
+                    pidfd: fds.add(pidfd),
+                }
+            }),
+            pid: self.pid,
+            pty: self.pty.map(|pty| fds.add(pty.into_fd())),
+            status: match self.status {
+                TerminalStatus::Running => handover::Status::Running,
+                TerminalStatus::Exited(code) => handover::Status::Exited(code),
+                TerminalStatus::Killed(signal) => handover::Status::Killed(signal),
+            },
+            input: self.input,
+            screen: self.emulator.snapshot(),
+        }
+    }
+
+    /// A terminal the last build handed over, taking its fds from `fds`.
+    pub(crate) fn resume(
+        terminal: &handover::Terminal,
+        fds: &mut Fds,
+        config: &DaemonConfig,
+    ) -> Result<Self, HandoverError> {
+        let process = terminal
+            .process
+            .as_ref()
+            .map(|process| resume_process(process, fds))
+            .transpose()?;
+        let pty = terminal
+            .pty
+            .map(|pty| fds.take(pty).map(Pty::from_fd))
+            .transpose()?;
+        Ok(Self {
+            id: TerminalId(terminal.id),
+            emulator: Terminal::restore(&terminal.screen, &config.terminal)?,
+            pty,
+            pid: terminal.pid,
+            process,
+            status: match terminal.status {
+                handover::Status::Running => TerminalStatus::Running,
+                handover::Status::Exited(code) => TerminalStatus::Exited(code),
+                handover::Status::Killed(signal) => TerminalStatus::Killed(signal),
+            },
+            input: terminal.input.clone(),
+            recording: None,
         })
     }
 
@@ -298,6 +357,23 @@ pub(crate) struct Orphan {
 }
 
 impl Orphan {
+    pub(crate) fn hand_over(self, fds: &mut Fds) -> handover::Process {
+        let (pid, pidfd) = self.process.into_parts();
+        handover::Process {
+            pid: pid.as_raw_pid(),
+            pidfd: fds.add(pidfd),
+        }
+    }
+
+    pub(crate) fn resume(
+        process: &handover::Process,
+        fds: &mut Fds,
+    ) -> Result<Self, HandoverError> {
+        Ok(Self {
+            process: resume_process(process, fds)?,
+        })
+    }
+
     pub(crate) fn exit_fd(&self) -> RawFd {
         self.process.as_raw_fd()
     }
@@ -306,6 +382,12 @@ impl Orphan {
     pub(crate) fn reap(&mut self) -> bool {
         matches!(self.process.try_wait(), Ok(Some(_)) | Err(_))
     }
+}
+
+fn resume_process(process: &handover::Process, fds: &mut Fds) -> Result<Process, HandoverError> {
+    let pid = rustix::process::Pid::from_raw(process.pid)
+        .ok_or(HandoverError::Damaged("a pid isn't one"))?;
+    Ok(Process::from_parts(pid, fds.take(process.pidfd)?))
 }
 
 fn start_recording(path: &Path, request: &NewTerminal) -> io::Result<BufWriter<File>> {

@@ -139,6 +139,17 @@ impl Session {
         &self.location
     }
 
+    /// Whether a daemon on this machine is listening, as one is when the
+    /// connection was lost because the daemon upgraded. Never starts one.
+    pub(crate) fn daemon_listening(&self) -> bool {
+        match &self.location {
+            Location::Local(runtime) => {
+                std::os::unix::net::UnixStream::connect(runtime.socket_path()).is_ok()
+            }
+            Location::Remote(_) => false,
+        }
+    }
+
     /// Connects again after the connection was lost.
     pub(crate) fn reconnect(&mut self) {
         self.commands = spawn(
@@ -253,14 +264,14 @@ fn run(
 }
 
 /// Connects to the daemon at `location`, starting it if it isn't running,
-/// or with `replace`, stopping it first. ssh asks its questions through
-/// the socket at `askpass`.
+/// or with `replace`, replacing it first: upgrading it if it can be, or else
+/// stopping it. ssh asks its questions through the socket at `askpass`.
 fn connect(location: &Location, askpass: Option<&Path>, replace: bool) -> Connected {
     let result = match location {
         Location::Local(runtime) => {
-            if replace && let Err(err) = launch::stop(runtime) {
+            if replace && let Err(err) = launch::replace(runtime) {
                 return Connected::Failed(format!(
-                    "couldn't stop the other daemon: {}",
+                    "couldn't replace the other daemon: {}",
                     with_causes(&err)
                 ));
             }

@@ -6,6 +6,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
+use clackatoo_daemon::launch;
 use clackatoo_daemon::{Contact, Sender};
 use clackatoo_protocol::{
     Content, Event, Layout, PROTOCOL_VERSION, Pane as LayoutPane, PaneId, ServerMessage, Size,
@@ -729,8 +730,10 @@ impl App {
                     input.push(text);
                 }
             }
-            Notice::OtherDaemon { .. } if enter => {
-                self.notice = Some(Notice::Replacing);
+            Notice::OtherDaemon { protocol } if enter && *protocol <= PROTOCOL_VERSION => {
+                self.notice = Some(Notice::Replacing {
+                    upgrading: launch::can_upgrade(*protocol),
+                });
                 self.session.replace_daemon();
             }
             Notice::Lost { .. } if enter => {
@@ -1095,8 +1098,8 @@ impl std::fmt::Debug for Typed {
 enum Notice {
     /// A daemon from another build is running; replace it?
     OtherDaemon { protocol: u32 },
-    /// Replacing it.
-    Replacing,
+    /// Replacing it: upgrading it in place if `upgrading`.
+    Replacing { upgrading: bool },
     /// The connection was lost, or never made; try again?
     Lost { reason: String },
     /// Connecting, or trying again.
@@ -1118,17 +1121,37 @@ impl Notice {
     fn lines(&self, host: Option<&str>, width: usize) -> Vec<String> {
         let on_host = host.map(|host| format!(" on {host}")).unwrap_or_default();
         let paragraphs = match self {
-            Self::OtherDaemon { protocol } => vec![
+            Self::OtherDaemon { protocol } if *protocol > PROTOCOL_VERSION => vec![
                 format!(
-                    "The clackatoo daemon{on_host} is from another build. It speaks \
+                    "The clackatoo daemon{on_host} is from a newer build than this window. \
+                     It speaks protocol {protocol}, and this window speaks \
+                     {PROTOCOL_VERSION}."
+                ),
+                "Open a window from the newer build instead.".into(),
+                "  Esc    quit".into(),
+            ],
+            Self::OtherDaemon { protocol } if launch::can_upgrade(*protocol) => vec![
+                format!(
+                    "The clackatoo daemon{on_host} is from an older build. It speaks \
                      protocol {protocol}, and this window speaks {PROTOCOL_VERSION}."
                 ),
-                "Replacing it closes every terminal running in it, and hangs up their \
-                 programs."
+                "Upgrading it moves it onto this build. Its terminals keep running.".into(),
+                "  Enter  upgrade it\n  Esc    quit".into(),
+            ],
+            Self::OtherDaemon { protocol } => vec![
+                format!(
+                    "The clackatoo daemon{on_host} is from an older build. It speaks \
+                     protocol {protocol}, and this window speaks {PROTOCOL_VERSION}."
+                ),
+                "It's too old to upgrade in place, so replacing it closes every terminal \
+                 running in it, and hangs up their programs."
                     .into(),
                 "  Enter  replace it\n  Esc    quit".into(),
             ],
-            Self::Replacing => vec![format!("Replacing the daemon{on_host}…")],
+            Self::Replacing { upgrading: true } => vec![format!("Upgrading the daemon{on_host}…")],
+            Self::Replacing { upgrading: false } => {
+                vec![format!("Replacing the daemon{on_host}…")]
+            }
             Self::Lost { reason } => vec![
                 format!("Lost the connection to the daemon{on_host}."),
                 reason.clone(),
@@ -1413,13 +1436,23 @@ impl App {
                     self.request_redraw();
                 }
             }
-            SessionEvent::Message(ServerMessage::Hello { .. }) => {}
+            SessionEvent::Message(
+                ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. },
+            ) => {}
             SessionEvent::Lost(reason) => {
                 log::warn!("lost the daemon: {reason}");
-                self.sender = None;
+                let was_connected = self.sender.take().is_some();
                 self.desk.lost();
                 self.contact = None;
-                self.notice = Some(Notice::Lost { reason });
+                // A daemon still listening has just upgraded, or restarted:
+                // carry on with it. Only once per connection, so one that
+                // keeps hanging up is reported.
+                if was_connected && self.session.daemon_listening() {
+                    self.notice = Some(Notice::Connecting);
+                    self.session.reconnect();
+                } else {
+                    self.notice = Some(Notice::Lost { reason });
+                }
                 self.request_redraw();
             }
         }

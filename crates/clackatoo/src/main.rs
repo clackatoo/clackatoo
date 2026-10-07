@@ -6,6 +6,7 @@ mod config;
 mod ping;
 mod render;
 
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clackatoo_daemon::remote::{self, Remote, RemoteError};
-use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, RuntimeDir};
+use clackatoo_daemon::{Client, ClientError, DaemonConfig, RuntimeDir, launch, upgrade};
 use clackatoo_protocol::{NewTerminal, Size, TerminalId};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -120,9 +121,17 @@ enum Command {
     /// Stop the daemon, closing every terminal and hanging up their
     /// programs. Works on a daemon from any version of clackatoo.
     Stop,
+    /// Move the running daemon onto this build of clackatoo, keeping its
+    /// terminals and their programs running. Daemons from before protocol
+    /// 11 can't be upgraded, only stopped.
+    Upgrade,
     /// Show or change the window's settings in client.toml. With no
     /// arguments, shows them all.
     Config(ConfigArgs),
+    /// Print the handover versions this build can take over from, for a
+    /// daemon checking it before upgrading to it.
+    #[command(name = "handover-versions", hide = true)]
+    HandoverVersions,
     /// Relay between standard input and output and the daemon, starting it
     /// if it isn't running. `--remote` runs this on the remote machine,
     /// through ssh.
@@ -151,6 +160,10 @@ struct BridgeArgs {
 
 #[derive(Debug, Args)]
 struct DaemonArgs {
+    /// Take over from an older build, which exec'd this one and handed
+    /// over its state on standard input.
+    #[arg(long, hide = true)]
+    resume: bool,
     /// When scrollback is compacted to save memory: `lazy` once output
     /// pauses, `eager` as each line scrolls off, or `off` for never, which
     /// is fastest but takes about 8 bytes per column for every line.
@@ -304,9 +317,27 @@ fn run(command: Command) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Stop => {
-            if !clackatoo_daemon::launch::stop(&RuntimeDir::for_current_user())? {
+            if !launch::stop(&RuntimeDir::for_current_user())? {
                 eprintln!("clackatoo: no daemon is running");
             }
+            Ok(())
+        }
+        Command::HandoverVersions => {
+            let versions: Vec<String> = upgrade::readable_versions()
+                .iter()
+                .map(u32::to_string)
+                .collect();
+            println!("{}", versions.join(" "));
+            Ok(())
+        }
+        Command::Upgrade => {
+            let mut client = launch::upgrade(&RuntimeDir::for_current_user())?;
+            let terminals = client.list_terminals()?.len();
+            println!(
+                "the daemon is now running {}, and kept its {terminals} terminal{}",
+                std::env::current_exe()?.display(),
+                if terminals == 1 { "" } else { "s" }
+            );
             Ok(())
         }
         Command::Ping(args) => {
@@ -369,13 +400,30 @@ fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
 fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let runtime = RuntimeDir::for_current_user();
-    let _lock = runtime.lock()?;
     let mut config = DaemonConfig::from_env();
     config.terminal.scrollback_compaction = args.scrollback_compaction.into();
-    let mut daemon = Daemon::bind(&runtime.socket_path(), config)
-        .with_context(|| format!("could not listen on {}", runtime.socket_path().display()))?;
-    daemon.run()?;
-    Ok(())
+    // An upgrade runs the next build with the same arguments.
+    let rerun: Vec<OsString> = std::env::args_os()
+        .skip(1)
+        .filter(|arg| arg != upgrade::RESUME_FLAG)
+        .collect();
+    upgrade::serve(&runtime, &config, args.resume, &rerun)
+        .with_context(|| format!("could not serve {}", runtime.socket_path().display()))
+}
+
+/// Why a daemon of another version can't be used, and what to do about it.
+fn other_version(daemon: u32, ours: u32, on_host: &str) -> String {
+    let what = format!(
+        "the daemon{on_host} is from another version of clackatoo (protocol {daemon}, this is \
+         {ours})"
+    );
+    if daemon > ours {
+        format!("{what}; use a newer clackatoo")
+    } else if on_host.is_empty() && launch::can_upgrade(daemon) {
+        format!("{what}; `clackatoo upgrade` moves it onto this one, keeping its terminals")
+    } else {
+        format!("{what}; `clackatoo stop`{on_host} stops it, closing its terminals")
+    }
 }
 
 fn connect(connection: &Connection) -> anyhow::Result<Client> {
@@ -384,12 +432,7 @@ fn connect(connection: &Connection) -> anyhow::Result<Client> {
         return match remote::connect(&remote, false, None) {
             Ok(client) => Ok(client),
             Err(RemoteError::Client(ClientError::VersionMismatch { daemon, ours })) => {
-                anyhow::bail!(
-                    "the daemon on {} is from another version of clackatoo (protocol \
-                     {daemon}, this is {ours}); `clackatoo stop` there stops it, closing its \
-                     terminals",
-                    remote.host
-                )
+                anyhow::bail!(other_version(daemon, ours, &format!(" on {}", remote.host)))
             }
             Err(err) => Err(err.into()),
         };
@@ -411,10 +454,9 @@ fn connect(connection: &Connection) -> anyhow::Result<Client> {
                 socket.display()
             )
         }
-        Err(ClientError::VersionMismatch { daemon, ours }) => anyhow::bail!(
-            "the daemon is from another version of clackatoo (protocol {daemon}, this is \
-             {ours}); `clackatoo stop` stops it, closing its terminals"
-        ),
+        Err(ClientError::VersionMismatch { daemon, ours }) => {
+            anyhow::bail!(other_version(daemon, ours, ""))
+        }
         Err(err) => Err(err.into()),
     }
 }

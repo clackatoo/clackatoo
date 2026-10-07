@@ -269,4 +269,20 @@ mod tests {
         .unwrap();
         assert_eq!(hello, [2, 0, 0, 0, 0, 1]);
     }
+
+    #[test]
+    fn upgrading_stays_variant_one() {
+        // Like Hello: these must decode the same in every version from 11.
+        let upgrade = encode(&ClientMessage::Upgrade {
+            protocol_version: 12,
+            executable: b"/c".to_vec(),
+        })
+        .unwrap();
+        assert_eq!(upgrade, [5, 0, 0, 0, 1, 12, 2, b'/', b'c']);
+        let refusal = encode(&ServerMessage::NotUpgrading {
+            reason: "no".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(refusal, [4, 0, 0, 0, 1, 2, b'n', b'o']);
+    }
 }

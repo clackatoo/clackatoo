@@ -13,13 +13,15 @@ bench = false
 [dependencies]
 bytes.workspace = true
 clackatoo-protocol.workspace = true
-clackatoo-term.workspace = true
+clackatoo-term = { workspace = true, features = ["serde"] }
 log.workspace = true
 mio.workspace = true
+postcard.workspace = true
 quinn-proto.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 rustix.workspace = true
+serde.workspace = true
 slab.workspace = true
 thiserror.workspace = true
 

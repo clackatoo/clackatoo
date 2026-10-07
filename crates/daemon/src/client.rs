@@ -141,8 +141,8 @@ impl Client {
             match self.receive()? {
                 ServerMessage::Response(response) => return Ok(response),
                 ServerMessage::Event(event) => self.events.push_back(event),
-                hello @ ServerMessage::Hello { .. } => {
-                    return Err(ClientError::UnexpectedMessage(Box::new(hello)));
+                other @ (ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. }) => {
+                    return Err(ClientError::UnexpectedMessage(Box::new(other)));
                 }
             }
         }
@@ -509,7 +509,7 @@ fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<Udp>), Clien
 }
 
 /// Reads until a whole message has arrived.
-fn receive(
+pub(crate) fn receive(
     stream: &mut UnixStream,
     decoder: &mut FrameDecoder,
 ) -> Result<ServerMessage, ClientError> {

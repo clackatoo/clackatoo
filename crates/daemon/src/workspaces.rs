@@ -6,9 +6,11 @@
 //! makes the change, which can't fail.
 
 use clackatoo_protocol::{
-    Content, Error, Layout, Pane, PaneId, Side, Tab, TabId, TerminalId, Workspace, WorkspaceId,
-    Workspaces,
+    Axis, Content, Error, Layout, Pane, PaneId, Side, Tab, TabId, TerminalId, Workspace,
+    WorkspaceId, Workspaces,
 };
+
+use crate::handover::{self, HandoverError};
 
 /// Every workspace, and the IDs the next ones get.
 #[derive(Debug)]
@@ -27,6 +29,110 @@ impl WorkspaceState {
             next_tab: 1,
             next_pane: 1,
         }
+    }
+
+    /// The workspaces, for the next build.
+    pub(crate) fn hand_over(&self) -> handover::Workspaces {
+        fn layout(node: &Layout) -> handover::Layout {
+            match node {
+                Layout::Pane(pane) => {
+                    let Content::Terminal(terminal) = pane.content;
+                    handover::Layout::Pane {
+                        id: pane.id.0,
+                        terminal: terminal.0,
+                    }
+                }
+                Layout::Split { axis, parts } => handover::Layout::Split {
+                    left_to_right: *axis == Axis::LeftToRight,
+                    parts: parts.iter().map(layout).collect(),
+                },
+            }
+        }
+        handover::Workspaces {
+            list: (self.workspaces.list.iter())
+                .map(|workspace| handover::Workspace {
+                    id: workspace.id.0,
+                    name: workspace.name.clone(),
+                    tabs: (workspace.tabs.iter())
+                        .map(|tab| handover::Tab {
+                            id: tab.id.0,
+                            layout: layout(&tab.layout),
+                            focused: tab.focused.0,
+                            name: tab.name.clone(),
+                        })
+                        .collect(),
+                    active_tab: workspace.active_tab.0,
+                })
+                .collect(),
+            active: self.workspaces.active.map(|id| id.0),
+            next_workspace: self.next_workspace,
+            next_tab: self.next_tab,
+            next_pane: self.next_pane,
+        }
+    }
+
+    /// The workspaces the last build handed over.
+    pub(crate) fn resume(handed: &handover::Workspaces) -> Result<Self, HandoverError> {
+        fn layout(node: &handover::Layout) -> Result<Layout, HandoverError> {
+            Ok(match node {
+                handover::Layout::Pane { id, terminal } => Layout::Pane(Pane {
+                    id: PaneId(*id),
+                    content: Content::Terminal(TerminalId(*terminal)),
+                }),
+                handover::Layout::Split {
+                    left_to_right,
+                    parts,
+                } if parts.len() >= 2 => Layout::Split {
+                    axis: if *left_to_right {
+                        Axis::LeftToRight
+                    } else {
+                        Axis::TopToBottom
+                    },
+                    parts: parts.iter().map(layout).collect::<Result<_, _>>()?,
+                },
+                handover::Layout::Split { .. } => {
+                    return Err(HandoverError::Damaged("a split has fewer than two parts"));
+                }
+            })
+        }
+        let mut list = Vec::new();
+        for workspace in &handed.list {
+            let mut tabs = Vec::new();
+            for tab in &workspace.tabs {
+                let tab = Tab {
+                    id: TabId(tab.id),
+                    layout: layout(&tab.layout)?,
+                    focused: PaneId(tab.focused),
+                    name: tab.name.clone(),
+                };
+                if !tab.layout.panes().iter().any(|pane| pane.id == tab.focused) {
+                    return Err(HandoverError::Damaged("a tab's focused pane isn't in it"));
+                }
+                tabs.push(tab);
+            }
+            let active_tab = TabId(workspace.active_tab);
+            if !tabs.iter().any(|tab| tab.id == active_tab) {
+                return Err(HandoverError::Damaged(
+                    "a workspace's active tab isn't in it",
+                ));
+            }
+            list.push(Workspace {
+                id: WorkspaceId(workspace.id),
+                name: workspace.name.clone(),
+                tabs,
+                active_tab,
+            });
+        }
+        let active = handed.active.map(WorkspaceId);
+        if active.is_some_and(|active| !list.iter().any(|workspace| workspace.id == active)) {
+            return Err(HandoverError::Damaged("the active workspace is missing"));
+        }
+        Ok(Self {
+            workspaces: Workspaces { list, active },
+            next_workspace: handed.next_workspace,
+            next_tab: handed.next_tab,
+            next_pane: handed.next_pane,
+        })
     }
 
     pub(crate) fn get(&self) -> &Workspaces {

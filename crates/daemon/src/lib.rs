@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 pub mod client;
+mod handover;
 mod hosted;
 pub mod launch;
 mod memory;
@@ -21,6 +22,7 @@ mod quic;
 pub mod remote;
 mod runtime;
 mod server;
+pub mod upgrade;
 mod workspaces;
 
 use std::ffi::OsString;

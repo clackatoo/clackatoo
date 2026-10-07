@@ -1,12 +1,16 @@
-//! Starting and stopping the daemon from a client.
+//! Starting, stopping and upgrading the daemon from a client.
 //!
 //! Clients start the daemon when none is running, in the background, so
-//! it outlives them. A daemon from an older build speaks an older protocol
-//! and can't be asked to stop, so stopping finds its process through the
-//! socket (the kernel says who is on the other end) and signals it, as
-//! closing every terminal would.
+//! it outlives them. A daemon from an older build speaks an older protocol.
+//! From protocol 11 on, it can be asked to upgrade in place, keeping its
+//! terminals (see [`upgrade`](crate::upgrade)). An older one can't be asked
+//! anything, so stopping finds its process through the socket (the kernel
+//! says who is on the other end) and signals it, as closing every terminal
+//! would.
 
 use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -14,9 +18,11 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use clackatoo_protocol::frame::{self, FrameDecoder};
+use clackatoo_protocol::{ClientMessage, PROTOCOL_VERSION, ServerMessage, UPGRADABLE_SINCE};
 use rustix::process::{Pid, Signal};
 
-use crate::client::{Client, ClientError};
+use crate::client::{self, Client, ClientError};
 use crate::runtime::{LockError, RuntimeDir};
 
 /// How long a daemon may take to start, or to stop.
@@ -42,6 +48,18 @@ pub enum LaunchError {
     /// The daemon didn't exit when told to.
     #[error("the daemon didn't stop")]
     DidNotStop,
+    /// No daemon is running.
+    #[error("no daemon is running")]
+    NotRunning,
+    /// The daemon is from a build before daemons could upgrade in place.
+    #[error(
+        "the daemon speaks protocol {0}, from before daemons could upgrade in place; \
+         `clackatoo stop` stops it, closing its terminals"
+    )]
+    CantUpgrade(u32),
+    /// The daemon was asked to upgrade, and didn't.
+    #[error("the daemon didn't upgrade: {0}")]
+    NotUpgraded(String),
     /// A system call failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -67,12 +85,6 @@ pub fn connect_or_start(runtime: &RuntimeDir) -> Result<Client, LaunchError> {
 /// If the daemon can't be started or reached.
 pub fn socket_or_start(runtime: &RuntimeDir) -> Result<UnixStream, LaunchError> {
     let socket = runtime.socket_path();
-    let not_running = |err: &std::io::Error| {
-        matches!(
-            err.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-        )
-    };
     match UnixStream::connect(&socket) {
         Ok(stream) => return Ok(stream),
         Err(err) if not_running(&err) => {}
@@ -112,6 +124,125 @@ pub fn socket_or_start(runtime: &RuntimeDir) -> Result<UnixStream, LaunchError> 
     }
 }
 
+/// What [`replace`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Replaced {
+    /// The daemon became this build, and its terminals carried on.
+    Upgraded,
+    /// The daemon was too old to upgrade, so it was stopped, closing its
+    /// terminals. The next connection starts a new one.
+    Stopped,
+    /// No daemon was running.
+    NotRunning,
+}
+
+/// Whether a daemon speaking `protocol` can upgrade in place to this build.
+/// A daemon newer than this build won't go back to it.
+#[must_use]
+pub fn can_upgrade(protocol: u32) -> bool {
+    (UPGRADABLE_SINCE..=PROTOCOL_VERSION).contains(&protocol)
+}
+
+/// The protocol the running daemon speaks, or `None` if none is running.
+///
+/// # Errors
+///
+/// If the daemon can't be reached, or doesn't answer.
+pub fn daemon_protocol(runtime: &RuntimeDir) -> Result<Option<u32>, LaunchError> {
+    let mut stream = match UnixStream::connect(runtime.socket_path()) {
+        Ok(stream) => stream,
+        Err(err) if not_running(&err) => return Ok(None),
+        Err(err) => return Err(ClientError::Connect(err).into()),
+    };
+    stream.set_read_timeout(Some(DEADLINE))?;
+    stream.write_all(
+        &frame::encode(&ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        })
+        .map_err(ClientError::from)?,
+    )?;
+    match client::receive(&mut stream, &mut FrameDecoder::new())? {
+        ServerMessage::Hello { protocol_version } => Ok(Some(protocol_version)),
+        other => Err(ClientError::UnexpectedMessage(Box::new(other)).into()),
+    }
+}
+
+/// Moves the running daemon onto this build, keeping its terminals and
+/// their programs running, then connects to it. The daemon must speak a
+/// protocol [`can_upgrade`] accepts; a daemon of this build's own protocol
+/// upgrades too, onto this build's program.
+///
+/// # Errors
+///
+/// [`LaunchError::NotRunning`], [`LaunchError::CantUpgrade`] if the daemon
+/// is too old or newer than this build, [`LaunchError::NotUpgraded`] if it
+/// refused or failed (its log says why), or if it can't be reached.
+pub fn upgrade(runtime: &RuntimeDir) -> Result<Client, LaunchError> {
+    match daemon_protocol(runtime)? {
+        None => return Err(LaunchError::NotRunning),
+        Some(protocol) if !can_upgrade(protocol) => return Err(LaunchError::CantUpgrade(protocol)),
+        Some(_) => {}
+    }
+    let socket = runtime.socket_path();
+    let mut stream = UnixStream::connect(&socket).map_err(ClientError::Connect)?;
+    stream.set_read_timeout(Some(DEADLINE))?;
+    let executable = std::env::current_exe()?;
+    stream.write_all(
+        &frame::encode(&ClientMessage::Upgrade {
+            protocol_version: PROTOCOL_VERSION,
+            executable: executable.as_os_str().as_bytes().to_vec(),
+        })
+        .map_err(ClientError::from)?,
+    )?;
+    // The daemon hangs up as it upgrades.
+    match client::receive(&mut stream, &mut FrameDecoder::new()) {
+        Err(ClientError::Disconnected) => {}
+        Ok(ServerMessage::NotUpgrading { reason }) => return Err(LaunchError::NotUpgraded(reason)),
+        Ok(other) => return Err(ClientError::UnexpectedMessage(Box::new(other)).into()),
+        Err(err) => return Err(err.into()),
+    }
+    // Connections wait in the socket's queue while the new build starts.
+    match Client::connect(&socket) {
+        Err(ClientError::VersionMismatch { daemon, .. }) if daemon != PROTOCOL_VERSION => {
+            Err(LaunchError::NotUpgraded(format!(
+                "it still speaks protocol {daemon}; {} says why",
+                runtime.path().join("daemon.log").display()
+            )))
+        }
+        result => Ok(result?),
+    }
+}
+
+/// Replaces the running daemon with this build: upgrades it in place if it
+/// can (see [`upgrade`]), keeping its terminals, or else stops it, closing
+/// them, so the next connection starts a new one.
+///
+/// # Errors
+///
+/// If upgrading or stopping fails. A daemon that should have upgraded and
+/// didn't isn't stopped instead.
+pub fn replace(runtime: &RuntimeDir) -> Result<Replaced, LaunchError> {
+    match daemon_protocol(runtime)? {
+        None => Ok(Replaced::NotRunning),
+        Some(protocol) if can_upgrade(protocol) => {
+            upgrade(runtime)?;
+            Ok(Replaced::Upgraded)
+        }
+        Some(_) => {
+            stop(runtime)?;
+            Ok(Replaced::Stopped)
+        }
+    }
+}
+
+/// Whether connecting failed because no daemon is listening.
+fn not_running(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
+}
+
 /// Stops the running daemon, whatever protocol it speaks, and waits for it
 /// to exit. Its terminals close, and their programs are hung up. Returns
 /// false if no daemon was running.
@@ -122,14 +253,7 @@ pub fn socket_or_start(runtime: &RuntimeDir) -> Result<UnixStream, LaunchError> 
 pub fn stop(runtime: &RuntimeDir) -> Result<bool, LaunchError> {
     let stream = match UnixStream::connect(runtime.socket_path()) {
         Ok(stream) => stream,
-        Err(err)
-            if matches!(
-                err.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Ok(false);
-        }
+        Err(err) if not_running(&err) => return Ok(false),
         Err(err) => return Err(err.into()),
     };
     let peer = rustix::net::sockopt::socket_peercred(&stream).map_err(std::io::Error::from)?;

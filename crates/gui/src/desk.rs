@@ -912,7 +912,9 @@ mod tests {
             .into_iter()
             .filter_map(|message| match message {
                 ClientMessage::Request(request) => Some(request),
-                ClientMessage::FrameDone { .. } | ClientMessage::Hello { .. } => None,
+                ClientMessage::FrameDone { .. }
+                | ClientMessage::Hello { .. }
+                | ClientMessage::Upgrade { .. } => None,
             })
             .collect();
         for _ in &requests {

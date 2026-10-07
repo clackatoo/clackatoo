@@ -20,8 +20,9 @@ use std::collections::{BTreeMap, VecDeque, btree_map};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::RangeInclusive;
-use std::os::fd::RawFd;
-use std::path::Path;
+use std::os::fd::{AsFd, RawFd};
+use std::os::unix::ffi::OsStringExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -41,9 +42,11 @@ use quinn_proto::{ConnectionHandle, StreamId};
 use slab::Slab;
 
 use crate::DaemonConfig;
+use crate::handover::{self, Fds, Handover, HandoverError};
 use crate::hosted::{HostedTerminal, Orphan, ReadOutcome};
 use crate::memory;
 use crate::quic::{self, CarrierId, QuicEvent, QuicServer, Received};
+use crate::upgrade::Upgrade;
 use crate::workspaces::WorkspaceState;
 
 const LISTENER: Token = Token(usize::MAX);
@@ -263,6 +266,9 @@ pub struct Daemon {
     damage: Damage,
     config: DaemonConfig,
     buffer: Box<[u8]>,
+    /// A client asked the daemon to become this program: see
+    /// [`ClientMessage::Upgrade`]. The client's token.
+    upgrade_to: Option<(PathBuf, Token)>,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -295,12 +301,17 @@ impl Daemon {
             Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
             _ => {}
         }
-        let mut listener = UnixListener::bind(socket_path)?;
+        let listener = UnixListener::bind(socket_path)?;
+        log::info!("listening on {}", socket_path.display());
+        Self::listening(listener, config)
+    }
+
+    /// A daemon with no terminals, listening on `listener`.
+    fn listening(mut listener: UnixListener, config: DaemonConfig) -> io::Result<Self> {
         let poll = Poll::new()?;
         poll.registry()
             .register(&mut listener, LISTENER, Interest::READABLE)?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKER)?);
-        log::info!("listening on {}", socket_path.display());
         Ok(Self {
             poll,
             listener,
@@ -320,6 +331,86 @@ impl Daemon {
             damage: Damage::new(),
             config,
             buffer: vec![0; READ_BUFFER_LEN].into_boxed_slice(),
+            upgrade_to: None,
+        })
+    }
+
+    /// Carries on from the daemon that handed over `handover`: an older
+    /// build, or this process if exec'ing the new build failed. A terminal
+    /// that can't be restored is lost, and its program hung up; workspaces
+    /// that can't be are dropped, keeping their terminals.
+    ///
+    /// # Errors
+    ///
+    /// If the listening socket is missing, or can't be watched.
+    pub(crate) fn resume(
+        mut handover: Handover,
+        config: DaemonConfig,
+    ) -> Result<Self, HandoverError> {
+        let state = &handover.state;
+        let fds = &mut handover.fds;
+        let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
+        let mut daemon = Self::listening(UnixListener::from_std(listener), config)?;
+        daemon.next_id = state.next_terminal;
+        daemon.workspaces = WorkspaceState::resume(&state.workspaces).unwrap_or_else(|err| {
+            log::error!("the workspaces couldn't be taken over: {err}");
+            WorkspaceState::new()
+        });
+
+        for terminal in &state.terminals {
+            let id = TerminalId(terminal.id);
+            let resumed = HostedTerminal::resume(terminal, fds, &daemon.config)
+                .map_err(|err| err.to_string())
+                .and_then(|terminal| daemon.add_terminal(terminal).map_err(|err| err.to_string()));
+            if let Err(err) = resumed {
+                log::error!("terminal {id} couldn't be taken over: {err}");
+                daemon.workspaces.remove_terminal(id);
+            }
+        }
+        for orphan in &state.orphans {
+            match Orphan::resume(orphan, fds) {
+                Ok(orphan) => daemon.watch_orphan(orphan),
+                Err(err) => log::error!("a hung-up program couldn't be taken over: {err}"),
+            }
+        }
+        let terminals = daemon.terminals.len();
+        log::info!(
+            "carrying on with {terminals} terminal{}",
+            if terminals == 1 { "" } else { "s" }
+        );
+        Ok(daemon)
+    }
+
+    /// Everything the next build needs, taken out of this daemon, which is
+    /// left with nothing to hang up when it's dropped. The listening socket
+    /// is shared: closing this daemon's copy leaves it open.
+    fn hand_over(&mut self) -> io::Result<Handover> {
+        let mut fds = Fds::default();
+        let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
+        let terminals = std::mem::take(&mut self.terminals)
+            .into_values()
+            .map(|slot| slot.terminal.hand_over(&mut fds))
+            .collect();
+        let orphan_tokens: Vec<usize> = (self.sources.iter())
+            .filter(|(_, source)| matches!(source, Source::Orphan(_)))
+            .map(|(key, _)| key)
+            .collect();
+        let orphans = (orphan_tokens.into_iter())
+            .filter_map(|key| match self.sources.remove(key) {
+                Source::Orphan(orphan) => Some(orphan.hand_over(&mut fds)),
+                _ => None,
+            })
+            .collect();
+        Ok(Handover {
+            state: handover::State {
+                listener,
+                lock: None,
+                next_terminal: self.next_id,
+                terminals,
+                orphans,
+                workspaces: self.workspaces.hand_over(),
+            },
+            fds,
         })
     }
 
@@ -332,15 +423,37 @@ impl Daemon {
         }
     }
 
-    /// Serves until shut down. Dropping the daemon afterwards closes every
-    /// terminal, which hangs up their programs.
+    /// Serves until shut down, or until a client asks the daemon to
+    /// upgrade: then it returns the [`Upgrade`], holding everything the
+    /// daemon had, for [`serve`](crate::upgrade::serve). Dropping the daemon
+    /// once it is shut down closes every terminal, which hangs up their
+    /// programs.
     ///
     /// # Errors
     ///
     /// If waiting for events fails, which leaves the daemon unable to work.
-    pub fn run(&mut self) -> io::Result<()> {
+    pub fn run(&mut self) -> io::Result<Option<Upgrade>> {
         let mut events = Events::with_capacity(256);
         while !self.shutdown.load(Ordering::Acquire) {
+            if let Some((executable, token)) = self.upgrade_to.take() {
+                // The client that asked hears how it went: its connection
+                // closes as the new build starts, or says why it didn't.
+                let requester = match self.sources.try_remove(token.0) {
+                    Some(Source::Client(Client {
+                        link: Link::Unix(mut stream),
+                        ..
+                    })) => {
+                        let _ = self.poll.registry().deregister(&mut stream);
+                        Some(stream)
+                    }
+                    _ => None,
+                };
+                return Ok(Some(Upgrade {
+                    executable,
+                    handover: self.hand_over()?,
+                    requester,
+                }));
+            }
             // With output still waiting, poll without blocking so it gets read
             // right after anything else that's ready. Otherwise wait for the
             // next compaction or QUIC timer, if there is one.
@@ -369,7 +482,7 @@ impl Daemon {
             self.transmit_quic();
         }
         log::info!("shutting down");
-        Ok(())
+        Ok(None)
     }
 
     fn handle(&mut self, event: &Event) {
@@ -597,6 +710,15 @@ impl Daemon {
         }
     }
 
+    /// Watches a hung-up program until it exits, to reap it.
+    fn watch_orphan(&mut self, orphan: Orphan) {
+        let fd = orphan.exit_fd();
+        if let Err(err) = self.register_fd(Some(fd), Source::Orphan(orphan)) {
+            // Dropped unreaped: it stays a zombie until the daemon exits.
+            log::error!("watching a hung-up program failed: {err}");
+        }
+    }
+
     fn reap_orphan(&mut self, token: Token) {
         if let Some(Source::Orphan(orphan)) = self.sources.get_mut(token.0)
             && orphan.reap()
@@ -612,7 +734,15 @@ impl Daemon {
         let id = TerminalId(self.next_id);
         let terminal = HostedTerminal::start(id, request, &self.config)?;
         self.next_id += 1;
+        // Dropping `terminal` on failure hangs up the program just started.
+        self.add_terminal(terminal)
+            .map_err(|_| Error::SpawnFailed("could not watch the new terminal".to_owned()))?;
+        Ok(id)
+    }
 
+    /// Watches `terminal`'s PTY and program, and adds it.
+    fn add_terminal(&mut self, terminal: HostedTerminal) -> io::Result<()> {
+        let id = terminal.info().id;
         let output = self.register_fd(terminal.pty_fd(), Source::Output(id));
         let exit = self.register_fd(terminal.exit_fd(), Source::Exit(id));
         match (output, exit) {
@@ -627,16 +757,15 @@ impl Daemon {
                         viewers: Vec::new(),
                     },
                 );
-                Ok(id)
+                // Input left over from before an upgrade.
+                self.update_pty_interest(id);
+                Ok(())
             }
             (output, exit) => {
-                for token in [output, exit].into_iter().flatten().flatten() {
+                for token in [&output, &exit].into_iter().flatten().flatten() {
                     self.sources.remove(token.0);
                 }
-                // Dropping `terminal` hangs up the program we just started.
-                Err(Error::SpawnFailed(
-                    "could not watch the new terminal".to_owned(),
-                ))
+                Err(output.and(exit).expect_err("one failed"))
             }
         }
     }
@@ -871,6 +1000,31 @@ impl Daemon {
                         protocol_version: PROTOCOL_VERSION,
                     }
                 }
+                ClientMessage::Upgrade {
+                    protocol_version,
+                    executable,
+                } if !greeted => {
+                    client.finished = true;
+                    let local = matches!(client.link, Link::Unix(_));
+                    let executable = PathBuf::from(std::ffi::OsString::from_vec(executable));
+                    match self.check_upgrade(local, protocol_version, &executable) {
+                        Ok(()) => {
+                            // The connection closes as the daemon upgrades.
+                            self.upgrade_to = Some((executable, token));
+                            return;
+                        }
+                        Err(reason) => {
+                            log::warn!("not upgrading: {reason}");
+                            ServerMessage::NotUpgrading { reason }
+                        }
+                    }
+                }
+                ClientMessage::Upgrade { .. } => {
+                    client.finished = true;
+                    ServerMessage::NotUpgrading {
+                        reason: "an upgrade must be asked for instead of Hello".to_owned(),
+                    }
+                }
                 _ if !greeted => {
                     client.finished = true;
                     ServerMessage::Response(Response::Error(Error::HelloRequired))
@@ -906,6 +1060,29 @@ impl Daemon {
         } else {
             self.flush_client(token);
         }
+    }
+
+    /// Why the daemon won't become `executable`, if it won't, as a client
+    /// speaking `protocol_version` asked, on this machine if `local`.
+    fn check_upgrade(
+        &self,
+        local: bool,
+        protocol_version: u32,
+        executable: &Path,
+    ) -> Result<(), String> {
+        if !local {
+            return Err("only a client on the daemon's machine can upgrade it".to_owned());
+        }
+        if protocol_version < PROTOCOL_VERSION {
+            return Err(format!(
+                "the daemon is newer (protocol {PROTOCOL_VERSION}) than the build it was asked to \
+                 become (protocol {protocol_version})"
+            ));
+        }
+        if self.upgrade_to.is_some() {
+            return Err("the daemon is already upgrading".to_owned());
+        }
+        crate::upgrade::check_takes_over(executable)
     }
 
     /// Reads and decodes everything a client has sent. Returns `None` if the

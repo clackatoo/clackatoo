@@ -316,3 +316,179 @@ fn config_sets_shows_and_unsets_settings() {
     stdout(&config(&["--unset", "renderer"]));
     assert_eq!(stdout(&config(&["renderer"])), "vulkan (the default)\n");
 }
+
+/// Polls `check` until it holds, failing after a few seconds.
+fn eventually(what: &str, mut check: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !check() {
+        assert!(Instant::now() < deadline, "never: {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The program the running daemon `pid` is.
+fn program_of(pid: u32) -> std::path::PathBuf {
+    std::fs::read_link(format!("/proc/{pid}/exe")).unwrap()
+}
+
+#[test]
+fn upgrading_keeps_terminals_and_their_programs_running() {
+    use clackatoo_daemon::Client;
+    use clackatoo_protocol::{NewTerminal, PaneTerminal, Side, TerminalStatus};
+
+    let runtime = Runtime::new();
+    let daemon = daemon(runtime.path());
+    let socket = runtime.path().join("clackatoo/daemon.sock");
+    let terminal = |command: &str| NewTerminal {
+        size: clackatoo_protocol::Size::new(40, 10).unwrap(),
+        command: Some(["sh", "-c", command].map(str::to_owned).to_vec()),
+        cwd: None,
+        record_to: None,
+    };
+
+    let mut client = Client::connect(&socket).unwrap();
+    // Enough coloured lines to fill history, then a wait for input.
+    let reader = client
+        .new_terminal(terminal(
+            r#"i=0; while [ $i -lt 60 ]; do printf '\033[3%dmline %d\033[0m\n' $((i % 8)) $i; i=$((i + 1)); done
+               echo ready; read reply; echo "got $reply"; exit 3"#,
+        ))
+        .unwrap();
+    let pane = client
+        .new_workspace(Some("work".to_owned()), PaneTerminal::New(terminal("cat")))
+        .unwrap();
+    client
+        .split_pane(pane, Side::Right, PaneTerminal::New(terminal("cat")))
+        .unwrap();
+    let shows = |text: &str| {
+        stdout(&clackatoo(
+            runtime.path(),
+            &["capture", &reader.to_string()],
+        ))
+        .contains(text)
+    };
+    eventually("the reader is ready", || shows("ready"));
+    let screen = client.capture(reader).unwrap();
+    let history = client.history(reader, u64::MAX, 100).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let terminals = client.list_terminals().unwrap();
+    drop(client);
+
+    // Onto a copy at another path, to see that the daemon becomes the
+    // program that asked.
+    let bin = tempfile::tempdir().unwrap();
+    let next = bin.path().join("clackatoo-next");
+    std::fs::copy(BINARY, &next).unwrap();
+    let upgraded = Command::new(&next)
+        .arg("upgrade")
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&upgraded).contains("kept its 3 terminals"),
+        "{upgraded:?}"
+    );
+    assert_eq!(program_of(daemon.id()), next);
+
+    let mut client = Client::connect(&socket).unwrap();
+    assert_eq!(client.capture(reader).unwrap(), screen);
+    assert_eq!(client.history(reader, u64::MAX, 100).unwrap(), history);
+    assert_eq!(client.watch_workspaces().unwrap(), workspaces);
+    assert_eq!(client.list_terminals().unwrap(), terminals);
+
+    // And back, which works the same, however many times.
+    let back = clackatoo(runtime.path(), &["upgrade"]);
+    assert!(back.status.success(), "{back:?}");
+    assert_eq!(
+        program_of(daemon.id()),
+        Path::new(BINARY).canonicalize().unwrap()
+    );
+
+    // The programs never noticed: typing reaches them, and when one exits,
+    // the daemon, still its parent, reaps it and has its exit status.
+    let mut client = Client::connect(&socket).unwrap();
+    client.send_input(reader, b"hello\r").unwrap();
+    eventually("the reader exits with 3", || {
+        client
+            .list_terminals()
+            .unwrap()
+            .iter()
+            .any(|info| info.id == reader && info.status == TerminalStatus::Exited(3))
+    });
+    assert!(shows("got hello"));
+    drop(runtime);
+    wait(daemon);
+}
+
+/// Asks the daemon in `runtime` to become `executable`, by hand, as a
+/// client could, and returns its answer, if any, once it hangs up.
+fn ask_to_upgrade(runtime: &Path, executable: &Path) -> Option<clackatoo_protocol::ServerMessage> {
+    use clackatoo_protocol::frame::{self, FrameDecoder};
+    use std::io::{Read, Write};
+    use std::os::unix::ffi::OsStrExt;
+
+    let socket = runtime.join("clackatoo/daemon.sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    let upgrade = clackatoo_protocol::ClientMessage::Upgrade {
+        protocol_version: clackatoo_protocol::PROTOCOL_VERSION,
+        executable: executable.as_os_str().as_bytes().to_vec(),
+    };
+    stream.write_all(&frame::encode(&upgrade).unwrap()).unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).unwrap();
+    let mut decoder = FrameDecoder::new();
+    decoder.push(&answer);
+    decoder.decode().unwrap()
+}
+
+#[test]
+fn a_failed_upgrade_says_why_and_changes_nothing() {
+    use clackatoo_protocol::ServerMessage;
+
+    let runtime = Runtime::new();
+    let daemon = daemon(runtime.path());
+    let id = stdout(&clackatoo(runtime.path(), &["new", "--", "cat"]));
+    let id = id.trim();
+    let not_upgrading = |answer: Option<ServerMessage>, why: &str| match answer {
+        Some(ServerMessage::NotUpgrading { reason }) => assert!(reason.contains(why), "{reason}"),
+        other => panic!("{other:?}"),
+    };
+
+    // Refused before anything is handed over: the program is missing.
+    not_upgrading(
+        ask_to_upgrade(runtime.path(), Path::new("/nonexistent/clackatoo")),
+        "can't be run",
+    );
+    // Refused too: a file that isn't a program, and a program that isn't a
+    // clackatoo that can take over.
+    let bin = tempfile::tempdir().unwrap();
+    let garbage = script(bin.path(), "garbage", "");
+    std::fs::write(&garbage, b"not a program").unwrap();
+    not_upgrading(ask_to_upgrade(runtime.path(), &garbage), "can't be run");
+    not_upgrading(
+        ask_to_upgrade(runtime.path(), Path::new("/bin/true")),
+        "can't take over",
+    );
+    // Failed after everything was handed over: it says it can take over,
+    // then vanishes before the exec. The daemon carries on from what it
+    // would have handed over.
+    let vanishing = script(
+        bin.path(),
+        "vanishing",
+        r#"[ "$1" = handover-versions ] && echo 1 && rm -- "$0""#,
+    );
+    not_upgrading(
+        ask_to_upgrade(runtime.path(), &vanishing),
+        "starting the new build failed",
+    );
+
+    stdout(&clackatoo(runtime.path(), &["run", id, "still here"]));
+    eventually("cat echoes", || {
+        stdout(&clackatoo(runtime.path(), &["capture", id]))
+            .matches("still here")
+            .count()
+            == 2
+    });
+    drop(runtime);
+    wait(daemon);
+}

@@ -11,6 +11,12 @@
 //! keeps them decodable across versions, so a version mismatch is always
 //! reported as one, not as a garbled message.
 //!
+//! A client that finds an older daemon (protocol 11 or later) can ask it to
+//! upgrade in place, by opening a connection with
+//! [`ClientMessage::Upgrade`] instead. Both it and
+//! [`ServerMessage::NotUpgrading`] are variant 1 of their enums and must
+//! stay that way too, for the same reason.
+//!
 //! After that, the daemon answers each [`Request`], in order, with exactly
 //! one [`Response`]. In between, it sends [`Event`]s: changes to the views
 //! the client has attached to. A client acknowledges each view update with
@@ -54,7 +60,11 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
+
+/// The first protocol version whose daemons can upgrade in place: see
+/// [`ClientMessage::Upgrade`].
+pub const UPGRADABLE_SINCE: u32 = 11;
 
 /// Everything a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +74,21 @@ pub enum ClientMessage {
     Hello {
         /// The client's [`PROTOCOL_VERSION`].
         protocol_version: u32,
+    },
+    /// Instead of [`Hello`](Self::Hello), on a connection from this
+    /// machine: asks the daemon to become `executable`, a newer build,
+    /// keeping its terminals. It replaces its own process with the new
+    /// build's, which picks up where it left off, and the connection
+    /// closes as it does. Connect again to talk to the new build. It
+    /// answers [`ServerMessage::NotUpgrading`] instead if it won't.
+    ///
+    /// Must stay variant 1 (see the crate docs).
+    Upgrade {
+        /// The client's [`PROTOCOL_VERSION`]. A daemon won't upgrade to an
+        /// older one.
+        protocol_version: u32,
+        /// The path of the program to run, as bytes.
+        executable: Vec<u8>,
     },
     /// A request, which the daemon answers with one [`Response`].
     Request(Request),
@@ -83,6 +108,12 @@ pub enum ServerMessage {
     Hello {
         /// The daemon's [`PROTOCOL_VERSION`].
         protocol_version: u32,
+    },
+    /// Answers [`ClientMessage::Upgrade`]: the daemon won't. Must stay
+    /// variant 1 (see the crate docs).
+    NotUpgrading {
+        /// Why not.
+        reason: String,
     },
     /// The answer to the oldest unanswered request.
     Response(Response),

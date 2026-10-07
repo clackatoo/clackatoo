@@ -38,7 +38,7 @@ rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # TLS for QUIC: the same version and backend as quinn-proto's.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rustix = { version = "1.1", features = ["fs", "net", "process", "pty", "std", "termios"] }
+rustix = { version = "1.1", features = ["fs", "net", "process", "pty", "std", "stdio", "termios"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
 simdutf8 = "0.1"
 slab = "0.4"

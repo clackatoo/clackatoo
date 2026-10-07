@@ -34,7 +34,7 @@ impl TestDaemon {
         };
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
         let shutdown = daemon.shutdown_handle();
-        let thread = std::thread::spawn(move || daemon.run().expect("daemon failed"));
+        let thread = std::thread::spawn(move || drop(daemon.run().expect("daemon failed")));
         Self {
             dir,
             shutdown,

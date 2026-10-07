@@ -246,14 +246,15 @@ fn reached_at() -> Option<IpAddr> {
 
 /// Relays between this process's input and output and the daemon, which
 /// is started if it isn't running, until either end hangs up. With
-/// `replace`, a daemon already running is stopped first.
+/// `replace`, a daemon already running is replaced first: upgraded in
+/// place if it can be, or else stopped (see [`launch::replace`]).
 ///
 /// # Errors
 ///
 /// If the daemon can't be stopped, started or reached.
 pub fn bridge(runtime: &RuntimeDir, replace: bool) -> Result<(), LaunchError> {
     if replace {
-        launch::stop(runtime)?;
+        launch::replace(runtime)?;
     }
     let daemon = launch::socket_or_start(runtime)?;
     // The raw descriptors: the standard library's stdout holds bytes back

@@ -8,6 +8,7 @@
 
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -67,7 +68,7 @@ impl RuntimeDir {
             .mode(0o600)
             .open(self.path.join("daemon.lock"))?;
         match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(DaemonLock { _file: file }),
+            Ok(()) => Ok(DaemonLock { file }),
             Err(rustix::io::Errno::WOULDBLOCK) => Err(LockError::AlreadyRunning),
             Err(err) => Err(LockError::Io(err.into())),
         }
@@ -103,7 +104,23 @@ impl RuntimeDir {
 /// Released when dropped, or when the process exits.
 #[derive(Debug)]
 pub struct DaemonLock {
-    _file: File,
+    file: File,
+}
+
+impl DaemonLock {
+    /// The lock an older build of the daemon held, handed over by an
+    /// upgrade. The lock belongs to the open file, so it carries over.
+    pub(crate) fn from_fd(fd: OwnedFd) -> Self {
+        Self {
+            file: File::from(fd),
+        }
+    }
+}
+
+impl AsFd for DaemonLock {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.file.as_fd()
+    }
 }
 
 /// The daemon lock couldn't be taken.
