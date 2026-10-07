@@ -18,13 +18,23 @@ use clackatoo_protocol::{
     Axis, ClientMessage, Content, NewTerminal, PaneId, PaneTerminal, Request, Response, Side, Size,
     Tab, TabId, TerminalId, ViewUpdate, WorkspaceId, Workspaces,
 };
+use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::chrome::Status;
 use crate::command::{self, Command, Kind, Place};
-use crate::input::KeyPress;
+use crate::input::{KeyPress, Modifiers};
 use crate::layout::{Area, Direction, Placement};
-use crate::pane::{Mode, Pane};
+use crate::pane::{Copy, Mode, Pane, PaneMouse};
+
+/// What a mouse event did, for the window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MouseOutcome {
+    /// The window must be redrawn.
+    pub(crate) redraw: bool,
+    /// The window is to paste the primary selection into the focused pane.
+    pub(crate) paste_primary: bool,
+}
 
 /// What the window shows: a workspace, one of its tabs, and the pane in
 /// that tab with the focus.
@@ -99,8 +109,17 @@ pub(crate) struct Desk {
     /// A message for the focused pane's label, until the next key, such as
     /// why a command failed.
     message: Option<String>,
-    /// Text copied, waiting for the window to put on the clipboard.
-    yanked: Option<String>,
+    /// Text copied, waiting for the window to put on the clipboard or the
+    /// primary selection.
+    yanked: Option<(String, Copy)>,
+    /// The terminal whose pane a mouse button went down in, and the
+    /// button: it gets the drag, wherever the pointer goes.
+    dragging: Option<(TerminalId, MouseButton)>,
+    /// The cell the mouse was last over, so motion is passed on once per
+    /// cell, not once per pixel.
+    mouse_cell: Option<(TerminalId, [i64; 2])>,
+    /// The window doesn't have the focus, so no pane does.
+    unfocused: bool,
     /// Every workspace has closed, so the window should too.
     finished: bool,
 }
@@ -120,8 +139,9 @@ impl Desk {
         self.finished
     }
 
-    /// Takes text copied with `y`, for the window to put on the clipboard.
-    pub(crate) fn take_yanked(&mut self) -> Option<String> {
+    /// Takes text copied, for the window to put on the clipboard or the
+    /// primary selection.
+    pub(crate) fn take_yanked(&mut self) -> Option<(String, Copy)> {
         self.yanked.take()
     }
 
@@ -390,14 +410,23 @@ impl Desk {
         if self.shown == Some(shown) {
             return;
         }
-        let normal = self
-            .focused_pane()
-            .is_some_and(|left| left.mode != Mode::Insert);
+        let unfocused = self.unfocused;
+        let normal = self.focused_pane().is_some_and(|left| {
+            if !unfocused {
+                left.focus_changed(false);
+            }
+            left.mode != Mode::Insert
+        });
         self.shown = Some(shown);
         // Before the mode: a pane of another workspace may not exist yet.
         self.attach_shown();
-        if normal && let Some(arrived) = self.focused_pane() {
-            arrived.enter_normal_mode();
+        if let Some(arrived) = self.focused_pane() {
+            if normal {
+                arrived.enter_normal_mode();
+            }
+            if !unfocused {
+                arrived.focus_changed(true);
+            }
         }
         self.request(Request::Focus { pane }, Asked::Quiet);
         self.fit_panes();
@@ -627,10 +656,127 @@ impl Desk {
         }
     }
 
-    /// Scrolls the focused pane `lines` up, or down if negative. Returns
-    /// whether the window must be redrawn.
-    pub(crate) fn wheel(&mut self, lines: i64) -> bool {
-        self.focused_pane().is_some_and(|pane| pane.wheel(lines))
+    /// Scrolls the pane at `point` `lines` up, or down if negative, as the
+    /// mouse wheel does. Returns whether the window must be redrawn.
+    pub(crate) fn wheel(&mut self, point: [f32; 2], lines: i64, modifiers: Modifiers) -> bool {
+        let Some((terminal, cell)) = self.cell_at(point, None) else {
+            return false;
+        };
+        self.panes
+            .get_mut(&terminal)
+            .is_some_and(|pane| pane.wheel(lines, cell, modifiers))
+    }
+
+    // --- The mouse --------------------------------------------------------
+
+    /// Handles a mouse button going down or up, or the mouse moving, at
+    /// `point`: `clicks` is 2 for a double click and 3 for a triple. A
+    /// press focuses the pane it's in, and that pane gets the drag that
+    /// follows, wherever it goes.
+    pub(crate) fn mouse(
+        &mut self,
+        point: [f32; 2],
+        action: MouseAction,
+        clicks: u8,
+        modifiers: Modifiers,
+    ) -> MouseOutcome {
+        let mut outcome = MouseOutcome::default();
+        let dragging = self.dragging.map(|(terminal, _)| terminal);
+        let Some((terminal, cell)) = self.cell_at(point, dragging) else {
+            return outcome;
+        };
+        let action = match action {
+            MouseAction::Press(button) => {
+                outcome.redraw = self.focus_at(point);
+                self.dragging = Some((terminal, button));
+                action
+            }
+            MouseAction::Release(_) => {
+                self.dragging = None;
+                action
+            }
+            // Motion is passed on once per cell, with the button held.
+            MouseAction::Motion(_) => {
+                if self.mouse_cell == Some((terminal, cell)) {
+                    return outcome;
+                }
+                MouseAction::Motion(self.dragging.map(|(_, button)| button))
+            }
+        };
+        self.mouse_cell = Some((terminal, cell));
+        let Some(pane) = self.panes.get_mut(&terminal) else {
+            return outcome;
+        };
+        // A middle click pastes the primary selection, unless the program
+        // gets the mouse.
+        if action == MouseAction::Press(MouseButton::Middle) && !pane.reports_mouse(modifiers.shift)
+        {
+            outcome.paste_primary = true;
+            return outcome;
+        }
+        let event = PaneMouse {
+            action,
+            line: cell[0],
+            col: cell[1],
+            clicks,
+            modifiers,
+        };
+        outcome.redraw |= pane.mouse(&event);
+        outcome
+    }
+
+    /// Whether the program in the pane at `point` gets the mouse, rather
+    /// than clackatoo.
+    pub(crate) fn reports_mouse_at(&self, point: [f32; 2], shift: bool) -> bool {
+        self.cell_at(point, None)
+            .and_then(|(terminal, _)| self.panes.get(&terminal))
+            .is_some_and(|pane| pane.reports_mouse(shift))
+    }
+
+    /// The window gained or lost the focus: the focused pane's program is
+    /// told, if it asked.
+    pub(crate) fn window_focus(&mut self, focused: bool) {
+        self.unfocused = !focused;
+        if let Some(pane) = self.focused_pane() {
+            pane.focus_changed(focused);
+        }
+    }
+
+    /// The terminal of the pane at `point`, or of the pane showing `within`
+    /// wherever `point` is, and the cell of its view under `point`, which
+    /// is off the view if `point` is off the pane.
+    fn cell_at(
+        &self,
+        point: [f32; 2],
+        within: Option<TerminalId>,
+    ) -> Option<(TerminalId, [i64; 2])> {
+        let area = self.area.as_ref()?;
+        let placement = self.placement()?;
+        let tab = self.shown_tab()?;
+        let panes = tab.layout.panes();
+        let terminal_of = |id: PaneId| {
+            let pane = panes.iter().find(|pane| pane.id == id)?;
+            let Content::Terminal(terminal) = pane.content;
+            Some(terminal)
+        };
+        let (terminal, card) = if let Some(within) = within {
+            placement.panes.iter().find_map(|&(id, card)| {
+                (terminal_of(id) == Some(within)).then_some((within, card))
+            })?
+        } else {
+            let id = placement.pane_at(point)?;
+            let card = placement.panes.iter().find(|(pane, _)| *pane == id)?.1;
+            (terminal_of(id)?, card)
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let cell = |offset: f32, size: f32| (offset / size).floor() as i64;
+        Some((
+            terminal,
+            [
+                cell(point[1] - card.origin[1], area.cell[1]),
+                cell(point[0] - card.origin[0], area.cell[0]),
+            ],
+        ))
     }
 
     /// Takes a key in the focused pane's normal mode if it's the window's:
@@ -839,6 +985,7 @@ impl Desk {
 #[cfg(test)]
 mod tests {
     use clackatoo_protocol::{Layout, Pane as LayoutPane, View, Workspace};
+    use clackatoo_term::mouse::{MouseAction, MouseButton};
     use clackatoo_term::{Config, Terminal};
     use winit::keyboard::{KeyCode, KeyLocation};
 
@@ -1204,5 +1351,54 @@ mod tests {
             Modifiers::default(),
         );
         assert_eq!(desk.message.as_deref(), None);
+    }
+
+    #[test]
+    fn a_drag_stays_with_the_pane_it_started_in() {
+        let mut desk = desk(workspaces(vec![workspace(
+            1,
+            "work",
+            vec![tab(1, side_by_side(vec![pane(1), pane(2)]))],
+        )]));
+        // Both panes' programs ask for drags, in SGR.
+        let mut screen = Terminal::new(Size::new(40, 24).unwrap(), &Config::default());
+        screen.advance(b"\x1b[?1002h\x1b[?1006h");
+        for terminal in [1, 2] {
+            desk.view_changed(
+                TerminalId(terminal),
+                &ViewUpdate::Snapshot(View::capture(&screen)),
+            );
+        }
+        desk.take_outbox();
+        let mouse = |desk: &mut Desk, point, action| {
+            desk.mouse(point, action, 1, Modifiers::default());
+        };
+        let left = MouseButton::Left;
+        // The left card's cells start 5 pixels in, and are 10 × 20.
+        mouse(&mut desk, [50.0, 25.0], MouseAction::Press(left));
+        mouse(&mut desk, [60.0, 25.0], MouseAction::Motion(None));
+        // Still in the same cell: nothing more.
+        mouse(&mut desk, [62.0, 30.0], MouseAction::Motion(None));
+        // Over the right pane, but the drag is the left one's, at its edge.
+        mouse(&mut desk, [500.0, 25.0], MouseAction::Motion(None));
+        mouse(&mut desk, [500.0, 25.0], MouseAction::Release(left));
+
+        let sent: Vec<(u32, String)> = desk
+            .take_outbox()
+            .into_iter()
+            .filter_map(|message| match message {
+                ClientMessage::Request(Request::SendInput { terminal, bytes }) => {
+                    Some((terminal.0, String::from_utf8(bytes).unwrap()))
+                }
+                _ => None,
+            })
+            .collect();
+        let expected = [
+            "\x1b[<0;5;2M",
+            "\x1b[<32;6;2M",
+            "\x1b[<32;40;2M",
+            "\x1b[<0;40;2m",
+        ];
+        assert_eq!(sent, expected.map(|bytes| (1, bytes.to_owned())).to_vec());
     }
 }

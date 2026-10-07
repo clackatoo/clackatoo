@@ -11,7 +11,7 @@
 use clackatoo_protocol::{Match, Position, Request};
 use winit::keyboard::{Key, NamedKey};
 
-use super::{Document, Lines, Mode, Pane, Pending, Prefix, Selection};
+use super::{Copy, Document, Lines, Mode, Pane, Pending, Prefix, Selection};
 use crate::input::KeyPress;
 use crate::motion::{Cursor, Motion, Point};
 
@@ -127,14 +127,18 @@ impl Pane {
     }
 
     /// Takes in what the daemon answered a copy or a search with.
-    pub(super) fn copied(&mut self, text: String) {
-        let lines = text.lines().count().max(1);
-        self.status = Some(if lines == 1 {
-            "copied".into()
-        } else {
-            format!("copied {lines} lines")
-        });
-        self.yanked = Some(text);
+    pub(super) fn copied(&mut self, text: String, to: Copy) {
+        // Selecting with the mouse copies to the primary selection all the
+        // time, which isn't worth a message.
+        if to == Copy::Clipboard {
+            let lines = text.lines().count().max(1);
+            self.status = Some(if lines == 1 {
+                "copied".into()
+            } else {
+                format!("copied {lines} lines")
+            });
+        }
+        self.yanked = Some((text, to));
     }
 
     pub(super) fn searched(&mut self, found: Option<Match>) {
@@ -240,15 +244,7 @@ impl Pane {
         let Some((start, end, kind)) = self.selection() else {
             return false;
         };
-        self.request(
-            Request::Text {
-                terminal: self.terminal,
-                from: position(start),
-                to: position(end),
-                whole_lines: kind == Selection::Lines,
-            },
-            Pending::Text,
-        );
+        self.copy(start, end, kind, Copy::Clipboard);
         self.mode = Mode::Normal;
         self.anchor = None;
         self.cursor = Some(Cursor::new(start));
@@ -269,7 +265,7 @@ impl Pane {
                 to: line,
                 whole_lines: true,
             },
-            Pending::Text,
+            Pending::Text(Copy::Clipboard),
         );
         false
     }
@@ -389,7 +385,7 @@ impl Pane {
     }
 }
 
-fn position(point: Point) -> Position {
+pub(super) fn position(point: Point) -> Position {
     Position {
         line: point.line,
         col: point.col,

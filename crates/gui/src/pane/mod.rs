@@ -26,7 +26,10 @@ use crate::motion::{Cursor, Lines, Point};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
 
+mod mouse;
 mod normal;
+
+pub(crate) use mouse::{Copy, PaneMouse};
 
 /// Whether keys go to the program or drive clackatoo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,8 +67,8 @@ pub(crate) enum Selection {
 enum Pending {
     /// History lines, the range asked for.
     History(Range<u64>),
-    /// Text to copy.
-    Text,
+    /// Text to copy, and where to.
+    Text(Copy),
     /// A search.
     Search,
     /// Anything answered with just "done" or an error.
@@ -101,8 +104,10 @@ pub(crate) struct Pane {
     found: Option<Match>,
     /// A short message for the label, until the next key.
     status: Option<String>,
-    /// Text copied and waiting for the window to put on the clipboard.
-    yanked: Option<String>,
+    /// Text copied, and where the window is to put it.
+    yanked: Option<(String, Copy)>,
+    /// Text selected with the mouse.
+    mouse_selection: Option<mouse::MouseSelection>,
     pending: VecDeque<Pending>,
     /// A view update was applied but not yet drawn and acknowledged.
     unacknowledged: bool,
@@ -129,6 +134,7 @@ impl Pane {
             found: None,
             status: None,
             yanked: None,
+            mouse_selection: None,
             pending: VecDeque::new(),
             unacknowledged: false,
             prefix: None,
@@ -228,8 +234,8 @@ impl Pane {
                 self.fetch_history();
                 true
             }
-            (Some(Pending::Text), Response::Text(text)) => {
-                self.copied(text);
+            (Some(Pending::Text(to)), Response::Text(text)) => {
+                self.copied(text, to);
                 true
             }
             (Some(Pending::Search), Response::Found(found)) => {
@@ -240,8 +246,9 @@ impl Pane {
         }
     }
 
-    /// Takes text copied with `y`, for the window to put on the clipboard.
-    pub(crate) fn take_yanked(&mut self) -> Option<String> {
+    /// Takes text copied, for the window to put on the clipboard or the
+    /// primary selection.
+    pub(crate) fn take_yanked(&mut self) -> Option<(String, Copy)> {
         self.yanked.take()
     }
 
@@ -266,7 +273,22 @@ impl Pane {
         let ctrl_semicolon =
             modifiers.ctrl && !modifiers.alt && press.code == Some(KeyCode::Semicolon);
         let prefix = self.prefix.take();
-        match self.mode {
+        // Text selected with the mouse is copied by Ctrl+Shift+C, or `y` in
+        // normal mode, and any other key forgets it.
+        let ctrl_shift_c =
+            modifiers.ctrl && matches!(press.key, Key::Character(text) if text == "C");
+        let y = self.mode == Mode::Normal
+            && !modifiers.ctrl
+            && matches!(press.key, Key::Character(text) if text == "y");
+        if (ctrl_shift_c || y) && self.copy_mouse_selection(Copy::Clipboard) {
+            self.mouse_selection = None;
+            return true;
+        }
+        let forgot_selection = self.mouse_selection.take().is_some();
+        if ctrl_shift_c && self.mode == Mode::Insert {
+            return forgot_selection;
+        }
+        let redraw = match self.mode {
             Mode::Insert if ctrl_backslash || shift_escape || ctrl_semicolon => {
                 self.enter_normal();
                 self.prefix = ctrl_backslash.then_some(Prefix::CtrlBackslash);
@@ -282,7 +304,8 @@ impl Pane {
                 self.insert()
             }
             _ => self.normal_key(press, prefix),
-        }
+        };
+        redraw || forgot_selection
     }
 
     /// Sends pasted text, marked as a paste if the program asked for that.
@@ -304,11 +327,30 @@ impl Pane {
         self.scroll = 0;
     }
 
-    /// Scrolls `lines` up (or down, if negative), as from the mouse wheel.
-    /// On the alternate screen, which has no history, programs get arrow
-    /// keys instead, as other terminals send them. Returns whether the pane
-    /// must be redrawn.
-    pub(crate) fn wheel(&mut self, lines: i64) -> bool {
+    /// Scrolls `lines` up (or down, if negative), as from the mouse wheel
+    /// turned with the pointer at `at`, a cell of the view. A program that
+    /// asked for mouse reports gets the wheel instead (see
+    /// [`mouse`](self::mouse)). On the alternate screen, which has no
+    /// history, other programs get arrow keys, as other terminals send
+    /// them. Returns whether the pane must be redrawn.
+    pub(crate) fn wheel(&mut self, lines: i64, at: [i64; 2], modifiers: input::Modifiers) -> bool {
+        if self.reports_mouse(modifiers.shift) {
+            let button = if lines > 0 {
+                clackatoo_term::mouse::MouseButton::WheelUp
+            } else {
+                clackatoo_term::mouse::MouseButton::WheelDown
+            };
+            for _ in 0..lines.unsigned_abs() {
+                self.mouse(&PaneMouse {
+                    action: clackatoo_term::mouse::MouseAction::Press(button),
+                    line: at[0],
+                    col: at[1],
+                    clicks: 1,
+                    modifiers,
+                });
+            }
+            return false;
+        }
         let Some(screen) = &self.screen else {
             return false;
         };
@@ -383,7 +425,7 @@ impl Pane {
         let document = Document(self);
         let in_view = |line: u64| usize::try_from(line - top).expect("within the height");
         let mut highlights = Vec::new();
-        if let Some((start, end, kind)) = self.selection() {
+        if let Some((start, end, kind)) = self.selection().or_else(|| self.mouse_selected()) {
             for line in start.line.max(top)..end.line.saturating_add(1).min(bottom) {
                 let row = document.line(line);
                 let width = row.map_or(0, Row::width);
@@ -896,17 +938,26 @@ mod tests {
         assert_eq!((highlights[0].line, highlights[0].cols.clone()), (0, 0..5));
         keys(&mut pane, "y");
         serve(&mut pane, &terminal);
-        assert_eq!(pane.take_yanked().as_deref(), Some("hello"));
+        assert_eq!(
+            pane.take_yanked().map(|(text, _)| text).as_deref(),
+            Some("hello")
+        );
         assert_eq!(pane.mode, Mode::Normal);
         assert_eq!(pane.label().as_deref(), Some("copied"));
 
         // Whole lines, and yy for the cursor's line.
         keys(&mut pane, "Vjy");
         serve(&mut pane, &terminal);
-        assert_eq!(pane.take_yanked().as_deref(), Some("hello world\nsecond"));
+        assert_eq!(
+            pane.take_yanked().map(|(text, _)| text).as_deref(),
+            Some("hello world\nsecond")
+        );
         keys(&mut pane, "jyy");
         serve(&mut pane, &terminal);
-        assert_eq!(pane.take_yanked().as_deref(), Some("second"));
+        assert_eq!(
+            pane.take_yanked().map(|(text, _)| text).as_deref(),
+            Some("second")
+        );
     }
 
     #[test]
@@ -934,5 +985,189 @@ mod tests {
         named(&mut pane, NamedKey::Enter);
         serve(&mut pane, &terminal);
         assert_eq!(pane.label().as_deref(), Some("not found: zebra"));
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use clackatoo_protocol::View;
+    use clackatoo_term::mouse::{MouseAction, MouseButton};
+    use clackatoo_term::{Config, Terminal};
+
+    use super::*;
+    use crate::input::Modifiers;
+
+    fn terminal(output: &str) -> Terminal {
+        let mut terminal = Terminal::new(Size::new(12, 5).unwrap(), &Config::default());
+        terminal.advance(output.as_bytes());
+        terminal
+    }
+
+    fn pane(terminal: &Terminal) -> Pane {
+        let mut pane = Pane::new(TerminalId(1));
+        pane.view_changed(&ViewUpdate::Snapshot(View::capture(terminal)));
+        pane.take_outbox();
+        pane
+    }
+
+    fn mouse(pane: &mut Pane, action: MouseAction, [line, col]: [i64; 2], clicks: u8) -> bool {
+        mouse_with(pane, action, [line, col], clicks, Modifiers::default())
+    }
+
+    fn mouse_with(
+        pane: &mut Pane,
+        action: MouseAction,
+        [line, col]: [i64; 2],
+        clicks: u8,
+        modifiers: Modifiers,
+    ) -> bool {
+        pane.mouse(&PaneMouse {
+            action,
+            line,
+            col,
+            clicks,
+            modifiers,
+        })
+    }
+
+    /// Everything the pane sent the program.
+    fn input(pane: &mut Pane) -> String {
+        let mut sent = Vec::new();
+        for message in pane.take_outbox() {
+            if let ClientMessage::Request(Request::SendInput { bytes, .. }) = message {
+                sent.extend(bytes);
+            }
+        }
+        String::from_utf8(sent).unwrap()
+    }
+
+    /// Answers a request for text, and returns what was copied, and where.
+    fn copied(pane: &mut Pane, terminal: &Terminal) -> Option<(String, Copy)> {
+        for message in pane.take_outbox() {
+            if let ClientMessage::Request(Request::Text {
+                from,
+                to,
+                whole_lines,
+                ..
+            }) = message
+            {
+                pane.answered(Response::Text(terminal.text(from, to, whole_lines)));
+            }
+        }
+        pane.take_yanked()
+    }
+
+    const LEFT: MouseButton = MouseButton::Left;
+
+    #[test]
+    fn a_program_that_asks_gets_clicks_drags_and_the_wheel() {
+        let terminal = terminal("\x1b[?1002h\x1b[?1006h");
+        let mut pane = pane(&terminal);
+        mouse(&mut pane, MouseAction::Press(LEFT), [1, 2], 1);
+        mouse(&mut pane, MouseAction::Motion(Some(LEFT)), [1, 3], 1);
+        // Dragged off the pane, the position stays on its edge.
+        mouse(&mut pane, MouseAction::Motion(Some(LEFT)), [9, 40], 1);
+        mouse(&mut pane, MouseAction::Release(LEFT), [9, 40], 1);
+        assert_eq!(
+            input(&mut pane),
+            "\x1b[<0;3;2M\x1b[<32;4;2M\x1b[<32;12;5M\x1b[<0;12;5m"
+        );
+        pane.wheel(2, [0, 0], Modifiers::default());
+        assert_eq!(input(&mut pane), "\x1b[<64;1;1M\x1b[<64;1;1M");
+        // Shift keeps the mouse clackatoo's.
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        mouse_with(&mut pane, MouseAction::Press(LEFT), [0, 0], 1, shift);
+        assert_eq!(input(&mut pane), "");
+    }
+
+    #[test]
+    fn dragging_selects_and_copies_to_the_primary_selection() {
+        let terminal = terminal("hello world\r\nsecond");
+        let mut pane = pane(&terminal);
+        // A click alone selects nothing.
+        mouse(&mut pane, MouseAction::Press(LEFT), [0, 0], 1);
+        mouse(&mut pane, MouseAction::Release(LEFT), [0, 0], 1);
+        assert_eq!(copied(&mut pane, &terminal), None);
+
+        mouse(&mut pane, MouseAction::Press(LEFT), [0, 6], 1);
+        assert!(mouse(&mut pane, MouseAction::Motion(Some(LEFT)), [1, 2], 1));
+        let highlights = pane.highlights(5);
+        assert_eq!(
+            highlights
+                .iter()
+                .map(|highlight| (highlight.line, highlight.cols.clone()))
+                .collect::<Vec<_>>(),
+            [(0, 6..12), (1, 0..3)]
+        );
+        mouse(&mut pane, MouseAction::Release(LEFT), [1, 2], 1);
+        assert_eq!(
+            copied(&mut pane, &terminal),
+            Some(("world\nsec".to_owned(), Copy::Primary))
+        );
+        // It stays shown, and Ctrl+Shift+C copies it to the clipboard.
+        assert_eq!(pane.highlights(5).len(), 2);
+        let key = Key::Character("C".into());
+        pane.key(&KeyPress {
+            key: &key,
+            text: None,
+            location: winit::keyboard::KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: true,
+                alt: false,
+            },
+        });
+        assert_eq!(
+            copied(&mut pane, &terminal),
+            Some(("world\nsec".to_owned(), Copy::Clipboard))
+        );
+        // Nothing went to the program, and the selection is gone.
+        assert_eq!(input(&mut pane), "");
+        assert!(pane.highlights(5).is_empty());
+    }
+
+    #[test]
+    fn double_and_triple_clicks_select_a_word_and_a_line() {
+        let terminal = terminal("cat ~/a.txt\r\nsecond");
+        let mut pane = pane(&terminal);
+        mouse(&mut pane, MouseAction::Press(LEFT), [0, 8], 2);
+        mouse(&mut pane, MouseAction::Release(LEFT), [0, 8], 2);
+        assert_eq!(
+            copied(&mut pane, &terminal),
+            Some(("~/a.txt".to_owned(), Copy::Primary))
+        );
+        mouse(&mut pane, MouseAction::Press(LEFT), [1, 1], 3);
+        mouse(&mut pane, MouseAction::Release(LEFT), [1, 1], 3);
+        assert_eq!(
+            copied(&mut pane, &terminal),
+            Some(("second".to_owned(), Copy::Primary))
+        );
+    }
+
+    #[test]
+    fn a_click_in_normal_mode_moves_the_cursor() {
+        let terminal = terminal("hello world");
+        let mut pane = pane(&terminal);
+        pane.enter_normal_mode();
+        mouse(&mut pane, MouseAction::Press(LEFT), [0, 6], 1);
+        mouse(&mut pane, MouseAction::Release(LEFT), [0, 6], 1);
+        assert_eq!(pane.cursor.map(|cursor| cursor.at.col), Some(6));
+        assert_eq!(pane.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn programs_that_ask_are_told_about_focus() {
+        let terminal = terminal("\x1b[?1004h");
+        let mut pane = pane(&terminal);
+        pane.focus_changed(false);
+        pane.focus_changed(true);
+        assert_eq!(input(&mut pane), "\x1b[O\x1b[I");
+        let mut quiet = super::mouse_tests::pane(&self::terminal(""));
+        quiet.focus_changed(true);
+        assert_eq!(input(&mut quiet), "");
     }
 }

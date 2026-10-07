@@ -6,6 +6,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
+use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
 use clackatoo_daemon::launch;
 use clackatoo_daemon::{Contact, Sender};
 use clackatoo_protocol::{
@@ -13,6 +14,7 @@ use clackatoo_protocol::{
     TabId, TerminalId, WorkspaceId,
 };
 use clackatoo_term::Row;
+use clackatoo_term::mouse::MouseAction;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
@@ -27,7 +29,7 @@ use crate::desktop::{Button, ButtonLayout, Desktop};
 use crate::fonts::Fonts;
 use crate::input;
 use crate::layout::{Card, Placement};
-use crate::pane::Mode;
+use crate::pane::{Copy, Mode};
 use crate::render::{
     CursorStyle, Fill, Highlight, PADDING, Paint, Picture, Renderer, Scene, SceneCursor,
 };
@@ -279,8 +281,9 @@ pub(crate) struct App {
     hover: Hit,
     /// The mouse cursor's shape, as last set.
     cursor_icon: CursorIcon,
-    /// The last click, and what it was on, to spot a double click.
-    last_click: Option<(Instant, Hit)>,
+    /// The last click, what it was on, and how many came quickly one after
+    /// another there, to spot double and triple clicks.
+    last_click: Option<(Instant, Hit, u8)>,
     /// The menu open, if any.
     menu: Option<Menu>,
     /// The window's title, as last set.
@@ -484,6 +487,11 @@ impl App {
             | Hit::NewWorkspace
             | Hit::NewTab
             | Hit::Menu(_) => CursorIcon::Pointer,
+            // A program that takes the mouse gets the arrow, as clicks are
+            // its, not for selecting text.
+            Hit::Cards if self.desk.reports_mouse_at(point, self.modifiers.shift) => {
+                CursorIcon::Default
+            }
             Hit::Cards => CursorIcon::Text,
             Hit::TopBar | Hit::Nothing => CursorIcon::Default,
         };
@@ -508,6 +516,52 @@ impl App {
             self.request_redraw();
         }
         self.hover = hit;
+        // Over a pane, or dragging out of one.
+        if self.notice.is_none() {
+            let outcome = self
+                .desk
+                .mouse(point, MouseAction::Motion(None), 1, self.modifiers);
+            self.send_outbox();
+            if outcome.redraw {
+                self.request_redraw();
+            }
+        }
+    }
+
+    /// A mouse button went down in a pane, the `clicks`th time in a row.
+    fn clicked_in_pane(&mut self, point: [f32; 2], button: MouseButton, clicks: u8) {
+        let Some(button) = mouse_button(button) else {
+            return;
+        };
+        let outcome = self
+            .desk
+            .mouse(point, MouseAction::Press(button), clicks, self.modifiers);
+        if outcome.paste_primary {
+            match paste_text(&mut self.clipboard, Copy::Primary) {
+                Ok(text) => self.desk.paste(&text),
+                Err(err) => log::warn!("pasting the primary selection failed: {err:#}"),
+            }
+        }
+        self.update_title();
+        self.send_outbox();
+        self.request_redraw();
+    }
+
+    /// A mouse button came up: the end of a click or drag in a pane.
+    fn released(&mut self, button: MouseButton) {
+        let (Some(point), Some(button)) = (self.pointer, mouse_button(button)) else {
+            return;
+        };
+        if self.notice.is_some() {
+            return;
+        }
+        let outcome = self
+            .desk
+            .mouse(point, MouseAction::Release(button), 1, self.modifiers);
+        self.send_outbox();
+        if outcome.redraw {
+            self.request_redraw();
+        }
     }
 
     fn pointer_left(&mut self) {
@@ -535,12 +589,17 @@ impl App {
         };
         let window = Arc::clone(&frame.window);
         let hit = self.hit(point);
-        // Twice on the same spot, soon enough, is a double click.
+        // Twice on the same thing, soon enough, is a double click, and
+        // three times a triple.
         let now = Instant::now();
-        let double = self
-            .last_click
-            .is_some_and(|(at, last)| last == hit && now.duration_since(at) < DOUBLE_CLICK);
-        self.last_click = (!double).then_some((now, hit));
+        let clicks = match self.last_click {
+            Some((at, last, clicks)) if last == hit && now.duration_since(at) < DOUBLE_CLICK => {
+                clicks % 3 + 1
+            }
+            _ => 1,
+        };
+        self.last_click = Some((now, hit, clicks));
+        let double = clicks == 2;
         // With a menu open, a click picks one of its items or, anywhere
         // else, just closes it.
         if let Some(menu) = self.menu.take() {
@@ -548,6 +607,11 @@ impl App {
                 self.menu_picked(menu.target, index);
             }
             self.request_redraw();
+            return;
+        }
+        // Clicks in a pane are the pane's: selecting, or for its program.
+        if hit == Hit::Cards {
+            self.clicked_in_pane(point, button, clicks);
             return;
         }
         if button == MouseButton::Right {
@@ -606,11 +670,7 @@ impl App {
                 self.desk.new_tab();
                 Ok(())
             }
-            Hit::Cards => {
-                self.desk.focus_at(point);
-                Ok(())
-            }
-            Hit::Menu(_) | Hit::Nothing => Ok(()),
+            Hit::Cards | Hit::Menu(_) | Hit::Nothing => Ok(()),
         };
         if let Err(err) = result {
             log::warn!("the desktop wouldn't move or resize the window: {err}");
@@ -675,7 +735,7 @@ impl App {
             return;
         }
         let redraw = if is_paste(&event.logical_key, self.modifiers) {
-            match paste_text(&mut self.clipboard) {
+            match paste_text(&mut self.clipboard, Copy::Clipboard) {
                 Ok(text) => self.desk.paste(&text),
                 Err(err) => log::warn!("pasting failed: {err:#}"),
             }
@@ -716,7 +776,7 @@ impl App {
                     let _ = answer.send(reply);
                     self.notice = Some(Notice::Connecting);
                 } else if is_paste(key, self.modifiers) {
-                    match paste_text(&mut self.clipboard) {
+                    match paste_text(&mut self.clipboard, Copy::Clipboard) {
                         Ok(text) => input.push(&text),
                         Err(err) => log::warn!("pasting failed: {err:#}"),
                     }
@@ -761,10 +821,14 @@ impl App {
         } + self.wheel_remainder;
         let whole = lines.trunc();
         self.wheel_remainder = lines - whole;
+        let Some(point) = self.pointer else {
+            return;
+        };
         #[allow(clippy::cast_possible_truncation)]
-        if whole != 0.0 && self.desk.wheel(whole as i64) {
+        if whole != 0.0 && self.desk.wheel(point, whole as i64, self.modifiers) {
             self.request_redraw();
         }
+        self.send_outbox();
     }
 
     fn request_redraw(&self) {
@@ -1253,14 +1317,39 @@ fn clipboard(slot: &mut Option<Clipboard>) -> anyhow::Result<&mut arboard::Clipb
     Ok(&mut clipboard.0)
 }
 
-/// The clipboard's text.
-fn paste_text(slot: &mut Option<Clipboard>) -> anyhow::Result<String> {
-    Ok(clipboard(slot)?.get_text()?)
+/// The text on the clipboard, or the primary selection.
+fn paste_text(slot: &mut Option<Clipboard>, from: Copy) -> anyhow::Result<String> {
+    let clipboard = clipboard(slot)?;
+    Ok(match from {
+        Copy::Clipboard => clipboard.get_text()?,
+        Copy::Primary => clipboard
+            .get()
+            .clipboard(LinuxClipboardKind::Primary)
+            .text()?,
+    })
 }
 
-/// Puts `text` on the clipboard.
-fn copy_text(slot: &mut Option<Clipboard>, text: String) -> anyhow::Result<()> {
-    Ok(clipboard(slot)?.set_text(text)?)
+/// Puts `text` on the clipboard, or the primary selection.
+fn copy_text(slot: &mut Option<Clipboard>, text: String, to: Copy) -> anyhow::Result<()> {
+    let clipboard = clipboard(slot)?;
+    match to {
+        Copy::Clipboard => clipboard.set_text(text)?,
+        Copy::Primary => clipboard
+            .set()
+            .clipboard(LinuxClipboardKind::Primary)
+            .text(text)?,
+    }
+    Ok(())
+}
+
+/// The button a pane's mouse handling knows `button` as, if it knows it.
+fn mouse_button(button: MouseButton) -> Option<clackatoo_term::mouse::MouseButton> {
+    match button {
+        MouseButton::Left => Some(clackatoo_term::mouse::MouseButton::Left),
+        MouseButton::Middle => Some(clackatoo_term::mouse::MouseButton::Middle),
+        MouseButton::Right => Some(clackatoo_term::mouse::MouseButton::Right),
+        _ => None,
+    }
 }
 
 /// The padding around the grid in physical pixels.
@@ -1370,8 +1459,15 @@ impl App {
                 button,
                 ..
             } => self.clicked(event_loop, button),
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button,
+                ..
+            } => self.released(button),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                self.desk.window_focus(focused);
+                self.send_outbox();
                 // Another window on the terminals may have resized them:
                 // the focused one decides.
                 if focused {
@@ -1426,8 +1522,8 @@ impl App {
             }
             SessionEvent::Message(ServerMessage::Response(response)) => {
                 let redraw = self.desk.answered(response);
-                if let Some(text) = self.desk.take_yanked()
-                    && let Err(err) = copy_text(&mut self.clipboard, text)
+                if let Some((text, to)) = self.desk.take_yanked()
+                    && let Err(err) = copy_text(&mut self.clipboard, text, to)
                 {
                     log::warn!("copying failed: {err:#}");
                 }
