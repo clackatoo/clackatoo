@@ -228,7 +228,11 @@ fn selections_and_matches_are_highlighted() {
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-fn two_pane_window(fonts: &mut Fonts, status: Status) -> ([u32; 2], Chrome, Placement) {
+fn two_pane_window(
+    fonts: &mut Fonts,
+    status: Status,
+    menu: Option<([f32; 2], Vec<String>)>,
+) -> ([u32; 2], Chrome, Placement) {
     let metrics = Metrics {
         cell: [fonts.cell.width as f32, fonts.cell.height as f32],
         ui_line: fonts.ui.height,
@@ -254,6 +258,7 @@ fn two_pane_window(fonts: &mut Fonts, status: Status) -> ([u32; 2], Chrome, Plac
             status,
             buttons: &buttons,
             bottom_shown: true,
+            menu,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -301,7 +306,7 @@ fn draw_window(
     let [width, height] = geometry.size;
     let mut fills = vec![
         Fill::rounded([0.0, 0.0, width, height], Paint::Backdrop, 0.0)
-            .fading(Paint::BackdropEnd, [1.0, 1.0]),
+            .fading(Paint::BackdropEnd, [1.0, -1.0]),
     ];
     fills.extend(painted.fills);
     for (index, (_, card)) in placement.panes.iter().enumerate() {
@@ -344,6 +349,7 @@ fn panes_are_drawn_on_cards_between_the_bars() {
         Status::Tabs {
             note: Some("NORMAL".into()),
         },
+        None,
     );
     // Each terminal is wider than its card, as before a resize lands: the
     // left one's long line must stop at its card's edge.
@@ -369,10 +375,10 @@ fn panes_are_drawn_on_cards_between_the_bars() {
             item.text
         );
     }
-    // The backdrop fades from indigo at the top left towards teal.
-    let top_left = pixel([1.0, 1.0]);
-    let bottom_right = pixel([size[0] as f32 - 2.0, size[1] as f32 - 2.0]);
-    assert!(top_left[2] > top_left[1] && bottom_right[1] > bottom_right[0]);
+    // The backdrop is bluest at the top right.
+    let top_right = pixel([size[0] as f32 - 2.0, 1.0]);
+    let bottom_left = pixel([1.0, size[1] as f32 - 2.0]);
+    assert!(top_right[2] > bottom_left[2]);
     let left_card = placement.panes[0].1.rect;
     let right_card = placement.panes[1].1.rect;
     // The focused card's edge is in the accent colour, for normal mode.
@@ -397,10 +403,47 @@ fn the_palette_is_drawn_over_the_cards() {
         return;
     };
     let mut fonts = fonts(2.0);
-    let window = two_pane_window(&mut fonts, Status::Typing(":|Terminal▏".into()));
+    let window = two_pane_window(
+        &mut fonts,
+        Status::Typing {
+            label: Some("Rename workspace".into()),
+            text: "clackatoo▏".into(),
+        },
+        None,
+    );
     let left = screen(20, 4, "left\r\n$ ");
     let right = screen(20, 4, "right\r\n$ ");
     let pixels = draw_window(&gpu, &mut fonts, &window, [&left, &right]);
     save("palette", window.0, &pixels);
     assert!(window.1.palette.is_some());
+}
+
+#[test]
+fn a_menu_opens_where_it_was_asked_for() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut fonts = fonts(2.0);
+    let probe = two_pane_window(&mut fonts, Status::Tabs { note: None }, None);
+    let workspace = probe.1.workspaces[0].rect;
+    let at = [workspace.x + 10.0, workspace.y + workspace.height];
+    let window = two_pane_window(
+        &mut fonts,
+        Status::Tabs { note: None },
+        Some((at, vec!["Rename".into(), "Close".into()])),
+    );
+    let left = screen(20, 4, "left\r\n$ ");
+    let right = screen(20, 4, "right\r\n$ ");
+    let pixels = draw_window(&gpu, &mut fonts, &window, [&left, &right]);
+    save("menu", window.0, &pixels);
+    let (rect, items) = window.1.menu.clone().expect("a menu");
+    assert_eq!((rect.x, rect.y), (at[0].round(), at[1].round()));
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        window
+            .1
+            .hit([items[1].1.x + 4.0, items[1].1.y + 4.0], false),
+        Hit::Menu(1)
+    );
 }

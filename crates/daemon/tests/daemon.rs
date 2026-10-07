@@ -729,3 +729,38 @@ fn refused_workspace_requests_start_no_terminal() {
     ));
     assert_eq!(client.list_terminals().unwrap().len(), 1);
 }
+
+#[test]
+fn tabs_are_named_and_tabs_and_workspaces_closed_with_their_terminals() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    client.new_workspace(None, new_pane(&["cat"])).unwrap();
+    let workspace = next_workspaces(&mut client).list[0].id;
+    client.new_tab(workspace, new_pane(&["cat"])).unwrap();
+    let tab = next_workspaces(&mut client).list[0].tabs[1].id;
+
+    let rename = Request::RenameTab {
+        tab,
+        name: "logs".into(),
+    };
+    assert_eq!(client.request(&rename).unwrap(), Response::Done);
+    let named = next_workspaces(&mut client);
+    assert_eq!(named.list[0].tabs[1].name.as_deref(), Some("logs"));
+
+    assert_eq!(
+        client.request(&Request::CloseTab { tab }).unwrap(),
+        Response::Done
+    );
+    let workspaces = next_workspaces(&mut client);
+    assert_eq!(workspaces.list[0].tabs.len(), 1);
+    assert_eq!(client.list_terminals().unwrap().len(), 1);
+
+    assert_eq!(
+        client
+            .request(&Request::CloseWorkspace { workspace })
+            .unwrap(),
+        Response::Done
+    );
+    assert!(client.list_terminals().unwrap().is_empty());
+}

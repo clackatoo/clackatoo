@@ -570,6 +570,14 @@ impl Daemon {
         Ok(())
     }
 
+    /// Closes `terminals`, as closing their tab or workspace does.
+    fn close_terminals(&mut self, terminals: &[TerminalId]) -> Result<Response, Error> {
+        for &terminal in terminals {
+            self.close_terminal(terminal)?;
+        }
+        Ok(Response::Done)
+    }
+
     /// The terminal for a new pane: a new one, starting by default in the
     /// directory `beside`'s terminal is in, or an existing one in no pane.
     fn pane_terminal(
@@ -896,7 +904,10 @@ impl Daemon {
             | Request::Split { .. }
             | Request::ClosePane { .. }
             | Request::Focus { .. }
-            | Request::RenameWorkspace { .. }) => self.respond_about_workspaces(request, token),
+            | Request::RenameWorkspace { .. }
+            | Request::RenameTab { .. }
+            | Request::CloseTab { .. }
+            | Request::CloseWorkspace { .. }) => self.respond_about_workspaces(request, token),
         };
         response.unwrap_or_else(Response::Error)
     }
@@ -940,6 +951,18 @@ impl Daemon {
                     self.workspaces_changed();
                     Response::Done
                 })
+            }
+            Request::RenameTab { tab, name } => self.workspaces.rename_tab(tab, &name).map(|()| {
+                self.workspaces_changed();
+                Response::Done
+            }),
+            Request::CloseTab { tab } => {
+                let terminals = self.workspaces.tab_terminals(tab)?;
+                self.close_terminals(&terminals)
+            }
+            Request::CloseWorkspace { workspace } => {
+                let terminals = self.workspaces.workspace_terminals(workspace)?;
+                self.close_terminals(&terminals)
             }
             other => unreachable!("{other:?} isn't about workspaces"),
         }

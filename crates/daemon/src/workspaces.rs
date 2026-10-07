@@ -125,6 +125,40 @@ impl WorkspaceState {
         Ok(())
     }
 
+    /// The terminals of the tab `tab`'s panes.
+    pub(crate) fn tab_terminals(&self, tab: TabId) -> Result<Vec<TerminalId>, Error> {
+        let (_, tab) = self.workspaces.find_tab(tab).ok_or(Error::NoSuchTab(tab))?;
+        Ok(tab.terminals())
+    }
+
+    /// The terminals of every pane in `workspace`.
+    pub(crate) fn workspace_terminals(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<Vec<TerminalId>, Error> {
+        Ok(self.check_workspace(workspace)?.terminals())
+    }
+
+    /// Names `tab`, or with an empty name, takes its name away.
+    pub(crate) fn rename_tab(&mut self, tab: TabId, name: &str) -> Result<(), Error> {
+        let name = name.trim();
+        if name.chars().any(char::is_control) {
+            return Err(Error::BadName {
+                name: name.to_owned(),
+                reason: "names can't contain control characters".to_owned(),
+            });
+        }
+        let tab = self
+            .workspaces
+            .list
+            .iter_mut()
+            .flat_map(|workspace| &mut workspace.tabs)
+            .find(|candidate| candidate.id == tab)
+            .ok_or(Error::NoSuchTab(tab))?;
+        tab.name = (!name.is_empty()).then(|| name.to_owned());
+        Ok(())
+    }
+
     pub(crate) fn rename(&mut self, workspace: WorkspaceId, name: &str) -> Result<(), Error> {
         self.check_workspace(workspace)?;
         let name = self.check_name(name, Some(workspace))?;
@@ -216,6 +250,7 @@ impl WorkspaceState {
             id,
             layout: Layout::Pane(pane),
             focused: pane.id,
+            name: None,
         };
         (tab, pane.id)
     }
@@ -448,6 +483,22 @@ mod tests {
         assert_eq!(state.rename(first, "3"), Err(Error::NameTaken("3".into())));
         state.rename(first, "clackatoo").unwrap();
         assert_eq!(state.get().list[0].name, "clackatoo");
+    }
+
+    #[test]
+    fn tabs_can_be_named_and_unnamed() {
+        let mut state = WorkspaceState::new();
+        state.new_workspace("a".into(), TerminalId(1));
+        let tab = state.get().list[0].tabs[0].id;
+        state.rename_tab(tab, " logs ").unwrap();
+        assert_eq!(state.get().list[0].tabs[0].name.as_deref(), Some("logs"));
+        state.rename_tab(tab, "").unwrap();
+        assert_eq!(state.get().list[0].tabs[0].name, None);
+        assert_eq!(
+            state.rename_tab(TabId(9), "x"),
+            Err(Error::NoSuchTab(TabId(9)))
+        );
+        assert_eq!(state.tab_terminals(tab).unwrap(), [TerminalId(1)]);
     }
 
     #[test]

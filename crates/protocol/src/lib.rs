@@ -49,7 +49,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Everything a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +235,26 @@ pub enum Request {
         /// Its new name, unique among the daemon's workspaces.
         name: String,
     },
+    /// Names a tab, or with an empty name, takes its name away, so clients
+    /// name it after its focused pane again.
+    RenameTab {
+        /// The tab.
+        tab: TabId,
+        /// Its new name.
+        name: String,
+    },
+    /// Closes a tab, and every pane in it and its terminal. A workspace
+    /// goes with its last tab.
+    CloseTab {
+        /// The tab.
+        tab: TabId,
+    },
+    /// Closes a workspace, and every tab and pane in it and their
+    /// terminals.
+    CloseWorkspace {
+        /// The workspace.
+        workspace: WorkspaceId,
+    },
 }
 
 /// How to start a terminal.
@@ -309,6 +329,9 @@ pub enum Error {
     /// No workspace has this ID. It may have been closed.
     #[error("no workspace {0}")]
     NoSuchWorkspace(WorkspaceId),
+    /// No tab has this ID. It may have been closed.
+    #[error("no tab {0}")]
+    NoSuchTab(TabId),
     /// The terminal is already shown in a pane.
     #[error("terminal {0} is already in a pane")]
     TerminalInPane(TerminalId),

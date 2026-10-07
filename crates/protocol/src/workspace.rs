@@ -76,6 +76,9 @@ pub struct Tab {
     pub layout: Layout,
     /// The pane any client last focused.
     pub focused: PaneId,
+    /// Its name, if given one. Clients name a tab without one after its
+    /// focused pane.
+    pub name: Option<String>,
 }
 
 /// How a tab's space is shared between its panes.
@@ -189,6 +192,30 @@ impl Workspaces {
             .flat_map(|tab| tab.layout.panes())
             .find(|pane| pane.content == Content::Terminal(terminal))
             .map(|pane| pane.id)
+    }
+}
+
+impl Workspaces {
+    /// The workspace holding the tab with `id`, and the tab.
+    #[must_use]
+    pub fn find_tab(&self, id: TabId) -> Option<(&Workspace, &Tab)> {
+        self.list
+            .iter()
+            .find_map(|workspace| workspace.tab(id).map(|tab| (workspace, tab)))
+    }
+}
+
+impl Tab {
+    /// The terminals its panes show.
+    #[must_use]
+    pub fn terminals(&self) -> Vec<TerminalId> {
+        self.layout
+            .panes()
+            .into_iter()
+            .map(|pane| match pane.content {
+                Content::Terminal(terminal) => terminal,
+            })
+            .collect()
     }
 }
 

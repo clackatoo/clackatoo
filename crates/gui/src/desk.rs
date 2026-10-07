@@ -55,6 +55,24 @@ enum Asked {
     Quiet,
 }
 
+/// Something being typed in the palette.
+#[derive(Debug)]
+struct Input {
+    purpose: Purpose,
+    text: String,
+}
+
+/// What's typed in the palette is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Purpose {
+    /// A command, after `:`.
+    Command,
+    /// A workspace's new name.
+    RenameWorkspace(WorkspaceId),
+    /// A tab's new name: empty for none.
+    RenameTab(TabId),
+}
+
 /// The window's view of the daemon's workspaces.
 #[derive(Debug, Default)]
 pub(crate) struct Desk {
@@ -76,8 +94,8 @@ pub(crate) struct Desk {
     outbox: Vec<ClientMessage>,
     /// The space the panes' cards share, once the window is open.
     area: Option<Area>,
-    /// The command line being typed, after `:`.
-    command: Option<String>,
+    /// What's being typed in the palette, such as a command after `:`.
+    input: Option<Input>,
     /// A message for the focused pane's label, until the next key, such as
     /// why a command failed.
     message: Option<String>,
@@ -178,8 +196,16 @@ impl Desk {
     /// typed, or else the tabs, with a message or the focused pane's mode
     /// and scroll position.
     pub(crate) fn status(&self) -> Status {
-        if let Some(line) = &self.command {
-            return Status::Typing(format!(":{line}▏"));
+        if let Some(input) = &self.input {
+            let (label, prefix) = match input.purpose {
+                Purpose::Command => (None, ":"),
+                Purpose::RenameWorkspace(_) => (Some("Rename workspace"), ""),
+                Purpose::RenameTab(_) => (Some("Rename tab"), ""),
+            };
+            return Status::Typing {
+                label: label.map(str::to_owned),
+                text: format!("{prefix}{}▏", input.text),
+            };
         }
         let pane = self
             .focused_terminal()
@@ -188,27 +214,23 @@ impl Desk {
             && pane.prompting()
             && let Some(prompt) = pane.label()
         {
-            return Status::Typing(prompt);
+            return Status::Typing {
+                label: None,
+                text: prompt,
+            };
         }
         Status::Tabs {
             note: self.message.clone().or_else(|| pane.and_then(Pane::label)),
         }
     }
 
-    /// What the bar calls a tab: its number, and its focused pane's title.
+    /// What the bar calls a tab: its number, and its name, or else its
+    /// focused pane's title.
     fn tab_name(&self, index: usize, tab: &Tab) -> String {
         /// Longer titles are cut short, to leave room for the other tabs.
         const MAX_TITLE: usize = 24;
         let number = index + 1;
-        let title = self
-            .workspaces
-            .find_pane(tab.focused)
-            .and_then(|(_, _, pane)| {
-                let Content::Terminal(terminal) = pane.content;
-                self.panes.get(&terminal)?.screen()
-            })
-            .map(|screen| screen.title.trim())
-            .filter(|title| !title.is_empty());
+        let title = tab.name.as_deref().or_else(|| self.tab_title(tab));
         match title {
             Some(title) if title.chars().count() > MAX_TITLE => {
                 let short: String = title.chars().take(MAX_TITLE - 1).collect();
@@ -217,6 +239,68 @@ impl Desk {
             Some(title) => format!("{number} {title}"),
             None => number.to_string(),
         }
+    }
+
+    /// The title of `tab`'s focused pane's program, if it set one.
+    fn tab_title(&self, tab: &Tab) -> Option<&str> {
+        self.workspaces
+            .find_pane(tab.focused)
+            .and_then(|(_, _, pane)| {
+                let Content::Terminal(terminal) = pane.content;
+                self.panes.get(&terminal)?.screen()
+            })
+            .map(|screen| screen.title.trim())
+            .filter(|title| !title.is_empty())
+    }
+
+    /// Opens the palette to rename `workspace`, starting from its name.
+    pub(crate) fn rename_workspace(&mut self, workspace: WorkspaceId) {
+        if let Some(found) = self.workspaces.get(workspace) {
+            self.input = Some(Input {
+                purpose: Purpose::RenameWorkspace(workspace),
+                text: found.name.clone(),
+            });
+        }
+    }
+
+    /// Opens the palette to name `tab`, starting from its name or title.
+    pub(crate) fn rename_tab(&mut self, tab: TabId) {
+        if let Some((_, found)) = self.workspaces.find_tab(tab) {
+            let text = found
+                .name
+                .as_deref()
+                .or_else(|| self.tab_title(found))
+                .unwrap_or_default()
+                .to_owned();
+            self.input = Some(Input {
+                purpose: Purpose::RenameTab(tab),
+                text,
+            });
+        }
+    }
+
+    /// Closes `workspace`, with every terminal in it.
+    pub(crate) fn close_workspace(&mut self, workspace: WorkspaceId) {
+        self.request(Request::CloseWorkspace { workspace }, Asked::Command);
+    }
+
+    /// Closes `tab`, with every terminal in it.
+    pub(crate) fn close_tab(&mut self, tab: TabId) {
+        self.request(Request::CloseTab { tab }, Asked::Command);
+    }
+
+    /// Makes a workspace, and switches to it.
+    pub(crate) fn new_workspace(&mut self) {
+        self.run(Command::Workspace(None));
+    }
+
+    /// Opens a terminal in a new tab of the workspace shown.
+    pub(crate) fn new_tab(&mut self) {
+        self.run(Command::Open {
+            place: Place::Tab,
+            kind: Kind::Terminal,
+            daemon: None,
+        });
     }
 
     /// Switches to `workspace`, at its active tab and that tab's focused
@@ -515,8 +599,8 @@ impl Desk {
     /// Handles a key press: the command line's, the window's own, then the
     /// focused pane's. Returns whether the window must be redrawn.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> bool {
-        if self.command.is_some() {
-            self.command_key(press);
+        if self.input.is_some() {
+            self.input_key(press);
             return true;
         }
         let had_message = self.message.take().is_some();
@@ -534,8 +618,10 @@ impl Desk {
     /// Pastes `text` into the command line, if it's open, or else the
     /// focused pane.
     pub(crate) fn paste(&mut self, text: &str) {
-        if let Some(line) = &mut self.command {
-            line.extend(text.chars().filter(|ch| !ch.is_control()));
+        if let Some(input) = &mut self.input {
+            input
+                .text
+                .extend(text.chars().filter(|ch| !ch.is_control()));
         } else if let Some(pane) = self.focused_pane() {
             pane.paste(text);
         }
@@ -559,7 +645,10 @@ impl Desk {
         let ctrl = press.modifiers.ctrl && !press.modifiers.alt;
         let direction = match character {
             Some(':') if !ctrl => {
-                self.command = Some(String::new());
+                self.input = Some(Input {
+                    purpose: Purpose::Command,
+                    text: String::new(),
+                });
                 return true;
             }
             Some('h') if ctrl => Direction::Left,
@@ -578,31 +667,47 @@ impl Desk {
         true
     }
 
-    /// Handles a key while the command line is open.
-    fn command_key(&mut self, press: &KeyPress<'_>) {
-        let Some(line) = &mut self.command else {
+    /// Handles a key while the palette is open.
+    fn input_key(&mut self, press: &KeyPress<'_>) {
+        let Some(input) = &mut self.input else {
             return;
         };
         match press.key {
-            Key::Named(NamedKey::Escape) => self.command = None,
+            Key::Named(NamedKey::Escape) => self.input = None,
             Key::Named(NamedKey::Enter) => {
-                let line = std::mem::take(line);
-                self.command = None;
-                match command::parse(&line) {
-                    Ok(command) => self.run(command),
-                    Err(message) => self.message = Some(message),
+                let Some(Input { purpose, text }) = self.input.take() else {
+                    return;
+                };
+                match purpose {
+                    Purpose::Command => match command::parse(&text) {
+                        Ok(command) => self.run(command),
+                        Err(message) => self.message = Some(message),
+                    },
+                    Purpose::RenameWorkspace(workspace) => self.request(
+                        Request::RenameWorkspace {
+                            workspace,
+                            name: text,
+                        },
+                        Asked::Command,
+                    ),
+                    Purpose::RenameTab(tab) => {
+                        self.request(Request::RenameTab { tab, name: text }, Asked::Command);
+                    }
                 }
             }
             Key::Named(NamedKey::Backspace) => {
-                // Deleting past the colon closes the line, as in Vim.
-                if line.pop().is_none() {
-                    self.command = None;
+                // Deleting past a command's colon closes the palette, as
+                // in Vim.
+                if input.text.pop().is_none() && input.purpose == Purpose::Command {
+                    self.input = None;
                 }
             }
             _ if press.modifiers.ctrl => {}
             _ => {
                 if let Some(text) = press.text {
-                    line.extend(text.chars().filter(|ch| !ch.is_control()));
+                    input
+                        .text
+                        .extend(text.chars().filter(|ch| !ch.is_control()));
                 }
             }
         }
@@ -760,6 +865,7 @@ mod tests {
             id: TabId(id),
             focused: layout.panes()[0].id,
             layout,
+            name: None,
         }
     }
 
@@ -1007,6 +1113,68 @@ mod tests {
             desk.message.as_deref(),
             Some("there's no tab 3; this workspace has 2")
         );
+    }
+
+    #[test]
+    fn workspaces_and_tabs_are_renamed_in_the_palette() {
+        let mut desk = desk(workspaces(vec![workspace(
+            1,
+            "work",
+            vec![tab(1, pane(1))],
+        )]));
+        desk.rename_workspace(WorkspaceId(1));
+        assert_eq!(
+            desk.status(),
+            Status::Typing {
+                label: Some("Rename workspace".into()),
+                text: "work▏".into(),
+            }
+        );
+        for _ in 0..4 {
+            press(
+                &mut desk,
+                Key::Named(NamedKey::Backspace),
+                None,
+                Modifiers::default(),
+            );
+        }
+        press(
+            &mut desk,
+            Key::Character("x".into()),
+            None,
+            Modifiers::default(),
+        );
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::RenameWorkspace {
+                workspace: WorkspaceId(1),
+                name: "x".into()
+            }]
+        );
+        // Backspace past the start of a name leaves the palette open.
+        desk.rename_tab(TabId(1));
+        for _ in 0..3 {
+            press(
+                &mut desk,
+                Key::Named(NamedKey::Backspace),
+                None,
+                Modifiers::default(),
+            );
+        }
+        assert!(matches!(desk.status(), Status::Typing { .. }));
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        assert!(matches!(desk.status(), Status::Tabs { .. }));
     }
 
     #[test]

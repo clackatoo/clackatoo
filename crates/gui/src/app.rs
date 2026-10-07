@@ -9,7 +9,7 @@ use anyhow::{Context, anyhow};
 use clackatoo_daemon::Sender;
 use clackatoo_protocol::{
     Content, Event, Layout, PROTOCOL_VERSION, Pane as LayoutPane, PaneId, ServerMessage, Size,
-    TerminalId,
+    TabId, TerminalId, WorkspaceId,
 };
 use clackatoo_term::Row;
 use winit::application::ApplicationHandler;
@@ -244,6 +244,24 @@ struct Frame {
     transparent: bool,
 }
 
+/// A menu open over the window, for a workspace or a tab.
+#[derive(Clone, Copy, Debug)]
+struct Menu {
+    /// Where it was asked for.
+    at: [f32; 2],
+    target: MenuTarget,
+}
+
+/// What a menu is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuTarget {
+    Workspace(WorkspaceId),
+    Tab(TabId),
+}
+
+/// A menu's items, in order.
+const MENU_ITEMS: [&str; 2] = ["Rename", "Close"];
+
 /// The window's whole state.
 #[derive(Debug)]
 pub(crate) struct App {
@@ -262,6 +280,8 @@ pub(crate) struct App {
     cursor_icon: CursorIcon,
     /// The last click, and what it was on, to spot a double click.
     last_click: Option<(Instant, Hit)>,
+    /// The menu open, if any.
+    menu: Option<Menu>,
     /// The window's title, as last set.
     title: String,
     /// Where messages to the daemon go, once connected.
@@ -301,6 +321,7 @@ impl App {
             hover: Hit::Nothing,
             cursor_icon: CursorIcon::Default,
             last_click: None,
+            menu: None,
             title: String::new(),
             sender: None,
             modifiers: input::Modifiers::default(),
@@ -411,6 +432,7 @@ impl App {
                 status: Status::Tabs { note: None },
                 buttons: &self.buttons,
                 bottom_shown: false,
+                menu: None,
             }
         } else {
             Contents {
@@ -419,6 +441,9 @@ impl App {
                 status: self.desk.status(),
                 buttons: &self.buttons,
                 bottom_shown: true,
+                menu: self
+                    .menu
+                    .map(|menu| (menu.at, MENU_ITEMS.map(str::to_owned).to_vec())),
             }
         };
         let fonts = &mut self.frame.as_mut()?.fonts;
@@ -436,7 +461,12 @@ impl App {
         let hit = self.hit(point);
         let icon = match hit {
             Hit::Resize(direction) => resize_icon(direction),
-            Hit::Button(_) | Hit::Workspace(_) | Hit::Tab(_) => CursorIcon::Pointer,
+            Hit::Button(_)
+            | Hit::Workspace(_)
+            | Hit::Tab(_)
+            | Hit::NewWorkspace
+            | Hit::NewTab
+            | Hit::Menu(_) => CursorIcon::Pointer,
             Hit::Cards => CursorIcon::Text,
             Hit::TopBar | Hit::Nothing => CursorIcon::Default,
         };
@@ -446,7 +476,17 @@ impl App {
             frame.window.set_cursor(icon);
             self.cursor_icon = icon;
         }
-        let lit = |hit: Hit| matches!(hit, Hit::Button(_) | Hit::Workspace(_) | Hit::Tab(_));
+        let lit = |hit: Hit| {
+            matches!(
+                hit,
+                Hit::Button(_)
+                    | Hit::Workspace(_)
+                    | Hit::Tab(_)
+                    | Hit::NewWorkspace
+                    | Hit::NewTab
+                    | Hit::Menu(_)
+            )
+        };
         if hit != self.hover && (lit(hit) || lit(self.hover)) {
             self.request_redraw();
         }
@@ -484,9 +524,30 @@ impl App {
             .last_click
             .is_some_and(|(at, last)| last == hit && now.duration_since(at) < DOUBLE_CLICK);
         self.last_click = (!double).then_some((now, hit));
+        // With a menu open, a click picks one of its items or, anywhere
+        // else, just closes it.
+        if let Some(menu) = self.menu.take() {
+            if let Hit::Menu(index) = hit {
+                self.menu_picked(menu.target, index);
+            }
+            self.request_redraw();
+            return;
+        }
         if button == MouseButton::Right {
-            if matches!(hit, Hit::TopBar | Hit::Workspace(_)) {
-                window.show_window_menu(PhysicalPosition::new(point[0], point[1]));
+            let target = match hit {
+                Hit::Workspace(workspace) => Some(MenuTarget::Workspace(workspace)),
+                Hit::Tab(tab) => Some(MenuTarget::Tab(tab)),
+                _ => None,
+            };
+            match target {
+                Some(target) => {
+                    self.menu = Some(Menu { at: point, target });
+                    self.request_redraw();
+                }
+                None if hit == Hit::TopBar => {
+                    window.show_window_menu(PhysicalPosition::new(point[0], point[1]));
+                }
+                None => {}
             }
             return;
         }
@@ -520,11 +581,19 @@ impl App {
                 self.desk.show_tab(tab);
                 Ok(())
             }
+            Hit::NewWorkspace => {
+                self.desk.new_workspace();
+                Ok(())
+            }
+            Hit::NewTab => {
+                self.desk.new_tab();
+                Ok(())
+            }
             Hit::Cards => {
                 self.desk.focus_at(point);
                 Ok(())
             }
-            Hit::Nothing => Ok(()),
+            Hit::Menu(_) | Hit::Nothing => Ok(()),
         };
         if let Err(err) = result {
             log::warn!("the desktop wouldn't move or resize the window: {err}");
@@ -561,7 +630,29 @@ impl App {
     }
 
     /// Handles a key press: a notice's keys, then the desk's.
+    /// Carries out the menu item at `index` for `target`.
+    fn menu_picked(&mut self, target: MenuTarget, index: usize) {
+        match (MENU_ITEMS.get(index).copied(), target) {
+            (Some("Rename"), MenuTarget::Workspace(workspace)) => {
+                self.desk.rename_workspace(workspace);
+            }
+            (Some("Rename"), MenuTarget::Tab(tab)) => self.desk.rename_tab(tab),
+            (Some("Close"), MenuTarget::Workspace(workspace)) => {
+                self.desk.close_workspace(workspace);
+            }
+            (Some("Close"), MenuTarget::Tab(tab)) => self.desk.close_tab(tab),
+            _ => {}
+        }
+    }
+
     fn key_pressed(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
+        // Any key closes a menu, and Esc does nothing else.
+        if self.menu.take().is_some() {
+            self.request_redraw();
+            if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                return;
+            }
+        }
         if self.notice.is_some() {
             self.notice_key(event_loop, event);
             return;
@@ -701,7 +792,7 @@ impl App {
             Paint::Backdrop,
             if rounded { geometry.window_radius } else { 0.0 },
         )
-        .fading(Paint::BackdropEnd, [1.0, 1.0]);
+        .fading(Paint::BackdropEnd, [1.0, -1.0]);
         // A faint line round the window, where it has corners of its own.
         Some(if rounded {
             backdrop.bordered(geometry.edge, Paint::WindowEdge)

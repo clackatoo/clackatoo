@@ -98,9 +98,9 @@ impl Fill {
 pub(crate) enum Paint {
     /// Nothing: for a border alone.
     Clear,
-    /// The window's background, at the top left of its fade...
+    /// The window's background, at the bottom left of its fade...
     Backdrop,
-    /// ...and at the bottom right.
+    /// ...and at the top right, bluer.
     BackdropEnd,
     /// The faint line round the window.
     WindowEdge,
@@ -124,6 +124,8 @@ pub(crate) enum Paint {
     Hover,
     /// Drawn icons.
     Icon,
+    /// Drawn icons under the mouse, in the text colour.
+    Ink,
     /// The command palette...
     Palette,
     /// ...and its edge.

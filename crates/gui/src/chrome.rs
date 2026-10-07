@@ -136,8 +136,8 @@ pub(crate) struct Item<T> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
     /// Something being typed, such as a command or a search, in the
-    /// palette.
-    Typing(String),
+    /// palette, perhaps after a label saying what it's for.
+    Typing { label: Option<String>, text: String },
     /// The tabs, and on the right a note: the mode, how far the view is
     /// scrolled, or a message.
     Tabs { note: Option<String> },
@@ -155,6 +155,14 @@ pub(crate) struct Chrome {
     pub(crate) note_x: f32,
     /// The palette, while something's being typed.
     pub(crate) palette: Option<Rect>,
+    /// Where the palette's text starts, after its label.
+    pub(crate) palette_text_x: f32,
+    /// The `+` after the workspaces, which makes one.
+    pub(crate) new_workspace: Option<Rect>,
+    /// The `+` after the tabs, which opens one.
+    pub(crate) new_tab: Option<Rect>,
+    /// A menu, if one is open: its box, and its items.
+    pub(crate) menu: Option<(Rect, Vec<(String, Rect)>)>,
     /// Whether to draw the bottom bar: notices take its place.
     pub(crate) bottom_shown: bool,
 }
@@ -168,6 +176,8 @@ pub(crate) struct Contents<'a> {
     pub(crate) buttons: &'a ButtonLayout,
     /// Whether to draw the bottom bar: notices take its place.
     pub(crate) bottom_shown: bool,
+    /// A menu to show: where it was asked for, and its items.
+    pub(crate) menu: Option<([f32; 2], Vec<String>)>,
 }
 
 impl Chrome {
@@ -185,33 +195,8 @@ impl Chrome {
         let top = geometry.top;
         let pill_height = metrics.pill_height();
         let pill_y = top.y + (top.height - pill_height) / 2.0;
-        let diameter = (pill_height * 0.8).round();
-        let button_y = (top.y + (top.height - diameter) / 2.0).round();
-        let spacing = 2.0 * padding;
-        let button = |x: f32| Rect {
-            x,
-            y: button_y,
-            width: diameter,
-            height: diameter,
-        };
-        let mut buttons = Vec::new();
-        let mut x = 3.0 * padding;
-        for &kind in &contents.buttons.left {
-            buttons.push((kind, button(x)));
-            x += diameter + spacing;
-        }
-        let workspaces_start = if contents.buttons.left.is_empty() {
-            geometry.area.rect.x
-        } else {
-            x + padding
-        };
-        let mut x = top.width - 3.0 * padding;
-        for &kind in contents.buttons.right.iter().rev() {
-            x -= diameter;
-            buttons.push((kind, button(x)));
-            x -= spacing;
-        }
-        let workspaces_end = x - padding;
+        let (buttons, workspaces_start, workspaces_end) =
+            place_buttons(&geometry, contents.buttons);
 
         let row = Row {
             height: pill_height,
@@ -219,10 +204,24 @@ impl Chrome {
         };
         let workspaces = row.lay_out(
             contents.workspaces,
-            workspaces_start..workspaces_end,
+            workspaces_start..workspaces_end - pill_height - padding,
             pill_y,
             measure,
         );
+        let plus = |after: f32, y: f32| Rect {
+            x: after + padding,
+            y,
+            width: pill_height,
+            height: pill_height,
+        };
+        let new_workspace = contents.bottom_shown.then(|| {
+            let after = workspaces
+                .last()
+                .map_or(workspaces_start - padding, |item| {
+                    item.rect.x + item.rect.width
+                });
+            plus(after, pill_y)
+        });
         let status = contents.status;
         let bottom = geometry.bottom;
         let note_width = match &status {
@@ -231,28 +230,35 @@ impl Chrome {
         };
         let card_right = geometry.area.rect.x + geometry.area.rect.width;
         let note_x = (card_right - padding - note_width).round();
+        let tabs_y = bottom.y + (bottom.height - pill_height) / 2.0;
         let tabs = match &status {
             Status::Tabs { .. } => row.lay_out(
                 contents.tabs,
-                geometry.area.rect.x..note_x - padding,
-                bottom.y + (bottom.height - pill_height) / 2.0,
+                geometry.area.rect.x..note_x - 2.0 * padding - pill_height,
+                tabs_y,
                 measure,
             ),
-            Status::Typing(_) => Vec::new(),
+            Status::Typing { .. } => Vec::new(),
         };
-        let palette = matches!(status, Status::Typing(_)).then(|| {
-            let [width, height] = geometry.size;
-            let palette_width = (width * 0.6)
-                .min(90.0 * metrics.cell[0])
-                .min(width - 2.0 * spacing);
-            let palette_height = (metrics.cell[1] + 4.0 * padding).round();
-            Rect {
-                x: ((width - palette_width) / 2.0).round(),
-                y: ((height - palette_height) / 2.0).round(),
-                width: palette_width.round(),
-                height: palette_height,
-            }
+        let new_tab = (contents.bottom_shown && matches!(status, Status::Tabs { .. })).then(|| {
+            let after = tabs.last().map_or(geometry.area.rect.x - padding, |item| {
+                item.rect.x + item.rect.width
+            });
+            plus(after, tabs_y)
         });
+        let (palette, palette_text_x) = match &status {
+            Status::Typing { label, .. } => {
+                let rect = place_palette(&geometry);
+                let label = label
+                    .as_deref()
+                    .map_or(0.0, |label| measure(label, false) + 2.0 * padding);
+                (Some(rect), (rect.x + 2.0 * padding + label).round())
+            }
+            Status::Tabs { .. } => (None, 0.0),
+        };
+        let menu = contents
+            .menu
+            .map(|(at, labels)| place_menu(&geometry, at, labels, measure));
         Self {
             geometry,
             workspaces,
@@ -261,6 +267,10 @@ impl Chrome {
             status,
             note_x,
             palette,
+            palette_text_x,
+            new_workspace,
+            new_tab,
+            menu,
             bottom_shown: contents.bottom_shown,
         }
     }
@@ -268,8 +278,22 @@ impl Chrome {
     /// What `point` is over. `maximised` windows can't be resized from
     /// their edges.
     pub(crate) fn hit(&self, point: [f32; 2], maximised: bool) -> Hit {
+        if let Some((rect, items)) = &self.menu
+            && rect.contains(point)
+        {
+            return items
+                .iter()
+                .position(|(_, item)| item.contains(point))
+                .map_or(Hit::Nothing, Hit::Menu);
+        }
         if !maximised && let Some(direction) = self.edge(point) {
             return Hit::Resize(direction);
+        }
+        if self.new_workspace.is_some_and(|rect| rect.contains(point)) {
+            return Hit::NewWorkspace;
+        }
+        if self.new_tab.is_some_and(|rect| rect.contains(point)) {
+            return Hit::NewTab;
         }
         if let Some(&(button, _)) = self.buttons.iter().find(|(_, rect)| rect.contains(point)) {
             return Hit::Button(button);
@@ -339,6 +363,12 @@ impl Chrome {
         for &(button, rect) in &self.buttons {
             self.paint_button(button, rect, hover == Hit::Button(button), &mut painted);
         }
+        if let Some(rect) = self.new_workspace {
+            paint_plus(rect, hover == Hit::NewWorkspace, metrics, &mut painted);
+        }
+        if let Some(rect) = self.new_tab {
+            paint_plus(rect, hover == Hit::NewTab, metrics, &mut painted);
+        }
         if self.bottom_shown {
             for item in &self.tabs {
                 paint_item(item, hover == Hit::Tab(item.id), metrics, &mut painted);
@@ -356,35 +386,67 @@ impl Chrome {
                 });
             }
         }
-        if let (Some(rect), Status::Typing(text)) = (self.palette, &self.status) {
-            // Layers of shadow, wider and fainter outwards, so it reads
-            // as soft.
-            for spread in [3.0, 2.0, 1.0] {
-                let grow = spread * metrics.padding;
-                painted.over.push(Fill::rounded(
-                    [
-                        rect.x - grow,
-                        rect.y - grow + metrics.padding,
-                        rect.width + 2.0 * grow,
-                        rect.height + 2.0 * grow,
-                    ],
-                    Paint::Shadow,
-                    self.geometry.radius + grow,
-                ));
-            }
+        if let (Some(rect), Status::Typing { label, text }) = (self.palette, &self.status) {
+            push_shadow(
+                &mut painted.over,
+                rect,
+                self.geometry.radius,
+                metrics.padding,
+            );
             painted.over.push(
                 Fill::rounded(rect.to_array(), Paint::Palette, self.geometry.radius)
                     .bordered(self.geometry.edge, Paint::PaletteEdge),
             );
+            if let Some(label) = label {
+                painted.over_texts.push(Text {
+                    origin: [
+                        rect.x + 2.0 * metrics.padding,
+                        (rect.y + (rect.height - metrics.ui_line) / 2.0).round(),
+                    ],
+                    content: label,
+                    ink: Ink::Muted,
+                    font: TextFont::Ui,
+                });
+            }
             painted.over_texts.push(Text {
                 origin: [
-                    rect.x + 2.0 * metrics.padding,
+                    self.palette_text_x,
                     rect.y + (rect.height - metrics.cell[1]) / 2.0,
                 ],
                 content: text,
                 ink: Ink::Plain,
                 font: TextFont::Mono,
             });
+        }
+        if let Some((rect, items)) = &self.menu {
+            push_shadow(
+                &mut painted.over,
+                *rect,
+                self.geometry.radius,
+                metrics.padding,
+            );
+            painted.over.push(
+                Fill::rounded(rect.to_array(), Paint::Palette, self.geometry.radius)
+                    .bordered(self.geometry.edge, Paint::PaletteEdge),
+            );
+            for (index, (label, item)) in items.iter().enumerate() {
+                if hover == Hit::Menu(index) {
+                    painted.over.push(Fill::rounded(
+                        item.to_array(),
+                        Paint::Picked,
+                        (1.5 * metrics.padding).round(),
+                    ));
+                }
+                painted.over_texts.push(Text {
+                    origin: [
+                        item.x + 3.0 * metrics.padding,
+                        (item.y + (item.height - metrics.ui_line) / 2.0).round(),
+                    ],
+                    content: label,
+                    ink: Ink::Plain,
+                    font: TextFont::Ui,
+                });
+            }
         }
         painted
     }
@@ -425,6 +487,148 @@ impl Chrome {
             }),
         }
     }
+}
+
+/// Places the window's buttons at the ends of the top bar, where the
+/// desktop's `layout` says. Returns them, and where the space between them
+/// starts and ends.
+fn place_buttons(geometry: &Geometry, layout: &ButtonLayout) -> (Vec<(Button, Rect)>, f32, f32) {
+    let metrics = geometry.metrics;
+    let padding = metrics.padding;
+    let top = geometry.top;
+    let diameter = (metrics.pill_height() * 0.8).round();
+    let button_y = (top.y + (top.height - diameter) / 2.0).round();
+    let spacing = 2.0 * padding;
+    let button = |x: f32| Rect {
+        x,
+        y: button_y,
+        width: diameter,
+        height: diameter,
+    };
+    let mut buttons = Vec::new();
+    let mut x = 3.0 * padding;
+    for &kind in &layout.left {
+        buttons.push((kind, button(x)));
+        x += diameter + spacing;
+    }
+    let start = if layout.left.is_empty() {
+        geometry.area.rect.x
+    } else {
+        x + padding
+    };
+    let mut x = top.width - 3.0 * padding;
+    for &kind in layout.right.iter().rev() {
+        x -= diameter;
+        buttons.push((kind, button(x)));
+        x -= spacing;
+    }
+    (buttons, start, x - padding)
+}
+
+/// The palette: in the middle of the window, wide enough for most
+/// commands.
+fn place_palette(geometry: &Geometry) -> Rect {
+    let metrics = geometry.metrics;
+    let [width, height] = geometry.size;
+    let palette_width = (width * 0.6)
+        .min(90.0 * metrics.cell[0])
+        .min(width - 4.0 * metrics.padding);
+    let palette_height = (metrics.cell[1] + 4.0 * metrics.padding).round();
+    Rect {
+        x: ((width - palette_width) / 2.0).round(),
+        y: ((height - palette_height) / 2.0).round(),
+        width: palette_width.round(),
+        height: palette_height,
+    }
+}
+
+/// A menu of `labels` asked for at `at`: below and right of it, unless
+/// that runs off the window. Returns its box, and its items.
+fn place_menu(
+    geometry: &Geometry,
+    at: [f32; 2],
+    labels: Vec<String>,
+    measure: &mut dyn FnMut(&str, bool) -> f32,
+) -> (Rect, Vec<(String, Rect)>) {
+    let padding = geometry.metrics.padding;
+    let item_height = geometry.metrics.pill_height();
+    let widest = labels
+        .iter()
+        .map(|label| measure(label, false))
+        .fold(0.0, f32::max);
+    let width = (widest + 8.0 * padding).round();
+    #[allow(clippy::cast_precision_loss)]
+    let height = labels.len() as f32 * item_height + 2.0 * padding;
+    let [window_width, window_height] = geometry.size;
+    let x = at[0]
+        .min(window_width - width - padding)
+        .max(padding)
+        .round();
+    let y = at[1]
+        .min(window_height - height - padding)
+        .max(padding)
+        .round();
+    let items = (0_u8..)
+        .zip(labels)
+        .map(|(index, label)| {
+            let rect = Rect {
+                x: x + padding,
+                y: y + padding + f32::from(index) * item_height,
+                width: width - 2.0 * padding,
+                height: item_height,
+            };
+            (label, rect)
+        })
+        .collect();
+    let menu = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    (menu, items)
+}
+
+/// Adds a soft shadow under `rect`, whose corners are `radius` round:
+/// layers wider and fainter outwards, a little below it.
+fn push_shadow(fills: &mut Vec<Fill>, rect: Rect, radius: f32, padding: f32) {
+    for spread in [3.0, 2.0, 1.0] {
+        let grow = spread * padding;
+        fills.push(Fill::rounded(
+            [
+                rect.x - grow,
+                rect.y - grow + padding,
+                rect.width + 2.0 * grow,
+                rect.height + 2.0 * grow,
+            ],
+            Paint::Shadow,
+            radius + grow,
+        ));
+    }
+}
+
+/// A `+`, which makes a workspace or opens a tab, on a soft background
+/// while the mouse is over it.
+fn paint_plus(rect: Rect, hovered: bool, metrics: Metrics, painted: &mut Painted<'_>) {
+    if hovered {
+        painted.fills.push(Fill::rounded(
+            rect.to_array(),
+            Paint::Hover,
+            (1.5 * metrics.padding).round(),
+        ));
+    }
+    let side = (metrics.ui_line * 0.6).round();
+    let stroke = (metrics.padding / 4.0).round().max(1.0);
+    let left = (rect.x + (rect.width - side) / 2.0).round();
+    let top = (rect.y + (rect.height - side) / 2.0).round();
+    let middle = |at: f32| (at + (side - stroke) / 2.0).round();
+    let paint = if hovered { Paint::Ink } else { Paint::Icon };
+    painted
+        .fills
+        .push(Fill::solid([left, middle(top), side, stroke], paint));
+    painted
+        .fills
+        .push(Fill::solid([middle(left), top, stroke, side], paint));
 }
 
 /// What the frame draws: under the cards, and over them.
@@ -526,6 +730,12 @@ pub(crate) enum Hit {
     Tab(TabId),
     /// The space the cards share.
     Cards,
+    /// The `+` that makes a workspace.
+    NewWorkspace,
+    /// The `+` that opens a tab.
+    NewTab,
+    /// An item of the open menu, by its place in it.
+    Menu(usize),
     Nothing,
 }
 
@@ -566,6 +776,7 @@ mod tests {
                 status,
                 buttons,
                 bottom_shown: true,
+                menu: None,
             },
             &mut measure,
         )
@@ -667,7 +878,10 @@ mod tests {
     #[test]
     fn typing_opens_the_palette_in_the_middle() {
         let chrome = chrome(
-            Status::Typing(":|Terminal".into()),
+            Status::Typing {
+                label: None,
+                text: ":|Terminal".into(),
+            },
             &ButtonLayout::default(),
         );
         assert!(chrome.tabs.is_empty());

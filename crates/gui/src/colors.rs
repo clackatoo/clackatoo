@@ -19,9 +19,9 @@ pub(crate) struct Theme {
     /// clackatoo's own colour, the cockatoo's crest, for the window's own
     /// marks such as the focused card's edge in normal mode.
     pub(crate) accent: Rgba,
-    /// The window's background fades from this, at the top left...
+    /// The window's background fades from this, at the bottom left...
     pub(crate) backdrop: Rgba,
-    /// ...to this, at the bottom right.
+    /// ...to this, bluer, at the top right.
     pub(crate) backdrop_end: Rgba,
     /// A card's edge.
     pub(crate) edge: Rgba,
@@ -78,11 +78,11 @@ impl Default for Theme {
             cursor: hex_rgba(0xc8_d0_da),
             accent: hex_rgba(0xd9_b2_4a),
             backdrop: hex_rgba(0x0a_0d_12),
-            backdrop_end: hex_rgba(0x0d_15_21),
+            backdrop_end: hex_rgba(0x0e_1a_2c),
             edge: hex_rgba(0x1d_23_2c),
             focus: hex_rgba(0x2f_86_a8),
             picked: hex_rgba(0x1b_21_2a),
-            hover: hex_rgba(0x15_1a_22),
+            hover: hex_rgba(0x18_1e_27),
             muted: hex_rgba(0x7c_86_96),
             palette_background: hex_rgba(0x14_19_20),
             palette_edge: hex_rgba(0x2a_32_3f),
@@ -111,6 +111,7 @@ impl Theme {
             Paint::Picked => self.picked,
             Paint::Hover => self.hover,
             Paint::Icon => self.muted,
+            Paint::Ink => self.foreground,
             Paint::Palette => self.palette_background,
             Paint::PaletteEdge => self.palette_edge,
         }
