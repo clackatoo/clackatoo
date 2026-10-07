@@ -13,12 +13,13 @@ use rustix::fs::{Mode, OFlags};
 use rustix::pty::OpenptFlags;
 use rustix::termios::Winsize;
 
-use super::{FLOOD_SCRIPT, READY_TITLE};
+use super::{FLOOD_SCRIPT, Flood, READY_TITLE};
 
-/// Runs [`FLOOD_SCRIPT`] on `file` on a fresh PTY of `size`, and times how
-/// long reading everything it prints takes, from the moment it's told to
-/// start.
-pub(crate) fn flood(file: &Path, size: Size) -> anyhow::Result<Duration> {
+/// Runs [`FLOOD_SCRIPT`] on `file` on a fresh PTY of `size`, and measures
+/// reading everything it prints, from the moment it's told to start: how
+/// long it takes, and the CPU time the reading costs, almost all of it in the
+/// kernel's TTY layer.
+pub(crate) fn flood(file: &Path, size: Size) -> anyhow::Result<Flood> {
     let master =
         rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
     rustix::pty::grantpt(&master)?;
@@ -64,6 +65,7 @@ pub(crate) fn flood(file: &Path, size: Size) -> anyhow::Result<Duration> {
         seen.extend_from_slice(&buffer[..n]);
     }
 
+    let cpu_before = thread_cpu_time()?;
     let started = Instant::now();
     master.write_all(b"\r")?;
     loop {
@@ -77,6 +79,18 @@ pub(crate) fn flood(file: &Path, size: Size) -> anyhow::Result<Duration> {
         }
     }
     let elapsed = started.elapsed();
+    let cpu = thread_cpu_time()?.saturating_sub(cpu_before);
     child.wait()?;
-    Ok(elapsed)
+    Ok(Flood { elapsed, cpu })
+}
+
+/// The CPU time this thread has used, to the nanosecond.
+fn thread_cpu_time() -> anyhow::Result<Duration> {
+    let schedstat = std::fs::read_to_string("/proc/thread-self/schedstat")?;
+    let nanos = schedstat
+        .split_whitespace()
+        .next()
+        .and_then(|field| field.parse().ok())
+        .context("malformed schedstat")?;
+    Ok(Duration::from_nanos(nanos))
 }

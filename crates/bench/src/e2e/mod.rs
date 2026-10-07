@@ -340,8 +340,14 @@ fn throughput(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
     }
 
     let (file, len, size) = ceiling_file.context("there are no workloads")?;
-    let samples = repeat(FLOOD_RUNS, || pty::flood(&file, size))?;
-    let rates: Vec<f64> = samples.iter().map(|secs| len as f64 / secs).collect();
+    let mib = len as f64 / f64::from(1 << 20);
+    let mut rates = Vec::new();
+    let mut pty_cpu = Vec::new();
+    for _ in 0..FLOOD_RUNS {
+        let run = pty::flood(&file, size)?;
+        rates.push(len as f64 / run.elapsed.as_secs_f64());
+        pty_cpu.push(run.cpu.as_secs_f64() / mib);
+    }
     report.record(
         "throughput/pty",
         "ascii through a bare PTY (the ceiling)",
@@ -359,6 +365,12 @@ fn throughput(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
             &cpu_per_mib,
         );
     }
+    report.record(
+        "cpu/pty",
+        "ascii, bare PTY reader per MiB (the floor)",
+        Unit::Seconds,
+        &pty_cpu,
+    );
     Ok(())
 }
 
