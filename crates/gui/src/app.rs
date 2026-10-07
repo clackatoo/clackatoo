@@ -14,7 +14,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
-use winit::window::{Window, WindowId};
+use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::fonts::Fonts;
 use crate::render::{PADDING, Renderer};
@@ -196,13 +196,7 @@ impl App {
             f64::from(cols * fonts.cell.width) + padding,
             f64::from(rows * fonts.cell.height) + padding,
         );
-        let window = Arc::new(
-            event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("clackatoo")
-                    .with_inner_size(size),
-            )?,
-        );
+        let window = Arc::new(event_loop.create_window(window_attributes(size))?);
         fonts.set_scale(window.scale_factor());
 
         let mut gpu = startup.gpu.join().map_err(join("GPU"))??;
@@ -324,6 +318,23 @@ impl App {
             }
         }
     }
+}
+
+/// The new window's title, size and app ID. Desktops find the window's
+/// icon through the app ID, matching it to `clackatoo.desktop`.
+fn window_attributes(size: LogicalSize<f64>) -> WindowAttributes {
+    let attributes = Window::default_attributes()
+        .with_title("clackatoo")
+        .with_inner_size(size);
+    #[cfg(target_os = "linux")]
+    let attributes = {
+        use winit::platform::wayland::WindowAttributesExtWayland;
+        use winit::platform::x11::WindowAttributesExtX11;
+        let attributes =
+            WindowAttributesExtWayland::with_name(attributes, "clackatoo", "clackatoo");
+        WindowAttributesExtX11::with_name(attributes, "clackatoo", "clackatoo")
+    };
+    attributes
 }
 
 /// The padding around the grid in physical pixels.

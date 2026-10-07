@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=clackatoo
+Comment=A fast, lightweight terminal workspace
+Exec=clackatoo
+Icon=clackatoo
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=clackatoo
