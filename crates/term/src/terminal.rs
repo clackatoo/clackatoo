@@ -135,7 +135,7 @@ impl Terminal {
     #[cfg(test)]
     pub(crate) fn assert_invariants(&self) {
         let emulator = &self.emulator;
-        for grid in [&emulator.primary, &emulator.alternate] {
+        for grid in std::iter::once(&emulator.primary).chain(&emulator.alternate) {
             assert_eq!(grid.rows().len(), emulator.height());
             for row in grid.scrollback().chain(grid.rows()) {
                 assert_eq!(row.width(), emulator.width());
@@ -143,8 +143,15 @@ impl Terminal {
             }
         }
         assert!(
-            emulator.alternate.scrollback_len() == 0,
+            emulator
+                .alternate
+                .as_ref()
+                .is_none_or(|grid| grid.scrollback_len() == 0),
             "the alternate screen has scrollback"
+        );
+        assert!(
+            emulator.screen == Screen::Primary || emulator.alternate.is_some(),
+            "the alternate screen is shown but doesn't exist"
         );
         assert!(
             emulator.cursor.line < emulator.height(),
@@ -191,6 +198,9 @@ bitflags! {
         const CURSOR_VISIBLE = 1 << 4;
     }
 }
+
+/// Why the alternate screen can be unwrapped while it is shown.
+const ALTERNATE_EXISTS: &str = "the alternate screen exists once it has been shown";
 
 /// U+200D ZERO WIDTH JOINER, which glues emoji like 👩‍💻 into one grapheme.
 const ZWJ: char = '\u{200D}';
@@ -297,7 +307,9 @@ pub(crate) struct Emulator {
     size: Size,
     config: Config,
     primary: Grid,
-    alternate: Grid,
+    /// Made the first time a program switches to it. Most terminals only
+    /// ever run a shell, which never does.
+    alternate: Option<Grid>,
     pub(crate) screen: Screen,
     pub(crate) cursor: CursorState,
     /// DECSC's saved cursor. Each screen has its own, as in xterm.
@@ -325,7 +337,7 @@ impl Emulator {
             size,
             config: config.clone(),
             primary: Grid::new(width, height, config.scrollback_lines),
-            alternate: Grid::new(width, height, 0),
+            alternate: None,
             screen: Screen::Primary,
             cursor: CursorState::default(),
             saved_primary: SavedCursor::default(),
@@ -344,14 +356,14 @@ impl Emulator {
     pub(crate) fn grid(&self) -> &Grid {
         match self.screen {
             Screen::Primary => &self.primary,
-            Screen::Alternate => &self.alternate,
+            Screen::Alternate => self.alternate.as_ref().expect(ALTERNATE_EXISTS),
         }
     }
 
     fn grid_mut(&mut self) -> &mut Grid {
         match self.screen {
             Screen::Primary => &mut self.primary,
-            Screen::Alternate => &mut self.alternate,
+            Screen::Alternate => self.alternate.as_mut().expect(ALTERNATE_EXISTS),
         }
     }
 
@@ -437,7 +449,7 @@ impl Emulator {
         } = self;
         let grid = match screen {
             Screen::Primary => primary,
-            Screen::Alternate => alternate,
+            Screen::Alternate => alternate.as_mut().expect(ALTERNATE_EXISTS),
         };
         let row = grid.row_mut(cursor.line);
         let mut joins = previous_cell(row, cursor).is_some_and(|col| ends_in_zwj(row, col));
@@ -922,7 +934,7 @@ impl Emulator {
             47 => self.switch_screen(on),
             1047 => {
                 if !on && self.screen == Screen::Alternate {
-                    self.alternate.clear(&Style::DEFAULT);
+                    self.grid_mut().clear(&Style::DEFAULT);
                 }
                 self.switch_screen(on);
             }
@@ -937,7 +949,7 @@ impl Emulator {
                 if on && self.screen == Screen::Primary {
                     self.save_cursor();
                     self.switch_screen(true);
-                    self.alternate.clear(&Style::DEFAULT);
+                    self.grid_mut().clear(&Style::DEFAULT);
                 } else if !on && self.screen == Screen::Alternate {
                     self.switch_screen(false);
                     self.restore_cursor();
@@ -948,11 +960,14 @@ impl Emulator {
     }
 
     fn switch_screen(&mut self, alternate: bool) {
-        self.screen = if alternate {
-            Screen::Alternate
+        if alternate {
+            let (width, height) = (self.width(), self.height());
+            self.alternate
+                .get_or_insert_with(|| Grid::new(width, height, 0));
+            self.screen = Screen::Alternate;
         } else {
-            Screen::Primary
-        };
+            self.screen = Screen::Primary;
+        }
     }
 
     // --- Cursor save and restore, resets ----------------------------------
