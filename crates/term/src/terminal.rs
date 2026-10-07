@@ -137,7 +137,11 @@ impl Terminal {
         let emulator = &self.emulator;
         for grid in std::iter::once(&emulator.primary).chain(&emulator.alternate) {
             assert_eq!(grid.rows().len(), emulator.height());
-            for row in grid.scrollback().chain(grid.rows()) {
+            for row in grid.scrollback() {
+                assert_eq!(row.width(), emulator.width());
+                row.assert_invariants();
+            }
+            for row in grid.rows() {
                 assert_eq!(row.width(), emulator.width());
                 row.assert_invariants();
             }
@@ -203,7 +207,7 @@ bitflags! {
 const ALTERNATE_EXISTS: &str = "the alternate screen exists once it has been shown";
 
 /// U+200D ZERO WIDTH JOINER, which glues emoji like 👩‍💻 into one grapheme.
-const ZWJ: char = '\u{200D}';
+pub(crate) const ZWJ: char = '\u{200D}';
 
 /// The column of the character just before the cursor on its line, if
 /// there is one. That's the cursor's own cell during a pending wrap, since

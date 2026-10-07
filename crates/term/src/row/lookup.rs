@@ -41,11 +41,6 @@ impl StyleLookup {
         self.slots.clear();
     }
 
-    /// Forgets the table and frees its memory.
-    pub(crate) fn release(&mut self) {
-        self.slots = Vec::new();
-    }
-
     /// The index of `style` in `palette`, which the table must be built for.
     pub(crate) fn find(&self, palette: &[Style], style: &Style) -> Option<StyleIndex> {
         let mask = self.slots.len() - 1;

@@ -33,6 +33,10 @@ pub struct Row {
     /// The style [`intern`](Self::intern) returned last, checked before
     /// anything else: runs of text in one style intern it over and over.
     last_style: StyleIndex,
+    /// Every cell from this column on is [`Cell::BLANK`]. An upper bound,
+    /// raised by writes, so finding where the row's content ends needn't
+    /// look at every blank after it.
+    written: u16,
     wrapped: bool,
 }
 
@@ -58,6 +62,7 @@ impl Row {
             palette: Vec::new(),
             extras: None,
             last_style: StyleIndex::DEFAULT,
+            written: 0,
             wrapped: false,
         }
     }
@@ -161,9 +166,22 @@ impl Row {
         self.unlink_wide(cols.start);
         self.unlink_wide(cols.end - 1);
         self.remove_graphemes(&cols);
+        self.touch(cols.end);
         for (cell, &byte) in self.cells[cols].iter_mut().zip(text) {
             *cell = Cell::new(char::from(byte), style, CellFlags::empty());
         }
+    }
+
+    /// How far the row has been written: every cell from here on is
+    /// [`Cell::BLANK`].
+    pub(crate) fn written(&self) -> usize {
+        usize::from(self.written)
+    }
+
+    /// Notes that cells before `end` may no longer be blank.
+    fn touch(&mut self, end: usize) {
+        let end = u16::try_from(end).expect("columns fit in u16");
+        self.written = self.written.max(end);
     }
 
     /// Appends a zero-width codepoint (a combining accent, a variation selector,
@@ -172,6 +190,7 @@ impl Row {
         debug_assert!(!self.cells[col].is_wide_spacer(), "spacers hold no text");
         if self.extras_mut().graphemes.append(col, ch) {
             self.cells[col].add_flags(CellFlags::GRAPHEME);
+            self.touch(col + 1);
         }
     }
 
@@ -180,17 +199,6 @@ impl Row {
         self.grapheme(col)
             .and_then(|extra| extra.last().copied())
             .unwrap_or_else(|| self.cells[col].ch())
-    }
-
-    /// Lets go of what only rows still on screen need. The grid calls this
-    /// as the row scrolls into scrollback, where it won't change again.
-    pub(crate) fn retire(&mut self) {
-        if let Some(extras) = &mut self.extras {
-            extras.lookup.release();
-            if extras.graphemes.is_empty() {
-                self.extras = None;
-            }
-        }
     }
 
     /// Blanks `cols` in `style`, clamped to the row.
@@ -203,6 +211,9 @@ impl Row {
         self.unlink_wide(cols.start);
         self.unlink_wide(cols.end - 1);
         self.remove_graphemes(&cols);
+        if blank != Cell::BLANK {
+            self.touch(cols.end);
+        }
         self.cells[cols].fill(blank);
     }
 
@@ -217,7 +228,15 @@ impl Row {
         }
         self.wrapped = false;
         let blank = Cell::blank(self.intern(style));
-        self.cells.fill(blank);
+        if blank == Cell::BLANK {
+            // Cells past the written mark are blank already.
+            let written = self.written();
+            self.cells[..written].fill(blank);
+            self.written = 0;
+        } else {
+            self.cells.fill(blank);
+            self.written = u16::try_from(self.cells.len()).expect("columns fit in u16");
+        }
     }
 
     /// Inserts `count` blank cells at `col`, shifting the rest of the row right.
@@ -246,6 +265,10 @@ impl Row {
         if let Some(extras) = &mut self.extras {
             extras.graphemes.shift_right(col, count, width);
         }
+        self.touch((self.written() + count).min(width));
+        if blank != Cell::BLANK {
+            self.touch(col + count);
+        }
         self.cells.copy_within(col..width - count, col + count);
         self.cells[col..col + count].fill(blank);
     }
@@ -273,6 +296,9 @@ impl Row {
 
         if let Some(extras) = &mut self.extras {
             extras.graphemes.shift_left(col, count);
+        }
+        if blank != Cell::BLANK {
+            self.touch(width);
         }
         self.cells.copy_within(after..width, col);
         self.cells[width - count..].fill(blank);
@@ -385,6 +411,9 @@ impl Row {
     }
 
     fn set_cell(&mut self, col: usize, cell: Cell) {
+        if cell != Cell::BLANK {
+            self.touch(col + 1);
+        }
         if self.cells[col].has_grapheme()
             && let Some(extras) = &mut self.extras
         {
@@ -393,7 +422,8 @@ impl Row {
         self.cells[col] = cell;
     }
 
-    fn grapheme(&self, col: usize) -> Option<&[char]> {
+    /// The codepoints the cell at `col` holds beyond its first, if any.
+    pub(crate) fn grapheme(&self, col: usize) -> Option<&[char]> {
         self.extras.as_ref()?.graphemes.get(col)
     }
 
@@ -412,6 +442,12 @@ impl Row {
     /// Panics if any of the row's invariants are broken.
     #[cfg(test)]
     pub(crate) fn assert_invariants(&self) {
+        assert!(
+            self.cells[self.written()..]
+                .iter()
+                .all(|&cell| cell == Cell::BLANK),
+            "a cell after the written mark isn't blank"
+        );
         for (col, cell) in self.cells.iter().enumerate() {
             if cell.is_wide() {
                 assert!(
@@ -626,10 +662,6 @@ mod tests {
             row.assert_invariants();
         }
         assert!(row.extras.as_ref().is_some_and(|e| e.lookup.is_built()));
-        assert_eq!(*row.style(row.cells()[255 % 40]), style(255));
-
-        row.retire();
-        assert!(row.extras.is_none(), "a retired row keeps no lookup");
         assert_eq!(*row.style(row.cells()[255 % 40]), style(255));
     }
 

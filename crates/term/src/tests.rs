@@ -33,7 +33,7 @@ fn style_at(terminal: &Terminal, line: usize, col: usize) -> Style {
 }
 
 fn scrollback_text(terminal: &Terminal) -> Vec<String> {
-    terminal.grid().scrollback().map(crate::Row::text).collect()
+    terminal.grid().scrollback().map(|row| row.text()).collect()
 }
 
 fn red_fg() -> Style {
@@ -559,26 +559,40 @@ fn observe(
 /// row wraps.
 type RowContents = (Vec<(String, CellFlags, Style)>, bool);
 
+fn row_contents(row: &crate::Row) -> RowContents {
+    let cells = (0..row.width())
+        .map(|col| {
+            let mut text = String::new();
+            row.push_text(col, &mut text);
+            let cell = row.cells()[col];
+            (text, cell.flags(), *row.style(cell))
+        })
+        .collect();
+    (cells, row.is_wrapped())
+}
+
 /// Every row of both screen and scrollback, in full.
 fn cells(terminal: &Terminal) -> Vec<RowContents> {
     let grid = terminal.grid();
     grid.scrollback()
-        .chain(grid.rows())
-        .map(|row| {
-            let cells = (0..row.width())
-                .map(|col| {
-                    let mut text = String::new();
-                    row.push_text(col, &mut text);
-                    let cell = row.cells()[col];
-                    (text, cell.flags(), *row.style(cell))
-                })
-                .collect();
-            (cells, row.is_wrapped())
-        })
+        .map(|row| row_contents(&row))
+        .chain(grid.rows().map(row_contents))
         .collect()
 }
 
 proptest! {
+    #[test]
+    fn scrollback_stores_any_row_exactly(bytes in output(), cols in 1u16..12, rows in 1u16..6) {
+        let mut t = terminal(cols, rows);
+        t.advance(&bytes);
+        for row in t.grid().rows() {
+            let mut history = crate::scrollback::Scrollback::new(1);
+            history.push(row, false);
+            let stored = history.rows().next().expect("one row was stored");
+            prop_assert_eq!(row_contents(&stored), row_contents(row));
+        }
+    }
+
     #[test]
     fn the_fast_print_path_matches_the_simple_one(
         bytes in output(),

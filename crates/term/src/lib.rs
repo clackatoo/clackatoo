@@ -18,6 +18,7 @@ mod grid;
 mod parser;
 pub mod recording;
 mod row;
+mod scrollback;
 mod sgr;
 mod size;
 mod style;

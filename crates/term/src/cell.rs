@@ -36,6 +36,7 @@ bitflags! {
 /// index, and codepoints beyond the first live in a side table on the row,
 /// so neither inflates every cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct Cell {
     ch: char,
     style: StyleIndex,
@@ -54,6 +55,13 @@ impl Cell {
 
     pub(crate) const fn new(ch: char, style: StyleIndex, flags: CellFlags) -> Self {
         Self { ch, style, flags }
+    }
+
+    /// The whole cell as one number: character in the low 32 bits, then
+    /// style, then flags. With the fields laid out in that order, this is a
+    /// single load, so loops can test several fields with one comparison.
+    pub(crate) const fn bits(self) -> u64 {
+        self.ch as u64 | (self.style.0 as u64) << 32 | (self.flags.bits() as u64) << 48
     }
 
     /// The cell's character, or its first codepoint if it holds a longer

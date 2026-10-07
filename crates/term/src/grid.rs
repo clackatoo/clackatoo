@@ -4,29 +4,30 @@ use std::collections::VecDeque;
 use std::ops::Range;
 
 use crate::row::Row;
+use crate::scrollback::Scrollback;
 use crate::style::Style;
 
-/// A screen of rows and the scrollback above it.
+/// A screen of rows and the history above it.
 ///
-/// Rows are kept in one deque: scrollback first, oldest at the front,
-/// followed by the screen's rows. Scrolling into scrollback moves the
-/// boundary instead of copying rows. Once scrollback is full, the oldest row
-/// is reused as the new blank line, so steady-state scrolling doesn't allocate.
+/// The screen is a ring of rows. A row that scrolls off the top is stored
+/// in [`Scrollback`], compactly, and then blanked and reused as the new
+/// bottom row, so scrolling never allocates rows.
 #[derive(Clone, Debug)]
 pub struct Grid {
+    /// Exactly `height` rows, top first.
     rows: VecDeque<Row>,
+    scrollback: Scrollback,
     width: usize,
     height: usize,
-    scrollback_limit: usize,
 }
 
 impl Grid {
     pub(crate) fn new(width: usize, height: usize, scrollback_limit: usize) -> Self {
         Self {
             rows: (0..height).map(|_| Row::new(width)).collect(),
+            scrollback: Scrollback::new(scrollback_limit),
             width,
             height,
-            scrollback_limit,
         }
     }
 
@@ -45,7 +46,7 @@ impl Grid {
     /// Rows currently held in scrollback.
     #[must_use]
     pub fn scrollback_len(&self) -> usize {
-        self.rows.len() - self.height
+        self.scrollback.len()
     }
 
     /// The screen row `line`, counting from the top of the screen.
@@ -55,47 +56,45 @@ impl Grid {
     /// If `line` is not on screen.
     #[must_use]
     pub fn row(&self, line: usize) -> &Row {
-        assert!(line < self.height, "row {line} is off screen");
-        &self.rows[self.scrollback_len() + line]
+        &self.rows[line]
     }
 
     /// The screen's rows, top to bottom.
     #[must_use]
     pub fn rows(&self) -> impl ExactSizeIterator<Item = &Row> {
-        self.rows.range(self.scrollback_len()..)
+        self.rows.iter()
     }
 
-    /// The scrollback's rows, oldest first.
+    /// The scrollback's rows, oldest first, each at the width it had when it
+    /// scrolled off. History is stored compactly, so each is rebuilt.
     #[must_use]
-    pub fn scrollback(&self) -> impl ExactSizeIterator<Item = &Row> {
-        self.rows.range(..self.scrollback_len())
+    pub fn scrollback(&self) -> impl ExactSizeIterator<Item = Row> + '_ {
+        self.scrollback.rows()
     }
 
     pub(crate) fn row_mut(&mut self, line: usize) -> &mut Row {
-        assert!(line < self.height, "row {line} is off screen");
-        let index = self.scrollback_len() + line;
-        &mut self.rows[index]
+        &mut self.rows[line]
     }
 
     /// Scrolls the whole screen up by `count` lines. The top lines move into
     /// scrollback, and blank lines in `blank` appear at the bottom.
     pub(crate) fn scroll_up_into_scrollback(&mut self, count: usize, blank: &Style) {
         for _ in 0..count.min(self.height) {
-            // When scrollback is full, the front row is the one to discard:
-            // the oldest scrollback row, or, with no scrollback at all, the
-            // top screen row, which has nowhere to go. Either way, reuse it.
-            let mut row = if self.scrollback_len() >= self.scrollback_limit {
-                self.rows.pop_front().expect("a grid always has rows")
-            } else {
-                Row::new(self.width)
-            };
+            let mut row = self.rows.pop_front().expect("a grid always has rows");
+            // A row that wrapped early, because a wide character didn't fit in
+            // its last column, ends with padding rather than text.
+            let padded = row.is_wrapped()
+                && row
+                    .cells()
+                    .last()
+                    .is_some_and(|&cell| cell == crate::Cell::BLANK)
+                && self
+                    .rows
+                    .front()
+                    .is_some_and(|next| next.cells().first().is_some_and(|cell| cell.is_wide()));
+            self.scrollback.push(&row, padded);
             row.reset(blank);
             self.rows.push_back(row);
-            if self.scrollback_limit > 0 {
-                // The top screen row has just become the newest scrollback.
-                let newest = self.scrollback_len() - 1;
-                self.rows[newest].retire();
-            }
         }
     }
 
@@ -125,25 +124,22 @@ impl Grid {
 
     /// Blanks every screen row in `blank`.
     pub(crate) fn clear(&mut self, blank: &Style) {
-        let start = self.scrollback_len();
-        for row in self.rows.range_mut(start..) {
+        for row in &mut self.rows {
             row.reset(blank);
         }
     }
 
     pub(crate) fn clear_scrollback(&mut self) {
-        let scrollback = self.scrollback_len();
-        self.rows.drain(..scrollback);
+        self.scrollback.clear();
     }
 
     fn absolute(&self, lines: Range<usize>) -> Range<usize> {
         assert!(lines.end <= self.height, "region {lines:?} is off screen");
-        let offset = self.scrollback_len();
-        lines.start + offset..lines.end + offset
+        lines
     }
 
     /// Rotates `rows` left by `count` in place, without making the deque
-    /// contiguous, which could move all of scrollback.
+    /// contiguous, which would move every row.
     fn rotate_left(&mut self, rows: Range<usize>, count: usize) {
         // The rows are almost always in one of the deque's two slices, where
         // the standard library rotates them with a few block moves.
@@ -192,7 +188,7 @@ mod tests {
     }
 
     fn scrollback(grid: &Grid) -> Vec<String> {
-        grid.scrollback().map(Row::text).collect()
+        grid.scrollback().map(|row| row.text()).collect()
     }
 
     #[test]
