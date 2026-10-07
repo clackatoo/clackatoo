@@ -3,7 +3,6 @@
 use std::ops::Range;
 
 use bitflags::bitflags;
-use unicode_width::UnicodeWidthChar;
 
 use crate::charset::Charsets;
 use crate::grid::Grid;
@@ -12,6 +11,7 @@ use crate::row::Row;
 use crate::size::Size;
 use crate::style::Style;
 use crate::tabs::TabStops;
+use crate::width;
 
 /// Settings fixed when a terminal is created.
 #[derive(Clone, Debug)]
@@ -485,7 +485,7 @@ impl Emulator {
 
             let (ch, len) = decode_utf8(&bytes[used..]);
             let ch = cursor.charsets.map(ch);
-            match ch.width() {
+            match width::of(ch) {
                 // Control characters never get here, but drop them if so.
                 None => {}
                 Some(cells) if cells == 0 || joins => {
@@ -525,7 +525,7 @@ impl Emulator {
     /// match this.
     fn print(&mut self, ch: char) {
         let ch = self.cursor.charsets.map(ch);
-        match ch.width() {
+        match width::of(ch) {
             // Control characters reach here only as invalid input; drop them.
             None => {}
             Some(0) => self.print_zero_width(ch),
@@ -605,7 +605,7 @@ impl Emulator {
     pub(crate) fn repeat_last(&mut self, count: usize) {
         if let Some(ch) = self.last_printed {
             for _ in 0..count {
-                self.print_cell(ch, ch.width() == Some(2));
+                self.print_cell(ch, width::of(ch) == Some(2));
             }
         }
     }

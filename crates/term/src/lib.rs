@@ -23,6 +23,7 @@ mod size;
 mod style;
 mod tabs;
 mod terminal;
+mod width;
 
 #[cfg(test)]
 mod tests;

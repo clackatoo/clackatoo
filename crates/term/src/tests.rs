@@ -54,6 +54,16 @@ mod printing {
     use super::*;
 
     #[test]
+    fn a_character_said_to_be_three_columns_wide_is_drawn_two_wide() {
+        // unicode-width gives U+17D8 a width of 3; cells hold at most 2.
+        let mut t = terminal(10, 2);
+        t.advance("\u{17D8}x".as_bytes());
+        assert_eq!(t.screen_text(), "\u{17D8}x");
+        assert_eq!(cursor(&t), (0, 3));
+        t.assert_invariants();
+    }
+
+    #[test]
     fn text_and_newlines() {
         let t = after(10, 3, "hello\r\nworld");
         assert_eq!(t.screen_text(), "hello\nworld");
