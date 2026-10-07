@@ -53,12 +53,17 @@ impl Gpu {
         descriptor.backends = backends;
         let instance = wgpu::Instance::new(descriptor);
         // The window doesn't exist yet, so the adapter can't be chosen by
-        // the screen it draws on. On desktops with two GPUs, the discrete
-        // one usually drives the screen; the integrated one may not be able
-        // to hand frames to the compositor at all. If the guess is wrong,
-        // the window picks again (see `App::open`).
+        // the screen it draws on. Without a preference, wgpu takes the
+        // first GPU the system lists, and Mesa's device-select layer lists
+        // first the one that drives the screen (the boot VGA device). That
+        // is what the window needs: on a desktop, the discrete GPU the
+        // monitors are plugged into; on a laptop, the integrated GPU behind
+        // its panel. Frames from the other GPU may never reach the
+        // compositor, and a laptop's sleeping discrete GPU takes seconds to
+        // wake. `WGPU_POWER_PREF` (`low` or `high`) overrides the choice. If
+        // the guess is wrong, the window picks again (see `App::open`).
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: wgpu::PowerPreference::from_env().unwrap_or_default(),
             ..Default::default()
         }))
         .context("no GPU found")?;
