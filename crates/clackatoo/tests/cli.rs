@@ -17,8 +17,15 @@ fn clackatoo(runtime: &Path, args: &[&str]) -> Output {
 
 /// Starts a daemon in `runtime` and waits until it answers.
 fn daemon(runtime: &Path) -> Child {
+    daemon_with(runtime, &[])
+}
+
+/// Starts a daemon in `runtime`, run with `args`, and waits until it
+/// answers.
+fn daemon_with(runtime: &Path, args: &[&str]) -> Child {
     let child = Command::new(BINARY)
         .arg("daemon")
+        .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
         .spawn()
         .expect("the daemon starts");
@@ -446,7 +453,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     use clackatoo_protocol::ServerMessage;
 
     let runtime = Runtime::new();
-    let daemon = daemon(runtime.path());
+    let daemon = daemon_with(runtime.path(), &["--scrollback-compaction", "lazy"]);
     let id = stdout(&clackatoo(runtime.path(), &["new", "--", "cat"]));
     let id = id.trim();
     let not_upgrading = |answer: Option<ServerMessage>, why: &str| match answer {
@@ -469,13 +476,21 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
         ask_to_upgrade(runtime.path(), Path::new("/bin/true")),
         "can't take over",
     );
+    // And a build that would take over, but not with the arguments this
+    // daemon was started with, as if it had dropped a flag.
+    let flagless = script(
+        bin.path(),
+        "flagless",
+        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1"#,
+    );
+    not_upgrading(ask_to_upgrade(runtime.path(), &flagless), "can't take over");
     // Failed after everything was handed over: it says it can take over,
     // then vanishes before the exec. The daemon carries on from what it
     // would have handed over.
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"[ "$1" = handover-versions ] && echo 1 && rm -- "$0""#,
+        r#"case " $* " in *" --handover-versions "*) echo 1; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),

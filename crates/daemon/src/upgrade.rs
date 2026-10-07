@@ -22,8 +22,10 @@
 //! on from its own handover.
 //!
 //! Once exec succeeds there's no way back, so first the daemon checks that
-//! the new program is a build that can take over: it runs it with
-//! [`VERSIONS_COMMAND`], which lists the handover versions it reads.
+//! the new program is a build that can take over: it runs it with the
+//! arguments the exec will use plus [`VERSIONS_FLAG`], which lists the
+//! handover versions it reads. A build that wouldn't accept those
+//! arguments fails that the same way.
 //! Without that, an older build, or any other program, would take the
 //! daemon's place and lose every terminal. (Even a file that isn't a
 //! program would: exec runs those with `/bin/sh`.)
@@ -56,11 +58,12 @@ const FDS_PER_MESSAGE: usize = 253;
 /// The flag that tells a new build it is taking over: see the module docs.
 pub const RESUME_FLAG: &str = "--resume";
 
-/// The command that asks a build which handovers it can take over from. It
-/// prints [`readable_versions`], separated by spaces.
-pub const VERSIONS_COMMAND: &str = "handover-versions";
+/// The flag that asks a build which handovers it can take over from,
+/// instead of running the daemon. It prints [`readable_versions`],
+/// separated by spaces.
+pub const VERSIONS_FLAG: &str = "--handover-versions";
 
-/// How long a build may take to answer [`VERSIONS_COMMAND`].
+/// How long a build may take to answer [`VERSIONS_FLAG`].
 const VERSIONS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The handover versions this build can take over from.
@@ -69,12 +72,13 @@ pub fn readable_versions() -> &'static [u32] {
     crate::handover::READABLE
 }
 
-/// Checks that `executable` is a build that can take over from this one,
-/// by asking it which handover versions it reads.
-pub(crate) fn check_takes_over(executable: &Path) -> Result<(), String> {
+/// Checks that `executable`, run with `args`, is a build that can take
+/// over from this one, by asking it which handover versions it reads.
+pub(crate) fn check_takes_over(executable: &Path, args: &[OsString]) -> Result<(), String> {
     let run = |err: io::Error| format!("{} can't be run: {err}", executable.display());
     let mut child = Command::new(executable)
-        .arg(VERSIONS_COMMAND)
+        .args(args)
+        .arg(VERSIONS_FLAG)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -163,6 +167,7 @@ pub fn serve(
         let lock = runtime.lock()?;
         (lock, Daemon::bind(&runtime.socket_path(), config.clone())?)
     };
+    daemon.set_upgrade_args(args);
 
     while let Some(Upgrade {
         executable,
@@ -181,6 +186,7 @@ pub fn serve(
         }
         handover.state.lock = None;
         daemon = Daemon::resume(handover, config.clone()).map_err(io::Error::other)?;
+        daemon.set_upgrade_args(args);
     }
     Ok(())
 }
@@ -266,6 +272,22 @@ fn exec(executable: &Path, args: &[OsString], handover: &Handover) -> io::Error 
 /// Receives the handover the last build sent on stdin (see the module
 /// docs), then points stdin at `/dev/null` again.
 fn receive() -> Result<Handover, HandoverError> {
+    let fds = receive_fds();
+    // Whatever happened: anything left in flight on the old stdin, such as
+    // the lock, is dropped with it.
+    rustix::stdio::dup2_stdin(File::open("/dev/null")?).map_err(io::Error::from)?;
+
+    let mut fds = fds?.into_iter();
+    let mut memfd = File::from(fds.next().ok_or(HandoverError::NotAHandover)?);
+    let state = State::read(&mut memfd)?;
+    Ok(Handover {
+        state,
+        fds: Fds::from_received(fds.collect()),
+    })
+}
+
+/// Every fd the last build sent on stdin, in order.
+fn receive_fds() -> Result<Vec<OwnedFd>, HandoverError> {
     let stdin = io::stdin();
     let mut fds = Vec::new();
     loop {
@@ -288,16 +310,7 @@ fn receive() -> Result<Handover, HandoverError> {
             return Err(HandoverError::Damaged("fds were cut off"));
         }
         if received.bytes == 0 {
-            break;
+            return Ok(fds);
         }
     }
-    rustix::stdio::dup2_stdin(File::open("/dev/null")?).map_err(io::Error::from)?;
-
-    let mut fds = fds.into_iter();
-    let mut memfd = File::from(fds.next().ok_or(HandoverError::NotAHandover)?);
-    let state = State::read(&mut memfd)?;
-    Ok(Handover {
-        state,
-        fds: Fds::from_received(fds.collect()),
-    })
 }

@@ -128,10 +128,6 @@ enum Command {
     /// Show or change the window's settings in client.toml. With no
     /// arguments, shows them all.
     Config(ConfigArgs),
-    /// Print the handover versions this build can take over from, for a
-    /// daemon checking it before upgrading to it.
-    #[command(name = "handover-versions", hide = true)]
-    HandoverVersions,
     /// Relay between standard input and output and the daemon, starting it
     /// if it isn't running. `--remote` runs this on the remote machine,
     /// through ssh.
@@ -164,6 +160,10 @@ struct DaemonArgs {
     /// over its state on standard input.
     #[arg(long, hide = true)]
     resume: bool,
+    /// Print the handover versions this build can take over from, instead
+    /// of running the daemon: an older build asks before upgrading to it.
+    #[arg(long, hide = true)]
+    handover_versions: bool,
     /// When scrollback is compacted to save memory: `lazy` once output
     /// pauses, `eager` as each line scrolls off, or `off` for never, which
     /// is fastest but takes about 8 bytes per column for every line.
@@ -322,14 +322,6 @@ fn run(command: Command) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Command::HandoverVersions => {
-            let versions: Vec<String> = upgrade::readable_versions()
-                .iter()
-                .map(u32::to_string)
-                .collect();
-            println!("{}", versions.join(" "));
-            Ok(())
-        }
         Command::Upgrade => {
             let mut client = launch::upgrade(&RuntimeDir::for_current_user())?;
             let terminals = client.list_terminals()?.len();
@@ -398,6 +390,14 @@ fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
 }
 
 fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
+    if args.handover_versions {
+        let versions: Vec<String> = upgrade::readable_versions()
+            .iter()
+            .map(u32::to_string)
+            .collect();
+        println!("{}", versions.join(" "));
+        return Ok(());
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let runtime = RuntimeDir::for_current_user();
     let mut config = DaemonConfig::from_env();

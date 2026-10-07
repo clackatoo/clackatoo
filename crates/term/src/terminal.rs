@@ -244,17 +244,12 @@ impl Terminal {
             return Err(RestoreError("the cursor is off the screen"));
         }
 
-        let history = snapshot
-            .history
-            .iter()
-            .map(Line::to_row)
-            .collect::<Result<Vec<_>, _>>()?;
         let history = Scrollback::restored(
             config.scrollback_lines,
             config.scrollback_compaction,
-            history,
+            snapshot.history.iter().map(Line::to_row),
             snapshot.history_end,
-        );
+        )?;
         let mut emulator = Emulator::new(size, config);
         emulator.primary = Grid::restored(width, &snapshot.primary, history)?;
         emulator.alternate = snapshot

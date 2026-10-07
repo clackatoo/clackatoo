@@ -235,23 +235,28 @@ impl Scrollback {
     }
 
     /// History holding `rows`, oldest first, each with whether it ends in
-    /// padding, the newest numbered `end - 1`.
-    pub(crate) fn restored(
+    /// padding, the newest numbered `end - 1`. Fails with the first row
+    /// that does.
+    pub(crate) fn restored<E>(
         limit: usize,
         compaction: Compaction,
-        rows: impl IntoIterator<Item = (Row, bool)>,
+        rows: impl IntoIterator<Item = Result<(Row, bool), E>>,
         end: u64,
-    ) -> Self {
-        let mut history = Self::new(limit, compaction);
-        for (row, padded) in rows {
+    ) -> Result<Self, E> {
+        // Nothing is printing, so lazy history needn't wait to compact:
+        // each row is compacted as it comes, so they're never all held raw.
+        let restoring = match compaction {
+            Compaction::Off => Compaction::Off,
+            Compaction::Lazy | Compaction::Eager => Compaction::Eager,
+        };
+        let mut history = Self::new(limit, restoring);
+        for row in rows {
+            let (row, padded) = row?;
             history.push(row, padded);
         }
-        // Nothing is printing, so there is no reason to wait.
-        if compaction == Compaction::Lazy {
-            history.compact();
-        }
+        history.compaction = compaction;
         history.stored = end.max(history.stored);
-        history
+        Ok(history)
     }
 
     /// The number the next line stored will get: one past the newest.

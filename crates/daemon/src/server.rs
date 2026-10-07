@@ -269,6 +269,9 @@ pub struct Daemon {
     /// A client asked the daemon to become this program: see
     /// [`ClientMessage::Upgrade`]. The client's token.
     upgrade_to: Option<(PathBuf, Token)>,
+    /// The arguments an upgrade runs the next build with. Without them,
+    /// the daemon can't upgrade.
+    upgrade_args: Vec<std::ffi::OsString>,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -332,6 +335,7 @@ impl Daemon {
             config,
             buffer: vec![0; READ_BUFFER_LEN].into_boxed_slice(),
             upgrade_to: None,
+            upgrade_args: Vec::new(),
         })
     }
 
@@ -373,12 +377,21 @@ impl Daemon {
                 Err(err) => log::error!("a hung-up program couldn't be taken over: {err}"),
             }
         }
+        // The handover's copy of every terminal, and the rows restoring
+        // their history built, are gone.
+        drop(handover);
+        memory::release_free_memory();
         let terminals = daemon.terminals.len();
         log::info!(
             "carrying on with {terminals} terminal{}",
             if terminals == 1 { "" } else { "s" }
         );
         Ok(daemon)
+    }
+
+    /// Lets the daemon upgrade, running the next build with `args`.
+    pub(crate) fn set_upgrade_args(&mut self, args: &[std::ffi::OsString]) {
+        self.upgrade_args = args.to_vec();
     }
 
     /// Everything the next build needs, taken out of this daemon, which is
@@ -1082,7 +1095,10 @@ impl Daemon {
         if self.upgrade_to.is_some() {
             return Err("the daemon is already upgrading".to_owned());
         }
-        crate::upgrade::check_takes_over(executable)
+        if self.upgrade_args.is_empty() {
+            return Err("this daemon wasn't started to be upgraded".to_owned());
+        }
+        crate::upgrade::check_takes_over(executable, &self.upgrade_args)
     }
 
     /// Reads and decodes everything a client has sent. Returns `None` if the
