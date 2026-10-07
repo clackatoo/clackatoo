@@ -3,9 +3,14 @@
 use clackatoo_protocol::{Size, View};
 use clackatoo_term::{Config, Terminal};
 
+use clackatoo_protocol::{Axis, Content, Layout, Pane, PaneId, TabId, TerminalId, WorkspaceId};
+
+use crate::chrome::{Chrome, Contents, Geometry, Hit, Metrics, Status};
+use crate::desktop::ButtonLayout;
 use crate::fonts::{FontOptions, Fonts};
+use crate::layout::Placement;
 use crate::render::{
-    Bar, BarItem, CursorStyle, Highlight, HighlightKind, Picture, Renderer, Scene, SceneCursor,
+    CursorStyle, Fill, Highlight, HighlightKind, Paint, Picture, Renderer, Scene, SceneCursor,
 };
 use crate::screen::Screen;
 
@@ -27,7 +32,7 @@ fn render(
     rows: u16,
     output: &str,
     scale: f64,
-    (normal_mode, label, highlights): (bool, Option<&str>, &[Highlight]),
+    (normal_mode, highlights): (bool, &[Highlight]),
 ) -> Option<([u32; 2], Vec<u8>)> {
     let gpu = gpu()?;
     let screen = screen(cols, rows, output);
@@ -53,13 +58,14 @@ fn render(
             style: CursorStyle::Block,
         }),
         normal_mode,
-        label,
         highlights,
     };
     let picture = Picture {
         scenes: &[scene],
-        bar: None,
-        dividers: &[],
+        fills: &[],
+        over: &[],
+        texts: &[],
+        transparent: false,
     };
     Some((size, draw(&gpu, size, &picture, &mut fonts)))
 }
@@ -77,7 +83,9 @@ fn fonts(scale: f64) -> Fonts {
         family: std::env::var("CLACKATOO_TEST_FONT").ok(),
         size: 12.0,
     };
-    Fonts::load(&options, scale).expect("a monospace font")
+    let mut fonts = Fonts::load(&options, scale).expect("a monospace font");
+    fonts.load_ui(None, 11.0, scale);
+    fonts
 }
 
 /// Draws `picture` in an image of `size`, and returns its RGBA pixels.
@@ -163,7 +171,7 @@ fn renders_text_colours_and_the_cursor() {
         \x1b[31mred \x1b[32mgreen \x1b[34mblue \x1b[38;2;255;128;0mrgb\x1b[0m \x1b[7minverse\x1b[0m\r\n\
         \x1b[41m red bg \x1b[0m 字符 e\u{301} 😀 👩\u{200D}💻 ok\r\n\
         box: ┌─┐ │ │ └─┘  arrows: → ← ↑ ↓\r\n$ ";
-    let Some((size, pixels)) = render(48, 6, output, 2.0, (false, None, &[])) else {
+    let Some((size, pixels)) = render(48, 6, output, 2.0, (false, &[])) else {
         eprintln!("no GPU available; skipping");
         return;
     };
@@ -174,27 +182,16 @@ fn renders_text_colours_and_the_cursor() {
 }
 
 #[test]
-fn box_drawing_joins_across_rows_and_normal_mode_is_framed() {
+fn box_drawing_joins_across_rows() {
     let output = "┌──┬──┐ ╭──╮ ┏━━┓ ╔══╦═╗\r\n\
         │ab│cd│ │  │ ┃  ┃ ║  ║ ║\r\n\
         ├──┼──┤ ╰──╯ ┗━━┛ ╠══╬═╣\r\n\
         └──┴──┘ ▁▂▃▄▅▆▇█ ░▒▓ ▌▐ ▖▗▘▝ ╚══╩═╝";
-    let Some((size, pixels)) = render(40, 5, output, 2.0, (true, Some("NORMAL  ↑12"), &[]))
-    else {
+    let Some((size, pixels)) = render(40, 5, output, 2.0, (true, &[])) else {
         eprintln!("no GPU available; skipping");
         return;
     };
     save("boxes", size, &pixels);
-    // The frame is drawn in the accent colour, just outside the grid's top
-    // left corner.
-    let width = size[0] as usize;
-    let framed = (0..4).any(|y| {
-        (0..4).any(|x| {
-            let index = (y * width + x) * 4;
-            pixels[index..index + 3] == [0xf8, 0xce, 0x57]
-        })
-    });
-    assert!(framed);
 }
 
 #[test]
@@ -217,137 +214,275 @@ fn selections_and_matches_are_highlighted() {
             kind: HighlightKind::Match,
         },
     ];
-    let Some((size, pixels)) = render(30, 3, output, 2.0, (true, Some("VISUAL"), &highlights))
-    else {
+    let Some((size, pixels)) = render(30, 3, output, 2.0, (true, &highlights)) else {
         eprintln!("no GPU available; skipping");
         return;
     };
     save("highlights", size, &pixels);
 }
 
-#[test]
+/// A window with room for two cards of 20 x 4 cells side by side, with
+/// its frame laid out and its cards placed.
 #[allow(
-    clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
 )]
-fn panes_are_drawn_side_by_side_under_the_bar_with_a_divider() {
-    let Some(gpu) = gpu() else {
-        eprintln!("no GPU available; skipping");
-        return;
+fn two_pane_window(
+    fonts: &mut Fonts,
+    status: Status,
+    menu: Option<([f32; 2], Vec<String>)>,
+    alert: Option<String>,
+) -> ([u32; 2], Chrome, Placement) {
+    let metrics = Metrics {
+        cell: [fonts.cell.width as f32, fonts.cell.height as f32],
+        ui_line: fonts.ui.height,
+        padding: 8.0,
     };
-    let mut fonts = fonts(2.0);
-    let (cell_width, cell_height) = (fonts.cell.width, fonts.cell.height);
-    // Two panes of 20 x 4, a divider's column between them, and the bar's
-    // row above, with a padding's space below it.
-    let padding = 8;
-    let size = [41 * cell_width + 2 * padding, 5 * cell_height + 3 * padding];
-    // Each terminal is wider than its pane, as before a resize lands: the
-    // left one's long line must stop at the divider.
-    let left = screen(30, 4, "left pane, with a line too long for it\r\n$ ");
-    let right = screen(20, 4, "right pane\r\n$ ");
-    let left_rows: Vec<_> = left.rows.iter().collect();
-    let right_rows: Vec<_> = right.rows.iter().collect();
-    let (padding, cell_width, cell_height) =
-        (padding as f32, cell_width as f32, cell_height as f32);
-    let top = 2.0 * padding + cell_height;
-    let pane_size = [20.0 * cell_width, 4.0 * cell_height];
-    let scene = |origin, rows, normal_mode| Scene {
-        origin,
-        size: pane_size,
-        rows,
-        cursor: None,
-        normal_mode,
-        label: None,
-        highlights: &[],
+    // One card of 20 columns, the gap, and another, inset alike.
+    let gap = 2.0 * metrics.padding;
+    let [width, height] = Geometry::window_size(20, 4, metrics);
+    let size = [(2.0 * width - 2.0 * gap) as u32 + gap as u32, height as u32];
+    let geometry = Geometry::new(size, metrics);
+    let buttons = ButtonLayout::default();
+    let chrome = Chrome::new(
+        geometry,
+        Contents {
+            workspaces: vec![
+                (WorkspaceId(1), "clackatoo".into(), true),
+                (WorkspaceId(2), "peios".into(), false),
+            ],
+            tabs: vec![
+                (TabId(1), "1 zsh".into(), true),
+                (TabId(2), "2 htop".into(), false),
+            ],
+            status,
+            buttons: &buttons,
+            bottom_shown: true,
+            menu,
+            alert,
+        },
+        &mut |text, bold| fonts.ui_width(text, bold),
+    );
+    let pane = |id| {
+        Layout::Pane(Pane {
+            id: PaneId(id),
+            content: Content::Terminal(TerminalId(id)),
+        })
     };
-    let scenes = [
-        scene([padding, top], &left_rows, false),
-        scene([padding + 21.0 * cell_width, top], &right_rows, true),
+    let layout = Layout::Split {
+        axis: Axis::LeftToRight,
+        parts: vec![pane(1), pane(2)],
+    };
+    (size, chrome, Placement::new(&layout, &geometry.area))
+}
+
+/// Draws `chrome` and `placement`'s cards, with `screens` on them, the
+/// second focused in normal mode.
+fn draw_window(
+    gpu: &(wgpu::Device, wgpu::Queue),
+    fonts: &mut Fonts,
+    (size, chrome, placement): &([u32; 2], Chrome, Placement),
+    screens: [&Screen; 2],
+) -> Vec<u8> {
+    let geometry = chrome.geometry;
+    let rows: Vec<Vec<_>> = screens
+        .iter()
+        .map(|screen| screen.rows.iter().collect())
+        .collect();
+    let scenes: Vec<Scene<'_>> = placement
+        .panes
+        .iter()
+        .zip(&rows)
+        .enumerate()
+        .map(|(index, ((_, card), rows))| Scene {
+            origin: card.origin,
+            size: card.cells_size(geometry.area.cell),
+            rows,
+            cursor: None,
+            normal_mode: index == 1,
+            highlights: &[],
+        })
+        .collect();
+    let painted = chrome.paint(Hit::Workspace(WorkspaceId(2)));
+    let [width, height] = geometry.size;
+    let mut fills = vec![
+        Fill::rounded([0.0, 0.0, width, height], Paint::Backdrop, 0.0)
+            .fading(Paint::BackdropEnd, [1.0, -1.0]),
     ];
-    let divider_left = padding + 20.5 * cell_width - 1.0;
-    let item = |text: &str, active| BarItem {
-        text: text.into(),
-        active,
-    };
+    fills.extend(painted.fills);
+    for (index, (_, card)) in placement.panes.iter().enumerate() {
+        let edge = if index == 1 {
+            Paint::Accent
+        } else {
+            Paint::Edge
+        };
+        fills.push(
+            Fill::rounded(card.rect.to_array(), Paint::Card, geometry.radius)
+                .bordered(geometry.edge, edge),
+        );
+    }
+    let mut texts = painted.texts;
+    texts.extend(painted.over_texts);
     let picture = Picture {
         scenes: &scenes,
-        bar: Some(Bar {
-            origin: [padding; 2],
-            width: 41.0 * cell_width,
-            left: &[item("clackatoo", true), item("peios", false)],
-            right: &[item("1 zsh", true), item("2 htop", false)],
-            alert: None,
-        }),
-        dividers: &[[divider_left, top, 2.0, pane_size[1]]],
+        fills: &fills,
+        over: &painted.over,
+        texts: &texts,
+        transparent: false,
     };
-    let pixels = draw(&gpu, size, &picture, &mut fonts);
-    save("panes", size, &pixels);
-
-    let pixel = |x: f32, y: f32| {
-        let index = (y as usize * size[0] as usize + x as usize) * 4;
-        &pixels[index..index + 3]
-    };
-    // The active workspace is picked out in the accent colour.
-    assert_eq!(pixel(padding + 1.0, padding + 1.0), [0xf8, 0xce, 0x57]);
-    // The divider is drawn, and the left pane's long line stops before it.
-    assert_eq!(pixel(divider_left + 1.0, top + 1.0), [0x3c, 0x40, 0x44]);
-    let background = pixel(0.0, size[1] as f32 - 1.0).to_vec();
-    let text_beside_divider = (0..cell_height as usize).any(|y| {
-        pixel(divider_left - cell_width / 2.0 + 2.0, top + y as f32) != background.as_slice()
-    });
-    assert!(
-        !text_beside_divider,
-        "the cut-off line spilled into the divider's cell"
-    );
+    draw(gpu, *size, &picture, fonts)
 }
 
 #[test]
 #[allow(
-    clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
 )]
-fn an_alert_sits_in_the_middle_of_the_bar_in_the_warning_colour() {
+fn panes_are_drawn_on_cards_between_the_bars() {
     let Some(gpu) = gpu() else {
         eprintln!("no GPU available; skipping");
         return;
     };
     let mut fonts = fonts(2.0);
-    let (cell_width, cell_height) = (fonts.cell.width as f32, fonts.cell.height as f32);
-    let padding = 8.0;
-    let size = [
-        (60.0 * cell_width + 2.0 * padding) as u32,
-        (cell_height + 2.0 * padding) as u32,
-    ];
-    let item = |text: &str, active| BarItem {
-        text: text.into(),
-        active,
-    };
-    let alert = "no contact with box for 4 s";
-    let picture = Picture {
-        scenes: &[],
-        bar: Some(Bar {
-            origin: [padding; 2],
-            width: 60.0 * cell_width,
-            left: &[item("clackatoo", true)],
-            right: &[item("1 zsh", true)],
-            alert: Some(alert),
-        }),
-        dividers: &[],
-    };
-    let pixels = draw(&gpu, size, &picture, &mut fonts);
-    save("alert", size, &pixels);
+    let window = two_pane_window(
+        &mut fonts,
+        Status::Tabs {
+            note: Some("NORMAL".into()),
+        },
+        None,
+        None,
+    );
+    // Each terminal is wider than its card, as before a resize lands: the
+    // left one's long line must stop at its card's edge.
+    let left = screen(30, 4, "left pane, with a line too long for it\r\n$ ");
+    let right = screen(20, 4, "right pane\r\n$ ");
+    let pixels = draw_window(&gpu, &mut fonts, &window, [&left, &right]);
+    let (size, chrome, placement) = &window;
+    save("panes", *size, &pixels);
 
-    let pixel = |x: f32, y: f32| {
+    let pixel = |[x, y]: [f32; 2]| {
         let index = (y as usize * size[0] as usize + x as usize) * 4;
         &pixels[index..index + 3]
     };
-    // The alert's first cell is space, so it shows the colour behind it.
-    let alert_left = padding + (60.0 - (alert.len() as f32 + 2.0)) / 2.0 * cell_width;
-    assert_eq!(pixel(alert_left + 2.0, padding + 1.0), [0xcc, 0x66, 0x66]);
-    // The items either side are still there.
-    assert_eq!(pixel(padding + 1.0, padding + 1.0), [0xf8, 0xce, 0x57]);
-    let right_left = padding + 60.0 * cell_width - 7.0 * cell_width;
-    assert_eq!(pixel(right_left + 1.0, padding + 1.0), [0xf8, 0xce, 0x57]);
+    let brightness = |rgb: &[u8]| rgb.iter().map(|&c| u32::from(c)).sum::<u32>();
+    // The workspace shown, and the one under the mouse, sit on soft
+    // backgrounds, lighter than the backdrop.
+    for item in &chrome.workspaces {
+        let inside = pixel([item.rect.x + 6.0, item.rect.y + item.rect.height - 4.0]);
+        let beside = pixel([item.rect.x - 3.0, item.rect.y + item.rect.height - 4.0]);
+        assert!(
+            brightness(inside) > brightness(beside) + 20,
+            "{} has a background",
+            item.text
+        );
+    }
+    // The backdrop is bluest at the top right.
+    let top_right = pixel([size[0] as f32 - 2.0, 1.0]);
+    let bottom_left = pixel([1.0, size[1] as f32 - 2.0]);
+    assert!(top_right[2] > bottom_left[2]);
+    let left_card = placement.panes[0].1.rect;
+    let right_card = placement.panes[1].1.rect;
+    // The focused card's edge is in the accent colour, for normal mode.
+    assert_eq!(
+        pixel([right_card.x + 0.5, right_card.y + right_card.height / 2.0]),
+        [0xd9, 0xb2, 0x4a]
+    );
+    // Between the cards, only the dark backdrop shows: the long line
+    // stopped at its card's edge.
+    let between = left_card.x + left_card.width + 3.0;
+    let spilled = (0..fonts.cell.height).any(|y| {
+        let rgb = pixel([between, placement.panes[0].1.origin[1] + y as f32]);
+        rgb.iter().any(|&c| c > 0x60)
+    });
+    assert!(!spilled, "the cut-off line spilled out of its card");
+}
+
+#[test]
+fn the_palette_is_drawn_over_the_cards() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut fonts = fonts(2.0);
+    let window = two_pane_window(
+        &mut fonts,
+        Status::Typing {
+            label: Some("Rename workspace".into()),
+            text: "clackatoo▏".into(),
+        },
+        None,
+        None,
+    );
+    let left = screen(20, 4, "left\r\n$ ");
+    let right = screen(20, 4, "right\r\n$ ");
+    let pixels = draw_window(&gpu, &mut fonts, &window, [&left, &right]);
+    save("palette", window.0, &pixels);
+    assert!(window.1.palette.is_some());
+}
+
+#[test]
+fn a_menu_opens_where_it_was_asked_for() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut fonts = fonts(2.0);
+    let probe = two_pane_window(&mut fonts, Status::Tabs { note: None }, None, None);
+    let workspace = probe.1.workspaces[0].rect;
+    let at = [workspace.x + 10.0, workspace.y + workspace.height];
+    let window = two_pane_window(
+        &mut fonts,
+        Status::Tabs { note: None },
+        Some((at, vec!["Rename".into(), "Close".into()])),
+        None,
+    );
+    let left = screen(20, 4, "left\r\n$ ");
+    let right = screen(20, 4, "right\r\n$ ");
+    let pixels = draw_window(&gpu, &mut fonts, &window, [&left, &right]);
+    save("menu", window.0, &pixels);
+    let (rect, items) = window.1.menu.clone().expect("a menu");
+    assert_eq!((rect.x, rect.y), (at[0].round(), at[1].round()));
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        window
+            .1
+            .hit([items[1].1.x + 4.0, items[1].1.y + 4.0], false),
+        Hit::Menu(1)
+    );
+}
+
+#[test]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn an_alert_is_drawn_in_the_top_bar() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut fonts = fonts(2.0);
+    let window = two_pane_window(
+        &mut fonts,
+        Status::Tabs { note: None },
+        None,
+        Some("no contact with box for 4 s".into()),
+    );
+    let left = screen(20, 4, "left\r\n$ ");
+    let right = screen(20, 4, "right\r\n$ ");
+    let pixels = draw_window(&gpu, &mut fonts, &window, [&left, &right]);
+    save("alert", window.0, &pixels);
+    let (_, rect) = window.1.alert.clone().expect("an alert");
+    // Inside the pill, past its rounded corner, it's redder than the bar
+    // just outside it.
+    let at = |x: f32, y: f32| {
+        let index = (y as usize * window.0[0] as usize + x as usize) * 4;
+        [pixels[index], pixels[index + 1], pixels[index + 2]]
+    };
+    let inside = at(rect.x + rect.height / 2.0, rect.y + 2.0);
+    let outside = at(rect.x - 4.0, rect.y + 2.0);
+    let rise = |channel: usize| i32::from(inside[channel]) - i32::from(outside[channel]);
+    assert!(
+        rise(0) > rise(1) + 10 && rise(0) > rise(2) + 10,
+        "not tinted red: {inside:?} against {outside:?}"
+    );
 }

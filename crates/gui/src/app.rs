@@ -7,27 +7,37 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use clackatoo_daemon::{Contact, Sender};
-use clackatoo_protocol::{Axis, Content, Event, PROTOCOL_VERSION, ServerMessage, Size, TerminalId};
+use clackatoo_protocol::{
+    Content, Event, Layout, PROTOCOL_VERSION, Pane as LayoutPane, PaneId, ServerMessage, Size,
+    TabId, TerminalId, WorkspaceId,
+};
 use clackatoo_term::Row;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{MouseScrollDelta, StartCause, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowAttributes, WindowId};
 
 use crate::GraphicsApi;
+use crate::chrome::{Chrome, Contents, Geometry, Hit, Metrics, Status};
 use crate::desk::Desk;
+use crate::desktop::{Button, ButtonLayout, Desktop};
 use crate::fonts::Fonts;
 use crate::input;
-use crate::layout::{Cells, Divider, Placement};
+use crate::layout::{Card, Placement};
 use crate::pane::Mode;
-use crate::render::{Bar, CursorStyle, Highlight, PADDING, Picture, Renderer, Scene, SceneCursor};
+use crate::render::{
+    CursorStyle, Fill, Highlight, PADDING, Paint, Picture, Renderer, Scene, SceneCursor,
+};
 use crate::screen::Screen;
 use crate::session::{Session, SessionEvent};
 
 /// Lines scrolled per notch of a mouse wheel.
 const WHEEL_LINES: f64 = 3.0;
+
+/// Two clicks on the same thing within this are a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// A graphics instance with `backends`, for drawing on `display` if given:
 /// OpenGL on Wayland draws only on the display it starts with.
@@ -53,7 +63,7 @@ fn instance(
 const SLOW_GPU: Duration = Duration::from_millis(500);
 
 /// The grid of panes a new window is sized for.
-const INITIAL_GRID: (u32, u32) = (100, 30);
+const INITIAL_GRID: (u16, u16) = (100, 30);
 
 /// A GPU device, made on its own thread while the window opens.
 #[derive(Debug)]
@@ -170,6 +180,16 @@ impl Gpu {
         let capabilities = surface.get_capabilities(&self.adapter);
         let format = surface_format(&capabilities.formats)
             .context("the window supports no texture format")?;
+        // See-through where nothing's drawn, so the window can round its
+        // corners, if the compositor allows.
+        let alpha_mode = if capabilities
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else {
+            wgpu::CompositeAlphaMode::Auto
+        };
         let present_mode = if capabilities
             .present_modes
             .contains(&wgpu::PresentMode::Mailbox)
@@ -186,7 +206,7 @@ impl Gpu {
             height: size.height.max(1),
             desired_maximum_frame_latency: 2,
             present_mode,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            alpha_mode,
             view_formats: vec![],
         };
         // Some GPUs claim support and then fail here, so the result is
@@ -206,7 +226,7 @@ impl Gpu {
 /// Work started before the window opened.
 #[derive(Debug)]
 struct Startup {
-    fonts: JoinHandle<anyhow::Result<Fonts>>,
+    fonts: JoinHandle<anyhow::Result<(Fonts, Desktop)>>,
     gpu: JoinHandle<anyhow::Result<Gpu>>,
 }
 
@@ -219,7 +239,28 @@ struct Frame {
     gpu: Gpu,
     renderer: Renderer,
     fonts: Fonts,
+    /// Whether the compositor shows what's behind the window where it's
+    /// see-through, which lets the window round its corners.
+    transparent: bool,
 }
+
+/// A menu open over the window, for a workspace or a tab.
+#[derive(Clone, Copy, Debug)]
+struct Menu {
+    /// Where it was asked for.
+    at: [f32; 2],
+    target: MenuTarget,
+}
+
+/// What a menu is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuTarget {
+    Workspace(WorkspaceId),
+    Tab(TabId),
+}
+
+/// A menu's items, in order.
+const MENU_ITEMS: [&str; 2] = ["Rename", "Close"];
 
 /// The window's whole state.
 #[derive(Debug)]
@@ -229,6 +270,18 @@ pub(crate) struct App {
     frame: Option<Frame>,
     /// The workspaces, and what's shown of them.
     desk: Desk,
+    /// Where the window's buttons go, as the desktop says.
+    buttons: ButtonLayout,
+    /// Where the mouse is, in pixels, while it's over the window.
+    pointer: Option<[f32; 2]>,
+    /// What the mouse is over.
+    hover: Hit,
+    /// The mouse cursor's shape, as last set.
+    cursor_icon: CursorIcon,
+    /// The last click, and what it was on, to spot a double click.
+    last_click: Option<(Instant, Hit)>,
+    /// The menu open, if any.
+    menu: Option<Menu>,
     /// The window's title, as last set.
     title: String,
     /// Where messages to the daemon go, once connected.
@@ -256,7 +309,7 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(
         started: Instant,
-        fonts: JoinHandle<anyhow::Result<Fonts>>,
+        fonts: JoinHandle<anyhow::Result<(Fonts, Desktop)>>,
         gpu: JoinHandle<anyhow::Result<Gpu>>,
         session: Session,
     ) -> Self {
@@ -265,6 +318,12 @@ impl App {
             startup: Some(Startup { fonts, gpu }),
             frame: None,
             desk: Desk::default(),
+            buttons: ButtonLayout::default(),
+            pointer: None,
+            hover: Hit::Nothing,
+            cursor_icon: CursorIcon::Default,
+            last_click: None,
+            menu: None,
             title: String::new(),
             sender: None,
             modifiers: input::Modifiers::default(),
@@ -289,17 +348,21 @@ impl App {
     /// Opens the window once fonts and the GPU are ready.
     fn open(&mut self, event_loop: &ActiveEventLoop, startup: Startup) -> anyhow::Result<Frame> {
         let join = |name| move |_| anyhow!("{name} thread panicked");
-        let mut fonts = startup.fonts.join().map_err(join("font"))??;
+        let (mut fonts, desktop) = startup.fonts.join().map_err(join("font"))??;
         let fonts_ready = self.started.elapsed();
+        self.buttons = desktop.buttons;
         // Fonts were loaded at one pixel per point; the window's display
-        // may have more. Room for the grid, and above it the bar and the
-        // space below the bar.
+        // may have more.
         let (cols, rows) = INITIAL_GRID;
-        let size = LogicalSize::new(
-            f64::from(cols * fonts.cell.width) + 2.0 * PADDING,
-            f64::from((rows + 1) * fonts.cell.height) + 3.0 * PADDING,
-        );
+        #[allow(clippy::cast_possible_truncation)]
+        let [width, height] = Geometry::window_size(cols, rows, metrics(&fonts, PADDING as f32));
+        let size = LogicalSize::new(f64::from(width), f64::from(height));
         let window = Arc::new(event_loop.create_window(window_attributes(size))?);
+        log::debug!(
+            "asked for a {size:?} window; got {:?} at scale {}",
+            window.inner_size(),
+            window.scale_factor()
+        );
         fonts.set_scale(window.scale_factor());
 
         let mut gpu = startup.gpu.join().map_err(join("GPU"))??;
@@ -332,6 +395,7 @@ impl App {
             self.started.elapsed(),
             gpu.adapter.get_info().name,
         );
+        let transparent = config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
         Ok(Frame {
             window,
             surface,
@@ -339,18 +403,219 @@ impl App {
             gpu,
             renderer,
             fonts,
+            transparent,
         })
     }
 
     /// Tells the desk how many cells the panes have, sizing their
     /// terminals to fit.
     fn fit_panes(&mut self) {
-        let area = self
+        let area = self.geometry().map(|geometry| geometry.area);
+        self.desk.set_area(area);
+    }
+
+    /// Where things go in the window, at its size now.
+    fn geometry(&self) -> Option<Geometry> {
+        let frame = self.frame.as_ref()?;
+        #[allow(clippy::cast_precision_loss)]
+        let padding = padding(&frame.window) as f32;
+        Some(Geometry::new(
+            [frame.config.width, frame.config.height],
+            metrics(&frame.fonts, padding),
+        ))
+    }
+
+    /// Where everything in the window's frame goes, now.
+    fn chrome(&mut self) -> Option<Chrome> {
+        let geometry = self.geometry()?;
+        let contents = if self.notice.is_some() {
+            Contents {
+                workspaces: Vec::new(),
+                tabs: Vec::new(),
+                status: Status::Tabs { note: None },
+                buttons: &self.buttons,
+                bottom_shown: false,
+                menu: None,
+                alert: None,
+            }
+        } else {
+            Contents {
+                workspaces: self.desk.workspace_names(),
+                tabs: self.desk.tab_names(),
+                status: self.desk.status(),
+                buttons: &self.buttons,
+                bottom_shown: true,
+                menu: self
+                    .menu
+                    .map(|menu| (menu.at, MENU_ITEMS.map(str::to_owned).to_vec())),
+                alert: self.out_of_contact(),
+            }
+        };
+        let fonts = &mut self.frame.as_mut()?.fonts;
+        Some(Chrome::new(geometry, contents, &mut |text, bold| {
+            fonts.ui_width(text, bold)
+        }))
+    }
+
+    /// What the top bar says while a daemon on another machine is out of
+    /// contact: since when, to the second.
+    fn out_of_contact(&self) -> Option<String> {
+        let since = self.contact.as_ref()?.silent_since()?;
+        let host = self.session.location().host().unwrap_or("the daemon");
+        Some(format!(
+            "No contact with {host} for {} s",
+            since.elapsed().as_secs()
+        ))
+    }
+
+    // --- The mouse --------------------------------------------------------
+
+    /// Follows the mouse to `point`: the cursor's shape, and what's drawn
+    /// lit up under it.
+    fn pointer_moved(&mut self, point: [f32; 2]) {
+        self.pointer = Some(point);
+        let hit = self.hit(point);
+        let icon = match hit {
+            Hit::Resize(direction) => resize_icon(direction),
+            Hit::Button(_)
+            | Hit::Workspace(_)
+            | Hit::Tab(_)
+            | Hit::NewWorkspace
+            | Hit::NewTab
+            | Hit::Menu(_) => CursorIcon::Pointer,
+            Hit::Cards => CursorIcon::Text,
+            Hit::TopBar | Hit::Nothing => CursorIcon::Default,
+        };
+        if let Some(frame) = &self.frame
+            && icon != self.cursor_icon
+        {
+            frame.window.set_cursor(icon);
+            self.cursor_icon = icon;
+        }
+        let lit = |hit: Hit| {
+            matches!(
+                hit,
+                Hit::Button(_)
+                    | Hit::Workspace(_)
+                    | Hit::Tab(_)
+                    | Hit::NewWorkspace
+                    | Hit::NewTab
+                    | Hit::Menu(_)
+            )
+        };
+        if hit != self.hover && (lit(hit) || lit(self.hover)) {
+            self.request_redraw();
+        }
+        self.hover = hit;
+    }
+
+    fn pointer_left(&mut self) {
+        self.pointer = None;
+        if self.hover != Hit::Nothing {
+            self.hover = Hit::Nothing;
+            self.request_redraw();
+        }
+    }
+
+    fn hit(&mut self, point: [f32; 2]) -> Hit {
+        let maximised = self
             .frame
             .as_ref()
-            .and_then(Geometry::of)
-            .map(|geometry| geometry.panes);
-        self.desk.set_area(area);
+            .is_some_and(|frame| frame.window.is_maximized());
+        self.chrome()
+            .map_or(Hit::Nothing, |chrome| chrome.hit(point, maximised))
+    }
+
+    /// Handles a click: moving or resizing the window, its buttons, and
+    /// switching to the workspace, tab or pane clicked.
+    fn clicked(&mut self, event_loop: &ActiveEventLoop, button: MouseButton) {
+        let (Some(point), Some(frame)) = (self.pointer, &self.frame) else {
+            return;
+        };
+        let window = Arc::clone(&frame.window);
+        let hit = self.hit(point);
+        // Twice on the same spot, soon enough, is a double click.
+        let now = Instant::now();
+        let double = self
+            .last_click
+            .is_some_and(|(at, last)| last == hit && now.duration_since(at) < DOUBLE_CLICK);
+        self.last_click = (!double).then_some((now, hit));
+        // With a menu open, a click picks one of its items or, anywhere
+        // else, just closes it.
+        if let Some(menu) = self.menu.take() {
+            if let Hit::Menu(index) = hit {
+                self.menu_picked(menu.target, index);
+            }
+            self.request_redraw();
+            return;
+        }
+        if button == MouseButton::Right {
+            let target = match hit {
+                Hit::Workspace(workspace) => Some(MenuTarget::Workspace(workspace)),
+                Hit::Tab(tab) => Some(MenuTarget::Tab(tab)),
+                _ => None,
+            };
+            match target {
+                Some(target) => {
+                    self.menu = Some(Menu { at: point, target });
+                    self.request_redraw();
+                }
+                None if hit == Hit::TopBar => {
+                    window.show_window_menu(PhysicalPosition::new(point[0], point[1]));
+                }
+                None => {}
+            }
+            return;
+        }
+        if button != MouseButton::Left {
+            return;
+        }
+        let result = match hit {
+            Hit::Resize(direction) => window.drag_resize_window(direction),
+            Hit::Button(Button::Minimise) => {
+                window.set_minimized(true);
+                Ok(())
+            }
+            Hit::Button(Button::Maximise) => {
+                window.set_maximized(!window.is_maximized());
+                Ok(())
+            }
+            Hit::Button(Button::Close) => {
+                event_loop.exit();
+                Ok(())
+            }
+            Hit::TopBar if double => {
+                window.set_maximized(!window.is_maximized());
+                Ok(())
+            }
+            Hit::TopBar => window.drag_window(),
+            Hit::Workspace(workspace) => {
+                self.desk.show_workspace(workspace);
+                Ok(())
+            }
+            Hit::Tab(tab) => {
+                self.desk.show_tab(tab);
+                Ok(())
+            }
+            Hit::NewWorkspace => {
+                self.desk.new_workspace();
+                Ok(())
+            }
+            Hit::NewTab => {
+                self.desk.new_tab();
+                Ok(())
+            }
+            Hit::Cards => {
+                self.desk.focus_at(point);
+                Ok(())
+            }
+            Hit::Menu(_) | Hit::Nothing => Ok(()),
+        };
+        if let Err(err) = result {
+            log::warn!("the desktop wouldn't move or resize the window: {err}");
+        }
+        self.update_title();
+        self.request_redraw();
     }
 
     /// Titles the window after the focused pane, and the daemon's machine.
@@ -381,7 +646,29 @@ impl App {
     }
 
     /// Handles a key press: a notice's keys, then the desk's.
+    /// Carries out the menu item at `index` for `target`.
+    fn menu_picked(&mut self, target: MenuTarget, index: usize) {
+        match (MENU_ITEMS.get(index).copied(), target) {
+            (Some("Rename"), MenuTarget::Workspace(workspace)) => {
+                self.desk.rename_workspace(workspace);
+            }
+            (Some("Rename"), MenuTarget::Tab(tab)) => self.desk.rename_tab(tab),
+            (Some("Close"), MenuTarget::Workspace(workspace)) => {
+                self.desk.close_workspace(workspace);
+            }
+            (Some("Close"), MenuTarget::Tab(tab)) => self.desk.close_tab(tab),
+            _ => {}
+        }
+    }
+
     fn key_pressed(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
+        // Any key closes a menu, and Esc does nothing else.
+        if self.menu.take().is_some() {
+            self.request_redraw();
+            if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                return;
+            }
+        }
         if self.notice.is_some() {
             self.notice_key(event_loop, event);
             return;
@@ -487,21 +774,17 @@ impl App {
 
     fn draw(&mut self) {
         let started = Instant::now();
-        let Some(geometry) = self.frame.as_ref().and_then(Geometry::of) else {
+        let Some(chrome) = self.chrome() else {
             return;
         };
-        if let Some(notice) = &self.notice {
-            let lines = notice.lines(
-                self.session.location().host(),
-                usize::from(geometry.grid.cols()),
-            );
-            if let Some(frame) = &mut self.frame {
-                draw_notice(frame, &lines, &geometry);
+        let drawn = if self.notice.is_some() {
+            self.draw_notice(&chrome);
+            return;
+        } else {
+            match self.draw_panes(&chrome) {
+                Some(drawn) => drawn,
+                None => return,
             }
-            return;
-        }
-        let Some(drawn) = self.draw_panes(&geometry) else {
-            return;
         };
         // For measuring: `RUST_LOG=clackatoo_gui::frame=trace`.
         log::trace!(target: "clackatoo_gui::frame", "frame {}", started.elapsed().as_micros());
@@ -514,84 +797,135 @@ impl App {
         self.desk.drawn(&drawn);
     }
 
-    /// Draws the bar and the shown tab's panes. Returns the terminals
-    /// drawn, or `None` if the frame wasn't shown.
-    fn draw_panes(&mut self, geometry: &Geometry) -> Option<Vec<TerminalId>> {
+    /// The window's background, fading corner to corner: rounded at the
+    /// corners where the window can be see-through, unless it's maximised.
+    fn window_fill(&self, geometry: &Geometry) -> Option<Fill> {
+        let frame = self.frame.as_ref()?;
+        let [width, height] = geometry.size;
+        let rounded = frame.transparent && !frame.window.is_maximized();
+        let backdrop = Fill::rounded(
+            [0.0, 0.0, width, height],
+            Paint::Backdrop,
+            if rounded { geometry.window_radius } else { 0.0 },
+        )
+        .fading(Paint::BackdropEnd, [1.0, -1.0]);
+        // A faint line round the window, where it has corners of its own.
+        Some(if rounded {
+            backdrop.bordered(geometry.edge, Paint::WindowEdge)
+        } else {
+            backdrop
+        })
+    }
+
+    /// Draws the notice on a card filling the space between the bars.
+    fn draw_notice(&mut self, chrome: &Chrome) {
+        let Some(notice) = &self.notice else { return };
+        let geometry = &chrome.geometry;
+        let area = geometry.area;
+        let card = Placement::new(&single_pane(), &area).panes[0].1;
+        let Ok(size) = Size::new(card.cols, card.rows) else {
+            return;
+        };
+        let lines = notice.lines(self.session.location().host(), usize::from(card.cols));
+        let screen = Screen::message(&lines, size);
+        let rows: Vec<_> = screen.rows.iter().collect();
+        let scenes = [Scene {
+            origin: card.origin,
+            size: card.cells_size(area.cell),
+            rows: &rows,
+            cursor: None,
+            normal_mode: false,
+            highlights: &[],
+        }];
+        let painted = chrome.paint(self.hover);
+        let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
+        fills.extend(painted.fills);
+        push_card(&mut fills, geometry, &card, Paint::Edge, None);
+        let mut texts = painted.texts;
+        texts.extend(painted.over_texts);
+        if let Some(frame) = &mut self.frame {
+            let transparent = frame.transparent;
+            present(
+                frame,
+                &Picture {
+                    scenes: &scenes,
+                    fills: &fills,
+                    over: &painted.over,
+                    texts: &texts,
+                    transparent,
+                },
+            );
+        }
+    }
+
+    /// Draws the frame and the shown tab's panes, each on its card. Returns
+    /// the terminals drawn, or `None` if the frame wasn't shown.
+    fn draw_panes(&mut self, chrome: &Chrome) -> Option<Vec<TerminalId>> {
+        let geometry = &chrome.geometry;
         let desk = &self.desk;
         let shown = desk.shown()?;
         let tab = desk.shown_tab()?;
-        let placement = Placement::new(&tab.layout, geometry.panes);
+        let placement = Placement::new(&tab.layout, &geometry.area);
         let layout_panes = tab.layout.panes();
+        let painted = chrome.paint(self.hover);
+        let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
+        fills.extend(painted.fills);
         let mut drawings = Vec::new();
-        for &(id, cells) in &placement.panes {
+        for &(id, card) in &placement.panes {
             let Some(pane) = layout_panes.iter().find(|pane| pane.id == id) else {
                 continue;
             };
             let Content::Terminal(terminal) = pane.content;
-            let Some(state) = desk.pane(terminal) else {
+            let state = desk.pane(terminal);
+            let focused = id == shown.pane;
+            let normal = state.is_some_and(|state| state.mode != Mode::Insert);
+            // The focused card's edge, and its glow, show where typing
+            // goes, and in what mode.
+            let (edge, glow) = match (focused, normal) {
+                (false, _) => (Paint::Edge, None),
+                (true, false) => (Paint::Focus, Some(Paint::FocusGlow)),
+                (true, true) => (Paint::Accent, Some(Paint::AccentGlow)),
+            };
+            push_card(&mut fills, geometry, &card, edge, glow);
+            let Some(state) = state.filter(|state| state.screen().is_some()) else {
                 continue;
             };
-            if state.screen().is_none() {
-                continue;
-            }
-            let height = usize::from(cells.rows);
+            let height = usize::from(card.rows);
             let (rows, mut cursor) = state.scene(height);
-            let focused = id == shown.pane;
             if let Some(cursor) = &mut cursor
                 && !(focused && self.focused)
             {
                 cursor.style = CursorStyle::Hollow;
             }
-            let label = if focused {
-                match (desk.command_line(), desk.message()) {
-                    (Some(line), _) => Some(format!(":{line}▏")),
-                    (None, Some(message)) => Some(message.to_owned()),
-                    (None, None) => state.label(),
-                }
-            } else {
-                state.label()
-            };
             drawings.push(Drawing {
                 terminal,
-                cells,
+                card,
                 rows,
                 cursor,
-                label,
                 highlights: state.highlights(height),
-                // Only the focused pane's mode matters, as only it gets keys.
-                normal_mode: focused && state.mode != Mode::Insert,
+                normal_mode: focused && normal,
             });
         }
         let scenes: Vec<Scene<'_>> = drawings
             .iter()
             .map(|drawing| Scene {
-                origin: geometry.origin(drawing.cells),
-                size: geometry.pixels(drawing.cells),
+                origin: drawing.card.origin,
+                size: drawing.card.cells_size(geometry.area.cell),
                 rows: &drawing.rows,
                 cursor: drawing.cursor,
                 normal_mode: drawing.normal_mode,
-                label: drawing.label.as_deref(),
                 highlights: &drawing.highlights,
             })
             .collect();
-        let dividers: Vec<[f32; 4]> = placement
-            .dividers
-            .iter()
-            .map(|divider| geometry.divider(divider))
-            .collect();
-        let (left, right) = desk.bar_items();
-        let alert = self.out_of_contact();
-        let bar = Bar {
-            origin: [geometry.padding; 2],
-            width: geometry.grid_pixels()[0],
-            left: &left,
-            right: &right,
-            alert: alert.as_deref(),
-        };
+        let mut texts = painted.texts;
+        texts.extend(painted.over_texts);
+        let transparent = self.frame.as_ref()?.transparent;
         let picture = Picture {
             scenes: &scenes,
-            bar: Some(bar),
-            dividers: &dividers,
+            fills: &fills,
+            over: &painted.over,
+            texts: &texts,
+            transparent,
         };
         let frame = self.frame.as_mut()?;
         if !present(frame, &picture) {
@@ -601,138 +935,78 @@ impl App {
     }
 }
 
-impl App {
-    /// What the bar says while a daemon on another machine is out of
-    /// contact: since when, to the second.
-    fn out_of_contact(&self) -> Option<String> {
-        let since = self.contact.as_ref()?.silent_since()?;
-        let host = self.session.location().host().unwrap_or("the daemon");
-        Some(format!(
-            "no contact with {host} for {} s",
-            since.elapsed().as_secs()
-        ))
+/// The sizes the window's frame is worked out from, for `fonts` and
+/// `padding` pixels of space between things.
+#[allow(clippy::cast_precision_loss)]
+fn metrics(fonts: &Fonts, padding: f32) -> Metrics {
+    Metrics {
+        cell: [fonts.cell.width as f32, fonts.cell.height as f32],
+        ui_line: fonts.ui.height,
+        padding,
     }
 }
 
-/// Draws a notice's `lines` over the whole window.
-fn draw_notice(frame: &mut Frame, lines: &[String], geometry: &Geometry) {
-    let screen = Screen::message(lines, geometry.grid);
-    let rows: Vec<_> = screen.rows.iter().collect();
-    let scenes = [Scene {
-        origin: [geometry.padding; 2],
-        size: geometry.grid_pixels(),
-        rows: &rows,
-        cursor: None,
-        normal_mode: false,
-        label: None,
-        highlights: &[],
-    }];
-    present(
-        frame,
-        &Picture {
-            scenes: &scenes,
-            bar: None,
-            dividers: &[],
-        },
+/// A layout of one pane, for a card filling the whole space.
+fn single_pane() -> Layout {
+    Layout::Pane(LayoutPane {
+        id: PaneId(0),
+        content: Content::Terminal(TerminalId(0)),
+    })
+}
+
+/// Adds a card's rounded rectangle, with its edge in `edge`, and around
+/// it, if given, a soft `glow`, fading over a few pixels.
+fn push_card(
+    fills: &mut Vec<Fill>,
+    geometry: &Geometry,
+    card: &Card,
+    edge: Paint,
+    glow: Option<Paint>,
+) {
+    if let Some(glow) = glow {
+        for spread in [3.0, 1.5] {
+            let outset = (spread * geometry.edge).round();
+            let rect = card.rect;
+            fills.push(Fill::rounded(
+                [
+                    rect.x - outset,
+                    rect.y - outset,
+                    rect.width + 2.0 * outset,
+                    rect.height + 2.0 * outset,
+                ],
+                glow,
+                geometry.radius + outset,
+            ));
+        }
+    }
+    fills.push(
+        Fill::rounded(card.rect.to_array(), Paint::Card, geometry.radius)
+            .bordered(geometry.edge, edge),
     );
+}
+
+/// The cursor for resizing the window towards `direction`.
+fn resize_icon(direction: ResizeDirection) -> CursorIcon {
+    match direction {
+        ResizeDirection::North => CursorIcon::NResize,
+        ResizeDirection::South => CursorIcon::SResize,
+        ResizeDirection::East => CursorIcon::EResize,
+        ResizeDirection::West => CursorIcon::WResize,
+        ResizeDirection::NorthEast => CursorIcon::NeResize,
+        ResizeDirection::NorthWest => CursorIcon::NwResize,
+        ResizeDirection::SouthEast => CursorIcon::SeResize,
+        ResizeDirection::SouthWest => CursorIcon::SwResize,
+    }
 }
 
 /// One pane, ready to draw.
 struct Drawing<'a> {
     terminal: TerminalId,
-    cells: Cells,
+    card: Card,
     rows: Vec<&'a Row>,
     cursor: Option<SceneCursor>,
-    label: Option<String>,
     highlights: Vec<Highlight>,
     normal_mode: bool,
-}
-
-/// Where things go in the window, in pixels: the bar along the top, and
-/// the panes below it, all inside the padding.
-#[derive(Debug)]
-struct Geometry {
-    padding: f32,
-    cell: [f32; 2],
-    /// Every cell inside the padding, for notices.
-    grid: Size,
-    /// The cells below the bar, for panes.
-    panes: Cells,
-    /// Where the panes' cells start.
-    panes_top: f32,
-}
-
-impl Geometry {
-    #[allow(clippy::cast_precision_loss)]
-    fn of(frame: &Frame) -> Option<Self> {
-        let cell = frame.fonts.cell;
-        let padding = padding(&frame.window);
-        let cells =
-            |pixels: u32, cell: u32| u16::try_from((pixels / cell).max(1)).unwrap_or(u16::MAX);
-        let (width, height) = (frame.config.width, frame.config.height);
-        let grid = Size::new(
-            cells(width.saturating_sub(2 * padding), cell.width),
-            cells(height.saturating_sub(2 * padding), cell.height),
-        )
-        .ok()?;
-        // The bar's row, and below it a padding's space before the panes.
-        let below_bar = 3 * padding + cell.height;
-        let panes = Cells {
-            col: 0,
-            row: 0,
-            cols: grid.cols(),
-            rows: cells(height.saturating_sub(below_bar), cell.height),
-        };
-        Some(Self {
-            padding: padding as f32,
-            cell: [cell.width as f32, cell.height as f32],
-            grid,
-            panes,
-            panes_top: (2 * padding + cell.height) as f32,
-        })
-    }
-
-    fn grid_pixels(&self) -> [f32; 2] {
-        [
-            f32::from(self.grid.cols()) * self.cell[0],
-            f32::from(self.grid.rows()) * self.cell[1],
-        ]
-    }
-
-    fn origin(&self, cells: Cells) -> [f32; 2] {
-        [
-            self.padding + f32::from(cells.col) * self.cell[0],
-            self.panes_top + f32::from(cells.row) * self.cell[1],
-        ]
-    }
-
-    fn pixels(&self, cells: Cells) -> [f32; 2] {
-        [
-            f32::from(cells.cols) * self.cell[0],
-            f32::from(cells.rows) * self.cell[1],
-        ]
-    }
-
-    /// A divider's line: thin, down or across the middle of its cells.
-    fn divider(&self, divider: &Divider) -> [f32; 4] {
-        let [left, top] = self.origin(divider.cells);
-        let [width, height] = self.pixels(divider.cells);
-        let thickness = (self.padding / 4.0).round().max(1.0);
-        match divider.axis {
-            Axis::LeftToRight => [
-                (left + (width - thickness) / 2.0).round(),
-                top,
-                thickness,
-                height,
-            ],
-            Axis::TopToBottom => [
-                left,
-                (top + (height - thickness) / 2.0).round(),
-                width,
-                thickness,
-            ],
-        }
-    }
 }
 
 /// The format to draw the window in, from those it supports. Colours are
@@ -917,11 +1191,14 @@ fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
 }
 
 /// The new window's title, size and app ID. Desktops find the window's
-/// icon through the app ID, matching it to `clackatoo.desktop`.
+/// icon through the app ID, matching it to `clackatoo.desktop`. The window
+/// draws its own frame (see [`chrome`]), so it asks for none.
 fn window_attributes(size: LogicalSize<f64>) -> WindowAttributes {
     let attributes = Window::default_attributes()
         .with_title("clackatoo")
-        .with_inner_size(size);
+        .with_inner_size(size)
+        .with_decorations(false)
+        .with_transparent(true);
     #[cfg(target_os = "linux")]
     let attributes = {
         use winit::platform::wayland::WindowAttributesExtWayland;
@@ -1007,8 +1284,8 @@ impl ApplicationHandler<SessionEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // While the daemon is out of contact, the bar counts the seconds;
-        // otherwise, nothing wakes the window but events.
+        // While the daemon is out of contact, the top bar counts the
+        // seconds; otherwise, nothing wakes the window but events.
         let flow = match self.contact.as_ref().and_then(Contact::silent_since) {
             Some(since) => {
                 let seconds = since.elapsed().as_secs() + 1;
@@ -1025,6 +1302,7 @@ impl App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                log::debug!("resized to {size:?}");
                 if let Some(frame) = &mut self.frame
                     && size.width > 0
                     && size.height > 0
@@ -1059,6 +1337,16 @@ impl App {
                 ..
             } if event.state.is_pressed() => self.key_pressed(event_loop, &event),
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
+            #[allow(clippy::cast_possible_truncation)]
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer_moved([position.x as f32, position.y as f32]);
+            }
+            WindowEvent::CursorLeft { .. } => self.pointer_left(),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => self.clicked(event_loop, button),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 // Another window on the terminals may have resized them:

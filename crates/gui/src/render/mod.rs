@@ -1,10 +1,11 @@
-//! Drawing the window with the GPU: its panes' screens, the bar of
-//! workspaces and tabs, and the dividers between panes.
+//! Drawing the window with the GPU: its panes' screens, and the window's
+//! own rectangles and text, such as its bars and the dividers between
+//! panes.
 //!
 //! Each frame turns everything into two lists of instanced quads, solid
 //! rectangles and glyphs, and draws them in four passes over one render
 //! pass: backgrounds and the cursor, then glyphs, then underlines,
-//! strikethroughs and labels' backgrounds, then labels' text on top. The
+//! strikethroughs and cursors, then the window's own text on top. The
 //! renderer draws into any texture, so the same code serves the window and
 //! offscreen tests.
 
@@ -22,34 +23,149 @@ use crate::glyphs::{ATLAS_SIZE, AtlasGlyph, GlyphCache};
 pub(crate) struct Picture<'a> {
     /// The panes.
     pub(crate) scenes: &'a [Scene<'a>],
-    /// The bar along the top, if shown.
-    pub(crate) bar: Option<Bar<'a>>,
-    /// Lines between panes, as rectangles in pixels: left, top, width and
-    /// height.
-    pub(crate) dividers: &'a [[f32; 4]],
+    /// Rectangles of the window's own, such as the cards and the names in
+    /// the bars, under the panes.
+    pub(crate) fills: &'a [Fill],
+    /// Rectangles of the window's own over the panes, such as the palette.
+    pub(crate) over: &'a [Fill],
+    /// Whether the window can be see-through, so that its background, a
+    /// fill of its own, can round its corners. Otherwise it's cleared to
+    /// the background colour.
+    pub(crate) transparent: bool,
+    /// Text of the window's own, such as the names in the bars, over
+    /// everything.
+    pub(crate) texts: &'a [Text<'a>],
 }
 
-/// The bar along the top of the window: workspaces on the left, tabs on
-/// the right.
-#[derive(Debug)]
-pub(crate) struct Bar<'a> {
-    /// Where its row starts, in pixels.
+/// A rectangle of the window's own: perhaps rounded, perhaps bordered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fill {
+    /// Left, top, width and height, in pixels.
+    pub(crate) rect: [f32; 4],
+    pub(crate) paint: Paint,
+    /// How round its corners are, in pixels.
+    pub(crate) radius: f32,
+    /// A border inside its edge: how thick, and its colour.
+    pub(crate) border: Option<(f32, Paint)>,
+    /// A fade to another colour: the colour, and which way, as a vector
+    /// across the rectangle, where one is its whole width or height.
+    pub(crate) fade: Option<(Paint, [f32; 2])>,
+}
+
+impl Fill {
+    /// A square-cornered, borderless rectangle.
+    pub(crate) fn solid(rect: [f32; 4], paint: Paint) -> Self {
+        Self {
+            rect,
+            paint,
+            radius: 0.0,
+            border: None,
+            fade: None,
+        }
+    }
+
+    /// A rectangle with corners `radius` round.
+    pub(crate) fn rounded(rect: [f32; 4], paint: Paint, radius: f32) -> Self {
+        Self {
+            rect,
+            paint,
+            radius,
+            border: None,
+            fade: None,
+        }
+    }
+
+    /// With a border `width` thick, in `paint`.
+    pub(crate) fn bordered(self, width: f32, paint: Paint) -> Self {
+        Self {
+            border: Some((width, paint)),
+            ..self
+        }
+    }
+
+    /// Fading to `paint` towards `direction`: `[0.0, 1.0]` top to bottom,
+    /// `[1.0, 1.0]` corner to corner.
+    pub(crate) fn fading(self, paint: Paint, direction: [f32; 2]) -> Self {
+        Self {
+            fade: Some((paint, direction)),
+            ..self
+        }
+    }
+}
+
+/// The colours the window's own things are drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Paint {
+    /// Nothing: for a border alone.
+    Clear,
+    /// The window's background, at the bottom left of its fade...
+    Backdrop,
+    /// ...and at the top right, bluer.
+    BackdropEnd,
+    /// The faint line round the window.
+    WindowEdge,
+    /// A soft shadow, under something raised.
+    Shadow,
+    /// A pane's card, the colour its terminal's background is.
+    Card,
+    /// A card's edge.
+    Edge,
+    /// The focused card's edge, while typing goes to its program...
+    Focus,
+    /// ...and the glow around it.
+    FocusGlow,
+    /// clackatoo's own colour: the focused card's edge in normal mode...
+    Accent,
+    /// ...and the glow around it.
+    AccentGlow,
+    /// Behind what's picked, such as the workspace shown.
+    Picked,
+    /// Under the mouse.
+    Hover,
+    /// Drawn icons.
+    Icon,
+    /// Drawn icons under the mouse, in the text colour.
+    Ink,
+    /// The command palette...
+    Palette,
+    /// ...and its edge.
+    PaletteEdge,
+    /// Behind what's gone wrong, faintly in the warning colour...
+    Warning,
+    /// ...and its edge.
+    WarningEdge,
+}
+
+/// A line of text of the window's own.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Text<'a> {
+    /// The top left corner of its line, in pixels.
     pub(crate) origin: [f32; 2],
-    /// How wide it is, in pixels.
-    pub(crate) width: f32,
-    pub(crate) left: &'a [BarItem],
-    pub(crate) right: &'a [BarItem],
-    /// Something gone wrong, such as the daemon being out of contact, in
-    /// the middle, picked out in the warning colour.
-    pub(crate) alert: Option<&'a str>,
+    pub(crate) content: &'a str,
+    pub(crate) ink: Ink,
+    pub(crate) font: TextFont,
 }
 
-/// One name in the bar.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BarItem {
-    pub(crate) text: String,
-    /// The one shown, which is drawn picked out.
-    pub(crate) active: bool,
+/// How text of the window's own is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ink {
+    /// In the text colour.
+    Plain,
+    /// In a quieter colour, for what matters less.
+    Muted,
+    /// Bold, in the text colour, for what's picked.
+    Strong,
+    /// In the warning colour, for what's gone wrong.
+    Warning,
+}
+
+/// Which font text of the window's own is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextFont {
+    /// The terminal's, a cell per character, as for commands being typed.
+    Mono,
+    /// The interface font, as for names in the bars.
+    Ui,
 }
 
 /// What one pane shows, and where.
@@ -62,11 +178,9 @@ pub(crate) struct Scene<'a> {
     /// The rows to show, top to bottom.
     pub(crate) rows: &'a [&'a clackatoo_term::Row],
     pub(crate) cursor: Option<SceneCursor>,
-    /// Frame the pane, to show it's in normal mode.
+    /// Whether the pane is in normal mode, which draws its cursor in the
+    /// accent colour.
     pub(crate) normal_mode: bool,
-    /// A label for the pane's top right corner, such as the scroll
-    /// position.
-    pub(crate) label: Option<&'a str>,
     /// Stretches of text to highlight.
     pub(crate) highlights: &'a [Highlight],
 }
@@ -122,6 +236,33 @@ struct Rect {
     origin: [f32; 2],
     size: [f32; 2],
     color: Rgba,
+    /// How round its corners are, in pixels.
+    radius: f32,
+    /// How thick its border is, in pixels, inside its edge.
+    border: f32,
+    border_color: Rgba,
+    /// The colour it fades to, along `direction`.
+    color_to: Rgba,
+    /// Which way it fades from `color` to `color_to`, as a vector across
+    /// the rectangle, where one is its whole width or height. Zero for no
+    /// fade.
+    direction: [f32; 2],
+}
+
+impl Rect {
+    /// A square-cornered rectangle of one colour.
+    fn solid(origin: [f32; 2], size: [f32; 2], color: Rgba) -> Self {
+        Self {
+            origin,
+            size,
+            color,
+            radius: 0.0,
+            border: 0.0,
+            border_color: [0.0; 4],
+            color_to: color,
+            direction: [0.0; 2],
+        }
+    }
 }
 
 /// A glyph, drawn from the atlas.
@@ -161,7 +302,7 @@ pub(crate) struct Renderer {
     overlays: Vec<Rect>,
     glyph_instances: Vec<Glyph>,
     /// Glyphs drawn over the overlays, such as a label's text.
-    label_glyphs: Vec<Glyph>,
+    text_glyphs: Vec<Glyph>,
     /// Each character's glyph in each variant, found once: finding it
     /// means asking the fonts, then the atlas.
     char_glyphs: CharGlyphs,
@@ -262,7 +403,10 @@ impl Renderer {
         let rect_pipeline = pipeline(
             "rects",
             ("rect_vs", "rect_fs"),
-            &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+            &wgpu::vertex_attr_array![
+                0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
+                4 => Float32, 5 => Float32x4, 6 => Float32x4, 7 => Float32x2,
+            ],
             std::mem::size_of::<Rect>() as u64,
         );
         let glyph_pipeline = pipeline(
@@ -287,7 +431,7 @@ impl Renderer {
             rects: Vec::new(),
             overlays: Vec::new(),
             glyph_instances: Vec::new(),
-            label_glyphs: Vec::new(),
+            text_glyphs: Vec::new(),
             char_glyphs: CharGlyphs::new(),
             cell_text: String::new(),
         }
@@ -334,7 +478,7 @@ impl Renderer {
         fonts: &mut Fonts,
     ) {
         let (device, queue) = gpu;
-        self.build(picture, fonts, size);
+        self.build(picture, fonts);
         for upload in self.glyphs.uploads.drain(..) {
             let [x, y, width, height] = upload.rect;
             queue.write_texture(
@@ -366,7 +510,7 @@ impl Renderer {
         let background_rects = self.rects.len();
         self.rects.append(&mut self.overlays);
         let grid_glyphs = self.glyph_instances.len();
-        self.glyph_instances.append(&mut self.label_glyphs);
+        self.glyph_instances.append(&mut self.text_glyphs);
         self.rect_buffer
             .write(device, queue, bytemuck::cast_slice(&self.rects));
         self.glyph_buffer
@@ -376,7 +520,12 @@ impl Renderer {
             label: Some("frame"),
         });
         {
-            let [r, g, b, a] = self.theme.background.map(f64::from);
+            let clear = if picture.transparent {
+                [0.0; 4]
+            } else {
+                self.theme.backdrop
+            };
+            let [r, g, b, a] = clear.map(f64::from);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -421,33 +570,54 @@ impl Renderer {
     }
 
     /// Turns the picture into rectangles and glyphs.
-    fn build(&mut self, picture: &Picture<'_>, fonts: &mut Fonts, size: [u32; 2]) {
+    fn build(&mut self, picture: &Picture<'_>, fonts: &mut Fonts) {
         self.rects.clear();
         self.overlays.clear();
         self.glyph_instances.clear();
-        self.label_glyphs.clear();
+        self.text_glyphs.clear();
         for scene in picture.scenes {
-            self.push_scene(scene, fonts, size);
+            self.push_scene(scene, fonts);
         }
-        for &[left, top, width, height] in picture.dividers {
-            self.rects.push(Rect {
+        let rect = |fill: &Fill| {
+            let [left, top, width, height] = fill.rect;
+            let (border, border_color) = fill.border.map_or((0.0, [0.0; 4]), |(width, paint)| {
+                (width, self.theme.paint(paint))
+            });
+            let color = self.theme.paint(fill.paint);
+            let (color_to, direction) =
+                fill.fade.map_or((color, [0.0; 2]), |(paint, direction)| {
+                    (self.theme.paint(paint), direction)
+                });
+            Rect {
                 origin: [left, top],
                 size: [width, height],
-                color: self.theme.divider,
-            });
-        }
-        if let Some(bar) = &picture.bar {
-            self.push_bar(bar, fonts);
+                color,
+                radius: fill.radius,
+                border,
+                border_color,
+                color_to,
+                direction,
+            }
+        };
+        let (under, over): (Vec<Rect>, Vec<Rect>) = (
+            picture.fills.iter().map(rect).collect(),
+            picture.over.iter().map(rect).collect(),
+        );
+        // The cards go under the panes' cells, and the palette over them.
+        self.rects.splice(0..0, under);
+        self.overlays.extend(over);
+        for text in picture.texts {
+            self.push_text(text, fonts);
         }
     }
 
-    /// Adds one pane's cells, cursor, highlights, frame and label.
+    /// Adds one pane's cells, cursor, highlights and frame.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    fn push_scene(&mut self, scene: &Scene<'_>, fonts: &mut Fonts, size: [u32; 2]) {
+    fn push_scene(&mut self, scene: &Scene<'_>, fonts: &mut Fonts) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
         let [origin_x, origin_y] = scene.origin;
@@ -482,11 +652,11 @@ impl Renderer {
                     }
                 }
                 if let Some(background) = colors.background {
-                    self.rects.push(Rect {
-                        origin: [left, top],
-                        size: [cells * cell_width, cell_height],
-                        color: background,
-                    });
+                    self.rects.push(Rect::solid(
+                        [left, top],
+                        [cells * cell_width, cell_height],
+                        background,
+                    ));
                 }
                 let variant = Variant::new(
                     style.attributes.contains(Attributes::BOLD),
@@ -504,18 +674,18 @@ impl Renderer {
                 );
                 let width = cells * cell_width;
                 if style.underline != Underline::None {
-                    self.overlays.push(Rect {
-                        origin: [left, baseline + cell.underline_offset],
-                        size: [width, cell.stroke],
-                        color: colors.underline,
-                    });
+                    self.overlays.push(Rect::solid(
+                        [left, baseline + cell.underline_offset],
+                        [width, cell.stroke],
+                        colors.underline,
+                    ));
                 }
                 if style.attributes.contains(Attributes::STRIKETHROUGH) {
-                    self.overlays.push(Rect {
-                        origin: [left, baseline - cell.strikeout_offset - cell.stroke / 2.0],
-                        size: [width, cell.stroke],
-                        color: colors.foreground,
-                    });
+                    self.overlays.push(Rect::solid(
+                        [left, baseline - cell.strikeout_offset - cell.stroke / 2.0],
+                        [width, cell.stroke],
+                        colors.foreground,
+                    ));
                 }
             }
         }
@@ -531,20 +701,14 @@ impl Renderer {
             };
             let start = highlight.cols.start.min(cols);
             let end = highlight.cols.end.min(cols);
-            self.rects.push(Rect {
-                origin: [
+            self.rects.push(Rect::solid(
+                [
                     origin_x + start as f32 * cell_width,
                     origin_y + highlight.line as f32 * cell_height,
                 ],
-                size: [(end - start) as f32 * cell_width, cell_height],
-                color: [r, g, b, alpha],
-            });
-        }
-        if scene.normal_mode {
-            self.push_frame(scene, cell.stroke, size);
-        }
-        if let Some(label) = scene.label {
-            self.push_label(label, fonts, scene);
+                [(end - start) as f32 * cell_width, cell_height],
+                [r, g, b, alpha],
+            ));
         }
     }
 
@@ -573,128 +737,71 @@ impl Renderer {
             ],
         };
         for &(origin, size) in rects {
-            self.overlays.push(Rect {
-                origin,
-                size,
-                color,
-            });
+            self.overlays.push(Rect::solid(origin, size, color));
         }
         false
     }
 
-    /// A border around the pane in the accent colour, just outside it, in
-    /// the window's padding or the space around a divider.
+    /// Adds a line of the window's own text. Drawn after the grid's
+    /// glyphs, so it sits on top of them: these glyphs go to a list of
+    /// their own, drawn last.
     #[allow(clippy::cast_precision_loss)]
-    fn push_frame(&mut self, scene: &Scene<'_>, stroke: f32, size: [u32; 2]) {
-        let t = (2.0 * stroke).max(2.0).round();
-        let gap = t + 1.0;
-        let left = (scene.origin[0] - gap).max(0.0);
-        let top = (scene.origin[1] - gap).max(0.0);
-        let right = (scene.origin[0] + scene.size[0] + gap).min(size[0] as f32);
-        let bottom = (scene.origin[1] + scene.size[1] + gap).min(size[1] as f32);
-        let (w, h) = (right - left, bottom - top);
-        for (origin, size) in [
-            ([left, top], [w, t]),
-            ([left, bottom - t], [w, t]),
-            ([left, top], [t, h]),
-            ([right - t, top], [t, h]),
-        ] {
-            self.overlays.push(Rect {
-                origin,
-                size,
-                color: self.theme.accent,
-            });
-        }
-    }
-
-    /// `text` in the pane's top right corner, dark on the accent colour,
-    /// over whatever the grid shows there.
-    #[allow(clippy::cast_precision_loss)]
-    fn push_label(&mut self, text: &str, fonts: &mut Fonts, scene: &Scene<'_>) {
-        let cell_width = fonts.cell.width as f32;
-        // A cell's width of space either side of the text.
-        let width = (text.chars().count() as f32 + 2.0) * cell_width;
-        let left = (scene.origin[0] + scene.size[0] - width).max(scene.origin[0]);
-        self.push_tag(
-            text,
-            fonts,
-            [left, scene.origin[1]],
-            Some(self.theme.accent),
-        );
-    }
-
-    /// `text` with a cell's space either side, at `origin`: dark on `fill`,
-    /// if it has one, or else in a muted colour. Drawn after
-    /// the grid's glyphs, so it sits on top of them: the overlay pass comes
-    /// last, and these glyphs go to their own list. Returns how wide it is.
-    #[allow(clippy::cast_precision_loss)]
-    fn push_tag(
-        &mut self,
-        text: &str,
-        fonts: &mut Fonts,
-        origin: [f32; 2],
-        fill: Option<Rgba>,
-    ) -> f32 {
+    fn push_text(&mut self, text: &Text<'_>, fonts: &mut Fonts) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
-        let width = (text.chars().count() as f32 + 2.0) * cell_width;
-        let [left, top] = origin;
-        let (color, variant) = if let Some(fill) = fill {
-            self.overlays.push(Rect {
-                origin,
-                size: [width, cell_height],
-                color: fill,
-            });
-            (self.theme.background, Variant::Bold)
-        } else {
-            (self.theme.muted, Variant::Regular)
+        let bold = text.ink == Ink::Strong;
+        let color = match text.ink {
+            Ink::Plain | Ink::Strong => self.theme.foreground,
+            Ink::Muted => self.theme.muted,
+            Ink::Warning => self.theme.warning,
         };
-        let baseline = top + cell.baseline;
-        for (index, ch) in text.chars().enumerate() {
-            let Some((face, glyph)) = fonts.glyph(ch, variant) else {
-                continue;
-            };
-            let Some(atlas) = self.glyphs.get(fonts, face, glyph) else {
-                continue;
-            };
-            let pen = [left + (index as f32 + 1.0) * cell_width, baseline];
-            self.label_glyphs.push(place(
-                &atlas,
-                pen,
-                [cell_width, cell_height],
-                color,
-                cell.baseline,
-            ));
-        }
-        width
-    }
-
-    /// The bar: its items on the left from the left edge, any alert in the
-    /// middle, or as near as it fits, and the items on the right up to the
-    /// right edge, dropped if they'd overlap.
-    #[allow(clippy::cast_precision_loss)]
-    fn push_bar(&mut self, bar: &Bar<'_>, fonts: &mut Fonts) {
-        let cell_width = fonts.cell.width as f32;
-        let tag_width = |text: &str| (text.chars().count() as f32 + 2.0) * cell_width;
-        let width = |item: &BarItem| tag_width(&item.text);
-        let accent = self.theme.accent;
-        let picked = |active: bool| active.then_some(accent);
-        let [mut left, top] = bar.origin;
-        for item in bar.left {
-            left += self.push_tag(&item.text, fonts, [left, top], picked(item.active));
-        }
-        if let Some(alert) = bar.alert {
-            let middle = bar.origin[0] + (bar.width - tag_width(alert)) / 2.0;
-            let x = middle.max(left + cell_width);
-            left = x + self.push_tag(alert, fonts, [x, top], Some(self.theme.warning));
-        }
-        let right_width: f32 = bar.right.iter().map(width).sum();
-        let mut x = bar.origin[0] + bar.width - right_width;
-        if x < left + cell_width {
-            return;
-        }
-        for item in bar.right {
-            x += self.push_tag(&item.text, fonts, [x, top], picked(item.active));
+        let [mut pen_x, top] = text.origin;
+        match text.font {
+            TextFont::Mono => {
+                let variant = if bold {
+                    Variant::Bold
+                } else {
+                    Variant::Regular
+                };
+                let baseline = top + cell.baseline;
+                for ch in text.content.chars() {
+                    if let Some((face, glyph)) = fonts.glyph(ch, variant)
+                        && let Some(atlas) = self.glyphs.get(fonts, face, glyph)
+                    {
+                        self.text_glyphs.push(place(
+                            &atlas,
+                            [pen_x, baseline],
+                            [cell_width, cell_height],
+                            color,
+                            cell.baseline,
+                        ));
+                    }
+                    pen_x += cell_width;
+                }
+            }
+            TextFont::Ui => {
+                let ui = fonts.ui;
+                let baseline = top + ui.baseline;
+                for ch in text.content.chars() {
+                    let Some(glyph) = fonts.ui_glyph(ch, bold) else {
+                        continue;
+                    };
+                    if let Some(atlas) =
+                        self.glyphs
+                            .get_sized(fonts, glyph.face, glyph.glyph, glyph.ppem)
+                    {
+                        // Whole pixels, so glyphs stay sharp.
+                        self.text_glyphs.push(place(
+                            &atlas,
+                            [pen_x.round(), baseline],
+                            [glyph.advance, ui.height],
+                            color,
+                            ui.baseline,
+                        ));
+                    }
+                    pen_x += glyph.advance.round();
+                }
+            }
         }
     }
 

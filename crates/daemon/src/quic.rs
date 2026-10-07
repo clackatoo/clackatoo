@@ -76,24 +76,54 @@ fn transport() -> TransportConfig {
     transport
 }
 
-/// The address QUIC knows the carrier with `key` by: one in the range set
-/// aside for discarding (RFC 6666), so never a real one.
-pub(crate) fn carrier_address(key: usize) -> SocketAddr {
-    let key = u32::try_from(key).unwrap_or(u32::MAX);
-    #[allow(clippy::cast_possible_truncation)]
-    let ip = Ipv6Addr::new(0x100, 0, 0, 0, 0, 0, (key >> 16) as u16, key as u16);
+/// Names one carrier: its key among the daemon's sources, and how many
+/// carriers came before it, so that a key used again never names an old
+/// carrier, whose connections may outlive it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CarrierId {
+    pub(crate) key: usize,
+    pub(crate) generation: u32,
+}
+
+/// The address QUIC knows the carrier `id` by: one in the range set aside
+/// for discarding (RFC 6666), so never a real one.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn carrier_address(id: CarrierId) -> SocketAddr {
+    let key = u32::try_from(id.key).unwrap_or(u32::MAX);
+    let generation = id.generation;
+    let ip = Ipv6Addr::new(
+        0x100,
+        0,
+        (generation >> 16) as u16,
+        generation as u16,
+        0,
+        0,
+        (key >> 16) as u16,
+        key as u16,
+    );
     SocketAddr::new(IpAddr::V6(ip), 1)
 }
 
-/// The key of the carrier with `address`, if it's a carrier's.
-pub(crate) fn carrier_key(address: SocketAddr) -> Option<usize> {
+/// The carrier with `address`, if it's a carrier's.
+pub(crate) fn carrier_id(address: SocketAddr) -> Option<CarrierId> {
     let IpAddr::V6(ip) = address.ip() else {
         return None;
     };
+    let join = |high: u16, low: u16| u32::from(high) << 16 | u32::from(low);
     match ip.segments() {
-        [0x100, 0, 0, 0, 0, 0, high, low] if address.port() == 1 => {
-            usize::try_from(u32::from(high) << 16 | u32::from(low)).ok()
-        }
+        [
+            0x100,
+            0,
+            generation_high,
+            generation_low,
+            0,
+            0,
+            key_high,
+            key_low,
+        ] if address.port() == 1 => Some(CarrierId {
+            key: usize::try_from(join(key_high, key_low)).ok()?,
+            generation: join(generation_high, generation_low),
+        }),
         _ => None,
     }
 }
@@ -144,9 +174,21 @@ mod tests {
     #[test]
     fn carrier_addresses_lead_back_to_their_carrier() {
         for key in [0, 1, 0xffff, 0x1_0000, 0x1234_5678] {
-            assert_eq!(carrier_key(carrier_address(key)), Some(key));
+            for generation in [0, 7, 0x8765_4321] {
+                let id = CarrierId { key, generation };
+                assert_eq!(carrier_id(carrier_address(id)), Some(id));
+            }
         }
-        assert_eq!(carrier_key("127.0.0.1:1".parse().unwrap()), None);
-        assert_eq!(carrier_key("[100::5]:2".parse().unwrap()), None);
+        let old = CarrierId {
+            key: 3,
+            generation: 1,
+        };
+        let new = CarrierId {
+            key: 3,
+            generation: 2,
+        };
+        assert_ne!(carrier_address(old), carrier_address(new));
+        assert_eq!(carrier_id("127.0.0.1:1".parse().unwrap()), None);
+        assert_eq!(carrier_id("[100::5]:2".parse().unwrap()), None);
     }
 }

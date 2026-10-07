@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use clackatoo_protocol::frame::FrameDecoder;
@@ -20,6 +20,11 @@ use quinn_proto::{
 };
 
 use super::SERVER_NAME;
+
+/// How long a connection whose carrier closed has to move onto UDP before
+/// it's dropped: a client that has only just found UDP gets through, and
+/// one that's gone is soon forgotten.
+const ORPHAN_GRACE: Duration = Duration::from_secs(15);
 
 /// Something the event loop must act on.
 #[derive(Debug, PartialEq, Eq)]
@@ -59,6 +64,8 @@ pub(crate) struct QuicServer {
     touched: Vec<ConnectionHandle>,
     /// Packets the endpoint answered without a connection, waiting to go.
     answers: Vec<(SocketAddr, Vec<u8>)>,
+    /// The clients of connections dropped since the last events.
+    forgotten: Vec<Token>,
     buffer: Vec<u8>,
 }
 
@@ -70,6 +77,9 @@ struct Remote {
     stream: Option<StreamId>,
     /// The client it is, once given one.
     client: Option<Token>,
+    /// The carrier it was on closed: its address, and when the connection
+    /// goes too, if it hasn't moved by then.
+    orphaned: Option<(SocketAddr, Instant)>,
 }
 
 /// Setting up the endpoint failed.
@@ -110,6 +120,7 @@ impl QuicServer {
             probe_key,
             touched: Vec::new(),
             answers: Vec::new(),
+            forgotten: Vec::new(),
             buffer: Vec::new(),
         })
     }
@@ -127,7 +138,7 @@ impl QuicServer {
     /// Takes a packet received from `from`, by a carrier or over UDP. Only
     /// a carrier's may open a connection: see the [module docs](super).
     pub(crate) fn receive(&mut self, now: Instant, from: SocketAddr, packet: &[u8]) {
-        let may_open = super::carrier_key(from).is_some();
+        let may_open = super::carrier_id(from).is_some();
         self.buffer.clear();
         let event = self.endpoint.handle(
             now,
@@ -159,6 +170,7 @@ impl QuicServer {
                                 connection,
                                 stream: None,
                                 client: None,
+                                orphaned: None,
                             },
                         );
                         self.touched.push(handle);
@@ -188,12 +200,16 @@ impl QuicServer {
     pub(crate) fn next_timeout(&mut self) -> Option<Instant> {
         self.connections
             .values_mut()
-            .filter_map(|remote| remote.connection.poll_timeout())
+            .flat_map(|remote| {
+                let orphaned = remote.orphaned.map(|(_, until)| until);
+                remote.connection.poll_timeout().into_iter().chain(orphaned)
+            })
             .min()
     }
 
     /// Lets each connection whose timer is due act on it.
     pub(crate) fn handle_timeouts(&mut self, now: Instant) {
+        let mut gone = Vec::new();
         for (&handle, remote) in &mut self.connections {
             if remote
                 .connection
@@ -203,11 +219,34 @@ impl QuicServer {
                 remote.connection.handle_timeout(now);
                 self.touched.push(handle);
             }
+            if let Some((address, until)) = remote.orphaned
+                && now >= until
+            {
+                remote.orphaned = None;
+                if remote.connection.remote_address() == address {
+                    gone.push(handle);
+                }
+            }
+        }
+        for handle in gone {
+            self.forget(handle);
+        }
+    }
+
+    /// Drops the connection with `handle` without a word, as it has no way
+    /// left to send one, and has its client dropped too.
+    fn forget(&mut self, handle: ConnectionHandle) {
+        if let Some(remote) = self.connections.remove(&handle) {
+            log::info!("a QUIC connection whose carrier closed never moved");
+            self.forgotten.extend(remote.client);
+            self.endpoint
+                .handle_event(handle, quinn_proto::EndpointEvent::drained());
         }
     }
 
     /// Collects what the event loop must act on, since the last call.
     pub(crate) fn events(&mut self, events: &mut Vec<QuicEvent>) {
+        events.extend(self.forgotten.drain(..).map(QuicEvent::Closed));
         self.touched.sort_unstable();
         self.touched.dedup();
         for handle in std::mem::take(&mut self.touched) {
@@ -322,24 +361,15 @@ impl QuicServer {
         }
     }
 
-    /// Forgets the connections on the carrier at `address`, which closed,
-    /// leaving them no way to send or receive. Returns their clients.
-    pub(crate) fn carrier_closed(&mut self, address: SocketAddr) -> Vec<Token> {
-        let gone: Vec<ConnectionHandle> = self
-            .connections
-            .iter()
-            .filter(|(_, remote)| remote.connection.remote_address() == address)
-            .map(|(&handle, _)| handle)
-            .collect();
-        let mut clients = Vec::new();
-        for handle in gone {
-            if let Some(remote) = self.connections.remove(&handle) {
-                clients.extend(remote.client);
-                self.endpoint
-                    .handle_event(handle, quinn_proto::EndpointEvent::drained());
+    /// Gives the connections on the carrier at `address`, which closed, a
+    /// while to move onto UDP, as a client may have only just started to:
+    /// those still on it after that are dropped.
+    pub(crate) fn carrier_closed(&mut self, address: SocketAddr, now: Instant) {
+        for remote in self.connections.values_mut() {
+            if remote.connection.remote_address() == address {
+                remote.orphaned = Some((address, now + ORPHAN_GRACE));
             }
         }
-        clients
     }
 
     /// Hands each packet ready to go to `send`, with where it goes.

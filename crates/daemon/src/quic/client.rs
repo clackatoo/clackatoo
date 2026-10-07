@@ -33,7 +33,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{self, DigitallySignedStruct, SignatureScheme};
 
 use super::path::{Action, Path, Route, Sending};
-use super::{KEEP_ALIVE, SERVER_NAME, carrier_address, frame_packet, transport};
+use super::{CarrierId, KEEP_ALIVE, SERVER_NAME, carrier_address, frame_packet, transport};
 use crate::remote::Ssh;
 
 const CARRIER: Token = Token(0);
@@ -356,7 +356,7 @@ impl Driver {
             .connect(
                 Instant::now(),
                 client_config(certificate)?,
-                carrier_address(0),
+                carrier_address(CarrierId::default()),
                 SERVER_NAME,
             )
             .map_err(io::Error::other)?;
@@ -482,7 +482,7 @@ impl Driver {
             while let Some(packet) = self.packets.next_payload().map_err(frame_error)? {
                 let event = self.endpoint.handle(
                     now,
-                    carrier_address(0),
+                    carrier_address(CarrierId::default()),
                     None,
                     None,
                     BytesMut::from(packet),
@@ -514,7 +514,7 @@ impl Driver {
                     Ok((n, from)) if from == udp.daemon => {
                         let event = self.endpoint.handle(
                             now,
-                            carrier_address(0),
+                            carrier_address(CarrierId::default()),
                             None,
                             None,
                             BytesMut::from(&self.read_buffer[..n]),

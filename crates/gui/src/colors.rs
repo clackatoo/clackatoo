@@ -5,6 +5,11 @@ use clackatoo_protocol::{Attributes, Color, Style};
 /// A colour as red, green, blue and alpha, each from 0 to 1, in sRGB.
 pub(crate) type Rgba = [f32; 4];
 
+/// White, `alpha` opaque, for faint lines that lighten what's behind them.
+const fn white(alpha: f32) -> Rgba {
+    [1.0, 1.0, 1.0, alpha]
+}
+
 /// The colours text is drawn in when a program doesn't choose its own.
 #[derive(Clone, Debug)]
 pub(crate) struct Theme {
@@ -12,13 +17,27 @@ pub(crate) struct Theme {
     pub(crate) background: Rgba,
     pub(crate) cursor: Rgba,
     /// clackatoo's own colour, the cockatoo's crest, for the window's own
-    /// marks such as the normal-mode frame.
+    /// marks such as the focused card's edge in normal mode.
     pub(crate) accent: Rgba,
-    /// Text that matters less, such as the names in the bar not shown.
+    /// The window's background fades from this, at the bottom left...
+    pub(crate) backdrop: Rgba,
+    /// ...to this, bluer, at the top right.
+    pub(crate) backdrop_end: Rgba,
+    /// A card's edge.
+    pub(crate) edge: Rgba,
+    /// The focused card's edge, while typing goes to its program.
+    pub(crate) focus: Rgba,
+    /// Behind what's picked, such as the workspace shown.
+    pub(crate) picked: Rgba,
+    /// Under the mouse.
+    pub(crate) hover: Rgba,
+    /// Text that matters less, such as the names in the bars not shown.
     pub(crate) muted: Rgba,
-    /// The lines between panes.
-    pub(crate) divider: Rgba,
-    /// Behind what's gone wrong, such as the daemon being out of contact.
+    /// The command palette's background.
+    pub(crate) palette_background: Rgba,
+    /// The command palette's edge.
+    pub(crate) palette_edge: Rgba,
+    /// For what's gone wrong, such as the daemon being out of contact.
     pub(crate) warning: Rgba,
     /// The 256 indexed colours: 16 named ones, a 6×6×6 cube, and 24 greys.
     palette: [Rgba; 256],
@@ -56,19 +75,53 @@ impl Default for Theme {
             palette[232 + n as usize] = hex_rgba(grey << 16 | grey << 8 | grey);
         }
         Self {
-            foreground: hex_rgba(0xc5_c8_c6),
-            background: hex_rgba(0x1d_1f_21),
-            cursor: hex_rgba(0xc5_c8_c6),
-            accent: hex_rgba(0xf8_ce_57),
-            muted: hex_rgba(0x80_84_88),
-            divider: hex_rgba(0x3c_40_44),
-            warning: hex_rgba(0xcc_66_66),
+            foreground: hex_rgba(0xc8_d0_da),
+            background: hex_rgba(0x11_15_1b),
+            cursor: hex_rgba(0xc8_d0_da),
+            accent: hex_rgba(0xd9_b2_4a),
+            backdrop: hex_rgba(0x0a_0d_12),
+            backdrop_end: hex_rgba(0x0e_1a_2c),
+            edge: hex_rgba(0x1d_23_2c),
+            focus: hex_rgba(0x2f_86_a8),
+            picked: hex_rgba(0x1b_21_2a),
+            hover: hex_rgba(0x18_1e_27),
+            muted: hex_rgba(0x7c_86_96),
+            palette_background: hex_rgba(0x14_19_20),
+            palette_edge: hex_rgba(0x2a_32_3f),
+            warning: hex_rgba(0xe0_6c_75),
             palette,
         }
     }
 }
 
 impl Theme {
+    /// The colour of `paint`.
+    pub(crate) fn paint(&self, paint: crate::render::Paint) -> Rgba {
+        use crate::render::Paint;
+        let faint = |[r, g, b, _]: Rgba, alpha: f32| [r, g, b, alpha];
+        match paint {
+            Paint::Clear => [0.0; 4],
+            Paint::Backdrop => self.backdrop,
+            Paint::BackdropEnd => self.backdrop_end,
+            Paint::WindowEdge => white(0.08),
+            Paint::Shadow => [0.0, 0.0, 0.0, 0.25],
+            Paint::Card => self.background,
+            Paint::Edge => self.edge,
+            Paint::Focus => self.focus,
+            Paint::FocusGlow => faint(self.focus, 0.16),
+            Paint::Accent => self.accent,
+            Paint::AccentGlow => faint(self.accent, 0.14),
+            Paint::Picked => self.picked,
+            Paint::Hover => self.hover,
+            Paint::Icon => self.muted,
+            Paint::Ink => self.foreground,
+            Paint::Palette => self.palette_background,
+            Paint::PaletteEdge => self.palette_edge,
+            Paint::Warning => faint(self.warning, 0.14),
+            Paint::WarningEdge => faint(self.warning, 0.4),
+        }
+    }
+
     /// The colours for a cell in `style`.
     pub(crate) fn cell(&self, style: &Style) -> CellColors {
         let attributes = style.attributes;

@@ -43,7 +43,7 @@ use slab::Slab;
 use crate::DaemonConfig;
 use crate::hosted::{HostedTerminal, Orphan, ReadOutcome};
 use crate::memory;
-use crate::quic::{self, QuicEvent, QuicServer, Received};
+use crate::quic::{self, CarrierId, QuicEvent, QuicServer, Received};
 use crate::workspaces::WorkspaceState;
 
 const LISTENER: Token = Token(usize::MAX);
@@ -163,6 +163,9 @@ struct Carrier {
     /// Packets not yet written.
     outgoing: Vec<u8>,
     wants_writable: bool,
+    /// How many carriers came before it, which tells it apart from any
+    /// that had its token before.
+    generation: u32,
 }
 
 /// A client following one terminal's view, and what it was last sent.
@@ -245,6 +248,8 @@ pub struct Daemon {
     quic: Option<QuicServer>,
     /// What the QUIC endpoint last asked to be acted on.
     quic_events: Vec<QuicEvent>,
+    /// How many connections have become carriers.
+    carriers_made: u32,
     /// Where QUIC connections that have moved off their carriers send and
     /// receive, set up along with the QUIC endpoint.
     udp: Option<UdpSocket>,
@@ -307,6 +312,7 @@ impl Daemon {
             workspaces: WorkspaceState::new(),
             quic: None,
             quic_events: Vec::new(),
+            carriers_made: 0,
             udp: None,
             unread: VecDeque::new(),
             compactions: BTreeMap::new(),
@@ -686,6 +692,14 @@ impl Daemon {
         Ok(())
     }
 
+    /// Closes `terminals`, as closing their tab or workspace does.
+    fn close_terminals(&mut self, terminals: &[TerminalId]) -> Result<Response, Error> {
+        for &terminal in terminals {
+            self.close_terminal(terminal)?;
+        }
+        Ok(Response::Done)
+    }
+
     /// The terminal for a new pane: a new one, starting by default in the
     /// directory `beside`'s terminal is in, or an existing one in no pane.
     fn pane_terminal(
@@ -1015,7 +1029,10 @@ impl Daemon {
             | Request::Split { .. }
             | Request::ClosePane { .. }
             | Request::Focus { .. }
-            | Request::RenameWorkspace { .. }) => self.respond_about_workspaces(request, token),
+            | Request::RenameWorkspace { .. }
+            | Request::RenameTab { .. }
+            | Request::CloseTab { .. }
+            | Request::CloseWorkspace { .. }) => self.respond_about_workspaces(request, token),
             Request::CarryQuic => self.carry_quic(token),
         };
         response.unwrap_or_else(Response::Error)
@@ -1060,6 +1077,18 @@ impl Daemon {
                     self.workspaces_changed();
                     Response::Done
                 })
+            }
+            Request::RenameTab { tab, name } => self.workspaces.rename_tab(tab, &name).map(|()| {
+                self.workspaces_changed();
+                Response::Done
+            }),
+            Request::CloseTab { tab } => {
+                let terminals = self.workspaces.tab_terminals(tab)?;
+                self.close_terminals(&terminals)
+            }
+            Request::CloseWorkspace { workspace } => {
+                let terminals = self.workspaces.workspace_terminals(workspace)?;
+                self.close_terminals(&terminals)
             }
             other => unreachable!("{other:?} isn't about workspaces"),
         }
@@ -1258,11 +1287,13 @@ impl Daemon {
             log::error!("registering a carrier failed: {err}");
             return;
         }
+        self.carriers_made = self.carriers_made.wrapping_add(1);
         entry.insert(Source::Carrier(Carrier {
             stream,
             packets: client.decoder,
             outgoing: client.outgoing,
             wants_writable: false,
+            generation: self.carriers_made,
         }));
         log::info!("a connection now carries QUIC");
         self.flush_carrier(carrier);
@@ -1310,7 +1341,10 @@ impl Daemon {
             return;
         };
         let now = Instant::now();
-        let from = quic::carrier_address(token.0);
+        let from = quic::carrier_address(CarrierId {
+            key: token.0,
+            generation: carrier.generation,
+        });
         loop {
             match carrier.packets.next_payload() {
                 Ok(Some(packet)) => quic.receive(now, from, packet),
@@ -1324,9 +1358,7 @@ impl Daemon {
         }
         if closed {
             self.sources.remove(token.0);
-            for client in quic.carrier_closed(from) {
-                self.drop_client(client);
-            }
+            quic.carrier_closed(from, now);
             log::info!("a carrier closed");
         }
     }
@@ -1396,9 +1428,11 @@ impl Daemon {
         };
         let mut carriers = Vec::new();
         quic.transmit(Instant::now(), |address, packet| {
-            match quic::carrier_key(address) {
-                Some(key) => {
-                    if let Some(Source::Carrier(carrier)) = self.sources.get_mut(key) {
+            match quic::carrier_id(address) {
+                Some(CarrierId { key, generation }) => {
+                    if let Some(Source::Carrier(carrier)) = self.sources.get_mut(key)
+                        && carrier.generation == generation
+                    {
                         quic::frame_packet(packet, &mut carrier.outgoing);
                         if !carriers.contains(&key) {
                             carriers.push(key);
