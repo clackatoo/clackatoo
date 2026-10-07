@@ -440,17 +440,18 @@ impl Receiver {
 }
 
 /// Greets the daemon on the other end of `stream`, checking that it speaks
-/// our protocol version, and turns the connection into a carrier of QUIC
-/// packets. Both are sent at once, to save a round trip: a daemon speaking
-/// another version hangs up after its greeting, ignoring the rest. Returns
-/// the certificate the daemon's QUIC endpoint presents.
+/// our protocol version, then turns the connection into a carrier of QUIC
+/// packets. Returns the certificate the daemon's QUIC endpoint presents.
+///
+/// The request waits for the greeting's answer: a daemon from an older
+/// build may hang up on a request it can't decode before answering a
+/// greeting that came with it, and then couldn't say which version it
+/// speaks.
 fn open_carrier(stream: &mut UnixStream) -> Result<Vec<u8>, ClientError> {
-    let mut opening = frame::encode(&ClientMessage::Hello {
-        protocol_version: PROTOCOL_VERSION,
-    })?;
-    opening.extend(frame::encode(&ClientMessage::Request(Request::CarryQuic))?);
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
-    stream.write_all(&opening)?;
+    stream.write_all(&frame::encode(&ClientMessage::Hello {
+        protocol_version: PROTOCOL_VERSION,
+    })?)?;
     let mut decoder = FrameDecoder::new();
     match receive(stream, &mut decoder)? {
         ServerMessage::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => {}
@@ -462,6 +463,7 @@ fn open_carrier(stream: &mut UnixStream) -> Result<Vec<u8>, ClientError> {
         }
         other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
     }
+    stream.write_all(&frame::encode(&ClientMessage::Request(Request::CarryQuic))?)?;
     let certificate = match receive(stream, &mut decoder)? {
         ServerMessage::Response(Response::Carrying { certificate }) => certificate,
         ServerMessage::Response(response) => return Err(unexpected(response)),

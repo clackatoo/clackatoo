@@ -863,3 +863,38 @@ fn quic_clients_follow_several_terminals_on_their_own_streams() {
         }
     }
 }
+
+#[test]
+fn a_daemon_from_an_older_build_can_say_its_version_before_carrying() {
+    // Older daemons decode everything that has arrived before answering,
+    // and hang up on a request they can't decode: this one hangs up if
+    // anything comes after the greeting before it has answered.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let old = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = FrameDecoder::new();
+        let mut buffer = [0; 1024];
+        while decoder.decode::<ClientMessage>().unwrap().is_none() {
+            let n = stream.read(&mut buffer).unwrap();
+            decoder.push(&buffer[..n]);
+        }
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        if decoder.has_partial_frame() || stream.read(&mut buffer).is_ok_and(|n| n > 0) {
+            return;
+        }
+        let hello = ServerMessage::Hello {
+            protocol_version: 1,
+        };
+        stream.write_all(&frame::encode(&hello).unwrap()).unwrap();
+    });
+    let stream = UnixStream::connect(&path).unwrap();
+    match Client::over_quic(stream) {
+        Err(ClientError::VersionMismatch { daemon: 1, .. }) => {}
+        other => panic!("expected a version mismatch, got {other:?}"),
+    }
+    old.join().unwrap();
+}

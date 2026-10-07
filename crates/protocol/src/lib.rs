@@ -244,8 +244,10 @@ pub enum Request {
     /// on another machine reaching the daemon over SSH. Answered with
     /// [`Response::Carrying`], after which each frame either way holds one
     /// QUIC packet, not a message. The client must wait for the answer
-    /// before sending any. Only a connection to the daemon's Unix socket
-    /// can carry QUIC.
+    /// before sending any, and should send this only once its `Hello` is
+    /// answered: an older daemon may hang up on a request it can't decode
+    /// without answering a `Hello` that came with it. Only a connection to
+    /// the daemon's Unix socket can carry QUIC.
     CarryQuic,
 }
 
