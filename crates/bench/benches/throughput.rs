@@ -19,7 +19,7 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
 use clackatoo_bench::workloads::{self, CHUNK_LEN, Workload};
-use clackatoo_term::{Size, Terminal};
+use clackatoo_term::{Compaction, Config, Size, Terminal};
 use criterion::{Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
 
 /// Long enough that per-iteration overhead vanishes, and that every
@@ -38,6 +38,13 @@ fn throughput(c: &mut Criterion) {
             .sampling_mode(SamplingMode::Flat);
         group.bench_function("clackatoo", |b| {
             let mut emulator = Clackatoo::new(workload.size);
+            emulator.feed(&workload.bytes);
+            b.iter(|| black_box(&mut emulator).feed(&workload.bytes));
+        });
+        // By default, history is compacted once output pauses, which a flood
+        // never does. This compacts every row as it scrolls off.
+        group.bench_function("clackatoo-eager", |b| {
+            let mut emulator = Clackatoo::with_compaction(workload.size, Compaction::Eager);
             emulator.feed(&workload.bytes);
             b.iter(|| black_box(&mut emulator).feed(&workload.bytes));
         });
@@ -94,9 +101,19 @@ trait Emulator {
 
 struct Clackatoo(Terminal);
 
+impl Clackatoo {
+    fn with_compaction(size: Size, compaction: Compaction) -> Self {
+        let config = Config {
+            scrollback_compaction: compaction,
+            ..Config::default()
+        };
+        Self(Terminal::new(size, &config))
+    }
+}
+
 impl Emulator for Clackatoo {
     fn new(size: Size) -> Self {
-        Self(Terminal::new(size, &clackatoo_term::Config::default()))
+        Self(Terminal::new(size, &Config::default()))
     }
 
     fn feed(&mut self, bytes: &[u8]) {

@@ -4,14 +4,14 @@ use std::collections::VecDeque;
 use std::ops::Range;
 
 use crate::row::Row;
-use crate::scrollback::Scrollback;
+use crate::scrollback::{Compaction, Scrollback};
 use crate::style::Style;
 
 /// A screen of rows and the history above it.
 ///
-/// The screen is a ring of rows. A row that scrolls off the top is stored
-/// in [`Scrollback`], compactly, and then blanked and reused as the new
-/// bottom row, so scrolling never allocates rows.
+/// The screen is a ring of rows. A row that scrolls off the top goes into
+/// [`Scrollback`], which hands back a row to blank and reuse as the new
+/// bottom row, so scrolling doesn't allocate rows.
 #[derive(Clone, Debug)]
 pub struct Grid {
     /// Exactly `height` rows, top first.
@@ -22,10 +22,15 @@ pub struct Grid {
 }
 
 impl Grid {
-    pub(crate) fn new(width: usize, height: usize, scrollback_limit: usize) -> Self {
+    pub(crate) fn new(
+        width: usize,
+        height: usize,
+        scrollback_limit: usize,
+        compaction: Compaction,
+    ) -> Self {
         Self {
             rows: (0..height).map(|_| Row::new(width)).collect(),
-            scrollback: Scrollback::new(scrollback_limit),
+            scrollback: Scrollback::new(scrollback_limit, compaction),
             width,
             height,
         }
@@ -66,7 +71,7 @@ impl Grid {
     }
 
     /// The scrollback's rows, oldest first, each at the width it had when it
-    /// scrolled off. History is stored compactly, so each is rebuilt.
+    /// scrolled off. History is mostly stored compactly, so each is rebuilt.
     #[must_use]
     pub fn scrollback(&self) -> impl ExactSizeIterator<Item = Row> + '_ {
         self.scrollback.rows()
@@ -80,19 +85,12 @@ impl Grid {
     /// scrollback, and blank lines in `blank` appear at the bottom.
     pub(crate) fn scroll_up_into_scrollback(&mut self, count: usize, blank: &Style) {
         for _ in 0..count.min(self.height) {
-            let mut row = self.rows.pop_front().expect("a grid always has rows");
-            // A row that wrapped early, because a wide character didn't fit in
-            // its last column, ends with padding rather than text.
-            let padded = row.is_wrapped()
-                && row
-                    .cells()
-                    .last()
-                    .is_some_and(|&cell| cell == crate::Cell::BLANK)
-                && self
-                    .rows
-                    .front()
-                    .is_some_and(|next| next.cells().first().is_some_and(|cell| cell.is_wide()));
-            self.scrollback.push(&row, padded);
+            let row = self.rows.pop_front().expect("a grid always has rows");
+            let padded = is_padded(&row, self.rows.front());
+            let mut row = match self.scrollback.push(row, padded) {
+                Some(spare) if spare.width() == self.width => spare,
+                _ => Row::new(self.width),
+            };
             row.reset(blank);
             self.rows.push_back(row);
         }
@@ -188,11 +186,12 @@ impl Grid {
             rows.pop();
         }
         let overflow = rows.len().saturating_sub(height).min(moved.0);
-        for index in 0..overflow {
-            self.scrollback
-                .push(&rows[index], is_padded(&rows[index], rows.get(index + 1)));
+        let padded: Vec<bool> = (0..overflow)
+            .map(|index| is_padded(&rows[index], rows.get(index + 1)))
+            .collect();
+        for (row, padded) in rows.drain(..overflow).zip(padded) {
+            self.scrollback.push(row, padded);
         }
-        rows.drain(..overflow);
         rows.truncate(height);
         rows.resize_with(height, || Row::new(width));
         self.rows = rows.into();
@@ -239,6 +238,19 @@ impl Grid {
 
     pub(crate) fn clear_scrollback(&mut self) {
         self.scrollback.clear();
+    }
+
+    pub(crate) fn scrollback_needs_compaction(&self) -> bool {
+        self.scrollback.needs_compaction()
+    }
+
+    pub(crate) fn compact_scrollback(&mut self) {
+        self.scrollback.compact();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_scrollback_invariants(&self) {
+        self.scrollback.assert_invariants();
     }
 
     fn absolute(&self, lines: Range<usize>) -> Range<usize> {
@@ -313,7 +325,7 @@ mod tests {
     use super::*;
 
     fn grid(lines: &[&str], scrollback_limit: usize) -> Grid {
-        let mut grid = Grid::new(4, lines.len(), scrollback_limit);
+        let mut grid = Grid::new(4, lines.len(), scrollback_limit, Compaction::default());
         for (line, text) in lines.iter().enumerate() {
             for (col, ch) in text.chars().enumerate() {
                 grid.row_mut(line).write(col, ch, false, &Style::DEFAULT);

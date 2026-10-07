@@ -8,6 +8,7 @@ use crate::charset::Charsets;
 use crate::grid::Grid;
 use crate::parser::Parser;
 use crate::row::Row;
+use crate::scrollback::Compaction;
 use crate::size::Size;
 use crate::style::Style;
 use crate::tabs::TabStops;
@@ -18,12 +19,15 @@ use crate::width;
 pub struct Config {
     /// How many lines scrolled off the top of the primary screen are kept.
     pub scrollback_lines: usize,
+    /// When those lines are compacted to save memory.
+    pub scrollback_compaction: Compaction,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             scrollback_lines: 10_000,
+            scrollback_compaction: Compaction::default(),
         }
     }
 }
@@ -91,6 +95,21 @@ impl Terminal {
         self.emulator.resize(size);
     }
 
+    /// Whether scrollback holds rows waiting for
+    /// [`compact_scrollback`](Self::compact_scrollback). Only ever true with
+    /// [`Compaction::Lazy`].
+    #[must_use]
+    pub fn scrollback_needs_compaction(&self) -> bool {
+        self.emulator.primary.scrollback_needs_compaction()
+    }
+
+    /// Compacts the scrollback rows that aren't yet, to save memory. With
+    /// [`Compaction::Lazy`], call this once output pauses. It takes well
+    /// under a millisecond per thousand rows.
+    pub fn compact_scrollback(&mut self) {
+        self.emulator.primary.compact_scrollback();
+    }
+
     /// The screen being shown: the primary screen, or the alternate screen
     /// that full-screen programs switch to.
     #[must_use]
@@ -145,6 +164,7 @@ impl Terminal {
         let emulator = &self.emulator;
         for grid in std::iter::once(&emulator.primary).chain(&emulator.alternate) {
             assert_eq!(grid.rows().len(), emulator.height());
+            grid.assert_scrollback_invariants();
             // History keeps the width each row had when it scrolled off.
             for row in grid.scrollback() {
                 row.assert_invariants();
@@ -368,7 +388,12 @@ impl Emulator {
         Self {
             size,
             config: config.clone(),
-            primary: Grid::new(width, height, config.scrollback_lines),
+            primary: Grid::new(
+                width,
+                height,
+                config.scrollback_lines,
+                config.scrollback_compaction,
+            ),
             alternate: None,
             screen: Screen::Primary,
             cursor: CursorState::default(),
@@ -994,7 +1019,7 @@ impl Emulator {
         if alternate {
             let (width, height) = (self.width(), self.height());
             self.alternate
-                .get_or_insert_with(|| Grid::new(width, height, 0));
+                .get_or_insert_with(|| Grid::new(width, height, 0, Compaction::Off));
             self.screen = Screen::Alternate;
         } else {
             self.screen = Screen::Primary;

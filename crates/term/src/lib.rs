@@ -32,6 +32,7 @@ mod tests;
 pub use cell::{Cell, CellFlags};
 pub use grid::Grid;
 pub use row::Row;
+pub use scrollback::Compaction;
 pub use size::{InvalidSize, Size};
 pub use style::{Attributes, Color, Style, Underline};
 pub use terminal::{Config, Cursor, Terminal};

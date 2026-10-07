@@ -2,7 +2,7 @@
 
 use proptest::prelude::*;
 
-use crate::{Attributes, CellFlags, Color, Config, Size, Style, Terminal};
+use crate::{Attributes, CellFlags, Color, Compaction, Config, Size, Style, Terminal};
 
 fn terminal(cols: u16, rows: u16) -> Terminal {
     let size = Size::new(cols, rows).expect("test sizes are valid");
@@ -10,6 +10,7 @@ fn terminal(cols: u16, rows: u16) -> Terminal {
         size,
         &Config {
             scrollback_lines: 100,
+            ..Config::default()
         },
     )
 }
@@ -706,11 +707,61 @@ proptest! {
         let mut t = terminal(cols, rows);
         t.advance(&bytes);
         for row in t.grid().rows() {
-            let mut history = crate::scrollback::Scrollback::new(1);
-            history.push(row, false);
+            let mut history = crate::scrollback::Scrollback::new(1, Compaction::Eager);
+            history.push(row.clone(), false);
             let stored = history.rows().next().expect("one row was stored");
             prop_assert_eq!(row_contents(&stored), row_contents(row));
         }
+    }
+
+    #[test]
+    fn every_compaction_mode_keeps_the_same_history(
+        bytes in output(),
+        cuts in prop::collection::vec(
+            (any::<prop::sample::Index>(), prop::option::of((1u16..12, 1u16..6))),
+            0..6,
+        ),
+        cols in 1u16..12,
+        rows in 1u16..6,
+        limit in 0usize..20,
+    ) {
+        let start = |compaction| {
+            let size = Size::new(cols, rows).expect("test sizes are valid");
+            Terminal::new(size, &Config { scrollback_lines: limit, scrollback_compaction: compaction })
+        };
+        let mut terminals = [
+            start(Compaction::Off),
+            start(Compaction::Lazy),
+            start(Compaction::Eager),
+        ];
+
+        // Lazy compacts at every cut, sometimes with a resize there too, and
+        // ends with history partly compacted.
+        let mut cuts: Vec<_> = cuts.iter().map(|(cut, size)| (cut.index(bytes.len() + 1), *size)).collect();
+        cuts.sort_unstable();
+        let mut start = 0;
+        for (cut, size) in cuts {
+            for terminal in &mut terminals {
+                terminal.advance(&bytes[start..cut]);
+                if let Some((cols, rows)) = size {
+                    terminal.resize(Size::new(cols, rows).expect("test sizes are valid"));
+                }
+            }
+            terminals[1].compact_scrollback();
+            prop_assert!(!terminals[1].scrollback_needs_compaction());
+            start = cut;
+        }
+        for terminal in &mut terminals {
+            terminal.advance(&bytes[start..]);
+        }
+
+        for terminal in &terminals {
+            terminal.assert_invariants();
+        }
+        let [off, lazy, eager] = &terminals;
+        prop_assert!(!off.scrollback_needs_compaction() && !eager.scrollback_needs_compaction());
+        prop_assert_eq!(cells(off), cells(lazy));
+        prop_assert_eq!(cells(off), cells(eager));
     }
 
     #[test]
