@@ -17,12 +17,18 @@ use crate::terminal::Emulator;
 /// so it must always be sent.
 const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
 
+/// Text is queued rather than printed straight away (see
+/// [`Emulator::queue_text`]), so every other method must call
+/// [`Emulator::flush_text`] before acting. DCS (`hook`, `put`, `unhook`)
+/// keeps vte's do-nothing defaults for now; implementing it means flushing
+/// there too.
 impl Perform for Emulator {
     fn print(&mut self, ch: char) {
-        Emulator::print(self, ch);
+        self.queue_text(ch);
     }
 
     fn execute(&mut self, byte: u8) {
+        self.flush_text();
         match byte {
             // BEL. A bell will reach clients once they can show one.
             0x07 => {}
@@ -39,6 +45,7 @@ impl Perform for Emulator {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        self.flush_text();
         if ignore {
             log::trace!("ignoring CSI {action} with too many parameters or intermediates");
             return;
@@ -112,6 +119,7 @@ impl Perform for Emulator {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+        self.flush_text();
         if ignore {
             log::trace!("ignoring ESC {byte:#04x} with too many intermediates");
             return;
@@ -140,6 +148,7 @@ impl Perform for Emulator {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.flush_text();
         match params {
             // OSC 0 sets the icon name and title, OSC 2 just the title. With
             // no icons to name, both set the title.

@@ -1,16 +1,14 @@
 //! One line of the grid.
 
+mod graphemes;
+mod lookup;
+
 use std::ops::Range;
 
 use crate::cell::{Cell, CellFlags, StyleIndex};
 use crate::style::Style;
-
-/// The most codepoints a cell may hold beyond its first.
-///
-/// Real graphemes stay far below this (long emoji ZWJ sequences have about
-/// ten). The cap keeps a stream of combining characters from growing one
-/// cell without limit.
-const MAX_GRAPHEME_EXTRA: usize = 32;
+use graphemes::Graphemes;
+use lookup::{LINEAR_SEARCH_MAX, StyleLookup};
 
 /// One line of cells, plus everything those cells refer to.
 ///
@@ -30,10 +28,20 @@ pub struct Row {
     /// Non-default styles used by cells. [`StyleIndex`] `i` refers to
     /// `palette[i - 1]`, and index 0 is the default style.
     palette: Vec<Style>,
-    /// Codepoints beyond the first, for cells flagged [`CellFlags::GRAPHEME`],
-    /// keyed by column. Rare enough that a linear scan beats a map.
-    graphemes: Vec<(usize, String)>,
+    /// What most rows never need, kept out of line so they don't pay for it.
+    extras: Option<Box<Extras>>,
     wrapped: bool,
+}
+
+/// The rarely needed parts of a row.
+#[derive(Clone, Debug, Default)]
+struct Extras {
+    /// Codepoints beyond the first, for cells flagged
+    /// [`CellFlags::GRAPHEME`].
+    graphemes: Graphemes,
+    /// An index into the palette, built while it is too big to search one by
+    /// one, and dropped when the row scrolls into scrollback.
+    lookup: StyleLookup,
 }
 
 impl Row {
@@ -41,7 +49,7 @@ impl Row {
         Self {
             cells: vec![Cell::BLANK; width],
             palette: Vec::new(),
-            graphemes: Vec::new(),
+            extras: None,
             wrapped: false,
         }
     }
@@ -92,7 +100,7 @@ impl Row {
         if cell.has_grapheme()
             && let Some(extra) = self.grapheme(col)
         {
-            out.push_str(extra);
+            out.extend(extra);
         }
     }
 
@@ -114,6 +122,12 @@ impl Row {
     /// Writes `ch` at `col`, taking two cells if it is `wide`.
     pub(crate) fn write(&mut self, col: usize, ch: char, wide: bool, style: &Style) {
         let style = self.intern(style);
+        self.write_cell(col, ch, wide, style);
+    }
+
+    /// Like [`write`](Self::write), with a style already interned in this
+    /// row by [`intern`](Self::intern).
+    pub(crate) fn write_cell(&mut self, col: usize, ch: char, wide: bool, style: StyleIndex) {
         if wide {
             debug_assert!(col + 1 < self.width(), "a wide character needs two cells");
             self.unlink_wide(col);
@@ -126,16 +140,29 @@ impl Row {
         }
     }
 
+    /// Writes narrow characters from `col` onwards, one per cell, in a style
+    /// interned in this row by [`intern`](Self::intern). They must fit in the
+    /// row, and none may be wide or zero-width.
+    pub(crate) fn write_narrow(&mut self, col: usize, text: &[char], style: StyleIndex) {
+        if text.is_empty() {
+            return;
+        }
+        let cols = col..col + text.len();
+        // Wide characters entirely inside the range are overwritten whole;
+        // only those straddling its edges need their other half blanked.
+        self.unlink_wide(cols.start);
+        self.unlink_wide(cols.end - 1);
+        self.remove_graphemes(&cols);
+        for (cell, &ch) in self.cells[cols].iter_mut().zip(text) {
+            *cell = Cell::new(ch, style, CellFlags::empty());
+        }
+    }
+
     /// Appends a zero-width codepoint (a combining accent, a variation selector,
     /// a joiner…) to the cell at `col`.
     pub(crate) fn append_to_grapheme(&mut self, col: usize, ch: char) {
         debug_assert!(!self.cells[col].is_wide_spacer(), "spacers hold no text");
-        if let Some((_, extra)) = self.graphemes.iter_mut().find(|(c, _)| *c == col) {
-            if extra.chars().count() < MAX_GRAPHEME_EXTRA {
-                extra.push(ch);
-            }
-        } else {
-            self.graphemes.push((col, ch.to_string()));
+        if self.extras_mut().graphemes.append(col, ch) {
             self.cells[col].add_flags(CellFlags::GRAPHEME);
         }
     }
@@ -143,8 +170,19 @@ impl Row {
     /// The last codepoint of the cell at `col`.
     pub(crate) fn last_char(&self, col: usize) -> char {
         self.grapheme(col)
-            .and_then(|extra| extra.chars().next_back())
+            .and_then(|extra| extra.last().copied())
             .unwrap_or_else(|| self.cells[col].ch())
+    }
+
+    /// Lets go of what only rows still on screen need. The grid calls this
+    /// as the row scrolls into scrollback, where it won't change again.
+    pub(crate) fn retire(&mut self) {
+        if let Some(extras) = &mut self.extras {
+            extras.lookup.clear();
+            if extras.graphemes.is_empty() {
+                self.extras = None;
+            }
+        }
     }
 
     /// Blanks `cols` in `style`, clamped to the row.
@@ -156,14 +194,18 @@ impl Row {
         let blank = Cell::blank(self.intern(style));
         self.unlink_wide(cols.start);
         self.unlink_wide(cols.end - 1);
-        self.graphemes.retain(|(col, _)| !cols.contains(col));
+        self.remove_graphemes(&cols);
         self.cells[cols].fill(blank);
     }
 
     /// Blanks the whole row in `style` and forgets everything it referenced.
     pub(crate) fn reset(&mut self, style: &Style) {
         self.palette.clear();
-        self.graphemes.clear();
+        if let Some(extras) = &mut self.extras {
+            // Keep the allocations: a recycled row is about to be written.
+            extras.graphemes.clear();
+            extras.lookup.clear();
+        }
         self.wrapped = false;
         let blank = Cell::blank(self.intern(style));
         self.cells.fill(blank);
@@ -192,12 +234,9 @@ impl Row {
             self.blank_in_place(last_kept);
         }
 
-        self.graphemes.retain_mut(|(c, _)| {
-            if *c >= col {
-                *c += count;
-            }
-            *c < width
-        });
+        if let Some(extras) = &mut self.extras {
+            extras.graphemes.shift_right(col, count, width);
+        }
         self.cells.copy_within(col..width - count, col + count);
         self.cells[col..col + count].fill(blank);
     }
@@ -223,16 +262,9 @@ impl Row {
             self.blank_in_place(after);
         }
 
-        self.graphemes.retain_mut(|(c, _)| {
-            if *c < col {
-                true
-            } else if *c < after {
-                false
-            } else {
-                *c -= count;
-                true
-            }
-        });
+        if let Some(extras) = &mut self.extras {
+            extras.graphemes.shift_left(col, count);
+        }
         self.cells.copy_within(after..width, col);
         self.cells[width - count..].fill(blank);
     }
@@ -241,19 +273,41 @@ impl Row {
     ///
     /// Compacts the palette first if it is full. Indices obtained before this
     /// call may be invalid afterwards, so callers intern *before* touching
-    /// cells.
-    fn intern(&mut self, style: &Style) -> StyleIndex {
+    /// cells. Nothing else changes an index, so one stays valid until this
+    /// row's next `intern`.
+    pub(crate) fn intern(&mut self, style: &Style) -> StyleIndex {
         if *style == Style::DEFAULT {
             return StyleIndex::DEFAULT;
         }
-        if let Some(i) = self.palette.iter().position(|s| s == style) {
-            return palette_index(i);
+        if let Some(index) = self.find_style(style) {
+            return index;
         }
         if self.palette.len() >= self.palette_limit() {
             self.compact_palette();
         }
         self.palette.push(*style);
-        palette_index(self.palette.len() - 1)
+        let index = palette_index(self.palette.len() - 1);
+        let limit = self.palette_limit();
+        match &mut self.extras {
+            Some(extras) if extras.lookup.is_built() => extras.lookup.insert(style, index),
+            extras if self.palette.len() > LINEAR_SEARCH_MAX => extras
+                .get_or_insert_default()
+                .lookup
+                .build(&self.palette, limit),
+            _ => {}
+        }
+        index
+    }
+
+    fn find_style(&self, style: &Style) -> Option<StyleIndex> {
+        match &self.extras {
+            Some(extras) if extras.lookup.is_built() => extras.lookup.find(&self.palette, style),
+            _ => self
+                .palette
+                .iter()
+                .position(|s| s == style)
+                .map(palette_index),
+        }
     }
 
     /// The palette size that triggers compaction.
@@ -290,6 +344,11 @@ impl Row {
                 *cell = cell.with_style(remap[i]);
             }
         }
+
+        // Every index moved, so the lookup starts again once it's needed.
+        if let Some(extras) = &mut self.extras {
+            extras.lookup.clear();
+        }
     }
 
     /// Before `col` is overwritten, blanks the other half of the wide
@@ -310,17 +369,28 @@ impl Row {
     }
 
     fn set_cell(&mut self, col: usize, cell: Cell) {
-        if self.cells[col].has_grapheme() {
-            self.graphemes.retain(|(c, _)| *c != col);
+        if self.cells[col].has_grapheme()
+            && let Some(extras) = &mut self.extras
+        {
+            extras.graphemes.remove(col);
         }
         self.cells[col] = cell;
     }
 
-    fn grapheme(&self, col: usize) -> Option<&str> {
-        self.graphemes
-            .iter()
-            .find(|(c, _)| *c == col)
-            .map(|(_, extra)| extra.as_str())
+    fn grapheme(&self, col: usize) -> Option<&[char]> {
+        self.extras.as_ref()?.graphemes.get(col)
+    }
+
+    fn remove_graphemes(&mut self, cols: &Range<usize>) {
+        if let Some(extras) = &mut self.extras
+            && !extras.graphemes.is_empty()
+        {
+            extras.graphemes.remove_range(cols);
+        }
+    }
+
+    fn extras_mut(&mut self) -> &mut Extras {
+        self.extras.get_or_insert_default()
     }
 
     /// Panics if any of the row's invariants are broken.
@@ -349,8 +419,22 @@ impl Row {
                 "cell at {col} has a dangling style index"
             );
         }
-        for (col, _) in &self.graphemes {
-            assert!(*col < self.width(), "grapheme entry past the edge");
+        if let Some(extras) = &self.extras {
+            let cols: Vec<usize> = extras.graphemes.cols().collect();
+            assert!(cols.is_sorted(), "graphemes out of order: {cols:?}");
+            assert!(
+                cols.last().is_none_or(|&col| col < self.width()),
+                "grapheme entry past the edge"
+            );
+            if extras.lookup.is_built() {
+                for (position, style) in self.palette.iter().enumerate() {
+                    assert_eq!(
+                        extras.lookup.find(&self.palette, style),
+                        Some(palette_index(position)),
+                        "the style lookup disagrees with the palette"
+                    );
+                }
+            }
         }
     }
 }
@@ -427,7 +511,7 @@ mod tests {
         for _ in 0..1000 {
             row.append_to_grapheme(0, '\u{301}');
         }
-        assert_eq!(row.text().chars().count(), 1 + MAX_GRAPHEME_EXTRA);
+        assert_eq!(row.text().chars().count(), 1 + graphemes::MAX_EXTRA);
     }
 
     #[test]
@@ -509,6 +593,28 @@ mod tests {
                 ..Style::DEFAULT
             }
         );
+    }
+
+    #[test]
+    fn big_palettes_are_found_through_the_lookup() {
+        let mut row = Row::new(40);
+        let style = |i: u8| Style {
+            fg: Color::Indexed(i),
+            bg: Color::Rgb(i, i, 0),
+            ..Style::DEFAULT
+        };
+        // Enough styles to build the lookup, then to compact it away and
+        // build it again.
+        for i in 0..=255 {
+            row.write(usize::from(i % 40), 'x', false, &style(i));
+            row.assert_invariants();
+        }
+        assert!(row.extras.as_ref().is_some_and(|e| e.lookup.is_built()));
+        assert_eq!(*row.style(row.cells()[255 % 40]), style(255));
+
+        row.retire();
+        assert!(row.extras.is_none(), "a retired row keeps no lookup");
+        assert_eq!(*row.style(row.cells()[255 % 40]), style(255));
     }
 
     #[test]

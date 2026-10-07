@@ -7,10 +7,15 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::charset::Charsets;
 use crate::grid::Grid;
+use crate::row::Row;
 use crate::size::Size;
 use crate::style::Style;
 use crate::tabs::TabStops;
 use crate::utf8::Utf8Carry;
+
+/// The most text queued before it's printed, so a long run doesn't grow the
+/// queue without bound.
+const MAX_QUEUED_TEXT: usize = 4096;
 
 /// Settings fixed when a terminal is created.
 #[derive(Clone, Debug)]
@@ -81,6 +86,7 @@ impl Terminal {
         self.utf8.split(bytes, |chunk| {
             self.parser.advance(&mut self.emulator, chunk);
         });
+        self.emulator.flush_text();
     }
 
     /// Takes the replies to queries seen so far. These must be written back to
@@ -122,6 +128,25 @@ impl Terminal {
     #[must_use]
     pub fn title(&self) -> &str {
         &self.emulator.title
+    }
+
+    /// The printing state the screen doesn't show: the cursor's position and
+    /// pending wrap, and the character REP would repeat.
+    #[cfg(test)]
+    pub(crate) fn emulator_state(&self) -> (usize, usize, bool, Option<char>) {
+        let cursor = &self.emulator.cursor;
+        (
+            cursor.line,
+            cursor.col,
+            cursor.pending_wrap,
+            self.emulator.last_printed,
+        )
+    }
+
+    /// Makes this terminal print through the simple per-character path.
+    #[cfg(test)]
+    pub(crate) fn use_simple_print(&mut self) {
+        self.emulator.simple_print = true;
     }
 
     /// Panics if any internal invariant is broken.
@@ -185,6 +210,40 @@ bitflags! {
     }
 }
 
+/// U+200D ZERO WIDTH JOINER, which glues emoji like 👩‍💻 into one grapheme.
+const ZWJ: char = '\u{200D}';
+
+fn is_printable_ascii(ch: char) -> bool {
+    matches!(ch, ' '..='~')
+}
+
+/// The column of the character just before the cursor on its line, if
+/// there is one. That's the cursor's own cell during a pending wrap, since
+/// the cursor hasn't moved off the character it just printed.
+fn previous_cell(row: &Row, cursor: &CursorState) -> Option<usize> {
+    let col = if cursor.pending_wrap {
+        cursor.col
+    } else {
+        cursor.col.checked_sub(1)?
+    };
+    if row.cells()[col].is_wide_spacer() {
+        Some(col - 1)
+    } else {
+        Some(col)
+    }
+}
+
+/// Moves the cursor past `cells` cells just printed. At the right edge it
+/// stays on the last column, waiting to wrap if autowrap is on.
+fn advance(cursor: &mut CursorState, cells: usize, width: usize, autowrap: bool) {
+    if cursor.col + cells < width {
+        cursor.col += cells;
+    } else {
+        cursor.col = width - 1;
+        cursor.pending_wrap = autowrap;
+    }
+}
+
 impl Default for Modes {
     fn default() -> Self {
         Self::AUTOWRAP | Self::CURSOR_VISIBLE
@@ -245,6 +304,13 @@ pub(crate) struct Emulator {
     pub(crate) replies: Vec<u8>,
     /// The last character printed, for REP (repeat).
     last_printed: Option<char>,
+    /// Printable characters the parser has passed on but that aren't on the
+    /// grid yet. See [`Emulator::queue_text`].
+    text: Vec<char>,
+    /// Prints everything through the simple per-character path, so tests can
+    /// check the fast path against it.
+    #[cfg(test)]
+    pub(crate) simple_print: bool,
 }
 
 impl Emulator {
@@ -265,6 +331,9 @@ impl Emulator {
             title: String::new(),
             replies: Vec::new(),
             last_printed: None,
+            text: Vec::new(),
+            #[cfg(test)]
+            simple_print: false,
         }
     }
 
@@ -297,7 +366,137 @@ impl Emulator {
 
     // --- Printing ---------------------------------------------------------
 
-    pub(crate) fn print(&mut self, ch: char) {
+    /// Queues a printable character from the parser.
+    ///
+    /// The parser hands over text one character at a time. Printing it in
+    /// runs instead lets a whole run share one row lookup and one style
+    /// lookup, and lets plain ASCII go straight into the cells. Everything
+    /// that isn't text calls [`flush_text`](Self::flush_text) first, so text
+    /// always lands before whatever followed it.
+    pub(crate) fn queue_text(&mut self, ch: char) {
+        self.text.push(ch);
+        if self.text.len() == MAX_QUEUED_TEXT {
+            self.flush_text();
+        }
+    }
+
+    /// Prints the queued text.
+    pub(crate) fn flush_text(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.text);
+        self.print_run(&text);
+        self.text = text;
+        self.text.clear();
+    }
+
+    fn print_run(&mut self, mut text: &[char]) {
+        // Insert mode is rare enough to take the simple path.
+        let simple = self.modes.contains(Modes::INSERT);
+        #[cfg(test)]
+        let simple = simple || self.simple_print;
+        if simple {
+            for &ch in text {
+                self.print(ch);
+            }
+            return;
+        }
+        while !text.is_empty() {
+            let (printed, wrap) = self.print_on_line(text);
+            text = &text[printed..];
+            if wrap {
+                self.wrap();
+            }
+        }
+    }
+
+    /// Prints as much of `text` as goes on the cursor's line: the hot path of
+    /// the whole emulator. It means the same as [`print`](Self::print) on
+    /// each character in turn, but looks the row and style up once per line,
+    /// and writes runs of plain ASCII in one go. Insert mode must be off.
+    ///
+    /// Returns how many characters it used, and whether the line must wrap
+    /// before the next one.
+    fn print_on_line(&mut self, text: &[char]) -> (usize, bool) {
+        let width = self.width();
+        let autowrap = self.modes.contains(Modes::AUTOWRAP);
+        let mut joins = self.joins_previous_grapheme();
+        let Self {
+            primary,
+            alternate,
+            screen,
+            cursor,
+            last_printed,
+            ..
+        } = self;
+        let grid = match screen {
+            Screen::Primary => primary,
+            Screen::Alternate => alternate,
+        };
+        let row = grid.row_mut(cursor.line);
+        // Nothing below interns again, so the index stays valid.
+        let style = row.intern(&cursor.pen);
+        let verbatim = cursor.charsets.maps_ascii_verbatim();
+
+        let mut used = 0;
+        while let Some(&ch) = text.get(used) {
+            if verbatim && !joins && is_printable_ascii(ch) {
+                if cursor.pending_wrap {
+                    return (used, true);
+                }
+                let run = text[used..]
+                    .iter()
+                    .take(width - cursor.col)
+                    .take_while(|&&ch| is_printable_ascii(ch))
+                    .count();
+                row.write_narrow(cursor.col, &text[used..used + run], style);
+                advance(cursor, run, width, autowrap);
+                used += run;
+                *last_printed = Some(text[used - 1]);
+                continue;
+            }
+
+            let ch = cursor.charsets.map(ch);
+            match ch.width() {
+                // Control characters only get here as invalid input.
+                None => {}
+                Some(cells) if cells == 0 || joins => {
+                    joins = match previous_cell(row, cursor) {
+                        Some(col) => {
+                            row.append_to_grapheme(col, ch);
+                            // Not just `ch == ZWJ`: a full grapheme drops
+                            // what's appended.
+                            row.last_char(col) == ZWJ
+                        }
+                        None => false,
+                    };
+                }
+                // A wide character can't fit a one-column terminal at all.
+                Some(cells) if cells > width => {}
+                Some(cells) => {
+                    let wide = cells == 2;
+                    if cursor.pending_wrap || (wide && cursor.col + 1 == width && autowrap) {
+                        return (used, true);
+                    }
+                    // Without autowrap, a wide character that won't fit has
+                    // no next line to go to, so it's dropped.
+                    if !(wide && cursor.col + 1 == width) {
+                        row.write_cell(cursor.col, ch, wide, style);
+                        advance(cursor, cells, width, autowrap);
+                        *last_printed = Some(ch);
+                    }
+                }
+            }
+            used += 1;
+        }
+        (used, false)
+    }
+
+    /// Prints one character at the cursor, the simple way. Text normally
+    /// takes [`print_on_line`](Self::print_on_line) instead, which must
+    /// match this.
+    fn print(&mut self, ch: char) {
         let ch = self.cursor.charsets.map(ch);
         match ch.width() {
             // Control characters reach here only as invalid input; drop them.
@@ -360,26 +559,17 @@ impl Emulator {
     /// starting a cell. That happens after a zero-width joiner (ZWJ), which
     /// glues emoji like 👩‍💻 into one.
     fn joins_previous_grapheme(&self) -> bool {
-        const ZWJ: char = '\u{200D}';
-        self.previous_cell()
-            .is_some_and(|col| self.grid().row(self.cursor.line).last_char(col) == ZWJ)
+        let row = self.grid().row(self.cursor.line);
+        previous_cell(row, &self.cursor).is_some_and(|col| {
+            // A ZWJ is zero-width, so it is only ever stored as a cell's
+            // extra codepoint. Checking the flag first skips the grapheme
+            // lookup for almost every cell.
+            row.cells()[col].has_grapheme() && row.last_char(col) == ZWJ
+        })
     }
 
-    /// The column of the character just before the cursor on this line, if
-    /// there is one. That's the cursor's own cell during a pending wrap,
-    /// since the cursor hasn't moved off the character it just printed.
     fn previous_cell(&self) -> Option<usize> {
-        let col = if self.cursor.pending_wrap {
-            self.cursor.col
-        } else {
-            self.cursor.col.checked_sub(1)?
-        };
-        let row = self.grid().row(self.cursor.line);
-        if row.cells()[col].is_wide_spacer() {
-            Some(col - 1)
-        } else {
-            Some(col)
-        }
+        previous_cell(self.grid().row(self.cursor.line), &self.cursor)
     }
 
     /// Continues on the next line after text reached the right edge.

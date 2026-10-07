@@ -2,7 +2,7 @@
 
 use proptest::prelude::*;
 
-use crate::{Attributes, Color, Config, Size, Style, Terminal};
+use crate::{Attributes, CellFlags, Color, Config, Size, Style, Terminal};
 
 fn terminal(cols: u16, rows: u16) -> Terminal {
     let size = Size::new(cols, rows).expect("test sizes are valid");
@@ -478,6 +478,8 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
         Just("e\u{301}".to_owned()),
         Just("👩\u{200D}💻".to_owned()),
         Just("\u{301}".to_owned()),
+        Just("\u{200D}".to_owned()),
+        Just("αβ😀".to_owned()),
     ]
     .prop_map(String::into_bytes);
     let control = prop::sample::select(vec![
@@ -543,7 +545,45 @@ fn observe(
     )
 }
 
+/// One row, cell by cell: each cell's text, flags and style, plus whether the
+/// row wraps.
+type RowContents = (Vec<(String, CellFlags, Style)>, bool);
+
+/// Every row of both screen and scrollback, in full.
+fn cells(terminal: &Terminal) -> Vec<RowContents> {
+    let grid = terminal.grid();
+    grid.scrollback()
+        .chain(grid.rows())
+        .map(|row| {
+            let cells = (0..row.width())
+                .map(|col| {
+                    let mut text = String::new();
+                    row.push_text(col, &mut text);
+                    let cell = row.cells()[col];
+                    (text, cell.flags(), *row.style(cell))
+                })
+                .collect();
+            (cells, row.is_wrapped())
+        })
+        .collect()
+}
+
 proptest! {
+    #[test]
+    fn the_fast_print_path_matches_the_simple_one(
+        bytes in output(),
+        cols in 1u16..12,
+        rows in 1u16..6,
+    ) {
+        let mut fast = terminal(cols, rows);
+        let mut simple = terminal(cols, rows);
+        simple.use_simple_print();
+        fast.advance(&bytes);
+        simple.advance(&bytes);
+        prop_assert_eq!(cells(&fast), cells(&simple));
+        prop_assert_eq!(fast.emulator_state(), simple.emulator_state());
+    }
+
     #[test]
     fn any_output_keeps_the_invariants(bytes in output(), cols in 1u16..12, rows in 1u16..6) {
         let mut t = terminal(cols, rows);

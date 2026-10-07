@@ -91,6 +91,11 @@ impl Grid {
             };
             row.reset(blank);
             self.rows.push_back(row);
+            if self.scrollback_limit > 0 {
+                // The top screen row has just become the newest scrollback.
+                let newest = self.scrollback_len() - 1;
+                self.rows[newest].retire();
+            }
         }
     }
 
@@ -137,10 +142,22 @@ impl Grid {
         lines.start + offset..lines.end + offset
     }
 
-    /// Rotates `rows` left by `count` in place, using three reversals. This
-    /// avoids allocating, and avoids making the deque contiguous, which could
-    /// move all of scrollback.
+    /// Rotates `rows` left by `count` in place, without making the deque
+    /// contiguous, which could move all of scrollback.
     fn rotate_left(&mut self, rows: Range<usize>, count: usize) {
+        // The rows are almost always in one of the deque's two slices, where
+        // the standard library rotates them with a few block moves.
+        let (front, back) = self.rows.as_mut_slices();
+        let split = front.len();
+        if rows.end <= split {
+            front[rows].rotate_left(count);
+            return;
+        }
+        if rows.start >= split {
+            back[rows.start - split..rows.end - split].rotate_left(count);
+            return;
+        }
+        // They straddle the deque's wrap point: three reversals, by swaps.
         self.reverse(rows.start..rows.start + count);
         self.reverse(rows.start + count..rows.end);
         self.reverse(rows);
@@ -227,6 +244,26 @@ mod tests {
         grid.scroll_up(0..3, 1, &Style::DEFAULT);
         assert_eq!(screen(&grid), ["c", "d", ""]);
         assert_eq!(scrollback(&grid), ["a"]);
+    }
+
+    #[test]
+    fn region_scrolls_work_wherever_the_ring_wraps() {
+        // Scrolling with full scrollback walks the deque's start around its
+        // buffer, so some of these offsets put the region across the point
+        // where the buffer wraps.
+        for offset in 0..12 {
+            let mut grid = grid(&["", "", "", ""], 3);
+            for _ in 0..offset {
+                grid.scroll_up_into_scrollback(1, &Style::DEFAULT);
+            }
+            for (line, ch) in "abcd".chars().enumerate() {
+                grid.row_mut(line).write(0, ch, false, &Style::DEFAULT);
+            }
+            grid.scroll_up(0..3, 1, &Style::DEFAULT);
+            assert_eq!(screen(&grid), ["b", "c", "", "d"], "offset {offset}");
+            grid.scroll_down(1..4, 2, &Style::DEFAULT);
+            assert_eq!(screen(&grid), ["b", "", "", "c"], "offset {offset}");
+        }
     }
 
     #[test]

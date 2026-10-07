@@ -61,6 +61,16 @@ impl Charsets {
     }
 
     /// `ch` as the active character set draws it.
+    /// Whether ASCII prints as itself, which it does unless the active set
+    /// is DEC Special Graphics.
+    pub(crate) fn maps_ascii_verbatim(self) -> bool {
+        let active = match self.active {
+            Slot::G0 => self.g0,
+            Slot::G1 => self.g1,
+        };
+        active == Charset::Ascii
+    }
+
     pub(crate) fn map(self, ch: char) -> char {
         match self.active {
             Slot::G0 => self.g0.map(ch),
