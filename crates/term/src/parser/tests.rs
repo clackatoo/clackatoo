@@ -235,6 +235,7 @@ fn stream() -> impl Strategy<Value = Vec<u8>> {
             b"\xc0\xaf".to_vec(), b"\xff".to_vec(), b"\xed\xa0\x80".to_vec(),
         ]),
         2 => prop::collection::vec(any::<u8>(), 1..8),
+        4 => well_formed(),
     ];
     prop::collection::vec(fragment, 0..40).prop_map(|fragments| fragments.concat())
 }
@@ -246,6 +247,46 @@ fn config() -> ProptestConfig {
         cases: default.cases.max(2000),
         ..default
     }
+}
+
+/// Complete, ordinary sequences, which random bytes rarely spell out: the
+/// shapes real programs send, and the ones the fast paths handle.
+fn well_formed() -> impl Strategy<Value = Vec<u8>> {
+    let number = prop_oneof![Just(String::new()), "[0-9]{1,3}", "[0-9]{4,7}"];
+    let separator = prop::sample::select(vec![";", ";", ":"]);
+    let params = prop::collection::vec((number, separator), 0..40).prop_map(|parts| {
+        let mut text = String::new();
+        for (number, separator) in &parts {
+            text.push_str(number);
+            text.push_str(separator);
+        }
+        text.pop();
+        text
+    });
+    let marker = prop::sample::select(vec!["", "", "?", ">", "<", "="]);
+    let intermediate = prop::sample::select(vec!["", "", "", " ", "$", "!"]);
+    let csi = (marker, params.clone(), intermediate, 0x40u8..=0x7E).prop_map(
+        |(marker, params, intermediate, end)| {
+            format!("\x1b[{marker}{params}{intermediate}{}", char::from(end)).into_bytes()
+        },
+    );
+    let osc = ("[0-9]{1,3}", "[ -:<-~]{0,20}", any::<bool>()).prop_map(|(n, text, bell)| {
+        let end = if bell { "\x07" } else { "\x1b\\" };
+        format!("\x1b]{n};{text}{end}").into_bytes()
+    });
+    let dcs = (params, "[ -~]{0,20}")
+        .prop_map(|(params, data)| format!("\x1bP{params}q{data}\x1b\\").into_bytes());
+    let esc = (intermediate_byte(), 0x30u8..=0x7E).prop_map(|(intermediate, end)| {
+        let mut bytes = vec![0x1B];
+        bytes.extend(intermediate);
+        bytes.push(end);
+        bytes
+    });
+    prop_oneof![4 => csi, 1 => osc, 1 => dcs, 1 => esc]
+}
+
+fn intermediate_byte() -> impl Strategy<Value = Option<u8>> {
+    prop_oneof![3 => Just(None), 1 => (0x20u8..=0x2F).prop_map(Some)]
 }
 
 proptest! {
@@ -312,4 +353,12 @@ fn osc_strings_are_capped() {
     assert_eq!(params[0], b"2");
     // The `2` takes one byte of the cap; separators take none.
     assert_eq!(params[1].len(), MAX_OSC_LEN - 1);
+}
+
+#[test]
+fn osc_strings_with_many_parts_match_vte() {
+    // More parts than are split out: the rest stay in the last one.
+    let parts: Vec<String> = (0..25).map(|n| n.to_string()).collect();
+    let bytes = format!("\x1b]{}\x07", parts.join(";")).into_bytes();
+    assert_eq!(ours(&[&bytes]), vtes(&bytes));
 }
