@@ -15,6 +15,7 @@
 
 mod app;
 mod boxdraw;
+mod chrome;
 mod colors;
 mod command;
 mod desk;

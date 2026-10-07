@@ -18,6 +18,12 @@ pub(crate) struct Theme {
     pub(crate) muted: Rgba,
     /// The lines between panes.
     pub(crate) divider: Rgba,
+    /// The background of the window's bars.
+    pub(crate) bar: Rgba,
+    /// Under the mouse.
+    pub(crate) hover: Rgba,
+    /// Under the mouse, on the close button.
+    pub(crate) danger: Rgba,
     /// The 256 indexed colours: 16 named ones, a 6×6×6 cube, and 24 greys.
     palette: [Rgba; 256],
 }
@@ -60,6 +66,9 @@ impl Default for Theme {
             accent: hex_rgba(0xf8_ce_57),
             muted: hex_rgba(0x80_84_88),
             divider: hex_rgba(0x3c_40_44),
+            bar: hex_rgba(0x15_17_19),
+            hover: hex_rgba(0x2c_30_34),
+            danger: hex_rgba(0xc8_45_45),
             palette,
         }
     }

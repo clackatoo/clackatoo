@@ -1,10 +1,11 @@
-//! Drawing the window with the GPU: its panes' screens, the bar of
-//! workspaces and tabs, and the dividers between panes.
+//! Drawing the window with the GPU: its panes' screens, and the window's
+//! own rectangles and text, such as its bars and the dividers between
+//! panes.
 //!
 //! Each frame turns everything into two lists of instanced quads, solid
 //! rectangles and glyphs, and draws them in four passes over one render
 //! pass: backgrounds and the cursor, then glyphs, then underlines,
-//! strikethroughs and labels' backgrounds, then labels' text on top. The
+//! strikethroughs and cursors, then the window's own text on top. The
 //! renderer draws into any texture, so the same code serves the window and
 //! offscreen tests.
 
@@ -22,31 +23,57 @@ use crate::glyphs::{ATLAS_SIZE, AtlasGlyph, GlyphCache};
 pub(crate) struct Picture<'a> {
     /// The panes.
     pub(crate) scenes: &'a [Scene<'a>],
-    /// The bar along the top, if shown.
-    pub(crate) bar: Option<Bar<'a>>,
-    /// Lines between panes, as rectangles in pixels: left, top, width and
-    /// height.
-    pub(crate) dividers: &'a [[f32; 4]],
+    /// Rectangles of the window's own, such as the bars and the dividers
+    /// between panes, under any text.
+    pub(crate) fills: &'a [Fill],
+    /// Text of the window's own, such as the names in the bars, over
+    /// everything.
+    pub(crate) texts: &'a [Text<'a>],
 }
 
-/// The bar along the top of the window: workspaces on the left, tabs on
-/// the right.
-#[derive(Debug)]
-pub(crate) struct Bar<'a> {
-    /// Where its row starts, in pixels.
+/// A solid rectangle of the window's own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fill {
+    /// Left, top, width and height, in pixels.
+    pub(crate) rect: [f32; 4],
+    pub(crate) paint: Paint,
+}
+
+/// The colours the window's own things are drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Paint {
+    /// clackatoo's own colour, for what's picked out.
+    Accent,
+    /// The bars' background.
+    Bar,
+    /// The lines between panes.
+    Divider,
+    /// Under the mouse.
+    Hover,
+    /// Under the mouse, on the close button.
+    Danger,
+    /// The text colour, for drawn icons.
+    Ink,
+}
+
+/// A line of text of the window's own.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Text<'a> {
+    /// The top left corner of its first cell, in pixels.
     pub(crate) origin: [f32; 2],
-    /// How wide it is, in pixels.
-    pub(crate) width: f32,
-    pub(crate) left: &'a [BarItem],
-    pub(crate) right: &'a [BarItem],
+    pub(crate) content: &'a str,
+    pub(crate) ink: Ink,
 }
 
-/// One name in the bar.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BarItem {
-    pub(crate) text: String,
-    /// The one shown, which is drawn picked out.
-    pub(crate) active: bool,
+/// How text of the window's own is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ink {
+    /// In the text colour.
+    Plain,
+    /// In a quieter colour, for what matters less.
+    Muted,
+    /// Bold and dark, on the accent colour.
+    OnAccent,
 }
 
 /// What one pane shows, and where.
@@ -61,9 +88,6 @@ pub(crate) struct Scene<'a> {
     pub(crate) cursor: Option<SceneCursor>,
     /// Frame the pane, to show it's in normal mode.
     pub(crate) normal_mode: bool,
-    /// A label for the pane's top right corner, such as the scroll
-    /// position.
-    pub(crate) label: Option<&'a str>,
     /// Stretches of text to highlight.
     pub(crate) highlights: &'a [Highlight],
 }
@@ -158,7 +182,7 @@ pub(crate) struct Renderer {
     overlays: Vec<Rect>,
     glyph_instances: Vec<Glyph>,
     /// Glyphs drawn over the overlays, such as a label's text.
-    label_glyphs: Vec<Glyph>,
+    text_glyphs: Vec<Glyph>,
     /// Each character's glyph in each variant, found once: finding it
     /// means asking the fonts, then the atlas.
     char_glyphs: CharGlyphs,
@@ -284,7 +308,7 @@ impl Renderer {
             rects: Vec::new(),
             overlays: Vec::new(),
             glyph_instances: Vec::new(),
-            label_glyphs: Vec::new(),
+            text_glyphs: Vec::new(),
             char_glyphs: CharGlyphs::new(),
             cell_text: String::new(),
         }
@@ -363,7 +387,7 @@ impl Renderer {
         let background_rects = self.rects.len();
         self.rects.append(&mut self.overlays);
         let grid_glyphs = self.glyph_instances.len();
-        self.glyph_instances.append(&mut self.label_glyphs);
+        self.glyph_instances.append(&mut self.text_glyphs);
         self.rect_buffer
             .write(device, queue, bytemuck::cast_slice(&self.rects));
         self.glyph_buffer
@@ -422,23 +446,32 @@ impl Renderer {
         self.rects.clear();
         self.overlays.clear();
         self.glyph_instances.clear();
-        self.label_glyphs.clear();
+        self.text_glyphs.clear();
         for scene in picture.scenes {
             self.push_scene(scene, fonts, size);
         }
-        for &[left, top, width, height] in picture.dividers {
+        for fill in picture.fills {
+            let [left, top, width, height] = fill.rect;
+            let color = match fill.paint {
+                Paint::Accent => self.theme.accent,
+                Paint::Bar => self.theme.bar,
+                Paint::Divider => self.theme.divider,
+                Paint::Hover => self.theme.hover,
+                Paint::Danger => self.theme.danger,
+                Paint::Ink => self.theme.foreground,
+            };
             self.rects.push(Rect {
                 origin: [left, top],
                 size: [width, height],
-                color: self.theme.divider,
+                color,
             });
         }
-        if let Some(bar) = &picture.bar {
-            self.push_bar(bar, fonts);
+        for text in picture.texts {
+            self.push_text(text, fonts);
         }
     }
 
-    /// Adds one pane's cells, cursor, highlights, frame and label.
+    /// Adds one pane's cells, cursor, highlights and frame.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -540,9 +573,6 @@ impl Renderer {
         if scene.normal_mode {
             self.push_frame(scene, cell.stroke, size);
         }
-        if let Some(label) = scene.label {
-            self.push_label(label, fonts, scene);
-        }
     }
 
     /// Draws a cursor of `style` over the cell at `origin` of `size`.
@@ -604,74 +634,35 @@ impl Renderer {
         }
     }
 
-    /// `text` in the pane's top right corner, dark on the accent colour,
-    /// over whatever the grid shows there.
+    /// Adds a line of the window's own text. Drawn after the grid's
+    /// glyphs, so it sits on top of them: these glyphs go to a list of
+    /// their own, drawn last.
     #[allow(clippy::cast_precision_loss)]
-    fn push_label(&mut self, text: &str, fonts: &mut Fonts, scene: &Scene<'_>) {
-        let cell_width = fonts.cell.width as f32;
-        // A cell's width of space either side of the text.
-        let width = (text.chars().count() as f32 + 2.0) * cell_width;
-        let left = (scene.origin[0] + scene.size[0] - width).max(scene.origin[0]);
-        self.push_tag(text, fonts, [left, scene.origin[1]], true);
-    }
-
-    /// `text` with a cell's space either side, at `origin`: dark on the
-    /// accent colour if `picked`, or else in a muted colour. Drawn after
-    /// the grid's glyphs, so it sits on top of them: the overlay pass comes
-    /// last, and these glyphs go to their own list. Returns how wide it is.
-    #[allow(clippy::cast_precision_loss)]
-    fn push_tag(&mut self, text: &str, fonts: &mut Fonts, origin: [f32; 2], picked: bool) -> f32 {
+    fn push_text(&mut self, text: &Text<'_>, fonts: &mut Fonts) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
-        let width = (text.chars().count() as f32 + 2.0) * cell_width;
-        let [left, top] = origin;
-        let (color, variant) = if picked {
-            self.overlays.push(Rect {
-                origin,
-                size: [width, cell_height],
-                color: self.theme.accent,
-            });
-            (self.theme.background, Variant::Bold)
-        } else {
-            (self.theme.muted, Variant::Regular)
+        let (color, variant) = match text.ink {
+            Ink::Plain => (self.theme.foreground, Variant::Regular),
+            Ink::Muted => (self.theme.muted, Variant::Regular),
+            Ink::OnAccent => (self.theme.background, Variant::Bold),
         };
+        let [left, top] = text.origin;
         let baseline = top + cell.baseline;
-        for (index, ch) in text.chars().enumerate() {
+        for (index, ch) in text.content.chars().enumerate() {
             let Some((face, glyph)) = fonts.glyph(ch, variant) else {
                 continue;
             };
             let Some(atlas) = self.glyphs.get(fonts, face, glyph) else {
                 continue;
             };
-            let pen = [left + (index as f32 + 1.0) * cell_width, baseline];
-            self.label_glyphs.push(place(
+            let pen = [left + index as f32 * cell_width, baseline];
+            self.text_glyphs.push(place(
                 &atlas,
                 pen,
                 [cell_width, cell_height],
                 color,
                 cell.baseline,
             ));
-        }
-        width
-    }
-
-    /// The bar: its items on the left from the left edge, and on the right
-    /// up to the right edge, with the right's dropped if they'd overlap.
-    #[allow(clippy::cast_precision_loss)]
-    fn push_bar(&mut self, bar: &Bar<'_>, fonts: &mut Fonts) {
-        let cell_width = fonts.cell.width as f32;
-        let width = |item: &BarItem| (item.text.chars().count() as f32 + 2.0) * cell_width;
-        let [mut left, top] = bar.origin;
-        for item in bar.left {
-            left += self.push_tag(&item.text, fonts, [left, top], item.active);
-        }
-        let right_width: f32 = bar.right.iter().map(width).sum();
-        let mut x = bar.origin[0] + bar.width - right_width;
-        if x < left + cell_width {
-            return;
-        }
-        for item in bar.right {
-            x += self.push_tag(&item.text, fonts, [x, top], item.active);
         }
     }
 

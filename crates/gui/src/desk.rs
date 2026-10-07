@@ -20,11 +20,11 @@ use clackatoo_protocol::{
 };
 use winit::keyboard::{Key, NamedKey};
 
+use crate::chrome::Status;
 use crate::command::{self, Command, Kind, Place};
 use crate::input::KeyPress;
 use crate::layout::{Cells, Direction, Placement};
 use crate::pane::{Mode, Pane};
-use crate::render::BarItem;
 
 /// What the window shows: a workspace, one of its tabs, and the pane in
 /// that tab with the focus.
@@ -98,14 +98,6 @@ impl Desk {
         self.panes.get(&terminal)
     }
 
-    pub(crate) fn command_line(&self) -> Option<&str> {
-        self.command.as_deref()
-    }
-
-    pub(crate) fn message(&self) -> Option<&str> {
-        self.message.as_deref()
-    }
-
     pub(crate) fn finished(&self) -> bool {
         self.finished
     }
@@ -146,36 +138,58 @@ impl Desk {
         (!title.is_empty()).then_some(title.as_str())
     }
 
-    /// What the bar shows: every workspace, and the shown one's tabs.
-    pub(crate) fn bar_items(&self) -> (Vec<BarItem>, Vec<BarItem>) {
-        let Some(shown) = self.shown else {
-            return (Vec::new(), Vec::new());
-        };
-        let workspaces = self
-            .workspaces
+    /// Every workspace, by name, and whether it's the one shown.
+    pub(crate) fn workspace_names(&self) -> Vec<(WorkspaceId, String, bool)> {
+        let shown = self.shown.map(|shown| shown.workspace);
+        self.workspaces
             .list
             .iter()
-            .map(|workspace| BarItem {
-                text: workspace.name.clone(),
-                active: workspace.id == shown.workspace,
-            })
-            .collect();
-        let tabs = self
-            .workspaces
-            .get(shown.workspace)
             .map(|workspace| {
-                workspace
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .map(|(index, tab)| BarItem {
-                        text: self.tab_name(index, tab),
-                        active: tab.id == shown.tab,
-                    })
-                    .collect()
+                (
+                    workspace.id,
+                    workspace.name.clone(),
+                    Some(workspace.id) == shown,
+                )
             })
-            .unwrap_or_default();
-        (workspaces, tabs)
+            .collect()
+    }
+
+    /// The shown workspace's tabs, by name, and whether each is the one
+    /// shown.
+    pub(crate) fn tab_names(&self) -> Vec<(TabId, String, bool)> {
+        let Some(shown) = self.shown else {
+            return Vec::new();
+        };
+        let Some(workspace) = self.workspaces.get(shown.workspace) else {
+            return Vec::new();
+        };
+        workspace
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| (tab.id, self.tab_name(index, tab), tab.id == shown.tab))
+            .collect()
+    }
+
+    /// What the status line shows: the command line or a search being
+    /// typed, or else the tabs, with a message or the focused pane's mode
+    /// and scroll position.
+    pub(crate) fn status(&self) -> Status {
+        if let Some(line) = &self.command {
+            return Status::Typing(format!(":{line}▏"));
+        }
+        let pane = self
+            .focused_terminal()
+            .and_then(|terminal| self.panes.get(&terminal));
+        if let Some(pane) = pane
+            && pane.prompting()
+            && let Some(prompt) = pane.label()
+        {
+            return Status::Typing(prompt);
+        }
+        Status::Tabs {
+            note: self.message.clone().or_else(|| pane.and_then(Pane::label)),
+        }
     }
 
     /// What the bar calls a tab: its number, and its focused pane's title.
@@ -199,6 +213,48 @@ impl Desk {
             }
             Some(title) => format!("{number} {title}"),
             None => number.to_string(),
+        }
+    }
+
+    /// Switches to `workspace`, at its active tab and that tab's focused
+    /// pane, as when its name is clicked.
+    pub(crate) fn show_workspace(&mut self, workspace: WorkspaceId) {
+        let Some(workspace) = self.workspaces.get(workspace) else {
+            return;
+        };
+        let pane = workspace
+            .tab(workspace.active_tab)
+            .unwrap_or(&workspace.tabs[0])
+            .focused;
+        self.show_pane(pane);
+    }
+
+    /// Switches to `tab` of the workspace shown, at its focused pane.
+    pub(crate) fn show_tab(&mut self, tab: TabId) {
+        if let Some(tab) = self
+            .shown
+            .and_then(|shown| self.workspaces.get(shown.workspace))
+            .and_then(|workspace| workspace.tab(tab))
+        {
+            self.show_pane(tab.focused);
+        }
+    }
+
+    /// Focuses the pane over the cell at `col`, `row` of the pane area, as
+    /// when it's clicked.
+    pub(crate) fn focus_cell(&mut self, col: u16, row: u16) {
+        let pane = self.placement().and_then(|placement| {
+            placement
+                .panes
+                .iter()
+                .find(|(_, cells)| {
+                    (cells.col..cells.col + cells.cols).contains(&col)
+                        && (cells.row..cells.row + cells.rows).contains(&row)
+                })
+                .map(|&(pane, _)| pane)
+        });
+        if let Some(pane) = pane {
+            self.show_pane(pane);
         }
     }
 
@@ -612,11 +668,7 @@ impl Desk {
                         .find(|workspace| workspace.name == name.trim())
                 });
                 if let Some(workspace) = existing {
-                    let pane = workspace
-                        .tab(workspace.active_tab)
-                        .unwrap_or(&workspace.tabs[0])
-                        .focused;
-                    self.show_pane(pane);
+                    self.show_workspace(workspace.id);
                 } else {
                     let terminal = new(self.new_pane_size(None));
                     self.request(Request::NewWorkspace { name, terminal }, Asked::Pane);
@@ -947,7 +999,7 @@ mod tests {
         command(&mut desk, "3");
         assert_eq!(desk.shown().unwrap().tab, TabId(2));
         assert_eq!(
-            desk.message(),
+            desk.message.as_deref(),
             Some("there's no tab 3; this workspace has 2")
         );
     }
@@ -966,7 +1018,7 @@ mod tests {
             "taken".into(),
         )));
         assert_eq!(
-            desk.message(),
+            desk.message.as_deref(),
             Some("there's already a workspace called \"taken\"")
         );
         // The next key clears it.
@@ -976,6 +1028,6 @@ mod tests {
             None,
             Modifiers::default(),
         );
-        assert_eq!(desk.message(), None);
+        assert_eq!(desk.message.as_deref(), None);
     }
 }

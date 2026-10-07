@@ -7,27 +7,31 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use clackatoo_daemon::Sender;
-use clackatoo_protocol::{Axis, Content, Event, PROTOCOL_VERSION, ServerMessage, Size, TerminalId};
+use clackatoo_protocol::{Content, Event, PROTOCOL_VERSION, ServerMessage, TerminalId};
 use clackatoo_term::Row;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{MouseScrollDelta, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowAttributes, WindowId};
 
 use crate::GraphicsApi;
+use crate::chrome::{self, Button, Chrome, Geometry, Hit, Status};
 use crate::desk::Desk;
 use crate::fonts::Fonts;
 use crate::input;
-use crate::layout::{Cells, Divider, Placement};
+use crate::layout::{Cells, Placement};
 use crate::pane::Mode;
-use crate::render::{Bar, CursorStyle, Highlight, PADDING, Picture, Renderer, Scene, SceneCursor};
+use crate::render::{CursorStyle, Highlight, PADDING, Picture, Renderer, Scene, SceneCursor};
 use crate::screen::Screen;
 use crate::session::{Session, SessionEvent};
 
 /// Lines scrolled per notch of a mouse wheel.
 const WHEEL_LINES: f64 = 3.0;
+
+/// Two clicks on the same thing within this are a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// A graphics instance with `backends`, for drawing on `display` if given:
 /// OpenGL on Wayland draws only on the display it starts with.
@@ -229,6 +233,14 @@ pub(crate) struct App {
     frame: Option<Frame>,
     /// The workspaces, and what's shown of them.
     desk: Desk,
+    /// Where the mouse is, in pixels, while it's over the window.
+    pointer: Option<[f32; 2]>,
+    /// What the mouse is over.
+    hover: Hit,
+    /// The mouse cursor's shape, as last set.
+    cursor_icon: CursorIcon,
+    /// The last click, and what it was on, to spot a double click.
+    last_click: Option<(Instant, Hit)>,
     /// The window's title, as last set.
     title: String,
     /// Where messages to the daemon go, once connected.
@@ -263,6 +275,10 @@ impl App {
             startup: Some(Startup { fonts, gpu }),
             frame: None,
             desk: Desk::default(),
+            pointer: None,
+            hover: Hit::Nothing,
+            cursor_icon: CursorIcon::Default,
+            last_click: None,
             title: String::new(),
             sender: None,
             modifiers: input::Modifiers::default(),
@@ -289,13 +305,15 @@ impl App {
         let mut fonts = startup.fonts.join().map_err(join("font"))??;
         let fonts_ready = self.started.elapsed();
         // Fonts were loaded at one pixel per point; the window's display
-        // may have more. Room for the grid, and above it the bar and the
-        // space below the bar.
+        // may have more.
         let (cols, rows) = INITIAL_GRID;
-        let size = LogicalSize::new(
-            f64::from(cols * fonts.cell.width) + 2.0 * PADDING,
-            f64::from((rows + 1) * fonts.cell.height) + 3.0 * PADDING,
+        let [width, height] = Geometry::window_size(
+            cols,
+            rows,
+            [f64::from(fonts.cell.width), f64::from(fonts.cell.height)],
+            PADDING,
         );
+        let size = LogicalSize::new(width, height);
         let window = Arc::new(event_loop.create_window(window_attributes(size))?);
         fonts.set_scale(window.scale_factor());
 
@@ -342,12 +360,147 @@ impl App {
     /// Tells the desk how many cells the panes have, sizing their
     /// terminals to fit.
     fn fit_panes(&mut self) {
-        let area = self
+        let area = self.geometry().map(|geometry| geometry.panes);
+        self.desk.set_area(area);
+    }
+
+    /// Where things go in the window, at its size now.
+    fn geometry(&self) -> Option<Geometry> {
+        let frame = self.frame.as_ref()?;
+        let cell = frame.fonts.cell;
+        Geometry::new(
+            [frame.config.width, frame.config.height],
+            [cell.width, cell.height],
+            padding(&frame.window),
+        )
+    }
+
+    /// Where everything in the window's frame goes, now.
+    fn chrome(&self) -> Option<Chrome> {
+        let geometry = self.geometry()?;
+        Some(if self.notice.is_some() {
+            Chrome::new(
+                geometry,
+                Vec::new(),
+                Vec::new(),
+                Status::Tabs { note: None },
+                false,
+            )
+        } else {
+            Chrome::new(
+                geometry,
+                self.desk.workspace_names(),
+                self.desk.tab_names(),
+                self.desk.status(),
+                true,
+            )
+        })
+    }
+
+    // --- The mouse --------------------------------------------------------
+
+    /// Follows the mouse to `point`: the cursor's shape, and what's drawn
+    /// lit up under it.
+    fn pointer_moved(&mut self, point: [f32; 2]) {
+        self.pointer = Some(point);
+        let hit = self.hit(point);
+        let icon = match hit {
+            Hit::Resize(direction) => resize_icon(direction),
+            Hit::Button(_) | Hit::Workspace(_) | Hit::Tab(_) => CursorIcon::Pointer,
+            Hit::Cell { .. } => CursorIcon::Text,
+            Hit::TopBar | Hit::Nothing => CursorIcon::Default,
+        };
+        if let Some(frame) = &self.frame
+            && icon != self.cursor_icon
+        {
+            frame.window.set_cursor(icon);
+            self.cursor_icon = icon;
+        }
+        let lit = |hit: Hit| matches!(hit, Hit::Button(_) | Hit::Workspace(_) | Hit::Tab(_));
+        if hit != self.hover && (lit(hit) || lit(self.hover)) {
+            self.request_redraw();
+        }
+        self.hover = hit;
+    }
+
+    fn pointer_left(&mut self) {
+        self.pointer = None;
+        if self.hover != Hit::Nothing {
+            self.hover = Hit::Nothing;
+            self.request_redraw();
+        }
+    }
+
+    fn hit(&self, point: [f32; 2]) -> Hit {
+        let maximised = self
             .frame
             .as_ref()
-            .and_then(Geometry::of)
-            .map(|geometry| geometry.panes);
-        self.desk.set_area(area);
+            .is_some_and(|frame| frame.window.is_maximized());
+        self.chrome()
+            .map_or(Hit::Nothing, |chrome| chrome.hit(point, maximised))
+    }
+
+    /// Handles a click: moving or resizing the window, its buttons, and
+    /// switching to the workspace, tab or pane clicked.
+    fn clicked(&mut self, event_loop: &ActiveEventLoop, button: MouseButton) {
+        let (Some(point), Some(frame)) = (self.pointer, &self.frame) else {
+            return;
+        };
+        let window = Arc::clone(&frame.window);
+        let hit = self.hit(point);
+        // Twice on the same spot, soon enough, is a double click.
+        let now = Instant::now();
+        let double = self
+            .last_click
+            .is_some_and(|(at, last)| last == hit && now.duration_since(at) < DOUBLE_CLICK);
+        self.last_click = (!double).then_some((now, hit));
+        if button == MouseButton::Right {
+            if matches!(hit, Hit::TopBar | Hit::Workspace(_)) {
+                window.show_window_menu(PhysicalPosition::new(point[0], point[1]));
+            }
+            return;
+        }
+        if button != MouseButton::Left {
+            return;
+        }
+        let result = match hit {
+            Hit::Resize(direction) => window.drag_resize_window(direction),
+            Hit::Button(Button::Minimise) => {
+                window.set_minimized(true);
+                Ok(())
+            }
+            Hit::Button(Button::Maximise) => {
+                window.set_maximized(!window.is_maximized());
+                Ok(())
+            }
+            Hit::Button(Button::Close) => {
+                event_loop.exit();
+                Ok(())
+            }
+            Hit::TopBar if double => {
+                window.set_maximized(!window.is_maximized());
+                Ok(())
+            }
+            Hit::TopBar => window.drag_window(),
+            Hit::Workspace(workspace) => {
+                self.desk.show_workspace(workspace);
+                Ok(())
+            }
+            Hit::Tab(tab) => {
+                self.desk.show_tab(tab);
+                Ok(())
+            }
+            Hit::Cell { col, row } => {
+                self.desk.focus_cell(col, row);
+                Ok(())
+            }
+            Hit::Nothing => Ok(()),
+        };
+        if let Err(err) = result {
+            log::warn!("the desktop wouldn't move or resize the window: {err}");
+        }
+        self.update_title();
+        self.request_redraw();
     }
 
     /// Titles the window after the focused pane, and the daemon's machine.
@@ -484,20 +637,39 @@ impl App {
 
     fn draw(&mut self) {
         let started = Instant::now();
-        let Some(geometry) = self.frame.as_ref().and_then(Geometry::of) else {
+        let Some(chrome) = self.chrome() else {
             return;
         };
         if let Some(notice) = &self.notice {
+            let geometry = chrome.geometry;
             let lines = notice.lines(
                 self.session.location().host(),
                 usize::from(geometry.grid.cols()),
             );
+            let screen = Screen::message(&lines, geometry.grid);
+            let rows: Vec<_> = screen.rows.iter().collect();
+            let scenes = [Scene {
+                origin: geometry.grid_origin(),
+                size: geometry.grid_pixels(),
+                rows: &rows,
+                cursor: None,
+                normal_mode: false,
+                highlights: &[],
+            }];
+            let (fills, texts) = chrome.paint(self.hover);
             if let Some(frame) = &mut self.frame {
-                draw_notice(frame, &lines, &geometry);
+                present(
+                    frame,
+                    &Picture {
+                        scenes: &scenes,
+                        fills: &fills,
+                        texts: &texts,
+                    },
+                );
             }
             return;
         }
-        let Some(drawn) = self.draw_panes(&geometry) else {
+        let Some(drawn) = self.draw_panes(&chrome) else {
             return;
         };
         // For measuring: `RUST_LOG=clackatoo_gui::frame=trace`.
@@ -511,9 +683,10 @@ impl App {
         self.desk.drawn(&drawn);
     }
 
-    /// Draws the bar and the shown tab's panes. Returns the terminals
+    /// Draws the frame and the shown tab's panes. Returns the terminals
     /// drawn, or `None` if the frame wasn't shown.
-    fn draw_panes(&mut self, geometry: &Geometry) -> Option<Vec<TerminalId>> {
+    fn draw_panes(&mut self, chrome: &Chrome) -> Option<Vec<TerminalId>> {
+        let geometry = &chrome.geometry;
         let desk = &self.desk;
         let shown = desk.shown()?;
         let tab = desk.shown_tab()?;
@@ -539,21 +712,11 @@ impl App {
             {
                 cursor.style = CursorStyle::Hollow;
             }
-            let label = if focused {
-                match (desk.command_line(), desk.message()) {
-                    (Some(line), _) => Some(format!(":{line}▏")),
-                    (None, Some(message)) => Some(message.to_owned()),
-                    (None, None) => state.label(),
-                }
-            } else {
-                state.label()
-            };
             drawings.push(Drawing {
                 terminal,
                 cells,
                 rows,
                 cursor,
-                label,
                 highlights: state.highlights(height),
                 // Only the focused pane's mode matters, as only it gets keys.
                 normal_mode: focused && state.mode != Mode::Insert,
@@ -567,26 +730,20 @@ impl App {
                 rows: &drawing.rows,
                 cursor: drawing.cursor,
                 normal_mode: drawing.normal_mode,
-                label: drawing.label.as_deref(),
                 highlights: &drawing.highlights,
             })
             .collect();
-        let dividers: Vec<[f32; 4]> = placement
-            .dividers
-            .iter()
-            .map(|divider| geometry.divider(divider))
-            .collect();
-        let (left, right) = desk.bar_items();
-        let bar = Bar {
-            origin: [geometry.padding; 2],
-            width: geometry.grid_pixels()[0],
-            left: &left,
-            right: &right,
-        };
+        let (mut fills, texts) = chrome.paint(self.hover);
+        fills.extend(
+            placement
+                .dividers
+                .iter()
+                .map(|divider| chrome::divider_fill(geometry, divider)),
+        );
         let picture = Picture {
             scenes: &scenes,
-            bar: Some(bar),
-            dividers: &dividers,
+            fills: &fills,
+            texts: &texts,
         };
         let frame = self.frame.as_mut()?;
         if !present(frame, &picture) {
@@ -596,27 +753,18 @@ impl App {
     }
 }
 
-/// Draws a notice's `lines` over the whole window.
-fn draw_notice(frame: &mut Frame, lines: &[String], geometry: &Geometry) {
-    let screen = Screen::message(lines, geometry.grid);
-    let rows: Vec<_> = screen.rows.iter().collect();
-    let scenes = [Scene {
-        origin: [geometry.padding; 2],
-        size: geometry.grid_pixels(),
-        rows: &rows,
-        cursor: None,
-        normal_mode: false,
-        label: None,
-        highlights: &[],
-    }];
-    present(
-        frame,
-        &Picture {
-            scenes: &scenes,
-            bar: None,
-            dividers: &[],
-        },
-    );
+/// The cursor for resizing the window towards `direction`.
+fn resize_icon(direction: ResizeDirection) -> CursorIcon {
+    match direction {
+        ResizeDirection::North => CursorIcon::NResize,
+        ResizeDirection::South => CursorIcon::SResize,
+        ResizeDirection::East => CursorIcon::EResize,
+        ResizeDirection::West => CursorIcon::WResize,
+        ResizeDirection::NorthEast => CursorIcon::NeResize,
+        ResizeDirection::NorthWest => CursorIcon::NwResize,
+        ResizeDirection::SouthEast => CursorIcon::SeResize,
+        ResizeDirection::SouthWest => CursorIcon::SwResize,
+    }
 }
 
 /// One pane, ready to draw.
@@ -625,96 +773,8 @@ struct Drawing<'a> {
     cells: Cells,
     rows: Vec<&'a Row>,
     cursor: Option<SceneCursor>,
-    label: Option<String>,
     highlights: Vec<Highlight>,
     normal_mode: bool,
-}
-
-/// Where things go in the window, in pixels: the bar along the top, and
-/// the panes below it, all inside the padding.
-#[derive(Debug)]
-struct Geometry {
-    padding: f32,
-    cell: [f32; 2],
-    /// Every cell inside the padding, for notices.
-    grid: Size,
-    /// The cells below the bar, for panes.
-    panes: Cells,
-    /// Where the panes' cells start.
-    panes_top: f32,
-}
-
-impl Geometry {
-    #[allow(clippy::cast_precision_loss)]
-    fn of(frame: &Frame) -> Option<Self> {
-        let cell = frame.fonts.cell;
-        let padding = padding(&frame.window);
-        let cells =
-            |pixels: u32, cell: u32| u16::try_from((pixels / cell).max(1)).unwrap_or(u16::MAX);
-        let (width, height) = (frame.config.width, frame.config.height);
-        let grid = Size::new(
-            cells(width.saturating_sub(2 * padding), cell.width),
-            cells(height.saturating_sub(2 * padding), cell.height),
-        )
-        .ok()?;
-        // The bar's row, and below it a padding's space before the panes.
-        let below_bar = 3 * padding + cell.height;
-        let panes = Cells {
-            col: 0,
-            row: 0,
-            cols: grid.cols(),
-            rows: cells(height.saturating_sub(below_bar), cell.height),
-        };
-        Some(Self {
-            padding: padding as f32,
-            cell: [cell.width as f32, cell.height as f32],
-            grid,
-            panes,
-            panes_top: (2 * padding + cell.height) as f32,
-        })
-    }
-
-    fn grid_pixels(&self) -> [f32; 2] {
-        [
-            f32::from(self.grid.cols()) * self.cell[0],
-            f32::from(self.grid.rows()) * self.cell[1],
-        ]
-    }
-
-    fn origin(&self, cells: Cells) -> [f32; 2] {
-        [
-            self.padding + f32::from(cells.col) * self.cell[0],
-            self.panes_top + f32::from(cells.row) * self.cell[1],
-        ]
-    }
-
-    fn pixels(&self, cells: Cells) -> [f32; 2] {
-        [
-            f32::from(cells.cols) * self.cell[0],
-            f32::from(cells.rows) * self.cell[1],
-        ]
-    }
-
-    /// A divider's line: thin, down or across the middle of its cells.
-    fn divider(&self, divider: &Divider) -> [f32; 4] {
-        let [left, top] = self.origin(divider.cells);
-        let [width, height] = self.pixels(divider.cells);
-        let thickness = (self.padding / 4.0).round().max(1.0);
-        match divider.axis {
-            Axis::LeftToRight => [
-                (left + (width - thickness) / 2.0).round(),
-                top,
-                thickness,
-                height,
-            ],
-            Axis::TopToBottom => [
-                left,
-                (top + (height - thickness) / 2.0).round(),
-                width,
-                thickness,
-            ],
-        }
-    }
 }
 
 /// The format to draw the window in, from those it supports. Colours are
@@ -899,11 +959,13 @@ fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
 }
 
 /// The new window's title, size and app ID. Desktops find the window's
-/// icon through the app ID, matching it to `clackatoo.desktop`.
+/// icon through the app ID, matching it to `clackatoo.desktop`. The window
+/// draws its own frame (see [`chrome`]), so it asks for none.
 fn window_attributes(size: LogicalSize<f64>) -> WindowAttributes {
     let attributes = Window::default_attributes()
         .with_title("clackatoo")
-        .with_inner_size(size);
+        .with_inner_size(size)
+        .with_decorations(false);
     #[cfg(target_os = "linux")]
     let attributes = {
         use winit::platform::wayland::WindowAttributesExtWayland;
@@ -1022,6 +1084,16 @@ impl App {
                 ..
             } if event.state.is_pressed() => self.key_pressed(event_loop, &event),
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
+            #[allow(clippy::cast_possible_truncation)]
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer_moved([position.x as f32, position.y as f32]);
+            }
+            WindowEvent::CursorLeft { .. } => self.pointer_left(),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => self.clicked(event_loop, button),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 // Another window on the terminals may have resized them:
