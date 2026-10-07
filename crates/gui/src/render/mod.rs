@@ -47,6 +47,9 @@ pub(crate) struct Fill {
     pub(crate) radius: f32,
     /// A border inside its edge: how thick, and its colour.
     pub(crate) border: Option<(f32, Paint)>,
+    /// A fade to another colour: the colour, and which way, as a vector
+    /// across the rectangle, where one is its whole width or height.
+    pub(crate) fade: Option<(Paint, [f32; 2])>,
 }
 
 impl Fill {
@@ -57,6 +60,7 @@ impl Fill {
             paint,
             radius: 0.0,
             border: None,
+            fade: None,
         }
     }
 
@@ -67,6 +71,7 @@ impl Fill {
             paint,
             radius,
             border: None,
+            fade: None,
         }
     }
 
@@ -77,6 +82,15 @@ impl Fill {
             ..self
         }
     }
+
+    /// Fading to `paint` towards `direction`: `[0.0, 1.0]` top to bottom,
+    /// `[1.0, 1.0]` corner to corner.
+    pub(crate) fn fading(self, paint: Paint, direction: [f32; 2]) -> Self {
+        Self {
+            fade: Some((paint, direction)),
+            ..self
+        }
+    }
 }
 
 /// The colours the window's own things are drawn in.
@@ -84,11 +98,14 @@ impl Fill {
 pub(crate) enum Paint {
     /// Nothing: for a border alone.
     Clear,
-    /// Behind the cards.
-    Window,
+    /// The window's background, at the top left of its fade...
+    Backdrop,
+    /// ...and at the bottom right.
+    BackdropEnd,
     /// A soft shadow, under something raised.
     Shadow,
-    /// A pane's card, the colour its terminal's background is.
+    /// A pane's card: a neutral grey, the colour its terminal's background
+    /// is.
     Card,
     /// A card's edge.
     Edge,
@@ -96,12 +113,18 @@ pub(crate) enum Paint {
     Focus,
     /// clackatoo's own colour: the focused card's edge in normal mode.
     Accent,
-    /// Behind what's picked, such as the workspace shown.
-    Picked,
-    /// Under the mouse.
-    Hover,
-    /// The window's buttons.
-    Button,
+    /// Glass, as names in the bars are: faint at the bottom...
+    Glass,
+    /// ...and brighter at the top.
+    GlassTop,
+    /// Glass for what's picked or under the mouse: at the bottom...
+    BrightGlass,
+    /// ...and at the top.
+    BrightGlassTop,
+    /// Glass's edge.
+    GlassEdge,
+    /// Bright glass's edge.
+    BrightGlassEdge,
     /// The text colour, for drawn icons.
     Ink,
     /// The command palette.
@@ -211,6 +234,12 @@ struct Rect {
     /// How thick its border is, in pixels, inside its edge.
     border: f32,
     border_color: Rgba,
+    /// The colour it fades to, along `direction`.
+    color_to: Rgba,
+    /// Which way it fades from `color` to `color_to`, as a vector across
+    /// the rectangle, where one is its whole width or height. Zero for no
+    /// fade.
+    direction: [f32; 2],
 }
 
 impl Rect {
@@ -223,6 +252,8 @@ impl Rect {
             radius: 0.0,
             border: 0.0,
             border_color: [0.0; 4],
+            color_to: color,
+            direction: [0.0; 2],
         }
     }
 }
@@ -367,7 +398,7 @@ impl Renderer {
             ("rect_vs", "rect_fs"),
             &wgpu::vertex_attr_array![
                 0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
-                4 => Float32, 5 => Float32x4,
+                4 => Float32, 5 => Float32x4, 6 => Float32x4, 7 => Float32x2,
             ],
             std::mem::size_of::<Rect>() as u64,
         );
@@ -485,7 +516,7 @@ impl Renderer {
             let clear = if picture.transparent {
                 [0.0; 4]
             } else {
-                self.theme.window
+                self.theme.backdrop
             };
             let [r, g, b, a] = clear.map(f64::from);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -545,13 +576,20 @@ impl Renderer {
             let (border, border_color) = fill.border.map_or((0.0, [0.0; 4]), |(width, paint)| {
                 (width, self.theme.paint(paint))
             });
+            let color = self.theme.paint(fill.paint);
+            let (color_to, direction) =
+                fill.fade.map_or((color, [0.0; 2]), |(paint, direction)| {
+                    (self.theme.paint(paint), direction)
+                });
             Rect {
                 origin: [left, top],
                 size: [width, height],
-                color: self.theme.paint(fill.paint),
+                color,
                 radius: fill.radius,
                 border,
                 border_color,
+                color_to,
+                direction,
             }
         };
         let (under, over): (Vec<Rect>, Vec<Rect>) = (

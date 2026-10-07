@@ -31,6 +31,8 @@ struct RectOut {
     @location(3) @interpolate(flat) radius: f32,
     @location(4) @interpolate(flat) border: f32,
     @location(5) border_color: vec4<f32>,
+    @location(6) color_to: vec4<f32>,
+    @location(7) @interpolate(flat) direction: vec2<f32>,
 }
 
 @vertex
@@ -42,6 +44,8 @@ fn rect_vs(
     @location(3) radius: f32,
     @location(4) border: f32,
     @location(5) border_color: vec4<f32>,
+    @location(6) color_to: vec4<f32>,
+    @location(7) direction: vec2<f32>,
 ) -> RectOut {
     let at = corner(vertex);
     var out: RectOut;
@@ -52,6 +56,8 @@ fn rect_vs(
     out.radius = radius;
     out.border = border;
     out.border_color = vec4<f32>(border_color.rgb * border_color.a, border_color.a);
+    out.color_to = vec4<f32>(color_to.rgb * color_to.a, color_to.a);
+    out.direction = direction;
     return out;
 }
 
@@ -63,17 +69,25 @@ fn rounded_box(offset: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
 
 @fragment
 fn rect_fs(in: RectOut) -> @location(0) vec4<f32> {
+    let fades = in.direction.x != 0.0 || in.direction.y != 0.0;
     // Cells, underlines and the cursor: square and solid.
-    if in.radius <= 0.0 && in.border <= 0.0 {
+    if in.radius <= 0.0 && in.border <= 0.0 && !fades {
         return in.color;
+    }
+    var color = in.color;
+    if fades {
+        // How far along the fade, from the corner it starts at.
+        let across = in.offset / (2.0 * in.half_size);
+        let reach = abs(in.direction.x) + abs(in.direction.y);
+        let along = clamp(dot(across, in.direction) / reach + 0.5, 0.0, 1.0);
+        color = mix(in.color, in.color_to, along);
     }
     let distance = rounded_box(in.offset, in.half_size, in.radius);
     // A pixel's worth of soft edge, so curves aren't jagged.
     let coverage = clamp(0.5 - distance, 0.0, 1.0);
-    var color = in.color;
     if in.border > 0.0 {
         let inside_border = clamp(0.5 - (distance + in.border), 0.0, 1.0);
-        color = mix(in.border_color, in.color, inside_border);
+        color = mix(in.border_color, color, inside_border);
     }
     return color * coverage;
 }

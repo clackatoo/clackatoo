@@ -394,14 +394,9 @@ impl Chrome {
     fn paint_button(&self, button: Button, rect: Rect, hovered: bool, painted: &mut Painted<'_>) {
         let metrics = self.geometry.metrics;
         let stroke = self.geometry.edge;
-        let paint = if hovered {
-            Paint::Picked
-        } else {
-            Paint::Button
-        };
         painted
             .fills
-            .push(Fill::rounded(rect.to_array(), paint, rect.width / 2.0));
+            .push(glass(rect, rect.width / 2.0, hovered, stroke));
         let side = (rect.width * 0.36).round();
         let left = (rect.x + (rect.width - side) / 2.0).round();
         let top = (rect.y + (rect.height - side) / 2.0).round();
@@ -446,18 +441,14 @@ fn paint_item<'a, T>(
     painted: &mut Painted<'a>,
 ) {
     let radius = (1.5 * metrics.padding).round();
-    let ink = if item.active {
-        painted
-            .fills
-            .push(Fill::rounded(item.rect.to_array(), Paint::Picked, radius));
-        Ink::Strong
-    } else if hovered {
-        painted
-            .fills
-            .push(Fill::rounded(item.rect.to_array(), Paint::Hover, radius));
-        Ink::Plain
-    } else {
-        Ink::Muted
+    let edge = (metrics.padding / 4.0).round().max(1.0);
+    painted
+        .fills
+        .push(glass(item.rect, radius, item.active || hovered, edge));
+    let ink = match (item.active, hovered) {
+        (true, _) => Ink::Strong,
+        (false, true) => Ink::Plain,
+        (false, false) => Ink::Muted,
     };
     painted.texts.push(Text {
         origin: [
@@ -468,6 +459,25 @@ fn paint_item<'a, T>(
         ink,
         font: TextFont::Ui,
     });
+}
+
+/// A pane of glass over the backdrop: brighter at the top than the
+/// bottom, with a bright edge, and brighter still if `bright`. Real glass
+/// would blur what's behind it, but behind it is a smooth fade, which
+/// blurring leaves as it is.
+fn glass(rect: Rect, radius: f32, bright: bool, edge: f32) -> Fill {
+    let (top, bottom, rim) = if bright {
+        (
+            Paint::BrightGlassTop,
+            Paint::BrightGlass,
+            Paint::BrightGlassEdge,
+        )
+    } else {
+        (Paint::GlassTop, Paint::Glass, Paint::GlassEdge)
+    };
+    Fill::rounded(rect.to_array(), top, radius)
+        .fading(bottom, [0.0, 1.0])
+        .bordered(edge, rim)
 }
 
 /// A row of names in a bar.

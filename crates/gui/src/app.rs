@@ -690,22 +690,20 @@ impl App {
         self.desk.drawn(&drawn);
     }
 
-    /// The window's background, rounded at the corners unless it's
-    /// maximised, where the window can be see-through. Otherwise the frame
-    /// is cleared to the background colour, and needs none.
+    /// The window's background, fading corner to corner: rounded at the
+    /// corners where the window can be see-through, unless it's maximised.
     fn window_fill(&self, geometry: &Geometry) -> Option<Fill> {
-        let frame = self.frame.as_ref().filter(|frame| frame.transparent)?;
+        let frame = self.frame.as_ref()?;
         let [width, height] = geometry.size;
-        let radius = if frame.window.is_maximized() {
-            0.0
-        } else {
+        let radius = if frame.transparent && !frame.window.is_maximized() {
             geometry.window_radius
+        } else {
+            0.0
         };
-        Some(Fill::rounded(
-            [0.0, 0.0, width, height],
-            Paint::Window,
-            radius,
-        ))
+        Some(
+            Fill::rounded([0.0, 0.0, width, height], Paint::Backdrop, radius)
+                .fading(Paint::BackdropEnd, [1.0, 1.0]),
+        )
     }
 
     /// Draws the notice on a card filling the space between the bars.

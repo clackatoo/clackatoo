@@ -298,7 +298,12 @@ fn draw_window(
         })
         .collect();
     let painted = chrome.paint(Hit::Workspace(WorkspaceId(2)));
-    let mut fills = painted.fills;
+    let [width, height] = geometry.size;
+    let mut fills = vec![
+        Fill::rounded([0.0, 0.0, width, height], Paint::Backdrop, 0.0)
+            .fading(Paint::BackdropEnd, [1.0, 1.0]),
+    ];
+    fills.extend(painted.fills);
     for (index, (_, card)) in placement.panes.iter().enumerate() {
         let edge = if index == 1 {
             Paint::Accent
@@ -352,19 +357,22 @@ fn panes_are_drawn_on_cards_between_the_bars() {
         let index = (y as usize * size[0] as usize + x as usize) * 4;
         &pixels[index..index + 3]
     };
-    let active = chrome.workspaces[0].rect;
-    assert_eq!(
-        pixel([active.x + 8.0, active.y + 2.0]),
-        [0x1d, 0x25, 0x2f],
-        "picked out"
-    );
-    let hovered = chrome.workspaces[1].rect;
-    assert_eq!(
-        pixel([hovered.x + 8.0, hovered.y + 2.0]),
-        [0x17, 0x1e, 0x27],
-        "lit up"
-    );
-    assert_eq!(pixel([1.0, 1.0]), [0x0a, 0x0e, 0x13], "the window");
+    let brightness = |rgb: &[u8]| rgb.iter().map(|&c| u32::from(c)).sum::<u32>();
+    // Glass lightens the backdrop behind it: the workspace shown, and the
+    // one under the mouse, most.
+    for item in &chrome.workspaces {
+        let inside = pixel([item.rect.x + 6.0, item.rect.y + item.rect.height - 4.0]);
+        let beside = pixel([item.rect.x - 3.0, item.rect.y + item.rect.height - 4.0]);
+        assert!(
+            brightness(inside) > brightness(beside) + 20,
+            "{} is glass",
+            item.text
+        );
+    }
+    // The backdrop fades from indigo at the top left towards teal.
+    let top_left = pixel([1.0, 1.0]);
+    let bottom_right = pixel([size[0] as f32 - 2.0, size[1] as f32 - 2.0]);
+    assert!(top_left[2] > top_left[1] && bottom_right[1] > bottom_right[0]);
     let left_card = placement.panes[0].1.rect;
     let right_card = placement.panes[1].1.rect;
     // The focused card's edge is in the accent colour, for normal mode.
@@ -372,10 +380,13 @@ fn panes_are_drawn_on_cards_between_the_bars() {
         pixel([right_card.x + 0.5, right_card.y + right_card.height / 2.0]),
         [0xf8, 0xce, 0x57]
     );
-    // Between the cards, only the window shows: the long line stopped.
-    let between = left_card.x + left_card.width + 2.0;
-    let spilled = (0..fonts.cell.height)
-        .any(|y| pixel([between, placement.panes[0].1.origin[1] + y as f32]) != [0x0a, 0x0e, 0x13]);
+    // Between the cards, only the dark backdrop shows: the long line
+    // stopped at its card's edge.
+    let between = left_card.x + left_card.width + 3.0;
+    let spilled = (0..fonts.cell.height).any(|y| {
+        let rgb = pixel([between, placement.panes[0].1.origin[1] + y as f32]);
+        rgb.iter().any(|&c| c > 0x60)
+    });
     assert!(!spilled, "the cut-off line spilled out of its card");
 }
 
