@@ -6,7 +6,7 @@ mod ping;
 mod render;
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -228,6 +228,12 @@ struct Capture {
 }
 
 fn main() -> ExitCode {
+    // Run by ssh as its askpass program, for a window: the question is the
+    // only argument, and the window answers it.
+    if let Some(socket) = std::env::var_os(remote::ASKPASS_VAR) {
+        let question = std::env::args().nth(1).unwrap_or_default();
+        return remote::ask(Path::new(&socket), &question);
+    }
     let cli = Cli::parse();
     let result = match cli.command {
         Some(command) => run(command),
@@ -324,7 +330,8 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
 
 fn connect(connection: &Connection) -> anyhow::Result<Client> {
     if let Some(remote) = connection.remote.remote() {
-        return match remote::connect(&remote, false) {
+        // ssh asks for any password on this terminal.
+        return match remote::connect(&remote, false, None) {
             Ok(client) => Ok(client),
             Err(RemoteError::Client(ClientError::VersionMismatch { daemon, ours })) => {
                 anyhow::bail!(

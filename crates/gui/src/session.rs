@@ -6,12 +6,17 @@
 //! another protocol: the thread tells the window, which asks whether to
 //! replace it, and waits for the answer. When the connection is lost, the
 //! thread ends, and reconnecting starts another.
+//!
+//! ssh, for a daemon on another machine, asks its questions (a password,
+//! whether to trust a new host) through an [`Askpass`] the window answers,
+//! since a window may have no terminal for ssh to ask on.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use clackatoo_daemon::launch::{self, LaunchError};
-use clackatoo_daemon::remote::{self, Remote, RemoteError};
+use clackatoo_daemon::remote::{self, Askpass, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, Receiver, RuntimeDir, Sender};
 use clackatoo_protocol::{
     NewTerminal, PROTOCOL_VERSION, ServerMessage, Size, TerminalId, TerminalStatus,
@@ -57,6 +62,12 @@ pub(crate) enum SessionEvent {
     },
     /// A message from the daemon.
     Message(ServerMessage),
+    /// ssh asks `question`, such as for a password. ssh waits until the
+    /// answer, or `None` to turn the question down, is sent on `answer`.
+    Ask {
+        question: String,
+        answer: mpsc::Sender<Option<String>>,
+    },
     /// The connection failed or closed.
     Lost(String),
 }
@@ -76,17 +87,47 @@ pub(crate) struct Session {
     /// Answers the thread's questions. Replacing it tells the last thread
     /// to give up.
     commands: mpsc::Sender<SessionCommand>,
+    /// Where ssh asks its questions, for a daemon on another machine.
+    askpass: Option<Askpass>,
 }
 
 impl Session {
     /// Starts connecting to the daemon at `location`. Its events arrive
-    /// through `proxy`.
-    pub(crate) fn start(location: Location, proxy: EventLoopProxy<SessionEvent>) -> Self {
-        let commands = spawn(location.clone(), None, proxy.clone());
+    /// through `proxy`. The socket ssh asks questions through, if the
+    /// daemon is on another machine, goes in `runtime`.
+    pub(crate) fn start(
+        location: Location,
+        runtime: &RuntimeDir,
+        proxy: EventLoopProxy<SessionEvent>,
+    ) -> Self {
+        let askpass = match location {
+            Location::Local(_) => None,
+            Location::Remote(_) => {
+                let proxy = proxy.clone();
+                let asked = Askpass::serve(runtime, move |question| {
+                    let (answer, answered) = mpsc::channel();
+                    proxy
+                        .send_event(SessionEvent::Ask { question, answer })
+                        .ok()?;
+                    answered.recv().ok().flatten()
+                });
+                // Without it, ssh asks on the terminal, if there is one.
+                asked
+                    .inspect_err(|err| log::warn!("ssh can't ask the window for passwords: {err}"))
+                    .ok()
+            }
+        };
+        let commands = spawn(
+            location.clone(),
+            askpass_path(askpass.as_ref()),
+            None,
+            proxy.clone(),
+        );
         Self {
             location,
             proxy,
             commands,
+            askpass,
         }
     }
 
@@ -97,7 +138,12 @@ impl Session {
     /// Connects again after the connection was lost, attaching to
     /// `preferred` if it's still running.
     pub(crate) fn reconnect(&mut self, preferred: Option<TerminalId>) {
-        self.commands = spawn(self.location.clone(), preferred, self.proxy.clone());
+        self.commands = spawn(
+            self.location.clone(),
+            askpass_path(self.askpass.as_ref()),
+            preferred,
+            self.proxy.clone(),
+        );
     }
 
     /// Answers [`SessionEvent::OtherDaemon`]: replace it.
@@ -107,18 +153,24 @@ impl Session {
     }
 }
 
+fn askpass_path(askpass: Option<&Askpass>) -> Option<PathBuf> {
+    askpass.map(|askpass| askpass.path().to_owned())
+}
+
 /// Starts a session thread for the daemon at `location`, attaching to
-/// `preferred` if it's running. The returned sender answers the thread's
+/// `preferred` if it's running, with ssh asking questions through the
+/// socket at `askpass`. The returned sender answers the thread's
 /// questions; dropping it tells the thread to give up.
 fn spawn(
     location: Location,
+    askpass: Option<PathBuf>,
     preferred: Option<TerminalId>,
     proxy: EventLoopProxy<SessionEvent>,
 ) -> mpsc::Sender<SessionCommand> {
     let (commands, received) = mpsc::channel();
     std::thread::Builder::new()
         .name("session".into())
-        .spawn(move || run(&location, preferred, &proxy, &received))
+        .spawn(move || run(&location, askpass.as_deref(), preferred, &proxy, &received))
         .expect("threads can be started");
     commands
 }
@@ -133,6 +185,7 @@ enum Connected {
 
 fn run(
     location: &Location,
+    askpass: Option<&Path>,
     preferred: Option<TerminalId>,
     proxy: &EventLoopProxy<SessionEvent>,
     commands: &mpsc::Receiver<SessionCommand>,
@@ -141,7 +194,7 @@ fn run(
     let lost = |reason: String| drop(proxy.send_event(SessionEvent::Lost(reason)));
     let mut replace = false;
     let client = loop {
-        match connect(location, replace) {
+        match connect(location, askpass, replace) {
             Connected::Client(client) => break client,
             // Replacing it started a daemon from another build: the one
             // installed on the remote machine.
@@ -194,8 +247,9 @@ fn run(
 }
 
 /// Connects to the daemon at `location`, starting it if it isn't running,
-/// or with `replace`, stopping it first.
-fn connect(location: &Location, replace: bool) -> Connected {
+/// or with `replace`, stopping it first. ssh asks its questions through
+/// the socket at `askpass`.
+fn connect(location: &Location, askpass: Option<&Path>, replace: bool) -> Connected {
     let result = match location {
         Location::Local(runtime) => {
             if replace && let Err(err) = launch::stop(runtime) {
@@ -209,10 +263,12 @@ fn connect(location: &Location, replace: bool) -> Connected {
                 err => Err(with_causes(&err)),
             })
         }
-        Location::Remote(remote) => remote::connect(remote, replace).map_err(|err| match err {
-            RemoteError::Client(ClientError::VersionMismatch { daemon, .. }) => Ok(daemon),
-            err => Err(with_causes(&err)),
-        }),
+        Location::Remote(remote) => {
+            remote::connect(remote, replace, askpass).map_err(|err| match err {
+                RemoteError::Client(ClientError::VersionMismatch { daemon, .. }) => Ok(daemon),
+                err => Err(with_causes(&err)),
+            })
+        }
     };
     match result {
         Ok(client) => Connected::Client(client),

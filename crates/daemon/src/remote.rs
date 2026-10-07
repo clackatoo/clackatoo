@@ -11,13 +11,21 @@
 //! A shell can print something before the bridge starts, such as a
 //! greeting from a startup file, so the bridge announces itself first, and
 //! the client skips everything before the announcement.
+//!
+//! ssh asks for passwords on the terminal it was started from, which a
+//! window may not have. A window serves an [`Askpass`] instead: ssh runs
+//! clackatoo as its askpass program (`SSH_ASKPASS`), which passes each
+//! question to the window over a socket, and the window's answer back.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::net::UnixStream;
-use std::process::{Child, Command, Stdio};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitCode, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -32,8 +40,16 @@ const ANNOUNCEMENT: &[u8] = b"\x1b[clackatoo-bridge]\n";
 /// The most a shell may print before the bridge announces itself.
 const MAX_GREETING: usize = 64 * 1024;
 
-/// How long ssh may take to log in and start the bridge.
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long ssh may take to log in and start the bridge, which includes
+/// someone typing a password.
+const LOGIN_TIMEOUT: Duration = Duration::from_mins(2);
+
+/// The environment variable that tells clackatoo it was run by ssh as its
+/// askpass program, naming the socket to ask through.
+pub const ASKPASS_VAR: &str = "CLACKATOO_ASKPASS";
+
+/// The longest question passed on from ssh.
+const MAX_QUESTION: u64 = 4 * 1024;
 
 /// The most of ssh's error output kept, to explain a failure.
 const MAX_SSH_ERRORS: usize = 4 * 1024;
@@ -88,15 +104,26 @@ fn ssh_program() -> String {
 
 /// Connects to the daemon on `remote`'s machine, starting it there if it
 /// isn't running. With `replace`, a daemon already running there is
-/// stopped first, closing its terminals.
+/// stopped first, closing its terminals. With `askpass`, the socket of an
+/// [`Askpass`], ssh asks for passwords through it rather than on the
+/// terminal.
 ///
 /// # Errors
 ///
 /// [`RemoteError::Client`] with [`ClientError::VersionMismatch`] if the
 /// daemon there speaks another protocol version. Otherwise, if ssh can't
 /// run, or can't reach clackatoo.
-pub fn connect(remote: &Remote, replace: bool) -> Result<Client, RemoteError> {
+pub fn connect(
+    remote: &Remote,
+    replace: bool,
+    askpass: Option<&Path>,
+) -> Result<Client, RemoteError> {
     let mut ssh = Command::new(ssh_program());
+    if let Some(socket) = askpass {
+        ssh.env("SSH_ASKPASS", std::env::current_exe()?)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env(ASKPASS_VAR, socket);
+    }
     ssh.args([
         "-T",
         "-o",
@@ -231,6 +258,128 @@ fn relay(from: &mut impl Read, to: &mut impl Write) -> io::Result<()> {
     }
 }
 
+/// Somewhere for ssh to ask questions, such as for a password, and get the
+/// answers from `answer`. Each question arrives on a connection to its
+/// socket, from clackatoo run by ssh as its askpass program (see [`ask`]).
+/// The socket is removed when this is dropped.
+///
+/// On the socket, the asker sends the question and shuts its side down;
+/// the answer comes back as `y` and the answer's text, or nothing at all
+/// when the question was turned down.
+#[derive(Debug)]
+pub struct Askpass {
+    path: PathBuf,
+    stopped: Arc<AtomicBool>,
+}
+
+impl Askpass {
+    /// Starts answering questions on a socket in `runtime`, on a thread of
+    /// its own, one question at a time. `answer` gets the question and
+    /// returns the answer, or `None` to turn it down.
+    ///
+    /// # Errors
+    ///
+    /// If the runtime directory or the socket can't be made.
+    pub fn serve(
+        runtime: &RuntimeDir,
+        answer: impl Fn(String) -> Option<String> + Send + 'static,
+    ) -> io::Result<Self> {
+        runtime.create_private().map_err(io::Error::other)?;
+        let path = runtime
+            .path()
+            .join(format!("askpass-{}.sock", std::process::id()));
+        // Left by an earlier process with the same ID that didn't exit
+        // cleanly.
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        let listener = UnixListener::bind(&path)?;
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&stopped);
+        std::thread::Builder::new()
+            .name("askpass".into())
+            .spawn(move || {
+                for stream in listener.incoming() {
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if let Ok(stream) = stream {
+                        // A broken asker is ssh's problem, not ours.
+                        let _ = answer_one(stream, &answer);
+                    }
+                }
+            })?;
+        Ok(Self { path, stopped })
+    }
+
+    /// The socket, for [`connect`].
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Askpass {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        // Wakes the thread, which sees it should stop.
+        let _ = UnixStream::connect(&self.path);
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Reads one question from `stream` and writes back what `answer` makes of
+/// it.
+fn answer_one(
+    mut stream: UnixStream,
+    answer: &impl Fn(String) -> Option<String>,
+) -> io::Result<()> {
+    let mut question = String::new();
+    (&mut stream)
+        .take(MAX_QUESTION)
+        .read_to_string(&mut question)?;
+    if let Some(text) = answer(question) {
+        stream.write_all(b"y")?;
+        stream.write_all(text.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// Asks the [`Askpass`] at `socket` the `question` ssh asked, and prints
+/// the answer for ssh, as its askpass program. Fails if the question is
+/// turned down or can't be asked, so ssh gives up.
+#[must_use]
+pub fn ask(socket: &Path, question: &str) -> ExitCode {
+    match asked(socket, question) {
+        Ok(Some(answer)) => {
+            let mut out = io::stdout().lock();
+            if writeln!(out, "{answer}").and_then(|()| out.flush()).is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Ok(None) => ExitCode::FAILURE,
+        Err(err) => {
+            eprintln!("clackatoo: couldn't ask the window: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The answer to `question` from the [`Askpass`] at `socket`, or `None` if
+/// it was turned down.
+fn asked(socket: &Path, question: &str) -> io::Result<Option<String>> {
+    let mut stream = UnixStream::connect(socket)?;
+    stream.write_all(question.as_bytes())?;
+    stream.shutdown(Shutdown::Write)?;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply)?;
+    Ok(reply.strip_prefix('y').map(str::to_owned))
+}
+
 /// The ssh process carrying a connection to a remote daemon. Ended when
 /// dropped.
 #[derive(Debug)]
@@ -276,5 +425,39 @@ impl Drop for Ssh {
     fn drop(&mut self) {
         self.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn questions_reach_the_askpass_and_answers_come_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = RuntimeDir::at(temp.path().join("clackatoo"));
+        let askpass = Askpass::serve(&runtime, |question| {
+            (question == "Password: ").then(|| "hunter2".to_owned())
+        })
+        .unwrap();
+        assert_eq!(
+            asked(askpass.path(), "Password: ").unwrap().as_deref(),
+            Some("hunter2")
+        );
+        // Turned down.
+        assert_eq!(asked(askpass.path(), "Passphrase: ").unwrap(), None);
+
+        let path = askpass.path().to_owned();
+        drop(askpass);
+        assert!(!path.exists(), "the socket is removed");
+        assert!(asked(&path, "Password: ").is_err());
+    }
+
+    #[test]
+    fn an_empty_answer_is_still_an_answer() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = RuntimeDir::at(temp.path().join("clackatoo"));
+        let askpass = Askpass::serve(&runtime, |_| Some(String::new())).unwrap();
+        assert_eq!(asked(askpass.path(), "?").unwrap().as_deref(), Some(""));
     }
 }

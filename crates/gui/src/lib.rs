@@ -70,9 +70,9 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         .context("could not open a window")?;
     let location = match options.remote {
         Some(remote) => session::Location::Remote(remote),
-        None => session::Location::Local(options.runtime),
+        None => session::Location::Local(options.runtime.clone()),
     };
-    let session = session::Session::start(location, event_loop.create_proxy());
+    let session = session::Session::start(location, &options.runtime, event_loop.create_proxy());
     let mut app = app::App::new(started, fonts, gpu, session);
     event_loop.run_app(&mut app)?;
     app.result

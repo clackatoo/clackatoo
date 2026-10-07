@@ -1,7 +1,7 @@
 //! The window: starting up, and turning window and daemon events into
 //! frames.
 
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -174,6 +174,7 @@ pub(crate) struct App {
     session: Session,
     /// Shown instead of the terminal, while there's no connection to it.
     notice: Option<Notice>,
+    /// Whether a frame has shown the terminal, rather than a notice.
     first_frame_drawn: bool,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
@@ -197,7 +198,9 @@ impl App {
             wheel_remainder: 0.0,
             clipboard: None,
             session,
-            notice: None,
+            // Shown from the first frame, so the window appears at once:
+            // on Wayland, a window that hasn't drawn isn't shown at all.
+            notice: Some(Notice::Connecting),
             first_frame_drawn: false,
             result: Ok(()),
         }
@@ -274,33 +277,15 @@ impl App {
     /// Handles a key press: a notice's keys, the window's own, then the
     /// pane's.
     fn key_pressed(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
-        if let Some(notice) = &self.notice {
-            let answerable = matches!(notice, Notice::OtherDaemon { .. } | Notice::Lost { .. });
-            match &event.logical_key {
-                Key::Named(NamedKey::Enter) if answerable => {
-                    if let Notice::OtherDaemon { .. } = notice {
-                        self.notice = Some(Notice::Replacing);
-                        self.session.replace_daemon();
-                    } else {
-                        self.notice = Some(Notice::Connecting);
-                        self.session
-                            .reconnect(self.pane.as_ref().map(Pane::terminal));
-                    }
-                    self.request_redraw();
-                }
-                Key::Named(NamedKey::Escape) if answerable => event_loop.exit(),
-                _ => {}
-            }
+        if self.notice.is_some() {
+            self.notice_key(event_loop, event);
             return;
         }
         let Some(pane) = &mut self.pane else {
             return;
         };
         let modifiers = self.modifiers;
-        let is_paste = modifiers.ctrl
-            && modifiers.shift
-            && matches!(&event.logical_key, Key::Character(text) if text.eq_ignore_ascii_case("v"));
-        let redraw = if is_paste {
+        let redraw = if is_paste(&event.logical_key, modifiers) {
             match paste_text(&mut self.clipboard) {
                 Ok(text) => pane.paste(&text),
                 Err(err) => log::warn!("pasting failed: {err:#}"),
@@ -317,6 +302,55 @@ impl App {
         if redraw {
             self.request_redraw();
         }
+    }
+
+    /// Handles a key while a notice is shown: answering its question, or
+    /// typing the answer to ssh's.
+    fn notice_key(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
+        let Some(notice) = &mut self.notice else {
+            return;
+        };
+        let key = &event.logical_key;
+        let enter = matches!(key, Key::Named(NamedKey::Enter));
+        let escape = matches!(key, Key::Named(NamedKey::Escape));
+        match notice {
+            Notice::Ask { input, answer, .. } => {
+                if enter || escape {
+                    let reply = enter.then(|| std::mem::take(&mut input.0));
+                    // ssh has given up if this fails, and the session
+                    // thread will say why.
+                    let _ = answer.send(reply);
+                    self.notice = Some(Notice::Connecting);
+                } else if is_paste(key, self.modifiers) {
+                    match paste_text(&mut self.clipboard) {
+                        Ok(text) => input.push(&text),
+                        Err(err) => log::warn!("pasting failed: {err:#}"),
+                    }
+                } else if matches!(key, Key::Named(NamedKey::Backspace)) {
+                    input.0.pop();
+                } else if self.modifiers.ctrl {
+                    if matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("u")) {
+                        input.0.clear();
+                    }
+                } else if let Some(text) = &event.text {
+                    input.push(text);
+                }
+            }
+            Notice::OtherDaemon { .. } if enter => {
+                self.notice = Some(Notice::Replacing);
+                self.session.replace_daemon();
+            }
+            Notice::Lost { .. } if enter => {
+                self.notice = Some(Notice::Connecting);
+                self.session
+                    .reconnect(self.pane.as_ref().map(Pane::terminal));
+            }
+            Notice::OtherDaemon { .. } | Notice::Lost { .. } | Notice::Connecting if escape => {
+                event_loop.exit();
+            }
+            _ => return,
+        }
+        self.request_redraw();
     }
 
     fn wheel(&mut self, delta: MouseScrollDelta) {
@@ -364,6 +398,7 @@ impl App {
             )),
             _ => None,
         };
+        let terminal_shown = message.is_none();
         let Self {
             frame,
             pane,
@@ -409,7 +444,9 @@ impl App {
         }
         // For measuring: `RUST_LOG=clackatoo_gui::frame=trace`.
         log::trace!(target: "clackatoo_gui::frame", "frame {}", started.elapsed().as_micros());
-        if !self.first_frame_drawn {
+        // What the benchmarks time: the terminal on screen, not the notice
+        // shown while connecting.
+        if terminal_shown && !self.first_frame_drawn {
             self.first_frame_drawn = true;
             log::info!("first frame after {:.1?}", self.started.elapsed());
         }
@@ -472,6 +509,38 @@ fn present(frame: &mut Frame, scene: &Scene<'_>) -> bool {
     true
 }
 
+/// Whether a key pastes: Ctrl+Shift+V.
+fn is_paste(key: &Key, modifiers: input::Modifiers) -> bool {
+    modifiers.ctrl
+        && modifiers.shift
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
+}
+
+/// Whether ssh's `question` wants a secret, such as a password, rather
+/// than an answer that can be shown, such as yes or no to trusting a new
+/// host.
+fn is_secret(question: &str) -> bool {
+    !question.to_lowercase().contains("yes/no")
+}
+
+/// Text typed into a notice. It may be a password, so it never appears in
+/// debug output.
+#[derive(Default)]
+struct Typed(String);
+
+impl Typed {
+    /// Adds `text`, without control characters such as newlines.
+    fn push(&mut self, text: &str) {
+        self.0.extend(text.chars().filter(|ch| !ch.is_control()));
+    }
+}
+
+impl std::fmt::Debug for Typed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Typed(..)")
+    }
+}
+
 /// A message the window shows instead of the terminal.
 #[derive(Debug)]
 enum Notice {
@@ -481,8 +550,17 @@ enum Notice {
     Replacing,
     /// The connection was lost, or never made; try again?
     Lost { reason: String },
-    /// Trying again.
+    /// Connecting, or trying again.
     Connecting,
+    /// ssh asks a question, such as for a password, while connecting.
+    Ask {
+        question: String,
+        /// The answer so far.
+        input: Typed,
+        /// Whether to hide the answer.
+        secret: bool,
+        answer: mpsc::Sender<Option<String>>,
+    },
 }
 
 impl Notice {
@@ -508,6 +586,24 @@ impl Notice {
                 "  Enter  reconnect\n  Esc    quit".into(),
             ],
             Self::Connecting => vec![format!("Connecting to the daemon{on_host}…")],
+            Self::Ask {
+                question,
+                input,
+                secret,
+                ..
+            } => {
+                let shown = if *secret {
+                    "•".repeat(input.0.chars().count())
+                } else {
+                    input.0.clone()
+                };
+                vec![
+                    format!("Logging in to {}.", host.unwrap_or("the daemon's machine")),
+                    question.trim().to_owned(),
+                    format!("> {shown}▏"),
+                    "  Enter  answer\n  Esc    cancel".into(),
+                ]
+            }
         };
         let mut lines = vec![String::new()];
         for paragraph in paragraphs {
@@ -606,6 +702,9 @@ impl ApplicationHandler<SessionEvent> for App {
         };
         match self.open(event_loop, startup) {
             Ok(frame) => {
+                // Whatever arrived while the window opened is drawn now:
+                // the notice, or a terminal whose snapshot came first.
+                frame.window.request_redraw();
                 self.frame = Some(frame);
                 self.fit_terminal();
             }
@@ -693,6 +792,15 @@ impl App {
                 self.notice = Some(Notice::OtherDaemon { protocol });
                 self.request_redraw();
             }
+            SessionEvent::Ask { question, answer } => {
+                self.notice = Some(Notice::Ask {
+                    secret: is_secret(&question),
+                    question,
+                    input: Typed::default(),
+                    answer,
+                });
+                self.request_redraw();
+            }
             SessionEvent::Message(ServerMessage::Event(Event::View { update, .. })) => {
                 let Some(pane) = &mut self.pane else {
                     return;
@@ -752,5 +860,25 @@ mod tests {
         assert_eq!(wrap("", 9, "  "), ["  "]);
         // A word longer than a line gets a line of its own.
         assert_eq!(wrap("a abcdefghijk b", 5, ""), ["a", "abcdefghijk", "b"]);
+    }
+
+    #[test]
+    fn passwords_are_hidden_but_host_confirmations_are_not() {
+        assert!(is_secret("jack@desktop's password: "));
+        assert!(is_secret(
+            "Enter passphrase for key '/home/jack/.ssh/id_ed25519': "
+        ));
+        assert!(!is_secret(
+            "The authenticity of host 'desktop' can't be established.\n\
+             Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        ));
+    }
+
+    #[test]
+    fn typed_answers_never_show_in_debug_output() {
+        let mut typed = Typed::default();
+        typed.push("hunter2\n");
+        assert_eq!(typed.0, "hunter2", "control characters are dropped");
+        assert_eq!(format!("{typed:?}"), "Typed(..)");
     }
 }
