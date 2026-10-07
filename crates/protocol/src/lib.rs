@@ -60,7 +60,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

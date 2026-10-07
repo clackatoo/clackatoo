@@ -582,9 +582,30 @@ mod other_sequences {
                 app_cursor_keys: true,
                 app_keypad: true,
                 bracketed_paste: true,
+                ..crate::InputModes::default()
             }
         );
         let t = after(4, 2, "\x1b[?1h\x1b=\x1b[?2004h\x1b[?1l\x1b>\x1b[?2004l");
+        assert_eq!(t.input_modes(), crate::InputModes::default());
+    }
+
+    #[test]
+    fn programs_ask_for_mouse_reports_and_focus_events() {
+        use crate::mouse::{MouseEncoding, MouseTracking};
+        // Neovim's sequence: all motion, SGR encoding, focus events.
+        let t = after(4, 2, "\x1b[?1003h\x1b[?1006h\x1b[?1004h");
+        let modes = t.input_modes();
+        assert_eq!(modes.mouse_tracking, MouseTracking::Motion);
+        assert_eq!(modes.mouse_encoding, MouseEncoding::Sgr);
+        assert!(modes.focus_events);
+        // One tracking mode at a time, and resetting any turns it off.
+        let t = after(4, 2, "\x1b[?1000h\x1b[?1002h");
+        assert_eq!(t.input_modes().mouse_tracking, MouseTracking::Drags);
+        let t = after(4, 2, "\x1b[?1002h\x1b[?1000l\x1b[?1006h\x1b[?1015l");
+        assert_eq!(t.input_modes().mouse_tracking, MouseTracking::Off);
+        assert_eq!(t.input_modes().mouse_encoding, MouseEncoding::Default);
+        // A full reset turns everything off.
+        let t = after(4, 2, "\x1b[?1003h\x1b[?1006h\x1b[?1004h\x1bc");
         assert_eq!(t.input_modes(), crate::InputModes::default());
     }
 
@@ -670,7 +691,10 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
             format!("\x1b[{intermediate}{}{action}", params.join(";")).into_bytes()
         });
     let modes = (
-        prop::sample::select(vec![4u16, 6, 7, 20, 25, 47, 1047, 1048, 1049]),
+        prop::sample::select(vec![
+            4u16, 6, 7, 20, 25, 47, 1047, 1048, 1049, 1, 66, 9, 1000, 1002, 1003, 1004, 1005, 1006,
+            1015, 2004,
+        ]),
         any::<bool>(),
     )
         .prop_map(|(mode, on)| {

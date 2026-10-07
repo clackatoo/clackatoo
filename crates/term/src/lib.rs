@@ -17,6 +17,7 @@ mod damage;
 mod dispatch;
 mod document;
 mod grid;
+pub mod mouse;
 mod parser;
 pub mod recording;
 mod row;

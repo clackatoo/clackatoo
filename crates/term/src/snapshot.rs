@@ -18,6 +18,7 @@
 //! restored terminal is all damaged).
 
 use crate::charset::{Charset as LiveCharset, Charsets as LiveCharsets, Slot};
+use crate::mouse::{MouseEncoding, MouseTracking};
 use crate::row::{Row, RowBuilder};
 use crate::style::{
     Attributes, Color as LiveColor, Style as LiveStyle, Underline as LiveUnderline,
@@ -144,18 +145,15 @@ pub(crate) struct SavedCursorState {
     pub(crate) origin: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The modes set, by the numbers programs set them by: ANSI modes (SM)
+/// and DEC private modes (DECSET). Reading ignores numbers it doesn't
+/// know, so a mode added later needs no new version, and one this build
+/// doesn't know is simply off.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[allow(clippy::struct_excessive_bools, reason = "a mode is a bool")]
 pub(crate) struct Modes {
-    pub(crate) insert: bool,
-    pub(crate) linefeed_newline: bool,
-    pub(crate) origin: bool,
-    pub(crate) autowrap: bool,
-    pub(crate) cursor_visible: bool,
-    pub(crate) app_cursor_keys: bool,
-    pub(crate) app_keypad: bool,
-    pub(crate) bracketed_paste: bool,
+    pub(crate) ansi: Vec<u16>,
+    pub(crate) dec: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -371,33 +369,63 @@ impl From<SavedCursorState> for SavedCursor {
     }
 }
 
-impl From<LiveModes> for Modes {
-    fn from(live: LiveModes) -> Self {
-        Self {
-            insert: live.contains(LiveModes::INSERT),
-            linefeed_newline: live.contains(LiveModes::LINEFEED_NEWLINE),
-            origin: live.contains(LiveModes::ORIGIN),
-            autowrap: live.contains(LiveModes::AUTOWRAP),
-            cursor_visible: live.contains(LiveModes::CURSOR_VISIBLE),
-            app_cursor_keys: live.contains(LiveModes::APP_CURSOR_KEYS),
-            app_keypad: live.contains(LiveModes::APP_KEYPAD),
-            bracketed_paste: live.contains(LiveModes::BRACKETED_PASTE),
-        }
-    }
-}
+/// Each mode flag, whether it is a DEC private mode, and its number.
+const NUMBERED: [(LiveModes, bool, u16); 9] = [
+    (LiveModes::INSERT, false, 4),
+    (LiveModes::LINEFEED_NEWLINE, false, 20),
+    (LiveModes::APP_CURSOR_KEYS, true, 1),
+    (LiveModes::ORIGIN, true, 6),
+    (LiveModes::AUTOWRAP, true, 7),
+    (LiveModes::CURSOR_VISIBLE, true, 25),
+    (LiveModes::APP_KEYPAD, true, 66),
+    (LiveModes::FOCUS_EVENTS, true, 1004),
+    (LiveModes::BRACKETED_PASTE, true, 2004),
+];
 
-impl From<Modes> for LiveModes {
-    fn from(modes: Modes) -> Self {
-        let mut live = Self::empty();
-        live.set(Self::INSERT, modes.insert);
-        live.set(Self::LINEFEED_NEWLINE, modes.linefeed_newline);
-        live.set(Self::ORIGIN, modes.origin);
-        live.set(Self::AUTOWRAP, modes.autowrap);
-        live.set(Self::CURSOR_VISIBLE, modes.cursor_visible);
-        live.set(Self::APP_CURSOR_KEYS, modes.app_cursor_keys);
-        live.set(Self::APP_KEYPAD, modes.app_keypad);
-        live.set(Self::BRACKETED_PASTE, modes.bracketed_paste);
-        live
+impl Modes {
+    pub(crate) fn capture(
+        modes: LiveModes,
+        tracking: MouseTracking,
+        encoding: MouseEncoding,
+    ) -> Self {
+        let mut captured = Self {
+            ansi: Vec::new(),
+            dec: Vec::new(),
+        };
+        for (flag, dec, number) in NUMBERED {
+            if modes.contains(flag) {
+                if dec {
+                    &mut captured.dec
+                } else {
+                    &mut captured.ansi
+                }
+                .push(number);
+            }
+        }
+        captured.dec.extend(tracking.mode());
+        captured.dec.extend(encoding.mode());
+        captured
+    }
+
+    pub(crate) fn restore(&self) -> (LiveModes, MouseTracking, MouseEncoding) {
+        let mut modes = LiveModes::empty();
+        for (flag, dec, number) in NUMBERED {
+            let set = if dec { &self.dec } else { &self.ansi };
+            modes.set(flag, set.contains(&number));
+        }
+        let tracking = self
+            .dec
+            .iter()
+            .find_map(|&mode| MouseTracking::from_mode(mode));
+        let encoding = self
+            .dec
+            .iter()
+            .find_map(|&mode| MouseEncoding::from_mode(mode));
+        (
+            modes,
+            tracking.unwrap_or_default(),
+            encoding.unwrap_or_default(),
+        )
     }
 }
 

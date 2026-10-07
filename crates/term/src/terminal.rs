@@ -7,6 +7,7 @@ use bitflags::bitflags;
 use crate::charset::Charsets;
 use crate::damage::Damage;
 use crate::grid::Grid;
+use crate::mouse::{MouseEncoding, MouseTracking};
 use crate::parser::Parser;
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
@@ -175,6 +176,9 @@ impl Terminal {
             app_cursor_keys: modes.contains(Modes::APP_CURSOR_KEYS),
             app_keypad: modes.contains(Modes::APP_KEYPAD),
             bracketed_paste: modes.contains(Modes::BRACKETED_PASTE),
+            mouse_tracking: self.emulator.mouse_tracking,
+            mouse_encoding: self.emulator.mouse_encoding,
+            focus_events: modes.contains(Modes::FOCUS_EVENTS),
         }
     }
 
@@ -202,7 +206,11 @@ impl Terminal {
             cursor: emulator.cursor.into(),
             saved_primary: emulator.saved_primary.into(),
             saved_alternate: emulator.saved_alternate.into(),
-            modes: emulator.modes.into(),
+            modes: crate::snapshot::Modes::capture(
+                emulator.modes,
+                emulator.mouse_tracking,
+                emulator.mouse_encoding,
+            ),
             scroll_region: (
                 position(emulator.scroll_region.start),
                 position(emulator.scroll_region.end),
@@ -263,7 +271,11 @@ impl Terminal {
         emulator.cursor = snapshot.cursor.into();
         emulator.saved_primary = snapshot.saved_primary.into();
         emulator.saved_alternate = snapshot.saved_alternate.into();
-        emulator.modes = snapshot.modes.into();
+        (
+            emulator.modes,
+            emulator.mouse_tracking,
+            emulator.mouse_encoding,
+        ) = snapshot.modes.restore();
         emulator.scroll_region = region;
         emulator.tabs = TabStops::at(
             width,
@@ -362,7 +374,7 @@ impl Terminal {
 bitflags! {
     /// Terminal modes that change how output is processed.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) struct Modes: u8 {
+    pub(crate) struct Modes: u16 {
         /// IRM: printing shifts the rest of the line right instead of overwriting.
         const INSERT = 1 << 0;
         /// LNM: line feed also returns to the first column.
@@ -379,6 +391,9 @@ bitflags! {
         const APP_KEYPAD = 1 << 6;
         /// Pasted text is wrapped in `ESC [200~` and `ESC [201~`.
         const BRACKETED_PASTE = 1 << 7;
+        /// Mode 1004: the program is told when the terminal gains or loses
+        /// focus.
+        const FOCUS_EVENTS = 1 << 8;
     }
 }
 
@@ -386,6 +401,7 @@ bitflags! {
 /// program. The emulator only records them; the client does the encoding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[allow(clippy::struct_excessive_bools, reason = "each mode is on or off")]
 pub struct InputModes {
     /// DECCKM: arrow keys send `ESC O A` rather than `ESC [ A`.
     pub app_cursor_keys: bool,
@@ -394,6 +410,13 @@ pub struct InputModes {
     /// Pasted text must be wrapped in `ESC [200~` and `ESC [201~`, so the
     /// program can tell it from typing.
     pub bracketed_paste: bool,
+    /// Which mouse events the program wants: see [`mouse`](crate::mouse).
+    pub mouse_tracking: MouseTracking,
+    /// How it wants them written.
+    pub mouse_encoding: MouseEncoding,
+    /// Mode 1004: the program wants to know when the terminal gains or
+    /// loses focus.
+    pub focus_events: bool,
 }
 
 /// Why the alternate screen can be unwrapped while it is shown.
@@ -533,6 +556,8 @@ pub(crate) struct Emulator {
     saved_primary: SavedCursor,
     saved_alternate: SavedCursor,
     pub(crate) modes: Modes,
+    pub(crate) mouse_tracking: MouseTracking,
+    pub(crate) mouse_encoding: MouseEncoding,
     /// The lines that scroll, set by DECSTBM. The whole screen unless an app
     /// has narrowed it, as vim does to keep its status line still.
     scroll_region: Range<usize>,
@@ -567,6 +592,8 @@ impl Emulator {
             saved_primary: SavedCursor::default(),
             saved_alternate: SavedCursor::default(),
             modes: Modes::default(),
+            mouse_tracking: MouseTracking::Off,
+            mouse_encoding: MouseEncoding::Default,
             scroll_region: 0..height,
             tabs: TabStops::new(width),
             title: String::new(),
@@ -1141,11 +1168,22 @@ impl Emulator {
 
     /// DECSET/DECRST: sets or resets a DEC private mode.
     ///
-    /// Mouse reporting and focus events are left for when a client sends
-    /// that input.
+    /// Mouse reporting and focus events are only recorded: clients do the
+    /// reporting.
     pub(crate) fn set_dec_mode(&mut self, mode: u16, on: bool) {
+        // As in xterm, one tracking mode and one encoding apply at a time,
+        // and resetting any of them turns tracking or encoding off.
+        if let Some(tracking) = MouseTracking::from_mode(mode) {
+            self.mouse_tracking = if on { tracking } else { MouseTracking::Off };
+            return;
+        }
+        if let Some(encoding) = MouseEncoding::from_mode(mode) {
+            self.mouse_encoding = if on { encoding } else { MouseEncoding::Default };
+            return;
+        }
         match mode {
             1 => self.modes.set(Modes::APP_CURSOR_KEYS, on),
+            1004 => self.modes.set(Modes::FOCUS_EVENTS, on),
             66 => self.modes.set(Modes::APP_KEYPAD, on),
             2004 => self.modes.set(Modes::BRACKETED_PASTE, on),
             6 => {
