@@ -1,0 +1,30 @@
+[package]
+name = "clackatoo-bench"
+description = "Benchmarks: generated terminal workloads, emulator throughput next to alacritty_terminal, and an end-to-end harness that drives the real binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# See crates/term/Cargo.toml: keeps `cargo bench -- OPTIONS` working.
+bench = false
+
+[dependencies]
+anyhow.workspace = true
+clackatoo-daemon.workspace = true
+clackatoo-protocol.workspace = true
+clackatoo-term.workspace = true
+rustix.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+alacritty_terminal.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[lints]
+workspace = true

@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "clackatoo"
+# See crates/term/Cargo.toml: keeps `cargo bench -- OPTIONS` working.
+bench = false
+
 [dependencies]
 anyhow.workspace = true
 clackatoo-daemon.workspace = true
@@ -15,7 +20,12 @@ env_logger.workspace = true
 log.workspace = true
 
 [dev-dependencies]
+clackatoo-bench.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "e2e"
+harness = false
 
 [lints]
 workspace = true
