@@ -574,6 +574,21 @@ mod other_sequences {
     }
 
     #[test]
+    fn input_modes_follow_the_program() {
+        let t = after(4, 2, "\x1b[?1h\x1b=\x1b[?2004h");
+        assert_eq!(
+            t.input_modes(),
+            crate::InputModes {
+                app_cursor_keys: true,
+                app_keypad: true,
+                bracketed_paste: true,
+            }
+        );
+        let t = after(4, 2, "\x1b[?1h\x1b=\x1b[?2004h\x1b[?1l\x1b>\x1b[?2004l");
+        assert_eq!(t.input_modes(), crate::InputModes::default());
+    }
+
+    #[test]
     fn hiding_the_cursor() {
         assert!(!after(5, 1, "\x1b[?25l").cursor().visible);
         assert!(after(5, 1, "\x1b[?25l\x1b[?25h").cursor().visible);

@@ -130,6 +130,8 @@ impl Perform for Emulator {
             ([], b'H') => self.set_tab_stop(),
             ([], b'M') => self.reverse_index(),
             ([], b'c') => self.full_reset(),
+            ([], b'=') => self.set_app_keypad(true),
+            ([], b'>') => self.set_app_keypad(false),
             ([b'#'], b'8') => self.screen_alignment_test(),
             ([slot @ (b'(' | b')')], designator) => {
                 let slot = if *slot == b'(' { Slot::G0 } else { Slot::G1 };

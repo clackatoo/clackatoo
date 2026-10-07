@@ -24,10 +24,9 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::cell::{Cell, StyleIndex};
-use crate::row::Row;
+use crate::row::{Row, RowBuilder};
 use crate::style::Style;
 use crate::terminal::ZWJ;
-use crate::width;
 
 /// Once a page's text reaches this size, the next record starts a new page.
 /// Big enough that per-page overhead vanishes, small enough that evicting
@@ -384,43 +383,22 @@ impl Page {
             }
             None => (0, 0),
         };
-        let text = std::str::from_utf8(&self.text[span(text_start, record.text_end)])
-            .expect("pages hold valid UTF-8");
+        let text = |start: u32, end: u32| {
+            std::str::from_utf8(&self.text[span(start, end)]).expect("pages hold valid UTF-8")
+        };
         let runs = &self.runs[span(runs_start, record.runs_end)];
 
-        let mut row = Row::new(usize::from(record.width));
-        row.set_wrapped(record.continues);
-        let mut col = 0;
-        let mut style = &Style::DEFAULT;
-        let mut runs = runs.iter().peekable();
-        // The start of a record is a cell boundary.
-        let mut joins = false;
-        for (at, ch) in text.char_indices() {
-            let at = offset(usize::try_from(text_start).expect("u32 fits") + at);
-            if let Some(run) = runs.next_if(|run| run.start == at) {
-                style = self.style(run.style);
-                joins &= !run.separate;
-            }
-            // The same rules the printer used, so the cells come out the same.
-            match width::of(ch) {
-                None => {}
-                Some(cells) if cells == 0 || joins => {
-                    let previous = if row.cells()[col - 1].is_wide_spacer() {
-                        col - 2
-                    } else {
-                        col - 1
-                    };
-                    row.append_to_grapheme(previous, ch);
-                    joins = row.last_char(previous) == ZWJ;
-                }
-                Some(cells) => {
-                    row.write(col, ch, cells == 2, style);
-                    col += cells;
-                    joins = false;
-                }
-            }
+        let mut builder = RowBuilder::new(usize::from(record.width));
+        // Text before the first run is in the default style.
+        let first = runs.first().map_or(record.text_end, |run| run.start);
+        builder.push(text(text_start, first), &Style::DEFAULT, false);
+        for (index, run) in runs.iter().enumerate() {
+            let end = runs
+                .get(index + 1)
+                .map_or(record.text_end, |next| next.start);
+            builder.push(text(run.start, end), self.style(run.style), run.separate);
         }
-        row
+        builder.finish(record.continues)
     }
 
     fn style(&self, index: u16) -> &Style {

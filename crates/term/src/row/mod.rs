@@ -1,5 +1,6 @@
 //! One line of the grid.
 
+mod builder;
 mod graphemes;
 mod lookup;
 
@@ -7,6 +8,7 @@ use std::ops::Range;
 
 use crate::cell::{Cell, CellFlags, StyleIndex};
 use crate::style::Style;
+pub use builder::RowBuilder;
 use graphemes::Graphemes;
 use lookup::{LINEAR_SEARCH_MAX, StyleLookup};
 

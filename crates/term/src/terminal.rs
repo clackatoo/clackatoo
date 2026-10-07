@@ -140,6 +140,17 @@ impl Terminal {
         }
     }
 
+    /// How the program wants keys and pastes encoded.
+    #[must_use]
+    pub fn input_modes(&self) -> InputModes {
+        let modes = self.emulator.modes;
+        InputModes {
+            app_cursor_keys: modes.contains(Modes::APP_CURSOR_KEYS),
+            app_keypad: modes.contains(Modes::APP_KEYPAD),
+            bracketed_paste: modes.contains(Modes::BRACKETED_PASTE),
+        }
+    }
+
     /// The window title the program last set, or empty.
     #[must_use]
     pub fn title(&self) -> &str {
@@ -235,7 +246,27 @@ bitflags! {
         const AUTOWRAP = 1 << 3;
         /// DECTCEM: the cursor is drawn.
         const CURSOR_VISIBLE = 1 << 4;
+        /// DECCKM: arrow keys send application sequences (`ESC O A`).
+        const APP_CURSOR_KEYS = 1 << 5;
+        /// DECKPAM: the keypad sends application sequences.
+        const APP_KEYPAD = 1 << 6;
+        /// Pasted text is wrapped in `ESC [200~` and `ESC [201~`.
+        const BRACKETED_PASTE = 1 << 7;
     }
+}
+
+/// Modes that change how a client should encode keys and pastes for the
+/// program. The emulator only records them; the client does the encoding.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct InputModes {
+    /// DECCKM: arrow keys send `ESC O A` rather than `ESC [ A`.
+    pub app_cursor_keys: bool,
+    /// DECKPAM: the numeric keypad sends application sequences.
+    pub app_keypad: bool,
+    /// Pasted text must be wrapped in `ESC [200~` and `ESC [201~`, so the
+    /// program can tell it from typing.
+    pub bracketed_paste: bool,
 }
 
 /// Why the alternate screen can be unwrapped while it is shown.
@@ -980,11 +1011,13 @@ impl Emulator {
 
     /// DECSET/DECRST: sets or resets a DEC private mode.
     ///
-    /// Modes that only change how input is encoded (application cursor keys,
-    /// mouse reporting, bracketed paste…) are left for the GUI client, which
-    /// is the first thing that sends that input.
+    /// Mouse reporting and focus events are left for when a client sends
+    /// that input.
     pub(crate) fn set_dec_mode(&mut self, mode: u16, on: bool) {
         match mode {
+            1 => self.modes.set(Modes::APP_CURSOR_KEYS, on),
+            66 => self.modes.set(Modes::APP_KEYPAD, on),
+            2004 => self.modes.set(Modes::BRACKETED_PASTE, on),
             6 => {
                 self.modes.set(Modes::ORIGIN, on);
                 self.move_to_origin(0, 0);
@@ -1069,6 +1102,12 @@ impl Emulator {
             Screen::Primary => &mut self.saved_primary,
             Screen::Alternate => &mut self.saved_alternate,
         }
+    }
+
+    /// DECKPAM and DECKPNM: the keypad sends application sequences, or
+    /// numbers.
+    pub(crate) fn set_app_keypad(&mut self, on: bool) {
+        self.modes.set(Modes::APP_KEYPAD, on);
     }
 
     /// DECSTR: soft reset. Returns modes, pen and margins to their defaults
