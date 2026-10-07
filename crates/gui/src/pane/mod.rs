@@ -2,9 +2,10 @@
 //! scrolling drive it.
 //!
 //! A pane is in insert mode, where keys go to the program, or normal mode,
-//! where they drive clackatoo. Shift+Esc or Ctrl+\ switches to normal
-//! mode, and `i` back; Ctrl+\ pressed twice sends a real Ctrl+\ to the
-//! program.
+//! where they drive clackatoo. Ctrl+;, Shift+Esc or Ctrl+\ switches to
+//! normal mode, and `i` back; Ctrl+\ pressed twice sends a real Ctrl+\ to
+//! the program. Ctrl+; is the quickest, and costs programs nothing: a
+//! terminal has no code to send them for it.
 //!
 //! Normal mode has a cursor of its own, moved with Vim's motions over the
 //! whole document: history, then the screen. The view follows it, and
@@ -17,7 +18,7 @@ use clackatoo_protocol::{
     ClientMessage, CursorShape, Match, Request, Response, Size, TerminalId, ViewUpdate,
 };
 use clackatoo_term::{Row, RowBuilder};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey};
 
 use crate::history::History;
 use crate::input::{self, KeyPress};
@@ -255,9 +256,13 @@ impl Pane {
             && !modifiers.alt
             && matches!(press.key, Key::Character(text) if text == "\\");
         let shift_escape = modifiers.shift && *press.key == Key::Named(NamedKey::Escape);
+        // By its place on the keyboard, so it's the same keys on layouts
+        // where `;` takes Shift.
+        let ctrl_semicolon =
+            modifiers.ctrl && !modifiers.alt && press.code == Some(KeyCode::Semicolon);
         let prefix = self.prefix.take();
         match self.mode {
-            Mode::Insert if ctrl_backslash || shift_escape => {
+            Mode::Insert if ctrl_backslash || shift_escape || ctrl_semicolon => {
                 self.enter_normal();
                 self.prefix = ctrl_backslash.then_some(Prefix::CtrlBackslash);
                 true
@@ -312,6 +317,7 @@ impl Pane {
                 key: &key,
                 text: None,
                 location: winit::keyboard::KeyLocation::Standard,
+                code: None,
                 modifiers: input::Modifiers::default(),
             };
             let mut bytes = Vec::new();
@@ -685,6 +691,7 @@ mod tests {
             key: &key,
             text: text.as_deref(),
             location: KeyLocation::Standard,
+            code: None,
             modifiers,
         });
     }
@@ -814,6 +821,32 @@ mod tests {
             })
             .collect();
         assert_eq!(sent, [vec![0x1c], vec![0x03]]);
+    }
+
+    #[test]
+    fn ctrl_semicolon_switches_to_normal_mode_by_where_the_key_is() {
+        let mut pane = pane(&terminal(""));
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        // On a German layout, the key where `;` is on a US one types `ö`.
+        let key = Key::Character("ö".into());
+        let press = |pane: &mut Pane| {
+            pane.key(&KeyPress {
+                key: &key,
+                text: None,
+                location: KeyLocation::Standard,
+                code: Some(KeyCode::Semicolon),
+                modifiers: ctrl,
+            })
+        };
+        press(&mut pane);
+        assert_eq!(pane.mode, Mode::Normal);
+        // Again, it stays there, and the program gets nothing.
+        press(&mut pane);
+        assert_eq!(pane.mode, Mode::Normal);
+        assert!(pane.take_outbox().is_empty());
     }
 
     #[test]

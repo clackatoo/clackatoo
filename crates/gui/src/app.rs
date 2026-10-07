@@ -696,6 +696,10 @@ impl App {
             key: &event.logical_key,
             text: event.text.as_deref(),
             location: event.location,
+            code: match event.physical_key {
+                winit::keyboard::PhysicalKey::Code(code) => Some(code),
+                winit::keyboard::PhysicalKey::Unidentified(_) => None,
+            },
             modifiers,
         };
         let mut redraw = had_message;
@@ -708,6 +712,7 @@ impl App {
                         key: &g,
                         text: Some("g"),
                         location: winit::keyboard::KeyLocation::Standard,
+                        code: None,
                         modifiers: input::Modifiers::default(),
                     });
                     redraw |= pane.key(&press);

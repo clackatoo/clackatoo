@@ -6,7 +6,7 @@
 //! escape sequences, with modifiers as a parameter.
 
 use clackatoo_protocol::InputModes;
-use winit::keyboard::{Key, KeyLocation, NamedKey};
+use winit::keyboard::{Key, KeyCode, KeyLocation, NamedKey};
 
 /// The modifier keys held during a key press.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -35,6 +35,8 @@ pub(crate) struct KeyPress<'a> {
     /// The text the key types, if any, after dead keys and compose.
     pub(crate) text: Option<&'a str>,
     pub(crate) location: KeyLocation,
+    /// Where the key is on the keyboard, whatever the layout, if known.
+    pub(crate) code: Option<KeyCode>,
     pub(crate) modifiers: Modifiers,
 }
 
@@ -226,6 +228,7 @@ mod tests {
                 key,
                 text: text.as_deref(),
                 location: KeyLocation::Standard,
+                code: None,
                 modifiers,
             },
             modes,
@@ -327,6 +330,7 @@ mod tests {
             key: &key,
             text: Some("5"),
             location: KeyLocation::Numpad,
+            code: None,
             modifiers: NONE,
         };
         encode(&press, app, &mut out);
