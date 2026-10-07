@@ -1,5 +1,6 @@
-// Draws a terminal: solid rectangles (backgrounds, the cursor, underlines)
-// and glyphs from the atlas. Every shape is an instanced quad, positioned
+// Draws the window: rectangles, square or rounded and perhaps bordered
+// (backgrounds, the cursor, underlines, cards, bars), and glyphs from the
+// atlas. Every shape is an instanced quad, positioned
 // in physical pixels from the top left. Colours are premultiplied.
 
 struct Uniforms {
@@ -24,6 +25,12 @@ fn to_clip(pixels: vec2<f32>) -> vec4<f32> {
 struct RectOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    // Where this fragment is, from the rectangle's centre, in pixels.
+    @location(1) offset: vec2<f32>,
+    @location(2) @interpolate(flat) half_size: vec2<f32>,
+    @location(3) @interpolate(flat) radius: f32,
+    @location(4) @interpolate(flat) border: f32,
+    @location(5) border_color: vec4<f32>,
 }
 
 @vertex
@@ -32,16 +39,43 @@ fn rect_vs(
     @location(0) origin: vec2<f32>,
     @location(1) size: vec2<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) radius: f32,
+    @location(4) border: f32,
+    @location(5) border_color: vec4<f32>,
 ) -> RectOut {
+    let at = corner(vertex);
     var out: RectOut;
-    out.position = to_clip(origin + corner(vertex) * size);
+    out.position = to_clip(origin + at * size);
     out.color = vec4<f32>(color.rgb * color.a, color.a);
+    out.offset = (at - vec2<f32>(0.5)) * size;
+    out.half_size = size / 2.0;
+    out.radius = radius;
+    out.border = border;
+    out.border_color = vec4<f32>(border_color.rgb * border_color.a, border_color.a);
     return out;
+}
+
+// How far `offset` is outside a box with rounded corners: negative inside.
+fn rounded_box(offset: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
+    let q = abs(offset) - half_size + vec2<f32>(radius);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
 }
 
 @fragment
 fn rect_fs(in: RectOut) -> @location(0) vec4<f32> {
-    return in.color;
+    // Cells, underlines and the cursor: square and solid.
+    if in.radius <= 0.0 && in.border <= 0.0 {
+        return in.color;
+    }
+    let distance = rounded_box(in.offset, in.half_size, in.radius);
+    // A pixel's worth of soft edge, so curves aren't jagged.
+    let coverage = clamp(0.5 - distance, 0.0, 1.0);
+    var color = in.color;
+    if in.border > 0.0 {
+        let inside_border = clamp(0.5 - (distance + in.border), 0.0, 1.0);
+        color = mix(in.border_color, in.color, inside_border);
+    }
+    return color * coverage;
 }
 
 struct GlyphOut {

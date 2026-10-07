@@ -23,7 +23,7 @@ use winit::keyboard::{Key, NamedKey};
 use crate::chrome::Status;
 use crate::command::{self, Command, Kind, Place};
 use crate::input::KeyPress;
-use crate::layout::{Cells, Direction, Placement};
+use crate::layout::{Area, Direction, Placement};
 use crate::pane::{Mode, Pane};
 
 /// What the window shows: a workspace, one of its tabs, and the pane in
@@ -74,8 +74,8 @@ pub(crate) struct Desk {
     asked: VecDeque<Asker>,
     /// Messages for the daemon, oldest first, besides the panes' own.
     outbox: Vec<ClientMessage>,
-    /// The cells the panes share, below the bar, once the window is open.
-    area: Option<Cells>,
+    /// The space the panes' cards share, once the window is open.
+    area: Option<Area>,
     /// The command line being typed, after `:`.
     command: Option<String>,
     /// A message for the focused pane's label, until the next key, such as
@@ -128,7 +128,10 @@ impl Desk {
 
     /// Where the shown tab's panes go.
     pub(crate) fn placement(&self) -> Option<Placement> {
-        Some(Placement::new(&self.shown_tab()?.layout, self.area?))
+        Some(Placement::new(
+            &self.shown_tab()?.layout,
+            self.area.as_ref()?,
+        ))
     }
 
     /// The title for the window: the focused pane's program's.
@@ -240,27 +243,21 @@ impl Desk {
         }
     }
 
-    /// Focuses the pane over the cell at `col`, `row` of the pane area, as
-    /// when it's clicked.
-    pub(crate) fn focus_cell(&mut self, col: u16, row: u16) {
-        let pane = self.placement().and_then(|placement| {
-            placement
-                .panes
-                .iter()
-                .find(|(_, cells)| {
-                    (cells.col..cells.col + cells.cols).contains(&col)
-                        && (cells.row..cells.row + cells.rows).contains(&row)
-                })
-                .map(|&(pane, _)| pane)
-        });
+    /// Focuses the pane whose card is at `point`, as when it's clicked.
+    /// Returns whether one is.
+    pub(crate) fn focus_at(&mut self, point: [f32; 2]) -> bool {
+        let pane = self
+            .placement()
+            .and_then(|placement| placement.pane_at(point));
         if let Some(pane) = pane {
             self.show_pane(pane);
         }
+        pane.is_some()
     }
 
-    /// Sets the cells the panes share, as the window opens or resizes, and
+    /// Sets the space the panes share, as the window opens or resizes, and
     /// sizes the terminals shown to fit.
-    pub(crate) fn set_area(&mut self, area: Option<Cells>) {
+    pub(crate) fn set_area(&mut self, area: Option<Area>) {
         self.area = area;
         self.fit_panes();
     }
@@ -368,14 +365,14 @@ impl Desk {
         };
         let Some(tab) = self.shown_tab() else { return };
         let panes = tab.layout.panes();
-        for (id, cells) in placement.panes {
+        for (id, card) in placement.panes {
             let Some(pane) = panes.iter().find(|pane| pane.id == id) else {
                 continue;
             };
             let Content::Terminal(terminal) = pane.content;
             if let (Some(pane), Ok(size)) = (
                 self.panes.get_mut(&terminal),
-                Size::new(cells.cols, cells.rows),
+                Size::new(card.cols, card.rows),
             ) {
                 pane.resize(size);
             }
@@ -710,24 +707,27 @@ impl Desk {
         let Some(area) = self.area else {
             return fallback;
         };
+        let whole = Placement::new(
+            &clackatoo_protocol::Layout::Pane(clackatoo_protocol::Pane {
+                id: PaneId(0),
+                content: Content::Terminal(TerminalId(0)),
+            }),
+            &area,
+        )
+        .panes[0]
+            .1;
         let focused = self
             .shown
             .zip(self.placement())
-            .and_then(|(shown, placement)| placement.cells(shown.pane));
-        let cells = match (side, focused) {
-            (Some(side), Some(cells)) => match side.axis() {
-                Axis::LeftToRight => Cells {
-                    cols: (cells.cols.saturating_sub(1) / 2).max(1),
-                    ..cells
-                },
-                Axis::TopToBottom => Cells {
-                    rows: (cells.rows.saturating_sub(1) / 2).max(1),
-                    ..cells
-                },
+            .and_then(|(shown, placement)| placement.card(shown.pane));
+        let (cols, rows) = match (side, focused) {
+            (Some(side), Some(card)) => match side.axis() {
+                Axis::LeftToRight => ((card.cols / 2).max(1), card.rows),
+                Axis::TopToBottom => (card.cols, (card.rows / 2).max(1)),
             },
-            _ => area,
+            _ => (whole.cols, whole.rows),
         };
-        Size::new(cells.cols, cells.rows).unwrap_or(fallback)
+        Size::new(cols, rows).unwrap_or(fallback)
     }
 }
 
@@ -779,15 +779,20 @@ mod tests {
         }
     }
 
-    /// A desk on a window 81 cells by 24, connected to `workspaces`, with
+    /// A desk with 810 × 480 pixels for panes, connected to `workspaces`, with
     /// what it asked for so far answered.
     fn desk(workspaces: Workspaces) -> Desk {
         let mut desk = Desk::default();
-        desk.set_area(Some(Cells {
-            col: 0,
-            row: 0,
-            cols: 81,
-            rows: 24,
+        desk.set_area(Some(Area {
+            rect: crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 810.0,
+                height: 480.0,
+            },
+            cell: [10.0, 20.0],
+            gap: 10.0,
+            inset: 5.0,
         }));
         desk.connected(workspaces);
         answer_all(&mut desk);

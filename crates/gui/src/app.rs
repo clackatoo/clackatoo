@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use clackatoo_daemon::Sender;
-use clackatoo_protocol::{Content, Event, PROTOCOL_VERSION, ServerMessage, TerminalId};
+use clackatoo_protocol::{
+    Content, Event, Layout, PROTOCOL_VERSION, Pane as LayoutPane, PaneId, ServerMessage, Size,
+    TerminalId,
+};
 use clackatoo_term::Row;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -17,13 +20,16 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowAttributes, WindowId};
 
 use crate::GraphicsApi;
-use crate::chrome::{self, Button, Chrome, Geometry, Hit, Status};
+use crate::chrome::{Chrome, Contents, Geometry, Hit, Metrics, Status};
 use crate::desk::Desk;
+use crate::desktop::{Button, ButtonLayout, Desktop};
 use crate::fonts::Fonts;
 use crate::input;
-use crate::layout::{Cells, Placement};
+use crate::layout::{Card, Placement};
 use crate::pane::Mode;
-use crate::render::{CursorStyle, Highlight, PADDING, Picture, Renderer, Scene, SceneCursor};
+use crate::render::{
+    CursorStyle, Fill, Highlight, PADDING, Paint, Picture, Renderer, Scene, SceneCursor,
+};
 use crate::screen::Screen;
 use crate::session::{Session, SessionEvent};
 
@@ -57,7 +63,7 @@ fn instance(
 const SLOW_GPU: Duration = Duration::from_millis(500);
 
 /// The grid of panes a new window is sized for.
-const INITIAL_GRID: (u32, u32) = (100, 30);
+const INITIAL_GRID: (u16, u16) = (100, 30);
 
 /// A GPU device, made on its own thread while the window opens.
 #[derive(Debug)]
@@ -174,6 +180,16 @@ impl Gpu {
         let capabilities = surface.get_capabilities(&self.adapter);
         let format = surface_format(&capabilities.formats)
             .context("the window supports no texture format")?;
+        // See-through where nothing's drawn, so the window can round its
+        // corners, if the compositor allows.
+        let alpha_mode = if capabilities
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else {
+            wgpu::CompositeAlphaMode::Auto
+        };
         let present_mode = if capabilities
             .present_modes
             .contains(&wgpu::PresentMode::Mailbox)
@@ -190,7 +206,7 @@ impl Gpu {
             height: size.height.max(1),
             desired_maximum_frame_latency: 2,
             present_mode,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            alpha_mode,
             view_formats: vec![],
         };
         // Some GPUs claim support and then fail here, so the result is
@@ -210,7 +226,7 @@ impl Gpu {
 /// Work started before the window opened.
 #[derive(Debug)]
 struct Startup {
-    fonts: JoinHandle<anyhow::Result<Fonts>>,
+    fonts: JoinHandle<anyhow::Result<(Fonts, Desktop)>>,
     gpu: JoinHandle<anyhow::Result<Gpu>>,
 }
 
@@ -223,6 +239,9 @@ struct Frame {
     gpu: Gpu,
     renderer: Renderer,
     fonts: Fonts,
+    /// Whether the compositor shows what's behind the window where it's
+    /// see-through, which lets the window round its corners.
+    transparent: bool,
 }
 
 /// The window's whole state.
@@ -233,6 +252,8 @@ pub(crate) struct App {
     frame: Option<Frame>,
     /// The workspaces, and what's shown of them.
     desk: Desk,
+    /// Where the window's buttons go, as the desktop says.
+    buttons: ButtonLayout,
     /// Where the mouse is, in pixels, while it's over the window.
     pointer: Option<[f32; 2]>,
     /// What the mouse is over.
@@ -266,7 +287,7 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(
         started: Instant,
-        fonts: JoinHandle<anyhow::Result<Fonts>>,
+        fonts: JoinHandle<anyhow::Result<(Fonts, Desktop)>>,
         gpu: JoinHandle<anyhow::Result<Gpu>>,
         session: Session,
     ) -> Self {
@@ -275,6 +296,7 @@ impl App {
             startup: Some(Startup { fonts, gpu }),
             frame: None,
             desk: Desk::default(),
+            buttons: ButtonLayout::default(),
             pointer: None,
             hover: Hit::Nothing,
             cursor_icon: CursorIcon::Default,
@@ -302,19 +324,21 @@ impl App {
     /// Opens the window once fonts and the GPU are ready.
     fn open(&mut self, event_loop: &ActiveEventLoop, startup: Startup) -> anyhow::Result<Frame> {
         let join = |name| move |_| anyhow!("{name} thread panicked");
-        let mut fonts = startup.fonts.join().map_err(join("font"))??;
+        let (mut fonts, desktop) = startup.fonts.join().map_err(join("font"))??;
         let fonts_ready = self.started.elapsed();
+        self.buttons = desktop.buttons;
         // Fonts were loaded at one pixel per point; the window's display
         // may have more.
         let (cols, rows) = INITIAL_GRID;
-        let [width, height] = Geometry::window_size(
-            cols,
-            rows,
-            [f64::from(fonts.cell.width), f64::from(fonts.cell.height)],
-            PADDING,
-        );
-        let size = LogicalSize::new(width, height);
+        #[allow(clippy::cast_possible_truncation)]
+        let [width, height] = Geometry::window_size(cols, rows, metrics(&fonts, PADDING as f32));
+        let size = LogicalSize::new(f64::from(width), f64::from(height));
         let window = Arc::new(event_loop.create_window(window_attributes(size))?);
+        log::debug!(
+            "asked for a {size:?} window; got {:?} at scale {}",
+            window.inner_size(),
+            window.scale_factor()
+        );
         fonts.set_scale(window.scale_factor());
 
         let mut gpu = startup.gpu.join().map_err(join("GPU"))??;
@@ -347,6 +371,7 @@ impl App {
             self.started.elapsed(),
             gpu.adapter.get_info().name,
         );
+        let transparent = config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
         Ok(Frame {
             window,
             surface,
@@ -354,47 +379,52 @@ impl App {
             gpu,
             renderer,
             fonts,
+            transparent,
         })
     }
 
     /// Tells the desk how many cells the panes have, sizing their
     /// terminals to fit.
     fn fit_panes(&mut self) {
-        let area = self.geometry().map(|geometry| geometry.panes);
+        let area = self.geometry().map(|geometry| geometry.area);
         self.desk.set_area(area);
     }
 
     /// Where things go in the window, at its size now.
     fn geometry(&self) -> Option<Geometry> {
         let frame = self.frame.as_ref()?;
-        let cell = frame.fonts.cell;
-        Geometry::new(
+        #[allow(clippy::cast_precision_loss)]
+        let padding = padding(&frame.window) as f32;
+        Some(Geometry::new(
             [frame.config.width, frame.config.height],
-            [cell.width, cell.height],
-            padding(&frame.window),
-        )
+            metrics(&frame.fonts, padding),
+        ))
     }
 
     /// Where everything in the window's frame goes, now.
-    fn chrome(&self) -> Option<Chrome> {
+    fn chrome(&mut self) -> Option<Chrome> {
         let geometry = self.geometry()?;
-        Some(if self.notice.is_some() {
-            Chrome::new(
-                geometry,
-                Vec::new(),
-                Vec::new(),
-                Status::Tabs { note: None },
-                false,
-            )
+        let contents = if self.notice.is_some() {
+            Contents {
+                workspaces: Vec::new(),
+                tabs: Vec::new(),
+                status: Status::Tabs { note: None },
+                buttons: &self.buttons,
+                bottom_shown: false,
+            }
         } else {
-            Chrome::new(
-                geometry,
-                self.desk.workspace_names(),
-                self.desk.tab_names(),
-                self.desk.status(),
-                true,
-            )
-        })
+            Contents {
+                workspaces: self.desk.workspace_names(),
+                tabs: self.desk.tab_names(),
+                status: self.desk.status(),
+                buttons: &self.buttons,
+                bottom_shown: true,
+            }
+        };
+        let fonts = &mut self.frame.as_mut()?.fonts;
+        Some(Chrome::new(geometry, contents, &mut |text, bold| {
+            fonts.ui_width(text, bold)
+        }))
     }
 
     // --- The mouse --------------------------------------------------------
@@ -407,7 +437,7 @@ impl App {
         let icon = match hit {
             Hit::Resize(direction) => resize_icon(direction),
             Hit::Button(_) | Hit::Workspace(_) | Hit::Tab(_) => CursorIcon::Pointer,
-            Hit::Cell { .. } => CursorIcon::Text,
+            Hit::Cards => CursorIcon::Text,
             Hit::TopBar | Hit::Nothing => CursorIcon::Default,
         };
         if let Some(frame) = &self.frame
@@ -431,7 +461,7 @@ impl App {
         }
     }
 
-    fn hit(&self, point: [f32; 2]) -> Hit {
+    fn hit(&mut self, point: [f32; 2]) -> Hit {
         let maximised = self
             .frame
             .as_ref()
@@ -490,8 +520,8 @@ impl App {
                 self.desk.show_tab(tab);
                 Ok(())
             }
-            Hit::Cell { col, row } => {
-                self.desk.focus_cell(col, row);
+            Hit::Cards => {
+                self.desk.focus_at(point);
                 Ok(())
             }
             Hit::Nothing => Ok(()),
@@ -640,37 +670,14 @@ impl App {
         let Some(chrome) = self.chrome() else {
             return;
         };
-        if let Some(notice) = &self.notice {
-            let geometry = chrome.geometry;
-            let lines = notice.lines(
-                self.session.location().host(),
-                usize::from(geometry.grid.cols()),
-            );
-            let screen = Screen::message(&lines, geometry.grid);
-            let rows: Vec<_> = screen.rows.iter().collect();
-            let scenes = [Scene {
-                origin: geometry.grid_origin(),
-                size: geometry.grid_pixels(),
-                rows: &rows,
-                cursor: None,
-                normal_mode: false,
-                highlights: &[],
-            }];
-            let (fills, texts) = chrome.paint(self.hover);
-            if let Some(frame) = &mut self.frame {
-                present(
-                    frame,
-                    &Picture {
-                        scenes: &scenes,
-                        fills: &fills,
-                        texts: &texts,
-                    },
-                );
+        let drawn = if self.notice.is_some() {
+            self.draw_notice(&chrome);
+            return;
+        } else {
+            match self.draw_panes(&chrome) {
+                Some(drawn) => drawn,
+                None => return,
             }
-            return;
-        }
-        let Some(drawn) = self.draw_panes(&chrome) else {
-            return;
         };
         // For measuring: `RUST_LOG=clackatoo_gui::frame=trace`.
         log::trace!(target: "clackatoo_gui::frame", "frame {}", started.elapsed().as_micros());
@@ -683,30 +690,99 @@ impl App {
         self.desk.drawn(&drawn);
     }
 
-    /// Draws the frame and the shown tab's panes. Returns the terminals
-    /// drawn, or `None` if the frame wasn't shown.
+    /// The window's background, rounded at the corners unless it's
+    /// maximised, where the window can be see-through. Otherwise the frame
+    /// is cleared to the background colour, and needs none.
+    fn window_fill(&self, geometry: &Geometry) -> Option<Fill> {
+        let frame = self.frame.as_ref().filter(|frame| frame.transparent)?;
+        let [width, height] = geometry.size;
+        let radius = if frame.window.is_maximized() {
+            0.0
+        } else {
+            geometry.window_radius
+        };
+        Some(Fill::rounded(
+            [0.0, 0.0, width, height],
+            Paint::Window,
+            radius,
+        ))
+    }
+
+    /// Draws the notice on a card filling the space between the bars.
+    fn draw_notice(&mut self, chrome: &Chrome) {
+        let Some(notice) = &self.notice else { return };
+        let geometry = &chrome.geometry;
+        let area = geometry.area;
+        let card = Placement::new(&single_pane(), &area).panes[0].1;
+        let Ok(size) = Size::new(card.cols, card.rows) else {
+            return;
+        };
+        let lines = notice.lines(self.session.location().host(), usize::from(card.cols));
+        let screen = Screen::message(&lines, size);
+        let rows: Vec<_> = screen.rows.iter().collect();
+        let scenes = [Scene {
+            origin: card.origin,
+            size: card.cells_size(area.cell),
+            rows: &rows,
+            cursor: None,
+            normal_mode: false,
+            highlights: &[],
+        }];
+        let painted = chrome.paint(self.hover);
+        let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
+        fills.extend(painted.fills);
+        fills.push(card_fill(geometry, &card, Paint::Edge));
+        let mut texts = painted.texts;
+        texts.extend(painted.over_texts);
+        if let Some(frame) = &mut self.frame {
+            let transparent = frame.transparent;
+            present(
+                frame,
+                &Picture {
+                    scenes: &scenes,
+                    fills: &fills,
+                    over: &painted.over,
+                    texts: &texts,
+                    transparent,
+                },
+            );
+        }
+    }
+
+    /// Draws the frame and the shown tab's panes, each on its card. Returns
+    /// the terminals drawn, or `None` if the frame wasn't shown.
     fn draw_panes(&mut self, chrome: &Chrome) -> Option<Vec<TerminalId>> {
         let geometry = &chrome.geometry;
         let desk = &self.desk;
         let shown = desk.shown()?;
         let tab = desk.shown_tab()?;
-        let placement = Placement::new(&tab.layout, geometry.panes);
+        let placement = Placement::new(&tab.layout, &geometry.area);
         let layout_panes = tab.layout.panes();
+        let painted = chrome.paint(self.hover);
+        let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
+        fills.extend(painted.fills);
         let mut drawings = Vec::new();
-        for &(id, cells) in &placement.panes {
+        for &(id, card) in &placement.panes {
             let Some(pane) = layout_panes.iter().find(|pane| pane.id == id) else {
                 continue;
             };
             let Content::Terminal(terminal) = pane.content;
-            let Some(state) = desk.pane(terminal) else {
+            let state = desk.pane(terminal);
+            let focused = id == shown.pane;
+            let normal = state.is_some_and(|state| state.mode != Mode::Insert);
+            // The focused card's edge shows where typing goes, and in what
+            // mode.
+            let edge = match (focused, normal) {
+                (false, _) => Paint::Edge,
+                (true, false) => Paint::Focus,
+                (true, true) => Paint::Accent,
+            };
+            fills.push(card_fill(geometry, &card, edge));
+            let Some(state) = state.filter(|state| state.screen().is_some()) else {
                 continue;
             };
-            if state.screen().is_none() {
-                continue;
-            }
-            let height = usize::from(cells.rows);
+            let height = usize::from(card.rows);
             let (rows, mut cursor) = state.scene(height);
-            let focused = id == shown.pane;
             if let Some(cursor) = &mut cursor
                 && !(focused && self.focused)
             {
@@ -714,36 +790,33 @@ impl App {
             }
             drawings.push(Drawing {
                 terminal,
-                cells,
+                card,
                 rows,
                 cursor,
                 highlights: state.highlights(height),
-                // Only the focused pane's mode matters, as only it gets keys.
-                normal_mode: focused && state.mode != Mode::Insert,
+                normal_mode: focused && normal,
             });
         }
         let scenes: Vec<Scene<'_>> = drawings
             .iter()
             .map(|drawing| Scene {
-                origin: geometry.origin(drawing.cells),
-                size: geometry.pixels(drawing.cells),
+                origin: drawing.card.origin,
+                size: drawing.card.cells_size(geometry.area.cell),
                 rows: &drawing.rows,
                 cursor: drawing.cursor,
                 normal_mode: drawing.normal_mode,
                 highlights: &drawing.highlights,
             })
             .collect();
-        let (mut fills, texts) = chrome.paint(self.hover);
-        fills.extend(
-            placement
-                .dividers
-                .iter()
-                .map(|divider| chrome::divider_fill(geometry, divider)),
-        );
+        let mut texts = painted.texts;
+        texts.extend(painted.over_texts);
+        let transparent = self.frame.as_ref()?.transparent;
         let picture = Picture {
             scenes: &scenes,
             fills: &fills,
+            over: &painted.over,
             texts: &texts,
+            transparent,
         };
         let frame = self.frame.as_mut()?;
         if !present(frame, &picture) {
@@ -751,6 +824,30 @@ impl App {
         }
         Some(drawings.iter().map(|drawing| drawing.terminal).collect())
     }
+}
+
+/// The sizes the window's frame is worked out from, for `fonts` and
+/// `padding` pixels of space between things.
+#[allow(clippy::cast_precision_loss)]
+fn metrics(fonts: &Fonts, padding: f32) -> Metrics {
+    Metrics {
+        cell: [fonts.cell.width as f32, fonts.cell.height as f32],
+        ui_line: fonts.ui.height,
+        padding,
+    }
+}
+
+/// A layout of one pane, for a card filling the whole space.
+fn single_pane() -> Layout {
+    Layout::Pane(LayoutPane {
+        id: PaneId(0),
+        content: Content::Terminal(TerminalId(0)),
+    })
+}
+
+/// A card's rounded rectangle, with its edge in `edge`.
+fn card_fill(geometry: &Geometry, card: &Card, edge: Paint) -> Fill {
+    Fill::rounded(card.rect.to_array(), Paint::Card, geometry.radius).bordered(geometry.edge, edge)
 }
 
 /// The cursor for resizing the window towards `direction`.
@@ -770,7 +867,7 @@ fn resize_icon(direction: ResizeDirection) -> CursorIcon {
 /// One pane, ready to draw.
 struct Drawing<'a> {
     terminal: TerminalId,
-    cells: Cells,
+    card: Card,
     rows: Vec<&'a Row>,
     cursor: Option<SceneCursor>,
     highlights: Vec<Highlight>,
@@ -965,7 +1062,8 @@ fn window_attributes(size: LogicalSize<f64>) -> WindowAttributes {
     let attributes = Window::default_attributes()
         .with_title("clackatoo")
         .with_inner_size(size)
-        .with_decorations(false);
+        .with_decorations(false)
+        .with_transparent(true);
     #[cfg(target_os = "linux")]
     let attributes = {
         use winit::platform::wayland::WindowAttributesExtWayland;
@@ -1050,6 +1148,7 @@ impl App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                log::debug!("resized to {size:?}");
                 if let Some(frame) = &mut self.frame
                     && size.width > 0
                     && size.height > 0

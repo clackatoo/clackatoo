@@ -5,10 +5,13 @@ use clackatoo_term::{Config, Terminal};
 
 use clackatoo_protocol::{Axis, Content, Layout, Pane, PaneId, TabId, TerminalId, WorkspaceId};
 
-use crate::chrome::{self, Chrome, Geometry, Hit, Status};
+use crate::chrome::{Chrome, Contents, Geometry, Hit, Metrics, Status};
+use crate::desktop::ButtonLayout;
 use crate::fonts::{FontOptions, Fonts};
 use crate::layout::Placement;
-use crate::render::{CursorStyle, Highlight, HighlightKind, Picture, Renderer, Scene, SceneCursor};
+use crate::render::{
+    CursorStyle, Fill, Highlight, HighlightKind, Paint, Picture, Renderer, Scene, SceneCursor,
+};
 use crate::screen::Screen;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -60,7 +63,9 @@ fn render(
     let picture = Picture {
         scenes: &[scene],
         fills: &[],
+        over: &[],
         texts: &[],
+        transparent: false,
     };
     Some((size, draw(&gpu, size, &picture, &mut fonts)))
 }
@@ -78,7 +83,9 @@ fn fonts(scale: f64) -> Fonts {
         family: std::env::var("CLACKATOO_TEST_FONT").ok(),
         size: 12.0,
     };
-    Fonts::load(&options, scale).expect("a monospace font")
+    let mut fonts = Fonts::load(&options, scale).expect("a monospace font");
+    fonts.load_ui(None, 11.0, scale);
+    fonts
 }
 
 /// Draws `picture` in an image of `size`, and returns its RGBA pixels.
@@ -175,7 +182,7 @@ fn renders_text_colours_and_the_cursor() {
 }
 
 #[test]
-fn box_drawing_joins_across_rows_and_normal_mode_is_framed() {
+fn box_drawing_joins_across_rows() {
     let output = "┌──┬──┐ ╭──╮ ┏━━┓ ╔══╦═╗\r\n\
         │ab│cd│ │  │ ┃  ┃ ║  ║ ║\r\n\
         ├──┼──┤ ╰──╯ ┗━━┛ ╠══╬═╣\r\n\
@@ -185,16 +192,6 @@ fn box_drawing_joins_across_rows_and_normal_mode_is_framed() {
         return;
     };
     save("boxes", size, &pixels);
-    // The frame is drawn in the accent colour, just outside the grid's top
-    // left corner.
-    let width = size[0] as usize;
-    let framed = (0..4).any(|y| {
-        (0..4).any(|x| {
-            let index = (y * width + x) * 4;
-            pixels[index..index + 3] == [0xf8, 0xce, 0x57]
-        })
-    });
-    assert!(framed);
 }
 
 #[test]
@@ -224,33 +221,41 @@ fn selections_and_matches_are_highlighted() {
     save("highlights", size, &pixels);
 }
 
-/// The frame of a window with room for two panes of 20 x 4 side by side,
-/// with a divider's column between, and where the panes go.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn two_pane_window(cell: [u32; 2]) -> ([u32; 2], Chrome, Placement) {
-    let padding = 8;
-    let [width, height] = Geometry::window_size(
-        41,
-        4,
-        [f64::from(cell[0]), f64::from(cell[1])],
-        f64::from(padding),
-    );
-    let size = [width as u32, height as u32];
-    let geometry = Geometry::new(size, cell, padding).unwrap();
+/// A window with room for two cards of 20 x 4 cells side by side, with
+/// its frame laid out and its cards placed.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn two_pane_window(fonts: &mut Fonts, status: Status) -> ([u32; 2], Chrome, Placement) {
+    let metrics = Metrics {
+        cell: [fonts.cell.width as f32, fonts.cell.height as f32],
+        ui_line: fonts.ui.height,
+        padding: 8.0,
+    };
+    // One card of 20 columns, the gap, and another, inset alike.
+    let gap = 2.0 * metrics.padding;
+    let [width, height] = Geometry::window_size(20, 4, metrics);
+    let size = [(2.0 * width - 2.0 * gap) as u32 + gap as u32, height as u32];
+    let geometry = Geometry::new(size, metrics);
+    let buttons = ButtonLayout::default();
     let chrome = Chrome::new(
         geometry,
-        vec![
-            (WorkspaceId(1), "clackatoo".into(), true),
-            (WorkspaceId(2), "peios".into(), false),
-        ],
-        vec![
-            (TabId(1), "1 zsh".into(), true),
-            (TabId(2), "2 htop".into(), false),
-        ],
-        Status::Tabs {
-            note: Some("NORMAL".into()),
+        Contents {
+            workspaces: vec![
+                (WorkspaceId(1), "clackatoo".into(), true),
+                (WorkspaceId(2), "peios".into(), false),
+            ],
+            tabs: vec![
+                (TabId(1), "1 zsh".into(), true),
+                (TabId(2), "2 htop".into(), false),
+            ],
+            status,
+            buttons: &buttons,
+            bottom_shown: true,
         },
-        true,
+        &mut |text, bold| fonts.ui_width(text, bold),
     );
     let pane = |id| {
         Layout::Pane(Pane {
@@ -262,29 +267,18 @@ fn two_pane_window(cell: [u32; 2]) -> ([u32; 2], Chrome, Placement) {
         axis: Axis::LeftToRight,
         parts: vec![pane(1), pane(2)],
     };
-    (size, chrome, Placement::new(&layout, geometry.panes))
+    (size, chrome, Placement::new(&layout, &geometry.area))
 }
 
-#[test]
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-fn panes_are_drawn_between_the_top_bar_and_the_status_line() {
-    let Some(gpu) = gpu() else {
-        eprintln!("no GPU available; skipping");
-        return;
-    };
-    let mut fonts = fonts(2.0);
-    let cell = [fonts.cell.width, fonts.cell.height];
-    let (size, chrome, placement) = two_pane_window(cell);
+/// Draws `chrome` and `placement`'s cards, with `screens` on them, the
+/// second focused in normal mode.
+fn draw_window(
+    gpu: &(wgpu::Device, wgpu::Queue),
+    fonts: &mut Fonts,
+    (size, chrome, placement): &([u32; 2], Chrome, Placement),
+    screens: [&Screen; 2],
+) -> Vec<u8> {
     let geometry = chrome.geometry;
-    // Each terminal is wider than its pane, as before a resize lands: the
-    // left one's long line must stop at the divider.
-    let left = screen(30, 4, "left pane, with a line too long for it\r\n$ ");
-    let right = screen(20, 4, "right pane\r\n$ ");
-    let screens = [&left, &right];
     let rows: Vec<Vec<_>> = screens
         .iter()
         .map(|screen| screen.rows.iter().collect())
@@ -294,57 +288,108 @@ fn panes_are_drawn_between_the_top_bar_and_the_status_line() {
         .iter()
         .zip(&rows)
         .enumerate()
-        .map(|(index, ((_, cells), rows))| Scene {
-            origin: geometry.origin(*cells),
-            size: geometry.pixels(*cells),
+        .map(|(index, ((_, card), rows))| Scene {
+            origin: card.origin,
+            size: card.cells_size(geometry.area.cell),
             rows,
             cursor: None,
             normal_mode: index == 1,
             highlights: &[],
         })
         .collect();
-    let (mut fills, texts) = chrome.paint(Hit::Workspace(WorkspaceId(2)));
-    fills.extend(
-        placement
-            .dividers
-            .iter()
-            .map(|divider| chrome::divider_fill(&geometry, divider)),
-    );
+    let painted = chrome.paint(Hit::Workspace(WorkspaceId(2)));
+    let mut fills = painted.fills;
+    for (index, (_, card)) in placement.panes.iter().enumerate() {
+        let edge = if index == 1 {
+            Paint::Accent
+        } else {
+            Paint::Edge
+        };
+        fills.push(
+            Fill::rounded(card.rect.to_array(), Paint::Card, geometry.radius)
+                .bordered(geometry.edge, edge),
+        );
+    }
+    let mut texts = painted.texts;
+    texts.extend(painted.over_texts);
     let picture = Picture {
         scenes: &scenes,
         fills: &fills,
+        over: &painted.over,
         texts: &texts,
+        transparent: false,
     };
-    let pixels = draw(&gpu, size, &picture, &mut fonts);
-    save("panes", size, &pixels);
+    draw(gpu, *size, &picture, fonts)
+}
 
-    let pixel = |x: f32, y: f32| {
+#[test]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn panes_are_drawn_on_cards_between_the_bars() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut fonts = fonts(2.0);
+    let window = two_pane_window(
+        &mut fonts,
+        Status::Tabs {
+            note: Some("NORMAL".into()),
+        },
+    );
+    // Each terminal is wider than its card, as before a resize lands: the
+    // left one's long line must stop at its card's edge.
+    let left = screen(30, 4, "left pane, with a line too long for it\r\n$ ");
+    let right = screen(20, 4, "right pane\r\n$ ");
+    let pixels = draw_window(&gpu, &mut fonts, &window, [&left, &right]);
+    let (size, chrome, placement) = &window;
+    save("panes", *size, &pixels);
+
+    let pixel = |[x, y]: [f32; 2]| {
         let index = (y as usize * size[0] as usize + x as usize) * 4;
         &pixels[index..index + 3]
     };
     let active = chrome.workspaces[0].rect;
     assert_eq!(
-        pixel(active.x + 1.0, active.y + 1.0),
-        [0xf8, 0xce, 0x57],
+        pixel([active.x + 8.0, active.y + 2.0]),
+        [0x1d, 0x25, 0x2f],
         "picked out"
     );
     let hovered = chrome.workspaces[1].rect;
     assert_eq!(
-        pixel(hovered.x + 1.0, hovered.y + 1.0),
-        [0x2c, 0x30, 0x34],
+        pixel([hovered.x + 8.0, hovered.y + 2.0]),
+        [0x17, 0x1e, 0x27],
         "lit up"
     );
-    assert_eq!(pixel(1.0, 1.0), [0x15, 0x17, 0x19], "the top bar");
-    let divider = chrome::divider_fill(&geometry, &placement.dividers[0]).rect;
-    assert_eq!(pixel(divider[0], divider[1] + 1.0), [0x3c, 0x40, 0x44]);
-    // Nothing of the cut-off line spills into the divider's cell.
-    let divider_cell = geometry.origin(placement.dividers[0].cells);
-    let background = pixel(
-        divider_cell[0] + 1.0,
-        divider_cell[1] + geometry.cell[1] * 3.0,
-    )
-    .to_vec();
-    let spilled = (0..cell[1])
-        .any(|y| pixel(divider_cell[0] + 1.0, divider_cell[1] + y as f32) != background.as_slice());
-    assert!(!spilled, "the cut-off line spilled into the divider's cell");
+    assert_eq!(pixel([1.0, 1.0]), [0x0a, 0x0e, 0x13], "the window");
+    let left_card = placement.panes[0].1.rect;
+    let right_card = placement.panes[1].1.rect;
+    // The focused card's edge is in the accent colour, for normal mode.
+    assert_eq!(
+        pixel([right_card.x + 0.5, right_card.y + right_card.height / 2.0]),
+        [0xf8, 0xce, 0x57]
+    );
+    // Between the cards, only the window shows: the long line stopped.
+    let between = left_card.x + left_card.width + 2.0;
+    let spilled = (0..fonts.cell.height)
+        .any(|y| pixel([between, placement.panes[0].1.origin[1] + y as f32]) != [0x0a, 0x0e, 0x13]);
+    assert!(!spilled, "the cut-off line spilled out of its card");
+}
+
+#[test]
+fn the_palette_is_drawn_over_the_cards() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut fonts = fonts(2.0);
+    let window = two_pane_window(&mut fonts, Status::Typing(":|Terminal▏".into()));
+    let left = screen(20, 4, "left\r\n$ ");
+    let right = screen(20, 4, "right\r\n$ ");
+    let pixels = draw_window(&gpu, &mut fonts, &window, [&left, &right]);
+    save("palette", window.0, &pixels);
+    assert!(window.1.palette.is_some());
 }

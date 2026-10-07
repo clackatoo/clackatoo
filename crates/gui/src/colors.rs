@@ -12,18 +12,24 @@ pub(crate) struct Theme {
     pub(crate) background: Rgba,
     pub(crate) cursor: Rgba,
     /// clackatoo's own colour, the cockatoo's crest, for the window's own
-    /// marks such as the normal-mode frame.
+    /// marks such as the focused card's edge in normal mode.
     pub(crate) accent: Rgba,
-    /// Text that matters less, such as the names in the bar not shown.
-    pub(crate) muted: Rgba,
-    /// The lines between panes.
-    pub(crate) divider: Rgba,
-    /// The background of the window's bars.
-    pub(crate) bar: Rgba,
+    /// Behind the cards.
+    pub(crate) window: Rgba,
+    /// A card's edge.
+    pub(crate) edge: Rgba,
+    /// The focused card's edge, while typing goes to its program.
+    pub(crate) focus: Rgba,
+    /// Behind what's picked, such as the workspace shown.
+    pub(crate) picked: Rgba,
     /// Under the mouse.
     pub(crate) hover: Rgba,
-    /// Under the mouse, on the close button.
-    pub(crate) danger: Rgba,
+    /// The window's buttons.
+    pub(crate) button: Rgba,
+    /// The command palette.
+    pub(crate) palette_background: Rgba,
+    /// Text that matters less, such as the names in the bars not shown.
+    pub(crate) muted: Rgba,
     /// The 256 indexed colours: 16 named ones, a 6×6×6 cube, and 24 greys.
     palette: [Rgba; 256],
 }
@@ -60,21 +66,43 @@ impl Default for Theme {
             palette[232 + n as usize] = hex_rgba(grey << 16 | grey << 8 | grey);
         }
         Self {
-            foreground: hex_rgba(0xc5_c8_c6),
-            background: hex_rgba(0x1d_1f_21),
-            cursor: hex_rgba(0xc5_c8_c6),
+            foreground: hex_rgba(0xc9_d1_d9),
+            background: hex_rgba(0x11_16_1d),
+            cursor: hex_rgba(0xc9_d1_d9),
             accent: hex_rgba(0xf8_ce_57),
-            muted: hex_rgba(0x80_84_88),
-            divider: hex_rgba(0x3c_40_44),
-            bar: hex_rgba(0x15_17_19),
-            hover: hex_rgba(0x2c_30_34),
-            danger: hex_rgba(0xc8_45_45),
+            window: hex_rgba(0x0a_0e_13),
+            edge: hex_rgba(0x1f_27_31),
+            focus: hex_rgba(0x2b_b3_a3),
+            picked: hex_rgba(0x1d_25_2f),
+            hover: hex_rgba(0x17_1e_27),
+            button: hex_rgba(0x1a_21_2a),
+            palette_background: hex_rgba(0x15_1b_23),
+            muted: hex_rgba(0x7d_87_94),
             palette,
         }
     }
 }
 
 impl Theme {
+    /// The colour of `paint`.
+    pub(crate) fn paint(&self, paint: crate::render::Paint) -> Rgba {
+        use crate::render::Paint;
+        match paint {
+            Paint::Clear => [0.0; 4],
+            Paint::Window => self.window,
+            Paint::Shadow => [0.0, 0.0, 0.0, 0.18],
+            Paint::Card => self.background,
+            Paint::Edge => self.edge,
+            Paint::Focus => self.focus,
+            Paint::Accent => self.accent,
+            Paint::Picked => self.picked,
+            Paint::Hover => self.hover,
+            Paint::Button => self.button,
+            Paint::Ink => self.foreground,
+            Paint::Palette => self.palette_background,
+        }
+    }
+
     /// The colours for a cell in `style`.
     pub(crate) fn cell(&self, style: &Style) -> CellColors {
         let attributes = style.attributes;

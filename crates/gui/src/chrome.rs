@@ -1,169 +1,125 @@
 //! The window's own frame: the top bar, with the workspaces and the
-//! window's buttons, and the status line along the bottom, with the tabs,
-//! the mode and the command line. Where each part goes, and what a point in
-//! the window is over, for clicks and the mouse cursor.
+//! window's buttons; the bottom bar, with the tabs and a note; the cards
+//! the panes sit on; and the palette, in the middle, while a command or a
+//! search is typed. Where each goes, what a point in the window is over,
+//! for clicks and the mouse cursor, and how to draw it all.
 //!
-//! The window draws its own frame instead of the desktop's, so it holds no
-//! title bar of its own: dragging the top bar moves the window, and its
-//! edges resize it.
+//! The window draws its own frame instead of the desktop's: dragging the
+//! top bar moves the window, and its edges resize it. The buttons go
+//! where the desktop's setting puts them.
 
-use clackatoo_protocol::{Size, TabId, WorkspaceId};
+use clackatoo_protocol::{TabId, WorkspaceId};
 use winit::window::ResizeDirection;
 
-use crate::layout::{Cells, Divider};
-use crate::render::{Fill, Ink, Paint, Text};
+use crate::desktop::{Button, ButtonLayout};
+use crate::layout::{Area, Rect};
+use crate::render::{Fill, Ink, Paint, Text, TextFont};
 
-/// A rectangle in pixels.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct Rect {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-    pub(crate) width: f32,
-    pub(crate) height: f32,
+/// The sizes everything else is worked out from, in pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Metrics {
+    /// A terminal cell's width and height.
+    pub(crate) cell: [f32; 2],
+    /// A line of interface text's height.
+    pub(crate) ui_line: f32,
+    /// The unit of space between things.
+    pub(crate) padding: f32,
 }
 
-impl Rect {
-    pub(crate) fn contains(self, [x, y]: [f32; 2]) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+impl Metrics {
+    /// The height of a name in a bar, with room above and below its text.
+    fn pill_height(self) -> f32 {
+        (self.ui_line + 2.0 * self.padding).round()
     }
 
-    pub(crate) fn to_array(self) -> [f32; 4] {
-        [self.x, self.y, self.width, self.height]
+    fn top_height(self) -> f32 {
+        self.pill_height() + 3.0 * self.padding
+    }
+
+    fn bottom_height(self) -> f32 {
+        self.pill_height() + 2.0 * self.padding
+    }
+
+    /// The space between cards, and between them and the window's edges.
+    fn gap(self) -> f32 {
+        2.0 * self.padding
+    }
+
+    /// How far in from a card's edges its cells start.
+    fn inset(self) -> f32 {
+        2.0 * self.padding
     }
 }
 
-/// Where the parts of the window go, in pixels, for a window of one size.
+/// Where the parts of the window go, for a window of one size.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Geometry {
     pub(crate) size: [f32; 2],
-    pub(crate) padding: f32,
-    pub(crate) cell: [f32; 2],
-    /// The top bar, across the top.
+    pub(crate) metrics: Metrics,
     pub(crate) top: Rect,
-    /// The status line, across the bottom.
-    pub(crate) status: Rect,
-    /// The cells between the bars, for panes.
-    pub(crate) panes: Cells,
-    /// Where the panes' cells start.
-    pub(crate) panes_origin: [f32; 2],
-    /// Every cell below the top bar, for notices, which need no status line.
-    pub(crate) grid: Size,
+    pub(crate) bottom: Rect,
+    /// Where the cards go.
+    pub(crate) area: Area,
+    /// How round the cards' corners are.
+    pub(crate) radius: f32,
+    /// How round the window's corners are, where it can be see-through and
+    /// isn't maximised.
+    pub(crate) window_radius: f32,
+    /// How thick their edges are.
+    pub(crate) edge: f32,
 }
 
 impl Geometry {
-    /// For a window `size` pixels, with cells `cell` pixels and `padding`
-    /// pixels around things.
+    /// For a window `size` pixels.
     #[allow(clippy::cast_precision_loss)]
-    pub(crate) fn new(size: [u32; 2], cell: [u32; 2], padding: u32) -> Option<Self> {
-        let cells =
-            |pixels: u32, cell: u32| u16::try_from((pixels / cell).max(1)).unwrap_or(u16::MAX);
-        let [width, height] = size;
-        let [cell_width, cell_height] = cell;
-        // A row of text with room above and below, as title bars have.
-        let top_height = cell_height + 4 * padding;
-        let status_height = cell_height + padding;
-        let below_top = top_height + padding;
-        let grid = Size::new(
-            cells(width.saturating_sub(2 * padding), cell_width),
-            cells(height.saturating_sub(below_top + padding), cell_height),
-        )
-        .ok()?;
-        let panes = Cells {
-            col: 0,
-            row: 0,
-            cols: grid.cols(),
-            rows: cells(
-                height.saturating_sub(below_top + status_height + padding),
-                cell_height,
-            ),
+    pub(crate) fn new(size: [u32; 2], metrics: Metrics) -> Self {
+        let [width, height] = [size[0] as f32, size[1] as f32];
+        let top = Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: metrics.top_height(),
         };
-        let (width, height) = (width as f32, height as f32);
-        Some(Self {
+        let bottom = Rect {
+            x: 0.0,
+            y: height - metrics.bottom_height(),
+            width,
+            height: metrics.bottom_height(),
+        };
+        let gap = metrics.gap();
+        let area = Area {
+            rect: Rect {
+                x: gap,
+                y: top.height,
+                width: (width - 2.0 * gap).max(1.0),
+                height: (bottom.y - top.height).max(1.0),
+            },
+            cell: metrics.cell,
+            gap,
+            inset: metrics.inset(),
+        };
+        Self {
             size: [width, height],
-            padding: padding as f32,
-            cell: [cell_width as f32, cell_height as f32],
-            top: Rect {
-                x: 0.0,
-                y: 0.0,
-                width,
-                height: top_height as f32,
-            },
-            status: Rect {
-                x: 0.0,
-                y: height - status_height as f32,
-                width,
-                height: status_height as f32,
-            },
-            panes,
-            panes_origin: [padding as f32, below_top as f32],
-            grid,
-        })
+            metrics,
+            top,
+            bottom,
+            area,
+            radius: (2.5 * metrics.padding).round(),
+            window_radius: (3.0 * metrics.padding).round(),
+            edge: (metrics.padding / 4.0).round().max(1.0),
+        }
     }
 
-    /// The window size that holds `cols` × `rows` cells of panes, in the
-    /// units `cell` and `padding` are in.
-    pub(crate) fn window_size(cols: u32, rows: u32, cell: [f64; 2], padding: f64) -> [f64; 2] {
-        let [cell_width, cell_height] = cell;
-        let top = cell_height + 4.0 * padding;
-        let status = cell_height + padding;
+    /// The window size whose one card holds `cols` × `rows` cells, in the
+    /// units `metrics` is in.
+    pub(crate) fn window_size(cols: u16, rows: u16, metrics: Metrics) -> [f32; 2] {
+        let [cell_width, cell_height] = metrics.cell;
+        let inset = 2.0 * metrics.inset();
         [
-            f64::from(cols) * cell_width + 2.0 * padding,
-            f64::from(rows) * cell_height + top + status + 2.0 * padding,
+            f32::from(cols) * cell_width + inset + 2.0 * metrics.gap(),
+            f32::from(rows) * cell_height + inset + metrics.top_height() + metrics.bottom_height(),
         ]
     }
-
-    pub(crate) fn origin(&self, cells: Cells) -> [f32; 2] {
-        [
-            self.panes_origin[0] + f32::from(cells.col) * self.cell[0],
-            self.panes_origin[1] + f32::from(cells.row) * self.cell[1],
-        ]
-    }
-
-    pub(crate) fn pixels(&self, cells: Cells) -> [f32; 2] {
-        [
-            f32::from(cells.cols) * self.cell[0],
-            f32::from(cells.rows) * self.cell[1],
-        ]
-    }
-
-    /// Where notices go: every cell below the top bar.
-    pub(crate) fn grid_origin(&self) -> [f32; 2] {
-        self.panes_origin
-    }
-
-    pub(crate) fn grid_pixels(&self) -> [f32; 2] {
-        [
-            f32::from(self.grid.cols()) * self.cell[0],
-            f32::from(self.grid.rows()) * self.cell[1],
-        ]
-    }
-
-    /// How wide `text` is as a tag: its characters, and a cell's space
-    /// either side.
-    #[allow(clippy::cast_precision_loss)]
-    pub(crate) fn tag_width(&self, text: &str) -> f32 {
-        (text.chars().count() as f32 + 2.0) * self.cell[0]
-    }
-
-    /// The cell of the pane area at `point`, if it's over one.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub(crate) fn cell_at(&self, [x, y]: [f32; 2]) -> Option<(u16, u16)> {
-        let col = ((x - self.panes_origin[0]) / self.cell[0]).floor();
-        let row = ((y - self.panes_origin[1]) / self.cell[1]).floor();
-        let inside = col >= 0.0
-            && row >= 0.0
-            && col < f32::from(self.panes.cols)
-            && row < f32::from(self.panes.rows);
-        inside.then_some((col as u16, row as u16))
-    }
-}
-
-/// One of the window's buttons, at the top bar's right end.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Button {
-    Minimise,
-    Maximise,
-    Close,
 }
 
 /// A name in a bar, and where it is.
@@ -176,11 +132,11 @@ pub(crate) struct Item<T> {
     pub(crate) rect: Rect,
 }
 
-/// What the status line shows.
+/// What the bottom bar and the palette show.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
-    /// Something being typed, such as a command or a search, across the
-    /// whole line.
+    /// Something being typed, such as a command or a search, in the
+    /// palette.
     Typing(String),
     /// The tabs, and on the right a note: the mode, how far the view is
     /// scrolled, or a message.
@@ -195,68 +151,108 @@ pub(crate) struct Chrome {
     pub(crate) buttons: Vec<(Button, Rect)>,
     pub(crate) tabs: Vec<Item<TabId>>,
     pub(crate) status: Status,
-    /// Where the status line's note starts.
+    /// Where the note starts, if there is one.
     pub(crate) note_x: f32,
-    /// Whether to draw the status line: notices take its place.
-    pub(crate) status_shown: bool,
+    /// The palette, while something's being typed.
+    pub(crate) palette: Option<Rect>,
+    /// Whether to draw the bottom bar: notices take its place.
+    pub(crate) bottom_shown: bool,
+}
+
+/// What goes in the frame, besides where.
+#[derive(Debug)]
+pub(crate) struct Contents<'a> {
+    pub(crate) workspaces: Vec<(WorkspaceId, String, bool)>,
+    pub(crate) tabs: Vec<(TabId, String, bool)>,
+    pub(crate) status: Status,
+    pub(crate) buttons: &'a ButtonLayout,
+    /// Whether to draw the bottom bar: notices take its place.
+    pub(crate) bottom_shown: bool,
 }
 
 impl Chrome {
-    /// Lays out the frame: the workspaces from the top bar's left, the
-    /// buttons at its right, and the tabs from the status line's left.
-    /// Names that don't fit are left out.
+    /// Lays out the frame: the buttons at the ends of the top bar where
+    /// the desktop puts them, the workspaces from its left, and the tabs
+    /// from the bottom bar's left. `measure` says how wide interface text
+    /// is, bold or not. Names that don't fit are left out.
     pub(crate) fn new(
         geometry: Geometry,
-        workspaces: Vec<(WorkspaceId, String, bool)>,
-        tabs: Vec<(TabId, String, bool)>,
-        status: Status,
-        status_shown: bool,
+        contents: Contents<'_>,
+        measure: &mut dyn FnMut(&str, bool) -> f32,
     ) -> Self {
-        let padding = geometry.padding;
+        let metrics = geometry.metrics;
+        let padding = metrics.padding;
         let top = geometry.top;
-        let button_width = top.height * 1.25;
+        let pill_height = metrics.pill_height();
+        let pill_y = top.y + (top.height - pill_height) / 2.0;
+        let diameter = (pill_height * 0.8).round();
+        let button_y = (top.y + (top.height - diameter) / 2.0).round();
+        let spacing = 2.0 * padding;
+        let button = |x: f32| Rect {
+            x,
+            y: button_y,
+            width: diameter,
+            height: diameter,
+        };
         let mut buttons = Vec::new();
-        for (index, button) in [Button::Close, Button::Maximise, Button::Minimise]
-            .into_iter()
-            .enumerate()
-        {
-            #[allow(clippy::cast_precision_loss)]
-            let x = top.width - button_width * (index as f32 + 1.0);
-            buttons.push((
-                button,
-                Rect {
-                    x,
-                    y: top.y,
-                    width: button_width,
-                    height: top.height,
-                },
-            ));
+        let mut x = 3.0 * padding;
+        for &kind in &contents.buttons.left {
+            buttons.push((kind, button(x)));
+            x += diameter + spacing;
         }
-        let buttons_start = top.width - 3.0 * button_width;
+        let workspaces_start = if contents.buttons.left.is_empty() {
+            geometry.area.rect.x
+        } else {
+            x + padding
+        };
+        let mut x = top.width - 3.0 * padding;
+        for &kind in contents.buttons.right.iter().rev() {
+            x -= diameter;
+            buttons.push((kind, button(x)));
+            x -= spacing;
+        }
+        let workspaces_end = x - padding;
 
-        let tag_height = geometry.cell[1] + padding;
-        let workspaces = lay_out(
-            &geometry,
-            workspaces,
-            top.y + (top.height - tag_height) / 2.0,
-            tag_height,
-            buttons_start - padding,
+        let row = Row {
+            height: pill_height,
+            padding,
+        };
+        let workspaces = row.lay_out(
+            contents.workspaces,
+            workspaces_start..workspaces_end,
+            pill_y,
+            measure,
         );
+        let status = contents.status;
+        let bottom = geometry.bottom;
         let note_width = match &status {
-            Status::Tabs { note: Some(note) } => geometry.tag_width(note),
+            Status::Tabs { note: Some(note) } => measure(note, false),
             _ => 0.0,
         };
-        let note_x = geometry.status.width - 2.0 * padding - note_width;
+        let card_right = geometry.area.rect.x + geometry.area.rect.width;
+        let note_x = (card_right - padding - note_width).round();
         let tabs = match &status {
-            Status::Tabs { .. } => lay_out(
-                &geometry,
-                tabs,
-                geometry.status.y,
-                geometry.status.height,
-                note_x - padding,
+            Status::Tabs { .. } => row.lay_out(
+                contents.tabs,
+                geometry.area.rect.x..note_x - padding,
+                bottom.y + (bottom.height - pill_height) / 2.0,
+                measure,
             ),
             Status::Typing(_) => Vec::new(),
         };
+        let palette = matches!(status, Status::Typing(_)).then(|| {
+            let [width, height] = geometry.size;
+            let palette_width = (width * 0.6)
+                .min(90.0 * metrics.cell[0])
+                .min(width - 2.0 * spacing);
+            let palette_height = (metrics.cell[1] + 4.0 * padding).round();
+            Rect {
+                x: ((width - palette_width) / 2.0).round(),
+                y: ((height - palette_height) / 2.0).round(),
+                width: palette_width.round(),
+                height: palette_height,
+            }
+        });
         Self {
             geometry,
             workspaces,
@@ -264,7 +260,8 @@ impl Chrome {
             tabs,
             status,
             note_x,
-            status_shown,
+            palette,
+            bottom_shown: contents.bottom_shown,
         }
     }
 
@@ -287,17 +284,18 @@ impl Chrome {
         if self.geometry.top.contains(point) {
             return Hit::TopBar;
         }
-        if self.status_shown {
+        if self.bottom_shown {
             if let Some(item) = self.tabs.iter().find(|item| item.rect.contains(point)) {
                 return Hit::Tab(item.id);
             }
-            if self.geometry.status.contains(point) {
+            if self.geometry.bottom.contains(point) {
                 return Hit::Nothing;
             }
         }
-        match self.geometry.cell_at(point) {
-            Some((col, row)) => Hit::Cell { col, row },
-            None => Hit::Nothing,
+        if self.geometry.area.rect.contains(point) {
+            Hit::Cards
+        } else {
+            Hit::Nothing
         }
     }
 
@@ -306,7 +304,7 @@ impl Chrome {
     /// that along either edge.
     fn edge(&self, [x, y]: [f32; 2]) -> Option<ResizeDirection> {
         let [width, height] = self.geometry.size;
-        let band = (self.geometry.padding * 1.5).max(4.0);
+        let band = (self.geometry.metrics.padding * 1.5).max(4.0);
         let corner = 3.0 * band;
         let (left, right) = (x < band, x >= width - band);
         let (top, bottom) = (y < band, y >= height - band);
@@ -324,191 +322,194 @@ impl Chrome {
             () => return None,
         })
     }
-}
 
-impl Chrome {
-    /// The frame's rectangles and text, with `hover` under the mouse.
-    pub(crate) fn paint(&self, hover: Hit) -> (Vec<Fill>, Vec<Text<'_>>) {
-        let geometry = &self.geometry;
-        let [cell_width, cell_height] = geometry.cell;
-        let mut fills = vec![Fill {
-            rect: geometry.top.to_array(),
-            paint: Paint::Bar,
-        }];
-        let mut placed = Vec::new();
+    /// The frame's rectangles and text, with `hover` under the mouse: those
+    /// of the bars, under the cards, and those of the palette, over them.
+    pub(crate) fn paint(&self, hover: Hit) -> Painted<'_> {
+        let metrics = self.geometry.metrics;
+        let mut painted = Painted::default();
         for item in &self.workspaces {
-            let hovered = hover == Hit::Workspace(item.id);
-            let (origin, ink) = paint_tag(geometry, item.rect, item.active, hovered, &mut fills);
-            placed.push(Text {
-                origin,
-                content: &item.text,
-                ink,
-            });
+            paint_item(
+                item,
+                hover == Hit::Workspace(item.id),
+                metrics,
+                &mut painted,
+            );
         }
-        let stroke = (geometry.padding / 4.0).round().max(1.0);
         for &(button, rect) in &self.buttons {
-            if hover == Hit::Button(button) {
-                fills.push(Fill {
-                    rect: rect.to_array(),
-                    paint: if button == Button::Close {
-                        Paint::Danger
-                    } else {
-                        Paint::Hover
-                    },
+            self.paint_button(button, rect, hover == Hit::Button(button), &mut painted);
+        }
+        if self.bottom_shown {
+            for item in &self.tabs {
+                paint_item(item, hover == Hit::Tab(item.id), metrics, &mut painted);
+            }
+            if let Status::Tabs { note: Some(note) } = &self.status {
+                let bottom = self.geometry.bottom;
+                painted.texts.push(Text {
+                    origin: [
+                        self.note_x,
+                        bottom.y + (bottom.height - metrics.ui_line) / 2.0,
+                    ],
+                    content: note,
+                    ink: Ink::Muted,
+                    font: TextFont::Ui,
                 });
             }
-            let centre = [rect.x + rect.width / 2.0, rect.y + rect.height / 2.0];
-            let side = (cell_height * 0.45).round();
-            let left = (centre[0] - side / 2.0).round();
-            let top = (centre[1] - side / 2.0).round();
-            let line = |x: f32, y: f32, width: f32, height: f32| Fill {
-                rect: [x, y, width, height],
-                paint: Paint::Ink,
-            };
-            match button {
-                Button::Minimise => fills.push(line(left, top + side - stroke, side, stroke)),
-                Button::Maximise => fills.extend([
-                    line(left, top, side, stroke),
-                    line(left, top + side - stroke, side, stroke),
-                    line(left, top, stroke, side),
-                    line(left + side - stroke, top, stroke, side),
-                ]),
-                Button::Close => placed.push(Text {
-                    origin: [centre[0] - cell_width / 2.0, centre[1] - cell_height / 2.0],
-                    content: "×",
-                    ink: Ink::Plain,
-                }),
-            }
         }
-        if self.status_shown {
-            let status = geometry.status;
-            fills.push(Fill {
-                rect: status.to_array(),
-                paint: Paint::Bar,
+        if let (Some(rect), Status::Typing(text)) = (self.palette, &self.status) {
+            // Layers of shadow, wider and fainter outwards, so it reads
+            // as soft.
+            for spread in [3.0, 2.0, 1.0] {
+                let grow = spread * metrics.padding;
+                painted.over.push(Fill::rounded(
+                    [
+                        rect.x - grow,
+                        rect.y - grow + metrics.padding,
+                        rect.width + 2.0 * grow,
+                        rect.height + 2.0 * grow,
+                    ],
+                    Paint::Shadow,
+                    self.geometry.radius + grow,
+                ));
+            }
+            painted.over.push(
+                Fill::rounded(rect.to_array(), Paint::Palette, self.geometry.radius)
+                    .bordered(self.geometry.edge, Paint::Focus),
+            );
+            painted.over_texts.push(Text {
+                origin: [
+                    rect.x + 2.0 * metrics.padding,
+                    rect.y + (rect.height - metrics.cell[1]) / 2.0,
+                ],
+                content: text,
+                ink: Ink::Plain,
+                font: TextFont::Mono,
             });
-            let text_top = status.y + (status.height - cell_height) / 2.0;
-            match &self.status {
-                Status::Typing(text) => placed.push(Text {
-                    origin: [2.0 * geometry.padding, text_top],
-                    content: text,
-                    ink: Ink::Plain,
-                }),
-                Status::Tabs { note } => {
-                    for item in &self.tabs {
-                        let hovered = hover == Hit::Tab(item.id);
-                        let (origin, ink) =
-                            paint_tag(geometry, item.rect, item.active, hovered, &mut fills);
-                        placed.push(Text {
-                            origin,
-                            content: &item.text,
-                            ink,
-                        });
-                    }
-                    if let Some(note) = note {
-                        placed.push(Text {
-                            origin: [self.note_x + cell_width, text_top],
-                            content: note,
-                            ink: Ink::Plain,
-                        });
-                    }
-                }
-            }
         }
-        (fills, placed)
+        painted
     }
-}
 
-/// A divider's line, as a fill: thin, down or across the middle of its
-/// cells.
-pub(crate) fn divider_fill(geometry: &Geometry, divider: &Divider) -> Fill {
-    let [left, top] = geometry.origin(divider.cells);
-    let [width, height] = geometry.pixels(divider.cells);
-    let thickness = (geometry.padding / 4.0).round().max(1.0);
-    let rect = match divider.axis {
-        clackatoo_protocol::Axis::LeftToRight => [
-            (left + (width - thickness) / 2.0).round(),
-            top,
-            thickness,
-            height,
-        ],
-        clackatoo_protocol::Axis::TopToBottom => [
-            left,
-            (top + (height - thickness) / 2.0).round(),
-            width,
-            thickness,
-        ],
-    };
-    Fill {
-        rect,
-        paint: Paint::Divider,
-    }
-}
-
-/// Places `items` side by side from the left, a padding apart, in a row
-/// at `y`, `height` high. Those that would pass `end` are left out.
-fn lay_out<T>(
-    geometry: &Geometry,
-    items: Vec<(T, String, bool)>,
-    y: f32,
-    height: f32,
-    end: f32,
-) -> Vec<Item<T>> {
-    let padding = geometry.padding;
-    let mut x = 2.0 * padding;
-    let mut placed = Vec::new();
-    for (id, text, active) in items {
-        let width = geometry.tag_width(&text);
-        if x + width > end {
-            break;
+    /// A round button with its icon: a line for minimise, a square for
+    /// maximise and a cross for close.
+    fn paint_button(&self, button: Button, rect: Rect, hovered: bool, painted: &mut Painted<'_>) {
+        let metrics = self.geometry.metrics;
+        let stroke = self.geometry.edge;
+        let paint = if hovered {
+            Paint::Picked
+        } else {
+            Paint::Button
+        };
+        painted
+            .fills
+            .push(Fill::rounded(rect.to_array(), paint, rect.width / 2.0));
+        let side = (rect.width * 0.36).round();
+        let left = (rect.x + (rect.width - side) / 2.0).round();
+        let top = (rect.y + (rect.height - side) / 2.0).round();
+        match button {
+            Button::Minimise => painted.fills.push(Fill::solid(
+                [left, top + side - stroke, side, stroke],
+                Paint::Ink,
+            )),
+            Button::Maximise => painted.fills.push(
+                Fill::rounded([left, top, side, side], Paint::Clear, stroke)
+                    .bordered(stroke, Paint::Ink),
+            ),
+            Button::Close => painted.texts.push(Text {
+                origin: [
+                    (rect.x + rect.width / 2.0 - metrics.ui_line * 0.27).round(),
+                    (rect.y + (rect.height - metrics.ui_line) / 2.0).round(),
+                ],
+                content: "×",
+                ink: Ink::Plain,
+                font: TextFont::Ui,
+            }),
         }
-        placed.push(Item {
-            id,
-            text,
-            active,
-            rect: Rect {
-                x,
-                y,
-                width,
-                height,
-            },
-        });
-        x += width + padding;
     }
-    placed
 }
 
-/// Fills in a name's background: the accent colour if it's `active`, or a
-/// highlight if it's `hovered`. Returns where its text goes, and how.
-fn paint_tag(
-    geometry: &Geometry,
-    rect: Rect,
-    active: bool,
+/// What the frame draws: under the cards, and over them.
+#[derive(Debug, Default)]
+pub(crate) struct Painted<'a> {
+    pub(crate) fills: Vec<Fill>,
+    pub(crate) texts: Vec<Text<'a>>,
+    /// Over the cards and their text, such as the palette.
+    pub(crate) over: Vec<Fill>,
+    pub(crate) over_texts: Vec<Text<'a>>,
+}
+
+/// Draws a name: picked out if it's the one shown, lit up if the mouse is
+/// over it, and quieter otherwise.
+fn paint_item<'a, T>(
+    item: &'a Item<T>,
     hovered: bool,
-    fills: &mut Vec<Fill>,
-) -> ([f32; 2], Ink) {
-    let [cell_width, cell_height] = geometry.cell;
-    let ink = if active {
-        fills.push(Fill {
-            rect: rect.to_array(),
-            paint: Paint::Accent,
-        });
-        Ink::OnAccent
+    metrics: Metrics,
+    painted: &mut Painted<'a>,
+) {
+    let radius = (1.5 * metrics.padding).round();
+    let ink = if item.active {
+        painted
+            .fills
+            .push(Fill::rounded(item.rect.to_array(), Paint::Picked, radius));
+        Ink::Strong
     } else if hovered {
-        fills.push(Fill {
-            rect: rect.to_array(),
-            paint: Paint::Hover,
-        });
+        painted
+            .fills
+            .push(Fill::rounded(item.rect.to_array(), Paint::Hover, radius));
         Ink::Plain
     } else {
         Ink::Muted
     };
-    (
-        [
-            rect.x + cell_width,
-            rect.y + (rect.height - cell_height) / 2.0,
+    painted.texts.push(Text {
+        origin: [
+            item.rect.x + 3.0 * metrics.padding,
+            (item.rect.y + (item.rect.height - metrics.ui_line) / 2.0).round(),
         ],
+        content: &item.text,
         ink,
-    )
+        font: TextFont::Ui,
+    });
+}
+
+/// A row of names in a bar.
+#[derive(Clone, Copy, Debug)]
+struct Row {
+    height: f32,
+    padding: f32,
+}
+
+impl Row {
+    /// Places `items` side by side across `span`, a padding apart, at `y`,
+    /// each as wide as its text and three paddings either side. Those that
+    /// would pass the span's end are left out.
+    fn lay_out<T>(
+        self,
+        items: Vec<(T, String, bool)>,
+        span: std::ops::Range<f32>,
+        y: f32,
+        measure: &mut dyn FnMut(&str, bool) -> f32,
+    ) -> Vec<Item<T>> {
+        let mut x = span.start;
+        let mut placed = Vec::new();
+        for (id, text, active) in items {
+            let width = (measure(&text, active) + 6.0 * self.padding).round();
+            if x + width > span.end {
+                break;
+            }
+            placed.push(Item {
+                id,
+                text,
+                active,
+                rect: Rect {
+                    x,
+                    y,
+                    width,
+                    height: self.height,
+                },
+            });
+            x += width + self.padding;
+        }
+        placed
+    }
 }
 
 /// What a point in the window is over.
@@ -522,11 +523,8 @@ pub(crate) enum Hit {
     /// window.
     TopBar,
     Tab(TabId),
-    /// A cell of the pane area.
-    Cell {
-        col: u16,
-        row: u16,
-    },
+    /// The space the cards share.
+    Cards,
     Nothing,
 }
 
@@ -536,67 +534,112 @@ pub(crate) enum Hit {
 mod tests {
     use super::*;
 
-    /// A window 800 × 600, with cells 10 × 20 and a padding of 4: a top bar
-    /// 36 high, a status line 24 high, and panes of 79 × 26 cells between.
-    fn chrome(status: Status) -> Chrome {
-        let geometry = Geometry::new([800, 600], [10, 20], 4).unwrap();
+    /// Cells 10 × 20, interface text 16 high, and a padding of 4: names in
+    /// the bars are 24 high, the top bar 36 and the bottom bar 32.
+    const METRICS: Metrics = Metrics {
+        cell: [10.0, 20.0],
+        ui_line: 16.0,
+        padding: 4.0,
+    };
+
+    /// Every character 8 wide.
+    fn measure(text: &str, _bold: bool) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let width = text.chars().count() as f32 * 8.0;
+        width
+    }
+
+    /// An 800 × 600 window.
+    fn chrome(status: Status, buttons: &ButtonLayout) -> Chrome {
         Chrome::new(
-            geometry,
-            vec![
-                (WorkspaceId(1), "clackatoo".into(), true),
-                (WorkspaceId(2), "peios".into(), false),
-            ],
-            vec![
-                (TabId(1), "1 zsh".into(), true),
-                (TabId(2), "2 htop".into(), false),
-            ],
-            status,
-            true,
+            Geometry::new([800, 600], METRICS),
+            Contents {
+                workspaces: vec![
+                    (WorkspaceId(1), "clackatoo".into(), true),
+                    (WorkspaceId(2), "peios".into(), false),
+                ],
+                tabs: vec![
+                    (TabId(1), "1 zsh".into(), true),
+                    (TabId(2), "2 htop".into(), false),
+                ],
+                status,
+                buttons,
+                bottom_shown: true,
+            },
+            &mut measure,
         )
     }
 
     #[test]
-    fn the_panes_fill_the_space_between_the_bars() {
-        let geometry = chrome(Status::Tabs { note: None }).geometry;
-        assert_eq!(geometry.top.height, 36.0);
-        assert_eq!(geometry.status.y, 576.0);
-        assert_eq!((geometry.panes.cols, geometry.panes.rows), (79, 26));
-        assert_eq!(geometry.panes_origin, [4.0, 40.0]);
-        let [width, height] = Geometry::window_size(79, 26, [10.0, 20.0], 4.0);
+    fn the_cards_fill_the_space_between_the_bars() {
+        let geometry = Geometry::new([800, 600], METRICS);
+        assert_eq!((geometry.top.height, geometry.bottom.y), (36.0, 568.0));
         assert_eq!(
-            (width, height),
-            (798.0, 588.0),
-            "room for exactly those cells"
+            geometry.area.rect,
+            Rect {
+                x: 8.0,
+                y: 36.0,
+                width: 784.0,
+                height: 532.0
+            }
         );
+        // 100 × 30 cells, inset 8 in a card, with gaps of 8 either side.
+        assert_eq!(Geometry::window_size(100, 30, METRICS), [1032.0, 684.0]);
     }
 
     #[test]
     fn points_hit_what_they_are_over() {
-        let chrome = chrome(Status::Tabs {
-            note: Some("NORMAL".into()),
-        });
-        // clackatoo's tag starts at 8 and is 11 cells wide; peios's follows.
+        let chrome = chrome(
+            Status::Tabs {
+                note: Some("NORMAL".into()),
+            },
+            &ButtonLayout::default(),
+        );
+        // clackatoo's pill starts at the cards' left edge, 8, and is 9
+        // characters and 24 of padding wide: 96.
+        assert_eq!(chrome.workspaces[0].rect.x, 8.0);
+        assert_eq!(chrome.workspaces[0].rect.width, 96.0);
         assert_eq!(
             chrome.hit([20.0, 18.0], false),
             Hit::Workspace(WorkspaceId(1))
         );
         assert_eq!(
-            chrome.hit([130.0, 18.0], false),
+            chrome.hit([120.0, 18.0], false),
             Hit::Workspace(WorkspaceId(2))
         );
         assert_eq!(chrome.hit([400.0, 18.0], false), Hit::TopBar);
-        assert_eq!(chrome.hit([790.0, 18.0], false), Hit::Button(Button::Close));
-        assert_eq!(chrome.hit([20.0, 590.0], false), Hit::Tab(TabId(1)));
-        assert_eq!(chrome.hit([400.0, 590.0], false), Hit::Nothing);
+        // The buttons are on the right, close last.
+        let close = chrome
+            .buttons
+            .iter()
+            .find(|(button, _)| *button == Button::Close)
+            .unwrap()
+            .1;
+        assert_eq!(close.x + close.width, 788.0);
         assert_eq!(
-            chrome.hit([14.0, 60.0], false),
-            Hit::Cell { col: 1, row: 1 }
+            chrome.hit([close.x + 5.0, 18.0], false),
+            Hit::Button(Button::Close)
         );
+        assert_eq!(chrome.hit([20.0, 584.0], false), Hit::Tab(TabId(1)));
+        assert_eq!(chrome.hit([400.0, 584.0], false), Hit::Nothing);
+        assert_eq!(chrome.hit([100.0, 100.0], false), Hit::Cards);
+    }
+
+    #[test]
+    fn buttons_on_the_left_push_the_workspaces_over() {
+        let buttons = ButtonLayout {
+            left: vec![Button::Close],
+            right: Vec::new(),
+        };
+        let chrome = chrome(Status::Tabs { note: None }, &buttons);
+        let close = chrome.buttons[0].1;
+        assert_eq!(close.x, 12.0);
+        assert!(chrome.workspaces[0].rect.x > close.x + close.width);
     }
 
     #[test]
     fn edges_and_corners_resize_unless_maximised() {
-        let chrome = chrome(Status::Tabs { note: None });
+        let chrome = chrome(Status::Tabs { note: None }, &ButtonLayout::default());
         assert_eq!(
             chrome.hit([2.0, 300.0], false),
             Hit::Resize(ResizeDirection::West)
@@ -621,9 +664,14 @@ mod tests {
     }
 
     #[test]
-    fn typing_takes_the_whole_status_line() {
-        let chrome = chrome(Status::Typing(":|Terminal".into()));
+    fn typing_opens_the_palette_in_the_middle() {
+        let chrome = chrome(
+            Status::Typing(":|Terminal".into()),
+            &ButtonLayout::default(),
+        );
         assert!(chrome.tabs.is_empty());
-        assert_eq!(chrome.hit([20.0, 590.0], false), Hit::Nothing);
+        let palette = chrome.palette.expect("a palette");
+        assert_eq!(palette.x + palette.width / 2.0, 400.0);
+        assert_eq!(palette.y + palette.height / 2.0, 300.0);
     }
 }

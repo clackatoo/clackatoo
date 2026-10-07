@@ -13,8 +13,8 @@ use crate::fonts::{CellMetrics, FaceId, Fonts};
 /// What a cached glyph is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum GlyphKey {
-    /// A glyph from a font.
-    Font(FaceId, GlyphId),
+    /// A glyph from a font, at a size in pixels per em, by its bits.
+    Font(FaceId, GlyphId, u32),
     /// A box-drawing or block character, drawn to fill its cell.
     Drawn(char),
 }
@@ -81,11 +81,23 @@ impl GlyphCache {
         face: FaceId,
         glyph: GlyphId,
     ) -> Option<AtlasGlyph> {
-        let key = GlyphKey::Font(face, glyph);
+        self.get_sized(fonts, face, glyph, fonts.ppem)
+    }
+
+    /// The glyph's place in the atlas at `ppem` pixels per em, as
+    /// interface text is drawn, rasterising it first if needed.
+    pub(crate) fn get_sized(
+        &mut self,
+        fonts: &Fonts,
+        face: FaceId,
+        glyph: GlyphId,
+        ppem: f32,
+    ) -> Option<AtlasGlyph> {
+        let key = GlyphKey::Font(face, glyph, ppem.to_bits());
         if let Some(&cached) = self.glyphs.get(&key) {
             return cached;
         }
-        let rasterised = self.rasterise(fonts, face, glyph);
+        let rasterised = self.rasterise(fonts, face, glyph, ppem);
         self.glyphs.insert(key, rasterised);
         rasterised
     }
@@ -117,12 +129,18 @@ impl GlyphCache {
         drawn
     }
 
-    fn rasterise(&mut self, fonts: &Fonts, face_id: FaceId, glyph: GlyphId) -> Option<AtlasGlyph> {
+    fn rasterise(
+        &mut self,
+        fonts: &Fonts,
+        face_id: FaceId,
+        glyph: GlyphId,
+        ppem: f32,
+    ) -> Option<AtlasGlyph> {
         let face = fonts.face(face_id);
         let mut scaler = self
             .context
             .builder(face.font())
-            .size(fonts.ppem)
+            .size(ppem)
             .hint(true)
             .build();
         let mut render = Render::new(&[
@@ -132,7 +150,7 @@ impl GlyphCache {
         ]);
         render.format(Format::Alpha);
         if face.embolden {
-            render.embolden(fonts.ppem / 24.0);
+            render.embolden(ppem / 24.0);
         }
         if face.skew {
             render.transform(Some(Transform::skew(

@@ -109,6 +109,31 @@ pub(crate) struct CellMetrics {
     pub(crate) stroke: f32,
 }
 
+/// The interface font, for the window's own text, such as its bars:
+/// proportional, so each glyph is placed by its own width.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UiFont {
+    regular: FaceId,
+    bold: FaceId,
+    /// The size, in points.
+    points: f32,
+    /// The size glyphs are drawn at, in pixels per em.
+    pub(crate) ppem: f32,
+    /// From the top of a line down to the baseline.
+    pub(crate) baseline: f32,
+    /// A line's height.
+    pub(crate) height: f32,
+}
+
+/// One glyph of interface text, and how far it moves the pen.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UiGlyph {
+    pub(crate) face: FaceId,
+    pub(crate) glyph: GlyphId,
+    pub(crate) ppem: f32,
+    pub(crate) advance: f32,
+}
+
 /// The fonts a window draws with, at one pixel size.
 pub(crate) struct Fonts {
     collection: Collection,
@@ -122,6 +147,7 @@ pub(crate) struct Fonts {
     /// The size glyphs are drawn at, in pixels per em.
     pub(crate) ppem: f32,
     pub(crate) cell: CellMetrics,
+    pub(crate) ui: UiFont,
 }
 
 impl std::fmt::Debug for Fonts {
@@ -160,11 +186,21 @@ impl Fonts {
             primary[slot] = push_face(&mut faces, face);
         }
 
+        // Until an interface font is loaded, the terminal's stands in.
+        let ui = UiFont {
+            regular: primary[0],
+            bold: primary[1],
+            points: options.size,
+            ppem: 0.0,
+            baseline: 0.0,
+            height: 1.0,
+        };
         let mut fonts = Self {
             collection,
             source_cache,
             faces,
             primary,
+            ui,
             glyphs: HashMap::new(),
             points: options.size,
             ppem: 0.0,
@@ -189,6 +225,86 @@ impl Fonts {
         let ppem = (f64::from(self.points) * 96.0 / 72.0 * scale) as f32;
         self.ppem = ppem;
         self.cell = measure(self.face(self.primary[0]), ppem);
+        #[allow(clippy::cast_possible_truncation)]
+        let ui_ppem = (f64::from(self.ui.points) * 96.0 / 72.0 * scale) as f32;
+        let metrics = self
+            .face(self.ui.regular)
+            .font()
+            .metrics(&[])
+            .scale(ui_ppem);
+        self.ui.ppem = ui_ppem;
+        self.ui.height = (metrics.ascent + metrics.descent + metrics.leading)
+            .ceil()
+            .max(1.0);
+        self.ui.baseline = (metrics.leading / 2.0 + metrics.ascent).round();
+    }
+
+    /// Loads the interface font: `family`, or the system's sans-serif font,
+    /// at `points`. Without either, the terminal's font stays in its place.
+    pub(crate) fn load_ui(&mut self, family: Option<&str>, points: f32, scale: f64) {
+        let family = match family {
+            Some(name) => QueryFamily::Named(name),
+            None => QueryFamily::Generic(GenericFamily::SansSerif),
+        };
+        let mut load = |variant| {
+            let face = query(
+                &mut self.collection,
+                &mut self.source_cache,
+                family,
+                variant,
+            )?;
+            Some(push_face(&mut self.faces, face))
+        };
+        let (Some(regular), bold) = (load(Variant::Regular), load(Variant::Bold)) else {
+            log::warn!("no interface font found for {family:?}");
+            return;
+        };
+        self.ui.regular = regular;
+        self.ui.bold = bold.unwrap_or(regular);
+        self.ui.points = points;
+        self.set_scale(scale);
+    }
+
+    /// The glyph for `ch` in interface text: from the interface font, or
+    /// else the terminal's fonts, a cell wide.
+    pub(crate) fn ui_glyph(&mut self, ch: char, bold: bool) -> Option<UiGlyph> {
+        let face_id = if bold { self.ui.bold } else { self.ui.regular };
+        let face = self.face(face_id);
+        if let Some(glyph) = face.glyph(ch) {
+            let advance = face
+                .font()
+                .glyph_metrics(&[])
+                .scale(self.ui.ppem)
+                .advance_width(glyph);
+            return Some(UiGlyph {
+                face: face_id,
+                glyph,
+                ppem: self.ui.ppem,
+                advance,
+            });
+        }
+        let variant = if bold {
+            Variant::Bold
+        } else {
+            Variant::Regular
+        };
+        let (face, glyph) = self.glyph(ch, variant)?;
+        #[allow(clippy::cast_precision_loss)]
+        let advance = self.cell.width as f32;
+        Some(UiGlyph {
+            face,
+            glyph,
+            ppem: self.ppem,
+            advance,
+        })
+    }
+
+    /// How wide `text` is in the interface font.
+    pub(crate) fn ui_width(&mut self, text: &str, bold: bool) -> f32 {
+        text.chars()
+            .filter_map(|ch| self.ui_glyph(ch, bold))
+            .map(|glyph| glyph.advance.round())
+            .sum()
     }
 
     pub(crate) fn face(&self, id: FaceId) -> &Face {

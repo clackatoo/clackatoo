@@ -23,46 +23,99 @@ use crate::glyphs::{ATLAS_SIZE, AtlasGlyph, GlyphCache};
 pub(crate) struct Picture<'a> {
     /// The panes.
     pub(crate) scenes: &'a [Scene<'a>],
-    /// Rectangles of the window's own, such as the bars and the dividers
-    /// between panes, under any text.
+    /// Rectangles of the window's own, such as the cards and the names in
+    /// the bars, under the panes.
     pub(crate) fills: &'a [Fill],
+    /// Rectangles of the window's own over the panes, such as the palette.
+    pub(crate) over: &'a [Fill],
+    /// Whether the window can be see-through, so that its background, a
+    /// fill of its own, can round its corners. Otherwise it's cleared to
+    /// the background colour.
+    pub(crate) transparent: bool,
     /// Text of the window's own, such as the names in the bars, over
     /// everything.
     pub(crate) texts: &'a [Text<'a>],
 }
 
-/// A solid rectangle of the window's own.
+/// A rectangle of the window's own: perhaps rounded, perhaps bordered.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Fill {
     /// Left, top, width and height, in pixels.
     pub(crate) rect: [f32; 4],
     pub(crate) paint: Paint,
+    /// How round its corners are, in pixels.
+    pub(crate) radius: f32,
+    /// A border inside its edge: how thick, and its colour.
+    pub(crate) border: Option<(f32, Paint)>,
+}
+
+impl Fill {
+    /// A square-cornered, borderless rectangle.
+    pub(crate) fn solid(rect: [f32; 4], paint: Paint) -> Self {
+        Self {
+            rect,
+            paint,
+            radius: 0.0,
+            border: None,
+        }
+    }
+
+    /// A rectangle with corners `radius` round.
+    pub(crate) fn rounded(rect: [f32; 4], paint: Paint, radius: f32) -> Self {
+        Self {
+            rect,
+            paint,
+            radius,
+            border: None,
+        }
+    }
+
+    /// With a border `width` thick, in `paint`.
+    pub(crate) fn bordered(self, width: f32, paint: Paint) -> Self {
+        Self {
+            border: Some((width, paint)),
+            ..self
+        }
+    }
 }
 
 /// The colours the window's own things are drawn in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Paint {
-    /// clackatoo's own colour, for what's picked out.
+    /// Nothing: for a border alone.
+    Clear,
+    /// Behind the cards.
+    Window,
+    /// A soft shadow, under something raised.
+    Shadow,
+    /// A pane's card, the colour its terminal's background is.
+    Card,
+    /// A card's edge.
+    Edge,
+    /// The focused card's edge, while typing goes to its program.
+    Focus,
+    /// clackatoo's own colour: the focused card's edge in normal mode.
     Accent,
-    /// The bars' background.
-    Bar,
-    /// The lines between panes.
-    Divider,
+    /// Behind what's picked, such as the workspace shown.
+    Picked,
     /// Under the mouse.
     Hover,
-    /// Under the mouse, on the close button.
-    Danger,
+    /// The window's buttons.
+    Button,
     /// The text colour, for drawn icons.
     Ink,
+    /// The command palette.
+    Palette,
 }
 
 /// A line of text of the window's own.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Text<'a> {
-    /// The top left corner of its first cell, in pixels.
+    /// The top left corner of its line, in pixels.
     pub(crate) origin: [f32; 2],
     pub(crate) content: &'a str,
     pub(crate) ink: Ink,
+    pub(crate) font: TextFont,
 }
 
 /// How text of the window's own is drawn.
@@ -72,8 +125,17 @@ pub(crate) enum Ink {
     Plain,
     /// In a quieter colour, for what matters less.
     Muted,
-    /// Bold and dark, on the accent colour.
-    OnAccent,
+    /// Bold, in the text colour, for what's picked.
+    Strong,
+}
+
+/// Which font text of the window's own is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextFont {
+    /// The terminal's, a cell per character, as for commands being typed.
+    Mono,
+    /// The interface font, as for names in the bars.
+    Ui,
 }
 
 /// What one pane shows, and where.
@@ -86,7 +148,8 @@ pub(crate) struct Scene<'a> {
     /// The rows to show, top to bottom.
     pub(crate) rows: &'a [&'a clackatoo_term::Row],
     pub(crate) cursor: Option<SceneCursor>,
-    /// Frame the pane, to show it's in normal mode.
+    /// Whether the pane is in normal mode, which draws its cursor in the
+    /// accent colour.
     pub(crate) normal_mode: bool,
     /// Stretches of text to highlight.
     pub(crate) highlights: &'a [Highlight],
@@ -143,6 +206,25 @@ struct Rect {
     origin: [f32; 2],
     size: [f32; 2],
     color: Rgba,
+    /// How round its corners are, in pixels.
+    radius: f32,
+    /// How thick its border is, in pixels, inside its edge.
+    border: f32,
+    border_color: Rgba,
+}
+
+impl Rect {
+    /// A square-cornered rectangle of one colour.
+    fn solid(origin: [f32; 2], size: [f32; 2], color: Rgba) -> Self {
+        Self {
+            origin,
+            size,
+            color,
+            radius: 0.0,
+            border: 0.0,
+            border_color: [0.0; 4],
+        }
+    }
 }
 
 /// A glyph, drawn from the atlas.
@@ -283,7 +365,10 @@ impl Renderer {
         let rect_pipeline = pipeline(
             "rects",
             ("rect_vs", "rect_fs"),
-            &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+            &wgpu::vertex_attr_array![
+                0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
+                4 => Float32, 5 => Float32x4,
+            ],
             std::mem::size_of::<Rect>() as u64,
         );
         let glyph_pipeline = pipeline(
@@ -355,7 +440,7 @@ impl Renderer {
         fonts: &mut Fonts,
     ) {
         let (device, queue) = gpu;
-        self.build(picture, fonts, size);
+        self.build(picture, fonts);
         for upload in self.glyphs.uploads.drain(..) {
             let [x, y, width, height] = upload.rect;
             queue.write_texture(
@@ -397,7 +482,12 @@ impl Renderer {
             label: Some("frame"),
         });
         {
-            let [r, g, b, a] = self.theme.background.map(f64::from);
+            let clear = if picture.transparent {
+                [0.0; 4]
+            } else {
+                self.theme.window
+            };
+            let [r, g, b, a] = clear.map(f64::from);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -442,30 +532,35 @@ impl Renderer {
     }
 
     /// Turns the picture into rectangles and glyphs.
-    fn build(&mut self, picture: &Picture<'_>, fonts: &mut Fonts, size: [u32; 2]) {
+    fn build(&mut self, picture: &Picture<'_>, fonts: &mut Fonts) {
         self.rects.clear();
         self.overlays.clear();
         self.glyph_instances.clear();
         self.text_glyphs.clear();
         for scene in picture.scenes {
-            self.push_scene(scene, fonts, size);
+            self.push_scene(scene, fonts);
         }
-        for fill in picture.fills {
+        let rect = |fill: &Fill| {
             let [left, top, width, height] = fill.rect;
-            let color = match fill.paint {
-                Paint::Accent => self.theme.accent,
-                Paint::Bar => self.theme.bar,
-                Paint::Divider => self.theme.divider,
-                Paint::Hover => self.theme.hover,
-                Paint::Danger => self.theme.danger,
-                Paint::Ink => self.theme.foreground,
-            };
-            self.rects.push(Rect {
+            let (border, border_color) = fill.border.map_or((0.0, [0.0; 4]), |(width, paint)| {
+                (width, self.theme.paint(paint))
+            });
+            Rect {
                 origin: [left, top],
                 size: [width, height],
-                color,
-            });
-        }
+                color: self.theme.paint(fill.paint),
+                radius: fill.radius,
+                border,
+                border_color,
+            }
+        };
+        let (under, over): (Vec<Rect>, Vec<Rect>) = (
+            picture.fills.iter().map(rect).collect(),
+            picture.over.iter().map(rect).collect(),
+        );
+        // The cards go under the panes' cells, and the palette over them.
+        self.rects.splice(0..0, under);
+        self.overlays.extend(over);
         for text in picture.texts {
             self.push_text(text, fonts);
         }
@@ -477,7 +572,7 @@ impl Renderer {
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    fn push_scene(&mut self, scene: &Scene<'_>, fonts: &mut Fonts, size: [u32; 2]) {
+    fn push_scene(&mut self, scene: &Scene<'_>, fonts: &mut Fonts) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
         let [origin_x, origin_y] = scene.origin;
@@ -512,11 +607,11 @@ impl Renderer {
                     }
                 }
                 if let Some(background) = colors.background {
-                    self.rects.push(Rect {
-                        origin: [left, top],
-                        size: [cells * cell_width, cell_height],
-                        color: background,
-                    });
+                    self.rects.push(Rect::solid(
+                        [left, top],
+                        [cells * cell_width, cell_height],
+                        background,
+                    ));
                 }
                 let variant = Variant::new(
                     style.attributes.contains(Attributes::BOLD),
@@ -534,18 +629,18 @@ impl Renderer {
                 );
                 let width = cells * cell_width;
                 if style.underline != Underline::None {
-                    self.overlays.push(Rect {
-                        origin: [left, baseline + cell.underline_offset],
-                        size: [width, cell.stroke],
-                        color: colors.underline,
-                    });
+                    self.overlays.push(Rect::solid(
+                        [left, baseline + cell.underline_offset],
+                        [width, cell.stroke],
+                        colors.underline,
+                    ));
                 }
                 if style.attributes.contains(Attributes::STRIKETHROUGH) {
-                    self.overlays.push(Rect {
-                        origin: [left, baseline - cell.strikeout_offset - cell.stroke / 2.0],
-                        size: [width, cell.stroke],
-                        color: colors.foreground,
-                    });
+                    self.overlays.push(Rect::solid(
+                        [left, baseline - cell.strikeout_offset - cell.stroke / 2.0],
+                        [width, cell.stroke],
+                        colors.foreground,
+                    ));
                 }
             }
         }
@@ -561,17 +656,14 @@ impl Renderer {
             };
             let start = highlight.cols.start.min(cols);
             let end = highlight.cols.end.min(cols);
-            self.rects.push(Rect {
-                origin: [
+            self.rects.push(Rect::solid(
+                [
                     origin_x + start as f32 * cell_width,
                     origin_y + highlight.line as f32 * cell_height,
                 ],
-                size: [(end - start) as f32 * cell_width, cell_height],
-                color: [r, g, b, alpha],
-            });
-        }
-        if scene.normal_mode {
-            self.push_frame(scene, cell.stroke, size);
+                [(end - start) as f32 * cell_width, cell_height],
+                [r, g, b, alpha],
+            ));
         }
     }
 
@@ -600,38 +692,9 @@ impl Renderer {
             ],
         };
         for &(origin, size) in rects {
-            self.overlays.push(Rect {
-                origin,
-                size,
-                color,
-            });
+            self.overlays.push(Rect::solid(origin, size, color));
         }
         false
-    }
-
-    /// A border around the pane in the accent colour, just outside it, in
-    /// the window's padding or the space around a divider.
-    #[allow(clippy::cast_precision_loss)]
-    fn push_frame(&mut self, scene: &Scene<'_>, stroke: f32, size: [u32; 2]) {
-        let t = (2.0 * stroke).max(2.0).round();
-        let gap = t + 1.0;
-        let left = (scene.origin[0] - gap).max(0.0);
-        let top = (scene.origin[1] - gap).max(0.0);
-        let right = (scene.origin[0] + scene.size[0] + gap).min(size[0] as f32);
-        let bottom = (scene.origin[1] + scene.size[1] + gap).min(size[1] as f32);
-        let (w, h) = (right - left, bottom - top);
-        for (origin, size) in [
-            ([left, top], [w, t]),
-            ([left, bottom - t], [w, t]),
-            ([left, top], [t, h]),
-            ([right - t, top], [t, h]),
-        ] {
-            self.overlays.push(Rect {
-                origin,
-                size,
-                color: self.theme.accent,
-            });
-        }
     }
 
     /// Adds a line of the window's own text. Drawn after the grid's
@@ -641,28 +704,58 @@ impl Renderer {
     fn push_text(&mut self, text: &Text<'_>, fonts: &mut Fonts) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
-        let (color, variant) = match text.ink {
-            Ink::Plain => (self.theme.foreground, Variant::Regular),
-            Ink::Muted => (self.theme.muted, Variant::Regular),
-            Ink::OnAccent => (self.theme.background, Variant::Bold),
+        let bold = text.ink == Ink::Strong;
+        let color = match text.ink {
+            Ink::Plain | Ink::Strong => self.theme.foreground,
+            Ink::Muted => self.theme.muted,
         };
-        let [left, top] = text.origin;
-        let baseline = top + cell.baseline;
-        for (index, ch) in text.content.chars().enumerate() {
-            let Some((face, glyph)) = fonts.glyph(ch, variant) else {
-                continue;
-            };
-            let Some(atlas) = self.glyphs.get(fonts, face, glyph) else {
-                continue;
-            };
-            let pen = [left + index as f32 * cell_width, baseline];
-            self.text_glyphs.push(place(
-                &atlas,
-                pen,
-                [cell_width, cell_height],
-                color,
-                cell.baseline,
-            ));
+        let [mut pen_x, top] = text.origin;
+        match text.font {
+            TextFont::Mono => {
+                let variant = if bold {
+                    Variant::Bold
+                } else {
+                    Variant::Regular
+                };
+                let baseline = top + cell.baseline;
+                for ch in text.content.chars() {
+                    if let Some((face, glyph)) = fonts.glyph(ch, variant)
+                        && let Some(atlas) = self.glyphs.get(fonts, face, glyph)
+                    {
+                        self.text_glyphs.push(place(
+                            &atlas,
+                            [pen_x, baseline],
+                            [cell_width, cell_height],
+                            color,
+                            cell.baseline,
+                        ));
+                    }
+                    pen_x += cell_width;
+                }
+            }
+            TextFont::Ui => {
+                let ui = fonts.ui;
+                let baseline = top + ui.baseline;
+                for ch in text.content.chars() {
+                    let Some(glyph) = fonts.ui_glyph(ch, bold) else {
+                        continue;
+                    };
+                    if let Some(atlas) =
+                        self.glyphs
+                            .get_sized(fonts, glyph.face, glyph.glyph, glyph.ppem)
+                    {
+                        // Whole pixels, so glyphs stay sharp.
+                        self.text_glyphs.push(place(
+                            &atlas,
+                            [pen_x.round(), baseline],
+                            [glyph.advance, ui.height],
+                            color,
+                            ui.baseline,
+                        ));
+                    }
+                    pen_x += glyph.advance.round();
+                }
+            }
         }
     }
 

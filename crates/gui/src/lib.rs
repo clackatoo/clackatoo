@@ -19,6 +19,7 @@ mod chrome;
 mod colors;
 mod command;
 mod desk;
+mod desktop;
 mod fonts;
 mod glyphs;
 mod history;
@@ -80,7 +81,18 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         let options = options.font.clone();
         std::thread::Builder::new()
             .name("fonts".into())
-            .spawn(move || fonts::Fonts::load(&options, 1.0))?
+            .spawn(move || {
+                // Asking the desktop takes a few milliseconds, which the
+                // GPU takes longer than anyway.
+                let desktop = desktop::Desktop::read();
+                let mut fonts = fonts::Fonts::load(&options, 1.0)?;
+                let (family, points) = match &desktop.font {
+                    Some((family, points)) => (Some(family.as_str()), *points),
+                    None => (None, 11.0),
+                };
+                fonts.load_ui(family, points, 1.0);
+                Ok((fonts, desktop))
+            })?
     };
     let (display, display_received) = std::sync::mpsc::channel();
     let graphics_api = options.graphics_api;
