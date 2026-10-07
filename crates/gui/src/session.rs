@@ -1,11 +1,15 @@
 //! The window's connection to the daemon, on a thread of its own.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use clackatoo_daemon::{Client, Sender};
 use clackatoo_protocol::{NewTerminal, ServerMessage, Size, TerminalId, TerminalStatus};
 use winit::event_loop::EventLoopProxy;
+
+/// How long the daemon may take to answer while the window attaches.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What the session thread tells the window.
 #[derive(Debug)]
@@ -63,6 +67,9 @@ pub(crate) fn spawn(socket: PathBuf, proxy: EventLoopProxy<SessionEvent>) {
 /// Attaches to the newest running terminal, starting one if there is none.
 fn attach(socket: &Path) -> anyhow::Result<(Sender, clackatoo_daemon::Receiver, TerminalId)> {
     let mut client = Client::connect(socket).context("could not connect to the daemon")?;
+    // A daemon that accepts but never answers would otherwise leave the
+    // window blank forever.
+    client.set_read_timeout(Some(ATTACH_TIMEOUT))?;
     let running = client
         .list_terminals()?
         .into_iter()
@@ -80,6 +87,7 @@ fn attach(socket: &Path) -> anyhow::Result<(Sender, clackatoo_daemon::Receiver, 
         })?,
     };
     client.attach(terminal)?;
+    client.set_read_timeout(None)?;
     let (sender, receiver) = client.split()?;
     Ok((sender, receiver, terminal))
 }

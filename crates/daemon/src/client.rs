@@ -11,6 +11,9 @@ use clackatoo_protocol::{
     Size, TerminalId, TerminalInfo, View,
 };
 
+/// How long the daemon may take to answer a new connection's hello.
+const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A connection to the daemon that sends one request at a time and waits for
 /// each answer. Events that arrive while it waits are kept for
 /// [`next_event`](Self::next_event).
@@ -35,11 +38,14 @@ impl Client {
             decoder: FrameDecoder::new(),
             events: VecDeque::new(),
         };
+        // A socket nothing serves would otherwise hang the handshake.
+        client.stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
         client.send(&ClientMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
         })?;
         match client.receive()? {
             ServerMessage::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => {
+                client.stream.set_read_timeout(None)?;
                 Ok(client)
             }
             ServerMessage::Hello { protocol_version } => Err(ClientError::VersionMismatch {

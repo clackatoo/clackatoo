@@ -20,7 +20,9 @@ bitflags = "2.13"
 bytemuck = { version = "1.25", features = ["derive"] }
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions"] }
 env_logger = { version = "0.11", default-features = false }
-fontique = "0.11"
+# Loads fontconfig only when the window first needs a font, so CLI commands
+# and the daemon don't pay for linking it and its dependencies.
+fontique = { version = "0.11", features = ["fontconfig-dlopen"] }
 log = "0.4"
 mio = { version = "1.2", features = ["os-poll", "os-ext", "net"] }
 pollster = "1.0"

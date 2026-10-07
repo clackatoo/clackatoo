@@ -39,23 +39,82 @@ impl Gpu {
         // The window doesn't exist yet, so the adapter can't be chosen by
         // the screen it draws on. On desktops with two GPUs, the discrete
         // one usually drives the screen; the integrated one may not be able
-        // to hand frames to the compositor at all.
+        // to hand frames to the compositor at all. If the guess is wrong,
+        // the window picks again (see `App::open`).
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
         }))
         .context("no GPU found")?;
+        Self::open(instance, adapter)
+    }
+
+    fn open(instance: wgpu::Instance, adapter: wgpu::Adapter) -> anyhow::Result<Self> {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("clackatoo"),
             ..Default::default()
         }))
         .context("could not open the GPU")?;
+        // A GPU error is a bug in how we drive it, but the window can often
+        // carry on, so it's logged rather than fatal.
+        device.on_uncaptured_error(Arc::new(|error| log::error!("GPU error: {error}")));
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
         })
+    }
+
+    /// Sets `surface` up to show frames, or says why it can't.
+    fn configure(
+        &self,
+        surface: &wgpu::Surface<'_>,
+        size: PhysicalSize<u32>,
+    ) -> anyhow::Result<wgpu::SurfaceConfiguration> {
+        if !self.adapter.is_surface_supported(surface) {
+            anyhow::bail!("{} can't draw to this window", self.adapter.get_info().name);
+        }
+        let capabilities = surface.get_capabilities(&self.adapter);
+        // Colours are blended in sRGB, as other terminals do, so text has
+        // its usual weight. That needs a format that doesn't convert.
+        let format = capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(|format| !format.is_srgb())
+            .or_else(|| capabilities.formats.first().copied())
+            .context("the window supports no texture format")?;
+        let present_mode = if capabilities
+            .present_modes
+            .contains(&wgpu::PresentMode::Mailbox)
+        {
+            wgpu::PresentMode::Mailbox
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            desired_maximum_frame_latency: 2,
+            present_mode,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        // Some GPUs claim support and then fail here, so the result is
+        // checked rather than trusted.
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        surface.configure(&self.device, &config);
+        if let Some(error) = pollster::block_on(scope.pop()) {
+            anyhow::bail!(
+                "{} can't draw to this window: {error}",
+                self.adapter.get_info().name
+            );
+        }
+        Ok(config)
     }
 }
 
@@ -146,43 +205,27 @@ impl App {
         );
         fonts.set_scale(window.scale_factor());
 
-        let gpu = startup.gpu.join().map_err(join("GPU"))??;
+        let mut gpu = startup.gpu.join().map_err(join("GPU"))??;
         let gpu_ready = self.started.elapsed();
         let surface = gpu.instance.create_surface(Arc::clone(&window))?;
-        if !gpu.adapter.is_surface_supported(&surface) {
-            anyhow::bail!("the GPU can't draw to this window");
-        }
-        let capabilities = surface.get_capabilities(&gpu.adapter);
-        // Colours are blended in sRGB, as other terminals do, so text has its
-        // usual weight. That needs a format that doesn't convert.
-        let format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(|format| !format.is_srgb())
-            .or_else(|| capabilities.formats.first().copied())
-            .context("the window supports no texture format")?;
-        let present_mode = if capabilities
-            .present_modes
-            .contains(&wgpu::PresentMode::Mailbox)
-        {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
+        let config = match gpu.configure(&surface, window.inner_size()) {
+            Ok(config) => config,
+            Err(err) => {
+                // The guessed GPU can't show this window: ask for one that
+                // can, now that there's a window to ask about.
+                log::warn!("{err:#}; looking for another GPU");
+                let adapter = pollster::block_on(gpu.instance.request_adapter(
+                    &wgpu::RequestAdapterOptions {
+                        compatible_surface: Some(&surface),
+                        ..Default::default()
+                    },
+                ))
+                .context("no GPU can draw to this window")?;
+                gpu = Gpu::open(gpu.instance.clone(), adapter)?;
+                gpu.configure(&surface, window.inner_size())?
+            }
         };
-        let PhysicalSize { width, height } = window.inner_size();
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-            width: width.max(1),
-            height: height.max(1),
-            desired_maximum_frame_latency: 2,
-            present_mode,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
-        };
-        surface.configure(&gpu.device, &config);
+        let (format, present_mode) = (config.format, config.present_mode);
         let renderer = Renderer::new(&gpu.device, format);
         log::info!(
             "window open after {:.1?} (fonts ready after {fonts_ready:.1?}, GPU after \
