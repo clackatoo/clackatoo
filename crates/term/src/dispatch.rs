@@ -21,6 +21,10 @@ impl Perform for Emulator {
         self.print_text(text);
     }
 
+    fn print_ascii(&mut self, text: &[u8]) {
+        Emulator::print_ascii(self, text);
+    }
+
     fn execute(&mut self, byte: u8) {
         match byte {
             // BEL. A bell will reach clients once they can show one.

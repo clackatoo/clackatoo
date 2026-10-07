@@ -72,6 +72,14 @@ impl Perform for Recorder {
         Recorder::print(self, text);
     }
 
+    fn print_ascii(&mut self, text: &[u8]) {
+        assert!(
+            text.iter().all(|byte| (0x20..0x7F).contains(byte)),
+            "{text:?} is not printable ASCII"
+        );
+        Recorder::print(self, std::str::from_utf8(text).expect("ASCII"));
+    }
+
     fn execute(&mut self, byte: u8) {
         self.0.push(Event::Execute(byte));
     }

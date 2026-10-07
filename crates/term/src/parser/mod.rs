@@ -48,9 +48,13 @@ const REPLACEMENT: &str = "\u{FFFD}";
 /// What the parser found, as it finds it.
 pub(crate) trait Perform {
     /// Printable text. It never contains a C0 control, DEL or a C1 control
-    /// (U+0080–U+009F), so text without non-ASCII bytes is all printable
-    /// ASCII. A run of text can arrive in several pieces.
+    /// (U+0080–U+009F). A run of text can arrive in several pieces, through
+    /// this and [`print_ascii`](Self::print_ascii).
     fn print(&mut self, text: &str);
+
+    /// Printable ASCII text (0x20–0x7E) only: the common case, passed as
+    /// bytes so nobody has to check or decode them.
+    fn print_ascii(&mut self, text: &[u8]);
 
     /// A C0 or C1 control character to act on, such as `\n`.
     fn execute(&mut self, byte: u8);
@@ -150,8 +154,7 @@ impl Parser {
         while i < bytes.len() {
             let ascii = scan::printable_ascii_len(&bytes[i..]);
             if ascii > 0 {
-                let text = std::str::from_utf8(&bytes[i..i + ascii]).expect("ASCII is UTF-8");
-                performer.print(text);
+                performer.print_ascii(&bytes[i..i + ascii]);
                 i += ascii;
             }
             let Some(&byte) = bytes.get(i) else {
