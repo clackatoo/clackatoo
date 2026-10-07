@@ -30,8 +30,15 @@ pub struct Row {
     palette: Vec<Style>,
     /// What most rows never need, kept out of line so they don't pay for it.
     extras: Option<Box<Extras>>,
+    /// The style [`intern`](Self::intern) returned last, checked before
+    /// anything else: runs of text in one style intern it over and over.
+    last_style: StyleIndex,
     wrapped: bool,
 }
+
+// Scrollback is mostly rows, so their size matters. The last-style hint and
+// the wrapped flag fit in what would otherwise be padding.
+const _: () = assert!(size_of::<Row>() <= 64);
 
 /// The rarely needed parts of a row.
 #[derive(Clone, Debug, Default)]
@@ -50,6 +57,7 @@ impl Row {
             cells: vec![Cell::BLANK; width],
             palette: Vec::new(),
             extras: None,
+            last_style: StyleIndex::DEFAULT,
             wrapped: false,
         }
     }
@@ -178,7 +186,7 @@ impl Row {
     /// as the row scrolls into scrollback, where it won't change again.
     pub(crate) fn retire(&mut self) {
         if let Some(extras) = &mut self.extras {
-            extras.lookup.clear();
+            extras.lookup.release();
             if extras.graphemes.is_empty() {
                 self.extras = None;
             }
@@ -201,10 +209,11 @@ impl Row {
     /// Blanks the whole row in `style` and forgets everything it referenced.
     pub(crate) fn reset(&mut self, style: &Style) {
         self.palette.clear();
+        self.last_style = StyleIndex::DEFAULT;
         if let Some(extras) = &mut self.extras {
             // Keep the allocations: a recycled row is about to be written.
             extras.graphemes.clear();
-            extras.lookup.clear();
+            extras.lookup.invalidate();
         }
         self.wrapped = false;
         let blank = Cell::blank(self.intern(style));
@@ -279,7 +288,12 @@ impl Row {
         if *style == Style::DEFAULT {
             return StyleIndex::DEFAULT;
         }
+        let last = self.last_style;
+        if last != StyleIndex::DEFAULT && self.palette[usize::from(last.0) - 1] == *style {
+            return last;
+        }
         if let Some(index) = self.find_style(style) {
+            self.last_style = index;
             return index;
         }
         if self.palette.len() >= self.palette_limit() {
@@ -296,6 +310,7 @@ impl Row {
                 .build(&self.palette, limit),
             _ => {}
         }
+        self.last_style = index;
         index
     }
 
@@ -346,8 +361,9 @@ impl Row {
         }
 
         // Every index moved, so the lookup starts again once it's needed.
+        self.last_style = StyleIndex::DEFAULT;
         if let Some(extras) = &mut self.extras {
-            extras.lookup.clear();
+            extras.lookup.invalidate();
         }
     }
 

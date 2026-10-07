@@ -36,8 +36,13 @@ impl StyleLookup {
         }
     }
 
-    /// Frees the table.
-    pub(crate) fn clear(&mut self) {
+    /// Forgets the table, keeping its memory to build the next one in.
+    pub(crate) fn invalidate(&mut self) {
+        self.slots.clear();
+    }
+
+    /// Forgets the table and frees its memory.
+    pub(crate) fn release(&mut self) {
         self.slots = Vec::new();
     }
 

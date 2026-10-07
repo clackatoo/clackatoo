@@ -233,6 +233,14 @@ fn previous_cell(row: &Row, cursor: &CursorState) -> Option<usize> {
     }
 }
 
+/// Whether the cell at `col` ends in a ZWJ, so the next character joins it.
+fn ends_in_zwj(row: &Row, col: usize) -> bool {
+    // A ZWJ is zero-width, so it is only ever stored as a cell's extra
+    // codepoint. Checking the flag first skips the grapheme lookup for almost
+    // every cell.
+    row.cells()[col].has_grapheme() && row.last_char(col) == ZWJ
+}
+
 /// Moves the cursor past `cells` cells just printed. At the right edge it
 /// stays on the last column, waiting to wrap if autowrap is on.
 fn advance(cursor: &mut CursorState, cells: usize, width: usize, autowrap: bool) {
@@ -421,7 +429,6 @@ impl Emulator {
     fn print_on_line(&mut self, text: &[char]) -> (usize, bool) {
         let width = self.width();
         let autowrap = self.modes.contains(Modes::AUTOWRAP);
-        let mut joins = self.joins_previous_grapheme();
         let Self {
             primary,
             alternate,
@@ -435,6 +442,7 @@ impl Emulator {
             Screen::Alternate => alternate,
         };
         let row = grid.row_mut(cursor.line);
+        let mut joins = previous_cell(row, cursor).is_some_and(|col| ends_in_zwj(row, col));
         // Nothing below interns again, so the index stays valid.
         let style = row.intern(&cursor.pen);
         let verbatim = cursor.charsets.maps_ascii_verbatim();
@@ -467,7 +475,7 @@ impl Emulator {
                             row.append_to_grapheme(col, ch);
                             // Not just `ch == ZWJ`: a full grapheme drops
                             // what's appended.
-                            row.last_char(col) == ZWJ
+                            ends_in_zwj(row, col)
                         }
                         None => false,
                     };
@@ -560,12 +568,7 @@ impl Emulator {
     /// glues emoji like 👩‍💻 into one.
     fn joins_previous_grapheme(&self) -> bool {
         let row = self.grid().row(self.cursor.line);
-        previous_cell(row, &self.cursor).is_some_and(|col| {
-            // A ZWJ is zero-width, so it is only ever stored as a cell's
-            // extra codepoint. Checking the flag first skips the grapheme
-            // lookup for almost every cell.
-            row.cells()[col].has_grapheme() && row.last_char(col) == ZWJ
-        })
+        previous_cell(row, &self.cursor).is_some_and(|col| ends_in_zwj(row, col))
     }
 
     fn previous_cell(&self) -> Option<usize> {

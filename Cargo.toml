@@ -42,3 +42,10 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
+
+[profile.release]
+# Whole-program optimisation: lets the compiler inline across crates (vte's
+# parameter iterator, for one, is otherwise a call per parameter). Slower
+# release builds, for a faster and smaller binary.
+lto = "fat"
+codegen-units = 1
