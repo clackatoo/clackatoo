@@ -45,6 +45,21 @@ pub struct Options {
     pub remote: Option<Remote>,
     /// What to draw text with.
     pub font: FontOptions,
+    /// The graphics API to draw with.
+    pub graphics_api: GraphicsApi,
+}
+
+/// The graphics API the window draws with. If the one chosen can't draw,
+/// the window tries the other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GraphicsApi {
+    /// Vulkan, which is fastest where it works well.
+    #[default]
+    Vulkan,
+    /// OpenGL, which on some machines with two GPUs opens a window much
+    /// sooner: Vulkan asks both GPUs about themselves first, which can
+    /// take seconds.
+    OpenGl,
 }
 
 /// Opens a window on the newest running terminal, or a new one, and runs
@@ -63,9 +78,10 @@ pub fn run(options: Options) -> anyhow::Result<()> {
             .spawn(move || fonts::Fonts::load(&options, 1.0))?
     };
     let (display, display_received) = std::sync::mpsc::channel();
+    let graphics_api = options.graphics_api;
     let gpu = std::thread::Builder::new()
         .name("gpu".into())
-        .spawn(move || app::Gpu::new(&display_received))?;
+        .spawn(move || app::Gpu::new(graphics_api, &display_received))?;
     let event_loop = EventLoop::with_user_event()
         .build()
         .context("could not open a window")?;

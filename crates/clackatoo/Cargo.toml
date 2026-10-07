@@ -20,6 +20,7 @@ clackatoo-term.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true
+toml_edit.workspace = true
 
 [dev-dependencies]
 clackatoo-bench.workspace = true

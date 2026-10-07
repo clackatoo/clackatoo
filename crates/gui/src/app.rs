@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use clackatoo_daemon::Sender;
@@ -15,6 +15,7 @@ use winit::event_loop::{ActiveEventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+use crate::GraphicsApi;
 use crate::fonts::Fonts;
 use crate::input;
 use crate::pane::{Mode, Pane};
@@ -24,6 +25,29 @@ use crate::session::{Session, SessionEvent};
 
 /// Lines scrolled per notch of a mouse wheel.
 const WHEEL_LINES: f64 = 3.0;
+
+/// A graphics instance with `backends`, for drawing on `display` if given:
+/// OpenGL on Wayland draws only on the display it starts with.
+fn instance(
+    backends: wgpu::Backends,
+    display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>,
+) -> wgpu::Instance {
+    let mut descriptor = match display {
+        Some(display) => wgpu::InstanceDescriptor::new_with_display_handle(display),
+        None => wgpu::InstanceDescriptor::new_without_display_handle(),
+    };
+    descriptor.backends = backends;
+    // Checks on indirect draws, which we don't make. Setting them up needs
+    // compute shaders, which OpenGL 3.3 (NVIDIA's on Wayland) lacks, and
+    // without them the device can't be opened at all.
+    descriptor
+        .flags
+        .remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
+    wgpu::Instance::new(descriptor)
+}
+
+/// Setting up the GPU for longer than this is worth a hint at OpenGL.
+const SLOW_GPU: Duration = Duration::from_millis(500);
 
 /// The grid a new window is sized for.
 const INITIAL_GRID: (u32, u32) = (100, 30);
@@ -38,53 +62,64 @@ pub(crate) struct Gpu {
 }
 
 impl Gpu {
-    /// Opens a GPU to draw the window with. `WGPU_BACKEND` (`vulkan`,
-    /// `gl`…) chooses the graphics API.
+    /// Opens a GPU to draw the window with, using `graphics_api`, or the
+    /// other if that can't.
     ///
     /// OpenGL on Wayland draws only on the display it started with, which
     /// arrives through `display` once the event loop has connected to it.
     /// Vulkan doesn't need it, so it starts without waiting.
-    pub(crate) fn new(display: &mpsc::Receiver<OwnedDisplayHandle>) -> anyhow::Result<Self> {
-        let open = |backends: wgpu::Backends| -> anyhow::Result<Self> {
+    pub(crate) fn new(
+        graphics_api: GraphicsApi,
+        display: &mpsc::Receiver<OwnedDisplayHandle>,
+    ) -> anyhow::Result<Self> {
+        let mut received = None;
+        let mut open = |backends: wgpu::Backends| -> anyhow::Result<Self> {
             let display = if backends.contains(wgpu::Backends::GL) {
-                Some(
-                    display
-                        .recv()
-                        .context("the window's display never arrived")?,
-                )
+                if received.is_none() {
+                    received = Some(
+                        display
+                            .recv()
+                            .context("the window's display never arrived")?,
+                    );
+                }
+                received.clone()
             } else {
                 None
             };
             Self::with_backends(backends, display)
         };
-        if let Some(backends) = wgpu::Backends::from_env() {
-            return open(backends);
+        if graphics_api == GraphicsApi::OpenGl {
+            match open(wgpu::Backends::GL) {
+                Ok(gpu) => return Ok(gpu),
+                Err(err) => log::warn!("{err:#}; trying Vulkan instead of OpenGL"),
+            }
         }
         // The native APIs first (Vulkan, Metal, DirectX 12). Setting up
         // OpenGL as well costs ~45 ms on Linux, for a backend only machines
         // without the others need.
-        open(wgpu::Backends::PRIMARY).or_else(|err| {
+        let started = Instant::now();
+        let gpu = open(wgpu::Backends::PRIMARY).or_else(|err| {
             log::info!("{err:#}; trying OpenGL too");
             open(wgpu::Backends::all())
-        })
+        })?;
+        let took = started.elapsed();
+        if took > SLOW_GPU && graphics_api == GraphicsApi::Vulkan {
+            log::warn!(
+                "setting up the GPU took {took:.1?}. On a machine with two GPUs, \
+                 `clackatoo config renderer opengl` may open windows sooner"
+            );
+        }
+        Ok(gpu)
     }
 
     fn with_backends(
         backends: wgpu::Backends,
         display: Option<OwnedDisplayHandle>,
     ) -> anyhow::Result<Self> {
-        let mut descriptor = match display {
-            Some(display) => wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display)),
-            None => wgpu::InstanceDescriptor::new_without_display_handle(),
-        };
-        descriptor.backends = backends;
-        // Checks on indirect draws, which we don't make. Setting them up
-        // needs compute shaders, which OpenGL 3.3 (NVIDIA's on Wayland)
-        // lacks, and without them the device can't be opened at all.
-        descriptor
-            .flags
-            .remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
-        let instance = wgpu::Instance::new(descriptor);
+        let instance = instance(
+            backends,
+            display.map(|display| Box::new(display) as Box<dyn wgpu::wgt::WgpuHasDisplayHandle>),
+        );
         // The window doesn't exist yet, so the adapter can't be chosen by
         // the screen it draws on. Without a preference, wgpu takes the
         // first GPU the system lists, and Mesa's device-select layer lists
@@ -260,21 +295,23 @@ impl App {
 
         let mut gpu = startup.gpu.join().map_err(join("GPU"))??;
         let gpu_ready = self.started.elapsed();
-        let surface = gpu.instance.create_surface(Arc::clone(&window))?;
+        let mut surface = gpu.instance.create_surface(Arc::clone(&window))?;
         let config = match gpu.configure(&surface, window.inner_size()) {
             Ok(config) => config,
             Err(err) => {
-                // The guessed GPU can't show this window: ask for one that
-                // can, now that there's a window to ask about.
+                // The guessed GPU, or graphics API, can't show this window:
+                // ask every API for a GPU that can, now that there's a
+                // window to ask about.
                 log::warn!("{err:#}; looking for another GPU");
-                let adapter = pollster::block_on(gpu.instance.request_adapter(
-                    &wgpu::RequestAdapterOptions {
+                let instance = instance(wgpu::Backends::all(), Some(Box::new(Arc::clone(&window))));
+                surface = instance.create_surface(Arc::clone(&window))?;
+                let adapter =
+                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                         compatible_surface: Some(&surface),
                         ..Default::default()
-                    },
-                ))
-                .context("no GPU can draw to this window")?;
-                gpu = Gpu::open(gpu.instance.clone(), adapter)?;
+                    }))
+                    .context("no GPU can draw to this window")?;
+                gpu = Gpu::open(instance, adapter)?;
                 gpu.configure(&surface, window.inner_size())?
             }
         };

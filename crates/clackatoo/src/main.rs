@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod config;
 mod ping;
 mod render;
 
@@ -30,22 +31,39 @@ struct Cli {
     window: WindowArgs,
 }
 
+/// The window's options. Each defaults to the setting in `client.toml`
+/// (see `clackatoo config`).
 #[derive(Debug, Args)]
 struct WindowArgs {
     /// The font family to draw text with. Defaults to your system's
     /// monospace font.
     #[arg(long, value_name = "FAMILY", env = "CLACKATOO_FONT")]
     font: Option<String>,
-    /// The text size, in points.
-    #[arg(
-        long,
-        value_name = "POINTS",
-        default_value_t = 12.0,
-        env = "CLACKATOO_FONT_SIZE"
-    )]
-    font_size: f32,
+    /// The text size, in points. Defaults to 12.
+    #[arg(long, value_name = "POINTS", env = "CLACKATOO_FONT_SIZE")]
+    font_size: Option<f32>,
+    /// The graphics API to draw with. Defaults to Vulkan.
+    #[arg(long, value_name = "API", env = "CLACKATOO_RENDERER")]
+    renderer: Option<RendererArg>,
     #[command(flatten)]
     remote: RemoteArgs,
+}
+
+/// [`clackatoo_gui::GraphicsApi`], as the command line spells it.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RendererArg {
+    Vulkan,
+    #[value(name = "opengl")]
+    OpenGl,
+}
+
+impl From<RendererArg> for clackatoo_gui::GraphicsApi {
+    fn from(renderer: RendererArg) -> Self {
+        match renderer {
+            RendererArg::Vulkan => Self::Vulkan,
+            RendererArg::OpenGl => Self::OpenGl,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -101,10 +119,25 @@ enum Command {
     /// Stop the daemon, closing every terminal and hanging up their
     /// programs. Works on a daemon from any version of clackatoo.
     Stop,
+    /// Show or change the window's settings in client.toml. With no
+    /// arguments, shows them all.
+    Config(ConfigArgs),
     /// Relay between standard input and output and the daemon, starting it
     /// if it isn't running. `--remote` runs this on the remote machine,
     /// through ssh.
     Bridge(BridgeArgs),
+}
+
+#[derive(Debug, Args)]
+struct ConfigArgs {
+    /// The setting: font, font-size or renderer.
+    name: Option<String>,
+    /// The value to set it to. Without one, prints its value.
+    #[arg(conflicts_with = "unset")]
+    value: Option<String>,
+    /// Remove the setting, so it takes its default.
+    #[arg(long, requires = "name")]
+    unset: bool,
 }
 
 #[derive(Debug, Args)]
@@ -297,6 +330,16 @@ fn run(command: Command) -> anyhow::Result<()> {
                 },
             )
         }
+        Command::Config(args) => {
+            let path = config::path().context("neither $XDG_CONFIG_HOME nor $HOME is set")?;
+            match (args.name, args.value) {
+                (None, _) => print!("{}", config::show_all(&path)?),
+                (Some(name), _) if args.unset => config::unset(&path, &name)?,
+                (Some(name), None) => println!("{}", config::get(&path, &name)?),
+                (Some(name), Some(value)) => config::set(&path, &name, &value)?,
+            }
+            Ok(())
+        }
         Command::Bridge(args) => {
             remote::bridge(&RuntimeDir::for_current_user(), args.replace)?;
             Ok(())
@@ -306,13 +349,19 @@ fn run(command: Command) -> anyhow::Result<()> {
 
 fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    let config = config::load();
     clackatoo_gui::run(clackatoo_gui::Options {
         runtime: RuntimeDir::for_current_user(),
         remote: args.remote.remote(),
         font: clackatoo_gui::FontOptions {
-            family: args.font.clone(),
-            size: args.font_size,
+            family: args.font.clone().or(config.font),
+            size: args.font_size.or(config.font_size).unwrap_or(12.0),
         },
+        graphics_api: args
+            .renderer
+            .map(Into::into)
+            .or(config.renderer)
+            .unwrap_or_default(),
     })
 }
 

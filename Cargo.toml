@@ -35,6 +35,8 @@ simdutf8 = "0.1"
 slab = "0.4"
 swash = "0.2"
 thiserror = "2.0"
+# Edits keep a config file's comments and layout.
+toml_edit = "0.25"
 unicode-width = "0.2"
 vte = { version = "0.15", default-features = false, features = ["std"] }
 wgpu = "30"

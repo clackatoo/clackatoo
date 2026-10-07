@@ -274,3 +274,27 @@ fn ping_times_requests_and_keys_and_cleans_up() {
     clackatoo(runtime.path(), &["stop"]);
     wait(daemon);
 }
+
+#[test]
+fn config_sets_shows_and_unsets_settings() {
+    let home = tempfile::tempdir().unwrap();
+    let config = |args: &[&str]| {
+        Command::new(BINARY)
+            .arg("config")
+            .args(args)
+            .env("XDG_CONFIG_HOME", home.path())
+            .output()
+            .expect("clackatoo runs")
+    };
+    assert_eq!(stdout(&config(&["renderer"])), "vulkan (the default)\n");
+    stdout(&config(&["renderer", "opengl"]));
+    assert_eq!(stdout(&config(&["renderer"])), "opengl\n");
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("clackatoo/client.toml")).unwrap(),
+        "renderer = \"opengl\"\n"
+    );
+    let refused = config(&["renderer", "metal"]);
+    assert!(!refused.status.success());
+    stdout(&config(&["--unset", "renderer"]));
+    assert_eq!(stdout(&config(&["renderer"])), "vulkan (the default)\n");
+}
