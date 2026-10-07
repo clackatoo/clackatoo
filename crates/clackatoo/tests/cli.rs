@@ -253,3 +253,24 @@ fn the_bridge_relays_over_pipes() {
         "{answer:?}"
     );
 }
+
+#[test]
+fn ping_times_requests_and_keys_and_cleans_up() {
+    let runtime = Runtime::new();
+    let daemon = daemon(runtime.path());
+    let output = stdout(&clackatoo(
+        runtime.path(),
+        &["ping", "--count", "3", "--interval", "0"],
+    ));
+    let rounds = output
+        .lines()
+        .filter(|line| line.starts_with("round ") && line.contains("key echo"))
+        .count();
+    assert_eq!(rounds, 3, "{output}");
+    assert!(output.contains("key echo  min "), "{output}");
+    // Its terminal is gone.
+    let listed = stdout(&clackatoo(runtime.path(), &["list"]));
+    assert_eq!(listed.lines().count(), 1, "{listed}");
+    clackatoo(runtime.path(), &["stop"]);
+    wait(daemon);
+}

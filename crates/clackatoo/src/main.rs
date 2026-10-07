@@ -2,11 +2,13 @@
 
 #![forbid(unsafe_code)]
 
+mod ping;
 mod render;
 
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clackatoo_daemon::remote::{self, Remote, RemoteError};
@@ -90,6 +92,9 @@ enum Command {
     Capture(Capture),
     /// Close a terminal, hanging up its program.
     Close(Target),
+    /// Time the daemon's answers, and keys coming back from a program, as
+    /// a window would type them. Most useful with `--remote`.
+    Ping(Ping),
     /// Change a terminal's size. Its program is told, and lines on screen
     /// are rewrapped to the new width.
     Resize(Resize),
@@ -174,6 +179,19 @@ struct New {
 }
 
 #[derive(Debug, Args)]
+struct Ping {
+    /// How many rounds to time.
+    #[arg(short, long, default_value_t = 10)]
+    count: u32,
+    /// The pause before each request and each key, in milliseconds, like
+    /// the gap between keys when typing.
+    #[arg(short, long, value_name = "MS", default_value_t = 200)]
+    interval: u64,
+    #[command(flatten)]
+    connection: Connection,
+}
+
+#[derive(Debug, Args)]
 struct Run {
     #[command(flatten)]
     target: Target,
@@ -250,6 +268,28 @@ fn run(command: Command) -> anyhow::Result<()> {
                 eprintln!("clackatoo: no daemon is running");
             }
             Ok(())
+        }
+        Command::Ping(args) => {
+            let started = Instant::now();
+            let mut client = connect(&args.connection)?;
+            let daemon = args
+                .connection
+                .remote
+                .remote
+                .clone()
+                .unwrap_or_else(|| "the daemon".into());
+            println!(
+                "connected to {daemon} in {:.1} ms",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+            ping::ping(
+                &mut client,
+                &daemon,
+                &ping::Rounds {
+                    count: args.count,
+                    interval: Duration::from_millis(args.interval),
+                },
+            )
         }
         Command::Bridge(args) => {
             remote::bridge(&RuntimeDir::for_current_user(), args.replace)?;
