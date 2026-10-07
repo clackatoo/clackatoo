@@ -4,9 +4,13 @@
 
 mod render;
 
+use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{ExitCode, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, RuntimeDir};
@@ -14,11 +18,32 @@ use clackatoo_protocol::{NewTerminal, Size, TerminalId};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// A fast, lightweight terminal workspace.
+///
+/// With no command, opens a window on your newest terminal, or a new one,
+/// starting the daemon first if it isn't running.
 #[derive(Debug, Parser)]
-#[command(version)]
+#[command(version, args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    #[command(flatten)]
+    window: WindowArgs,
+}
+
+#[derive(Debug, Args)]
+struct WindowArgs {
+    /// The font family to draw text with. Defaults to your system's
+    /// monospace font.
+    #[arg(long, value_name = "FAMILY", env = "CLACKATOO_FONT")]
+    font: Option<String>,
+    /// The text size, in points.
+    #[arg(
+        long,
+        value_name = "POINTS",
+        default_value_t = 12.0,
+        env = "CLACKATOO_FONT_SIZE"
+    )]
+    font_size: f32,
 }
 
 #[derive(Debug, Subcommand)]
@@ -143,7 +168,11 @@ struct Capture {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli.command) {
+    let result = match cli.command {
+        Some(command) => run(command),
+        None => open_window(&cli.window),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("clackatoo: {err:#}");
@@ -172,6 +201,71 @@ fn run(command: Command) -> anyhow::Result<()> {
             let target = &resize.target;
             connect(&target.connection)?.resize(TerminalId(target.terminal), resize.size)?;
             Ok(())
+        }
+    }
+}
+
+fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    let socket = start_daemon_if_needed(&RuntimeDir::for_current_user())?;
+    clackatoo_gui::run(clackatoo_gui::Options {
+        socket,
+        font: clackatoo_gui::FontOptions {
+            family: args.font.clone(),
+            size: args.font_size,
+        },
+    })
+}
+
+/// The daemon's socket, starting a daemon in the background if none is
+/// running. It logs to `daemon.log` in the runtime directory, and keeps
+/// running after the window closes.
+fn start_daemon_if_needed(runtime: &RuntimeDir) -> anyhow::Result<PathBuf> {
+    let socket = runtime.socket_path();
+    match Client::connect(&socket) {
+        Ok(_) => return Ok(socket),
+        Err(ClientError::Connect(_)) => {}
+        Err(err @ ClientError::VersionMismatch { .. }) => {
+            return Err(err).context("an older daemon is running; stop it, then try again");
+        }
+        Err(err) => return Err(err.into()),
+    }
+
+    runtime.create_private()?;
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(runtime.path().join("daemon.log"))?;
+    let mut daemon = std::process::Command::new(std::env::current_exe()?)
+        .arg("daemon")
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        // A process group of its own, so it isn't hung up along with the
+        // terminal it was started from.
+        .process_group(0)
+        .spawn()
+        .context("could not start the daemon")?;
+    // Reaped if it exits while we run, as when another window's daemon won
+    // the race to start.
+    std::thread::spawn(move || daemon.wait());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match Client::connect(&socket) {
+            Ok(_) => return Ok(socket),
+            Err(ClientError::Connect(_)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "the daemon didn't start; see {}",
+                        runtime.path().join("daemon.log").display()
+                    )
+                });
+            }
         }
     }
 }

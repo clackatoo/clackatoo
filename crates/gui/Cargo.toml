@@ -1,0 +1,30 @@
+[package]
+name = "clackatoo-gui"
+description = "clackatoo's window: draws daemon views on the GPU and sends input back."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# See crates/term/Cargo.toml: keeps `cargo bench -- OPTIONS` working.
+bench = false
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+clackatoo-daemon.workspace = true
+clackatoo-protocol.workspace = true
+clackatoo-term.workspace = true
+fontique.workspace = true
+log.workspace = true
+pollster.workspace = true
+swash.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+
+[dev-dependencies]
+png.workspace = true
+
+[lints]
+workspace = true

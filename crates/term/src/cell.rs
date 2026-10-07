@@ -85,11 +85,17 @@ impl Cell {
         Self { style, ..self }
     }
 
-    pub(crate) fn is_wide(self) -> bool {
+    /// Whether the cell holds a double-width character, which also covers
+    /// the cell to its right.
+    #[must_use]
+    pub fn is_wide(self) -> bool {
         self.flags.contains(CellFlags::WIDE)
     }
 
-    pub(crate) fn is_wide_spacer(self) -> bool {
+    /// Whether the cell is the right half of a double-width character, and
+    /// holds nothing of its own.
+    #[must_use]
+    pub fn is_wide_spacer(self) -> bool {
         self.flags.contains(CellFlags::WIDE_SPACER)
     }
 

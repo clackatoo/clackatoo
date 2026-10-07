@@ -75,7 +75,12 @@ impl RuntimeDir {
 
     /// Creates the directory, owner-only, or checks that an existing one is
     /// owner-only. In `/tmp`, another user could have created it first.
-    fn create_private(&self) -> Result<(), LockError> {
+    ///
+    /// # Errors
+    ///
+    /// [`LockError::Insecure`] if the directory exists but other users could
+    /// get into it, or [`LockError::Io`] if it can't be made.
+    pub fn create_private(&self) -> Result<(), LockError> {
         match DirBuilder::new()
             .recursive(false)
             .mode(0o700)
