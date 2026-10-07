@@ -148,10 +148,10 @@ impl Row {
         }
     }
 
-    /// Writes narrow characters from `col` onwards, one per cell, in a style
-    /// interned in this row by [`intern`](Self::intern). They must fit in the
-    /// row, and none may be wide or zero-width.
-    pub(crate) fn write_narrow(&mut self, col: usize, text: &[char], style: StyleIndex) {
+    /// Writes printable ASCII from `col` onwards, one character per cell, in
+    /// a style interned in this row by [`intern`](Self::intern). The text
+    /// must fit in the row.
+    pub(crate) fn write_ascii(&mut self, col: usize, text: &[u8], style: StyleIndex) {
         if text.is_empty() {
             return;
         }
@@ -161,8 +161,8 @@ impl Row {
         self.unlink_wide(cols.start);
         self.unlink_wide(cols.end - 1);
         self.remove_graphemes(&cols);
-        for (cell, &ch) in self.cells[cols].iter_mut().zip(text) {
-            *cell = Cell::new(ch, style, CellFlags::empty());
+        for (cell, &byte) in self.cells[cols].iter_mut().zip(text) {
+            *cell = Cell::new(char::from(byte), style, CellFlags::empty());
         }
     }
 

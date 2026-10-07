@@ -1,14 +1,13 @@
 //! Turns parsed escape sequences into emulator operations.
 //!
-//! `vte` splits the byte stream into printable characters, C0 control
-//! characters and escape sequences (ESC, CSI, OSC, DCS). This module decides
+//! The parser splits the byte stream into text, control characters and
+//! escape sequences (ESC, CSI, OSC, DCS). This module decides
 //! what each one means. The supported set is what shells, ncurses apps (htop)
 //! and vim use with `TERM=xterm-256color`. Anything else is logged at trace
 //! level and ignored, the same way xterm ignores what it doesn't know.
 
-use vte::{Params, Perform};
-
 use crate::charset::{Charset, Slot};
+use crate::parser::{Params, Perform};
 use crate::sgr;
 use crate::terminal::Emulator;
 
@@ -17,18 +16,12 @@ use crate::terminal::Emulator;
 /// so it must always be sent.
 const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
 
-/// Text is queued rather than printed straight away (see
-/// [`Emulator::queue_text`]), so every other method must call
-/// [`Emulator::flush_text`] before acting. DCS (`hook`, `put`, `unhook`)
-/// keeps vte's do-nothing defaults for now; implementing it means flushing
-/// there too.
 impl Perform for Emulator {
-    fn print(&mut self, ch: char) {
-        self.queue_text(ch);
+    fn print(&mut self, text: &str) {
+        self.print_text(text);
     }
 
     fn execute(&mut self, byte: u8) {
-        self.flush_text();
         match byte {
             // BEL. A bell will reach clients once they can show one.
             0x07 => {}
@@ -45,7 +38,6 @@ impl Perform for Emulator {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        self.flush_text();
         if ignore {
             log::trace!("ignoring CSI {action} with too many parameters or intermediates");
             return;
@@ -119,7 +111,6 @@ impl Perform for Emulator {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
-        self.flush_text();
         if ignore {
             log::trace!("ignoring ESC {byte:#04x} with too many intermediates");
             return;
@@ -148,7 +139,6 @@ impl Perform for Emulator {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        self.flush_text();
         match params {
             // OSC 0 sets the icon name and title, OSC 2 just the title. With
             // no icons to name, both set the title.
@@ -163,7 +153,7 @@ impl Perform for Emulator {
     }
 }
 
-/// Whether a sequence came without parameters. vte reports `CSI s` as having
+/// Whether a sequence came without parameters. The parser reports `CSI s` as having
 /// one parameter of 0.
 fn no_params(params: &Params) -> bool {
     params.len() <= 1 && params.iter().flatten().all(|&value| value == 0)

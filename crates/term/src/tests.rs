@@ -172,7 +172,7 @@ mod printing {
 
     #[test]
     fn a_character_split_between_reads_loses_nothing() {
-        // Regression test for the vte bug worked around in `utf8.rs`.
+        // vte, the parser clackatoo used to use, dropped the `e` here.
         let mut t = terminal(10, 2);
         t.advance(b"\xcc");
         t.advance(b"\x81e\xcc\x81");

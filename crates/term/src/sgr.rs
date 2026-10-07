@@ -121,7 +121,7 @@ fn underline(kind: u16) -> Underline {
 mod tests {
     use super::*;
 
-    /// Parses `spec` the way vte would: `;` separates parameters and `:`
+    /// Parses `spec` the way the parser would: `;` separates parameters and `:`
     /// separates subparameters, with an empty value meaning 0.
     fn sgr(spec: &str) -> Style {
         let mut style = Style::DEFAULT;

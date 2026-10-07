@@ -7,15 +7,11 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::charset::Charsets;
 use crate::grid::Grid;
+use crate::parser::Parser;
 use crate::row::Row;
 use crate::size::Size;
 use crate::style::Style;
 use crate::tabs::TabStops;
-use crate::utf8::Utf8Carry;
-
-/// The most text queued before it's printed, so a long run doesn't grow the
-/// queue without bound.
-const MAX_QUEUED_TEXT: usize = 4096;
 
 /// Settings fixed when a terminal is created.
 #[derive(Clone, Debug)]
@@ -51,19 +47,10 @@ pub struct Cursor {
 /// answer, such as "where is the cursor?". Their answers collect in a buffer
 /// that the owner drains with [`take_replies`](Self::take_replies) and writes
 /// back to the program.
+#[derive(Debug)]
 pub struct Terminal {
-    parser: vte::Parser,
+    parser: Parser,
     emulator: Emulator,
-    utf8: Utf8Carry,
-}
-
-impl std::fmt::Debug for Terminal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // vte's parser doesn't implement Debug, and its state is noise anyway.
-        f.debug_struct("Terminal")
-            .field("emulator", &self.emulator)
-            .finish_non_exhaustive()
-    }
 }
 
 impl Terminal {
@@ -71,9 +58,8 @@ impl Terminal {
     #[must_use]
     pub fn new(size: Size, config: &Config) -> Self {
         Self {
-            parser: vte::Parser::new(),
+            parser: Parser::new(),
             emulator: Emulator::new(size, config),
-            utf8: Utf8Carry::default(),
         }
     }
 
@@ -82,11 +68,7 @@ impl Terminal {
     /// Splitting a stream into calls never changes the result. An escape
     /// sequence or UTF-8 character cut in half is completed by the next call.
     pub fn advance(&mut self, bytes: &[u8]) {
-        // See `utf8.rs` for why chunks are re-split on character boundaries.
-        self.utf8.split(bytes, |chunk| {
-            self.parser.advance(&mut self.emulator, chunk);
-        });
-        self.emulator.flush_text();
+        self.parser.advance(&mut self.emulator, bytes);
     }
 
     /// Takes the replies to queries seen so far. These must be written back to
@@ -213,10 +195,6 @@ bitflags! {
 /// U+200D ZERO WIDTH JOINER, which glues emoji like 👩‍💻 into one grapheme.
 const ZWJ: char = '\u{200D}';
 
-fn is_printable_ascii(ch: char) -> bool {
-    matches!(ch, ' '..='~')
-}
-
 /// The column of the character just before the cursor on its line, if
 /// there is one. That's the cursor's own cell during a pending wrap, since
 /// the cursor hasn't moved off the character it just printed.
@@ -290,7 +268,7 @@ pub(crate) struct SavedCursor {
 /// All of a terminal's state apart from the parser.
 ///
 /// Split from [`Terminal`] so the parser can borrow it mutably as its
-/// [`vte::Perform`] handler. The handler lives in `dispatch.rs` and turns
+/// [`Perform`](crate::parser::Perform) handler. The handler lives in `dispatch.rs` and turns
 /// escape sequences into calls to the operations here.
 #[derive(Debug)]
 pub(crate) struct Emulator {
@@ -312,9 +290,6 @@ pub(crate) struct Emulator {
     pub(crate) replies: Vec<u8>,
     /// The last character printed, for REP (repeat).
     last_printed: Option<char>,
-    /// Printable characters the parser has passed on but that aren't on the
-    /// grid yet. See [`Emulator::queue_text`].
-    text: Vec<char>,
     /// Prints everything through the simple per-character path, so tests can
     /// check the fast path against it.
     #[cfg(test)]
@@ -339,7 +314,6 @@ impl Emulator {
             title: String::new(),
             replies: Vec::new(),
             last_printed: None,
-            text: Vec::new(),
             #[cfg(test)]
             simple_print: false,
         }
@@ -374,38 +348,15 @@ impl Emulator {
 
     // --- Printing ---------------------------------------------------------
 
-    /// Queues a printable character from the parser.
-    ///
-    /// The parser hands over text one character at a time. Printing it in
-    /// runs instead lets a whole run share one row lookup and one style
-    /// lookup, and lets plain ASCII go straight into the cells. Everything
-    /// that isn't text calls [`flush_text`](Self::flush_text) first, so text
-    /// always lands before whatever followed it.
-    pub(crate) fn queue_text(&mut self, ch: char) {
-        self.text.push(ch);
-        if self.text.len() == MAX_QUEUED_TEXT {
-            self.flush_text();
-        }
-    }
-
-    /// Prints the queued text.
-    pub(crate) fn flush_text(&mut self) {
-        if self.text.is_empty() {
-            return;
-        }
-        let text = std::mem::take(&mut self.text);
-        self.print_run(&text);
-        self.text = text;
-        self.text.clear();
-    }
-
-    fn print_run(&mut self, mut text: &[char]) {
+    /// Prints text from the parser, which never contains control
+    /// characters.
+    pub(crate) fn print_text(&mut self, mut text: &str) {
         // Insert mode is rare enough to take the simple path.
         let simple = self.modes.contains(Modes::INSERT);
         #[cfg(test)]
         let simple = simple || self.simple_print;
         if simple {
-            for &ch in text {
+            for ch in text.chars() {
                 self.print(ch);
             }
             return;
@@ -422,11 +373,12 @@ impl Emulator {
     /// Prints as much of `text` as goes on the cursor's line: the hot path of
     /// the whole emulator. It means the same as [`print`](Self::print) on
     /// each character in turn, but looks the row and style up once per line,
-    /// and writes runs of plain ASCII in one go. Insert mode must be off.
+    /// and writes runs of ASCII straight from the bytes. Insert mode must be
+    /// off.
     ///
-    /// Returns how many characters it used, and whether the line must wrap
-    /// before the next one.
-    fn print_on_line(&mut self, text: &[char]) -> (usize, bool) {
+    /// Returns how many bytes of `text` it used, and whether the line must
+    /// wrap before the rest.
+    fn print_on_line(&mut self, text: &str) -> (usize, bool) {
         let width = self.width();
         let autowrap = self.modes.contains(Modes::AUTOWRAP);
         let Self {
@@ -447,27 +399,35 @@ impl Emulator {
         let style = row.intern(&cursor.pen);
         let verbatim = cursor.charsets.maps_ascii_verbatim();
 
+        let bytes = text.as_bytes();
         let mut used = 0;
-        while let Some(&ch) = text.get(used) {
-            if verbatim && !joins && is_printable_ascii(ch) {
+        while let Some(&byte) = bytes.get(used) {
+            // The parser never passes control characters, so any ASCII byte
+            // is printable.
+            if byte.is_ascii() && verbatim && !joins {
                 if cursor.pending_wrap {
                     return (used, true);
                 }
-                let run = text[used..]
+                let run = bytes[used..]
                     .iter()
                     .take(width - cursor.col)
-                    .take_while(|&&ch| is_printable_ascii(ch))
+                    .take_while(|byte| byte.is_ascii())
                     .count();
-                row.write_narrow(cursor.col, &text[used..used + run], style);
+                row.write_ascii(cursor.col, &bytes[used..used + run], style);
                 advance(cursor, run, width, autowrap);
                 used += run;
-                *last_printed = Some(text[used - 1]);
+                *last_printed = Some(char::from(bytes[used - 1]));
                 continue;
             }
 
+            let ch = text[used..]
+                .chars()
+                .next()
+                .expect("used is a char boundary");
+            let len = ch.len_utf8();
             let ch = cursor.charsets.map(ch);
             match ch.width() {
-                // Control characters only get here as invalid input.
+                // Control characters never get here, but drop them if so.
                 None => {}
                 Some(cells) if cells == 0 || joins => {
                     joins = match previous_cell(row, cursor) {
@@ -496,7 +456,7 @@ impl Emulator {
                     }
                 }
             }
-            used += 1;
+            used += len;
         }
         (used, false)
     }

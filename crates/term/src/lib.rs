@@ -15,6 +15,7 @@ mod cell;
 mod charset;
 mod dispatch;
 mod grid;
+mod parser;
 pub mod recording;
 mod row;
 mod sgr;
@@ -22,7 +23,6 @@ mod size;
 mod style;
 mod tabs;
 mod terminal;
-mod utf8;
 
 #[cfg(test)]
 mod tests;
