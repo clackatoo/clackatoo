@@ -5,9 +5,10 @@
 //! always builds a fresh release binary for it to measure. Every daemon it
 //! starts has a runtime directory of its own, so it never touches yours.
 //!
-//! The protocol can't push changes to clients yet, so the harness learns
-//! that a terminal has caught up by polling: either the terminal's title,
-//! which a script sets when it finishes, or its screen.
+//! Most groups learn that a terminal has caught up by polling: either the
+//! terminal's title, which a script sets when it finishes, or its screen.
+//! The latency group also follows a terminal's view, as the window does,
+//! to time the path the window's updates take.
 
 // Sizes and counts here are far below 2^52, where converting to f64 starts
 // losing precision.
@@ -16,6 +17,7 @@
 mod daemon;
 mod pty;
 mod report;
+mod window;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -23,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clackatoo_daemon::Client;
-use clackatoo_protocol::{NewTerminal, Size, TerminalId};
+use clackatoo_protocol::{Event, NewTerminal, Size, TerminalId, View, ViewUpdate};
 
 use crate::workloads::{self, Workload};
 use daemon::DaemonProcess;
@@ -88,7 +90,8 @@ usage: cargo bench -p clackatoo --bench e2e -- [OPTIONS] [GROUP...]
 
 Measures the release clackatoo binary end to end. Without GROUPs, runs
 every group: size, startup, latency, throughput (with cpu), memory,
-idle.
+idle, window. The window group needs a display, and is skipped without
+one.
 
 options:
   --save-baseline NAME  compare with baseline NAME, then replace it
@@ -186,6 +189,9 @@ fn run(paths: &Paths<'_>) -> anyhow::Result<()> {
     }
     if options.wants("idle") {
         idle(binary, &mut report)?;
+    }
+    if options.wants("window") {
+        window::measure(binary, &mut report)?;
     }
     report.finish()
 }
@@ -307,7 +313,86 @@ fn latency(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
         Unit::Seconds,
         &captures,
     );
+
+    // The path the window's updates take: following the view, and timing
+    // each key until the update showing it arrives.
+    let mut view = attach(&mut client, terminal)?;
+    let pushed = view_latency(&mut client, terminal, &mut view, KEYPRESSES)?;
+    report.record(
+        "latency/view",
+        "keypress to view update",
+        Unit::Seconds,
+        &pushed,
+    );
+
+    // The same while another terminal floods, which must not hold up the
+    // terminal being typed in.
+    let dir = tempfile::tempdir()?;
+    let workload = workloads::generated(FLOOD_LEN)
+        .into_iter()
+        .find(|workload| workload.name == "ascii")
+        .context("there is an ascii workload")?;
+    let file = write_workload(dir.path(), &workload)?;
+    let file = file.to_str().context("temporary paths are UTF-8")?;
+    let flooder = new_terminal(
+        &mut client,
+        workload.size,
+        &["sh", "-c", r#"while :; do cat "$1"; done"#, "sh", file],
+    )?;
+    let during = view_latency(&mut client, terminal, &mut view, KEYPRESSES / 4)?;
+    client.close_terminal(flooder)?;
+    report.record(
+        "latency/view-flood",
+        "keypress to view update, while another floods",
+        Unit::Seconds,
+        &during,
+    );
     Ok(())
+}
+
+/// Follows `terminal`'s view, returning the first snapshot.
+fn attach(client: &mut Client, terminal: TerminalId) -> anyhow::Result<View> {
+    client.set_read_timeout(Some(TIMEOUT))?;
+    client.attach(terminal)?;
+    let Event::View {
+        update: ViewUpdate::Snapshot(view),
+        ..
+    } = client.next_event()?
+    else {
+        anyhow::bail!("attaching didn't start with a snapshot");
+    };
+    client.frame_done(terminal)?;
+    Ok(view)
+}
+
+/// Types `count` keys into `terminal` (after a tenth as many to warm up),
+/// timing each until a view update shows its echo.
+fn view_latency(
+    client: &mut Client,
+    terminal: TerminalId,
+    view: &mut View,
+    count: usize,
+) -> anyhow::Result<Vec<f64>> {
+    let mut times = Vec::new();
+    for i in 0..count + count / 10 {
+        let letter = char::from(b'a' + u8::try_from(i % 26)?);
+        let started = Instant::now();
+        client.send_input(terminal, format!("\r{letter}").as_bytes())?;
+        loop {
+            let Event::View { update, .. } = client.next_event()?;
+            view.apply(update);
+            client.frame_done(terminal)?;
+            let echoed = view
+                .grid()
+                .and_then(|grid| grid.lines.first())
+                .is_some_and(|line| line.text().starts_with(letter));
+            if echoed {
+                break;
+            }
+        }
+        times.push(started.elapsed());
+    }
+    Ok(seconds(&times[count / 10..]))
 }
 
 fn throughput(binary: &Path, report: &mut Report) -> anyhow::Result<()> {

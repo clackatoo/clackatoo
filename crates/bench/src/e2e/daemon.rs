@@ -18,7 +18,7 @@ const MAX_SOCKET_PATH: usize = 107;
 pub(crate) struct DaemonProcess {
     child: Child,
     socket: PathBuf,
-    _runtime_dir: tempfile::TempDir,
+    runtime_dir: tempfile::TempDir,
 }
 
 impl DaemonProcess {
@@ -48,7 +48,7 @@ impl DaemonProcess {
         let mut daemon = Self {
             child,
             socket,
-            _runtime_dir: runtime_dir,
+            runtime_dir,
         };
         let deadline = started + Duration::from_secs(5);
         loop {
@@ -70,6 +70,12 @@ impl DaemonProcess {
             );
             std::thread::sleep(Duration::from_micros(50));
         }
+    }
+
+    /// The runtime directory the daemon runs in, for clients that find the
+    /// daemon through `XDG_RUNTIME_DIR`.
+    pub(crate) fn runtime_dir(&self) -> &Path {
+        self.runtime_dir.path()
     }
 
     /// The socket clients connect to.

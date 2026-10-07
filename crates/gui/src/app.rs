@@ -39,7 +39,19 @@ pub(crate) struct Gpu {
 
 impl Gpu {
     pub(crate) fn new() -> anyhow::Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        // The native APIs first (Vulkan, Metal, DirectX 12). Setting up
+        // OpenGL as well costs ~45 ms on Linux, for a backend only machines
+        // without the others need.
+        Self::with_backends(wgpu::Backends::PRIMARY).or_else(|err| {
+            log::info!("{err:#}; trying OpenGL too");
+            Self::with_backends(wgpu::Backends::all())
+        })
+    }
+
+    fn with_backends(backends: wgpu::Backends) -> anyhow::Result<Self> {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = backends;
+        let instance = wgpu::Instance::new(descriptor);
         // The window doesn't exist yet, so the adapter can't be chosen by
         // the screen it draws on. On desktops with two GPUs, the discrete
         // one usually drives the screen; the integrated one may not be able
@@ -339,6 +351,7 @@ impl App {
     }
 
     fn draw(&mut self) {
+        let started = Instant::now();
         let message = match (&self.pane, &self.notice, self.grid_size()) {
             (None, Some(notice), Some(size)) => Some(Screen::message(&notice.lines(), size)),
             _ => None,
@@ -386,6 +399,8 @@ impl App {
                 return;
             }
         }
+        // For measuring: `RUST_LOG=clackatoo_gui::frame=trace`.
+        log::trace!(target: "clackatoo_gui::frame", "frame {}", started.elapsed().as_micros());
         if !self.first_frame_drawn {
             self.first_frame_drawn = true;
             log::info!("first frame after {:.1?}", self.started.elapsed());

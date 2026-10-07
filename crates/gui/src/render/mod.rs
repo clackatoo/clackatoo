@@ -120,6 +120,35 @@ pub(crate) struct Renderer {
     glyph_instances: Vec<Glyph>,
     /// Glyphs drawn over the overlays, such as a label's text.
     label_glyphs: Vec<Glyph>,
+    /// Each character's glyph in each variant, found once: finding it
+    /// means asking the fonts, then the atlas.
+    char_glyphs: CharGlyphs,
+    /// Holds a cell's text when it has more than one codepoint.
+    cell_text: String,
+}
+
+/// Glyphs by character and variant, with ASCII in a table of its own, as
+/// it's nearly everything a terminal shows.
+#[derive(Debug)]
+struct CharGlyphs {
+    ascii: Box<[[Cached; 4]; 128]>,
+    other: std::collections::HashMap<(char, Variant), Option<AtlasGlyph>>,
+}
+
+/// A table entry: looked up or not, and if so, the glyph, if any.
+#[derive(Clone, Copy, Debug)]
+enum Cached {
+    Unknown,
+    Known(Option<AtlasGlyph>),
+}
+
+impl CharGlyphs {
+    fn new() -> Self {
+        Self {
+            ascii: Box::new([[Cached::Unknown; 4]; 128]),
+            other: std::collections::HashMap::new(),
+        }
+    }
 }
 
 impl Renderer {
@@ -217,12 +246,40 @@ impl Renderer {
             overlays: Vec::new(),
             glyph_instances: Vec::new(),
             label_glyphs: Vec::new(),
+            char_glyphs: CharGlyphs::new(),
+            cell_text: String::new(),
         }
     }
 
     /// Throws away every rasterised glyph, after the text size changed.
     pub(crate) fn forget_glyphs(&mut self) {
         self.glyphs = GlyphCache::new();
+        self.char_glyphs = CharGlyphs::new();
+    }
+
+    /// The glyph for `ch` in `variant`, if any font has it.
+    fn char_glyph(&mut self, fonts: &mut Fonts, ch: char, variant: Variant) -> Option<AtlasGlyph> {
+        let glyphs = &mut self.glyphs;
+        let mut find = || {
+            let (face, glyph) = fonts.glyph(ch, variant)?;
+            glyphs.get(fonts, face, glyph)
+        };
+        match usize::try_from(u32::from(ch)) {
+            Ok(code) if code < 128 => {
+                let slot = &mut self.char_glyphs.ascii[code][variant as usize];
+                if let Cached::Known(glyph) = *slot {
+                    return glyph;
+                }
+                let glyph = find();
+                *slot = Cached::Known(glyph);
+                glyph
+            }
+            _ => *self
+                .char_glyphs
+                .other
+                .entry((ch, variant))
+                .or_insert_with(find),
+        }
     }
 
     /// Draws `screen` into `target`, which is `size` physical pixels, with
@@ -536,13 +593,18 @@ impl Renderer {
             }
             return;
         }
-        let mut text = String::new();
+        if !cell.has_grapheme() {
+            if let Some(atlas) = self.char_glyph(fonts, base, variant) {
+                self.glyph_instances
+                    .push(place(&atlas, pen, cell_box, color, fonts.cell.baseline));
+            }
+            return;
+        }
+        let mut text = std::mem::take(&mut self.cell_text);
+        text.clear();
         row.push_text(col, &mut text);
         for (index, ch) in text.chars().enumerate() {
-            let Some((face, glyph)) = fonts.glyph(ch, variant) else {
-                continue;
-            };
-            let Some(atlas) = self.glyphs.get(fonts, face, glyph) else {
+            let Some(atlas) = self.char_glyph(fonts, ch, variant) else {
                 continue;
             };
             if atlas.color && index > 0 {
@@ -562,6 +624,7 @@ impl Renderer {
                 break;
             }
         }
+        self.cell_text = text;
     }
 }
 
