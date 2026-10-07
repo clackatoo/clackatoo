@@ -17,6 +17,7 @@ mod hosted;
 pub mod launch;
 mod memory;
 mod pty;
+mod quic;
 pub mod remote;
 mod runtime;
 mod server;

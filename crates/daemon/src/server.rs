@@ -5,6 +5,11 @@
 //! pidfd. The terminals' grids stay on that thread, so nothing is locked or
 //! shared, and output goes from PTY to grid with no handoff in between.
 //!
+//! Clients on other machines talk over QUIC, inside a connection to the
+//! socket that carries its packets (see [`quic`]). The QUIC endpoint is
+//! driven here too: a client over QUIC is served just like one on the
+//! socket.
+//!
 //! mio delivers edge-triggered events: an fd is reported once when it
 //! becomes ready, not again until it has been drained. Every handler
 //! therefore reads or writes until `WouldBlock`, or records that it stopped
@@ -29,12 +34,14 @@ use clackatoo_term::{Damage, Terminal};
 use mio::event::Event;
 use mio::net::{UnixListener, UnixStream};
 use mio::unix::SourceFd;
-use mio::{Events, Interest, Poll, Token, Waker};
+use mio::{Events, Interest, Poll, Registry, Token, Waker};
+use quinn_proto::ConnectionHandle;
 use slab::Slab;
 
 use crate::DaemonConfig;
 use crate::hosted::{HostedTerminal, Orphan, ReadOutcome};
 use crate::memory;
+use crate::quic::{self, QuicEvent, QuicServer, Received};
 use crate::workspaces::WorkspaceState;
 
 const LISTENER: Token = Token(usize::MAX);
@@ -63,6 +70,7 @@ enum Source {
     /// The pidfd of a closed terminal's program that hasn't exited yet.
     Orphan(Orphan),
     Client(Client),
+    Carrier(Carrier),
 }
 
 /// A terminal plus its event-loop registrations.
@@ -85,7 +93,7 @@ struct Slot {
 // Separate facts about the connection, not states of one machine.
 #[allow(clippy::struct_excessive_bools)]
 struct Client {
-    stream: UnixStream,
+    link: Link,
     decoder: FrameDecoder,
     /// Encoded responses not yet written.
     outgoing: Vec<u8>,
@@ -98,6 +106,45 @@ struct Client {
     views: BTreeMap<TerminalId, Subscription>,
     /// Whether the client is told when the workspaces change.
     watching_workspaces: bool,
+    /// The connection is to become a carrier, once its answer is queued.
+    carrying: bool,
+}
+
+impl Client {
+    fn new(link: Link) -> Self {
+        Self {
+            link,
+            decoder: FrameDecoder::new(),
+            outgoing: Vec::new(),
+            greeted: false,
+            finished: false,
+            wants_writable: false,
+            views: BTreeMap::new(),
+            watching_workspaces: false,
+            carrying: false,
+        }
+    }
+}
+
+/// How a client is connected.
+#[derive(Debug)]
+enum Link {
+    /// To the daemon's socket.
+    Unix(UnixStream),
+    /// Over QUIC, from another machine.
+    Quic(ConnectionHandle),
+}
+
+/// A connection to the daemon's socket that carries QUIC packets for
+/// clients on another machine, each framed like a message.
+#[derive(Debug)]
+struct Carrier {
+    stream: UnixStream,
+    /// Packets arriving.
+    packets: FrameDecoder,
+    /// Packets not yet written.
+    outgoing: Vec<u8>,
+    wants_writable: bool,
 }
 
 /// A client following one terminal's view, and what it was last sent.
@@ -176,6 +223,10 @@ pub struct Daemon {
     terminals: BTreeMap<TerminalId, Slot>,
     next_id: u32,
     workspaces: WorkspaceState,
+    /// The QUIC endpoint, set up when a connection first carries QUIC.
+    quic: Option<QuicServer>,
+    /// What the QUIC endpoint last asked to be acted on.
+    quic_events: Vec<QuicEvent>,
     /// Terminals whose output budget ran out with more output waiting.
     unread: VecDeque<TerminalId>,
     /// When each terminal with uncompacted scrollback should compact it.
@@ -233,6 +284,8 @@ impl Daemon {
             terminals: BTreeMap::new(),
             next_id: 1,
             workspaces: WorkspaceState::new(),
+            quic: None,
+            quic_events: Vec::new(),
             unread: VecDeque::new(),
             compactions: BTreeMap::new(),
             views_pending: false,
@@ -262,9 +315,11 @@ impl Daemon {
         while !self.shutdown.load(Ordering::Acquire) {
             // With output still waiting, poll without blocking so it gets read
             // right after anything else that's ready. Otherwise wait for the
-            // next compaction, if there is one.
+            // next compaction or QUIC timer, if there is one.
             let timeout = if self.unread.is_empty() {
-                let next = self.compactions.values().min();
+                let compaction = self.compactions.values().min().copied();
+                let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
+                let next = compaction.into_iter().chain(quic).min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
                 Some(Duration::ZERO)
@@ -277,11 +332,13 @@ impl Daemon {
             for event in &events {
                 self.handle(event);
             }
+            self.drive_quic();
             for id in std::mem::take(&mut self.unread) {
                 self.read_output(id);
             }
             self.compact_scrollbacks();
             self.send_view_updates();
+            self.transmit_quic();
         }
         log::info!("shutting down");
         Ok(())
@@ -307,6 +364,7 @@ impl Daemon {
                 }
                 Some(Source::Orphan(_)) => self.reap_orphan(token),
                 Some(Source::Client(_)) => self.serve_client(token),
+                Some(Source::Carrier(_)) => self.serve_carrier(token, event),
                 None => {}
             },
         }
@@ -704,16 +762,7 @@ impl Daemon {
                         log::error!("registering a client failed: {err}");
                         continue;
                     }
-                    entry.insert(Source::Client(Client {
-                        stream,
-                        decoder: FrameDecoder::new(),
-                        outgoing: Vec::new(),
-                        greeted: false,
-                        finished: false,
-                        wants_writable: false,
-                        views: BTreeMap::new(),
-                        watching_workspaces: false,
-                    }));
+                    entry.insert(Source::Client(Client::new(Link::Unix(stream))));
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
@@ -776,11 +825,15 @@ impl Daemon {
                     client.finished = true;
                 }
             }
-            if client.finished {
+            if client.finished || client.carrying {
                 break;
             }
         }
-        self.flush_client(token);
+        if matches!(self.sources.get(token.0), Some(Source::Client(client)) if client.carrying) {
+            self.become_carrier(token);
+        } else {
+            self.flush_client(token);
+        }
     }
 
     /// Reads and decodes everything a client has sent. Returns `None` if the
@@ -789,19 +842,27 @@ impl Daemon {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return None;
         };
-        loop {
-            match client.stream.read(&mut self.buffer) {
-                Ok(0) => {
-                    client.finished = true;
-                    break;
+        match &mut client.link {
+            Link::Unix(stream) => loop {
+                match stream.read(&mut self.buffer) {
+                    Ok(0) => {
+                        client.finished = true;
+                        break;
+                    }
+                    Ok(n) => client.decoder.push(&self.buffer[..n]),
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                    Err(err) => {
+                        log::debug!("client read failed: {err}");
+                        self.drop_client(token);
+                        return None;
+                    }
                 }
-                Ok(n) => client.decoder.push(&self.buffer[..n]),
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(err) => {
-                    log::debug!("client read failed: {err}");
-                    self.drop_client(token);
-                    return None;
+            },
+            Link::Quic(handle) => {
+                let quic = self.quic.as_mut()?;
+                if quic.read(*handle, &mut client.decoder) == Received::Ended {
+                    client.finished = true;
                 }
             }
         }
@@ -897,6 +958,7 @@ impl Daemon {
             | Request::ClosePane { .. }
             | Request::Focus { .. }
             | Request::RenameWorkspace { .. }) => self.respond_about_workspaces(request, token),
+            Request::CarryQuic => self.carry_quic(token),
         };
         response.unwrap_or_else(Response::Error)
     }
@@ -982,28 +1044,43 @@ impl Daemon {
         Ok(())
     }
 
-    /// Writes a client's queued responses until the socket is full, and drops
-    /// the client once it is finished and flushed.
+    /// Writes a client's queued responses until the socket or stream is
+    /// full, and drops the client once it is finished and flushed.
     fn flush_client(&mut self, token: Token) {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return;
         };
-        let mut written = 0;
-        while written < client.outgoing.len() {
-            match client.stream.write(&client.outgoing[written..]) {
-                Ok(n) => written += n,
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(err) => {
-                    log::debug!("client write failed: {err}");
-                    self.drop_client(token);
-                    return;
+        let written = match &mut client.link {
+            Link::Unix(stream) => write_out(
+                self.poll.registry(),
+                stream,
+                token,
+                &mut client.outgoing,
+                &mut client.wants_writable,
+            ),
+            Link::Quic(handle) => {
+                let written = self
+                    .quic
+                    .as_mut()
+                    .and_then(|quic| quic.write(*handle, &client.outgoing))
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe));
+                if let Ok(written) = written {
+                    client.outgoing.drain(..written);
                 }
+                written
             }
-        }
-        client.outgoing.drain(..written);
-
+        };
+        let written = match written {
+            Ok(written) => written,
+            Err(err) => {
+                log::debug!("client write failed: {err}");
+                self.drop_client(token);
+                return;
+            }
+        };
         let flushed = client.outgoing.is_empty();
+        // Over QUIC, closing the connection discards what's still to send,
+        // so a client dropped for breaking the protocol may not hear why.
         if flushed && client.finished {
             self.drop_client(token);
             return;
@@ -1012,38 +1089,260 @@ impl Daemon {
         if flushed && written > 0 && !client.views.is_empty() {
             self.views_pending = true;
         }
-        // Ask to hear about writability only while responses are queued.
-        let wants_writable = !flushed;
-        if wants_writable != client.wants_writable {
-            let interest = if wants_writable {
-                Interest::READABLE | Interest::WRITABLE
-            } else {
-                Interest::READABLE
-            };
-            if let Err(err) = self
-                .poll
-                .registry()
-                .reregister(&mut client.stream, token, interest)
-            {
-                log::error!("updating a client registration failed: {err}");
-                self.drop_client(token);
-                return;
-            }
-            client.wants_writable = wants_writable;
-        }
     }
 
     /// Forgets a client. Dropping its stream closes the socket, which also
     /// removes it from epoll.
     fn drop_client(&mut self, token: Token) {
         if let Some(Source::Client(client)) = self.sources.try_remove(token.0) {
-            for id in client.views.keys() {
-                if let Some(slot) = self.terminals.get_mut(id) {
-                    slot.viewers.retain(|&viewer| viewer != token);
-                }
+            self.forget_viewer(token, &client);
+            if let Link::Quic(handle) = client.link
+                && let Some(quic) = self.quic.as_mut()
+            {
+                quic.close(handle, Instant::now(), "");
             }
         }
     }
+
+    /// Takes the client at `token` off the viewers of the terminals it
+    /// follows.
+    fn forget_viewer(&mut self, token: Token, client: &Client) {
+        for id in client.views.keys() {
+            if let Some(slot) = self.terminals.get_mut(id) {
+                slot.viewers.retain(|&viewer| viewer != token);
+            }
+        }
+    }
+
+    // --- QUIC -------------------------------------------------------------
+
+    /// Answers [`Request::CarryQuic`] from the client at `token`, setting up
+    /// the QUIC endpoint if this is the first carrier.
+    fn carry_quic(&mut self, token: Token) -> Result<Response, Error> {
+        let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
+            return Err(Error::CantCarry("the connection closed".into()));
+        };
+        if !matches!(client.link, Link::Unix(_)) {
+            return Err(Error::CantCarry(
+                "only a connection to the daemon's socket can carry QUIC".into(),
+            ));
+        }
+        let quic = match &mut self.quic {
+            Some(quic) => quic,
+            None => self
+                .quic
+                .insert(QuicServer::new().map_err(|err| Error::CantCarry(err.to_string()))?),
+        };
+        client.carrying = true;
+        Ok(Response::Carrying {
+            certificate: quic.certificate().to_vec(),
+        })
+    }
+
+    /// Turns the client at `token`, which asked to carry QUIC and has its
+    /// answer queued, into a carrier.
+    fn become_carrier(&mut self, token: Token) {
+        let Some(Source::Client(client)) = self.sources.try_remove(token.0) else {
+            return;
+        };
+        self.forget_viewer(token, &client);
+        let Link::Unix(mut stream) = client.link else {
+            return;
+        };
+        let entry = self.sources.vacant_entry();
+        let carrier = Token(entry.key());
+        if let Err(err) = self
+            .poll
+            .registry()
+            .reregister(&mut stream, carrier, Interest::READABLE)
+        {
+            log::error!("registering a carrier failed: {err}");
+            return;
+        }
+        entry.insert(Source::Carrier(Carrier {
+            stream,
+            packets: client.decoder,
+            outgoing: client.outgoing,
+            wants_writable: false,
+        }));
+        log::info!("a connection now carries QUIC");
+        self.flush_carrier(carrier);
+        // The client waits for the answer before sending packets, but
+        // anything already here is a packet.
+        self.receive_packets(carrier, false);
+    }
+
+    /// Reads the packets a carrier has brought, and writes what it can of
+    /// those waiting to go.
+    fn serve_carrier(&mut self, token: Token, event: &Event) {
+        if event.is_writable() {
+            self.flush_carrier(token);
+        }
+        let Some(Source::Carrier(carrier)) = self.sources.get_mut(token.0) else {
+            return;
+        };
+        let mut closed = false;
+        loop {
+            match carrier.stream.read(&mut self.buffer) {
+                Ok(0) => {
+                    closed = true;
+                    break;
+                }
+                Ok(n) => carrier.packets.push(&self.buffer[..n]),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => {
+                    log::debug!("carrier read failed: {err}");
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        self.receive_packets(token, closed);
+    }
+
+    /// Hands the QUIC endpoint the packets the carrier at `token` has
+    /// brought, then closes the carrier if it has `closed`, or its packets
+    /// are malformed.
+    fn receive_packets(&mut self, token: Token, mut closed: bool) {
+        let (Some(Source::Carrier(carrier)), Some(quic)) =
+            (self.sources.get_mut(token.0), self.quic.as_mut())
+        else {
+            return;
+        };
+        let now = Instant::now();
+        let from = quic::carrier_address(token.0);
+        loop {
+            match carrier.packets.next_payload() {
+                Ok(Some(packet)) => quic.receive(now, from, packet),
+                Ok(None) => break,
+                Err(err) => {
+                    log::warn!("closing a carrier that sent a bad frame: {err}");
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        if closed {
+            self.sources.remove(token.0);
+            for client in quic.carrier_closed(from) {
+                self.drop_client(client);
+            }
+            log::info!("a carrier closed");
+        }
+    }
+
+    /// Writes what it can of a carrier's waiting packets, and closes it if
+    /// that fails.
+    fn flush_carrier(&mut self, token: Token) {
+        let Some(Source::Carrier(carrier)) = self.sources.get_mut(token.0) else {
+            return;
+        };
+        if let Err(err) = write_out(
+            self.poll.registry(),
+            &mut carrier.stream,
+            token,
+            &mut carrier.outgoing,
+            &mut carrier.wants_writable,
+        ) {
+            log::debug!("carrier write failed: {err}");
+            self.receive_packets(token, true);
+        }
+    }
+
+    /// Lets the QUIC endpoint act on its due timers and the packets it was
+    /// handed, and acts on what it asks.
+    fn drive_quic(&mut self) {
+        let Some(quic) = self.quic.as_mut() else {
+            return;
+        };
+        quic.handle_timeouts(Instant::now());
+        let mut events = std::mem::take(&mut self.quic_events);
+        loop {
+            if let Some(quic) = self.quic.as_mut() {
+                quic.events(&mut events);
+            }
+            if events.is_empty() {
+                break;
+            }
+            for event in events.drain(..) {
+                match event {
+                    QuicEvent::Opened(handle) => self.new_quic_client(handle),
+                    QuicEvent::Readable(token) => self.serve_client(token),
+                    QuicEvent::Writable(token) => self.flush_client(token),
+                    QuicEvent::Closed(token) => self.drop_client(token),
+                }
+            }
+        }
+        self.quic_events = events;
+    }
+
+    /// Serves the connection with `handle`, which opened its stream, as a
+    /// client.
+    fn new_quic_client(&mut self, handle: ConnectionHandle) {
+        let entry = self.sources.vacant_entry();
+        let token = Token(entry.key());
+        entry.insert(Source::Client(Client::new(Link::Quic(handle))));
+        if let Some(quic) = self.quic.as_mut() {
+            quic.set_client(handle, token);
+        }
+        // Its greeting may have come with the stream.
+        self.serve_client(token);
+    }
+
+    /// Sends the packets the QUIC endpoint has ready, each on its carrier.
+    fn transmit_quic(&mut self) {
+        let Some(quic) = self.quic.as_mut() else {
+            return;
+        };
+        let mut carriers = Vec::new();
+        quic.transmit(Instant::now(), |address, packet| {
+            if let Some(key) = quic::carrier_key(address)
+                && let Some(Source::Carrier(carrier)) = self.sources.get_mut(key)
+            {
+                quic::frame_packet(packet, &mut carrier.outgoing);
+                if !carriers.contains(&key) {
+                    carriers.push(key);
+                }
+            }
+        });
+        for key in carriers {
+            self.flush_carrier(Token(key));
+        }
+    }
+}
+
+/// Writes what it can of `outgoing` to `stream`, registered with `token`,
+/// and asks to hear of writability exactly while some is left. Returns how
+/// much was written.
+fn write_out(
+    registry: &Registry,
+    stream: &mut UnixStream,
+    token: Token,
+    outgoing: &mut Vec<u8>,
+    wants_writable: &mut bool,
+) -> io::Result<usize> {
+    let mut written = 0;
+    while written < outgoing.len() {
+        match stream.write(&outgoing[written..]) {
+            Ok(n) => written += n,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    outgoing.drain(..written);
+    let wanted = !outgoing.is_empty();
+    if wanted != *wants_writable {
+        let interest = if wanted {
+            Interest::READABLE | Interest::WRITABLE
+        } else {
+            Interest::READABLE
+        };
+        registry.reregister(stream, token, interest)?;
+        *wants_writable = wanted;
+    }
+    Ok(written)
 }
 
 /// Up to `count` of `terminal`'s history lines, ending before line `end`.

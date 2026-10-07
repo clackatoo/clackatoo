@@ -349,7 +349,7 @@ fn latency(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
     );
 
     // The same through `clackatoo bridge`, as `--remote` connects, without
-    // ssh or a network: what the bridge itself costs.
+    // ssh or a network: what the bridge and QUIC cost.
     let mut bridge = Command::new(binary);
     bridge
         .arg("bridge")
@@ -362,6 +362,23 @@ fn latency(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
         "keypress to view update, through the bridge",
         Unit::Seconds,
         &bridged,
+    );
+
+    // The same while another terminal the client follows floods, so its
+    // updates share the connection with the echoes.
+    let flooder = new_terminal(
+        &mut client,
+        workload.size,
+        &["sh", "-c", r#"while :; do cat "$1"; done"#, "sh", file],
+    )?;
+    attach(&mut client, flooder)?;
+    let during = view_latency(&mut client, terminal, &mut view, KEYPRESSES / 4)?;
+    client.close_terminal(flooder)?;
+    report.record(
+        "latency/view-bridge-flood",
+        "keypress to view update, through the bridge, while a followed terminal floods",
+        Unit::Seconds,
+        &during,
     );
     Ok(())
 }
@@ -382,7 +399,8 @@ fn attach(client: &mut Client, terminal: TerminalId) -> anyhow::Result<View> {
 }
 
 /// Types `count` keys into `terminal` (after a tenth as many to warm up),
-/// timing each until a view update shows its echo.
+/// timing each until a view update shows its echo. Updates to other
+/// terminals followed are acknowledged and passed over.
 fn view_latency(
     client: &mut Client,
     terminal: TerminalId,
@@ -395,11 +413,19 @@ fn view_latency(
         let started = Instant::now();
         client.send_input(terminal, format!("\r{letter}").as_bytes())?;
         loop {
-            let Event::View { update, .. } = client.next_event()? else {
+            let Event::View {
+                terminal: from,
+                update,
+            } = client.next_event()?
+            else {
                 continue;
             };
+            // Drawn at once, as the window would.
+            client.frame_done(from)?;
+            if from != terminal {
+                continue;
+            }
             view.apply(update);
-            client.frame_done(terminal)?;
             let echoed = view
                 .grid()
                 .and_then(|grid| grid.lines.first())

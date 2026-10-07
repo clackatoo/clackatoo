@@ -729,3 +729,84 @@ fn refused_workspace_requests_start_no_terminal() {
     ));
     assert_eq!(client.list_terminals().unwrap().len(), 1);
 }
+
+// --- QUIC ---------------------------------------------------------------
+
+impl TestDaemon {
+    /// A client talking over QUIC, inside a connection to the socket, as
+    /// one on another machine does through ssh.
+    fn quic_client(&self) -> Client {
+        let stream = UnixStream::connect(self.socket()).expect("connect");
+        Client::over_quic(stream).expect("connect over QUIC")
+    }
+}
+
+#[test]
+fn quic_clients_are_served_like_local_ones() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.quic_client();
+    let terminal = spawn(&mut client, &["sh", "-c", "printf ready; exec cat"]);
+    wait_for_screen(&mut client, terminal, |text| text.starts_with("ready"));
+
+    let mut view = attach(&mut client, terminal);
+    client.frame_done(terminal).unwrap();
+    client.send_input(terminal, b"x").unwrap();
+    view.apply(next_update(&mut client, terminal));
+    assert_eq!(view, client.capture(terminal).unwrap());
+
+    // The same daemon, seen from its socket.
+    let listed = daemon.client().list_terminals().unwrap();
+    assert_eq!(listed.len(), 1);
+}
+
+#[test]
+fn a_view_over_quic_keeps_up_with_a_flood() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.quic_client();
+    let script = r"read go; seq 1 20000; printf '\033]2;done\007'; exec cat";
+    let terminal = spawn(&mut client, &["sh", "-c", script]);
+    let mut view = attach(&mut client, terminal);
+    client.frame_done(terminal).unwrap();
+    client.send_input(terminal, b"\r").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        view.apply(next_update(&mut client, terminal));
+        client.frame_done(terminal).unwrap();
+        if view.title == "done" && view == client.capture(terminal).unwrap() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the view never caught up");
+    }
+}
+
+#[test]
+fn quic_clients_come_and_go() {
+    let daemon = TestDaemon::start();
+    let mut first = daemon.quic_client();
+    let terminal = spawn(&mut first, &["cat"]);
+    attach(&mut first, terminal);
+    drop(first);
+
+    // Its carrier closing forgot it, and others carry on.
+    let mut second = daemon.quic_client();
+    attach(&mut second, terminal);
+    second.frame_done(terminal).unwrap();
+    second.send_input(terminal, b"x").unwrap();
+    next_update(&mut second, terminal);
+    let mut local = daemon.client();
+    local.send_input(terminal, b"y").unwrap();
+    wait_for_screen(&mut local, terminal, |text| text.starts_with("xy"));
+}
+
+#[test]
+fn only_the_socket_can_carry_quic() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.quic_client();
+    match client.request(&Request::CarryQuic).unwrap() {
+        Response::Error(Error::CantCarry(_)) => {}
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    // Still talking.
+    client.list_terminals().unwrap();
+}

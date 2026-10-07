@@ -19,6 +19,8 @@ anyhow = "1.0"
 # Text only: images would pull in an image codec.
 arboard = { version = "3.6", default-features = false }
 bitflags = "2.13"
+# The buffers quinn-proto takes packets in.
+bytes = "1.10"
 bytemuck = { version = "1.25", features = ["derive"] }
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions"] }
 env_logger = { version = "0.11", default-features = false }
@@ -28,7 +30,14 @@ fontique = { version = "0.11", features = ["fontconfig-dlopen"] }
 log = "0.4"
 mio = { version = "1.2", features = ["os-poll", "os-ext", "net"] }
 pollster = "1.0"
+# The QUIC engine with no networking of its own, driven from our own event
+# loops (CLACKA-6). ring rather than aws-lc-rs, which needs cmake to build.
+quinn-proto = { version = "0.11", default-features = false, features = ["rustls-ring", "log"] }
+# A self-signed certificate for each daemon's QUIC endpoint.
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+# TLS for QUIC: the same version and backend as quinn-proto's.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustix = { version = "1.1", features = ["fs", "net", "process", "pty", "std", "termios"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
 simdutf8 = "0.1"

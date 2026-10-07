@@ -11,10 +11,14 @@ publish.workspace = true
 bench = false
 
 [dependencies]
+bytes.workspace = true
 clackatoo-protocol.workspace = true
 clackatoo-term.workspace = true
 log.workspace = true
 mio.workspace = true
+quinn-proto.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 rustix.workspace = true
 slab.workspace = true
 thiserror.workspace = true

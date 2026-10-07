@@ -2,9 +2,10 @@
 //!
 //! A client runs `ssh HOST clackatoo bridge`. On the far end, the bridge
 //! starts the daemon if it isn't running, then relays bytes between its own
-//! input and output and the daemon's socket. The protocol runs end to end,
-//! with SSH logging in and encrypting, so clackatoo has no network code or
-//! cryptography of its own. The bridge doesn't speak the protocol, so the
+//! input and output and the daemon's socket. The client greets the daemon
+//! through it, then turns the connection into a carrier of QUIC packets
+//! and talks over QUIC inside it (see [`Client::over_quic`]). SSH logs in, and is how
+//! each end knows the other. The bridge doesn't speak the protocol, so the
 //! version check is between the client and the remote daemon, whichever
 //! build of clackatoo runs the bridge.
 //!
@@ -209,7 +210,7 @@ pub fn through(mut command: Command, host: &str) -> Result<Client, RemoteError> 
         }
     }
     stream.set_read_timeout(None)?;
-    Ok(Client::over(stream)?.carried_by(ssh))
+    Ok(Client::over_carrier(stream, Some(ssh))?)
 }
 
 /// Relays between this process's input and output and the daemon, which

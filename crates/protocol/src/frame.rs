@@ -3,6 +3,9 @@
 //! A frame is a 4-byte little-endian payload length, then the payload: one
 //! message serialized with `postcard`. Frames longer than [`MAX_FRAME_LEN`]
 //! are rejected, so a peer can't make the other side buffer without limit.
+//!
+//! A connection carrying QUIC (see [`Request::CarryQuic`](crate::Request))
+//! frames each packet the same way, with the packet as the payload.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -29,6 +32,14 @@ pub fn encode<T: Serialize>(message: &T) -> Result<Vec<u8>, FrameError> {
         .to_le_bytes();
     frame[..HEADER_LEN].copy_from_slice(&header);
     Ok(frame)
+}
+
+/// The header of a frame whose payload is `len` bytes, such as a QUIC
+/// packet. The caller keeps payloads within [`MAX_FRAME_LEN`].
+#[must_use]
+pub fn header(len: usize) -> [u8; HEADER_LEN] {
+    debug_assert!(len <= MAX_FRAME_LEN);
+    u32::try_from(len).unwrap_or(u32::MAX).to_le_bytes()
 }
 
 /// Reassembles frames from a byte stream that arrives in arbitrary pieces.
@@ -67,6 +78,24 @@ impl FrameDecoder {
     /// If the frame is too large or doesn't hold a valid `T`. The stream can't
     /// be resynchronised after that, so the connection should be closed.
     pub fn decode<T: DeserializeOwned>(&mut self) -> Result<Option<T>, FrameError> {
+        let Some(payload) = self.next_payload()? else {
+            return Ok(None);
+        };
+        let (message, unread) = postcard::take_from_bytes(payload).map_err(FrameError::Decode)?;
+        if !unread.is_empty() {
+            return Err(FrameError::TrailingBytes(unread.len()));
+        }
+        Ok(Some(message))
+    }
+
+    /// Takes the next complete frame's payload as it is, such as a QUIC
+    /// packet, or returns `None` if one hasn't fully arrived yet.
+    ///
+    /// # Errors
+    ///
+    /// If the frame is too large. The stream can't be resynchronised after
+    /// that, so the connection should be closed.
+    pub fn next_payload(&mut self) -> Result<Option<&[u8]>, FrameError> {
         let pending = &self.buffer[self.start..];
         let Some((header, rest)) = pending.split_first_chunk::<HEADER_LEN>() else {
             return Ok(None);
@@ -76,16 +105,12 @@ impl FrameDecoder {
         if len > MAX_FRAME_LEN {
             return Err(FrameError::TooLarge(len));
         }
-        let Some(payload) = rest.get(..len) else {
+        if rest.len() < len {
             return Ok(None);
-        };
-
-        let (message, unread) = postcard::take_from_bytes(payload).map_err(FrameError::Decode)?;
-        if !unread.is_empty() {
-            return Err(FrameError::TrailingBytes(unread.len()));
         }
-        self.start += HEADER_LEN + len;
-        Ok(Some(message))
+        let start = self.start + HEADER_LEN;
+        self.start = start + len;
+        Ok(Some(&self.buffer[start..self.start]))
     }
 
     /// Whether bytes of an unfinished frame are buffered. At the end of a
@@ -147,6 +172,23 @@ mod tests {
             assert_eq!(received, messages, "pieces of {piece_len} bytes");
             assert!(!decoder.has_partial_frame());
         }
+    }
+
+    #[test]
+    fn payloads_come_out_as_they_went_in() {
+        let mut stream = Vec::new();
+        for packet in [&b"one"[..], b"", b"three"] {
+            stream.extend_from_slice(&header(packet.len()));
+            stream.extend_from_slice(packet);
+        }
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&stream[..13]);
+        assert_eq!(decoder.next_payload().unwrap(), Some(&b"one"[..]));
+        assert_eq!(decoder.next_payload().unwrap(), Some(&b""[..]));
+        assert_eq!(decoder.next_payload().unwrap(), None, "three is partial");
+        decoder.push(&stream[13..]);
+        assert_eq!(decoder.next_payload().unwrap(), Some(&b"three"[..]));
+        assert!(!decoder.has_partial_frame());
     }
 
     #[test]

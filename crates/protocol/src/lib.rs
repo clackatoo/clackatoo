@@ -1,7 +1,6 @@
 //! The protocol clackatoo clients use to talk to the daemon.
 //!
-//! A connection is a byte stream (a Unix socket today, other transports
-//! later) carrying [frames](frame): a length prefix, then one message
+//! A connection is a byte stream carrying [frames](frame): a length prefix, then one message
 //! serialized with `postcard`. The client sends [`ClientMessage`]s and the
 //! daemon sends [`ServerMessage`]s.
 //!
@@ -20,6 +19,12 @@
 //! merged into the next update, so a client gets updates as fast as it can
 //! draw them and no faster, and a flood of output costs it one update per
 //! frame.
+//!
+//! On this machine, that byte stream is a Unix socket. A client on another
+//! machine reaches the daemon over SSH, and the stream is a QUIC stream:
+//! its connection to the daemon's socket turns into a carrier of QUIC
+//! packets with [`Request::CarryQuic`], and the client then opens a QUIC
+//! connection through it, whose first stream it talks over as usual.
 //!
 //! The crate does no I/O, so a browser client compiled to WebAssembly can
 //! use it as-is.
@@ -49,7 +54,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Everything a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +240,13 @@ pub enum Request {
         /// Its new name, unique among the daemon's workspaces.
         name: String,
     },
+    /// Turns this connection into a carrier of QUIC packets, for a client
+    /// on another machine reaching the daemon over SSH. Answered with
+    /// [`Response::Carrying`], after which each frame either way holds one
+    /// QUIC packet, not a message. The client must wait for the answer
+    /// before sending any. Only a connection to the daemon's Unix socket
+    /// can carry QUIC.
+    CarryQuic,
 }
 
 /// How to start a terminal.
@@ -274,6 +286,14 @@ pub enum Response {
     Workspaces(Workspaces),
     /// Answers requests that make a pane.
     PaneCreated(PaneId),
+    /// Answers [`Request::CarryQuic`]: the connection now carries QUIC
+    /// packets.
+    Carrying {
+        /// The DER-encoded certificate the daemon's QUIC endpoint presents,
+        /// for the client to accept and no other. The client learned it
+        /// over SSH, which logged it in to this machine.
+        certificate: Vec<u8>,
+    },
 }
 
 /// Why the daemon refused or failed a request.
@@ -323,6 +343,10 @@ pub enum Error {
         /// What's wrong with it.
         reason: String,
     },
+    /// The connection can't carry QUIC: it isn't to the Unix socket, or
+    /// the daemon couldn't set up its QUIC endpoint.
+    #[error("can't carry QUIC: {0}")]
+    CantCarry(String),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while

@@ -12,6 +12,7 @@ use clackatoo_protocol::{
     Workspaces,
 };
 
+use crate::quic::{self, Carried};
 use crate::remote::Ssh;
 
 /// How long the daemon may take to answer a new connection's hello.
@@ -25,8 +26,8 @@ pub struct Client {
     stream: UnixStream,
     decoder: FrameDecoder,
     events: VecDeque<Event>,
-    /// The ssh process carrying the connection, for a remote daemon.
-    ssh: Option<Ssh>,
+    /// What carries the connection to a remote daemon.
+    carried: Option<Carried>,
 }
 
 impl Client {
@@ -52,7 +53,7 @@ impl Client {
             stream,
             decoder: FrameDecoder::new(),
             events: VecDeque::new(),
-            ssh: None,
+            carried: None,
         };
         // A socket nothing serves would otherwise hang the handshake.
         client.stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
@@ -72,11 +73,29 @@ impl Client {
         }
     }
 
-    /// Keeps `ssh`, which carries the connection, running as long as the
-    /// connection is open.
-    pub(crate) fn carried_by(mut self, ssh: Ssh) -> Self {
-        self.ssh = Some(ssh);
-        self
+    /// Greets the daemon on the other end of `stream`, a connection to its
+    /// socket, and talks to it over QUIC inside that, as a client on
+    /// another machine does (see [`remote`](crate::remote)).
+    ///
+    /// # Errors
+    ///
+    /// If the daemon doesn't answer, speaks another version, or the QUIC
+    /// connection can't be set up.
+    pub fn over_quic(stream: UnixStream) -> Result<Self, ClientError> {
+        Self::over_carrier(stream, None)
+    }
+
+    /// As [`over_quic`](Self::over_quic), with `ssh` carrying `stream`, kept
+    /// running as long as the connection is open.
+    pub(crate) fn over_carrier(
+        mut stream: UnixStream,
+        ssh: Option<Ssh>,
+    ) -> Result<Self, ClientError> {
+        let certificate = open_carrier(&mut stream)?;
+        let (local, carried) = quic::carry(stream, certificate, ssh)?;
+        let mut client = Self::over(local)?;
+        client.carried = Some(carried);
+        Ok(client)
     }
 
     /// Sends `request` and waits for the daemon's answer.
@@ -130,7 +149,7 @@ impl Client {
             stream: self.stream,
             decoder: self.decoder,
             events: self.events,
-            _ssh: self.ssh,
+            _carried: self.carried,
         };
         Ok((sender, receiver))
     }
@@ -402,8 +421,8 @@ pub struct Receiver {
     decoder: FrameDecoder,
     /// Events that arrived before the split.
     events: VecDeque<Event>,
-    /// The ssh process carrying the connection, for a remote daemon.
-    _ssh: Option<Ssh>,
+    /// What carries the connection to a remote daemon.
+    _carried: Option<Carried>,
 }
 
 impl Receiver {
@@ -418,6 +437,42 @@ impl Receiver {
         }
         receive(&mut self.stream, &mut self.decoder)
     }
+}
+
+/// Greets the daemon on the other end of `stream`, checking that it speaks
+/// our protocol version, and turns the connection into a carrier of QUIC
+/// packets. Both are sent at once, to save a round trip: a daemon speaking
+/// another version hangs up after its greeting, ignoring the rest. Returns
+/// the certificate the daemon's QUIC endpoint presents.
+fn open_carrier(stream: &mut UnixStream) -> Result<Vec<u8>, ClientError> {
+    let mut opening = frame::encode(&ClientMessage::Hello {
+        protocol_version: PROTOCOL_VERSION,
+    })?;
+    opening.extend(frame::encode(&ClientMessage::Request(Request::CarryQuic))?);
+    stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
+    stream.write_all(&opening)?;
+    let mut decoder = FrameDecoder::new();
+    match receive(stream, &mut decoder)? {
+        ServerMessage::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => {}
+        ServerMessage::Hello { protocol_version } => {
+            return Err(ClientError::VersionMismatch {
+                ours: PROTOCOL_VERSION,
+                daemon: protocol_version,
+            });
+        }
+        other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
+    }
+    let certificate = match receive(stream, &mut decoder)? {
+        ServerMessage::Response(Response::Carrying { certificate }) => certificate,
+        ServerMessage::Response(response) => return Err(unexpected(response)),
+        other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
+    };
+    // Nothing comes before the first packet, which is ours to send.
+    if decoder.has_partial_frame() {
+        return Err(ClientError::Disconnected);
+    }
+    stream.set_read_timeout(None)?;
+    Ok(certificate)
 }
 
 /// Reads until a whole message has arrived.
