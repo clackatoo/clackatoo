@@ -32,7 +32,9 @@ mod view;
 
 use std::fmt;
 
-pub use clackatoo_term::{Attributes, Color, CursorShape, InputModes, Size, Style, Underline};
+pub use clackatoo_term::{
+    Attributes, Color, CursorShape, InputModes, Match, Position, Size, Style, Underline,
+};
 use serde::{Deserialize, Serialize};
 
 pub use view::{
@@ -42,7 +44,7 @@ pub use view::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Everything a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +149,33 @@ pub enum Request {
         /// How many lines, at most.
         count: u16,
     },
+    /// Asks for the text between two places in the terminal's document:
+    /// its history, then its screen (see [`HistoryLines`] for how lines are
+    /// numbered). Answered with [`Response::Text`].
+    Text {
+        /// The terminal.
+        terminal: TerminalId,
+        /// One end, included.
+        from: Position,
+        /// The other end, included.
+        to: Position,
+        /// Take every line whole, ignoring the columns.
+        whole_lines: bool,
+    },
+    /// Searches the terminal's document for `query`, from just after
+    /// `from` (or just before it, if `backward`), wrapping around the
+    /// ends. Case is ignored unless the query has a capital letter.
+    /// Answered with [`Response::Found`].
+    Search {
+        /// The terminal.
+        terminal: TerminalId,
+        /// The text to look for.
+        query: String,
+        /// Where to start.
+        from: Position,
+        /// Search towards the start of the document.
+        backward: bool,
+    },
 }
 
 /// How to start a terminal.
@@ -178,6 +207,10 @@ pub enum Response {
     View(View),
     /// Answers [`Request::History`].
     History(HistoryLines),
+    /// Answers [`Request::Text`].
+    Text(String),
+    /// Answers [`Request::Search`]: where the text is, if anywhere.
+    Found(Option<Match>),
 }
 
 /// Why the daemon refused or failed a request.

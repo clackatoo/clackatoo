@@ -15,6 +15,7 @@ mod cell;
 mod charset;
 mod damage;
 mod dispatch;
+mod document;
 mod grid;
 mod parser;
 pub mod recording;
@@ -32,6 +33,7 @@ mod tests;
 
 pub use cell::{Cell, CellFlags};
 pub use damage::Damage;
+pub use document::{Match, Position};
 pub use grid::Grid;
 pub use row::{Row, RowBuilder};
 pub use scrollback::Compaction;

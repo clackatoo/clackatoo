@@ -361,11 +361,13 @@ impl App {
             cursor.style = CursorStyle::Hollow;
         }
         let label = pane.label();
+        let highlights = pane.highlights(rows.len());
         let scene = Scene {
             rows: &rows,
             cursor,
-            normal_mode: pane.mode == Mode::Normal,
+            normal_mode: pane.mode != Mode::Insert,
             label: label.as_deref(),
+            highlights: &highlights,
         };
         frame.renderer.render(
             (&frame.gpu.device, &frame.gpu.queue),
@@ -412,15 +414,25 @@ impl std::fmt::Debug for Clipboard {
     }
 }
 
-/// The clipboard's text, opening the clipboard on first use.
-fn paste_text(clipboard: &mut Option<Clipboard>) -> anyhow::Result<String> {
-    let clipboard = match clipboard {
+/// The clipboard, opened on first use.
+fn clipboard(slot: &mut Option<Clipboard>) -> anyhow::Result<&mut arboard::Clipboard> {
+    let clipboard = match slot {
         Some(clipboard) => clipboard,
-        None => clipboard.insert(Clipboard(
+        None => slot.insert(Clipboard(
             arboard::Clipboard::new().context("no clipboard")?,
         )),
     };
-    Ok(clipboard.0.get_text()?)
+    Ok(&mut clipboard.0)
+}
+
+/// The clipboard's text.
+fn paste_text(slot: &mut Option<Clipboard>) -> anyhow::Result<String> {
+    Ok(clipboard(slot)?.get_text()?)
+}
+
+/// Puts `text` on the clipboard.
+fn copy_text(slot: &mut Option<Clipboard>, text: String) -> anyhow::Result<()> {
+    Ok(clipboard(slot)?.set_text(text)?)
 }
 
 /// The padding around the grid in physical pixels.
@@ -527,9 +539,16 @@ impl App {
                 }
             }
             SessionEvent::Message(ServerMessage::Response(response)) => {
-                if let Some(pane) = &mut self.pane
-                    && pane.answered(response)
+                let Some(pane) = &mut self.pane else {
+                    return;
+                };
+                let redraw = pane.answered(response);
+                if let Some(text) = pane.take_yanked()
+                    && let Err(err) = copy_text(&mut self.clipboard, text)
                 {
+                    log::warn!("copying failed: {err:#}");
+                }
+                if redraw {
                     self.request_redraw();
                 }
             }

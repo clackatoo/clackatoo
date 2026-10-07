@@ -747,6 +747,28 @@ impl Daemon {
                 .get(&terminal)
                 .map(|slot| Response::History(history(slot.terminal.emulator(), end, count)))
                 .ok_or(Error::NoSuchTerminal(terminal)),
+            Request::Text {
+                terminal,
+                from,
+                to,
+                whole_lines,
+            } => self
+                .terminals
+                .get(&terminal)
+                .map(|slot| Response::Text(slot.terminal.emulator().text(from, to, whole_lines)))
+                .ok_or(Error::NoSuchTerminal(terminal)),
+            Request::Search {
+                terminal,
+                query,
+                from,
+                backward,
+            } => self
+                .terminals
+                .get(&terminal)
+                .map(|slot| {
+                    Response::Found(slot.terminal.emulator().search(&query, from, backward))
+                })
+                .ok_or(Error::NoSuchTerminal(terminal)),
         };
         response.unwrap_or_else(Response::Error)
     }

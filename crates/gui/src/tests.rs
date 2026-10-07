@@ -4,7 +4,7 @@ use clackatoo_protocol::{Size, View};
 use clackatoo_term::{Config, Terminal};
 
 use crate::fonts::{FontOptions, Fonts};
-use crate::render::{CursorStyle, Renderer, Scene, SceneCursor};
+use crate::render::{CursorStyle, Highlight, HighlightKind, Renderer, Scene, SceneCursor};
 use crate::screen::Screen;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -25,7 +25,7 @@ fn render(
     rows: u16,
     output: &str,
     scale: f64,
-    (normal_mode, label): (bool, Option<&str>),
+    (normal_mode, label, highlights): (bool, Option<&str>, &[Highlight]),
 ) -> Option<([u32; 2], Vec<u8>)> {
     let (device, queue) = gpu()?;
     let mut terminal = Terminal::new(Size::new(cols, rows).unwrap(), &Config::default());
@@ -69,6 +69,7 @@ fn render(
         }),
         normal_mode,
         label,
+        highlights,
     };
     renderer.render(
         (&device, &queue),
@@ -138,7 +139,7 @@ fn renders_text_colours_and_the_cursor() {
         \x1b[31mred \x1b[32mgreen \x1b[34mblue \x1b[38;2;255;128;0mrgb\x1b[0m \x1b[7minverse\x1b[0m\r\n\
         \x1b[41m red bg \x1b[0m 字符 e\u{301} 😀 👩\u{200D}💻 ok\r\n\
         box: ┌─┐ │ │ └─┘  arrows: → ← ↑ ↓\r\n$ ";
-    let Some((size, pixels)) = render(48, 6, output, 2.0, (false, None)) else {
+    let Some((size, pixels)) = render(48, 6, output, 2.0, (false, None, &[])) else {
         eprintln!("no GPU available; skipping");
         return;
     };
@@ -154,11 +155,40 @@ fn box_drawing_joins_across_rows_and_normal_mode_is_framed() {
         │ab│cd│ │  │ ┃  ┃ ║  ║ ║\r\n\
         ├──┼──┤ ╰──╯ ┗━━┛ ╠══╬═╣\r\n\
         └──┴──┘ ▁▂▃▄▅▆▇█ ░▒▓ ▌▐ ▖▗▘▝ ╚══╩═╝";
-    let Some((size, pixels)) = render(40, 5, output, 2.0, (true, Some("NORMAL  ↑12"))) else {
+    let Some((size, pixels)) = render(40, 5, output, 2.0, (true, Some("NORMAL  ↑12"), &[]))
+    else {
         eprintln!("no GPU available; skipping");
         return;
     };
     save("boxes", size, &pixels);
     // The frame is drawn in the accent colour at the top left corner.
     assert_eq!(&pixels[..3], &[0xf8, 0xce, 0x57]);
+}
+
+#[test]
+fn selections_and_matches_are_highlighted() {
+    let output = "selected text on\r\ntwo lines, and a match";
+    let highlights = [
+        Highlight {
+            line: 0,
+            cols: 9..16,
+            kind: HighlightKind::Selection,
+        },
+        Highlight {
+            line: 1,
+            cols: 0..9,
+            kind: HighlightKind::Selection,
+        },
+        Highlight {
+            line: 1,
+            cols: 17..22,
+            kind: HighlightKind::Match,
+        },
+    ];
+    let Some((size, pixels)) = render(30, 3, output, 2.0, (true, Some("VISUAL"), &highlights))
+    else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    save("highlights", size, &pixels);
 }

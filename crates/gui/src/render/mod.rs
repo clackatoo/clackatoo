@@ -25,6 +25,26 @@ pub(crate) struct Scene<'a> {
     pub(crate) normal_mode: bool,
     /// A label for the top right corner, such as the scroll position.
     pub(crate) label: Option<&'a str>,
+    /// Stretches of text to highlight.
+    pub(crate) highlights: &'a [Highlight],
+}
+
+/// A stretch of one line to highlight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Highlight {
+    /// The line in view, from the top.
+    pub(crate) line: usize,
+    pub(crate) cols: std::ops::Range<usize>,
+    pub(crate) kind: HighlightKind,
+}
+
+/// Why text is highlighted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HighlightKind {
+    /// It's selected.
+    Selection,
+    /// A search found it.
+    Match,
 }
 
 /// Where the cursor is drawn, and how.
@@ -375,6 +395,22 @@ impl Renderer {
                     });
                 }
             }
+        }
+        for highlight in scene.highlights {
+            let [r, g, b, _] = self.theme.accent;
+            // Translucent, so the text's own colours show through.
+            let alpha = match highlight.kind {
+                HighlightKind::Selection => 0.35,
+                HighlightKind::Match => 0.6,
+            };
+            self.rects.push(Rect {
+                origin: [
+                    padding + highlight.cols.start as f32 * cell_width,
+                    padding + highlight.line as f32 * cell_height,
+                ],
+                size: [highlight.cols.len() as f32 * cell_width, cell_height],
+                color: [r, g, b, alpha],
+            });
         }
         if scene.normal_mode {
             self.push_frame(size, padding);

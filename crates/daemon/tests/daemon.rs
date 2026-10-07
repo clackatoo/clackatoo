@@ -558,3 +558,37 @@ fn history_lines_keep_their_numbers() {
     assert_eq!((history.first, history.lines.len()), (89, 2));
     assert!(client.history(terminal, 0, 10).unwrap().lines.is_empty());
 }
+
+#[test]
+fn text_and_search_cover_history_and_screen() {
+    use clackatoo_protocol::{Match, Position};
+
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["sh", "-c", "seq 20; echo needle; exec cat"]);
+    wait_for_screen(&mut client, terminal, |text| text.contains("needle"));
+    let at = |line, col| Position { line, col };
+
+    // Lines 0 to 19 are "1" to "20", and "needle" is line 20.
+    let text = client.request(&Request::Text {
+        terminal,
+        from: at(2, 0),
+        to: at(4, 0),
+        whole_lines: true,
+    });
+    assert_eq!(text.unwrap(), Response::Text("3\n4\n5".into()));
+
+    let found = client.request(&Request::Search {
+        terminal,
+        query: "NEEDLE".to_lowercase(),
+        from: at(0, 0),
+        backward: false,
+    });
+    assert_eq!(
+        found.unwrap(),
+        Response::Found(Some(Match {
+            start: at(20, 0),
+            cells: 6,
+        }))
+    );
+}
