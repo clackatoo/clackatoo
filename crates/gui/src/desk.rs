@@ -15,8 +15,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use clackatoo_protocol::{
-    Axis, ClientMessage, Content, NewTerminal, PaneId, PaneTerminal, Request, Response, Side, Size,
-    Tab, TabId, TerminalId, ViewUpdate, WorkspaceId, Workspaces,
+    Axis, ClientMessage, Content, Layout, NewTerminal, PaneId, PaneTerminal, Request, Response,
+    Side, Size, Tab, TabId, TerminalId, ViewUpdate, WorkspaceId, Workspaces,
 };
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
@@ -24,7 +24,7 @@ use winit::keyboard::{Key, NamedKey};
 use crate::chrome::Status;
 use crate::command::{self, Command, Kind, Place};
 use crate::input::{KeyPress, Modifiers};
-use crate::layout::{Area, Direction, Placement};
+use crate::layout::{Area, Direction, Divider, Placement};
 use crate::pane::{Copy, Mode, Pane, PaneMouse};
 
 /// What a mouse event did, for the window.
@@ -63,6 +63,9 @@ enum Asked {
     Command,
     /// Something done for the window's own sake, whose failure is logged.
     Quiet,
+    /// A split resized, whose shares are shown ahead of the daemon's until
+    /// it has answered.
+    Resize,
 }
 
 /// Something being typed in the palette.
@@ -120,6 +123,14 @@ pub(crate) struct Desk {
     mouse_cell: Option<(TerminalId, [i64; 2])>,
     /// The window doesn't have the focus, so no pane does.
     unfocused: bool,
+    /// The divider being dragged, as it was when grabbed.
+    dragging_divider: Option<Divider>,
+    /// Shares given to a split of a tab here, shown ahead of the daemon's
+    /// while a divider is dragged and until the daemon has answered every
+    /// resize sent, so the divider never jumps back.
+    split_shares: Option<(TabId, Vec<u16>, Vec<u32>)>,
+    /// Resizes sent and not answered yet.
+    resizes_pending: usize,
     /// Every workspace has closed, so the window should too.
     finished: bool,
 }
@@ -164,12 +175,23 @@ impl Desk {
         self.workspaces.get(shown.workspace)?.tab(shown.tab)
     }
 
-    /// Where the shown tab's panes go.
+    /// Where the shown tab's panes go, with any split being resized at its
+    /// new shares.
     pub(crate) fn placement(&self) -> Option<Placement> {
-        Some(Placement::new(
-            &self.shown_tab()?.layout,
-            self.area.as_ref()?,
-        ))
+        let tab = self.shown_tab()?;
+        let area = self.area.as_ref()?;
+        if let Some((resized, path, new_shares)) = &self.split_shares
+            && *resized == tab.id
+        {
+            let mut layout = tab.layout.clone();
+            if let Some(Layout::Split { shares, .. }) = layout.at_mut(path)
+                && shares.len() == new_shares.len()
+            {
+                shares.clone_from(new_shares);
+            }
+            return Some(Placement::new(&layout, area));
+        }
+        Some(Placement::new(&tab.layout, area))
     }
 
     /// The title for the window: the focused pane's program's.
@@ -562,6 +584,18 @@ impl Desk {
                 }
                 redraw
             }
+            Some(Asker::Window(Asked::Resize)) => {
+                self.resizes_pending -= 1;
+                if let Response::Error(err) = response {
+                    log::warn!("the daemon wouldn't resize the split: {err}");
+                }
+                // The daemon's workspaces, sent before this answer, have the
+                // last shares asked for.
+                if self.resizes_pending == 0 && self.dragging_divider.is_none() {
+                    self.split_shares = None;
+                }
+                false
+            }
             Some(Asker::Window(asked)) => match (asked, response) {
                 (Asked::Quiet, Response::Error(err)) => {
                     log::warn!("the daemon refused a request: {err}");
@@ -733,6 +767,134 @@ impl Desk {
             .is_some_and(|pane| pane.reports_mouse(shift))
     }
 
+    // --- Dividers -----------------------------------------------------------
+
+    /// Which way the divider at `point` runs, if there is one: dragging it
+    /// resizes the panes either side.
+    pub(crate) fn divider_at(&self, point: [f32; 2]) -> Option<Axis> {
+        if let Some(divider) = &self.dragging_divider {
+            return Some(divider.axis);
+        }
+        Some(self.placement()?.divider_at(point)?.axis)
+    }
+
+    /// Grabs the divider at `point`, if there is one, to drag it. A double
+    /// click shares its split's space equally instead. Returns whether
+    /// there was one.
+    pub(crate) fn grab_divider(&mut self, point: [f32; 2], clicks: u8) -> bool {
+        let Some(divider) = self
+            .placement()
+            .and_then(|placement| placement.divider_at(point).cloned())
+        else {
+            return false;
+        };
+        if clicks == 2 {
+            let equal = vec![1; divider.parts.len()];
+            self.resize_split(&divider.split, equal);
+        } else {
+            self.dragging_divider = Some(divider);
+        }
+        true
+    }
+
+    /// Moves the divider being dragged to `point`. Returns whether the
+    /// window must be redrawn.
+    pub(crate) fn drag_divider(&mut self, point: [f32; 2]) -> bool {
+        let (Some(divider), Some(area)) = (&self.dragging_divider, &self.area) else {
+            return false;
+        };
+        let position = match divider.axis {
+            Axis::LeftToRight => point[0],
+            Axis::TopToBottom => point[1],
+        };
+        let shares = divider.shares_at(position, area);
+        let path = divider.split.clone();
+        let unchanged = self
+            .split_shares
+            .as_ref()
+            .is_some_and(|(_, at, current)| *at == path && *current == shares);
+        if unchanged {
+            return false;
+        }
+        self.resize_split(&path, shares);
+        true
+    }
+
+    /// Lets go of the divider being dragged. Returns whether one was.
+    pub(crate) fn drop_divider(&mut self) -> bool {
+        let dropped = self.dragging_divider.take().is_some();
+        if self.resizes_pending == 0 {
+            self.split_shares = None;
+        }
+        dropped
+    }
+
+    /// In normal mode, Alt with `h`, `j`, `k` or `l`: moves an edge of the
+    /// focused pane a cell that way, the edge on that side if it has one,
+    /// or else the other.
+    fn move_edge(&mut self, direction: Direction) {
+        let (Some(shown), Some(placement), Some(area)) = (self.shown, self.placement(), self.area)
+        else {
+            return;
+        };
+        let Some(card) = placement.card(shown.pane) else {
+            return;
+        };
+        let rect = card.rect;
+        let middle = [rect.x + rect.width / 2.0, rect.y + rect.height / 2.0];
+        let half_gap = area.gap / 2.0;
+        let (near, far, step) = match direction {
+            Direction::Left => (
+                [rect.x - half_gap, middle[1]],
+                [rect.x + rect.width + half_gap, middle[1]],
+                -area.cell[0],
+            ),
+            Direction::Right => (
+                [rect.x + rect.width + half_gap, middle[1]],
+                [rect.x - half_gap, middle[1]],
+                area.cell[0],
+            ),
+            Direction::Up => (
+                [middle[0], rect.y - half_gap],
+                [middle[0], rect.y + rect.height + half_gap],
+                -area.cell[1],
+            ),
+            Direction::Down => (
+                [middle[0], rect.y + rect.height + half_gap],
+                [middle[0], rect.y - half_gap],
+                area.cell[1],
+            ),
+        };
+        let Some(divider) = placement
+            .divider_at(near)
+            .or_else(|| placement.divider_at(far))
+        else {
+            return;
+        };
+        let shares = divider.shares_at(divider.position(&area) + step, &area);
+        let path = divider.split.clone();
+        self.resize_split(&path, shares);
+    }
+
+    /// Shows the split at `path` in the tab shown with `shares` at once,
+    /// and asks the daemon to keep them.
+    fn resize_split(&mut self, path: &[u16], shares: Vec<u32>) {
+        let Some(tab) = self.shown.map(|shown| shown.tab) else {
+            return;
+        };
+        self.split_shares = Some((tab, path.to_vec(), shares.clone()));
+        self.resizes_pending += 1;
+        self.request(
+            Request::ResizeSplit {
+                tab,
+                split: path.to_vec(),
+                shares,
+            },
+            Asked::Resize,
+        );
+        self.fit_panes();
+    }
+
     /// The window gained or lost the focus: the focused pane's program is
     /// told, if it asked.
     pub(crate) fn window_focus(&mut self, focused: bool) {
@@ -794,6 +956,15 @@ impl Desk {
                 self.input = Some(Input {
                     purpose: Purpose::Command,
                     text: String::new(),
+                });
+                return true;
+            }
+            Some(letter @ ('h' | 'j' | 'k' | 'l')) if press.modifiers.alt && !ctrl => {
+                self.move_edge(match letter {
+                    'h' => Direction::Left,
+                    'j' => Direction::Down,
+                    'k' => Direction::Up,
+                    _ => Direction::Right,
                 });
                 return true;
             }
@@ -1002,6 +1173,7 @@ mod tests {
     fn side_by_side(parts: Vec<Layout>) -> Layout {
         Layout::Split {
             axis: Axis::LeftToRight,
+            shares: vec![1; parts.len()],
             parts,
         }
     }
@@ -1400,5 +1572,86 @@ mod tests {
             "\x1b[<0;40;2m",
         ];
         assert_eq!(sent, expected.map(|bytes| (1, bytes.to_owned())).to_vec());
+    }
+
+    /// The width of `pane`'s card.
+    fn width(desk: &Desk, pane: u32) -> f32 {
+        desk.placement()
+            .unwrap()
+            .card(PaneId(pane))
+            .unwrap()
+            .rect
+            .width
+    }
+
+    /// The shares of every split resize asked of the daemon, oldest first.
+    fn resizes(desk: &mut Desk) -> Vec<Vec<u32>> {
+        answer_all(desk)
+            .into_iter()
+            .filter_map(|request| match request {
+                Request::ResizeSplit { shares, .. } => Some(shares),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn two_side_by_side() -> Workspaces {
+        workspaces(vec![workspace(
+            1,
+            "work",
+            vec![tab(1, side_by_side(vec![pane(1), pane(2)]))],
+        )])
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn dragging_a_divider_resizes_the_panes_at_once_and_tells_the_daemon() {
+        let mut desk = desk(two_side_by_side());
+        // 810 pixels: 400, a gap at 400 to 410, and 400.
+        assert_eq!(desk.divider_at([405.0, 100.0]), Some(Axis::LeftToRight));
+        assert_eq!(desk.divider_at([300.0, 100.0]), None);
+        assert!(desk.grab_divider([405.0, 100.0], 1));
+        assert!(desk.drag_divider([303.0, 100.0]));
+        assert_eq!(width(&desk, 1), 300.0);
+        assert!(!desk.drag_divider([304.0, 100.0]), "within the same cell");
+        desk.drop_divider();
+
+        // The daemon's workspaces, from before it heard, don't move it back.
+        desk.workspaces_changed(two_side_by_side());
+        assert_eq!(width(&desk, 1), 300.0);
+        assert_eq!(resizes(&mut desk), [vec![300 * 16, 500 * 16]]);
+        // Once answered, the daemon's shares rule, as they would be by now.
+        let mut resized = two_side_by_side();
+        if let Layout::Split { shares, .. } = &mut resized.list[0].tabs[0].layout {
+            *shares = vec![3, 5];
+        }
+        desk.workspaces_changed(resized);
+        assert_eq!(width(&desk, 1), 300.0);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn alt_moves_the_focused_panes_edges_and_a_double_click_evens_them() {
+        let mut desk = desk(two_side_by_side());
+        normal_mode(&mut desk);
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        // The left pane has its right edge only: Alt+L grows it, and Alt+H
+        // shrinks it, both moving that edge a column.
+        press(&mut desk, Key::Character("l".into()), None, alt);
+        assert_eq!(width(&desk, 1), 410.0);
+        press(&mut desk, Key::Character("h".into()), None, alt);
+        press(&mut desk, Key::Character("h".into()), None, alt);
+        assert_eq!(width(&desk, 1), 390.0);
+        // Up and down have no edge to move here.
+        press(&mut desk, Key::Character("j".into()), None, alt);
+        assert_eq!(resizes(&mut desk).len(), 3);
+
+        // Answered, with this test's daemon still sharing equally.
+        assert!(desk.grab_divider([405.0, 100.0], 2));
+        desk.drop_divider();
+        assert_eq!(resizes(&mut desk), [vec![1, 1]]);
     }
 }

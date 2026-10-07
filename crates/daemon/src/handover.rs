@@ -136,10 +136,12 @@ pub(crate) struct Tab {
 pub(crate) enum Layout {
     /// A pane showing a terminal.
     Pane { id: u32, terminal: u32 },
-    /// Panes side by side, left to right or top to bottom.
+    /// Panes side by side, left to right or top to bottom, each with its
+    /// share of the space.
     Split {
         left_to_right: bool,
         parts: Vec<Layout>,
+        shares: Vec<u32>,
     },
 }
 
@@ -211,6 +213,7 @@ mod tests {
                                 Layout::Pane { id: 1, terminal: 1 },
                                 Layout::Pane { id: 2, terminal: 2 },
                             ],
+                            shares: vec![2, 1],
                         },
                         focused: 2,
                         name: None,

@@ -1225,7 +1225,8 @@ impl Daemon {
             | Request::RenameWorkspace { .. }
             | Request::RenameTab { .. }
             | Request::CloseTab { .. }
-            | Request::CloseWorkspace { .. }) => self.respond_about_workspaces(request, token),
+            | Request::CloseWorkspace { .. }
+            | Request::ResizeSplit { .. }) => self.respond_about_workspaces(request, token),
             Request::CarryQuic => self.carry_quic(token),
         };
         response.unwrap_or_else(Response::Error)
@@ -1275,6 +1276,13 @@ impl Daemon {
                 self.workspaces_changed();
                 Response::Done
             }),
+            Request::ResizeSplit { tab, split, shares } => self
+                .workspaces
+                .resize_split(tab, &split, &shares)
+                .map(|()| {
+                    self.workspaces_changed();
+                    Response::Done
+                }),
             Request::CloseTab { tab } => {
                 let terminals = self.workspaces.tab_terminals(tab)?;
                 self.close_terminals(&terminals)

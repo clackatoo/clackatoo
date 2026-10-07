@@ -42,9 +42,14 @@ impl WorkspaceState {
                         terminal: terminal.0,
                     }
                 }
-                Layout::Split { axis, parts } => handover::Layout::Split {
+                Layout::Split {
+                    axis,
+                    parts,
+                    shares,
+                } => handover::Layout::Split {
                     left_to_right: *axis == Axis::LeftToRight,
                     parts: parts.iter().map(layout).collect(),
+                    shares: shares.clone(),
                 },
             }
         }
@@ -82,14 +87,23 @@ impl WorkspaceState {
                 handover::Layout::Split {
                     left_to_right,
                     parts,
-                } if parts.len() >= 2 => Layout::Split {
-                    axis: if *left_to_right {
-                        Axis::LeftToRight
-                    } else {
-                        Axis::TopToBottom
-                    },
-                    parts: parts.iter().map(layout).collect::<Result<_, _>>()?,
-                },
+                    shares,
+                } if parts.len() >= 2 => {
+                    if shares.len() != parts.len() || shares.contains(&0) {
+                        return Err(HandoverError::Damaged(
+                            "a split's shares don't fit its parts",
+                        ));
+                    }
+                    Layout::Split {
+                        axis: if *left_to_right {
+                            Axis::LeftToRight
+                        } else {
+                            Axis::TopToBottom
+                        },
+                        parts: parts.iter().map(layout).collect::<Result<_, _>>()?,
+                        shares: shares.clone(),
+                    }
+                }
                 handover::Layout::Split { .. } => {
                     return Err(HandoverError::Damaged("a split has fewer than two parts"));
                 }
@@ -265,6 +279,35 @@ impl WorkspaceState {
         Ok(())
     }
 
+    /// Shares the split at `path` in `tab` anew: see
+    /// [`Request::ResizeSplit`](clackatoo_protocol::Request::ResizeSplit).
+    pub(crate) fn resize_split(
+        &mut self,
+        tab: TabId,
+        path: &[u16],
+        new_shares: &[u32],
+    ) -> Result<(), Error> {
+        if new_shares.contains(&0) {
+            return Err(Error::EmptyShare);
+        }
+        let layout = &mut self
+            .workspaces
+            .list
+            .iter_mut()
+            .flat_map(|workspace| &mut workspace.tabs)
+            .find(|candidate| candidate.id == tab)
+            .ok_or(Error::NoSuchTab(tab))?
+            .layout;
+        match layout.at_mut(path) {
+            Some(Layout::Split { parts, shares, .. }) if parts.len() == new_shares.len() => {
+                let wide: Vec<u64> = new_shares.iter().map(|&share| u64::from(share)).collect();
+                *shares = normalized(&wide);
+                Ok(())
+            }
+            _ => Err(Error::NoSuchSplit(tab)),
+        }
+    }
+
     pub(crate) fn rename(&mut self, workspace: WorkspaceId, name: &str) -> Result<(), Error> {
         self.check_workspace(workspace)?;
         let name = self.check_name(name, Some(workspace))?;
@@ -379,9 +422,28 @@ impl WorkspaceState {
     }
 }
 
+/// The most a split's shares add up to, kept well inside `u32`.
+const SHARES_TOTAL: u64 = 1 << 20;
+
+/// `shares` in proportion, adding up to at most [`SHARES_TOTAL`], none 0.
+fn normalized(shares: &[u64]) -> Vec<u32> {
+    let total: u64 = shares.iter().sum();
+    shares
+        .iter()
+        .map(|&share| {
+            let share = if total > SHARES_TOTAL {
+                share * SHARES_TOTAL / total
+            } else {
+                share
+            };
+            u32::try_from(share.max(1)).expect("at most SHARES_TOTAL")
+        })
+        .collect()
+}
+
 /// Puts `new` on `side` of the pane `target` in `layout`. In a split along
-/// the same axis, it joins that split, so three panes side by side share
-/// the space in thirds.
+/// the same axis, it joins that split with the average share, so three
+/// panes side by side that were never resized share the space in thirds.
 fn split(layout: &mut Layout, target: PaneId, side: Side, new: Pane) {
     let axis = side.axis();
     match layout {
@@ -393,12 +455,17 @@ fn split(layout: &mut Layout, target: PaneId, side: Side, new: Pane) {
             } else {
                 vec![old, new]
             };
-            *layout = Layout::Split { axis, parts };
+            *layout = Layout::Split {
+                axis,
+                parts,
+                shares: vec![1, 1],
+            };
         }
         Layout::Pane(_) => {}
         Layout::Split {
             axis: split_axis,
             parts,
+            shares,
         } => {
             let leaf = parts
                 .iter()
@@ -406,7 +473,12 @@ fn split(layout: &mut Layout, target: PaneId, side: Side, new: Pane) {
             match leaf {
                 Some(index) if *split_axis == axis => {
                     let at = if side.before() { index } else { index + 1 };
+                    let average = shares.iter().map(|&share| u64::from(share)).sum::<u64>()
+                        / shares.len() as u64;
                     parts.insert(at, Layout::Pane(new));
+                    let mut wide: Vec<u64> = shares.iter().map(|&share| u64::from(share)).collect();
+                    wide.insert(at, average);
+                    *shares = normalized(&wide);
                 }
                 _ => {
                     for part in parts {
@@ -438,8 +510,14 @@ fn remove(tab: &mut Tab, pane: PaneId) -> bool {
 }
 
 fn remove_from(layout: &mut Layout, pane: PaneId) {
-    if let Layout::Split { parts, .. } = layout {
-        parts.retain(|part| !matches!(part, Layout::Pane(p) if p.id == pane));
+    if let Layout::Split { parts, shares, .. } = layout {
+        if let Some(index) = parts
+            .iter()
+            .position(|part| matches!(part, Layout::Pane(p) if p.id == pane))
+        {
+            parts.remove(index);
+            shares.remove(index);
+        }
         for part in parts {
             remove_from(part, pane);
         }
@@ -450,27 +528,49 @@ fn remove_from(layout: &mut Layout, pane: PaneId) {
 /// one part becomes that part, and a split inside another along the same
 /// axis gives its parts to it.
 fn tidy(layout: &mut Layout) {
-    let Layout::Split { axis, parts } = layout else {
+    let Layout::Split {
+        axis,
+        parts,
+        shares,
+    } = layout
+    else {
         return;
     };
     let axis = *axis;
     for part in parts.iter_mut() {
         tidy(part);
     }
+    // A split given to this one shares out the space its part had.
     let mut flat = Vec::with_capacity(parts.len());
-    for part in parts.drain(..) {
+    let mut flat_shares = Vec::with_capacity(parts.len());
+    for (part, share) in parts.drain(..).zip(shares.drain(..)) {
+        let share = u64::from(share) * SHARES_TOTAL;
         match part {
             Layout::Split {
                 axis: inner,
                 parts: inner_parts,
-            } if inner == axis => flat.extend(inner_parts),
-            part => flat.push(part),
+                shares: inner_shares,
+            } if inner == axis => {
+                let total: u64 = inner_shares.iter().map(|&inner| u64::from(inner)).sum();
+                flat.extend(inner_parts);
+                flat_shares.extend(
+                    inner_shares
+                        .iter()
+                        // At most 2^40 times 2^20: well inside u64.
+                        .map(|&inner| share * u64::from(inner) / total.max(1)),
+                );
+            }
+            part => {
+                flat.push(part);
+                flat_shares.push(share);
+            }
         }
     }
     if flat.len() == 1 {
         *layout = flat.pop().expect("one part");
     } else {
         *parts = flat;
+        *shares = normalized(&flat_shares);
     }
 }
 
@@ -485,7 +585,7 @@ mod tests {
     fn shape(layout: &Layout) -> String {
         match layout {
             Layout::Pane(pane) => pane.id.to_string(),
-            Layout::Split { axis, parts } => {
+            Layout::Split { axis, parts, .. } => {
                 let divider = match axis {
                     Axis::LeftToRight => " | ",
                     Axis::TopToBottom => " / ",
@@ -561,6 +661,69 @@ mod tests {
         // Without 3, the stack 2 / 4 lands in the outer stack.
         state.remove_terminal(TerminalId(3));
         assert_eq!(shape(&only_tab(&state).layout), "(1 / 2 / 4)");
+    }
+
+    /// Each part's share of the split at `path` in the only tab, in whole
+    /// percent.
+    fn percents(state: &WorkspaceState, path: &[u16]) -> Vec<u64> {
+        let Some(Layout::Split { shares, .. }) = only_tab(state).layout.at(path) else {
+            panic!("no split at {path:?}");
+        };
+        let total: u64 = shares.iter().map(|&share| u64::from(share)).sum();
+        shares
+            .iter()
+            .map(|&share| u64::from(share) * 100 / total)
+            .collect()
+    }
+
+    #[test]
+    fn shares_follow_resizing_splitting_and_closing() {
+        let mut state = WorkspaceState::new();
+        let one = state.new_workspace("work".into(), TerminalId(1));
+        let tab = only_tab(&state).id;
+        let two = state.split(one, Side::Right, TerminalId(2));
+        assert_eq!(percents(&state, &[]), [50, 50]);
+        state.resize_split(tab, &[], &[3, 1]).unwrap();
+        assert_eq!(percents(&state, &[]), [75, 25]);
+        // A pane joining the split gets the average share.
+        state.split(two, Side::Right, TerminalId(3));
+        assert_eq!(percents(&state, &[]), [50, 16, 33]);
+        state.remove_terminal(TerminalId(3));
+        assert_eq!(percents(&state, &[]), [75, 25]);
+
+        // Asking for a split that isn't there, or a share of nothing.
+        assert!(matches!(
+            state.resize_split(tab, &[1], &[1, 1]),
+            Err(Error::NoSuchSplit(_))
+        ));
+        assert!(matches!(
+            state.resize_split(tab, &[], &[1, 1, 1]),
+            Err(Error::NoSuchSplit(_))
+        ));
+        assert!(matches!(
+            state.resize_split(tab, &[], &[1, 0]),
+            Err(Error::EmptyShare)
+        ));
+        assert!(matches!(
+            state.resize_split(TabId(99), &[], &[1, 1]),
+            Err(Error::NoSuchTab(_))
+        ));
+    }
+
+    #[test]
+    fn a_split_merged_into_another_shares_out_its_part() {
+        let mut state = WorkspaceState::new();
+        let one = state.new_workspace("work".into(), TerminalId(1));
+        let two = state.split(one, Side::Below, TerminalId(2));
+        state.split(two, Side::Right, TerminalId(3));
+        state.split(two, Side::Below, TerminalId(4));
+        let tab = only_tab(&state).id;
+        state.resize_split(tab, &[], &[1, 3]).unwrap();
+        state.resize_split(tab, &[1, 0], &[2, 1]).unwrap();
+        assert_eq!(shape(&only_tab(&state).layout), "(1 / ((2 / 4) | 3))");
+        state.remove_terminal(TerminalId(3));
+        assert_eq!(shape(&only_tab(&state).layout), "(1 / 2 / 4)");
+        assert_eq!(percents(&state, &[]), [25, 50, 25]);
     }
 
     #[test]

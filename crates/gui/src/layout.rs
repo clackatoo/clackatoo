@@ -2,8 +2,9 @@
 //!
 //! Each pane is a card: a rectangle with a gap around it, holding its
 //! terminal's cells a little in from its edges. A split shares its space
-//! equally between its parts, in whole pixels, with any pixels left over
-//! going to the first parts.
+//! between its parts by their shares, in whole pixels, with any pixels
+//! left over going to the first parts. The gaps between a split's parts
+//! are its dividers, which dragging moves.
 
 use clackatoo_protocol::{Axis, Layout, PaneId};
 
@@ -66,56 +67,144 @@ impl Card {
     }
 }
 
+/// How far either side of a divider's gap still grabs it, in pixels.
+const GRAB: f32 = 3.0;
+
+/// The gap between two parts of a split, which dragging moves.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Divider {
+    /// Where the split is in the tab's layout: see [`Layout::at`].
+    pub(crate) split: Vec<u16>,
+    /// The divider follows this part of the split.
+    pub(crate) after: usize,
+    pub(crate) axis: Axis,
+    /// The gap, and a little either side, where it can be grabbed.
+    pub(crate) rect: Rect,
+    /// Where each part of the split starts, and its length, along the axis.
+    pub(crate) parts: Vec<(f32, f32)>,
+}
+
+impl Divider {
+    /// The shares that put this divider at `position` along its axis, in
+    /// whole cells from where the part before it starts, leaving both parts
+    /// beside it at least a cell inside their insets.
+    pub(crate) fn shares_at(&self, position: f32, area: &Area) -> Vec<u32> {
+        let cell = match self.axis {
+            Axis::LeftToRight => area.cell[0],
+            Axis::TopToBottom => area.cell[1],
+        };
+        let (start, before) = self.parts[self.after];
+        let after = self.parts[self.after + 1].1;
+        let both = before + after;
+        let least = cell + 2.0 * area.inset;
+        let mut lengths: Vec<f32> = self.parts.iter().map(|&(_, length)| length).collect();
+        if both >= 2.0 * least {
+            // In whole cells, so the shares change only as cells do.
+            let wanted = position - area.gap / 2.0 - start - 2.0 * area.inset;
+            let snapped = (wanted / cell).round() * cell + 2.0 * area.inset;
+            let length = snapped.clamp(least, both - least);
+            lengths[self.after] = length;
+            lengths[self.after + 1] = both - length;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        lengths
+            .iter()
+            .map(|length| ((length * 16.0).round() as u32).max(1))
+            .collect()
+    }
+
+    /// Where the divider is now, along its axis: the middle of its gap.
+    pub(crate) fn position(&self, area: &Area) -> f32 {
+        let (start, length) = self.parts[self.after];
+        start + length + area.gap / 2.0
+    }
+}
+
 /// Where everything in a tab goes.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Placement {
     pub(crate) panes: Vec<(PaneId, Card)>,
+    pub(crate) dividers: Vec<Divider>,
 }
 
 impl Placement {
     /// Lays out `layout` in `area`.
     pub(crate) fn new(layout: &Layout, area: &Area) -> Self {
         let mut placement = Self::default();
-        placement.place(layout, area.rect, area);
+        placement.place(layout, area.rect, area, &mut Vec::new());
         placement
     }
 
-    fn place(&mut self, layout: &Layout, rect: Rect, area: &Area) {
-        let (axis, parts) = match layout {
+    fn place(&mut self, layout: &Layout, rect: Rect, area: &Area, path: &mut Vec<u16>) {
+        let (axis, parts, shares) = match layout {
             Layout::Pane(pane) => {
                 self.panes.push((pane.id, card(rect, area)));
                 return;
             }
-            Layout::Split { axis, parts } => (*axis, parts),
+            Layout::Split {
+                axis,
+                parts,
+                shares,
+            } => (*axis, parts, shares),
         };
-        let length = match axis {
-            Axis::LeftToRight => rect.width,
-            Axis::TopToBottom => rect.height,
+        let (origin, length) = match axis {
+            Axis::LeftToRight => (rect.x, rect.width),
+            Axis::TopToBottom => (rect.y, rect.height),
         };
-        #[allow(clippy::cast_precision_loss)]
-        let count = parts.len() as f32;
-        let space = (length - area.gap * (count - 1.0)).max(0.0);
-        let each = (space / count).floor();
-        let mut extra = space - each * count;
-        let mut start = 0.0;
-        for part in parts {
-            let size = each + if extra >= 1.0 { 1.0 } else { 0.0 };
-            extra -= 1.0;
+        let lengths = share_out(length, area.gap, shares);
+        let mut extents = Vec::with_capacity(parts.len());
+        let mut start = origin;
+        for (index, (part, &size)) in parts.iter().zip(&lengths).enumerate() {
             let part_rect = match axis {
                 Axis::LeftToRight => Rect {
-                    x: rect.x + start,
+                    x: start,
                     width: size,
                     ..rect
                 },
                 Axis::TopToBottom => Rect {
-                    y: rect.y + start,
+                    y: start,
                     height: size,
                     ..rect
                 },
             };
-            self.place(part, part_rect, area);
+            path.push(u16::try_from(index).unwrap_or(u16::MAX));
+            self.place(part, part_rect, area, path);
+            path.pop();
+            extents.push((start, size));
             start += size + area.gap;
         }
+        for after in 0..parts.len() - 1 {
+            let (start, size) = extents[after];
+            let gap_start = start + size - GRAB;
+            let gap_length = area.gap + 2.0 * GRAB;
+            let gap = match axis {
+                Axis::LeftToRight => Rect {
+                    x: gap_start,
+                    width: gap_length,
+                    ..rect
+                },
+                Axis::TopToBottom => Rect {
+                    y: gap_start,
+                    height: gap_length,
+                    ..rect
+                },
+            };
+            self.dividers.push(Divider {
+                split: path.clone(),
+                after,
+                axis,
+                rect: gap,
+                parts: extents.clone(),
+            });
+        }
+    }
+
+    /// The divider at `point`, if any: the innermost, where they cross.
+    pub(crate) fn divider_at(&self, point: [f32; 2]) -> Option<&Divider> {
+        self.dividers
+            .iter()
+            .filter(|divider| divider.rect.contains(point))
+            .max_by_key(|divider| divider.split.len())
     }
 
     pub(crate) fn card(&self, pane: PaneId) -> Option<Card> {
@@ -176,6 +265,29 @@ impl Placement {
     }
 }
 
+/// `length` less the gaps between the parts, shared out by `shares` in
+/// whole pixels, with pixels left over going to the first parts.
+fn share_out(length: f32, gap: f32, shares: &[u32]) -> Vec<f32> {
+    #[allow(clippy::cast_precision_loss)]
+    let count = shares.len() as f32;
+    let space = (length - gap * (count - 1.0)).max(0.0);
+    let total: f64 = shares.iter().map(|&share| f64::from(share)).sum();
+    #[allow(clippy::cast_possible_truncation)]
+    let mut lengths: Vec<f32> = shares
+        .iter()
+        .map(|&share| (f64::from(space) * f64::from(share) / total.max(1.0)).floor() as f32)
+        .collect();
+    let mut extra = space - lengths.iter().sum::<f32>();
+    for length in &mut lengths {
+        if extra < 1.0 {
+            break;
+        }
+        *length += 1.0;
+        extra -= 1.0;
+    }
+    lengths
+}
+
 /// A card filling `rect`, with as many whole cells as fit inside its inset.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn card(rect: Rect, area: &Area) -> Card {
@@ -222,7 +334,12 @@ mod tests {
     }
 
     fn split(axis: Axis, parts: Vec<Layout>) -> Layout {
-        Layout::Split { axis, parts }
+        let shares = vec![1; parts.len()];
+        Layout::Split {
+            axis,
+            parts,
+            shares,
+        }
     }
 
     /// 410 × 210 pixels, with cells 10 × 20, a gap of 10 and an inset of 5.
@@ -311,5 +428,50 @@ mod tests {
         assert_eq!(next(2, Direction::Up), None);
         assert_eq!(placement.pane_at([300.0, 150.0]), Some(PaneId(3)));
         assert_eq!(placement.pane_at([205.0, 50.0]), None, "in the gap");
+    }
+
+    #[test]
+    fn shares_size_the_parts() {
+        let layout = Layout::Split {
+            axis: Axis::LeftToRight,
+            parts: vec![pane(1), pane(2)],
+            shares: vec![3, 1],
+        };
+        let widths: Vec<f32> = Placement::new(&layout, &area())
+            .panes
+            .iter()
+            .map(|(_, card)| card.rect.width)
+            .collect();
+        // 400 pixels besides the gap: 300 and 100.
+        assert_eq!(widths, [300.0, 100.0]);
+    }
+
+    #[test]
+    fn dividers_are_found_in_their_gaps_and_move_by_whole_cells() {
+        // (1 | (2 / 3)): the upright divider at 200 to 210, and the flat
+        // one in the right part, at 100 to 110.
+        let layout = split(
+            Axis::LeftToRight,
+            vec![pane(1), split(Axis::TopToBottom, vec![pane(2), pane(3)])],
+        );
+        let area = area();
+        let placement = Placement::new(&layout, &area);
+        let upright = placement.divider_at([199.0, 50.0]).unwrap();
+        assert_eq!((upright.split.as_slice(), upright.after), (&[][..], 0));
+        assert_eq!(upright.position(&area), 205.0);
+        let flat = placement.divider_at([300.0, 105.0]).unwrap();
+        assert_eq!(
+            (flat.split.as_slice(), flat.axis),
+            (&[1][..], Axis::TopToBottom)
+        );
+        assert!(placement.divider_at([100.0, 100.0]).is_none());
+
+        // Dragged to 103, the left part would be 98 pixels: 8.8 columns
+        // inside its inset, so 9, which is 100 pixels with it. The right
+        // gets the rest.
+        assert_eq!(upright.shares_at(103.0, &area), [100 * 16, 300 * 16]);
+        // Never smaller than a cell inside its inset.
+        assert_eq!(upright.shares_at(-50.0, &area), [20 * 16, 380 * 16]);
+        assert_eq!(upright.shares_at(900.0, &area), [380 * 16, 20 * 16]);
     }
 }

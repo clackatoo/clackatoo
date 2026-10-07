@@ -60,7 +60,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -291,6 +291,16 @@ pub enum Request {
         /// The workspace.
         workspace: WorkspaceId,
     },
+    /// Shares a split's space between its parts anew, as dragging the
+    /// dividers between them does.
+    ResizeSplit {
+        /// The tab the split is in.
+        tab: TabId,
+        /// Where the split is in the tab's layout: see [`Layout::at`].
+        split: Vec<u16>,
+        /// A share for each of its parts, none 0. Only their ratios matter.
+        shares: Vec<u32>,
+    },
     /// Turns this connection into a carrier of QUIC packets, for a client
     /// on another machine reaching the daemon over SSH. Answered with
     /// [`Response::Carrying`], after which each frame either way holds one
@@ -403,6 +413,12 @@ pub enum Error {
     /// No tab has this ID. It may have been closed.
     #[error("no tab {0}")]
     NoSuchTab(TabId),
+    /// The tab has no split there, or not with that many parts.
+    #[error("tab {0} has no such split")]
+    NoSuchSplit(TabId),
+    /// A part's share of a split can't be 0.
+    #[error("every part of a split needs some of its space")]
+    EmptyShare,
     /// The terminal is already shown in a pane.
     #[error("terminal {0} is already in a pane")]
     TerminalInPane(TerminalId),

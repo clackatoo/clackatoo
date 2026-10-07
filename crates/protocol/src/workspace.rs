@@ -3,7 +3,7 @@
 //!
 //! A workspace is a piece of distinct work, such as a project. It holds
 //! tabs, and each tab a [`Layout`]: a tree of splits whose leaves are
-//! panes. A split shares its space equally between its parts.
+//! panes. A split shares its space between its parts by their shares.
 //!
 //! Which workspace and tab a client shows, and which pane has its focus,
 //! are the client's own. The daemon keeps only a hint of where each
@@ -86,14 +86,17 @@ pub struct Tab {
 pub enum Layout {
     /// The space is one pane.
     Pane(Pane),
-    /// The space is shared equally between `parts`, side by side along
-    /// `axis`. There are always at least two, and none is a split along
-    /// the same axis: that would be the same parts in this split.
+    /// The space is shared between `parts`, side by side along `axis`.
+    /// There are always at least two, and none is a split along the same
+    /// axis: that would be the same parts in this split.
     Split {
         /// Which way the parts are side by side.
         axis: Axis,
         /// The parts, left to right or top to bottom.
         parts: Vec<Layout>,
+        /// Each part's share of the space: the part gets its share over
+        /// their sum. One for each part, and none 0.
+        shares: Vec<u32>,
     },
 }
 
@@ -265,6 +268,30 @@ impl Layout {
         match self {
             Self::Pane(pane) => pane.id == id,
             Self::Split { parts, .. } => parts.iter().any(|part| part.contains(id)),
+        }
+    }
+
+    /// The layout at `path`: the index of a part in this split, then in
+    /// that part, and so on. The empty path is this layout.
+    #[must_use]
+    pub fn at(&self, path: &[u16]) -> Option<&Self> {
+        match path.split_first() {
+            None => Some(self),
+            Some((&index, rest)) => match self {
+                Self::Split { parts, .. } => parts.get(usize::from(index))?.at(rest),
+                Self::Pane(_) => None,
+            },
+        }
+    }
+
+    /// As [`at`](Self::at), for changing it.
+    pub fn at_mut(&mut self, path: &[u16]) -> Option<&mut Self> {
+        match path.split_first() {
+            None => Some(self),
+            Some((&index, rest)) => match self {
+                Self::Split { parts, .. } => parts.get_mut(usize::from(index))?.at_mut(rest),
+                Self::Pane(_) => None,
+            },
         }
     }
 }

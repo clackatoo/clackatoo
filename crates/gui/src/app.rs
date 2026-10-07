@@ -10,8 +10,8 @@ use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
 use clackatoo_daemon::launch;
 use clackatoo_daemon::{Contact, Sender};
 use clackatoo_protocol::{
-    Content, Event, Layout, PROTOCOL_VERSION, Pane as LayoutPane, PaneId, ServerMessage, Size,
-    TabId, TerminalId, WorkspaceId,
+    Axis, Content, Event, Layout, PROTOCOL_VERSION, Pane as LayoutPane, PaneId, ServerMessage,
+    Size, TabId, TerminalId, WorkspaceId,
 };
 use clackatoo_term::Row;
 use clackatoo_term::mouse::MouseAction;
@@ -487,6 +487,10 @@ impl App {
             | Hit::NewWorkspace
             | Hit::NewTab
             | Hit::Menu(_) => CursorIcon::Pointer,
+            Hit::Cards if let Some(axis) = self.desk.divider_at(point) => match axis {
+                Axis::LeftToRight => CursorIcon::ColResize,
+                Axis::TopToBottom => CursorIcon::RowResize,
+            },
             // A program that takes the mouse gets the arrow, as clicks are
             // its, not for selecting text.
             Hit::Cards if self.desk.reports_mouse_at(point, self.modifiers.shift) => {
@@ -516,6 +520,11 @@ impl App {
             self.request_redraw();
         }
         self.hover = hit;
+        if self.desk.drag_divider(point) {
+            self.send_outbox();
+            self.request_redraw();
+            return;
+        }
         // Over a pane, or dragging out of one.
         if self.notice.is_none() {
             let outcome = self
@@ -530,6 +539,12 @@ impl App {
 
     /// A mouse button went down in a pane, the `clicks`th time in a row.
     fn clicked_in_pane(&mut self, point: [f32; 2], button: MouseButton, clicks: u8) {
+        // Between panes, the left button grabs the divider.
+        if button == MouseButton::Left && self.desk.grab_divider(point, clicks) {
+            self.send_outbox();
+            self.request_redraw();
+            return;
+        }
         let Some(button) = mouse_button(button) else {
             return;
         };
@@ -549,6 +564,9 @@ impl App {
 
     /// A mouse button came up: the end of a click or drag in a pane.
     fn released(&mut self, button: MouseButton) {
+        if button == MouseButton::Left && self.desk.drop_divider() {
+            return;
+        }
         let (Some(point), Some(button)) = (self.pointer, mouse_button(button)) else {
             return;
         };

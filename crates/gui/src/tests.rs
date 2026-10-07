@@ -273,6 +273,7 @@ fn two_pane_window(
     let layout = Layout::Split {
         axis: Axis::LeftToRight,
         parts: vec![pane(1), pane(2)],
+        shares: vec![1, 1],
     };
     (size, chrome, Placement::new(&layout, &geometry.area))
 }
