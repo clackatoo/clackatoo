@@ -50,3 +50,12 @@ module_name_repetitions = "allow"
 # release builds, for a faster and smaller binary.
 lto = "fat"
 codegen-units = 1
+
+# An optimised build without whole-program optimisation, for trying things
+# out: much faster to build than release, a little slower to run.
+# `cargo build --profile quick`
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
