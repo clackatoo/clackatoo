@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     ClientMessage, Error, GridState, HistoryLine, HistoryLines, Line, NodeId, PROTOCOL_VERSION,
-    Patch, Request, Response, ServerMessage, Size, TerminalId, View, ViewUpdate,
+    PaneId, PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size, TerminalId,
+    TerminalStatus, View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_term::{Damage, Terminal};
 use mio::event::Event;
@@ -34,6 +35,7 @@ use slab::Slab;
 use crate::DaemonConfig;
 use crate::hosted::{HostedTerminal, Orphan, ReadOutcome};
 use crate::memory;
+use crate::workspaces::WorkspaceState;
 
 const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);
@@ -80,6 +82,8 @@ struct Slot {
 
 /// A connected client.
 #[derive(Debug)]
+// Separate facts about the connection, not states of one machine.
+#[allow(clippy::struct_excessive_bools)]
 struct Client {
     stream: UnixStream,
     decoder: FrameDecoder,
@@ -92,6 +96,8 @@ struct Client {
     wants_writable: bool,
     /// The terminals whose views the client follows.
     views: BTreeMap<TerminalId, Subscription>,
+    /// Whether the client is told when the workspaces change.
+    watching_workspaces: bool,
 }
 
 /// A client following one terminal's view, and what it was last sent.
@@ -169,6 +175,7 @@ pub struct Daemon {
     sources: Slab<Source>,
     terminals: BTreeMap<TerminalId, Slot>,
     next_id: u32,
+    workspaces: WorkspaceState,
     /// Terminals whose output budget ran out with more output waiting.
     unread: VecDeque<TerminalId>,
     /// When each terminal with uncompacted scrollback should compact it.
@@ -225,6 +232,7 @@ impl Daemon {
             sources: Slab::new(),
             terminals: BTreeMap::new(),
             next_id: 1,
+            workspaces: WorkspaceState::new(),
             unread: VecDeque::new(),
             compactions: BTreeMap::new(),
             views_pending: false,
@@ -469,6 +477,12 @@ impl Daemon {
             // Reaping closed the pidfd, which removed it from epoll.
             slot.exit = None;
             self.sources.remove(token.0);
+            // A pane closes when its program exits, as in other terminals.
+            if self.workspaces.get().pane_showing(id).is_some()
+                && let Err(err) = self.close_terminal(id)
+            {
+                log::error!("terminal {id}: closing its pane failed: {err}");
+            }
         }
     }
 
@@ -547,10 +561,116 @@ impl Daemon {
                 self.sources.remove(token.0);
             }
         }
+        if self.workspaces.remove_terminal(id) {
+            self.workspaces_changed();
+        }
         // Its history may have been thousands of rows.
         memory::release_free_memory();
         log::info!("terminal {id} closed");
         Ok(())
+    }
+
+    /// The terminal for a new pane: a new one, starting by default in the
+    /// directory `beside`'s terminal is in, or an existing one in no pane.
+    fn pane_terminal(
+        &mut self,
+        terminal: PaneTerminal,
+        beside: Option<PaneId>,
+    ) -> Result<TerminalId, Error> {
+        match terminal {
+            PaneTerminal::Existing(id) => {
+                let slot = self.terminals.get(&id).ok_or(Error::NoSuchTerminal(id))?;
+                if slot.terminal.info().status != TerminalStatus::Running {
+                    return Err(Error::TerminalExited(id));
+                }
+                if self.workspaces.get().pane_showing(id).is_some() {
+                    return Err(Error::TerminalInPane(id));
+                }
+                Ok(id)
+            }
+            PaneTerminal::New(mut request) => {
+                if request.cwd.is_none() {
+                    request.cwd = beside.and_then(|pane| self.working_directory(pane));
+                }
+                self.new_terminal(&request)
+            }
+        }
+    }
+
+    /// The directory the program in `pane`'s terminal is in: for a shell,
+    /// where it last changed to.
+    fn working_directory(&self, pane: PaneId) -> Option<String> {
+        let terminal = self.workspaces.check_pane(pane).ok()?;
+        let pid = self.terminals.get(&terminal)?.terminal.info().pid;
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+        cwd.into_os_string().into_string().ok()
+    }
+
+    fn new_workspace(
+        &mut self,
+        name: Option<&str>,
+        terminal: PaneTerminal,
+    ) -> Result<Response, Error> {
+        let name = self.workspaces.name_for_new(name)?;
+        let terminal = self.pane_terminal(terminal, None)?;
+        let pane = self.workspaces.new_workspace(name, terminal);
+        self.workspaces_changed();
+        Ok(Response::PaneCreated(pane))
+    }
+
+    fn new_tab(
+        &mut self,
+        workspace: WorkspaceId,
+        terminal: PaneTerminal,
+    ) -> Result<Response, Error> {
+        self.workspaces.check_workspace(workspace)?;
+        let beside = self.workspaces.focused_pane(workspace);
+        let terminal = self.pane_terminal(terminal, beside)?;
+        let pane = self.workspaces.new_tab(workspace, terminal);
+        self.workspaces_changed();
+        Ok(Response::PaneCreated(pane))
+    }
+
+    fn split(
+        &mut self,
+        pane: PaneId,
+        side: Side,
+        terminal: PaneTerminal,
+    ) -> Result<Response, Error> {
+        self.workspaces.check_pane(pane)?;
+        let terminal = self.pane_terminal(terminal, Some(pane))?;
+        let new = self.workspaces.split(pane, side, terminal);
+        self.workspaces_changed();
+        Ok(Response::PaneCreated(new))
+    }
+
+    /// Tells every client watching the workspaces what they are now. The
+    /// client whose request changed them hears before the request's answer,
+    /// which is queued after this.
+    fn workspaces_changed(&mut self) {
+        let event = ServerMessage::Event(clackatoo_protocol::Event::Workspaces(
+            self.workspaces.get().clone(),
+        ));
+        let bytes = match frame::encode(&event) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                log::error!("encoding the workspaces failed: {err}");
+                return;
+            }
+        };
+        let mut watchers = Vec::new();
+        for (key, source) in &mut self.sources {
+            if let Source::Client(client) = source
+                && client.watching_workspaces
+                && !client.finished
+            {
+                client.outgoing.extend_from_slice(&bytes);
+                watchers.push(Token(key));
+            }
+        }
+        for token in watchers {
+            self.flush_client(token);
+        }
     }
 
     /// Registers `fd` for readability under a new token. `None` for a missing
@@ -592,6 +712,7 @@ impl Daemon {
                         finished: false,
                         wants_writable: false,
                         views: BTreeMap::new(),
+                        watching_workspaces: false,
                     }));
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
@@ -769,8 +890,59 @@ impl Daemon {
                     Response::Found(slot.terminal.emulator().search(&query, from, backward))
                 })
                 .ok_or(Error::NoSuchTerminal(terminal)),
+            request @ (Request::WatchWorkspaces
+            | Request::NewWorkspace { .. }
+            | Request::NewTab { .. }
+            | Request::Split { .. }
+            | Request::ClosePane { .. }
+            | Request::Focus { .. }
+            | Request::RenameWorkspace { .. }) => self.respond_about_workspaces(request, token),
         };
         response.unwrap_or_else(Response::Error)
+    }
+
+    /// Answers a request about workspaces from the client at `token`.
+    fn respond_about_workspaces(
+        &mut self,
+        request: Request,
+        token: Token,
+    ) -> Result<Response, Error> {
+        match request {
+            Request::WatchWorkspaces => {
+                if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
+                    client.watching_workspaces = true;
+                }
+                Ok(Response::Workspaces(self.workspaces.get().clone()))
+            }
+            Request::NewWorkspace { name, terminal } => {
+                self.new_workspace(name.as_deref(), terminal)
+            }
+            Request::NewTab {
+                workspace,
+                terminal,
+            } => self.new_tab(workspace, terminal),
+            Request::Split {
+                pane,
+                side,
+                terminal,
+            } => self.split(pane, side, terminal),
+            Request::ClosePane { pane } => self
+                .workspaces
+                .check_pane(pane)
+                .and_then(|terminal| self.close_terminal(terminal))
+                .map(|()| Response::Done),
+            Request::Focus { pane } => self.workspaces.focus(pane).map(|()| {
+                self.workspaces_changed();
+                Response::Done
+            }),
+            Request::RenameWorkspace { workspace, name } => {
+                self.workspaces.rename(workspace, &name).map(|()| {
+                    self.workspaces_changed();
+                    Response::Done
+                })
+            }
+            other => unreachable!("{other:?} isn't about workspaces"),
+        }
     }
 
     /// Starts sending `id`'s view to the client at `token`, beginning with a

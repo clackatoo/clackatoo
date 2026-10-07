@@ -190,7 +190,8 @@ struct Window {
 }
 
 impl Window {
-    /// Opens a window on `daemon`'s newest terminal, logging at `log`.
+    /// Opens a window on `daemon`, which makes a workspace of its newest
+    /// terminal if it has none, logging at `log`.
     fn open(
         binary: &Path,
         daemon: &DaemonProcess,

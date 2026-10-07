@@ -1,10 +1,12 @@
-//! Drawing a terminal's screen with the GPU.
+//! Drawing the window with the GPU: its panes' screens, the bar of
+//! workspaces and tabs, and the dividers between panes.
 //!
-//! Each frame turns the screen into two lists of instanced quads, solid
-//! rectangles and glyphs, and draws them in three passes over one render
-//! pass: backgrounds and the cursor, then glyphs, then underlines and
-//! strikethroughs on top. The renderer draws into any texture, so the same
-//! code serves the window and offscreen tests.
+//! Each frame turns everything into two lists of instanced quads, solid
+//! rectangles and glyphs, and draws them in four passes over one render
+//! pass: backgrounds and the cursor, then glyphs, then underlines,
+//! strikethroughs and labels' backgrounds, then labels' text on top. The
+//! renderer draws into any texture, so the same code serves the window and
+//! offscreen tests.
 
 use bytemuck::{Pod, Zeroable};
 use clackatoo_protocol::{Attributes, Underline};
@@ -17,13 +19,50 @@ use crate::glyphs::{ATLAS_SIZE, AtlasGlyph, GlyphCache};
 
 /// Everything one frame shows.
 #[derive(Debug)]
+pub(crate) struct Picture<'a> {
+    /// The panes.
+    pub(crate) scenes: &'a [Scene<'a>],
+    /// The bar along the top, if shown.
+    pub(crate) bar: Option<Bar<'a>>,
+    /// Lines between panes, as rectangles in pixels: left, top, width and
+    /// height.
+    pub(crate) dividers: &'a [[f32; 4]],
+}
+
+/// The bar along the top of the window: workspaces on the left, tabs on
+/// the right.
+#[derive(Debug)]
+pub(crate) struct Bar<'a> {
+    /// Where its row starts, in pixels.
+    pub(crate) origin: [f32; 2],
+    /// How wide it is, in pixels.
+    pub(crate) width: f32,
+    pub(crate) left: &'a [BarItem],
+    pub(crate) right: &'a [BarItem],
+}
+
+/// One name in the bar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BarItem {
+    pub(crate) text: String,
+    /// The one shown, which is drawn picked out.
+    pub(crate) active: bool,
+}
+
+/// What one pane shows, and where.
+#[derive(Debug)]
 pub(crate) struct Scene<'a> {
+    /// Where the pane's top left corner is, in pixels.
+    pub(crate) origin: [f32; 2],
+    /// How big the pane is, in pixels. Rows and cells past it aren't drawn.
+    pub(crate) size: [f32; 2],
     /// The rows to show, top to bottom.
     pub(crate) rows: &'a [&'a clackatoo_term::Row],
     pub(crate) cursor: Option<SceneCursor>,
-    /// Frame the window, to show the pane is in normal mode.
+    /// Frame the pane, to show it's in normal mode.
     pub(crate) normal_mode: bool,
-    /// A label for the top right corner, such as the scroll position.
+    /// A label for the pane's top right corner, such as the scroll
+    /// position.
     pub(crate) label: Option<&'a str>,
     /// Stretches of text to highlight.
     pub(crate) highlights: &'a [Highlight],
@@ -282,19 +321,17 @@ impl Renderer {
         }
     }
 
-    /// Draws `screen` into `target`, which is `size` physical pixels, with
-    /// the grid `padding` pixels in from the top left.
+    /// Draws `picture` into `target`, which is `size` physical pixels.
     pub(crate) fn render(
         &mut self,
         gpu: (&wgpu::Device, &wgpu::Queue),
         target: &wgpu::TextureView,
         size: [u32; 2],
-        padding: f32,
-        scene: &Scene<'_>,
+        picture: &Picture<'_>,
         fonts: &mut Fonts,
     ) {
         let (device, queue) = gpu;
-        self.build(scene, fonts, padding, size);
+        self.build(picture, fonts, size);
         for upload in self.glyphs.uploads.drain(..) {
             let [x, y, width, height] = upload.rect;
             queue.write_texture(
@@ -380,25 +417,51 @@ impl Renderer {
         queue.submit([encoder.finish()]);
     }
 
-    /// Turns the scene into rectangles and glyphs.
-    #[allow(clippy::cast_precision_loss)]
-    fn build(&mut self, scene: &Scene<'_>, fonts: &mut Fonts, padding: f32, size: [u32; 2]) {
+    /// Turns the picture into rectangles and glyphs.
+    fn build(&mut self, picture: &Picture<'_>, fonts: &mut Fonts, size: [u32; 2]) {
         self.rects.clear();
         self.overlays.clear();
         self.glyph_instances.clear();
         self.label_glyphs.clear();
+        for scene in picture.scenes {
+            self.push_scene(scene, fonts, size);
+        }
+        for &[left, top, width, height] in picture.dividers {
+            self.rects.push(Rect {
+                origin: [left, top],
+                size: [width, height],
+                color: self.theme.divider,
+            });
+        }
+        if let Some(bar) = &picture.bar {
+            self.push_bar(bar, fonts);
+        }
+    }
+
+    /// Adds one pane's cells, cursor, highlights, frame and label.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn push_scene(&mut self, scene: &Scene<'_>, fonts: &mut Fonts, size: [u32; 2]) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
+        let [origin_x, origin_y] = scene.origin;
+        // Whole cells only: a terminal wider or taller than its pane, as
+        // while it's being resized, is cut off.
+        let cols = (scene.size[0] / cell_width).round() as usize;
+        let lines = (scene.size[1] / cell_height).round() as usize;
         let cursor = scene.cursor;
-        for (line, row) in scene.rows.iter().enumerate() {
-            let top = padding + line as f32 * cell_height;
+        for (line, row) in scene.rows.iter().take(lines).enumerate() {
+            let top = origin_y + line as f32 * cell_height;
             let baseline = top + cell.baseline;
-            for (col, &cell_value) in row.cells().iter().enumerate() {
+            for (col, &cell_value) in row.cells().iter().enumerate().take(cols) {
                 if cell_value.is_wide_spacer() {
                     continue;
                 }
                 let cells = if cell_value.is_wide() { 2.0 } else { 1.0 };
-                let left = padding + col as f32 * cell_width;
+                let left = origin_x + col as f32 * cell_width;
                 let style = row.style(cell_value);
                 let mut colors = self.theme.cell(style);
                 if let Some(cursor) =
@@ -454,26 +517,31 @@ impl Renderer {
             }
         }
         for highlight in scene.highlights {
+            if highlight.line >= lines {
+                continue;
+            }
             let [r, g, b, _] = self.theme.accent;
             // Translucent, so the text's own colours show through.
             let alpha = match highlight.kind {
                 HighlightKind::Selection => 0.35,
                 HighlightKind::Match => 0.6,
             };
+            let start = highlight.cols.start.min(cols);
+            let end = highlight.cols.end.min(cols);
             self.rects.push(Rect {
                 origin: [
-                    padding + highlight.cols.start as f32 * cell_width,
-                    padding + highlight.line as f32 * cell_height,
+                    origin_x + start as f32 * cell_width,
+                    origin_y + highlight.line as f32 * cell_height,
                 ],
-                size: [highlight.cols.len() as f32 * cell_width, cell_height],
+                size: [(end - start) as f32 * cell_width, cell_height],
                 color: [r, g, b, alpha],
             });
         }
         if scene.normal_mode {
-            self.push_frame(size, padding);
+            self.push_frame(scene, cell.stroke, size);
         }
         if let Some(label) = scene.label {
-            self.push_label(label, fonts, padding, size);
+            self.push_label(label, fonts, scene);
         }
     }
 
@@ -511,16 +579,22 @@ impl Renderer {
         false
     }
 
-    /// A border around the window in the accent colour, inside the padding.
+    /// A border around the pane in the accent colour, just outside it, in
+    /// the window's padding or the space around a divider.
     #[allow(clippy::cast_precision_loss)]
-    fn push_frame(&mut self, size: [u32; 2], padding: f32) {
-        let (w, h) = (size[0] as f32, size[1] as f32);
-        let t = (padding / 2.0).max(1.0).round();
+    fn push_frame(&mut self, scene: &Scene<'_>, stroke: f32, size: [u32; 2]) {
+        let t = (2.0 * stroke).max(2.0).round();
+        let gap = t + 1.0;
+        let left = (scene.origin[0] - gap).max(0.0);
+        let top = (scene.origin[1] - gap).max(0.0);
+        let right = (scene.origin[0] + scene.size[0] + gap).min(size[0] as f32);
+        let bottom = (scene.origin[1] + scene.size[1] + gap).min(size[1] as f32);
+        let (w, h) = (right - left, bottom - top);
         for (origin, size) in [
-            ([0.0, 0.0], [w, t]),
-            ([0.0, h - t], [w, t]),
-            ([0.0, 0.0], [t, h]),
-            ([w - t, 0.0], [t, h]),
+            ([left, top], [w, t]),
+            ([left, bottom - t], [w, t]),
+            ([left, top], [t, h]),
+            ([right - t, top], [t, h]),
         ] {
             self.overlays.push(Rect {
                 origin,
@@ -530,27 +604,40 @@ impl Renderer {
         }
     }
 
-    /// `text` in the top right corner, dark on the accent colour, over
-    /// whatever the grid shows there.
+    /// `text` in the pane's top right corner, dark on the accent colour,
+    /// over whatever the grid shows there.
     #[allow(clippy::cast_precision_loss)]
-    fn push_label(&mut self, text: &str, fonts: &mut Fonts, padding: f32, size: [u32; 2]) {
+    fn push_label(&mut self, text: &str, fonts: &mut Fonts, scene: &Scene<'_>) {
+        let cell_width = fonts.cell.width as f32;
+        // A cell's width of space either side of the text.
+        let width = (text.chars().count() as f32 + 2.0) * cell_width;
+        let left = (scene.origin[0] + scene.size[0] - width).max(scene.origin[0]);
+        self.push_tag(text, fonts, [left, scene.origin[1]], true);
+    }
+
+    /// `text` with a cell's space either side, at `origin`: dark on the
+    /// accent colour if `picked`, or else in a muted colour. Drawn after
+    /// the grid's glyphs, so it sits on top of them: the overlay pass comes
+    /// last, and these glyphs go to their own list. Returns how wide it is.
+    #[allow(clippy::cast_precision_loss)]
+    fn push_tag(&mut self, text: &str, fonts: &mut Fonts, origin: [f32; 2], picked: bool) -> f32 {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
-        let chars = text.chars().count() as f32;
-        // A cell's width of space either side of the text.
-        let width = (chars + 2.0) * cell_width;
-        let left = (size[0] as f32 - padding - width).max(0.0);
-        let top = padding;
-        self.overlays.push(Rect {
-            origin: [left, top],
-            size: [width, cell_height],
-            color: self.theme.accent,
-        });
+        let width = (text.chars().count() as f32 + 2.0) * cell_width;
+        let [left, top] = origin;
+        let (color, variant) = if picked {
+            self.overlays.push(Rect {
+                origin,
+                size: [width, cell_height],
+                color: self.theme.accent,
+            });
+            (self.theme.background, Variant::Bold)
+        } else {
+            (self.theme.muted, Variant::Regular)
+        };
         let baseline = top + cell.baseline;
-        // Drawn after the grid's glyphs, so it sits on top of them: the
-        // overlay pass comes last, and these glyphs go to their own list.
         for (index, ch) in text.chars().enumerate() {
-            let Some((face, glyph)) = fonts.glyph(ch, Variant::Bold) else {
+            let Some((face, glyph)) = fonts.glyph(ch, variant) else {
                 continue;
             };
             let Some(atlas) = self.glyphs.get(fonts, face, glyph) else {
@@ -561,9 +648,30 @@ impl Renderer {
                 &atlas,
                 pen,
                 [cell_width, cell_height],
-                self.theme.background,
+                color,
                 cell.baseline,
             ));
+        }
+        width
+    }
+
+    /// The bar: its items on the left from the left edge, and on the right
+    /// up to the right edge, with the right's dropped if they'd overlap.
+    #[allow(clippy::cast_precision_loss)]
+    fn push_bar(&mut self, bar: &Bar<'_>, fonts: &mut Fonts) {
+        let cell_width = fonts.cell.width as f32;
+        let width = |item: &BarItem| (item.text.chars().count() as f32 + 2.0) * cell_width;
+        let [mut left, top] = bar.origin;
+        for item in bar.left {
+            left += self.push_tag(&item.text, fonts, [left, top], item.active);
+        }
+        let right_width: f32 = bar.right.iter().map(width).sum();
+        let mut x = bar.origin[0] + bar.width - right_width;
+        if x < left + cell_width {
+            return;
+        }
+        for item in bar.right {
+            x += self.push_tag(&item.text, fonts, [x, top], item.active);
         }
     }
 

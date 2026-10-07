@@ -1,13 +1,18 @@
 //! The window: starting up, and turning window and daemon events into
 //! frames.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use clackatoo_daemon::Sender;
-use clackatoo_protocol::{Event, PROTOCOL_VERSION, ServerMessage, Size};
+use clackatoo_protocol::{
+    Axis, ClientMessage, Content, Event, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal,
+    Request, Response, ServerMessage, Side, Size, Tab, TabId, TerminalId, WorkspaceId, Workspaces,
+};
+use clackatoo_term::Row;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{MouseScrollDelta, WindowEvent};
@@ -16,10 +21,14 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::GraphicsApi;
+use crate::command::{self, Command, Kind, Place};
 use crate::fonts::Fonts;
 use crate::input;
+use crate::layout::{Cells, Direction, Divider, Placement};
 use crate::pane::{Mode, Pane};
-use crate::render::{CursorStyle, PADDING, Renderer, Scene};
+use crate::render::{
+    Bar, BarItem, CursorStyle, Highlight, PADDING, Picture, Renderer, Scene, SceneCursor,
+};
 use crate::screen::Screen;
 use crate::session::{Session, SessionEvent};
 
@@ -49,7 +58,7 @@ fn instance(
 /// Setting up the GPU for longer than this is worth a hint at OpenGL.
 const SLOW_GPU: Duration = Duration::from_millis(500);
 
-/// The grid a new window is sized for.
+/// The grid of panes a new window is sized for.
 const INITIAL_GRID: (u32, u32) = (100, 30);
 
 /// A GPU device, made on its own thread while the window opens.
@@ -218,15 +227,80 @@ struct Frame {
     fonts: Fonts,
 }
 
+/// What the window shows: a workspace, one of its tabs, and the pane in
+/// that tab with the focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Shown {
+    workspace: WorkspaceId,
+    tab: TabId,
+    pane: PaneId,
+}
+
+/// Who sent a request, and so gets its answer.
+#[derive(Clone, Copy, Debug)]
+enum Asker {
+    /// A pane, which keeps track of its own requests.
+    Pane(TerminalId),
+    /// The window itself.
+    Window(Asked),
+}
+
+/// What the window asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    /// A new pane, to switch to once made.
+    Pane,
+    /// Something typed on the command line, whose failure is shown.
+    Command,
+    /// Something done for the window's own sake, whose failure is logged.
+    Quiet,
+}
+
+/// The first key of a two-key window command, in normal mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowPrefix {
+    /// Ctrl+W, then a direction to move to the pane there.
+    CtrlW,
+    /// `g`, then `t` or `T` for the next or last tab, `w` or `W` for the
+    /// next or last workspace. Anything else is the pane's, such as `gg`.
+    G,
+}
+
+/// What a key in normal mode means to the window.
+enum WindowKey {
+    /// The window took it.
+    Taken,
+    /// A held `g` wasn't the window's after all: the pane gets it, then
+    /// this key.
+    ReleaseG,
+    /// It's the pane's.
+    Pane,
+}
+
 /// The window's whole state.
 #[derive(Debug)]
 pub(crate) struct App {
     started: Instant,
     startup: Option<Startup>,
     frame: Option<Frame>,
-    /// The terminal shown, once attached.
-    pane: Option<Pane>,
-    /// Where messages to the daemon go, once attached.
+    /// The panes of the workspace shown, by the terminal each shows.
+    panes: HashMap<TerminalId, Pane>,
+    /// The daemon's workspaces, as last heard.
+    workspaces: Workspaces,
+    /// What's shown, once connected.
+    shown: Option<Shown>,
+    /// The terminals attached to on this connection.
+    attached: HashSet<TerminalId>,
+    /// Who sent each request not yet answered, oldest first: answers come
+    /// in the order requests were sent.
+    asked: VecDeque<Asker>,
+    /// The command line being typed, after `:`.
+    command: Option<String>,
+    /// A message for the focused pane's label, until the next key, such as
+    /// why a command failed.
+    message: Option<String>,
+    prefix: Option<WindowPrefix>,
+    /// Where messages to the daemon go, once connected.
     sender: Option<Sender>,
     /// The modifier keys held now.
     modifiers: input::Modifiers,
@@ -238,10 +312,12 @@ pub(crate) struct App {
     clipboard: Option<Clipboard>,
     /// The connection to the daemon.
     session: Session,
-    /// Shown instead of the terminal, while there's no connection to it.
+    /// Shown instead of the panes, while there's no connection.
     notice: Option<Notice>,
-    /// Whether a frame has shown the terminal, rather than a notice.
+    /// Whether a frame has shown a terminal, rather than a notice.
     first_frame_drawn: bool,
+    /// Every workspace has closed, so the window closes too.
+    finished: bool,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
 }
@@ -257,7 +333,14 @@ impl App {
             started,
             startup: Some(Startup { fonts, gpu }),
             frame: None,
-            pane: None,
+            panes: HashMap::new(),
+            workspaces: Workspaces::default(),
+            shown: None,
+            attached: HashSet::new(),
+            asked: VecDeque::new(),
+            command: None,
+            message: None,
+            prefix: None,
             sender: None,
             modifiers: input::Modifiers::default(),
             focused: true,
@@ -268,6 +351,7 @@ impl App {
             // on Wayland, a window that hasn't drawn isn't shown at all.
             notice: Some(Notice::Connecting),
             first_frame_drawn: false,
+            finished: false,
             result: Ok(()),
         }
     }
@@ -283,12 +367,12 @@ impl App {
         let mut fonts = startup.fonts.join().map_err(join("font"))??;
         let fonts_ready = self.started.elapsed();
         // Fonts were loaded at one pixel per point; the window's display
-        // may have more.
+        // may have more. Room for the grid, and above it the bar and the
+        // space below the bar.
         let (cols, rows) = INITIAL_GRID;
-        let padding = 2.0 * PADDING;
         let size = LogicalSize::new(
-            f64::from(cols * fonts.cell.width) + padding,
-            f64::from(rows * fonts.cell.height) + padding,
+            f64::from(cols * fonts.cell.width) + 2.0 * PADDING,
+            f64::from((rows + 1) * fonts.cell.height) + 3.0 * PADDING,
         );
         let window = Arc::new(event_loop.create_window(window_attributes(size))?);
         fonts.set_scale(window.scale_factor());
@@ -333,43 +417,521 @@ impl App {
         })
     }
 
-    /// Asks the daemon to make the terminal as big as fits the window.
-    fn fit_terminal(&mut self) {
-        if let Some(size) = self.grid_size()
-            && let Some(pane) = &mut self.pane
-        {
-            pane.resize(size);
+    // --- What's shown -----------------------------------------------------
+
+    /// The terminal the focused pane shows.
+    fn focused_terminal(&self) -> Option<TerminalId> {
+        let shown = self.shown?;
+        let (_, _, pane) = self.workspaces.find_pane(shown.pane)?;
+        let Content::Terminal(terminal) = pane.content;
+        Some(terminal)
+    }
+
+    fn focused_pane(&mut self) -> Option<&mut Pane> {
+        let terminal = self.focused_terminal()?;
+        self.panes.get_mut(&terminal)
+    }
+
+    /// The tab shown.
+    fn shown_tab(&self) -> Option<&Tab> {
+        let shown = self.shown?;
+        self.workspaces.get(shown.workspace)?.tab(shown.tab)
+    }
+
+    /// Where the shown tab's panes go.
+    fn placement(&self) -> Option<Placement> {
+        let area = Geometry::of(self.frame.as_ref()?)?.panes;
+        Some(Placement::new(&self.shown_tab()?.layout, area))
+    }
+
+    /// Makes sure what's shown still exists, after the workspaces changed:
+    /// what was shown if it's still there, or else the nearest to it.
+    fn settle(&mut self) {
+        let workspaces = &self.workspaces;
+        let Some(workspace) = self
+            .shown
+            .and_then(|shown| workspaces.get(shown.workspace))
+            .or_else(|| workspaces.active.and_then(|id| workspaces.get(id)))
+            .or_else(|| workspaces.list.first())
+        else {
+            self.shown = None;
+            return;
+        };
+        let tab = self
+            .shown
+            .and_then(|shown| workspace.tab(shown.tab))
+            .or_else(|| workspace.tab(workspace.active_tab))
+            .unwrap_or(&workspace.tabs[0]);
+        let pane = self
+            .shown
+            .map(|shown| shown.pane)
+            .filter(|&pane| tab.layout.contains(pane))
+            .unwrap_or(tab.focused);
+        self.shown = Some(Shown {
+            workspace: workspace.id,
+            tab: tab.id,
+            pane,
+        });
+    }
+
+    /// Switches to `pane`, wherever it is. The pane left goes back to
+    /// insert mode, as every window command ends there.
+    fn show_pane(&mut self, pane: PaneId) {
+        let Some((workspace, tab, _)) = self.workspaces.find_pane(pane) else {
+            return;
+        };
+        let shown = Shown {
+            workspace: workspace.id,
+            tab: tab.id,
+            pane,
+        };
+        if self.shown == Some(shown) {
+            return;
+        }
+        if let Some(left) = self.focused_pane() {
+            left.leave();
+        }
+        self.shown = Some(shown);
+        self.request(Request::Focus { pane }, Asked::Quiet);
+        self.shown_changed();
+    }
+
+    /// Moves to the tab `step` along from the one shown, round the ends.
+    fn step_tab(&mut self, step: isize) {
+        let Some(shown) = self.shown else { return };
+        let Some(workspace) = self.workspaces.get(shown.workspace) else {
+            return;
+        };
+        let tabs = &workspace.tabs;
+        let Some(index) = tabs.iter().position(|tab| tab.id == shown.tab) else {
+            return;
+        };
+        let next = &tabs[step_index(index, step, tabs.len())];
+        self.show_pane(next.focused);
+    }
+
+    /// Moves to the workspace `step` along from the one shown, round the
+    /// ends.
+    fn step_workspace(&mut self, step: isize) {
+        let Some(shown) = self.shown else { return };
+        let list = &self.workspaces.list;
+        let Some(index) = list.iter().position(|w| w.id == shown.workspace) else {
+            return;
+        };
+        let next = &list[step_index(index, step, list.len())];
+        let pane = next.tab(next.active_tab).unwrap_or(&next.tabs[0]).focused;
+        self.show_pane(pane);
+    }
+
+    /// Follows a change in what's shown: attaches to the terminals now
+    /// shown, sizes them to their panes, and redraws.
+    fn shown_changed(&mut self) {
+        self.attach_shown();
+        self.fit_panes();
+        self.update_title();
+        self.request_redraw();
+    }
+
+    /// Attaches to every terminal in the workspace shown, and detaches from
+    /// the rest. Terminals in tabs not shown are attached too: each sends
+    /// one update, which waits undrawn and unacknowledged, so the daemon
+    /// sends no more until the tab is shown, and then shows at once.
+    fn attach_shown(&mut self) {
+        let wanted: HashSet<TerminalId> = self
+            .shown
+            .and_then(|shown| self.workspaces.get(shown.workspace))
+            .map(|workspace| workspace.terminals().into_iter().collect())
+            .unwrap_or_default();
+        self.panes.retain(|terminal, _| wanted.contains(terminal));
+        for &terminal in &wanted {
+            self.panes
+                .entry(terminal)
+                .or_insert_with(|| Pane::new(terminal));
+        }
+        if self.sender.is_none() {
+            return;
+        }
+        let gone: Vec<TerminalId> = self.attached.difference(&wanted).copied().collect();
+        for terminal in gone {
+            self.attached.remove(&terminal);
+            self.request(Request::Detach { terminal }, Asked::Quiet);
+        }
+        let new: Vec<TerminalId> = wanted.difference(&self.attached).copied().collect();
+        for terminal in new {
+            self.attached.insert(terminal);
+            self.request(Request::Attach { terminal }, Asked::Quiet);
         }
     }
 
-    /// Handles a key press: a notice's keys, the window's own, then the
-    /// pane's.
+    /// Asks the daemon to size each terminal shown to its pane.
+    fn fit_panes(&mut self) {
+        let Some(placement) = self.placement() else {
+            return;
+        };
+        let Some(tab) = self.shown_tab() else { return };
+        let panes = tab.layout.panes();
+        for (id, cells) in placement.panes {
+            let Some(pane) = panes.iter().find(|pane| pane.id == id) else {
+                continue;
+            };
+            let Content::Terminal(terminal) = pane.content;
+            if let (Some(pane), Ok(size)) = (
+                self.panes.get_mut(&terminal),
+                Size::new(cells.cols, cells.rows),
+            ) {
+                pane.resize(size);
+            }
+        }
+    }
+
+    /// Titles the window after the focused pane, and the daemon's machine.
+    fn update_title(&self) {
+        let Some(frame) = &self.frame else { return };
+        let title = self
+            .focused_terminal()
+            .and_then(|terminal| self.panes.get(&terminal))
+            .and_then(Pane::screen)
+            .map(|screen| screen.title.as_str())
+            .filter(|title| !title.is_empty())
+            .unwrap_or("clackatoo");
+        match self.session.location().host() {
+            Some(host) => frame.window.set_title(&format!("{title} — {host}")),
+            None => frame.window.set_title(title),
+        }
+    }
+
+    // --- Talking to the daemon --------------------------------------------
+
+    /// Sends a request of the window's own.
+    fn request(&mut self, request: Request, asked: Asked) {
+        self.send(&ClientMessage::Request(request), Some(Asker::Window(asked)));
+    }
+
+    /// Sends `message`, noting who gets the answer if it's a request.
+    fn send(&mut self, message: &ClientMessage, asker: Option<Asker>) {
+        let Some(sender) = &mut self.sender else {
+            return;
+        };
+        match sender.send(message) {
+            Ok(()) => self.asked.extend(asker),
+            Err(err) => log::warn!("sending to the daemon failed: {err}"),
+        }
+    }
+
+    /// Sends what the panes have for the daemon.
+    fn send_outbox(&mut self) {
+        let outgoing: Vec<(TerminalId, ClientMessage)> = self
+            .panes
+            .iter_mut()
+            .flat_map(|(&terminal, pane)| {
+                pane.take_outbox()
+                    .into_iter()
+                    .map(move |message| (terminal, message))
+            })
+            .collect();
+        for (terminal, message) in outgoing {
+            let asker =
+                matches!(message, ClientMessage::Request(_)).then_some(Asker::Pane(terminal));
+            self.send(&message, asker);
+        }
+    }
+
+    /// Hands the daemon's answer to whoever asked.
+    fn answered(&mut self, response: Response) {
+        match self.asked.pop_front() {
+            Some(Asker::Pane(terminal)) => {
+                let Some(pane) = self.panes.get_mut(&terminal) else {
+                    return;
+                };
+                let redraw = pane.answered(response);
+                if let Some(text) = pane.take_yanked()
+                    && let Err(err) = copy_text(&mut self.clipboard, text)
+                {
+                    log::warn!("copying failed: {err:#}");
+                }
+                if redraw {
+                    self.request_redraw();
+                }
+            }
+            Some(Asker::Window(asked)) => match (asked, response) {
+                (_, Response::Error(err)) if asked == Asked::Quiet => {
+                    log::warn!("the daemon refused a request: {err}");
+                }
+                (_, Response::Error(err)) => {
+                    self.message = Some(err.to_string());
+                    self.request_redraw();
+                }
+                // The workspaces came first, so the pane is there to show.
+                (Asked::Pane, Response::PaneCreated(pane)) => self.show_pane(pane),
+                _ => {}
+            },
+            None => log::warn!("the daemon answered a request nobody sent"),
+        }
+    }
+
+    // --- Keys -------------------------------------------------------------
+
+    /// Handles a key press: a notice's keys, the command line's, the
+    /// window's own, then the focused pane's.
     fn key_pressed(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
         if self.notice.is_some() {
             self.notice_key(event_loop, event);
             return;
         }
-        let Some(pane) = &mut self.pane else {
+        if self.command.is_some() {
+            self.command_key(event);
+            self.request_redraw();
             return;
-        };
+        }
+        let had_message = self.message.take().is_some();
         let modifiers = self.modifiers;
-        let redraw = if is_paste(&event.logical_key, modifiers) {
-            match paste_text(&mut self.clipboard) {
-                Ok(text) => pane.paste(&text),
-                Err(err) => log::warn!("pasting failed: {err:#}"),
+        let paste = is_paste(&event.logical_key, modifiers);
+        let window_key = match self.focused_pane() {
+            Some(pane) if !paste && pane.mode != Mode::Insert && !pane.prompting() => {
+                self.window_key(event)
             }
-            true
-        } else {
-            pane.key(&input::KeyPress {
-                key: &event.logical_key,
-                text: event.text.as_deref(),
-                location: event.location,
-                modifiers,
-            })
+            _ => WindowKey::Pane,
         };
+        let press = input::KeyPress {
+            key: &event.logical_key,
+            text: event.text.as_deref(),
+            location: event.location,
+            modifiers,
+        };
+        let mut redraw = had_message;
+        match window_key {
+            WindowKey::Taken => redraw = true,
+            WindowKey::ReleaseG => {
+                if let Some(pane) = self.focused_pane() {
+                    let g = Key::Character("g".into());
+                    pane.key(&input::KeyPress {
+                        key: &g,
+                        text: Some("g"),
+                        location: winit::keyboard::KeyLocation::Standard,
+                        modifiers: input::Modifiers::default(),
+                    });
+                    redraw |= pane.key(&press);
+                }
+            }
+            WindowKey::Pane if paste => {
+                match paste_text(&mut self.clipboard) {
+                    Ok(text) => {
+                        if let Some(pane) = self.focused_pane() {
+                            pane.paste(&text);
+                        }
+                    }
+                    Err(err) => log::warn!("pasting failed: {err:#}"),
+                }
+                redraw = true;
+            }
+            WindowKey::Pane => {
+                if let Some(pane) = self.focused_pane() {
+                    redraw |= pane.key(&press);
+                }
+            }
+        }
         if redraw {
             self.request_redraw();
         }
+    }
+
+    /// What a key in the focused pane's normal mode means to the window.
+    fn window_key(&mut self, event: &winit::event::KeyEvent) -> WindowKey {
+        let key = &event.logical_key;
+        let character = match key {
+            Key::Character(text) => text.chars().next(),
+            _ => None,
+        };
+        let ctrl = self.modifiers.ctrl;
+        match self.prefix.take() {
+            Some(WindowPrefix::CtrlW) => {
+                let direction = match (key, character) {
+                    (Key::Named(NamedKey::ArrowLeft), _) | (_, Some('h')) => Direction::Left,
+                    (Key::Named(NamedKey::ArrowDown), _) | (_, Some('j')) => Direction::Down,
+                    (Key::Named(NamedKey::ArrowUp), _) | (_, Some('k')) => Direction::Up,
+                    (Key::Named(NamedKey::ArrowRight), _) | (_, Some('l')) => Direction::Right,
+                    (_, Some('c' | 'q')) => {
+                        self.run(Command::Close);
+                        return WindowKey::Taken;
+                    }
+                    _ => return WindowKey::Taken,
+                };
+                if let Some(shown) = self.shown
+                    && let Some(next) = self
+                        .placement()
+                        .and_then(|placement| placement.neighbour(shown.pane, direction))
+                {
+                    self.show_pane(next);
+                }
+                return WindowKey::Taken;
+            }
+            Some(WindowPrefix::G) => {
+                match character {
+                    Some('t') => self.step_tab(1),
+                    Some('T') => self.step_tab(-1),
+                    Some('w') => self.step_workspace(1),
+                    Some('W') => self.step_workspace(-1),
+                    _ => return WindowKey::ReleaseG,
+                }
+                return WindowKey::Taken;
+            }
+            None => {}
+        }
+        match character {
+            Some(':') if !ctrl => self.command = Some(String::new()),
+            Some('w' | 'W') if ctrl => self.prefix = Some(WindowPrefix::CtrlW),
+            Some('g') if !ctrl => self.prefix = Some(WindowPrefix::G),
+            _ => return WindowKey::Pane,
+        }
+        WindowKey::Taken
+    }
+
+    /// Handles a key while the command line is open.
+    fn command_key(&mut self, event: &winit::event::KeyEvent) {
+        let Some(line) = &mut self.command else {
+            return;
+        };
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.command = None,
+            Key::Named(NamedKey::Enter) => {
+                let line = std::mem::take(line);
+                self.command = None;
+                match command::parse(&line) {
+                    Ok(command) => self.run(command),
+                    Err(message) => self.message = Some(message),
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                // Deleting past the colon closes the line, as in Vim.
+                if line.pop().is_none() {
+                    self.command = None;
+                }
+            }
+            key if is_paste(key, self.modifiers) => match paste_text(&mut self.clipboard) {
+                Ok(text) => line.extend(text.chars().filter(|ch| !ch.is_control())),
+                Err(err) => log::warn!("pasting failed: {err:#}"),
+            },
+            _ if self.modifiers.ctrl => {}
+            _ => {
+                if let Some(text) = &event.text {
+                    line.extend(text.chars().filter(|ch| !ch.is_control()));
+                }
+            }
+        }
+    }
+
+    /// Carries out a command. Like every window command, it leaves the
+    /// focused pane in insert mode.
+    fn run(&mut self, command: Command) {
+        let Some(shown) = self.shown else { return };
+        if let Command::Open {
+            daemon: Some(daemon),
+            ..
+        } = &command
+        {
+            self.message = Some(format!(
+                "panes on {daemon} come with :connect, which isn't built yet"
+            ));
+            return;
+        }
+        if let Some(pane) = self.focused_pane() {
+            pane.leave();
+        }
+        let new = |size| {
+            PaneTerminal::New(NewTerminal {
+                size,
+                command: None,
+                cwd: None,
+                record_to: None,
+            })
+        };
+        match command {
+            Command::Open {
+                place: Place::Tab,
+                kind: Kind::Terminal,
+                ..
+            } => {
+                let terminal = new(self.new_pane_size(None));
+                self.request(
+                    Request::NewTab {
+                        workspace: shown.workspace,
+                        terminal,
+                    },
+                    Asked::Pane,
+                );
+            }
+            Command::Open {
+                place: Place::Beside(side),
+                kind: Kind::Terminal,
+                ..
+            } => {
+                let terminal = new(self.new_pane_size(Some(side)));
+                self.request(
+                    Request::Split {
+                        pane: shown.pane,
+                        side,
+                        terminal,
+                    },
+                    Asked::Pane,
+                );
+            }
+            Command::Workspace(name) => {
+                let existing = name.as_deref().and_then(|name| {
+                    self.workspaces
+                        .list
+                        .iter()
+                        .find(|workspace| workspace.name == name.trim())
+                });
+                if let Some(workspace) = existing {
+                    let pane = workspace
+                        .tab(workspace.active_tab)
+                        .unwrap_or(&workspace.tabs[0])
+                        .focused;
+                    self.show_pane(pane);
+                } else {
+                    let terminal = new(self.new_pane_size(None));
+                    self.request(Request::NewWorkspace { name, terminal }, Asked::Pane);
+                }
+            }
+            Command::Rename(name) => self.request(
+                Request::RenameWorkspace {
+                    workspace: shown.workspace,
+                    name,
+                },
+                Asked::Command,
+            ),
+            Command::Close => {
+                self.request(Request::ClosePane { pane: shown.pane }, Asked::Command);
+            }
+        }
+    }
+
+    /// About the size a new pane will be: the size of every pane together,
+    /// for a new tab or workspace, or half the focused pane's, beside it on
+    /// `side`. The window resizes it to fit as soon as it's shown.
+    fn new_pane_size(&self, side: Option<Side>) -> Size {
+        let fallback = Size::new(80, 24).expect("80x24 is a valid size");
+        let Some(geometry) = self.frame.as_ref().and_then(Geometry::of) else {
+            return fallback;
+        };
+        let focused = self
+            .shown
+            .zip(self.placement())
+            .and_then(|(shown, placement)| placement.cells(shown.pane));
+        let cells = match (side, focused) {
+            (Some(side), Some(cells)) => match side.axis() {
+                Axis::LeftToRight => Cells {
+                    cols: (cells.cols.saturating_sub(1) / 2).max(1),
+                    ..cells
+                },
+                Axis::TopToBottom => Cells {
+                    rows: (cells.rows.saturating_sub(1) / 2).max(1),
+                    ..cells
+                },
+            },
+            _ => geometry.panes,
+        };
+        Size::new(cells.cols, cells.rows).unwrap_or(fallback)
     }
 
     /// Handles a key while a notice is shown: answering its question, or
@@ -410,8 +972,7 @@ impl App {
             }
             Notice::Lost { .. } if enter => {
                 self.notice = Some(Notice::Connecting);
-                self.session
-                    .reconnect(self.pane.as_ref().map(Pane::terminal));
+                self.session.reconnect();
             }
             Notice::OtherDaemon { .. } | Notice::Lost { .. } | Notice::Connecting if escape => {
                 event_loop.exit();
@@ -422,32 +983,24 @@ impl App {
     }
 
     fn wheel(&mut self, delta: MouseScrollDelta) {
-        let (Some(frame), Some(pane), None) = (&self.frame, &mut self.pane, &self.notice) else {
+        if self.notice.is_some() {
+            return;
+        }
+        let Some(cell_height) = self.frame.as_ref().map(|frame| frame.fonts.cell.height) else {
             return;
         };
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y) * WHEEL_LINES,
-            MouseScrollDelta::PixelDelta(position) => {
-                position.y / f64::from(frame.fonts.cell.height)
-            }
+            MouseScrollDelta::PixelDelta(position) => position.y / f64::from(cell_height),
         } + self.wheel_remainder;
         let whole = lines.trunc();
         self.wheel_remainder = lines - whole;
         #[allow(clippy::cast_possible_truncation)]
-        if whole != 0.0 && pane.wheel(whole as i64) {
-            frame.window.request_redraw();
-        }
-    }
-
-    /// Sends what the pane has for the daemon.
-    fn send_outbox(&mut self) {
-        let (Some(pane), Some(sender)) = (&mut self.pane, &mut self.sender) else {
-            return;
-        };
-        for message in pane.take_outbox() {
-            if let Err(err) = sender.send(&message) {
-                log::warn!("sending to the daemon failed: {err}");
-            }
+        if whole != 0.0
+            && let Some(pane) = self.focused_pane()
+            && pane.wheel(whole as i64)
+        {
+            self.request_redraw();
         }
     }
 
@@ -457,86 +1010,317 @@ impl App {
         }
     }
 
+    // --- Drawing ----------------------------------------------------------
+
     fn draw(&mut self) {
         let started = Instant::now();
-        let message = match (&self.notice, self.grid_size()) {
-            (Some(notice), Some(size)) => Some(Screen::message(
-                &notice.lines(self.session.location().host(), usize::from(size.cols())),
-                size,
-            )),
-            _ => None,
-        };
-        let terminal_shown = message.is_none();
-        let Self {
-            frame,
-            pane,
-            focused,
-            ..
-        } = self;
-        let Some(frame) = frame else {
+        let Some(geometry) = self.frame.as_ref().and_then(Geometry::of) else {
             return;
         };
-        {
-            let (rows, cursor, label, highlights, normal_mode) = if let Some(screen) = &message {
-                (screen.rows.iter().collect(), None, None, Vec::new(), false)
-            } else if let Some(pane) = pane.as_ref()
-                && let Some(screen) = pane.screen()
-            {
-                let (rows, mut cursor) = pane.scene(screen.rows.len());
-                if let Some(cursor) = &mut cursor
-                    && !*focused
-                {
-                    cursor.style = CursorStyle::Hollow;
-                }
-                let highlights = pane.highlights(rows.len());
-                (
-                    rows,
-                    cursor,
-                    pane.label(),
-                    highlights,
-                    pane.mode != Mode::Insert,
-                )
-            } else {
-                return;
-            };
-            let scene = Scene {
-                rows: &rows,
-                cursor,
-                normal_mode,
-                label: label.as_deref(),
-                highlights: &highlights,
-            };
-            if !present(frame, &scene) {
-                return;
+        if let Some(notice) = &self.notice {
+            let lines = notice.lines(
+                self.session.location().host(),
+                usize::from(geometry.grid.cols()),
+            );
+            if let Some(frame) = &mut self.frame {
+                draw_notice(frame, &lines, &geometry);
             }
+            return;
         }
+        let Some(drawn) = self.draw_panes(&geometry) else {
+            return;
+        };
         // For measuring: `RUST_LOG=clackatoo_gui::frame=trace`.
         log::trace!(target: "clackatoo_gui::frame", "frame {}", started.elapsed().as_micros());
-        // What the benchmarks time: the terminal on screen, not the notice
+        // What the benchmarks time: a terminal on screen, not the notice
         // shown while connecting.
-        if terminal_shown && !self.first_frame_drawn {
+        if !drawn.is_empty() && !self.first_frame_drawn {
             self.first_frame_drawn = true;
             log::info!("first frame after {:.1?}", self.started.elapsed());
         }
-        if let Some(pane) = &mut self.pane {
-            pane.drawn();
+        for terminal in drawn {
+            if let Some(pane) = self.panes.get_mut(&terminal) {
+                pane.drawn();
+            }
         }
     }
 
-    /// How many cells fit in the window, inside the padding.
-    fn grid_size(&self) -> Option<Size> {
-        let frame = self.frame.as_ref()?;
+    /// Draws the bar and the shown tab's panes. Returns the terminals
+    /// drawn, or `None` if the frame wasn't shown.
+    fn draw_panes(&mut self, geometry: &Geometry) -> Option<Vec<TerminalId>> {
+        let shown = self.shown?;
+        let workspace = self.workspaces.get(shown.workspace)?;
+        let tab = workspace.tab(shown.tab)?;
+        let placement = Placement::new(&tab.layout, geometry.panes);
+        let layout_panes = tab.layout.panes();
+        let mut drawings = Vec::new();
+        for &(id, cells) in &placement.panes {
+            let Some(pane) = layout_panes.iter().find(|pane| pane.id == id) else {
+                continue;
+            };
+            let Content::Terminal(terminal) = pane.content;
+            let Some(state) = self.panes.get(&terminal) else {
+                continue;
+            };
+            if state.screen().is_none() {
+                continue;
+            }
+            let height = usize::from(cells.rows);
+            let (rows, mut cursor) = state.scene(height);
+            let focused = id == shown.pane;
+            if let Some(cursor) = &mut cursor
+                && !(focused && self.focused)
+            {
+                cursor.style = CursorStyle::Hollow;
+            }
+            let label = if focused {
+                match (&self.command, &self.message) {
+                    (Some(line), _) => Some(format!(":{line}▏")),
+                    (None, Some(message)) => Some(message.clone()),
+                    (None, None) => state.label(),
+                }
+            } else {
+                state.label()
+            };
+            drawings.push(Drawing {
+                terminal,
+                cells,
+                rows,
+                cursor,
+                label,
+                highlights: state.highlights(height),
+                normal_mode: state.mode != Mode::Insert,
+            });
+        }
+        let scenes: Vec<Scene<'_>> = drawings
+            .iter()
+            .map(|drawing| Scene {
+                origin: geometry.origin(drawing.cells),
+                size: geometry.pixels(drawing.cells),
+                rows: &drawing.rows,
+                cursor: drawing.cursor,
+                normal_mode: drawing.normal_mode,
+                label: drawing.label.as_deref(),
+                highlights: &drawing.highlights,
+            })
+            .collect();
+        let dividers: Vec<[f32; 4]> = placement
+            .dividers
+            .iter()
+            .map(|divider| geometry.divider(divider))
+            .collect();
+        let (left, right) = self.bar_items(shown);
+        let bar = Bar {
+            origin: [geometry.padding; 2],
+            width: geometry.grid_pixels()[0],
+            left: &left,
+            right: &right,
+        };
+        let picture = Picture {
+            scenes: &scenes,
+            bar: Some(bar),
+            dividers: &dividers,
+        };
+        let frame = self.frame.as_mut()?;
+        if !present(frame, &picture) {
+            return None;
+        }
+        Some(drawings.iter().map(|drawing| drawing.terminal).collect())
+    }
+
+    /// What the bar shows: every workspace, and the shown one's tabs.
+    fn bar_items(&self, shown: Shown) -> (Vec<BarItem>, Vec<BarItem>) {
+        let workspaces = self
+            .workspaces
+            .list
+            .iter()
+            .map(|workspace| BarItem {
+                text: workspace.name.clone(),
+                active: workspace.id == shown.workspace,
+            })
+            .collect();
+        let tabs = self
+            .workspaces
+            .get(shown.workspace)
+            .map(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tab)| BarItem {
+                        text: self.tab_name(index, tab),
+                        active: tab.id == shown.tab,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        (workspaces, tabs)
+    }
+
+    /// What the bar calls a tab: its number, and its focused pane's title.
+    fn tab_name(&self, index: usize, tab: &Tab) -> String {
+        /// Longer titles are cut short, to leave room for the other tabs.
+        const MAX_TITLE: usize = 24;
+        let number = index + 1;
+        let title = self
+            .workspaces
+            .find_pane(tab.focused)
+            .and_then(|(_, _, pane)| {
+                let Content::Terminal(terminal) = pane.content;
+                self.panes.get(&terminal)?.screen()
+            })
+            .map(|screen| screen.title.trim())
+            .filter(|title| !title.is_empty());
+        match title {
+            Some(title) if title.chars().count() > MAX_TITLE => {
+                let short: String = title.chars().take(MAX_TITLE - 1).collect();
+                format!("{number} {short}…")
+            }
+            Some(title) => format!("{number} {title}"),
+            None => number.to_string(),
+        }
+    }
+
+    // --- The daemon's news ------------------------------------------------
+
+    /// Takes the daemon's workspaces, as they are now.
+    fn workspaces_changed(&mut self, workspaces: Workspaces) {
+        self.workspaces = workspaces;
+        if self.workspaces.list.is_empty() {
+            // Every pane closed, as when the last shell exits.
+            self.finished = true;
+            return;
+        }
+        self.settle();
+        self.shown_changed();
+    }
+}
+
+/// Draws a notice's `lines` over the whole window.
+fn draw_notice(frame: &mut Frame, lines: &[String], geometry: &Geometry) {
+    let screen = Screen::message(lines, geometry.grid);
+    let rows: Vec<_> = screen.rows.iter().collect();
+    let scenes = [Scene {
+        origin: [geometry.padding; 2],
+        size: geometry.grid_pixels(),
+        rows: &rows,
+        cursor: None,
+        normal_mode: false,
+        label: None,
+        highlights: &[],
+    }];
+    present(
+        frame,
+        &Picture {
+            scenes: &scenes,
+            bar: None,
+            dividers: &[],
+        },
+    );
+}
+
+/// `index` moved `step` along a list `len` long, round the ends.
+fn step_index(index: usize, step: isize, len: usize) -> usize {
+    let len = isize::try_from(len).expect("lists are shorter than isize::MAX");
+    let index = isize::try_from(index).expect("indices are shorter than isize::MAX");
+    usize::try_from((index + step).rem_euclid(len)).expect("rem_euclid is never negative")
+}
+
+/// One pane, ready to draw.
+struct Drawing<'a> {
+    terminal: TerminalId,
+    cells: Cells,
+    rows: Vec<&'a Row>,
+    cursor: Option<SceneCursor>,
+    label: Option<String>,
+    highlights: Vec<Highlight>,
+    normal_mode: bool,
+}
+
+/// Where things go in the window, in pixels: the bar along the top, and
+/// the panes below it, all inside the padding.
+#[derive(Debug)]
+struct Geometry {
+    padding: f32,
+    cell: [f32; 2],
+    /// Every cell inside the padding, for notices.
+    grid: Size,
+    /// The cells below the bar, for panes.
+    panes: Cells,
+    /// Where the panes' cells start.
+    panes_top: f32,
+}
+
+impl Geometry {
+    #[allow(clippy::cast_precision_loss)]
+    fn of(frame: &Frame) -> Option<Self> {
         let cell = frame.fonts.cell;
         let padding = padding(&frame.window);
-        let grid = |pixels: u32, cell: u32| {
-            let cells = (pixels.saturating_sub(2 * padding) / cell).max(1);
-            u16::try_from(cells).unwrap_or(u16::MAX)
-        };
-        Size::new(
-            grid(frame.config.width, cell.width),
-            grid(frame.config.height, cell.height),
+        let cells =
+            |pixels: u32, cell: u32| u16::try_from((pixels / cell).max(1)).unwrap_or(u16::MAX);
+        let (width, height) = (frame.config.width, frame.config.height);
+        let grid = Size::new(
+            cells(width.saturating_sub(2 * padding), cell.width),
+            cells(height.saturating_sub(2 * padding), cell.height),
         )
-        .ok()
+        .ok()?;
+        // The bar's row, and below it a padding's space before the panes.
+        let below_bar = 3 * padding + cell.height;
+        let panes = Cells {
+            col: 0,
+            row: 0,
+            cols: grid.cols(),
+            rows: cells(height.saturating_sub(below_bar), cell.height),
+        };
+        Some(Self {
+            padding: padding as f32,
+            cell: [cell.width as f32, cell.height as f32],
+            grid,
+            panes,
+            panes_top: (2 * padding + cell.height) as f32,
+        })
+    }
+
+    fn grid_pixels(&self) -> [f32; 2] {
+        [
+            f32::from(self.grid.cols()) * self.cell[0],
+            f32::from(self.grid.rows()) * self.cell[1],
+        ]
+    }
+
+    fn origin(&self, cells: Cells) -> [f32; 2] {
+        [
+            self.padding + f32::from(cells.col) * self.cell[0],
+            self.panes_top + f32::from(cells.row) * self.cell[1],
+        ]
+    }
+
+    fn pixels(&self, cells: Cells) -> [f32; 2] {
+        [
+            f32::from(cells.cols) * self.cell[0],
+            f32::from(cells.rows) * self.cell[1],
+        ]
+    }
+
+    /// A divider's line: thin, down or across the middle of its cells.
+    fn divider(&self, divider: &Divider) -> [f32; 4] {
+        let [left, top] = self.origin(divider.cells);
+        let [width, height] = self.pixels(divider.cells);
+        let thickness = (self.padding / 4.0).round().max(1.0);
+        match divider.axis {
+            Axis::LeftToRight => [
+                (left + (width - thickness) / 2.0).round(),
+                top,
+                thickness,
+                height,
+            ],
+            Axis::TopToBottom => [
+                left,
+                (top + (height - thickness) / 2.0).round(),
+                width,
+                thickness,
+            ],
+        }
     }
 }
 
@@ -555,9 +1339,9 @@ fn surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat
         .or_else(|| formats.first().copied())
 }
 
-/// Draws `scene` into the window and shows it. Returns whether a frame
+/// Draws `picture` into the window and shows it. Returns whether a frame
 /// was shown.
-fn present(frame: &mut Frame, scene: &Scene<'_>) -> bool {
+fn present(frame: &mut Frame, picture: &Picture<'_>) -> bool {
     let texture = match frame.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(texture)
         | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
@@ -577,14 +1361,11 @@ fn present(frame: &mut Frame, scene: &Scene<'_>) -> bool {
     let view = texture
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
-    #[allow(clippy::cast_precision_loss)]
-    let padding = padding(&frame.window) as f32;
     frame.renderer.render(
         (&frame.gpu.device, &frame.gpu.queue),
         &view,
         [frame.config.width, frame.config.height],
-        padding,
-        scene,
+        picture,
         &mut frame.fonts,
     );
     frame.window.pre_present_notify();
@@ -786,10 +1567,10 @@ impl ApplicationHandler<SessionEvent> for App {
         match self.open(event_loop, startup) {
             Ok(frame) => {
                 // Whatever arrived while the window opened is drawn now:
-                // the notice, or a terminal whose snapshot came first.
+                // the notice, or panes whose snapshots came first.
                 frame.window.request_redraw();
                 self.frame = Some(frame);
-                self.fit_terminal();
+                self.fit_panes();
             }
             Err(err) => self.fail(event_loop, err),
         }
@@ -800,9 +1581,12 @@ impl ApplicationHandler<SessionEvent> for App {
         self.send_outbox();
     }
 
-    fn user_event(&mut self, _: &ActiveEventLoop, event: SessionEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
         self.handle_session_event(event);
         self.send_outbox();
+        if self.finished {
+            event_loop.exit();
+        }
     }
 }
 
@@ -820,7 +1604,7 @@ impl App {
                     frame.surface.configure(&frame.gpu.device, &frame.config);
                     frame.window.request_redraw();
                 }
-                self.fit_terminal();
+                self.fit_panes();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(frame) = &mut self.frame {
@@ -828,7 +1612,7 @@ impl App {
                     frame.renderer.forget_glyphs();
                     frame.window.request_redraw();
                 }
-                self.fit_terminal();
+                self.fit_panes();
             }
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -847,10 +1631,10 @@ impl App {
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
-                // Another window on the terminal may have resized it: the
-                // focused one decides.
+                // Another window on the terminals may have resized them:
+                // the focused one decides.
                 if focused {
-                    self.fit_terminal();
+                    self.fit_panes();
                 }
                 self.request_redraw();
             }
@@ -860,16 +1644,18 @@ impl App {
 
     fn handle_session_event(&mut self, event: SessionEvent) {
         match event {
-            SessionEvent::Attached { sender, terminal } => {
+            SessionEvent::Connected { sender, workspaces } => {
                 self.notice = None;
-                match &mut self.pane {
-                    // Reconnected: keep the mode, scroll and history.
-                    Some(pane) if pane.terminal() == terminal => pane.reconnected(),
-                    _ => self.pane = Some(Pane::new(terminal)),
-                }
                 self.sender = Some(sender);
-                self.fit_terminal();
-                self.request_redraw();
+                // A new connection: nothing is attached or asked yet, and
+                // panes kept from the last one start over, keeping their
+                // mode, scroll and history.
+                self.attached.clear();
+                self.asked.clear();
+                for pane in self.panes.values_mut() {
+                    pane.reconnected();
+                }
+                self.workspaces_changed(workspaces);
             }
             SessionEvent::OtherDaemon { protocol } => {
                 self.notice = Some(Notice::OtherDaemon { protocol });
@@ -884,44 +1670,37 @@ impl App {
                 });
                 self.request_redraw();
             }
-            SessionEvent::Message(ServerMessage::Event(Event::View { update, .. })) => {
-                let Some(pane) = &mut self.pane else {
+            SessionEvent::Message(ServerMessage::Event(Event::View { terminal, update })) => {
+                let Some(pane) = self.panes.get_mut(&terminal) else {
                     return;
                 };
                 if !pane.view_changed(&update) {
                     return;
                 }
-                if let (Some(frame), Some(screen)) = (&self.frame, pane.screen()) {
-                    let title = if screen.title.is_empty() {
-                        "clackatoo"
-                    } else {
-                        &screen.title
-                    };
-                    match self.session.location().host() {
-                        Some(host) => frame.window.set_title(&format!("{title} — {host}")),
-                        None => frame.window.set_title(title),
-                    }
-                    frame.window.request_redraw();
+                if self.focused_terminal() == Some(terminal) {
+                    self.update_title();
                 }
-            }
-            SessionEvent::Message(ServerMessage::Response(response)) => {
-                let Some(pane) = &mut self.pane else {
-                    return;
-                };
-                let redraw = pane.answered(response);
-                if let Some(text) = pane.take_yanked()
-                    && let Err(err) = copy_text(&mut self.clipboard, text)
-                {
-                    log::warn!("copying failed: {err:#}");
-                }
-                if redraw {
+                // Tabs not shown wait, undrawn, until they are.
+                let shown = self.shown_tab().is_some_and(|tab| {
+                    tab.layout
+                        .panes()
+                        .iter()
+                        .any(|pane| pane.content == Content::Terminal(terminal))
+                });
+                if shown {
                     self.request_redraw();
                 }
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Workspaces(workspaces))) => {
+                self.workspaces_changed(workspaces);
+            }
+            SessionEvent::Message(ServerMessage::Response(response)) => self.answered(response),
             SessionEvent::Message(ServerMessage::Hello { .. }) => {}
             SessionEvent::Lost(reason) => {
                 log::warn!("lost the daemon: {reason}");
                 self.sender = None;
+                self.attached.clear();
+                self.asked.clear();
                 self.notice = Some(Notice::Lost { reason });
                 self.request_redraw();
             }

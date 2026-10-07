@@ -1,10 +1,11 @@
-//! clackatoo's window: draws a terminal's view with the GPU, kept current
-//! by the daemon's updates.
+//! clackatoo's window: draws the daemon's workspaces, their tabs and their
+//! panes' terminals with the GPU, kept current by the daemon's updates.
 //!
-//! The window is a client of the daemon like any other. It attaches to a
-//! terminal, mirrors its view in a [`Screen`](screen::Screen), and redraws
-//! only when an update arrives, acknowledging each once it's on screen so
-//! the daemon sends the next. Between updates it does nothing at all.
+//! The window is a client of the daemon like any other. It watches the
+//! workspaces, attaches to the terminals of the one it shows, mirrors each
+//! terminal's view in a [`Screen`](screen::Screen), and redraws only when
+//! an update arrives, acknowledging each once it's on screen so the daemon
+//! sends the next. Between updates it does nothing at all.
 //!
 //! Starting up overlaps the slow parts: fonts load and the GPU opens on
 //! threads of their own while the event loop starts, and a third thread
@@ -15,10 +16,12 @@
 mod app;
 mod boxdraw;
 mod colors;
+mod command;
 mod fonts;
 mod glyphs;
 mod history;
 mod input;
+mod layout;
 mod motion;
 mod pane;
 mod render;
@@ -62,8 +65,8 @@ pub enum GraphicsApi {
     OpenGl,
 }
 
-/// Opens a window on the newest running terminal, or a new one, and runs
-/// until the window closes.
+/// Opens a window on the daemon's workspaces, making one if there are none,
+/// and runs until the window closes or every workspace has.
 ///
 /// # Errors
 ///

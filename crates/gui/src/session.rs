@@ -1,8 +1,8 @@
 //! The window's connection to the daemon, on a thread of its own.
 //!
-//! The thread connects, starting the daemon if none is running, attaches
-//! to a terminal, and then forwards everything the daemon sends to the
-//! window's event loop. A daemon from another build of clackatoo speaks
+//! The thread connects, starting the daemon if none is running, asks for
+//! the workspaces, making one if there are none, and then forwards
+//! everything the daemon sends to the window's event loop. A daemon from another build of clackatoo speaks
 //! another protocol: the thread tells the window, which asks whether to
 //! replace it, and waits for the answer. When the connection is lost, the
 //! thread ends, and reconnecting starts another.
@@ -19,12 +19,12 @@ use clackatoo_daemon::launch::{self, LaunchError};
 use clackatoo_daemon::remote::{self, Askpass, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, Receiver, RuntimeDir, Sender};
 use clackatoo_protocol::{
-    NewTerminal, PROTOCOL_VERSION, ServerMessage, Size, TerminalId, TerminalStatus,
+    NewTerminal, PROTOCOL_VERSION, PaneTerminal, ServerMessage, Size, TerminalStatus, Workspaces,
 };
 use winit::event_loop::EventLoopProxy;
 
-/// How long the daemon may take to answer while the window attaches.
-const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the daemon may take to answer while the window opens.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where the daemon is.
 #[derive(Clone, Debug)]
@@ -48,11 +48,11 @@ impl Location {
 /// What the session thread tells the window.
 #[derive(Debug)]
 pub(crate) enum SessionEvent {
-    /// Attached to `terminal`. Messages sent through `sender` are answered
-    /// among later `Message`s.
-    Attached {
+    /// Connected, and watching `workspaces`, of which there's at least one.
+    /// Messages sent through `sender` are answered among later `Message`s.
+    Connected {
         sender: Sender,
-        terminal: TerminalId,
+        workspaces: Workspaces,
     },
     /// A daemon speaking another protocol is running. The thread waits
     /// for a [`SessionCommand`].
@@ -120,7 +120,6 @@ impl Session {
         let commands = spawn(
             location.clone(),
             askpass_path(askpass.as_ref()),
-            None,
             proxy.clone(),
         );
         Self {
@@ -135,13 +134,11 @@ impl Session {
         &self.location
     }
 
-    /// Connects again after the connection was lost, attaching to
-    /// `preferred` if it's still running.
-    pub(crate) fn reconnect(&mut self, preferred: Option<TerminalId>) {
+    /// Connects again after the connection was lost.
+    pub(crate) fn reconnect(&mut self) {
         self.commands = spawn(
             self.location.clone(),
             askpass_path(self.askpass.as_ref()),
-            preferred,
             self.proxy.clone(),
         );
     }
@@ -157,20 +154,18 @@ fn askpass_path(askpass: Option<&Askpass>) -> Option<PathBuf> {
     askpass.map(|askpass| askpass.path().to_owned())
 }
 
-/// Starts a session thread for the daemon at `location`, attaching to
-/// `preferred` if it's running, with ssh asking questions through the
-/// socket at `askpass`. The returned sender answers the thread's
-/// questions; dropping it tells the thread to give up.
+/// Starts a session thread for the daemon at `location`, with ssh asking
+/// questions through the socket at `askpass`. The returned sender answers
+/// the thread's questions; dropping it tells the thread to give up.
 fn spawn(
     location: Location,
     askpass: Option<PathBuf>,
-    preferred: Option<TerminalId>,
     proxy: EventLoopProxy<SessionEvent>,
 ) -> mpsc::Sender<SessionCommand> {
     let (commands, received) = mpsc::channel();
     std::thread::Builder::new()
         .name("session".into())
-        .spawn(move || run(&location, askpass.as_deref(), preferred, &proxy, &received))
+        .spawn(move || run(&location, askpass.as_deref(), &proxy, &received))
         .expect("threads can be started");
     commands
 }
@@ -186,7 +181,6 @@ enum Connected {
 fn run(
     location: &Location,
     askpass: Option<&Path>,
-    preferred: Option<TerminalId>,
     proxy: &EventLoopProxy<SessionEvent>,
     commands: &mpsc::Receiver<SessionCommand>,
 ) {
@@ -223,10 +217,10 @@ fn run(
             Connected::Failed(reason) => return lost(reason),
         }
     };
-    let mut receiver = match attach(client, preferred) {
-        Ok((sender, receiver, terminal)) => {
+    let mut receiver = match open(client) {
+        Ok((sender, receiver, workspaces)) => {
             if proxy
-                .send_event(SessionEvent::Attached { sender, terminal })
+                .send_event(SessionEvent::Connected { sender, workspaces })
                 .is_err()
             {
                 return;
@@ -288,36 +282,35 @@ fn with_causes(err: &dyn std::error::Error) -> String {
     text
 }
 
-/// Attaches to `preferred` if it's running, or else the newest running
-/// terminal, starting one if there is none.
-fn attach(
-    mut client: Client,
-    preferred: Option<TerminalId>,
-) -> Result<(Sender, Receiver, TerminalId), ClientError> {
+/// Starts watching the workspaces. With none, makes one, showing the
+/// newest running terminal, such as one a script started, or else a new
+/// one.
+fn open(mut client: Client) -> Result<(Sender, Receiver, Workspaces), ClientError> {
     // A daemon that accepts but never answers would otherwise leave the
     // window blank forever.
-    client.set_read_timeout(Some(ATTACH_TIMEOUT))?;
-    let running: Vec<TerminalId> = client
-        .list_terminals()?
-        .into_iter()
-        .filter(|terminal| terminal.status == TerminalStatus::Running)
-        .map(|terminal| terminal.id)
-        .collect();
-    let running = preferred
-        .filter(|terminal| running.contains(terminal))
-        .or_else(|| running.into_iter().max());
-    let terminal = match running {
-        Some(terminal) => terminal,
-        // Started at a typical size; the window resizes it to fit at once.
-        None => client.new_terminal(NewTerminal {
-            size: Size::new(80, 24).expect("80x24 is a valid size"),
-            command: None,
-            cwd: None,
-            record_to: None,
-        })?,
-    };
-    client.attach(terminal)?;
+    client.set_read_timeout(Some(OPEN_TIMEOUT))?;
+    let mut workspaces = client.watch_workspaces()?;
+    if workspaces.list.is_empty() {
+        let newest = client
+            .list_terminals()?
+            .into_iter()
+            .filter(|terminal| terminal.status == TerminalStatus::Running)
+            .map(|terminal| terminal.id)
+            .max();
+        let terminal = match newest {
+            Some(terminal) => PaneTerminal::Existing(terminal),
+            // Started at a typical size; the window resizes it to fit at once.
+            None => PaneTerminal::New(NewTerminal {
+                size: Size::new(80, 24).expect("80x24 is a valid size"),
+                command: None,
+                cwd: None,
+                record_to: None,
+            }),
+        };
+        client.new_workspace(None, terminal)?;
+        workspaces = client.watch_workspaces()?;
+    }
     client.set_read_timeout(None)?;
     let (sender, receiver) = client.split()?;
-    Ok((sender, receiver, terminal))
+    Ok((sender, receiver, workspaces))
 }

@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    ClientMessage, Error, Event, NewTerminal, PROTOCOL_VERSION, Patch, Request, Response,
-    ServerMessage, Size, TerminalId, TerminalStatus, View, ViewUpdate,
+    ClientMessage, Error, Event, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch,
+    Request, Response, ServerMessage, Side, Size, TerminalId, TerminalStatus, View, ViewUpdate,
+    Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -400,6 +401,7 @@ fn next_update(client: &mut Client, terminal: TerminalId) -> ViewUpdate {
             assert_eq!(from, terminal);
             update
         }
+        Event::Workspaces(_) => panic!("expected a view update, got the workspaces"),
     }
 }
 
@@ -591,4 +593,139 @@ fn text_and_search_cover_history_and_screen() {
             cells: 6,
         }))
     );
+}
+
+// --- Workspaces ----------------------------------------------------------
+
+/// A new pane running `command`.
+fn new_pane(command: &[&str]) -> PaneTerminal {
+    PaneTerminal::New(NewTerminal {
+        size: Size::new(40, 10).unwrap(),
+        command: Some(command.iter().map(|&arg| arg.to_owned()).collect()),
+        cwd: None,
+        record_to: None,
+    })
+}
+
+/// The workspaces, the next time they change, failing after a few seconds.
+fn next_workspaces(client: &mut Client) -> Workspaces {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    loop {
+        if let Event::Workspaces(workspaces) = client.next_event().expect("the workspaces") {
+            return workspaces;
+        }
+    }
+}
+
+/// The panes of the first workspace's first tab.
+fn first_tab_panes(workspaces: &Workspaces) -> Vec<PaneId> {
+    workspaces.list[0].tabs[0]
+        .layout
+        .panes()
+        .iter()
+        .map(|pane| pane.id)
+        .collect()
+}
+
+#[test]
+fn watchers_see_workspaces_made_split_and_closed() {
+    let daemon = TestDaemon::start();
+    let mut watcher = daemon.client();
+    assert_eq!(watcher.watch_workspaces().unwrap(), Workspaces::default());
+    let mut client = daemon.client();
+
+    let first = client
+        .new_workspace(Some("work".into()), new_pane(&["cat"]))
+        .unwrap();
+    let workspaces = next_workspaces(&mut watcher);
+    assert_eq!(workspaces.list[0].name, "work");
+    assert_eq!(workspaces.active, Some(workspaces.list[0].id));
+
+    let second = client
+        .split_pane(first, Side::Right, new_pane(&["cat"]))
+        .unwrap();
+    assert_eq!(
+        first_tab_panes(&next_workspaces(&mut watcher)),
+        [first, second]
+    );
+
+    client.close_pane(second).unwrap();
+    assert_eq!(first_tab_panes(&next_workspaces(&mut watcher)), [first]);
+    assert_eq!(
+        client.list_terminals().unwrap().len(),
+        1,
+        "its terminal closed with it"
+    );
+}
+
+#[test]
+fn a_pane_closes_when_its_program_exits_taking_its_tab_and_workspace() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    client
+        .new_workspace(None, new_pane(&["sh", "-c", "read line"]))
+        .unwrap();
+    let workspaces = next_workspaces(&mut client);
+    assert_eq!(workspaces.list[0].name, "1");
+    let terminal = workspaces.list[0].terminals()[0];
+
+    client.send_input(terminal, b"\r").unwrap();
+    assert_eq!(next_workspaces(&mut client), Workspaces::default());
+    assert!(client.list_terminals().unwrap().is_empty());
+}
+
+#[test]
+fn a_split_starts_where_the_split_pane_is() {
+    let daemon = TestDaemon::start();
+    std::fs::create_dir(daemon.dir.path().join("project")).unwrap();
+    let mut client = daemon.client();
+    let shell = client.new_workspace(None, new_pane(&["sh"])).unwrap();
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    // Quoted, so the echo of what was typed doesn't match.
+    client
+        .send_input(terminal, b"cd project && echo mo\"\"ved\r")
+        .unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.contains("moved"));
+
+    client
+        .split_pane(shell, Side::Below, new_pane(&["sh", "-c", "pwd; cat"]))
+        .unwrap();
+    let workspaces = next_workspaces(&mut client);
+    let split = workspaces.list[0].terminals()[1];
+    wait_for_screen(&mut client, split, |text| text.contains("/project"));
+}
+
+#[test]
+fn a_running_terminal_can_be_put_in_one_pane() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["cat"]);
+    client
+        .new_workspace(None, PaneTerminal::Existing(terminal))
+        .unwrap();
+    assert!(matches!(
+        client.new_workspace(None, PaneTerminal::Existing(terminal)),
+        Err(ClientError::Daemon(Error::TerminalInPane(id))) if id == terminal
+    ));
+}
+
+#[test]
+fn refused_workspace_requests_start_no_terminal() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    assert!(matches!(
+        client.split_pane(PaneId(7), Side::Right, new_pane(&["cat"])),
+        Err(ClientError::Daemon(Error::NoSuchPane(PaneId(7))))
+    ));
+    client
+        .new_workspace(Some("work".into()), new_pane(&["cat"]))
+        .unwrap();
+    assert!(matches!(
+        client.new_workspace(Some("work".into()), new_pane(&["cat"])),
+        Err(ClientError::Daemon(Error::NameTaken(_)))
+    ));
+    assert_eq!(client.list_terminals().unwrap().len(), 1);
 }

@@ -20,6 +20,7 @@ mod pty;
 pub mod remote;
 mod runtime;
 mod server;
+mod workspaces;
 
 use std::ffi::OsString;
 use std::path::PathBuf;

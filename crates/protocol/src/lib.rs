@@ -29,6 +29,7 @@
 
 pub mod frame;
 mod view;
+mod workspace;
 
 use std::fmt;
 
@@ -41,10 +42,14 @@ pub use view::{
     CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, Node, NodeId, Patch, Run,
     View, ViewUpdate,
 };
+pub use workspace::{
+    Axis, Content, Layout, Pane, PaneId, PaneTerminal, Side, Tab, TabId, Workspace, WorkspaceId,
+    Workspaces,
+};
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Everything a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +95,9 @@ pub enum Event {
         /// The change.
         update: ViewUpdate,
     },
+    /// The workspaces changed, for a client watching them. Sent to the
+    /// client whose request changed them before that request's answer.
+    Workspaces(Workspaces),
 }
 
 /// A message from a client to the daemon that expects an answer.
@@ -176,6 +184,57 @@ pub enum Request {
         /// Search towards the start of the document.
         backward: bool,
     },
+    /// Asks for every workspace, and for an [`Event::Workspaces`] whenever
+    /// they change. Answered with [`Response::Workspaces`].
+    WatchWorkspaces,
+    /// Makes a workspace with one tab, showing `terminal`. Without a name,
+    /// it's named with the lowest number no workspace has. Answered with
+    /// [`Response::PaneCreated`].
+    NewWorkspace {
+        /// Its name, unique among the daemon's workspaces.
+        name: Option<String>,
+        /// What its pane shows.
+        terminal: PaneTerminal,
+    },
+    /// Adds a tab to a workspace, after its others, showing `terminal`.
+    /// Answered with [`Response::PaneCreated`].
+    NewTab {
+        /// The workspace.
+        workspace: WorkspaceId,
+        /// What the tab's pane shows.
+        terminal: PaneTerminal,
+    },
+    /// Splits a pane in two, putting a new pane on `side` of it. Answered
+    /// with [`Response::PaneCreated`].
+    Split {
+        /// The pane to split.
+        pane: PaneId,
+        /// Where the new pane goes.
+        side: Side,
+        /// What the new pane shows.
+        terminal: PaneTerminal,
+    },
+    /// Closes a pane and the terminal it shows. A tab goes with its last
+    /// pane, and a workspace with its last tab. A pane also closes when its
+    /// terminal's program exits.
+    ClosePane {
+        /// The pane to close.
+        pane: PaneId,
+    },
+    /// Records that a client switched to this pane: its tab becomes its
+    /// workspace's active tab, it becomes that tab's focused pane, and the
+    /// workspace becomes the active one.
+    Focus {
+        /// The pane switched to.
+        pane: PaneId,
+    },
+    /// Renames a workspace.
+    RenameWorkspace {
+        /// The workspace.
+        workspace: WorkspaceId,
+        /// Its new name, unique among the daemon's workspaces.
+        name: String,
+    },
 }
 
 /// How to start a terminal.
@@ -211,6 +270,10 @@ pub enum Response {
     Text(String),
     /// Answers [`Request::Search`]: where the text is, if anywhere.
     Found(Option<Match>),
+    /// Answers [`Request::WatchWorkspaces`].
+    Workspaces(Workspaces),
+    /// Answers requests that make a pane.
+    PaneCreated(PaneId),
 }
 
 /// Why the daemon refused or failed a request.
@@ -238,6 +301,26 @@ pub enum Error {
         /// The requested recording path.
         path: String,
         /// What went wrong.
+        reason: String,
+    },
+    /// No pane has this ID. It may have been closed.
+    #[error("no pane {0}")]
+    NoSuchPane(PaneId),
+    /// No workspace has this ID. It may have been closed.
+    #[error("no workspace {0}")]
+    NoSuchWorkspace(WorkspaceId),
+    /// The terminal is already shown in a pane.
+    #[error("terminal {0} is already in a pane")]
+    TerminalInPane(TerminalId),
+    /// Another workspace has this name.
+    #[error("there's already a workspace called {0:?}")]
+    NameTaken(String),
+    /// The name can't be a workspace's.
+    #[error("{name:?} can't be a workspace's name: {reason}")]
+    BadName {
+        /// The name asked for.
+        name: String,
+        /// What's wrong with it.
         reason: String,
     },
 }

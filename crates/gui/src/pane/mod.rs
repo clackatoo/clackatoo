@@ -139,8 +139,16 @@ impl Pane {
         self.screen.as_ref()
     }
 
-    pub(crate) fn terminal(&self) -> TerminalId {
-        self.terminal
+    /// Whether a search is being typed, which takes every key.
+    pub(crate) fn prompting(&self) -> bool {
+        self.prompt.is_some()
+    }
+
+    /// Back to insert mode, as the window's commands leave a pane.
+    pub(crate) fn leave(&mut self) {
+        if self.mode != Mode::Insert {
+            self.insert();
+        }
     }
 
     /// Starts over on a new connection to the daemon, which sends a fresh

@@ -7,8 +7,9 @@ use std::path::Path;
 
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
 use clackatoo_protocol::{
-    ClientMessage, Error, Event, HistoryLines, NewTerminal, PROTOCOL_VERSION, Request, Response,
-    ServerMessage, Size, TerminalId, TerminalInfo, View,
+    ClientMessage, Error, Event, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal,
+    Request, Response, ServerMessage, Side, Size, TerminalId, TerminalInfo, View, WorkspaceId,
+    Workspaces,
 };
 
 use crate::remote::Ssh;
@@ -98,7 +99,8 @@ impl Client {
         }
     }
 
-    /// Waits for the next event: changes to the views attached to.
+    /// Waits for the next event: changes to the views attached to, or to
+    /// the workspaces, if watching them.
     ///
     /// # Errors
     ///
@@ -279,7 +281,96 @@ impl Client {
     ///
     /// See [`ClientError`].
     pub fn resize(&mut self, terminal: TerminalId, size: Size) -> Result<(), ClientError> {
-        match self.request(&Request::Resize { terminal, size })? {
+        self.done(&Request::Resize { terminal, size })
+    }
+
+    /// Fetches every workspace, and asks for an [`Event::Workspaces`]
+    /// whenever they change.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn watch_workspaces(&mut self) -> Result<Workspaces, ClientError> {
+        match self.request(&Request::WatchWorkspaces)? {
+            Response::Workspaces(workspaces) => Ok(workspaces),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Makes a workspace whose one pane shows `terminal`.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn new_workspace(
+        &mut self,
+        name: Option<String>,
+        terminal: PaneTerminal,
+    ) -> Result<PaneId, ClientError> {
+        self.pane_created(&Request::NewWorkspace { name, terminal })
+    }
+
+    /// Adds a tab to `workspace`, showing `terminal`.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn new_tab(
+        &mut self,
+        workspace: WorkspaceId,
+        terminal: PaneTerminal,
+    ) -> Result<PaneId, ClientError> {
+        self.pane_created(&Request::NewTab {
+            workspace,
+            terminal,
+        })
+    }
+
+    /// Splits `pane`, putting a pane showing `terminal` on `side` of it.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn split_pane(
+        &mut self,
+        pane: PaneId,
+        side: Side,
+        terminal: PaneTerminal,
+    ) -> Result<PaneId, ClientError> {
+        self.pane_created(&Request::Split {
+            pane,
+            side,
+            terminal,
+        })
+    }
+
+    /// Closes `pane` and its terminal.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn close_pane(&mut self, pane: PaneId) -> Result<(), ClientError> {
+        self.done(&Request::ClosePane { pane })
+    }
+
+    /// Records a switch to `pane`.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn focus(&mut self, pane: PaneId) -> Result<(), ClientError> {
+        self.done(&Request::Focus { pane })
+    }
+
+    fn pane_created(&mut self, request: &Request) -> Result<PaneId, ClientError> {
+        match self.request(request)? {
+            Response::PaneCreated(pane) => Ok(pane),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    fn done(&mut self, request: &Request) -> Result<(), ClientError> {
+        match self.request(request)? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
         }

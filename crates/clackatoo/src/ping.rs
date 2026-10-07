@@ -111,7 +111,10 @@ fn next_view(
         let Event::View {
             terminal: updated,
             update,
-        } = event;
+        } = event
+        else {
+            continue;
+        };
         if updated != terminal {
             continue;
         }

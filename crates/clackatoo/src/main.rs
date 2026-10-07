@@ -19,9 +19,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// A fast, lightweight terminal workspace.
 ///
-/// With no command, opens a window on your newest terminal, or a new one,
-/// starting the daemon first if it isn't running. With `--remote`, the
-/// terminal is on another machine.
+/// With no command, opens a window on your workspaces, starting the daemon
+/// first if it isn't running. With none yet, the window makes one, showing
+/// your newest terminal or a new one. With `--remote`, the workspaces are
+/// on another machine.
 #[derive(Debug, Parser)]
 #[command(version, args_conflicts_with_subcommands = true)]
 struct Cli {

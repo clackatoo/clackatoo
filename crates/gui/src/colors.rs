@@ -14,6 +14,10 @@ pub(crate) struct Theme {
     /// clackatoo's own colour, the cockatoo's crest, for the window's own
     /// marks such as the normal-mode frame.
     pub(crate) accent: Rgba,
+    /// Text that matters less, such as the names in the bar not shown.
+    pub(crate) muted: Rgba,
+    /// The lines between panes.
+    pub(crate) divider: Rgba,
     /// The 256 indexed colours: 16 named ones, a 6×6×6 cube, and 24 greys.
     palette: [Rgba; 256],
 }
@@ -54,6 +58,8 @@ impl Default for Theme {
             background: hex_rgba(0x1d_1f_21),
             cursor: hex_rgba(0xc5_c8_c6),
             accent: hex_rgba(0xf8_ce_57),
+            muted: hex_rgba(0x80_84_88),
+            divider: hex_rgba(0x3c_40_44),
             palette,
         }
     }

@@ -395,7 +395,9 @@ fn view_latency(
         let started = Instant::now();
         client.send_input(terminal, format!("\r{letter}").as_bytes())?;
         loop {
-            let Event::View { update, .. } = client.next_event()?;
+            let Event::View { update, .. } = client.next_event()? else {
+                continue;
+            };
             view.apply(update);
             client.frame_done(terminal)?;
             let echoed = view
