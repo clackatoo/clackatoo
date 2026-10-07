@@ -10,11 +10,11 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 
 use clackatoo_term::Size;
 use rustix::fs::{Mode, OFlags};
-use rustix::process::{Pid, PidfdFlags};
+use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions, WaitIdStatus};
 use rustix::pty::OpenptFlags;
 use rustix::termios::Winsize;
 
@@ -48,10 +48,41 @@ const OUTER_TERMINAL_VARIABLES: &[&str] = &[
 #[derive(Debug)]
 pub(crate) struct Spawned {
     pub(crate) pty: Pty,
-    pub(crate) child: Child,
-    /// A pidfd: a file descriptor that becomes readable when the child exits.
-    /// That's how the event loop learns of the exit without signal handlers.
-    pub(crate) exit: OwnedFd,
+    pub(crate) process: Process,
+}
+
+/// A child process, known by its pid and a pidfd: a file descriptor that
+/// becomes readable when the process exits. That's how the event loop
+/// learns of the exit without signal handlers.
+///
+/// Unlike [`std::process::Child`], this can be rebuilt from its parts, which
+/// is what will let the daemon keep its children across an upgrade in
+/// place: the pid and pidfd survive exec, a `Child` doesn't.
+#[derive(Debug)]
+pub(crate) struct Process {
+    pid: Pid,
+    pidfd: OwnedFd,
+}
+
+impl Process {
+    pub(crate) fn pid(&self) -> Pid {
+        self.pid
+    }
+
+    /// Collects the process's exit status, if it has exited. After that the
+    /// process is gone, and this mustn't be called again.
+    pub(crate) fn try_wait(&self) -> io::Result<Option<WaitIdStatus>> {
+        Ok(rustix::process::waitid(
+            WaitId::PidFd(self.pidfd.as_fd()),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
+        )?)
+    }
+}
+
+impl AsRawFd for Process {
+    fn as_raw_fd(&self) -> RawFd {
+        self.pidfd.as_raw_fd()
+    }
 }
 
 /// What to run, and where.
@@ -114,12 +145,14 @@ pub(crate) fn spawn(program: &Program<'_>, size: Size) -> io::Result<Spawned> {
 
     let flags = rustix::fs::fcntl_getfl(&master)?;
     rustix::fs::fcntl_setfl(&master, flags | OFlags::NONBLOCK)?;
-    let exit = rustix::process::pidfd_open(Pid::from_child(&child), PidfdFlags::empty())?;
+    // From here on the process is known by its pidfd. Dropping the `Child`
+    // neither waits for nor kills it.
+    let pid = Pid::from_child(&child);
+    let pidfd = rustix::process::pidfd_open(pid, PidfdFlags::empty())?;
 
     Ok(Spawned {
         pty: Pty { master },
-        child,
-        exit,
+        process: Process { pid, pidfd },
     })
 }
 

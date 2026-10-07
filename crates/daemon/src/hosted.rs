@@ -3,10 +3,8 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::os::unix::process::ExitStatusExt;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
-use std::process::Child;
 
 use clackatoo_protocol::{
     Error, NewTerminal, Size, TerminalId, TerminalInfo, TerminalStatus, View,
@@ -14,7 +12,7 @@ use clackatoo_protocol::{
 use clackatoo_term::{Damage, Terminal, recording};
 
 use crate::DaemonConfig;
-use crate::pty::{self, Program, Pty};
+use crate::pty::{self, Process, Program, Pty};
 
 /// How much input may wait for a program that isn't reading it. Pastes far
 /// larger than any real one fit.
@@ -40,9 +38,9 @@ pub(crate) struct HostedTerminal {
     emulator: Terminal,
     /// `None` once the PTY has closed.
     pty: Option<Pty>,
-    child: Child,
-    /// The child's pidfd. `None` once the child has been reaped.
-    exit: Option<OwnedFd>,
+    pid: u32,
+    /// `None` once the program has been reaped.
+    process: Option<Process>,
     status: TerminalStatus,
     /// Input written by clients (and replies to the program's queries) that
     /// the PTY hasn't accepted yet.
@@ -78,14 +76,15 @@ impl HostedTerminal {
             .map_or(config.home.as_path(), Path::new);
         let spawned = pty::spawn(&Program { path, args, cwd }, request.size)
             .map_err(|err| Error::SpawnFailed(err.to_string()))?;
-        log::info!("terminal {id} started: pid {}", spawned.child.id());
+        let pid = spawned.process.pid().as_raw_pid().cast_unsigned();
+        log::info!("terminal {id} started: pid {pid}");
 
         Ok(Self {
             id,
             emulator: Terminal::new(request.size, &config.terminal),
             pty: Some(spawned.pty),
-            child: spawned.child,
-            exit: Some(spawned.exit),
+            pid,
+            process: Some(spawned.process),
             status: TerminalStatus::Running,
             input: Vec::new(),
             recording,
@@ -95,7 +94,7 @@ impl HostedTerminal {
     pub(crate) fn info(&self) -> TerminalInfo {
         TerminalInfo {
             id: self.id,
-            pid: self.child.id(),
+            pid: self.pid,
             size: self.emulator.size(),
             title: self.emulator.title().to_owned(),
             status: self.status,
@@ -119,7 +118,7 @@ impl HostedTerminal {
     }
 
     pub(crate) fn exit_fd(&self) -> Option<RawFd> {
-        self.exit.as_ref().map(AsRawFd::as_raw_fd)
+        self.process.as_ref().map(AsRawFd::as_raw_fd)
     }
 
     pub(crate) fn has_pending_input(&self) -> bool {
@@ -257,15 +256,18 @@ impl HostedTerminal {
     /// Collects the child's exit status, if it has exited. Returns whether it
     /// has.
     pub(crate) fn reap(&mut self) -> bool {
-        match self.child.try_wait() {
+        let Some(process) = &self.process else {
+            return true;
+        };
+        match process.try_wait() {
             Ok(Some(status)) => {
-                self.status = match (status.code(), status.signal()) {
+                self.status = match (status.exit_status(), status.terminating_signal()) {
                     (Some(code), _) => TerminalStatus::Exited(code),
                     (None, Some(signal)) => TerminalStatus::Killed(signal),
                     (None, None) => unreachable!("an exited process has a code or a signal"),
                 };
                 log::info!("terminal {}: program {}", self.id, self.status);
-                self.exit = None;
+                self.process = None;
                 true
             }
             Ok(None) => false,
@@ -280,12 +282,11 @@ impl HostedTerminal {
     }
 
     /// Closes the terminal. Closing the PTY sends its programs SIGHUP, as when
-    /// a terminal window closes. Returns the child if it is still running, so
-    /// the caller can reap it once it exits.
+    /// a terminal window closes. Returns the program if it is still running,
+    /// so the caller can reap it once it exits.
     pub(crate) fn close(self) -> Option<Orphan> {
         // Dropping the PTY here is what hangs up the program.
-        let Self { child, exit, .. } = self;
-        exit.map(|exit| Orphan { child, exit })
+        self.process.map(|process| Orphan { process })
     }
 }
 
@@ -293,18 +294,17 @@ impl HostedTerminal {
 /// reaped and not left as a zombie.
 #[derive(Debug)]
 pub(crate) struct Orphan {
-    child: Child,
-    exit: OwnedFd,
+    process: Process,
 }
 
 impl Orphan {
     pub(crate) fn exit_fd(&self) -> RawFd {
-        self.exit.as_raw_fd()
+        self.process.as_raw_fd()
     }
 
     /// Returns whether the process has exited and been reaped.
     pub(crate) fn reap(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
+        matches!(self.process.try_wait(), Ok(Some(_)) | Err(_))
     }
 }
 
