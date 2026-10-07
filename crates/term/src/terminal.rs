@@ -221,26 +221,46 @@ fn previous_cell(row: &Row, cursor: &CursorState) -> Option<usize> {
     }
 }
 
-/// The character at the start of `bytes`, which must be valid UTF-8, and
-/// its length. Cheaper than decoding through `str`, which would check the
-/// bytes again.
-fn decode_utf8(bytes: &[u8]) -> (char, usize) {
-    let continuation = |i: usize| u32::from(bytes[i] & 0x3F);
-    let lead = u32::from(bytes[0]);
-    let (scalar, len) = match bytes[0] {
-        0x00..=0x7F => (lead, 1),
-        0xC0..=0xDF => ((lead & 0x1F) << 6 | continuation(1), 2),
-        0xE0..=0xEF => (
-            (lead & 0x0F) << 12 | continuation(1) << 6 | continuation(2),
-            3,
-        ),
-        _ => (
-            (lead & 0x07) << 18 | continuation(1) << 12 | continuation(2) << 6 | continuation(3),
-            4,
-        ),
-    };
-    let ch = char::from_u32(scalar).expect("the text is valid UTF-8");
-    (ch, len)
+/// Text the printer walks: valid UTF-8 without control characters.
+trait Printable {
+    /// Whether every byte is known to be ASCII, which skips checking.
+    const ASCII: bool;
+
+    fn bytes(&self) -> &[u8];
+
+    /// The character starting at byte `at`, a character boundary, and its
+    /// length in bytes.
+    fn char_at(&self, at: usize) -> (char, usize);
+}
+
+/// Printable ASCII, as the parser hands it over.
+struct Ascii<'a>(&'a [u8]);
+
+impl Printable for Ascii<'_> {
+    const ASCII: bool = true;
+
+    fn bytes(&self) -> &[u8] {
+        self.0
+    }
+
+    fn char_at(&self, at: usize) -> (char, usize) {
+        (char::from(self.0[at]), 1)
+    }
+}
+
+impl Printable for &str {
+    const ASCII: bool = false;
+
+    fn bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+
+    fn char_at(&self, at: usize) -> (char, usize) {
+        // Decoding through `str` trusts that it is valid, so it is cheaper
+        // than decoding raw bytes, which would check them again.
+        let ch = self[at..].chars().next().expect("at is within the text");
+        (ch, ch.len_utf8())
+    }
 }
 
 /// Whether the cell at `col` ends in a ZWJ, so the next character joins it.
@@ -390,7 +410,7 @@ impl Emulator {
                 self.print(ch);
             }
         } else {
-            self.print_bytes(text.as_bytes(), false);
+            self.print_printable(&text);
         }
     }
 
@@ -402,7 +422,7 @@ impl Emulator {
                 self.print(char::from(byte));
             }
         } else {
-            self.print_bytes(text, true);
+            self.print_printable(&Ascii(text));
         }
     }
 
@@ -415,12 +435,12 @@ impl Emulator {
         simple
     }
 
-    /// Prints `text`, which is valid UTF-8 without control characters, and
-    /// all ASCII if `ascii` says so.
-    fn print_bytes(&mut self, mut text: &[u8], ascii: bool) {
-        while !text.is_empty() {
-            let (printed, wrap) = self.print_on_line(text, ascii);
-            text = &text[printed..];
+    /// Prints `text`, line by line.
+    fn print_printable(&mut self, text: &impl Printable) {
+        let mut at = 0;
+        while at < text.bytes().len() {
+            let (end, wrap) = self.print_on_line(text, at);
+            at = end;
             if wrap {
                 self.wrap();
             }
@@ -433,10 +453,9 @@ impl Emulator {
     /// and writes runs of ASCII straight from the bytes. Insert mode must be
     /// off.
     ///
-    /// `text` is valid UTF-8 without control characters, and all ASCII if
-    /// `ascii` says so. Returns how many bytes of it were used, and whether
-    /// the line must wrap before the rest.
-    fn print_on_line(&mut self, text: &[u8], ascii: bool) -> (usize, bool) {
+    /// Starts at byte `start` of `text`. Returns where it stopped, and
+    /// whether the line must wrap before the rest.
+    fn print_on_line<T: Printable>(&mut self, text: &T, start: usize) -> (usize, bool) {
         let width = self.width();
         let autowrap = self.modes.contains(Modes::AUTOWRAP);
         let Self {
@@ -457,8 +476,8 @@ impl Emulator {
         let style = row.intern(&cursor.pen);
         let verbatim = cursor.charsets.maps_ascii_verbatim();
 
-        let bytes = text;
-        let mut used = 0;
+        let bytes = text.bytes();
+        let mut used = start;
         while let Some(&byte) = bytes.get(used) {
             // The parser never passes control characters, so any ASCII byte
             // is printable.
@@ -467,7 +486,7 @@ impl Emulator {
                     return (used, true);
                 }
                 let room = width - cursor.col;
-                let run = if ascii {
+                let run = if T::ASCII {
                     room.min(bytes.len() - used)
                 } else {
                     bytes[used..]
@@ -483,7 +502,7 @@ impl Emulator {
                 continue;
             }
 
-            let (ch, len) = decode_utf8(&bytes[used..]);
+            let (ch, len) = text.char_at(used);
             let ch = cursor.charsets.map(ch);
             match width::of(ch) {
                 // Control characters never get here, but drop them if so.
@@ -1021,19 +1040,5 @@ impl Emulator {
 
     pub(crate) fn reply(&mut self, bytes: &[u8]) {
         self.replies.extend_from_slice(bytes);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decoding_agrees_with_std_for_every_character() {
-        let mut buffer = [0; 4];
-        for ch in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
-            let encoded = ch.encode_utf8(&mut buffer);
-            assert_eq!(decode_utf8(encoded.as_bytes()), (ch, ch.len_utf8()));
-        }
     }
 }
