@@ -421,3 +421,126 @@ impl Remote {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use quinn_proto::ClientConfig;
+
+    use super::super::{CarrierId, carrier_address, client};
+    use super::*;
+
+    /// A client endpoint and its connection to a [`QuicServer`], passing
+    /// packets in memory, with time moved by hand.
+    struct Pair {
+        server: QuicServer,
+        client: Endpoint,
+        handle: ConnectionHandle,
+        connection: quinn_proto::Connection,
+        /// Where the server hears the client from: a carrier.
+        carrier: SocketAddr,
+        events: Vec<QuicEvent>,
+    }
+
+    /// Where the client sends to.
+    const DAEMON: SocketAddr =
+        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
+
+    impl Pair {
+        fn connect(now: Instant) -> Self {
+            let server = QuicServer::new().unwrap();
+            let config: ClientConfig =
+                client::client_config(server.certificate().to_vec()).unwrap();
+            let mut client = Endpoint::new(Arc::new(EndpointConfig::default()), None, true, None);
+            let (handle, connection) = client.connect(now, config, DAEMON, SERVER_NAME).unwrap();
+            let mut pair = Self {
+                server,
+                client,
+                handle,
+                connection,
+                carrier: carrier_address(CarrierId {
+                    key: 3,
+                    generation: 1,
+                }),
+                events: Vec::new(),
+            };
+            pair.pump(now);
+            pair
+        }
+
+        /// Passes packets both ways until neither side has more to send.
+        fn pump(&mut self, now: Instant) {
+            let mut buffer = Vec::new();
+            for _ in 0..50 {
+                let mut moved = false;
+                while let Some(transmit) = self.connection.poll_transmit(now, 1, &mut buffer) {
+                    self.server
+                        .receive(now, self.carrier, &buffer[..transmit.size]);
+                    buffer.clear();
+                    moved = true;
+                }
+                self.server.events(&mut self.events);
+                let mut replies = Vec::new();
+                self.server
+                    .transmit(now, |_, packet| replies.push(packet.to_vec()));
+                for packet in replies {
+                    moved = true;
+                    let mut response = Vec::new();
+                    if let Some(DatagramEvent::ConnectionEvent(_, event)) = self.client.handle(
+                        now,
+                        DAEMON,
+                        None,
+                        None,
+                        BytesMut::from(&packet[..]),
+                        &mut response,
+                    ) {
+                        self.connection.handle_event(event);
+                    }
+                }
+                while let Some(event) = self.connection.poll_endpoint_events() {
+                    if let Some(event) = self.client.handle_event(self.handle, event) {
+                        self.connection.handle_event(event);
+                    }
+                }
+                while self.connection.poll().is_some() {}
+                if !moved {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_connection_whose_carrier_closed_goes_if_it_never_moves() {
+        let start = Instant::now();
+        let mut pair = Pair::connect(start);
+        assert!(!pair.connection.is_handshaking(), "connected");
+        let (&handle, _) = pair.server.connections.iter().next().unwrap();
+        pair.server.set_client(handle, Token(7));
+
+        pair.server.carrier_closed(pair.carrier, start);
+        // Within the grace, it can still move onto UDP.
+        pair.server.handle_timeouts(start + ORPHAN_GRACE / 2);
+        assert_eq!(pair.server.connections.len(), 1);
+        // After it, the connection is dropped, and its client with it.
+        pair.server
+            .handle_timeouts(start + ORPHAN_GRACE + Duration::from_secs(1));
+        assert!(pair.server.connections.is_empty());
+        let mut events = Vec::new();
+        pair.server.events(&mut events);
+        assert_eq!(events, [QuicEvent::Closed(Token(7))]);
+    }
+
+    #[test]
+    fn a_connection_that_moved_stays_when_its_old_carrier_closes() {
+        let start = Instant::now();
+        let mut pair = Pair::connect(start);
+        pair.server.carrier_closed(pair.carrier, start);
+        // Its packets now come from somewhere else, as over UDP.
+        pair.carrier = "192.0.2.7:4000".parse().unwrap();
+        pair.connection.ping();
+        pair.pump(start + Duration::from_millis(10));
+        pair.server
+            .handle_timeouts(start + ORPHAN_GRACE + Duration::from_secs(1));
+        assert_eq!(pair.server.connections.len(), 1);
+    }
+}

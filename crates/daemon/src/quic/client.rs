@@ -239,7 +239,7 @@ impl ServerCertVerifier for Pinned {
 }
 
 /// A client configuration that accepts only `certificate`.
-fn client_config(certificate: Vec<u8>) -> io::Result<ClientConfig> {
+pub(super) fn client_config(certificate: Vec<u8>) -> io::Result<ClientConfig> {
     let provider = Arc::new(crypto::ring::default_provider());
     let algorithms = provider.signature_verification_algorithms;
     let tls = rustls::ClientConfig::builder_with_provider(provider)
