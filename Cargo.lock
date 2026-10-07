@@ -167,6 +167,7 @@ dependencies = [
  "clackatoo-bench",
  "clackatoo-daemon",
  "clackatoo-protocol",
+ "clackatoo-term",
  "clap",
  "env_logger",
  "log",

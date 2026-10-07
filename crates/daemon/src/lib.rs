@@ -5,13 +5,15 @@
 //! agents are all clients, speaking [`clackatoo_protocol`] over a Unix
 //! socket. Terminals outlive any client, so closing a window closes nothing.
 
-// The only unsafe code is the pre-exec hook in `pty::spawn`, which opts out
-// of this explicitly.
+// The only unsafe code is the pre-exec hook in `pty::spawn` and the
+// declaration of glibc's `malloc_trim` in `memory`, which opt out of this
+// explicitly.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod client;
 mod hosted;
+mod memory;
 mod pty;
 mod runtime;
 mod server;

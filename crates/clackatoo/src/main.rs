@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use anyhow::Context;
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, RuntimeDir};
 use clackatoo_protocol::{NewTerminal, Size, TerminalId};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// A fast, lightweight terminal workspace.
 #[derive(Debug, Parser)]
@@ -25,7 +25,7 @@ struct Cli {
 enum Command {
     /// Run the daemon in the foreground. It owns every terminal, so
     /// terminals live exactly as long as it does.
-    Daemon,
+    Daemon(DaemonArgs),
     /// List terminals.
     List(Connection),
     /// Start a terminal and print its ID.
@@ -41,6 +41,33 @@ enum Command {
     /// Change a terminal's size. Its program is told, and lines on screen
     /// are rewrapped to the new width.
     Resize(Resize),
+}
+
+#[derive(Debug, Args)]
+struct DaemonArgs {
+    /// When scrollback is compacted to save memory: `lazy` once output
+    /// pauses, `eager` as each line scrolls off, or `off` for never, which
+    /// is fastest but takes about 8 bytes per column for every line.
+    #[arg(long, value_name = "WHEN", default_value = "lazy")]
+    scrollback_compaction: Compaction,
+}
+
+/// [`clackatoo_term::Compaction`], as the command line spells it.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Compaction {
+    Off,
+    Lazy,
+    Eager,
+}
+
+impl From<Compaction> for clackatoo_term::Compaction {
+    fn from(compaction: Compaction) -> Self {
+        match compaction {
+            Compaction::Off => Self::Off,
+            Compaction::Lazy => Self::Lazy,
+            Compaction::Eager => Self::Eager,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -127,7 +154,7 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Daemon => run_daemon(),
+        Command::Daemon(args) => run_daemon(&args),
         Command::List(connection) => list(&connection),
         Command::New(new) => new_terminal(new),
         Command::Run(run) => {
@@ -149,11 +176,13 @@ fn run(command: Command) -> anyhow::Result<()> {
     }
 }
 
-fn run_daemon() -> anyhow::Result<()> {
+fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let runtime = RuntimeDir::for_current_user();
     let _lock = runtime.lock()?;
-    let mut daemon = Daemon::bind(&runtime.socket_path(), DaemonConfig::from_env())
+    let mut config = DaemonConfig::from_env();
+    config.terminal.scrollback_compaction = args.scrollback_compaction.into();
+    let mut daemon = Daemon::bind(&runtime.socket_path(), config)
         .with_context(|| format!("could not listen on {}", runtime.socket_path().display()))?;
     daemon.run()?;
     Ok(())

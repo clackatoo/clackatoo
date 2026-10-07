@@ -15,6 +15,7 @@ bench = false
 anyhow.workspace = true
 clackatoo-daemon.workspace = true
 clackatoo-protocol.workspace = true
+clackatoo-term.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true

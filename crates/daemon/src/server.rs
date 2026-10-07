@@ -17,6 +17,7 @@ use std::os::fd::RawFd;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{Error, PROTOCOL_VERSION, Request, Response, TerminalId};
@@ -28,6 +29,7 @@ use slab::Slab;
 
 use crate::DaemonConfig;
 use crate::hosted::{HostedTerminal, Orphan, ReadOutcome};
+use crate::memory;
 
 const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);
@@ -39,6 +41,11 @@ const READ_BUFFER_LEN: usize = 64 * 1024;
 /// clients a turn. Keeps a flood of output (`cat` of a huge file) from
 /// freezing everything else.
 const OUTPUT_BUDGET: usize = 1024 * 1024;
+
+/// How long a terminal's output must pause before its scrollback is
+/// compacted: long enough that a flood never stops for it, short enough
+/// that the memory comes back soon after.
+const COMPACT_AFTER: Duration = Duration::from_millis(100);
 
 /// What a token refers to.
 #[derive(Debug)]
@@ -91,6 +98,8 @@ pub struct Daemon {
     next_id: u32,
     /// Terminals whose output budget ran out with more output waiting.
     unread: VecDeque<TerminalId>,
+    /// When each terminal with uncompacted scrollback should compact it.
+    compactions: BTreeMap<TerminalId, Instant>,
     config: DaemonConfig,
     buffer: Box<[u8]>,
 }
@@ -140,6 +149,7 @@ impl Daemon {
             terminals: BTreeMap::new(),
             next_id: 1,
             unread: VecDeque::new(),
+            compactions: BTreeMap::new(),
             config,
             buffer: vec![0; READ_BUFFER_LEN].into_boxed_slice(),
         })
@@ -164,8 +174,14 @@ impl Daemon {
         let mut events = Events::with_capacity(256);
         while !self.shutdown.load(Ordering::Acquire) {
             // With output still waiting, poll without blocking so it gets read
-            // right after anything else that's ready.
-            let timeout = (!self.unread.is_empty()).then_some(std::time::Duration::ZERO);
+            // right after anything else that's ready. Otherwise wait for the
+            // next compaction, if there is one.
+            let timeout = if self.unread.is_empty() {
+                let next = self.compactions.values().min();
+                next.map(|due| due.saturating_duration_since(Instant::now()))
+            } else {
+                Some(Duration::ZERO)
+            };
             match self.poll.poll(&mut events, timeout) {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -177,6 +193,7 @@ impl Daemon {
             for id in std::mem::take(&mut self.unread) {
                 self.read_output(id);
             }
+            self.compact_scrollbacks();
         }
         log::info!("shutting down");
         Ok(())
@@ -226,6 +243,41 @@ impl Daemon {
         }
         // Replies to the program's queries may have queued input.
         self.update_pty_interest(id);
+        self.schedule_compaction(id);
+    }
+
+    /// Puts off compacting the terminal's scrollback until its output has
+    /// paused, if it has rows to compact.
+    fn schedule_compaction(&mut self, id: TerminalId) {
+        if self
+            .terminals
+            .get(&id)
+            .is_some_and(|slot| slot.terminal.scrollback_needs_compaction())
+        {
+            self.compactions.insert(id, Instant::now() + COMPACT_AFTER);
+        }
+    }
+
+    /// Compacts the scrollback of each terminal whose output has paused.
+    fn compact_scrollbacks(&mut self) {
+        if self.compactions.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut compacted = false;
+        self.compactions.retain(|id, due| {
+            if *due > now {
+                return true;
+            }
+            if let Some(slot) = self.terminals.get_mut(id) {
+                slot.terminal.compact_scrollback();
+                compacted = true;
+            }
+            false
+        });
+        if compacted {
+            memory::release_free_memory();
+        }
     }
 
     fn flush_input(&mut self, id: TerminalId) {
@@ -507,14 +559,15 @@ impl Daemon {
             Request::CloseTerminal { terminal } => {
                 self.close_terminal(terminal).map(|()| Response::Done)
             }
-            Request::Resize { terminal, size } => self
-                .terminals
-                .get_mut(&terminal)
-                .map(|slot| {
+            Request::Resize { terminal, size } => match self.terminals.get_mut(&terminal) {
+                Some(slot) => {
                     slot.terminal.resize(size);
-                    Response::Done
-                })
-                .ok_or(Error::NoSuchTerminal(terminal)),
+                    // Rewrapping may have pushed rows into scrollback.
+                    self.schedule_compaction(terminal);
+                    Ok(Response::Done)
+                }
+                None => Err(Error::NoSuchTerminal(terminal)),
+            },
         };
         (response.unwrap_or_else(Response::Error), false)
     }

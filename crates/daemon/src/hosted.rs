@@ -118,6 +118,14 @@ impl HostedTerminal {
         !self.input.is_empty()
     }
 
+    pub(crate) fn scrollback_needs_compaction(&self) -> bool {
+        self.emulator.scrollback_needs_compaction()
+    }
+
+    pub(crate) fn compact_scrollback(&mut self) {
+        self.emulator.compact_scrollback();
+    }
+
     /// Reads and processes the program's output until the PTY has nothing
     /// more or `budget` bytes have been read, whichever comes first.
     pub(crate) fn read_output(&mut self, buffer: &mut [u8], budget: usize) -> ReadOutcome {

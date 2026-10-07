@@ -417,6 +417,7 @@ fn memory(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
     let typical = scrollback_workload(scrollback, false);
     let typical_file = write_workload(dir.path(), &typical)?;
     let mut per_typical_line = Vec::new();
+    let mut per_raw_line = Vec::new();
 
     for _ in 0..MEMORY_RUNS {
         let (daemon, _) = DaemonProcess::start(binary)?;
@@ -434,13 +435,11 @@ fn memory(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
         let after = daemon.resident_memory()?;
         per_terminal.push(after.saturating_sub(before) as f64 / MEMORY_TERMINALS as f64);
 
-        for (file, samples) in [
-            (&lines_file, &mut per_line),
-            (&typical_file, &mut per_typical_line),
-        ] {
-            let growth = scrollback_growth(&daemon, &mut client, lines.size, file)?;
-            samples.push(growth as f64 / scrollback as f64);
-        }
+        let growth = scrollback_growth(&daemon, &mut client, lines.size, &lines_file)?;
+        per_raw_line.push(growth.flooded as f64 / scrollback as f64);
+        per_line.push(growth.settled as f64 / scrollback as f64);
+        let growth = scrollback_growth(&daemon, &mut client, lines.size, &typical_file)?;
+        per_typical_line.push(growth.settled as f64 / scrollback as f64);
     }
 
     report.record("memory/daemon", "daemon at rest", Unit::Bytes, &at_rest);
@@ -457,6 +456,15 @@ fn memory(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
         &per_line,
     );
     report.record(
+        "memory/scrollback-flooding",
+        &format!(
+            "per scrollback line ({} cols, full, before compaction)",
+            lines.size.cols()
+        ),
+        Unit::Bytes,
+        &per_raw_line,
+    );
+    report.record(
         "memory/scrollback-typical",
         &format!("per scrollback line ({} cols, typical)", lines.size.cols()),
         Unit::Bytes,
@@ -465,6 +473,19 @@ fn memory(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How much the daemon's memory grew while a terminal filled its
+/// scrollback.
+struct Growth {
+    /// Right after the output ended.
+    flooded: u64,
+    /// Once the daemon has had time to compact the scrollback.
+    settled: u64,
+}
+
+/// How long to wait for the daemon to compact a terminal's scrollback
+/// after its output stops: comfortably past the daemon's 100 ms pause.
+const COMPACTION_WAIT: Duration = Duration::from_millis(300);
+
 /// How much the daemon's memory grows while a new terminal fills its
 /// scrollback with `file`.
 fn scrollback_growth(
@@ -472,15 +493,20 @@ fn scrollback_growth(
     client: &mut Client,
     size: Size,
     file: &Path,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<Growth> {
     let file = file.to_str().context("temporary paths are UTF-8")?;
     let terminal = new_terminal(client, size, &["sh", "-c", FLOOD_SCRIPT, "sh", file])?;
     wait_for_title(client, terminal, READY_TITLE)?;
     let before = daemon.resident_memory()?;
     client.send_input(terminal, b"\r")?;
     wait_for_title(client, terminal, DONE_TITLE)?;
-    let after = daemon.resident_memory()?;
-    Ok(after.saturating_sub(before))
+    let flooded = daemon.resident_memory()?;
+    std::thread::sleep(COMPACTION_WAIT);
+    let settled = daemon.resident_memory()?;
+    Ok(Growth {
+        flooded: flooded.saturating_sub(before),
+        settled: settled.saturating_sub(before),
+    })
 }
 
 /// Exactly enough lines to fill an 80x24 terminal's scrollback: all full
@@ -512,12 +538,24 @@ fn scrollback_workload(scrollback: usize, full: bool) -> Workload {
 fn idle(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
     let (daemon, _) = DaemonProcess::start(binary)?;
     // A connected client and a few terminals with nothing to say: the state
-    // a daemon spends most of its life in.
+    // a daemon spends most of its life in. One printed some history first,
+    // which the daemon compacts once it goes quiet, and then must stop
+    // waking up for.
     let mut client = daemon.connect()?;
-    for _ in 0..3 {
+    for _ in 0..2 {
         new_terminal(&mut client, workloads::generated_size(), &["cat"])?;
     }
-    std::thread::sleep(Duration::from_millis(200));
+    let history = new_terminal(
+        &mut client,
+        workloads::generated_size(),
+        &[
+            "sh",
+            "-c",
+            "seq 1000; printf '\\033]2;%s\\007' done; exec cat",
+        ],
+    )?;
+    wait_for_title(&mut client, history, "done")?;
+    std::thread::sleep(COMPACTION_WAIT);
     let mut samples = Vec::new();
     let mut last = daemon.context_switches()?;
     for _ in 0..IDLE_SECONDS {
