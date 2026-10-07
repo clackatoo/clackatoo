@@ -158,9 +158,11 @@ impl Graphemes {
 
     /// Where `col`'s entry is, or where it would go.
     fn search(&self, col: usize) -> Result<usize, usize> {
-        // The common case, a grapheme after all the others, skips the search.
+        // The common cases, the last grapheme or one after all the others,
+        // skip the search.
         match self.entries.last() {
             None => Err(0),
+            Some(last) if usize::from(last.col) == col => Ok(self.entries.len() - 1),
             Some(last) if usize::from(last.col) < col => Err(self.entries.len()),
             Some(_) => self
                 .entries

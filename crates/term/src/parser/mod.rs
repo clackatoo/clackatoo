@@ -161,6 +161,14 @@ impl Parser {
                 break;
             };
             match byte {
+                0x1B if bytes.get(i + 1) == Some(&b'[') => {
+                    if let Some(len) = self.fast_csi(performer, &bytes[i + 2..]) {
+                        i += 2 + len;
+                        continue;
+                    }
+                    self.enter(State::CsiEntry);
+                    return i + 2;
+                }
                 0x1B => {
                     self.enter(State::Escape);
                     return i + 1;
@@ -263,6 +271,49 @@ impl Parser {
     }
 
     // --- Sequences ----------------------------------------------------------
+
+    /// Parses a complete, ordinary CSI sequence from the start of `bytes`,
+    /// which follow its `ESC [`, in one go: an optional private marker (like
+    /// `?`), numbers separated by `;` or `:`, and a final byte. That covers
+    /// nearly every CSI sequence, and skips the state machine.
+    ///
+    /// Returns how many bytes it used, or `None` without reporting anything
+    /// if the sequence is anything else or isn't complete yet. The state
+    /// machine then parses it from the start, so both always agree.
+    fn fast_csi(&mut self, performer: &mut impl Perform, bytes: &[u8]) -> Option<usize> {
+        self.params.clear();
+        self.intermediate_len = 0;
+        let mut i = 0;
+        if let Some(&marker @ 0x3C..=0x3F) = bytes.first() {
+            self.intermediates[0] = marker;
+            self.intermediate_len = 1;
+            i = 1;
+        }
+        let mut param: u32 = 0;
+        loop {
+            let byte = *bytes.get(i)?;
+            i += 1;
+            match byte {
+                b'0'..=b'9' => param = (param * 10 + u32::from(byte - b'0')).min(u16::MAX.into()),
+                b';' | b':' | 0x40..=0x7E if self.params.is_full() => return None,
+                b';' => {
+                    self.params.push(u16::try_from(param).expect("clamped"));
+                    param = 0;
+                }
+                b':' => {
+                    self.params.extend(u16::try_from(param).expect("clamped"));
+                    param = 0;
+                }
+                0x40..=0x7E => {
+                    self.params.push(u16::try_from(param).expect("clamped"));
+                    let intermediates = &self.intermediates[..self.intermediate_len];
+                    performer.csi_dispatch(&self.params, intermediates, false, char::from(byte));
+                    return Some(i);
+                }
+                _ => return None,
+            }
+        }
+    }
 
     /// Handles bytes one at a time while inside an escape, CSI or DCS
     /// header, until the state changes to one handled elsewhere. Returns how
@@ -494,10 +545,10 @@ impl Parser {
         if self.params.is_full() {
             self.ignoring = true;
         } else {
-            self.param = self
-                .param
-                .saturating_mul(10)
-                .saturating_add(u16::from(byte - b'0'));
+            // Saturating, like two saturating steps, but without the
+            // overflow checks they cost.
+            let value = u32::from(self.param) * 10 + u32::from(byte - b'0');
+            self.param = u16::try_from(value).unwrap_or(u16::MAX);
         }
     }
 
