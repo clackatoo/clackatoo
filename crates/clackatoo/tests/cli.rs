@@ -167,6 +167,24 @@ fn remote_commands_go_through_a_bridge_that_starts_the_daemon() {
 }
 
 #[test]
+fn remote_connections_move_onto_udp_when_it_gets_through() {
+    let runtime = Runtime::new();
+    let bin = tempfile::tempdir().unwrap();
+    let ssh = fake_ssh(bin.path());
+    // As sshd tells the bridge where it was reached, and with a daemon
+    // taking any free port.
+    let command =
+        format!("env SSH_CONNECTION='127.0.0.1 50000 127.0.0.1 22' CLACKATOO_UDP_PORTS=0 {BINARY}");
+    let pinged = stdout(&remote(
+        runtime.path(),
+        &ssh,
+        &command,
+        &["ping", "--count", "5", "--interval", "50"],
+    ));
+    assert!(pinged.contains("(over UDP)"), "{pinged}");
+}
+
+#[test]
 fn failing_to_reach_the_remote_daemon_says_why() {
     let runtime = Runtime::new();
     let bin = tempfile::tempdir().unwrap();

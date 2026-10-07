@@ -30,6 +30,7 @@ impl TestDaemon {
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),
+            udp_ports: Some(0..=0),
         };
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
         let shutdown = daemon.shutdown_handle();
@@ -897,4 +898,64 @@ fn a_daemon_from_an_older_build_can_say_its_version_before_carrying() {
         other => panic!("expected a version mismatch, got {other:?}"),
     }
     old.join().unwrap();
+}
+
+/// Waits until `client`'s connection goes `route`, asking the daemon
+/// something meanwhile so packets flow, failing after a few seconds.
+fn wait_for_route(client: &mut Client, route: clackatoo_daemon::Route) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.route() != Some(route) {
+        assert!(
+            Instant::now() < deadline,
+            "the connection never went {route:?}"
+        );
+        client.list_terminals().unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn quic_moves_onto_udp_and_outlives_its_carrier() {
+    let daemon = TestDaemon::start();
+    let stream = UnixStream::connect(daemon.socket()).unwrap();
+    let carrier = stream.try_clone().unwrap();
+    let mut client = Client::over_quic_via(stream, "127.0.0.1".parse().unwrap()).unwrap();
+    wait_for_route(&mut client, clackatoo_daemon::Route::Udp);
+
+    // As when ssh dies with the network it was on.
+    carrier.shutdown(std::net::Shutdown::Both).unwrap();
+    let terminal = spawn(&mut client, &["sh", "-c", "printf ready; exec cat"]);
+    let mut view = attach(&mut client, terminal);
+    client.frame_done(terminal).unwrap();
+    client.send_input(terminal, b"x").unwrap();
+    while view.grid().unwrap().lines[0].text() != "readyx" {
+        view.apply(next_update(&mut client, terminal));
+        client.frame_done(terminal).unwrap();
+    }
+    assert_eq!(client.route(), Some(clackatoo_daemon::Route::Udp));
+}
+
+#[test]
+fn quic_stays_in_ssh_when_udp_doesnt_get_through() {
+    let daemon = TestDaemon::start();
+    let stream = UnixStream::connect(daemon.socket()).unwrap();
+    let carrier = stream.try_clone().unwrap();
+    // An address set aside for documentation, which nothing answers.
+    let mut client = Client::over_quic_via(stream, "192.0.2.1".parse().unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        // Nothing waits on the try.
+        let asked = Instant::now();
+        client.list_terminals().unwrap();
+        assert!(asked.elapsed() < Duration::from_millis(500));
+        assert_eq!(client.route(), Some(clackatoo_daemon::Route::Ssh));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // With UDP never having worked, the carrier closing is the end.
+    carrier.shutdown(std::net::Shutdown::Both).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    assert!(client.list_terminals().is_err());
 }

@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
@@ -12,7 +13,7 @@ use clackatoo_protocol::{
     Workspaces,
 };
 
-use crate::quic::{self, Carried};
+use crate::quic::{self, Carried, Route};
 use crate::remote::Ssh;
 
 /// How long the daemon may take to answer a new connection's hello.
@@ -82,20 +83,39 @@ impl Client {
     /// If the daemon doesn't answer, speaks another version, or the QUIC
     /// connection can't be set up.
     pub fn over_quic(stream: UnixStream) -> Result<Self, ClientError> {
-        Self::over_carrier(stream, None)
+        Self::over_carrier(stream, None, None)
     }
 
-    /// As [`over_quic`](Self::over_quic), with `ssh` carrying `stream`, kept
-    /// running as long as the connection is open.
+    /// As [`over_quic`](Self::over_quic), moving the connection onto UDP
+    /// when the daemon, at `daemon_ip`, can be reached there.
+    ///
+    /// # Errors
+    ///
+    /// As [`over_quic`](Self::over_quic).
+    pub fn over_quic_via(stream: UnixStream, daemon_ip: IpAddr) -> Result<Self, ClientError> {
+        Self::over_carrier(stream, Some(daemon_ip), None)
+    }
+
+    /// As [`over_quic_via`](Self::over_quic_via), with `ssh` carrying
+    /// `stream`, kept running as long as the connection is open.
     pub(crate) fn over_carrier(
         mut stream: UnixStream,
+        daemon_ip: Option<IpAddr>,
         ssh: Option<Ssh>,
     ) -> Result<Self, ClientError> {
-        let certificate = open_carrier(&mut stream)?;
-        let (local, carried) = quic::carry(stream, certificate, ssh)?;
+        let (certificate, udp_port) = open_carrier(&mut stream)?;
+        let udp = daemon_ip.zip(udp_port).map(SocketAddr::from);
+        let (local, carried) = quic::carry(stream, certificate, udp, ssh)?;
         let mut client = Self::over(local)?;
         client.carried = Some(carried);
         Ok(client)
+    }
+
+    /// How the connection reaches a daemon on another machine: through
+    /// SSH, or straight over UDP. `None` for a daemon on this one.
+    #[must_use]
+    pub fn route(&self) -> Option<Route> {
+        self.carried.as_ref().map(Carried::route)
     }
 
     /// Sends `request` and waits for the daemon's answer.
@@ -441,13 +461,14 @@ impl Receiver {
 
 /// Greets the daemon on the other end of `stream`, checking that it speaks
 /// our protocol version, then turns the connection into a carrier of QUIC
-/// packets. Returns the certificate the daemon's QUIC endpoint presents.
+/// packets. Returns the certificate the daemon's QUIC endpoint presents,
+/// and the UDP port it takes packets on, if it has one.
 ///
 /// The request waits for the greeting's answer: a daemon from an older
 /// build may hang up on a request it can't decode before answering a
 /// greeting that came with it, and then couldn't say which version it
 /// speaks.
-fn open_carrier(stream: &mut UnixStream) -> Result<Vec<u8>, ClientError> {
+fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<u16>), ClientError> {
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
     stream.write_all(&frame::encode(&ClientMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
@@ -464,8 +485,11 @@ fn open_carrier(stream: &mut UnixStream) -> Result<Vec<u8>, ClientError> {
         other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
     }
     stream.write_all(&frame::encode(&ClientMessage::Request(Request::CarryQuic))?)?;
-    let certificate = match receive(stream, &mut decoder)? {
-        ServerMessage::Response(Response::Carrying { certificate }) => certificate,
+    let carrying = match receive(stream, &mut decoder)? {
+        ServerMessage::Response(Response::Carrying {
+            certificate,
+            udp_port,
+        }) => (certificate, udp_port),
         ServerMessage::Response(response) => return Err(unexpected(response)),
         other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
     };
@@ -474,7 +498,7 @@ fn open_carrier(stream: &mut UnixStream) -> Result<Vec<u8>, ClientError> {
         return Err(ClientError::Disconnected);
     }
     stream.set_read_timeout(None)?;
-    Ok(certificate)
+    Ok(carrying)
 }
 
 /// Reads until a whole message has arrived.

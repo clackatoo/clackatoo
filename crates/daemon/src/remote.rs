@@ -11,7 +11,9 @@
 //!
 //! A shell can print something before the bridge starts, such as a
 //! greeting from a startup file, so the bridge announces itself first, and
-//! the client skips everything before the announcement.
+//! the client skips everything before the announcement. Just before it,
+//! the bridge says which address sshd was reached at, which is where the
+//! client can try reaching the daemon over UDP.
 //!
 //! ssh asks for passwords on the terminal it was started from, which a
 //! window may not have. A window serves an [`Askpass`] instead: ssh runs
@@ -20,7 +22,7 @@
 
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::net::Shutdown;
+use std::net::{IpAddr, Shutdown};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -37,6 +39,11 @@ use crate::runtime::RuntimeDir;
 /// What the bridge sends before relaying, unlikely to begin anything a
 /// shell prints.
 const ANNOUNCEMENT: &[u8] = b"\x1b[clackatoo-bridge]\n";
+
+/// What begins the line before the announcement that gives the address sshd
+/// was reached at, followed by the address, `]` and a newline. Clients from
+/// before it skip it, as they would a greeting.
+const ADDRESS: &[u8] = b"\x1b[clackatoo-address ";
 
 /// The most a shell may print before the bridge announces itself.
 const MAX_GREETING: usize = 64 * 1024;
@@ -210,7 +217,31 @@ pub fn through(mut command: Command, host: &str) -> Result<Client, RemoteError> 
         }
     }
     stream.set_read_timeout(None)?;
-    Ok(Client::over_carrier(stream, Some(ssh))?)
+    let greeting = &greeting[..greeting.len() - ANNOUNCEMENT.len()];
+    Ok(Client::over_carrier(
+        stream,
+        announced_address(greeting),
+        Some(ssh),
+    )?)
+}
+
+/// The address the bridge announced, at the end of `greeting`, if it did.
+fn announced_address(greeting: &[u8]) -> Option<IpAddr> {
+    let line = greeting.strip_suffix(b"]\n")?;
+    let at = line
+        .windows(ADDRESS.len())
+        .rposition(|window| window == ADDRESS)?;
+    std::str::from_utf8(&line[at + ADDRESS.len()..])
+        .ok()?
+        .parse()
+        .ok()
+}
+
+/// The address sshd was reached at, from what it tells the programs it
+/// runs: `client-address client-port server-address server-port`.
+fn reached_at() -> Option<IpAddr> {
+    let connection = std::env::var("SSH_CONNECTION").ok()?;
+    connection.split_whitespace().nth(2)?.parse().ok()
 }
 
 /// Relays between this process's input and output and the daemon, which
@@ -229,6 +260,11 @@ pub fn bridge(runtime: &RuntimeDir, replace: bool) -> Result<(), LaunchError> {
     // until a newline.
     let mut input = File::from(io::stdin().as_fd().try_clone_to_owned()?);
     let mut output = File::from(io::stdout().as_fd().try_clone_to_owned()?);
+    if let Some(address) = reached_at() {
+        let mut line = ADDRESS.to_vec();
+        line.extend_from_slice(format!("{address}]\n").as_bytes());
+        output.write_all(&line)?;
+    }
     output.write_all(ANNOUNCEMENT)?;
     let mut to_daemon = daemon.try_clone()?;
     std::thread::Builder::new()
@@ -432,6 +468,24 @@ impl Drop for Ssh {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_address_comes_from_the_line_before_the_announcement() {
+        assert_eq!(
+            announced_address(b"Welcome!\n\x1b[clackatoo-address 192.0.2.7]\n"),
+            Some("192.0.2.7".parse().unwrap())
+        );
+        assert_eq!(
+            announced_address(b"\x1b[clackatoo-address 2001:db8::1]\n"),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        assert_eq!(announced_address(b"Welcome!\n"), None, "an older bridge");
+        assert_eq!(
+            announced_address(b"\x1b[clackatoo-address 192.0.2.7]\nMore greeting\n"),
+            None,
+            "only right before the announcement"
+        );
+    }
 
     #[test]
     fn questions_reach_the_askpass_and_answers_come_back() {

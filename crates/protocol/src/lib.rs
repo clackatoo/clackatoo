@@ -295,6 +295,11 @@ pub enum Response {
         /// for the client to accept and no other. The client learned it
         /// over SSH, which logged it in to this machine.
         certificate: Vec<u8>,
+        /// The UDP port the daemon's QUIC endpoint takes packets on, if it
+        /// has one. A client that reaches it there may move its connection
+        /// off the carrier onto UDP, where it survives the client's network
+        /// changing. New connections only ever come through a carrier.
+        udp_port: Option<u16>,
     },
 }
 

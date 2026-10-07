@@ -18,6 +18,8 @@
 
 use std::collections::{BTreeMap, VecDeque, btree_map};
 use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::ops::RangeInclusive;
 use std::os::fd::RawFd;
 use std::path::Path;
 use std::sync::Arc;
@@ -32,7 +34,7 @@ use clackatoo_protocol::{
 };
 use clackatoo_term::{Damage, Terminal};
 use mio::event::Event;
-use mio::net::{UnixListener, UnixStream};
+use mio::net::{UdpSocket, UnixListener, UnixStream};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Registry, Token, Waker};
 use quinn_proto::{ConnectionHandle, StreamId};
@@ -46,6 +48,7 @@ use crate::workspaces::WorkspaceState;
 
 const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);
+const UDP: Token = Token(usize::MAX - 2);
 
 /// Bytes read per `read` call, from PTYs and clients alike.
 const READ_BUFFER_LEN: usize = 64 * 1024;
@@ -242,6 +245,9 @@ pub struct Daemon {
     quic: Option<QuicServer>,
     /// What the QUIC endpoint last asked to be acted on.
     quic_events: Vec<QuicEvent>,
+    /// Where QUIC connections that have moved off their carriers send and
+    /// receive, set up along with the QUIC endpoint.
+    udp: Option<UdpSocket>,
     /// Terminals whose output budget ran out with more output waiting.
     unread: VecDeque<TerminalId>,
     /// When each terminal with uncompacted scrollback should compact it.
@@ -301,6 +307,7 @@ impl Daemon {
             workspaces: WorkspaceState::new(),
             quic: None,
             quic_events: Vec::new(),
+            udp: None,
             unread: VecDeque::new(),
             compactions: BTreeMap::new(),
             views_pending: false,
@@ -363,6 +370,7 @@ impl Daemon {
         match event.token() {
             LISTENER => self.accept_clients(),
             WAKER => {}
+            UDP => self.receive_udp(),
             token => match self.sources.get(token.0) {
                 Some(Source::Output(id)) => {
                     let id = *id;
@@ -1179,16 +1187,45 @@ impl Daemon {
                 "only a connection to the daemon's socket can carry QUIC".into(),
             ));
         }
-        let quic = match &mut self.quic {
-            Some(quic) => quic,
-            None => self
-                .quic
-                .insert(QuicServer::new().map_err(|err| Error::CantCarry(err.to_string()))?),
-        };
+        if self.quic.is_none() {
+            self.quic = Some(QuicServer::new().map_err(|err| Error::CantCarry(err.to_string()))?);
+            self.udp = self.config.udp_ports.clone().and_then(|ports| {
+                bind_udp(self.poll.registry(), ports)
+                    .inspect_err(|err| log::warn!("no UDP port for QUIC: {err}"))
+                    .ok()
+            });
+        }
         client.carrying = true;
         Ok(Response::Carrying {
-            certificate: quic.certificate().to_vec(),
+            certificate: self
+                .quic
+                .as_ref()
+                .map(|quic| quic.certificate().to_vec())
+                .unwrap_or_default(),
+            udp_port: self
+                .udp
+                .as_ref()
+                .and_then(|udp| udp.local_addr().ok())
+                .map(|address| address.port()),
         })
+    }
+
+    /// Hands the QUIC endpoint every packet that has arrived over UDP.
+    fn receive_udp(&mut self) {
+        let (Some(udp), Some(quic)) = (&self.udp, self.quic.as_mut()) else {
+            return;
+        };
+        let now = Instant::now();
+        loop {
+            match udp.recv_from(&mut self.buffer) {
+                Ok((n, from)) => quic.receive(now, from, &self.buffer[..n]),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                // Such as an ICMP error for an earlier packet: the next
+                // read gets on with the rest.
+                Err(err) => log::debug!("UDP read failed: {err}"),
+            }
+        }
     }
 
     /// Turns the client at `token`, which asked to carry QUIC and has its
@@ -1349,12 +1386,24 @@ impl Daemon {
         };
         let mut carriers = Vec::new();
         quic.transmit(Instant::now(), |address, packet| {
-            if let Some(key) = quic::carrier_key(address)
-                && let Some(Source::Carrier(carrier)) = self.sources.get_mut(key)
-            {
-                quic::frame_packet(packet, &mut carrier.outgoing);
-                if !carriers.contains(&key) {
-                    carriers.push(key);
+            match quic::carrier_key(address) {
+                Some(key) => {
+                    if let Some(Source::Carrier(carrier)) = self.sources.get_mut(key) {
+                        quic::frame_packet(packet, &mut carrier.outgoing);
+                        if !carriers.contains(&key) {
+                            carriers.push(key);
+                        }
+                    }
+                }
+                // A packet the socket has no room for is as good as lost, and
+                // QUIC sends it again.
+                None => {
+                    if let Some(udp) = &self.udp
+                        && let Err(err) = udp.send_to(packet, address)
+                        && err.kind() != io::ErrorKind::WouldBlock
+                    {
+                        log::debug!("UDP send to {address} failed: {err}");
+                    }
                 }
             }
         });
@@ -1362,6 +1411,29 @@ impl Daemon {
             self.flush_carrier(Token(key));
         }
     }
+}
+
+/// Binds a UDP socket on the first free port in `ports`, taking IPv6 and
+/// IPv4 alike where the system allows, and registers it.
+fn bind_udp(registry: &Registry, ports: RangeInclusive<u16>) -> io::Result<UdpSocket> {
+    let mut last = io::Error::other("the range of ports is empty");
+    for port in ports {
+        let any = [
+            IpAddr::from(Ipv6Addr::UNSPECIFIED),
+            Ipv4Addr::UNSPECIFIED.into(),
+        ];
+        for ip in any {
+            match UdpSocket::bind(SocketAddr::new(ip, port)) {
+                Ok(mut udp) => {
+                    registry.register(&mut udp, UDP, Interest::READABLE)?;
+                    log::info!("QUIC takes UDP on port {}", udp.local_addr()?.port());
+                    return Ok(udp);
+                }
+                Err(err) => last = err,
+            }
+        }
+    }
+    Err(last)
 }
 
 /// Writes what it can of `outgoing` to `stream`, registered with `token`,

@@ -5,12 +5,14 @@
 //! connection costs, and then a key, from sending it to the view update
 //! that shows the program's echo, which is what typing costs. The key goes
 //! to a terminal of ping's own, running `cat`, as a window would send it.
+//! For a daemon on another machine, each round also says whether it went
+//! through ssh or over UDP.
 
 use std::fmt::Display;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use clackatoo_daemon::Client;
+use clackatoo_daemon::{Client, Route};
 use clackatoo_protocol::{Event, NewTerminal, Size, TerminalId, View, ViewUpdate};
 
 /// How long to wait for any one answer.
@@ -82,9 +84,10 @@ fn measure(
         let key = started.elapsed();
 
         println!(
-            "round {round}: request {}, key echo {}",
+            "round {round}: request {}, key echo {}{}",
             Millis(request),
-            Millis(key)
+            Millis(key),
+            route(client)
         );
         requests.push(request);
         keys.push(key);
@@ -94,6 +97,16 @@ fn measure(
     println!("request   {}", Summary(&requests));
     println!("key echo  {}", Summary(&keys));
     Ok(())
+}
+
+/// How the connection reaches a daemon on another machine, to follow a
+/// round's times.
+fn route(client: &Client) -> &'static str {
+    match client.route() {
+        None => "",
+        Some(Route::Ssh) => " (through ssh)",
+        Some(Route::Udp) => " (over UDP)",
+    }
 }
 
 /// Waits for the next update of `terminal`'s view, applies it to `view`

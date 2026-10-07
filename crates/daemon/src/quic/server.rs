@@ -87,7 +87,7 @@ impl QuicServer {
         let key =
             rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
         let mut config = ServerConfig::with_single_cert(vec![certificate.clone()], key.into())?;
-        config.transport_config(super::transport());
+        config.transport_config(Arc::new(super::transport()));
         let endpoint = Endpoint::new(
             Arc::new(EndpointConfig::default()),
             Some(Arc::new(config)),
@@ -109,9 +109,10 @@ impl QuicServer {
         &self.certificate
     }
 
-    /// Takes a packet a carrier received from `from`. New connections are
-    /// accepted only this way: see the [module docs](super).
+    /// Takes a packet received from `from`, by a carrier or over UDP. Only
+    /// a carrier's may open a connection: see the [module docs](super).
     pub(crate) fn receive(&mut self, now: Instant, from: SocketAddr, packet: &[u8]) {
+        let may_open = super::carrier_key(from).is_some();
         self.buffer.clear();
         let event = self.endpoint.handle(
             now,
@@ -127,6 +128,11 @@ impl QuicServer {
                     remote.connection.handle_event(event);
                     self.touched.push(handle);
                 }
+            }
+            Some(DatagramEvent::NewConnection(incoming)) if !may_open => {
+                // Not even refused: an answer would tell a scanner that
+                // something's here.
+                self.endpoint.ignore(incoming);
             }
             Some(DatagramEvent::NewConnection(incoming)) => {
                 self.buffer.clear();
@@ -150,8 +156,10 @@ impl QuicServer {
                     }
                 }
             }
-            Some(DatagramEvent::Response(transmit)) => self.answer(&transmit),
-            None => {}
+            // Over UDP, answering packets for no connection would also
+            // tell a scanner something's here.
+            Some(DatagramEvent::Response(transmit)) if may_open => self.answer(&transmit),
+            Some(DatagramEvent::Response(_)) | None => {}
         }
     }
 

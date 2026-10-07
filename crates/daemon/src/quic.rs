@@ -11,41 +11,59 @@
 //! holds up another, or the answers.
 //!
 //! QUIC inside SSH gives every remote client one way in, whether or not UDP
-//! gets through to the machine, and streams that don't hold each other up. Later, when UDP does get through, the same connection moves
-//! onto it, to survive the client's network changing.
+//! gets through to the machine, and streams that don't hold each other up.
+//! When UDP does get through, the client moves the connection onto it, to
+//! survive its network changing: see [`carry`].
 //!
 //! SSH is what authenticates. The daemon takes new QUIC connections only
 //! from carriers, which only someone logged in over SSH can open, and the
-//! client accepts only the certificate the daemon gave it over SSH.
+//! client accepts only the certificate the daemon gave it over SSH. Over
+//! UDP, the daemon only takes packets for connections already open, which
+//! only the keys agreed inside SSH can make.
 //!
 //! quinn-proto, a QUIC implementation with no networking of its own, is
 //! driven by the daemon's event loop ([`QuicServer`]) and, on the client,
 //! by a thread of its own ([`carry`]).
 
 mod client;
+mod path;
 mod server;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clackatoo_protocol::frame;
 use quinn_proto::congestion::BbrConfig;
 use quinn_proto::{TransportConfig, VarInt};
 
 pub(crate) use client::{Carried, carry};
+pub use path::Route;
 pub(crate) use server::{QuicEvent, QuicServer, Received};
 
 /// The name the daemon's certificate is for. Nothing checks it: the client
 /// pins the certificate itself.
 const SERVER_NAME: &str = "clackatoo";
 
+/// How long a connection may go without hearing from the other end before
+/// it ends: long enough for a laptop to change networks, or sleep briefly,
+/// and pick up where it left off. The client's keep-alives stop an idle
+/// terminal reaching it.
+const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
+
+/// How often a client lets the daemon know it's there when nothing else is
+/// sent: often enough to keep a home router's mapping for UDP open.
+const KEEP_ALIVE: Duration = Duration::from_secs(25);
+
 /// How both ends' connections behave.
-fn transport() -> Arc<TransportConfig> {
+fn transport() -> TransportConfig {
     let mut transport = TransportConfig::default();
     transport
-        // A terminal can sit idle for hours. While a connection is carried
-        // over SSH, SSH notices it dying, and the carrier closing ends it.
-        .max_idle_timeout(None)
+        .max_idle_timeout(Some(
+            IDLE_TIMEOUT
+                .try_into()
+                .expect("the idle timeout is within QUIC's limits"),
+        ))
         // A carrier never loses packets, so a loss-based controller would
         // grow its window without end, queueing behind keystrokes. BBR
         // paces to the measured rate and round trip instead.
@@ -54,7 +72,7 @@ fn transport() -> Arc<TransportConfig> {
         .enable_segmentation_offload(false)
         // A stream for each terminal a client follows.
         .max_concurrent_uni_streams(VarInt::from_u32(1024));
-    Arc::new(transport)
+    transport
 }
 
 /// The address QUIC knows the carrier with `key` by: one in the range set
