@@ -16,6 +16,7 @@ mod app;
 mod colors;
 mod fonts;
 mod glyphs;
+mod input;
 mod render;
 mod screen;
 mod session;

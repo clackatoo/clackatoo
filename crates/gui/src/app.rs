@@ -17,6 +17,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::fonts::Fonts;
+use crate::input;
 use crate::render::{PADDING, Renderer};
 use crate::screen::Screen;
 use crate::session::SessionEvent;
@@ -155,6 +156,8 @@ pub(crate) struct App {
     screen: Option<Screen>,
     /// A view update has been applied but not yet drawn and acknowledged.
     unacknowledged: bool,
+    /// The modifier keys held now.
+    modifiers: input::Modifiers,
     first_frame_drawn: bool,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
@@ -173,6 +176,7 @@ impl App {
             attached: None,
             screen: None,
             unacknowledged: false,
+            modifiers: input::Modifiers::default(),
             first_frame_drawn: false,
             result: Ok(()),
         }
@@ -264,6 +268,31 @@ impl App {
         });
         if let Err(err) = attached.sender.send(&request) {
             log::warn!("asking for a resize failed: {err}");
+        }
+    }
+
+    /// Sends a key press to the terminal's program.
+    fn key_pressed(&mut self, event: &winit::event::KeyEvent) {
+        let (Some(attached), Some(screen)) = (&mut self.attached, &self.screen) else {
+            return;
+        };
+        let press = input::KeyPress {
+            key: &event.logical_key,
+            text: event.text.as_deref(),
+            location: event.location,
+            modifiers: self.modifiers,
+        };
+        let mut bytes = Vec::new();
+        input::encode(&press, screen.modes, &mut bytes);
+        if bytes.is_empty() {
+            return;
+        }
+        let request = ClientMessage::Request(Request::SendInput {
+            terminal: attached.terminal,
+            bytes,
+        });
+        if let Err(err) = attached.sender.send(&request) {
+            log::warn!("sending a key failed: {err}");
         }
     }
 
@@ -382,6 +411,19 @@ impl ApplicationHandler<SessionEvent> for App {
                 self.fit_terminal();
             }
             WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let state = modifiers.state();
+                self.modifiers = input::Modifiers {
+                    shift: state.shift_key(),
+                    ctrl: state.control_key(),
+                    alt: state.alt_key(),
+                };
+            }
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if event.state.is_pressed() => self.key_pressed(&event),
             _ => {}
         }
     }
