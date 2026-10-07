@@ -12,6 +12,7 @@ bench = false
 
 [dependencies]
 anyhow.workspace = true
+arboard.workspace = true
 bytemuck.workspace = true
 clackatoo-daemon.workspace = true
 clackatoo-protocol.workspace = true

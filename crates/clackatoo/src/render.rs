@@ -102,19 +102,14 @@ fn color(color: Color, base: u8, bright_base: u8, extended: &str) -> Option<Stri
 
 #[cfg(test)]
 mod tests {
-    use clackatoo_protocol::{CursorState, InputModes, Line, Run, Size};
+    use clackatoo_protocol::{GridState, Line, Run, Size};
 
     use super::*;
 
     fn screen(lines: Vec<Line>) -> GridNode {
         GridNode {
             size: Size::new(10, u16::try_from(lines.len()).unwrap()).unwrap(),
-            cursor: CursorState {
-                line: 0,
-                col: 0,
-                visible: true,
-            },
-            modes: InputModes::default(),
+            state: GridState::default(),
             lines,
         }
     }

@@ -7,7 +7,17 @@ use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Format, Transform};
 
-use crate::fonts::{FaceId, Fonts};
+use crate::boxdraw;
+use crate::fonts::{CellMetrics, FaceId, Fonts};
+
+/// What a cached glyph is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum GlyphKey {
+    /// A glyph from a font.
+    Font(FaceId, GlyphId),
+    /// A box-drawing or block character, drawn to fill its cell.
+    Drawn(char),
+}
 
 /// The atlas texture's width and height, in pixels. Room for thousands of
 /// glyphs at any normal size.
@@ -39,7 +49,7 @@ pub(crate) struct Upload {
 /// Every glyph drawn so far, rasterised once and kept in the atlas.
 pub(crate) struct GlyphCache {
     context: ScaleContext,
-    glyphs: HashMap<(FaceId, GlyphId), Option<AtlasGlyph>>,
+    glyphs: HashMap<GlyphKey, Option<AtlasGlyph>>,
     shelves: Shelves,
     /// New glyphs not yet in the texture.
     pub(crate) uploads: Vec<Upload>,
@@ -71,12 +81,40 @@ impl GlyphCache {
         face: FaceId,
         glyph: GlyphId,
     ) -> Option<AtlasGlyph> {
-        if let Some(&cached) = self.glyphs.get(&(face, glyph)) {
+        let key = GlyphKey::Font(face, glyph);
+        if let Some(&cached) = self.glyphs.get(&key) {
             return cached;
         }
         let rasterised = self.rasterise(fonts, face, glyph);
-        self.glyphs.insert((face, glyph), rasterised);
+        self.glyphs.insert(key, rasterised);
         rasterised
+    }
+
+    /// A box-drawing or block character, drawn to fill a cell of `cell`'s
+    /// size. Its top sits `cell.baseline` above the pen, at the cell's top.
+    pub(crate) fn drawn(&mut self, ch: char, cell: &CellMetrics) -> Option<AtlasGlyph> {
+        let key = GlyphKey::Drawn(ch);
+        if let Some(&cached) = self.glyphs.get(&key) {
+            return cached;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let stroke = cell.stroke as u32;
+        let drawn = boxdraw::rasterize(ch, cell.width, cell.height, stroke).and_then(|mask| {
+            let [x, y] = self.shelves.allocate(cell.width, cell.height)?;
+            let rect = [x, y, cell.width, cell.height];
+            let pixels = mask.iter().flat_map(|&a| [a, a, a, a]).collect();
+            self.uploads.push(Upload { rect, pixels });
+            #[allow(clippy::cast_possible_truncation)]
+            let top = cell.baseline as i32;
+            Some(AtlasGlyph {
+                rect,
+                left: 0,
+                top,
+                color: false,
+            })
+        });
+        self.glyphs.insert(key, drawn);
+        drawn
     }
 
     fn rasterise(&mut self, fonts: &Fonts, face_id: FaceId, glyph: GlyphId) -> Option<AtlasGlyph> {

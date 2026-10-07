@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    ClientMessage, CursorState, Error, InputModes, Line, NodeId, PROTOCOL_VERSION, Patch, Request,
-    Response, ServerMessage, Size, TerminalId, View, ViewUpdate,
+    ClientMessage, Error, GridState, HistoryLine, HistoryLines, Line, NodeId, PROTOCOL_VERSION,
+    Patch, Request, Response, ServerMessage, Size, TerminalId, View, ViewUpdate,
 };
 use clackatoo_term::{Damage, Terminal};
 use mio::event::Event;
@@ -103,8 +103,7 @@ struct Subscription {
     /// after a re-attach, which asks for a fresh one.
     size: Option<Size>,
     title: String,
-    cursor: CursorState,
-    modes: InputModes,
+    state: GridState,
     /// An update was sent and not yet acknowledged with `FrameDone`.
     awaiting_ack: bool,
 }
@@ -115,12 +114,7 @@ impl Subscription {
             damage: Damage::new(),
             size: None,
             title: String::new(),
-            cursor: CursorState {
-                line: 0,
-                col: 0,
-                visible: false,
-            },
-            modes: InputModes::default(),
+            state: GridState::default(),
             awaiting_ack: false,
         }
     }
@@ -129,13 +123,11 @@ impl Subscription {
     /// `terminal` shows now, recorded as sent. `None` if nothing changed.
     fn update(&mut self, terminal: &Terminal) -> Option<ViewUpdate> {
         let size = terminal.size();
-        let cursor = CursorState::of(terminal);
-        let modes = terminal.input_modes();
+        let state = GridState::of(terminal);
         if self.size != Some(size) {
             self.size = Some(size);
             terminal.title().clone_into(&mut self.title);
-            self.cursor = cursor;
-            self.modes = modes;
+            self.state = state;
             self.damage.clear();
             return Some(ViewUpdate::Snapshot(View::capture(terminal)));
         }
@@ -155,13 +147,11 @@ impl Subscription {
             })
             .collect();
         self.damage.clear();
-        if !lines.is_empty() || cursor != self.cursor || modes != self.modes {
-            self.cursor = cursor;
-            self.modes = modes;
+        if !lines.is_empty() || state != self.state {
+            self.state = state;
             patches.push(Patch::Grid {
                 node: NodeId::ROOT,
-                cursor,
-                modes,
+                state,
                 lines,
             });
         }
@@ -748,6 +738,15 @@ impl Daemon {
                 self.detach(token, terminal);
                 Ok(Response::Done)
             }
+            Request::History {
+                terminal,
+                end,
+                count,
+            } => self
+                .terminals
+                .get(&terminal)
+                .map(|slot| Response::History(history(slot.terminal.emulator(), end, count)))
+                .ok_or(Error::NoSuchTerminal(terminal)),
         };
         response.unwrap_or_else(Response::Error)
     }
@@ -850,5 +849,26 @@ impl Daemon {
                 }
             }
         }
+    }
+}
+
+/// Up to `count` of `terminal`'s history lines, ending before line `end`.
+fn history(terminal: &Terminal, end: u64, count: u16) -> HistoryLines {
+    let history = terminal.primary();
+    let start = end.saturating_sub(u64::from(count));
+    let mut first = None;
+    let lines = history
+        .scrollback_lines(start..end)
+        .map(|(number, row)| {
+            first.get_or_insert(number);
+            HistoryLine {
+                width: u16::try_from(row.width()).expect("rows are at most Size::MAX wide"),
+                line: Line::from_row(&row),
+            }
+        })
+        .collect();
+    HistoryLines {
+        first: first.unwrap_or(end),
+        lines,
     }
 }

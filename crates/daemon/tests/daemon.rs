@@ -530,3 +530,31 @@ fn a_view_kept_by_patches_matches_the_screen_through_a_flood() {
         assert!(Instant::now() < deadline, "the view never caught up");
     }
 }
+
+#[test]
+fn history_lines_keep_their_numbers() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["sh", "-c", "seq 100; exec cat"]);
+    wait_for_screen(&mut client, terminal, |text| text.contains("100"));
+    let end = client
+        .capture(terminal)
+        .unwrap()
+        .grid()
+        .unwrap()
+        .state
+        .history_end;
+    // 100 lines and a blank one for cat, on a 10-line screen.
+    assert_eq!(end, 91);
+
+    let history = client.history(terminal, end, 3).unwrap();
+    assert_eq!(history.first, 88);
+    let texts: Vec<String> = history.lines.iter().map(|line| line.line.text()).collect();
+    assert_eq!(texts, ["89", "90", "91"]);
+    assert!(history.lines.iter().all(|line| line.width == 40));
+
+    // Lines past the end, or before the start, are left out.
+    let history = client.history(terminal, end + 50, 52).unwrap();
+    assert_eq!((history.first, history.lines.len()), (89, 2));
+    assert!(client.history(terminal, 0, 10).unwrap().lines.is_empty());
+}

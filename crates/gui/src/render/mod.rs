@@ -10,10 +10,31 @@ use bytemuck::{Pod, Zeroable};
 use clackatoo_protocol::{Attributes, Underline};
 use clackatoo_term::Cell;
 
+use crate::boxdraw;
 use crate::colors::{Rgba, Theme};
 use crate::fonts::{Fonts, Variant};
 use crate::glyphs::{ATLAS_SIZE, AtlasGlyph, GlyphCache};
-use crate::screen::Screen;
+
+/// Everything one frame shows.
+#[derive(Debug)]
+pub(crate) struct Scene<'a> {
+    /// The rows to show, top to bottom.
+    pub(crate) rows: &'a [&'a clackatoo_term::Row],
+    pub(crate) cursor: Option<SceneCursor>,
+    /// Frame the window, to show the pane is in normal mode.
+    pub(crate) normal_mode: bool,
+    /// A label for the top right corner, such as the scroll position.
+    pub(crate) label: Option<&'a str>,
+}
+
+/// Where the cursor is drawn.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SceneCursor {
+    pub(crate) line: usize,
+    pub(crate) col: usize,
+    /// An outline rather than a block, while the window isn't focused.
+    pub(crate) hollow: bool,
+}
 
 /// Space between the window's edge and the grid, in physical pixels per
 /// logical pixel.
@@ -64,6 +85,8 @@ pub(crate) struct Renderer {
     rects: Vec<Rect>,
     overlays: Vec<Rect>,
     glyph_instances: Vec<Glyph>,
+    /// Glyphs drawn over the overlays, such as a label's text.
+    label_glyphs: Vec<Glyph>,
 }
 
 impl Renderer {
@@ -160,6 +183,7 @@ impl Renderer {
             rects: Vec::new(),
             overlays: Vec::new(),
             glyph_instances: Vec::new(),
+            label_glyphs: Vec::new(),
         }
     }
 
@@ -176,11 +200,11 @@ impl Renderer {
         target: &wgpu::TextureView,
         size: [u32; 2],
         padding: f32,
-        screen: &Screen,
+        scene: &Scene<'_>,
         fonts: &mut Fonts,
     ) {
         let (device, queue) = gpu;
-        self.build(screen, fonts, padding);
+        self.build(scene, fonts, padding, size);
         for upload in self.glyphs.uploads.drain(..) {
             let [x, y, width, height] = upload.rect;
             queue.write_texture(
@@ -211,6 +235,8 @@ impl Renderer {
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
         let background_rects = self.rects.len();
         self.rects.append(&mut self.overlays);
+        let grid_glyphs = self.glyph_instances.len();
+        self.glyph_instances.append(&mut self.label_glyphs);
         self.rect_buffer
             .write(device, queue, bytemuck::cast_slice(&self.rects));
         self.glyph_buffer
@@ -244,7 +270,7 @@ impl Renderer {
             if let Some(buffer) = &self.glyph_buffer.buffer {
                 pass.set_pipeline(&self.glyph_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..4, 0..count(self.glyph_instances.len()));
+                pass.draw(0..4, 0..count(grid_glyphs));
             }
             if let Some(buffer) = &self.rect_buffer.buffer
                 && self.rects.len() > background_rects
@@ -253,20 +279,28 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..4, count(background_rects)..count(self.rects.len()));
             }
+            if let Some(buffer) = &self.glyph_buffer.buffer
+                && self.glyph_instances.len() > grid_glyphs
+            {
+                pass.set_pipeline(&self.glyph_pipeline);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..4, count(grid_glyphs)..count(self.glyph_instances.len()));
+            }
         }
         queue.submit([encoder.finish()]);
     }
 
-    /// Turns the screen into rectangles and glyphs.
+    /// Turns the scene into rectangles and glyphs.
     #[allow(clippy::cast_precision_loss)]
-    fn build(&mut self, screen: &Screen, fonts: &mut Fonts, padding: f32) {
+    fn build(&mut self, scene: &Scene<'_>, fonts: &mut Fonts, padding: f32, size: [u32; 2]) {
         self.rects.clear();
         self.overlays.clear();
         self.glyph_instances.clear();
+        self.label_glyphs.clear();
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
-        let cursor = screen.cursor;
-        for (line, row) in screen.rows.iter().enumerate() {
+        let cursor = scene.cursor;
+        for (line, row) in scene.rows.iter().enumerate() {
             let top = padding + line as f32 * cell_height;
             let baseline = top + cell.baseline;
             for (col, &cell_value) in row.cells().iter().enumerate() {
@@ -277,12 +311,34 @@ impl Renderer {
                 let left = padding + col as f32 * cell_width;
                 let style = row.style(cell_value);
                 let mut colors = self.theme.cell(style);
-                let under_cursor = cursor.visible
-                    && usize::from(cursor.line) == line
-                    && usize::from(cursor.col) == col;
-                if under_cursor {
-                    colors.background = Some(self.theme.cursor);
-                    colors.foreground = self.theme.background;
+                let cursor_here = cursor.filter(|cursor| cursor.line == line && cursor.col == col);
+                let cursor_color = if scene.normal_mode {
+                    self.theme.accent
+                } else {
+                    self.theme.cursor
+                };
+                match cursor_here {
+                    Some(SceneCursor { hollow: false, .. }) => {
+                        colors.background = Some(cursor_color);
+                        colors.foreground = self.theme.background;
+                    }
+                    Some(SceneCursor { hollow: true, .. }) => {
+                        let thickness = cell.stroke;
+                        let (w, h) = (cells * cell_width, cell_height);
+                        for (origin, size) in [
+                            ([left, top], [w, thickness]),
+                            ([left, top + h - thickness], [w, thickness]),
+                            ([left, top], [thickness, h]),
+                            ([left + w - thickness, top], [thickness, h]),
+                        ] {
+                            self.overlays.push(Rect {
+                                origin,
+                                size,
+                                color: cursor_color,
+                            });
+                        }
+                    }
+                    None => {}
                 }
                 if let Some(background) = colors.background {
                     self.rects.push(Rect {
@@ -322,6 +378,68 @@ impl Renderer {
                 }
             }
         }
+        if scene.normal_mode {
+            self.push_frame(size, padding);
+        }
+        if let Some(label) = scene.label {
+            self.push_label(label, fonts, padding, size);
+        }
+    }
+
+    /// A border around the window in the accent colour, inside the padding.
+    #[allow(clippy::cast_precision_loss)]
+    fn push_frame(&mut self, size: [u32; 2], padding: f32) {
+        let (w, h) = (size[0] as f32, size[1] as f32);
+        let t = (padding / 2.0).max(1.0).round();
+        for (origin, size) in [
+            ([0.0, 0.0], [w, t]),
+            ([0.0, h - t], [w, t]),
+            ([0.0, 0.0], [t, h]),
+            ([w - t, 0.0], [t, h]),
+        ] {
+            self.overlays.push(Rect {
+                origin,
+                size,
+                color: self.theme.accent,
+            });
+        }
+    }
+
+    /// `text` in the top right corner, dark on the accent colour, over
+    /// whatever the grid shows there.
+    #[allow(clippy::cast_precision_loss)]
+    fn push_label(&mut self, text: &str, fonts: &mut Fonts, padding: f32, size: [u32; 2]) {
+        let cell = fonts.cell;
+        let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
+        let chars = text.chars().count() as f32;
+        // A cell's width of space either side of the text.
+        let width = (chars + 2.0) * cell_width;
+        let left = (size[0] as f32 - padding - width).max(0.0);
+        let top = padding;
+        self.overlays.push(Rect {
+            origin: [left, top],
+            size: [width, cell_height],
+            color: self.theme.accent,
+        });
+        let baseline = top + cell.baseline;
+        // Drawn after the grid's glyphs, so it sits on top of them: the
+        // overlay pass comes last, and these glyphs go to their own list.
+        for (index, ch) in text.chars().enumerate() {
+            let Some((face, glyph)) = fonts.glyph(ch, Variant::Bold) else {
+                continue;
+            };
+            let Some(atlas) = self.glyphs.get(fonts, face, glyph) else {
+                continue;
+            };
+            let pen = [left + (index as f32 + 1.0) * cell_width, baseline];
+            self.label_glyphs.push(place(
+                &atlas,
+                pen,
+                [cell_width, cell_height],
+                self.theme.background,
+                cell.baseline,
+            ));
+        }
     }
 
     /// Adds the glyphs for one cell's text: its character, then any
@@ -341,6 +459,13 @@ impl Renderer {
     ) {
         let base = cell.ch();
         if base == ' ' {
+            return;
+        }
+        if boxdraw::is_drawn(base) && !cell.has_grapheme() {
+            if let Some(atlas) = self.glyphs.drawn(base, &fonts.cell) {
+                self.glyph_instances
+                    .push(place(&atlas, pen, cell_box, color, fonts.cell.baseline));
+            }
             return;
         }
         let mut text = String::new();

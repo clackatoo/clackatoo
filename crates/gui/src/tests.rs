@@ -4,7 +4,7 @@ use clackatoo_protocol::{Size, View};
 use clackatoo_term::{Config, Terminal};
 
 use crate::fonts::{FontOptions, Fonts};
-use crate::render::Renderer;
+use crate::render::{Renderer, Scene, SceneCursor};
 use crate::screen::Screen;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -20,7 +20,13 @@ fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
 
 /// Renders `output` played into a terminal of `cols` × `rows`, and returns
 /// the image's size and RGBA pixels.
-fn render(cols: u16, rows: u16, output: &str, scale: f64) -> Option<([u32; 2], Vec<u8>)> {
+fn render(
+    cols: u16,
+    rows: u16,
+    output: &str,
+    scale: f64,
+    (normal_mode, label): (bool, Option<&str>),
+) -> Option<([u32; 2], Vec<u8>)> {
     let (device, queue) = gpu()?;
     let mut terminal = Terminal::new(Size::new(cols, rows).unwrap(), &Config::default());
     terminal.advance(output.as_bytes());
@@ -52,12 +58,24 @@ fn render(cols: u16, rows: u16, output: &str, scale: f64) -> Option<([u32; 2], V
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let mut renderer = Renderer::new(&device, FORMAT);
     #[allow(clippy::cast_precision_loss)]
+    let rows: Vec<_> = screen.rows.iter().collect();
+    let cursor = screen.state.cursor;
+    let scene = Scene {
+        rows: &rows,
+        cursor: Some(SceneCursor {
+            line: usize::from(cursor.line),
+            col: usize::from(cursor.col),
+            hollow: false,
+        }),
+        normal_mode,
+        label,
+    };
     renderer.render(
         (&device, &queue),
         &view,
         size,
-        padding as f32,
-        &screen,
+        f32::from(u8::try_from(padding).unwrap()),
+        &scene,
         &mut fonts,
     );
 
@@ -120,7 +138,7 @@ fn renders_text_colours_and_the_cursor() {
         \x1b[31mred \x1b[32mgreen \x1b[34mblue \x1b[38;2;255;128;0mrgb\x1b[0m \x1b[7minverse\x1b[0m\r\n\
         \x1b[41m red bg \x1b[0m 字符 e\u{301} 😀 👩\u{200D}💻 ok\r\n\
         box: ┌─┐ │ │ └─┘  arrows: → ← ↑ ↓\r\n$ ";
-    let Some((size, pixels)) = render(48, 6, output, 2.0) else {
+    let Some((size, pixels)) = render(48, 6, output, 2.0, (false, None)) else {
         eprintln!("no GPU available; skipping");
         return;
     };
@@ -128,4 +146,19 @@ fn renders_text_colours_and_the_cursor() {
     // Something other than the background was drawn.
     let background = &pixels[..4];
     assert!(pixels.chunks(4).any(|pixel| pixel != background));
+}
+
+#[test]
+fn box_drawing_joins_across_rows_and_normal_mode_is_framed() {
+    let output = "┌──┬──┐ ╭──╮ ┏━━┓ ╔══╦═╗\r\n\
+        │ab│cd│ │  │ ┃  ┃ ║  ║ ║\r\n\
+        ├──┼──┤ ╰──╯ ┗━━┛ ╠══╬═╣\r\n\
+        └──┴──┘ ▁▂▃▄▅▆▇█ ░▒▓ ▌▐ ▖▗▘▝ ╚══╩═╝";
+    let Some((size, pixels)) = render(40, 5, output, 2.0, (true, Some("NORMAL  ↑12"))) else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    save("boxes", size, &pixels);
+    // The frame is drawn in the accent colour at the top left corner.
+    assert_eq!(&pixels[..3], &[0xf8, 0xce, 0x57]);
 }

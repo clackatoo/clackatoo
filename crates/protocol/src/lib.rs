@@ -35,11 +35,14 @@ use std::fmt;
 pub use clackatoo_term::{Attributes, Color, InputModes, Size, Style, Underline};
 use serde::{Deserialize, Serialize};
 
-pub use view::{CursorState, GridNode, Line, Node, NodeId, Patch, Run, View, ViewUpdate};
+pub use view::{
+    CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, Node, NodeId, Patch, Run,
+    View, ViewUpdate,
+};
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Everything a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +136,17 @@ pub enum Request {
         /// The terminal to stop following.
         terminal: TerminalId,
     },
+    /// Asks for up to `count` lines of the terminal's history, ending just
+    /// before line number `end`. Answered with [`Response::History`], which
+    /// leaves out lines no longer held.
+    History {
+        /// The terminal.
+        terminal: TerminalId,
+        /// One past the newest line wanted.
+        end: u64,
+        /// How many lines, at most.
+        count: u16,
+    },
 }
 
 /// How to start a terminal.
@@ -162,6 +176,8 @@ pub enum Response {
     TerminalCreated(TerminalId),
     /// Answers [`Request::Capture`].
     View(View),
+    /// Answers [`Request::History`].
+    History(HistoryLines),
 }
 
 /// Why the daemon refused or failed a request.

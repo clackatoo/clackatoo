@@ -7,8 +7,8 @@ use std::path::Path;
 
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
 use clackatoo_protocol::{
-    ClientMessage, Error, Event, NewTerminal, PROTOCOL_VERSION, Request, Response, ServerMessage,
-    Size, TerminalId, TerminalInfo, View,
+    ClientMessage, Error, Event, HistoryLines, NewTerminal, PROTOCOL_VERSION, Request, Response,
+    ServerMessage, Size, TerminalId, TerminalInfo, View,
 };
 
 /// How long the daemon may take to answer a new connection's hello.
@@ -213,6 +213,27 @@ impl Client {
     pub fn capture(&mut self, terminal: TerminalId) -> Result<View, ClientError> {
         match self.request(&Request::Capture { terminal })? {
             Response::View(view) => Ok(view),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Fetches up to `count` history lines ending before line `end`.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn history(
+        &mut self,
+        terminal: TerminalId,
+        end: u64,
+        count: u16,
+    ) -> Result<HistoryLines, ClientError> {
+        match self.request(&Request::History {
+            terminal,
+            end,
+            count,
+        })? {
+            Response::History(lines) => Ok(lines),
             other => Err(unexpected(other)),
         }
     }

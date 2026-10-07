@@ -16,6 +16,8 @@ clackatoo-bench = { path = "crates/bench" }
 clackatoo-gui = { path = "crates/gui" }
 
 anyhow = "1.0"
+# Text only: images would pull in an image codec.
+arboard = { version = "3.6", default-features = false }
 bitflags = "2.13"
 bytemuck = { version = "1.25", features = ["derive"] }
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions"] }

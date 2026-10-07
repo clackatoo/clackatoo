@@ -6,21 +6,22 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use anyhow::{Context, anyhow};
-use clackatoo_daemon::Sender;
-use clackatoo_protocol::{
-    ClientMessage, Event, Request, Response, ServerMessage, Size, TerminalId,
-};
+use clackatoo_protocol::{Event, ServerMessage, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::WindowEvent;
+use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::Key;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::fonts::Fonts;
 use crate::input;
-use crate::render::{PADDING, Renderer};
-use crate::screen::Screen;
+use crate::pane::{Mode, Pane};
+use crate::render::{PADDING, Renderer, Scene};
 use crate::session::SessionEvent;
+
+/// Lines scrolled per notch of a mouse wheel.
+const WHEEL_LINES: f64 = 3.0;
 
 /// The grid a new window is sized for.
 const INITIAL_GRID: (u32, u32) = (100, 30);
@@ -137,27 +138,22 @@ struct Frame {
     fonts: Fonts,
 }
 
-/// The terminal the window shows.
-#[derive(Debug)]
-struct Attached {
-    sender: Sender,
-    terminal: TerminalId,
-    /// The size last asked of the daemon.
-    requested: Option<Size>,
-}
-
 /// The window's whole state.
 #[derive(Debug)]
 pub(crate) struct App {
     started: Instant,
     startup: Option<Startup>,
     frame: Option<Frame>,
-    attached: Option<Attached>,
-    screen: Option<Screen>,
-    /// A view update has been applied but not yet drawn and acknowledged.
-    unacknowledged: bool,
+    /// The terminal shown, once attached.
+    pane: Option<Pane>,
     /// The modifier keys held now.
     modifiers: input::Modifiers,
+    focused: bool,
+    /// Scrolling from touchpads arrives in pixels; this is what's left
+    /// over after whole lines, in lines.
+    wheel_remainder: f64,
+    /// Opened on the first paste.
+    clipboard: Option<Clipboard>,
     first_frame_drawn: bool,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
@@ -173,10 +169,11 @@ impl App {
             started,
             startup: Some(Startup { fonts, gpu }),
             frame: None,
-            attached: None,
-            screen: None,
-            unacknowledged: false,
+            pane: None,
             modifiers: input::Modifiers::default(),
+            focused: true,
+            wheel_remainder: 0.0,
+            clipboard: None,
             first_frame_drawn: false,
             result: Ok(()),
         }
@@ -243,7 +240,7 @@ impl App {
 
     /// Asks the daemon to make the terminal as big as fits the window.
     fn fit_terminal(&mut self) {
-        let (Some(frame), Some(attached)) = (&self.frame, &mut self.attached) else {
+        let (Some(frame), Some(pane)) = (&self.frame, &mut self.pane) else {
             return;
         };
         let cell = frame.fonts.cell;
@@ -258,46 +255,66 @@ impl App {
         ) else {
             return;
         };
-        if attached.requested == Some(size) {
+        pane.resize(size);
+    }
+
+    /// Handles a key press: the window's own keys, then the pane's.
+    fn key_pressed(&mut self, event: &winit::event::KeyEvent) {
+        let Some(pane) = &mut self.pane else {
             return;
-        }
-        attached.requested = Some(size);
-        let request = ClientMessage::Request(Request::Resize {
-            terminal: attached.terminal,
-            size,
-        });
-        if let Err(err) = attached.sender.send(&request) {
-            log::warn!("asking for a resize failed: {err}");
+        };
+        let modifiers = self.modifiers;
+        let is_paste = modifiers.ctrl
+            && modifiers.shift
+            && matches!(&event.logical_key, Key::Character(text) if text.eq_ignore_ascii_case("v"));
+        let redraw = if is_paste {
+            match paste_text(&mut self.clipboard) {
+                Ok(text) => pane.paste(&text),
+                Err(err) => log::warn!("pasting failed: {err:#}"),
+            }
+            true
+        } else {
+            pane.key(&input::KeyPress {
+                key: &event.logical_key,
+                text: event.text.as_deref(),
+                location: event.location,
+                modifiers,
+            })
+        };
+        if redraw {
+            self.request_redraw();
         }
     }
 
-    /// Sends a key press to the terminal's program.
-    fn key_pressed(&mut self, event: &winit::event::KeyEvent) {
-        let (Some(attached), Some(screen)) = (&mut self.attached, &self.screen) else {
+    fn wheel(&mut self, delta: MouseScrollDelta) {
+        let (Some(frame), Some(pane)) = (&self.frame, &mut self.pane) else {
             return;
         };
-        let press = input::KeyPress {
-            key: &event.logical_key,
-            text: event.text.as_deref(),
-            location: event.location,
-            modifiers: self.modifiers,
-        };
-        let mut bytes = Vec::new();
-        input::encode(&press, screen.modes, &mut bytes);
-        if bytes.is_empty() {
-            return;
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => f64::from(y) * WHEEL_LINES,
+            MouseScrollDelta::PixelDelta(position) => {
+                position.y / f64::from(frame.fonts.cell.height)
+            }
+        } + self.wheel_remainder;
+        let whole = lines.trunc();
+        self.wheel_remainder = lines - whole;
+        #[allow(clippy::cast_possible_truncation)]
+        if whole != 0.0 && pane.wheel(whole as i64) {
+            frame.window.request_redraw();
         }
-        let request = ClientMessage::Request(Request::SendInput {
-            terminal: attached.terminal,
-            bytes,
-        });
-        if let Err(err) = attached.sender.send(&request) {
-            log::warn!("sending a key failed: {err}");
+    }
+
+    fn request_redraw(&self) {
+        if let Some(frame) = &self.frame {
+            frame.window.request_redraw();
         }
     }
 
     fn draw(&mut self) {
-        let (Some(frame), Some(screen)) = (&mut self.frame, &self.screen) else {
+        let (Some(frame), Some(pane)) = (&mut self.frame, &mut self.pane) else {
+            return;
+        };
+        let Some(screen) = pane.screen() else {
             return;
         };
         let texture = match frame.surface.get_current_texture() {
@@ -321,12 +338,23 @@ impl App {
             .create_view(&wgpu::TextureViewDescriptor::default());
         #[allow(clippy::cast_precision_loss)]
         let padding = padding(&frame.window) as f32;
+        let (rows, mut cursor) = pane.scene(screen.rows.len());
+        if let Some(cursor) = &mut cursor {
+            cursor.hollow = !self.focused;
+        }
+        let label = pane.label();
+        let scene = Scene {
+            rows: &rows,
+            cursor,
+            normal_mode: pane.mode == Mode::Normal,
+            label: label.as_deref(),
+        };
         frame.renderer.render(
             (&frame.gpu.device, &frame.gpu.queue),
             &view,
             [frame.config.width, frame.config.height],
             padding,
-            screen,
+            &scene,
             &mut frame.fonts,
         );
         frame.window.pre_present_notify();
@@ -336,16 +364,7 @@ impl App {
             self.first_frame_drawn = true;
             log::info!("first frame after {:.1?}", self.started.elapsed());
         }
-        if std::mem::take(&mut self.unacknowledged)
-            && let Some(attached) = &mut self.attached
-        {
-            let done = ClientMessage::FrameDone {
-                terminal: attached.terminal,
-            };
-            if let Err(err) = attached.sender.send(&done) {
-                log::warn!("acknowledging a frame failed: {err}");
-            }
-        }
+        pane.drawn();
     }
 }
 
@@ -364,6 +383,26 @@ fn window_attributes(size: LogicalSize<f64>) -> WindowAttributes {
         WindowAttributesExtX11::with_name(attributes, "clackatoo", "clackatoo")
     };
     attributes
+}
+
+/// The system clipboard.
+struct Clipboard(arboard::Clipboard);
+
+impl std::fmt::Debug for Clipboard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Clipboard")
+    }
+}
+
+/// The clipboard's text, opening the clipboard on first use.
+fn paste_text(clipboard: &mut Option<Clipboard>) -> anyhow::Result<String> {
+    let clipboard = match clipboard {
+        Some(clipboard) => clipboard,
+        None => clipboard.insert(Clipboard(
+            arboard::Clipboard::new().context("no clipboard")?,
+        )),
+    };
+    Ok(clipboard.0.get_text()?)
 }
 
 /// The padding around the grid in physical pixels.
@@ -424,6 +463,11 @@ impl ApplicationHandler<SessionEvent> for App {
                 is_synthetic: false,
                 ..
             } if event.state.is_pressed() => self.key_pressed(&event),
+            WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                self.request_redraw();
+            }
             _ => {}
         }
     }
@@ -431,32 +475,17 @@ impl ApplicationHandler<SessionEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
         match event {
             SessionEvent::Attached { sender, terminal } => {
-                self.attached = Some(Attached {
-                    sender,
-                    terminal,
-                    requested: None,
-                });
+                self.pane = Some(Pane::new(sender, terminal));
                 self.fit_terminal();
             }
-            SessionEvent::Message(ServerMessage::Event(Event::View { terminal, update })) => {
-                if self
-                    .attached
-                    .as_ref()
-                    .is_none_or(|attached| attached.terminal != terminal)
-                {
+            SessionEvent::Message(ServerMessage::Event(Event::View { update, .. })) => {
+                let Some(pane) = &mut self.pane else {
+                    return;
+                };
+                if !pane.view_changed(&update) {
                     return;
                 }
-                match &mut self.screen {
-                    Some(screen) => screen.apply(&update),
-                    None => match &update {
-                        clackatoo_protocol::ViewUpdate::Snapshot(view) => {
-                            self.screen = Some(Screen::new(view));
-                        }
-                        clackatoo_protocol::ViewUpdate::Patch(_) => return,
-                    },
-                }
-                self.unacknowledged = true;
-                if let (Some(frame), Some(screen)) = (&self.frame, &self.screen) {
+                if let (Some(frame), Some(screen)) = (&self.frame, pane.screen()) {
                     let title = if screen.title.is_empty() {
                         "clackatoo"
                     } else {
@@ -466,10 +495,14 @@ impl ApplicationHandler<SessionEvent> for App {
                     frame.window.request_redraw();
                 }
             }
-            SessionEvent::Message(ServerMessage::Response(Response::Error(err))) => {
-                log::warn!("the daemon refused a request: {err}");
+            SessionEvent::Message(ServerMessage::Response(response)) => {
+                if let Some(pane) = &mut self.pane
+                    && pane.answered(response)
+                {
+                    self.request_redraw();
+                }
             }
-            SessionEvent::Message(_) => {}
+            SessionEvent::Message(ServerMessage::Hello { .. }) => {}
             SessionEvent::Lost(reason) => {
                 self.fail(event_loop, anyhow!("lost the daemon: {reason}"));
             }

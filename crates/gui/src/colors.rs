@@ -11,6 +11,9 @@ pub(crate) struct Theme {
     pub(crate) foreground: Rgba,
     pub(crate) background: Rgba,
     pub(crate) cursor: Rgba,
+    /// clackatoo's own colour, the cockatoo's crest, for the window's own
+    /// marks such as the normal-mode frame.
+    pub(crate) accent: Rgba,
     /// The 256 indexed colours: 16 named ones, a 6×6×6 cube, and 24 greys.
     palette: [Rgba; 256],
 }
@@ -50,6 +53,7 @@ impl Default for Theme {
             foreground: hex_rgba(0xc5_c8_c6),
             background: hex_rgba(0x1d_1f_21),
             cursor: hex_rgba(0xc5_c8_c6),
+            accent: hex_rgba(0xf8_ce_57),
             palette,
         }
     }

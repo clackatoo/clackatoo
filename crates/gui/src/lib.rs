@@ -13,10 +13,13 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod boxdraw;
 mod colors;
 mod fonts;
 mod glyphs;
+mod history;
 mod input;
+mod pane;
 mod render;
 mod screen;
 mod session;

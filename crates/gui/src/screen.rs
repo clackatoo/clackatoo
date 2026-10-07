@@ -1,7 +1,7 @@
 //! The window's copy of a terminal's view, kept current by the daemon's
 //! updates.
 
-use clackatoo_protocol::{CursorState, InputModes, Node, NodeId, Patch, Size, View, ViewUpdate};
+use clackatoo_protocol::{GridState, Node, NodeId, Patch, Size, View, ViewUpdate};
 use clackatoo_term::Row;
 
 /// What a terminal shows, as rows of cells ready to draw.
@@ -9,8 +9,7 @@ use clackatoo_term::Row;
 pub(crate) struct Screen {
     pub(crate) title: String,
     pub(crate) size: Size,
-    pub(crate) cursor: CursorState,
-    pub(crate) modes: InputModes,
+    pub(crate) state: GridState,
     pub(crate) rows: Vec<Row>,
 }
 
@@ -21,8 +20,7 @@ impl Screen {
         Self {
             title: view.title.clone(),
             size: grid.size,
-            cursor: grid.cursor,
-            modes: grid.modes,
+            state: grid.state,
             rows: grid.lines.iter().map(|line| line.to_row(width)).collect(),
         }
     }
@@ -43,12 +41,10 @@ impl Screen {
                 Patch::Title(title) => title.clone_into(&mut self.title),
                 Patch::Grid {
                     node: NodeId::ROOT,
-                    cursor,
-                    modes,
+                    state,
                     lines,
                 } => {
-                    self.cursor = *cursor;
-                    self.modes = *modes;
+                    self.state = *state;
                     for (index, line) in lines {
                         if let Some(row) = self.rows.get_mut(usize::from(*index)) {
                             *row = line.to_row(width);

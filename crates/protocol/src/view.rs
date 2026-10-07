@@ -38,16 +38,49 @@ impl NodeId {
 pub struct GridNode {
     /// The grid's size.
     pub size: Size,
-    /// The cursor.
-    pub cursor: CursorState,
-    /// How the program wants keys and pastes encoded.
-    pub modes: InputModes,
+    /// Everything but the lines.
+    pub state: GridState,
     /// The grid's lines, top to bottom. There is always one per row.
     pub lines: Vec<Line>,
 }
 
+/// The parts of a grid besides its lines. Small, so every patch carries
+/// all of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridState {
+    /// The cursor.
+    pub cursor: CursorState,
+    /// How the program wants keys and pastes encoded.
+    pub modes: InputModes,
+    /// Whether the alternate screen is showing, which has no history.
+    pub alternate: bool,
+    /// The number the next line scrolled into history will get: the
+    /// history's lines are numbered below it (see [`HistoryLines`]).
+    pub history_end: u64,
+}
+
+/// Lines of a terminal's history, answering a request for them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryLines {
+    /// The number of the first line. Lines are numbered from 0 as they
+    /// scroll into history, so a line keeps its number while newer lines
+    /// push older ones out.
+    pub first: u64,
+    /// The lines, oldest first, each at the width it had.
+    pub lines: Vec<HistoryLine>,
+}
+
+/// One line of history.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryLine {
+    /// The columns the line had when it scrolled off.
+    pub width: u16,
+    /// Its text and styles.
+    pub line: Line,
+}
+
 /// Where the cursor is, and whether it is shown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CursorState {
     /// Screen line, from 0 at the top.
     pub line: u16,
@@ -102,10 +135,8 @@ pub enum Patch {
     Grid {
         /// The grid node.
         node: NodeId,
-        /// The cursor, changed or not.
-        cursor: CursorState,
-        /// The input modes, changed or not.
-        modes: InputModes,
+        /// The grid's state, changed or not.
+        state: GridState,
         /// The lines that changed, each with its line number.
         lines: Vec<(u16, Line)>,
     },
@@ -145,14 +176,12 @@ impl View {
                 (
                     Patch::Grid {
                         node: NodeId::ROOT,
-                        cursor,
-                        modes,
+                        state,
                         lines,
                     },
                     Node::Grid(grid),
                 ) => {
-                    grid.cursor = cursor;
-                    grid.modes = modes;
+                    grid.state = state;
                     for (index, line) in lines {
                         if let Some(old) = grid.lines.get_mut(usize::from(index)) {
                             *old = line;
@@ -171,9 +200,21 @@ impl GridNode {
     pub fn capture(terminal: &Terminal) -> Self {
         Self {
             size: terminal.size(),
+            state: GridState::of(terminal),
+            lines: terminal.grid().rows().map(Line::from_row).collect(),
+        }
+    }
+}
+
+impl GridState {
+    /// `terminal`'s state.
+    #[must_use]
+    pub fn of(terminal: &Terminal) -> Self {
+        Self {
             cursor: CursorState::of(terminal),
             modes: terminal.input_modes(),
-            lines: terminal.grid().rows().map(Line::from_row).collect(),
+            alternate: terminal.is_alternate_screen(),
+            history_end: terminal.primary().scrollback_end(),
         }
     }
 }
@@ -320,14 +361,14 @@ mod tests {
         assert_eq!(view.title, "hi");
         let grid = view.grid().unwrap();
         assert_eq!(
-            grid.cursor,
+            grid.state.cursor,
             CursorState {
                 line: 1,
                 col: 1,
                 visible: false
             }
         );
-        assert!(grid.modes.bracketed_paste);
+        assert!(grid.state.modes.bracketed_paste);
         assert!(grid.lines[0].wrapped);
         assert_eq!(grid.lines.len(), 2);
     }
@@ -385,8 +426,7 @@ mod tests {
             Patch::Title("x".into()),
             Patch::Grid {
                 node: NodeId::ROOT,
-                cursor: CursorState::of(&t),
-                modes: t.input_modes(),
+                state: GridState::of(&t),
                 lines: vec![(1, Line::from_row(t.grid().row(1))), (9, Line::default())],
             },
         ]));

@@ -99,7 +99,10 @@ impl Cell {
         self.flags.contains(CellFlags::WIDE_SPACER)
     }
 
-    pub(crate) fn has_grapheme(self) -> bool {
+    /// Whether the cell holds more than one codepoint: a character with
+    /// combining marks, or an emoji sequence.
+    #[must_use]
+    pub fn has_grapheme(self) -> bool {
         self.flags.contains(CellFlags::GRAPHEME)
     }
 
