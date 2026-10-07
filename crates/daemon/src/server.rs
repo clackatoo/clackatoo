@@ -377,6 +377,7 @@ impl Daemon {
             .remove(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
         self.unread.retain(|&unread| unread != id);
+        self.compactions.remove(&id);
         for token in [slot.output, slot.exit].into_iter().flatten() {
             self.sources.remove(token.0);
         }
@@ -396,6 +397,8 @@ impl Daemon {
                 self.sources.remove(token.0);
             }
         }
+        // Its history may have been thousands of rows.
+        memory::release_free_memory();
         log::info!("terminal {id} closed");
         Ok(())
     }

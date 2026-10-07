@@ -171,7 +171,8 @@ impl Scrollback {
         } else {
             self.raw_cells += row.width();
             self.raw.push_back(RawRow { row, padded });
-            if self.compaction == Compaction::Lazy && self.raw_cells > RAW_CELLS_MAX {
+            // After a resize, older rows may be narrower than this one.
+            while self.compaction == Compaction::Lazy && self.raw_cells > RAW_CELLS_MAX {
                 spare = Some(self.compact_oldest());
             }
         }
@@ -560,6 +561,20 @@ mod tests {
         history.assert_invariants();
         let expected: Vec<String> = (0..rows).map(|n| n.to_string()).collect();
         assert_eq!(texts(&history), expected);
+    }
+
+    #[test]
+    fn a_wide_row_compacts_as_many_narrow_ones_as_it_takes() {
+        const NARROW: usize = 100;
+        let narrow_rows = RAW_CELLS_MAX / NARROW;
+        let mut history = Scrollback::new(narrow_rows + 1, Compaction::Lazy);
+        for _ in 0..narrow_rows {
+            history.push(row("a", NARROW), false);
+        }
+        history.push(row("wide", usize::from(u16::MAX)), false);
+        assert!(history.raw_cells <= RAW_CELLS_MAX);
+        assert!(history.records > 1);
+        history.assert_invariants();
     }
 
     #[test]
