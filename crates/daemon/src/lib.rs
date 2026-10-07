@@ -13,6 +13,7 @@
 
 pub mod client;
 mod hosted;
+pub mod launch;
 mod memory;
 mod pty;
 mod runtime;

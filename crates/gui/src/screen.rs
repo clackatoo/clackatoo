@@ -1,8 +1,8 @@
 //! The window's copy of a terminal's view, kept current by the daemon's
 //! updates.
 
-use clackatoo_protocol::{GridState, Node, NodeId, Patch, Size, View, ViewUpdate};
-use clackatoo_term::Row;
+use clackatoo_protocol::{GridState, Node, NodeId, Patch, Size, Style, View, ViewUpdate};
+use clackatoo_term::{Row, RowBuilder};
 
 /// What a terminal shows, as rows of cells ready to draw.
 #[derive(Debug)]
@@ -22,6 +22,27 @@ impl Screen {
             size: grid.size,
             state: grid.state,
             rows: grid.lines.iter().map(|line| line.to_row(width)).collect(),
+        }
+    }
+
+    /// A screen of `size` showing `lines` of text, for the window's own
+    /// messages, such as before any terminal is shown.
+    pub(crate) fn message(lines: &[impl AsRef<str>], size: Size) -> Self {
+        let width = usize::from(size.cols());
+        let rows = (0..usize::from(size.rows()))
+            .map(|line| {
+                let mut builder = RowBuilder::new(width);
+                if let Some(text) = lines.get(line) {
+                    builder.push(text.as_ref(), &Style::DEFAULT, false);
+                }
+                builder.finish(false)
+            })
+            .collect();
+        Self {
+            title: "clackatoo".into(),
+            size,
+            state: GridState::default(),
+            rows,
         }
     }
 

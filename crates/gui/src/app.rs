@@ -1,25 +1,26 @@
 //! The window: starting up, and turning window and daemon events into
 //! frames.
 
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
 use anyhow::{Context, anyhow};
 use clackatoo_daemon::Sender;
-use clackatoo_protocol::{Event, ServerMessage, Size};
+use clackatoo_protocol::{Event, PROTOCOL_VERSION, ServerMessage, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::Key;
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::fonts::Fonts;
 use crate::input;
 use crate::pane::{Mode, Pane};
 use crate::render::{CursorStyle, PADDING, Renderer, Scene};
-use crate::session::SessionEvent;
+use crate::screen::Screen;
+use crate::session::{SessionCommand, SessionEvent};
 
 /// Lines scrolled per notch of a mouse wheel.
 const WHEEL_LINES: f64 = 3.0;
@@ -157,6 +158,10 @@ pub(crate) struct App {
     wheel_remainder: f64,
     /// Opened on the first paste.
     clipboard: Option<Clipboard>,
+    /// Answers the session thread's questions.
+    session: mpsc::Sender<SessionCommand>,
+    /// Shown instead of a terminal, before one is attached.
+    notice: Option<Notice>,
     first_frame_drawn: bool,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
@@ -167,6 +172,7 @@ impl App {
         started: Instant,
         fonts: JoinHandle<anyhow::Result<Fonts>>,
         gpu: JoinHandle<anyhow::Result<Gpu>>,
+        session: mpsc::Sender<SessionCommand>,
     ) -> Self {
         Self {
             started,
@@ -178,6 +184,8 @@ impl App {
             focused: true,
             wheel_remainder: 0.0,
             clipboard: None,
+            session,
+            notice: None,
             first_frame_drawn: false,
             result: Ok(()),
         }
@@ -244,26 +252,30 @@ impl App {
 
     /// Asks the daemon to make the terminal as big as fits the window.
     fn fit_terminal(&mut self) {
-        let (Some(frame), Some(pane)) = (&self.frame, &mut self.pane) else {
-            return;
-        };
-        let cell = frame.fonts.cell;
-        let padding = padding(&frame.window);
-        let grid = |pixels: u32, cell: u32| {
-            let cells = (pixels.saturating_sub(2 * padding) / cell).max(1);
-            u16::try_from(cells).unwrap_or(u16::MAX)
-        };
-        let Ok(size) = Size::new(
-            grid(frame.config.width, cell.width),
-            grid(frame.config.height, cell.height),
-        ) else {
-            return;
-        };
-        pane.resize(size);
+        if let Some(size) = self.grid_size()
+            && let Some(pane) = &mut self.pane
+        {
+            pane.resize(size);
+        }
     }
 
-    /// Handles a key press: the window's own keys, then the pane's.
-    fn key_pressed(&mut self, event: &winit::event::KeyEvent) {
+    /// Handles a key press: a notice's keys, the window's own, then the
+    /// pane's.
+    fn key_pressed(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
+        if let Some(Notice::OlderDaemon { .. }) = self.notice {
+            match &event.logical_key {
+                Key::Named(NamedKey::Enter) => {
+                    self.notice = Some(Notice::Replacing);
+                    // The session thread has gone if this fails, and has
+                    // said why.
+                    let _ = self.session.send(SessionCommand::ReplaceDaemon);
+                    self.request_redraw();
+                }
+                Key::Named(NamedKey::Escape) => event_loop.exit(),
+                _ => {}
+            }
+            return;
+        }
         let Some(pane) = &mut self.pane else {
             return;
         };
@@ -327,64 +339,143 @@ impl App {
     }
 
     fn draw(&mut self) {
-        let (Some(frame), Some(pane)) = (&mut self.frame, &mut self.pane) else {
+        let message = match (&self.pane, &self.notice, self.grid_size()) {
+            (None, Some(notice), Some(size)) => Some(Screen::message(&notice.lines(), size)),
+            _ => None,
+        };
+        let Self {
+            frame,
+            pane,
+            focused,
+            ..
+        } = self;
+        let Some(frame) = frame else {
             return;
         };
-        let Some(screen) = pane.screen() else {
-            return;
-        };
-        let texture = match frame.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                frame.surface.configure(&frame.gpu.device, &frame.config);
-                frame.window.request_redraw();
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                log::error!("the GPU refused a frame");
-                return;
-            }
-        };
-        let view = texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        #[allow(clippy::cast_precision_loss)]
-        let padding = padding(&frame.window) as f32;
-        let (rows, mut cursor) = pane.scene(screen.rows.len());
-        if let Some(cursor) = &mut cursor
-            && !self.focused
         {
-            cursor.style = CursorStyle::Hollow;
+            let (rows, cursor, label, highlights, normal_mode) = if let Some(screen) = &message {
+                (screen.rows.iter().collect(), None, None, Vec::new(), false)
+            } else if let Some(pane) = pane.as_ref()
+                && let Some(screen) = pane.screen()
+            {
+                let (rows, mut cursor) = pane.scene(screen.rows.len());
+                if let Some(cursor) = &mut cursor
+                    && !*focused
+                {
+                    cursor.style = CursorStyle::Hollow;
+                }
+                let highlights = pane.highlights(rows.len());
+                (
+                    rows,
+                    cursor,
+                    pane.label(),
+                    highlights,
+                    pane.mode != Mode::Insert,
+                )
+            } else {
+                return;
+            };
+            let scene = Scene {
+                rows: &rows,
+                cursor,
+                normal_mode,
+                label: label.as_deref(),
+                highlights: &highlights,
+            };
+            if !present(frame, &scene) {
+                return;
+            }
         }
-        let label = pane.label();
-        let highlights = pane.highlights(rows.len());
-        let scene = Scene {
-            rows: &rows,
-            cursor,
-            normal_mode: pane.mode != Mode::Insert,
-            label: label.as_deref(),
-            highlights: &highlights,
-        };
-        frame.renderer.render(
-            (&frame.gpu.device, &frame.gpu.queue),
-            &view,
-            [frame.config.width, frame.config.height],
-            padding,
-            &scene,
-            &mut frame.fonts,
-        );
-        frame.window.pre_present_notify();
-        frame.gpu.queue.present(texture);
-
         if !self.first_frame_drawn {
             self.first_frame_drawn = true;
             log::info!("first frame after {:.1?}", self.started.elapsed());
         }
-        pane.drawn();
+        if let Some(pane) = &mut self.pane {
+            pane.drawn();
+        }
+    }
+
+    /// How many cells fit in the window, inside the padding.
+    fn grid_size(&self) -> Option<Size> {
+        let frame = self.frame.as_ref()?;
+        let cell = frame.fonts.cell;
+        let padding = padding(&frame.window);
+        let grid = |pixels: u32, cell: u32| {
+            let cells = (pixels.saturating_sub(2 * padding) / cell).max(1);
+            u16::try_from(cells).unwrap_or(u16::MAX)
+        };
+        Size::new(
+            grid(frame.config.width, cell.width),
+            grid(frame.config.height, cell.height),
+        )
+        .ok()
+    }
+}
+
+/// Draws `scene` into the window and shows it. Returns whether a frame
+/// was shown.
+fn present(frame: &mut Frame, scene: &Scene<'_>) -> bool {
+    let texture = match frame.surface.get_current_texture() {
+        wgpu::CurrentSurfaceTexture::Success(texture)
+        | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+            return false;
+        }
+        wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+            frame.surface.configure(&frame.gpu.device, &frame.config);
+            frame.window.request_redraw();
+            return false;
+        }
+        wgpu::CurrentSurfaceTexture::Validation => {
+            log::error!("the GPU refused a frame");
+            return false;
+        }
+    };
+    let view = texture
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    #[allow(clippy::cast_precision_loss)]
+    let padding = padding(&frame.window) as f32;
+    frame.renderer.render(
+        (&frame.gpu.device, &frame.gpu.queue),
+        &view,
+        [frame.config.width, frame.config.height],
+        padding,
+        scene,
+        &mut frame.fonts,
+    );
+    frame.window.pre_present_notify();
+    frame.gpu.queue.present(texture);
+    true
+}
+
+/// A message the window shows instead of a terminal.
+#[derive(Debug)]
+enum Notice {
+    /// An older daemon is running; replace it?
+    OlderDaemon { protocol: u32 },
+    /// Replacing it.
+    Replacing,
+}
+
+impl Notice {
+    fn lines(&self) -> Vec<String> {
+        match self {
+            Self::OlderDaemon { protocol } => vec![
+                String::new(),
+                "  A clackatoo daemon from an older build is running.".into(),
+                format!(
+                    "  It speaks protocol {protocol}, and this window speaks {PROTOCOL_VERSION}."
+                ),
+                String::new(),
+                "  Replacing it closes every terminal running in it, and hangs".into(),
+                "  up their programs.".into(),
+                String::new(),
+                "    Enter  replace it".into(),
+                "    Esc    quit".into(),
+            ],
+            Self::Replacing => vec![String::new(), "  Replacing the daemon…".into()],
+        }
     }
 }
 
@@ -504,7 +595,7 @@ impl App {
                 event,
                 is_synthetic: false,
                 ..
-            } if event.state.is_pressed() => self.key_pressed(&event),
+            } if event.state.is_pressed() => self.key_pressed(event_loop, &event),
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
@@ -517,9 +608,14 @@ impl App {
     fn handle_session_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
         match event {
             SessionEvent::Attached { sender, terminal } => {
+                self.notice = None;
                 self.pane = Some(Pane::new(terminal));
                 self.sender = Some(sender);
                 self.fit_terminal();
+            }
+            SessionEvent::OlderDaemon { protocol } => {
+                self.notice = Some(Notice::OlderDaemon { protocol });
+                self.request_redraw();
             }
             SessionEvent::Message(ServerMessage::Event(Event::View { update, .. })) => {
                 let Some(pane) = &mut self.pane else {

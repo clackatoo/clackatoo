@@ -28,18 +28,18 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Context;
+use clackatoo_daemon::RuntimeDir;
 pub use fonts::FontOptions;
 use winit::event_loop::EventLoop;
 
 /// How to open the window.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// The daemon's socket.
-    pub socket: PathBuf,
+    /// Where the daemon is, or will be started.
+    pub runtime: RuntimeDir,
     /// What to draw text with.
     pub font: FontOptions,
 }
@@ -65,8 +65,8 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     let event_loop = EventLoop::with_user_event()
         .build()
         .context("could not open a window")?;
-    session::spawn(options.socket, event_loop.create_proxy());
-    let mut app = app::App::new(started, fonts, gpu);
+    let session = session::spawn(options.runtime, event_loop.create_proxy());
+    let mut app = app::App::new(started, fonts, gpu, session);
     event_loop.run_app(&mut app)?;
     app.result
 }
