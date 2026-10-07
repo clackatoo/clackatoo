@@ -17,6 +17,7 @@ mod app;
 mod boxdraw;
 mod colors;
 mod command;
+mod desk;
 mod fonts;
 mod glyphs;
 mod history;

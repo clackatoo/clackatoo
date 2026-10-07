@@ -1,17 +1,13 @@
 //! The window: starting up, and turning window and daemon events into
 //! frames.
 
-use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use clackatoo_daemon::Sender;
-use clackatoo_protocol::{
-    Axis, ClientMessage, Content, Event, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal,
-    Request, Response, ServerMessage, Side, Size, Tab, TabId, TerminalId, WorkspaceId, Workspaces,
-};
+use clackatoo_protocol::{Axis, Content, Event, PROTOCOL_VERSION, ServerMessage, Size, TerminalId};
 use clackatoo_term::Row;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -21,14 +17,12 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::GraphicsApi;
-use crate::command::{self, Command, Kind, Place};
+use crate::desk::Desk;
 use crate::fonts::Fonts;
 use crate::input;
-use crate::layout::{Cells, Direction, Divider, Placement};
-use crate::pane::{Mode, Pane};
-use crate::render::{
-    Bar, BarItem, CursorStyle, Highlight, PADDING, Picture, Renderer, Scene, SceneCursor,
-};
+use crate::layout::{Cells, Divider, Placement};
+use crate::pane::Mode;
+use crate::render::{Bar, CursorStyle, Highlight, PADDING, Picture, Renderer, Scene, SceneCursor};
 use crate::screen::Screen;
 use crate::session::{Session, SessionEvent};
 
@@ -227,57 +221,16 @@ struct Frame {
     fonts: Fonts,
 }
 
-/// What the window shows: a workspace, one of its tabs, and the pane in
-/// that tab with the focus.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Shown {
-    workspace: WorkspaceId,
-    tab: TabId,
-    pane: PaneId,
-}
-
-/// Who sent a request, and so gets its answer.
-#[derive(Clone, Copy, Debug)]
-enum Asker {
-    /// A pane, which keeps track of its own requests.
-    Pane(TerminalId),
-    /// The window itself.
-    Window(Asked),
-}
-
-/// What the window asked for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Asked {
-    /// A new pane, to switch to once made.
-    Pane,
-    /// Something typed on the command line, whose failure is shown.
-    Command,
-    /// Something done for the window's own sake, whose failure is logged.
-    Quiet,
-}
-
 /// The window's whole state.
 #[derive(Debug)]
 pub(crate) struct App {
     started: Instant,
     startup: Option<Startup>,
     frame: Option<Frame>,
-    /// The panes of the workspace shown, by the terminal each shows.
-    panes: HashMap<TerminalId, Pane>,
-    /// The daemon's workspaces, as last heard.
-    workspaces: Workspaces,
-    /// What's shown, once connected.
-    shown: Option<Shown>,
-    /// The terminals attached to on this connection.
-    attached: HashSet<TerminalId>,
-    /// Who sent each request not yet answered, oldest first: answers come
-    /// in the order requests were sent.
-    asked: VecDeque<Asker>,
-    /// The command line being typed, after `:`.
-    command: Option<String>,
-    /// A message for the focused pane's label, until the next key, such as
-    /// why a command failed.
-    message: Option<String>,
+    /// The workspaces, and what's shown of them.
+    desk: Desk,
+    /// The window's title, as last set.
+    title: String,
     /// Where messages to the daemon go, once connected.
     sender: Option<Sender>,
     /// The modifier keys held now.
@@ -294,8 +247,6 @@ pub(crate) struct App {
     notice: Option<Notice>,
     /// Whether a frame has shown a terminal, rather than a notice.
     first_frame_drawn: bool,
-    /// Every workspace has closed, so the window closes too.
-    finished: bool,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
 }
@@ -311,13 +262,8 @@ impl App {
             started,
             startup: Some(Startup { fonts, gpu }),
             frame: None,
-            panes: HashMap::new(),
-            workspaces: Workspaces::default(),
-            shown: None,
-            attached: HashSet::new(),
-            asked: VecDeque::new(),
-            command: None,
-            message: None,
+            desk: Desk::default(),
+            title: String::new(),
             sender: None,
             modifiers: input::Modifiers::default(),
             focused: true,
@@ -328,7 +274,6 @@ impl App {
             // on Wayland, a window that hasn't drawn isn't shown at all.
             notice: Some(Notice::Connecting),
             first_frame_drawn: false,
-            finished: false,
             result: Ok(()),
         }
     }
@@ -394,481 +339,72 @@ impl App {
         })
     }
 
-    // --- What's shown -----------------------------------------------------
-
-    /// The terminal the focused pane shows.
-    fn focused_terminal(&self) -> Option<TerminalId> {
-        let shown = self.shown?;
-        let (_, _, pane) = self.workspaces.find_pane(shown.pane)?;
-        let Content::Terminal(terminal) = pane.content;
-        Some(terminal)
-    }
-
-    fn focused_pane(&mut self) -> Option<&mut Pane> {
-        let terminal = self.focused_terminal()?;
-        self.panes.get_mut(&terminal)
-    }
-
-    /// The tab shown.
-    fn shown_tab(&self) -> Option<&Tab> {
-        let shown = self.shown?;
-        self.workspaces.get(shown.workspace)?.tab(shown.tab)
-    }
-
-    /// Where the shown tab's panes go.
-    fn placement(&self) -> Option<Placement> {
-        let area = Geometry::of(self.frame.as_ref()?)?.panes;
-        Some(Placement::new(&self.shown_tab()?.layout, area))
-    }
-
-    /// Makes sure what's shown still exists, after the workspaces changed:
-    /// what was shown if it's still there, or else the nearest to it.
-    fn settle(&mut self) {
-        let workspaces = &self.workspaces;
-        let Some(workspace) = self
-            .shown
-            .and_then(|shown| workspaces.get(shown.workspace))
-            .or_else(|| workspaces.active.and_then(|id| workspaces.get(id)))
-            .or_else(|| workspaces.list.first())
-        else {
-            self.shown = None;
-            return;
-        };
-        let tab = self
-            .shown
-            .and_then(|shown| workspace.tab(shown.tab))
-            .or_else(|| workspace.tab(workspace.active_tab))
-            .unwrap_or(&workspace.tabs[0]);
-        let pane = self
-            .shown
-            .map(|shown| shown.pane)
-            .filter(|&pane| tab.layout.contains(pane))
-            .unwrap_or(tab.focused);
-        self.shown = Some(Shown {
-            workspace: workspace.id,
-            tab: tab.id,
-            pane,
-        });
-    }
-
-    /// Switches to `pane`, wherever it is. The mode comes along: from a
-    /// pane in normal mode, it arrives in normal mode too. The pane left
-    /// stays as it was, in its mode and scrolled where it was.
-    fn show_pane(&mut self, pane: PaneId) {
-        let Some((workspace, tab, _)) = self.workspaces.find_pane(pane) else {
-            return;
-        };
-        let shown = Shown {
-            workspace: workspace.id,
-            tab: tab.id,
-            pane,
-        };
-        if self.shown == Some(shown) {
-            return;
-        }
-        let normal = self
-            .focused_pane()
-            .is_some_and(|left| left.mode != Mode::Insert);
-        self.shown = Some(shown);
-        if normal && let Some(arrived) = self.focused_pane() {
-            arrived.enter_normal_mode();
-        }
-        self.request(Request::Focus { pane }, Asked::Quiet);
-        self.shown_changed();
-    }
-
-    /// Follows a change in what's shown: attaches to the terminals now
-    /// shown, sizes them to their panes, and redraws.
-    fn shown_changed(&mut self) {
-        self.attach_shown();
-        self.fit_panes();
-        self.update_title();
-        self.request_redraw();
-    }
-
-    /// Attaches to every terminal in the workspace shown, and detaches from
-    /// the rest. Terminals in tabs not shown are attached too: each sends
-    /// one update, which waits undrawn and unacknowledged, so the daemon
-    /// sends no more until the tab is shown, and then shows at once.
-    fn attach_shown(&mut self) {
-        let wanted: HashSet<TerminalId> = self
-            .shown
-            .and_then(|shown| self.workspaces.get(shown.workspace))
-            .map(|workspace| workspace.terminals().into_iter().collect())
-            .unwrap_or_default();
-        self.panes.retain(|terminal, _| wanted.contains(terminal));
-        for &terminal in &wanted {
-            self.panes
-                .entry(terminal)
-                .or_insert_with(|| Pane::new(terminal));
-        }
-        if self.sender.is_none() {
-            return;
-        }
-        let gone: Vec<TerminalId> = self.attached.difference(&wanted).copied().collect();
-        for terminal in gone {
-            self.attached.remove(&terminal);
-            self.request(Request::Detach { terminal }, Asked::Quiet);
-        }
-        let new: Vec<TerminalId> = wanted.difference(&self.attached).copied().collect();
-        for terminal in new {
-            self.attached.insert(terminal);
-            self.request(Request::Attach { terminal }, Asked::Quiet);
-        }
-    }
-
-    /// Asks the daemon to size each terminal shown to its pane.
+    /// Tells the desk how many cells the panes have, sizing their
+    /// terminals to fit.
     fn fit_panes(&mut self) {
-        let Some(placement) = self.placement() else {
-            return;
-        };
-        let Some(tab) = self.shown_tab() else { return };
-        let panes = tab.layout.panes();
-        for (id, cells) in placement.panes {
-            let Some(pane) = panes.iter().find(|pane| pane.id == id) else {
-                continue;
-            };
-            let Content::Terminal(terminal) = pane.content;
-            if let (Some(pane), Ok(size)) = (
-                self.panes.get_mut(&terminal),
-                Size::new(cells.cols, cells.rows),
-            ) {
-                pane.resize(size);
-            }
-        }
+        let area = self
+            .frame
+            .as_ref()
+            .and_then(Geometry::of)
+            .map(|geometry| geometry.panes);
+        self.desk.set_area(area);
     }
 
     /// Titles the window after the focused pane, and the daemon's machine.
-    fn update_title(&self) {
+    fn update_title(&mut self) {
         let Some(frame) = &self.frame else { return };
-        let title = self
-            .focused_terminal()
-            .and_then(|terminal| self.panes.get(&terminal))
-            .and_then(Pane::screen)
-            .map(|screen| screen.title.as_str())
-            .filter(|title| !title.is_empty())
-            .unwrap_or("clackatoo");
-        match self.session.location().host() {
-            Some(host) => frame.window.set_title(&format!("{title} — {host}")),
-            None => frame.window.set_title(title),
+        let title = self.desk.title().unwrap_or("clackatoo");
+        let title = match self.session.location().host() {
+            Some(host) => format!("{title} — {host}"),
+            None => title.to_owned(),
+        };
+        if title != self.title {
+            frame.window.set_title(&title);
+            self.title = title;
         }
     }
 
-    // --- Talking to the daemon --------------------------------------------
-
-    /// Sends a request of the window's own.
-    fn request(&mut self, request: Request, asked: Asked) {
-        self.send(&ClientMessage::Request(request), Some(Asker::Window(asked)));
-    }
-
-    /// Sends `message`, noting who gets the answer if it's a request.
-    fn send(&mut self, message: &ClientMessage, asker: Option<Asker>) {
+    /// Sends what the desk has for the daemon.
+    fn send_outbox(&mut self) {
+        let messages = self.desk.take_outbox();
         let Some(sender) = &mut self.sender else {
             return;
         };
-        match sender.send(message) {
-            Ok(()) => self.asked.extend(asker),
-            Err(err) => log::warn!("sending to the daemon failed: {err}"),
-        }
-    }
-
-    /// Sends what the panes have for the daemon.
-    fn send_outbox(&mut self) {
-        let outgoing: Vec<(TerminalId, ClientMessage)> = self
-            .panes
-            .iter_mut()
-            .flat_map(|(&terminal, pane)| {
-                pane.take_outbox()
-                    .into_iter()
-                    .map(move |message| (terminal, message))
-            })
-            .collect();
-        for (terminal, message) in outgoing {
-            let asker =
-                matches!(message, ClientMessage::Request(_)).then_some(Asker::Pane(terminal));
-            self.send(&message, asker);
-        }
-    }
-
-    /// Hands the daemon's answer to whoever asked.
-    fn answered(&mut self, response: Response) {
-        match self.asked.pop_front() {
-            Some(Asker::Pane(terminal)) => {
-                let Some(pane) = self.panes.get_mut(&terminal) else {
-                    return;
-                };
-                let redraw = pane.answered(response);
-                if let Some(text) = pane.take_yanked()
-                    && let Err(err) = copy_text(&mut self.clipboard, text)
-                {
-                    log::warn!("copying failed: {err:#}");
-                }
-                if redraw {
-                    self.request_redraw();
-                }
+        for message in messages {
+            if let Err(err) = sender.send(&message) {
+                log::warn!("sending to the daemon failed: {err}");
             }
-            Some(Asker::Window(asked)) => match (asked, response) {
-                (_, Response::Error(err)) if asked == Asked::Quiet => {
-                    log::warn!("the daemon refused a request: {err}");
-                }
-                (_, Response::Error(err)) => {
-                    self.message = Some(err.to_string());
-                    self.request_redraw();
-                }
-                // The workspaces came first, so the pane is there to show.
-                (Asked::Pane, Response::PaneCreated(pane)) => self.show_pane(pane),
-                _ => {}
-            },
-            None => log::warn!("the daemon answered a request nobody sent"),
         }
     }
 
-    // --- Keys -------------------------------------------------------------
-
-    /// Handles a key press: a notice's keys, the command line's, the
-    /// window's own, then the focused pane's.
+    /// Handles a key press: a notice's keys, then the desk's.
     fn key_pressed(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
         if self.notice.is_some() {
             self.notice_key(event_loop, event);
             return;
         }
-        if self.command.is_some() {
-            self.command_key(event);
-            self.request_redraw();
-            return;
-        }
-        let had_message = self.message.take().is_some();
-        let modifiers = self.modifiers;
-        let paste = is_paste(&event.logical_key, modifiers);
-        let window_key = match self.focused_pane() {
-            Some(pane) if !paste && pane.mode != Mode::Insert && !pane.prompting() => {
-                self.window_key(event)
+        let redraw = if is_paste(&event.logical_key, self.modifiers) {
+            match paste_text(&mut self.clipboard) {
+                Ok(text) => self.desk.paste(&text),
+                Err(err) => log::warn!("pasting failed: {err:#}"),
             }
-            _ => false,
+            true
+        } else {
+            self.desk.key(&input::KeyPress {
+                key: &event.logical_key,
+                text: event.text.as_deref(),
+                location: event.location,
+                code: match event.physical_key {
+                    winit::keyboard::PhysicalKey::Code(code) => Some(code),
+                    winit::keyboard::PhysicalKey::Unidentified(_) => None,
+                },
+                modifiers: self.modifiers,
+            })
         };
-        let press = input::KeyPress {
-            key: &event.logical_key,
-            text: event.text.as_deref(),
-            location: event.location,
-            code: match event.physical_key {
-                winit::keyboard::PhysicalKey::Code(code) => Some(code),
-                winit::keyboard::PhysicalKey::Unidentified(_) => None,
-            },
-            modifiers,
-        };
-        let mut redraw = had_message;
-        match window_key {
-            true => redraw = true,
-            false if paste => {
-                match paste_text(&mut self.clipboard) {
-                    Ok(text) => {
-                        if let Some(pane) = self.focused_pane() {
-                            pane.paste(&text);
-                        }
-                    }
-                    Err(err) => log::warn!("pasting failed: {err:#}"),
-                }
-                redraw = true;
-            }
-            false => {
-                if let Some(pane) = self.focused_pane() {
-                    redraw |= pane.key(&press);
-                }
-            }
-        }
+        self.update_title();
         if redraw {
             self.request_redraw();
         }
-    }
-
-    /// Takes a key in the focused pane's normal mode if it's the window's:
-    /// `:` opens the command line, and Ctrl with `h`, `j`, `k` or `l` moves
-    /// to the pane to the left, below, above or right. Returns whether it
-    /// took it.
-    fn window_key(&mut self, event: &winit::event::KeyEvent) -> bool {
-        let character = match &event.logical_key {
-            Key::Character(text) => text.chars().next(),
-            _ => None,
-        };
-        let ctrl = self.modifiers.ctrl && !self.modifiers.alt;
-        let direction = match character {
-            Some(':') if !ctrl => {
-                self.command = Some(String::new());
-                return true;
-            }
-            Some('h') if ctrl => Direction::Left,
-            Some('j') if ctrl => Direction::Down,
-            Some('k') if ctrl => Direction::Up,
-            Some('l') if ctrl => Direction::Right,
-            _ => return false,
-        };
-        if let Some(shown) = self.shown
-            && let Some(next) = self
-                .placement()
-                .and_then(|placement| placement.neighbour(shown.pane, direction))
-        {
-            self.show_pane(next);
-        }
-        true
-    }
-
-    /// Handles a key while the command line is open.
-    fn command_key(&mut self, event: &winit::event::KeyEvent) {
-        let Some(line) = &mut self.command else {
-            return;
-        };
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => self.command = None,
-            Key::Named(NamedKey::Enter) => {
-                let line = std::mem::take(line);
-                self.command = None;
-                match command::parse(&line) {
-                    Ok(command) => self.run(command),
-                    Err(message) => self.message = Some(message),
-                }
-            }
-            Key::Named(NamedKey::Backspace) => {
-                // Deleting past the colon closes the line, as in Vim.
-                if line.pop().is_none() {
-                    self.command = None;
-                }
-            }
-            key if is_paste(key, self.modifiers) => match paste_text(&mut self.clipboard) {
-                Ok(text) => line.extend(text.chars().filter(|ch| !ch.is_control())),
-                Err(err) => log::warn!("pasting failed: {err:#}"),
-            },
-            _ if self.modifiers.ctrl => {}
-            _ => {
-                if let Some(text) = &event.text {
-                    line.extend(text.chars().filter(|ch| !ch.is_control()));
-                }
-            }
-        }
-    }
-
-    /// Carries out a command.
-    fn run(&mut self, command: Command) {
-        let Some(shown) = self.shown else { return };
-        if let Command::Open {
-            daemon: Some(daemon),
-            ..
-        } = &command
-        {
-            self.message = Some(format!(
-                "panes on {daemon} come with :connect, which isn't built yet"
-            ));
-            return;
-        }
-        let new = |size| {
-            PaneTerminal::New(NewTerminal {
-                size,
-                command: None,
-                cwd: None,
-                record_to: None,
-            })
-        };
-        match command {
-            Command::Open {
-                place: Place::Tab,
-                kind: Kind::Terminal,
-                ..
-            } => {
-                let terminal = new(self.new_pane_size(None));
-                self.request(
-                    Request::NewTab {
-                        workspace: shown.workspace,
-                        terminal,
-                    },
-                    Asked::Pane,
-                );
-            }
-            Command::Open {
-                place: Place::Beside(side),
-                kind: Kind::Terminal,
-                ..
-            } => {
-                let terminal = new(self.new_pane_size(Some(side)));
-                self.request(
-                    Request::Split {
-                        pane: shown.pane,
-                        side,
-                        terminal,
-                    },
-                    Asked::Pane,
-                );
-            }
-            Command::Workspace(name) => {
-                let existing = name.as_deref().and_then(|name| {
-                    self.workspaces
-                        .list
-                        .iter()
-                        .find(|workspace| workspace.name == name.trim())
-                });
-                if let Some(workspace) = existing {
-                    let pane = workspace
-                        .tab(workspace.active_tab)
-                        .unwrap_or(&workspace.tabs[0])
-                        .focused;
-                    self.show_pane(pane);
-                } else {
-                    let terminal = new(self.new_pane_size(None));
-                    self.request(Request::NewWorkspace { name, terminal }, Asked::Pane);
-                }
-            }
-            Command::Tab(number) => {
-                let tabs = self
-                    .workspaces
-                    .get(shown.workspace)
-                    .map_or(&[][..], |workspace| &workspace.tabs[..]);
-                match number.checked_sub(1).and_then(|index| tabs.get(index)) {
-                    Some(tab) => self.show_pane(tab.focused),
-                    None => {
-                        self.message = Some(match tabs.len() {
-                            1 => format!("there's no tab {number}; this workspace has one"),
-                            count => format!("there's no tab {number}; this workspace has {count}"),
-                        });
-                    }
-                }
-            }
-            Command::Rename(name) => self.request(
-                Request::RenameWorkspace {
-                    workspace: shown.workspace,
-                    name,
-                },
-                Asked::Command,
-            ),
-            Command::Close => {
-                self.request(Request::ClosePane { pane: shown.pane }, Asked::Command);
-            }
-        }
-    }
-
-    /// About the size a new pane will be: the size of every pane together,
-    /// for a new tab or workspace, or half the focused pane's, beside it on
-    /// `side`. The window resizes it to fit as soon as it's shown.
-    fn new_pane_size(&self, side: Option<Side>) -> Size {
-        let fallback = Size::new(80, 24).expect("80x24 is a valid size");
-        let Some(geometry) = self.frame.as_ref().and_then(Geometry::of) else {
-            return fallback;
-        };
-        let focused = self
-            .shown
-            .zip(self.placement())
-            .and_then(|(shown, placement)| placement.cells(shown.pane));
-        let cells = match (side, focused) {
-            (Some(side), Some(cells)) => match side.axis() {
-                Axis::LeftToRight => Cells {
-                    cols: (cells.cols.saturating_sub(1) / 2).max(1),
-                    ..cells
-                },
-                Axis::TopToBottom => Cells {
-                    rows: (cells.rows.saturating_sub(1) / 2).max(1),
-                    ..cells
-                },
-            },
-            _ => geometry.panes,
-        };
-        Size::new(cells.cols, cells.rows).unwrap_or(fallback)
     }
 
     /// Handles a key while a notice is shown: answering its question, or
@@ -933,10 +469,7 @@ impl App {
         let whole = lines.trunc();
         self.wheel_remainder = lines - whole;
         #[allow(clippy::cast_possible_truncation)]
-        if whole != 0.0
-            && let Some(pane) = self.focused_pane()
-            && pane.wheel(whole as i64)
-        {
+        if whole != 0.0 && self.desk.wheel(whole as i64) {
             self.request_redraw();
         }
     }
@@ -975,19 +508,15 @@ impl App {
             self.first_frame_drawn = true;
             log::info!("first frame after {:.1?}", self.started.elapsed());
         }
-        for terminal in drawn {
-            if let Some(pane) = self.panes.get_mut(&terminal) {
-                pane.drawn();
-            }
-        }
+        self.desk.drawn(&drawn);
     }
 
     /// Draws the bar and the shown tab's panes. Returns the terminals
     /// drawn, or `None` if the frame wasn't shown.
     fn draw_panes(&mut self, geometry: &Geometry) -> Option<Vec<TerminalId>> {
-        let shown = self.shown?;
-        let workspace = self.workspaces.get(shown.workspace)?;
-        let tab = workspace.tab(shown.tab)?;
+        let desk = &self.desk;
+        let shown = desk.shown()?;
+        let tab = desk.shown_tab()?;
         let placement = Placement::new(&tab.layout, geometry.panes);
         let layout_panes = tab.layout.panes();
         let mut drawings = Vec::new();
@@ -996,7 +525,7 @@ impl App {
                 continue;
             };
             let Content::Terminal(terminal) = pane.content;
-            let Some(state) = self.panes.get(&terminal) else {
+            let Some(state) = desk.pane(terminal) else {
                 continue;
             };
             if state.screen().is_none() {
@@ -1011,9 +540,9 @@ impl App {
                 cursor.style = CursorStyle::Hollow;
             }
             let label = if focused {
-                match (&self.command, &self.message) {
+                match (desk.command_line(), desk.message()) {
                     (Some(line), _) => Some(format!(":{line}▏")),
-                    (None, Some(message)) => Some(message.clone()),
+                    (None, Some(message)) => Some(message.to_owned()),
                     (None, None) => state.label(),
                 }
             } else {
@@ -1047,7 +576,7 @@ impl App {
             .iter()
             .map(|divider| geometry.divider(divider))
             .collect();
-        let (left, right) = self.bar_items(shown);
+        let (left, right) = desk.bar_items();
         let bar = Bar {
             origin: [geometry.padding; 2],
             width: geometry.grid_pixels()[0],
@@ -1064,73 +593,6 @@ impl App {
             return None;
         }
         Some(drawings.iter().map(|drawing| drawing.terminal).collect())
-    }
-
-    /// What the bar shows: every workspace, and the shown one's tabs.
-    fn bar_items(&self, shown: Shown) -> (Vec<BarItem>, Vec<BarItem>) {
-        let workspaces = self
-            .workspaces
-            .list
-            .iter()
-            .map(|workspace| BarItem {
-                text: workspace.name.clone(),
-                active: workspace.id == shown.workspace,
-            })
-            .collect();
-        let tabs = self
-            .workspaces
-            .get(shown.workspace)
-            .map(|workspace| {
-                workspace
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .map(|(index, tab)| BarItem {
-                        text: self.tab_name(index, tab),
-                        active: tab.id == shown.tab,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        (workspaces, tabs)
-    }
-
-    /// What the bar calls a tab: its number, and its focused pane's title.
-    fn tab_name(&self, index: usize, tab: &Tab) -> String {
-        /// Longer titles are cut short, to leave room for the other tabs.
-        const MAX_TITLE: usize = 24;
-        let number = index + 1;
-        let title = self
-            .workspaces
-            .find_pane(tab.focused)
-            .and_then(|(_, _, pane)| {
-                let Content::Terminal(terminal) = pane.content;
-                self.panes.get(&terminal)?.screen()
-            })
-            .map(|screen| screen.title.trim())
-            .filter(|title| !title.is_empty());
-        match title {
-            Some(title) if title.chars().count() > MAX_TITLE => {
-                let short: String = title.chars().take(MAX_TITLE - 1).collect();
-                format!("{number} {short}…")
-            }
-            Some(title) => format!("{number} {title}"),
-            None => number.to_string(),
-        }
-    }
-
-    // --- The daemon's news ------------------------------------------------
-
-    /// Takes the daemon's workspaces, as they are now.
-    fn workspaces_changed(&mut self, workspaces: Workspaces) {
-        self.workspaces = workspaces;
-        if self.workspaces.list.is_empty() {
-            // Every pane closed, as when the last shell exits.
-            self.finished = true;
-            return;
-        }
-        self.settle();
-        self.shown_changed();
     }
 }
 
@@ -1515,7 +977,7 @@ impl ApplicationHandler<SessionEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
         self.handle_session_event(event);
         self.send_outbox();
-        if self.finished {
+        if self.desk.finished() {
             event_loop.exit();
         }
     }
@@ -1578,15 +1040,9 @@ impl App {
             SessionEvent::Connected { sender, workspaces } => {
                 self.notice = None;
                 self.sender = Some(sender);
-                // A new connection: nothing is attached or asked yet, and
-                // panes kept from the last one start over, keeping their
-                // mode, scroll and history.
-                self.attached.clear();
-                self.asked.clear();
-                for pane in self.panes.values_mut() {
-                    pane.reconnected();
-                }
-                self.workspaces_changed(workspaces);
+                self.desk.connected(workspaces);
+                self.update_title();
+                self.request_redraw();
             }
             SessionEvent::OtherDaemon { protocol } => {
                 self.notice = Some(Notice::OtherDaemon { protocol });
@@ -1602,36 +1058,35 @@ impl App {
                 self.request_redraw();
             }
             SessionEvent::Message(ServerMessage::Event(Event::View { terminal, update })) => {
-                let Some(pane) = self.panes.get_mut(&terminal) else {
-                    return;
-                };
-                if !pane.view_changed(&update) {
-                    return;
-                }
-                if self.focused_terminal() == Some(terminal) {
-                    self.update_title();
-                }
-                // Tabs not shown wait, undrawn, until they are.
-                let shown = self.shown_tab().is_some_and(|tab| {
-                    tab.layout
-                        .panes()
-                        .iter()
-                        .any(|pane| pane.content == Content::Terminal(terminal))
-                });
-                if shown {
+                if self.desk.view_changed(terminal, &update) {
                     self.request_redraw();
+                }
+                if self.desk.focused_terminal() == Some(terminal) {
+                    self.update_title();
                 }
             }
             SessionEvent::Message(ServerMessage::Event(Event::Workspaces(workspaces))) => {
-                self.workspaces_changed(workspaces);
+                self.desk.workspaces_changed(workspaces);
+                self.update_title();
+                self.request_redraw();
             }
-            SessionEvent::Message(ServerMessage::Response(response)) => self.answered(response),
+            SessionEvent::Message(ServerMessage::Response(response)) => {
+                let redraw = self.desk.answered(response);
+                if let Some(text) = self.desk.take_yanked()
+                    && let Err(err) = copy_text(&mut self.clipboard, text)
+                {
+                    log::warn!("copying failed: {err:#}");
+                }
+                self.update_title();
+                if redraw {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Message(ServerMessage::Hello { .. }) => {}
             SessionEvent::Lost(reason) => {
                 log::warn!("lost the daemon: {reason}");
                 self.sender = None;
-                self.attached.clear();
-                self.asked.clear();
+                self.desk.lost();
                 self.notice = Some(Notice::Lost { reason });
                 self.request_redraw();
             }
