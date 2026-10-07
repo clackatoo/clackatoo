@@ -56,11 +56,27 @@ pub enum LaunchError {
 /// older daemon is running, which [`stop`] can end. Otherwise, if the
 /// daemon can't be started or reached.
 pub fn connect_or_start(runtime: &RuntimeDir) -> Result<Client, LaunchError> {
+    Ok(Client::over(socket_or_start(runtime)?)?)
+}
+
+/// Connects to the daemon's socket, starting the daemon in the background
+/// if none is running, without greeting it: whatever protocol it speaks.
+///
+/// # Errors
+///
+/// If the daemon can't be started or reached.
+pub fn socket_or_start(runtime: &RuntimeDir) -> Result<UnixStream, LaunchError> {
     let socket = runtime.socket_path();
-    match Client::connect(&socket) {
-        Ok(client) => return Ok(client),
-        Err(ClientError::Connect(_)) => {}
-        Err(err) => return Err(err.into()),
+    let not_running = |err: &std::io::Error| {
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        )
+    };
+    match UnixStream::connect(&socket) {
+        Ok(stream) => return Ok(stream),
+        Err(err) if not_running(&err) => {}
+        Err(err) => return Err(ClientError::Connect(err).into()),
     }
 
     runtime.create_private()?;
@@ -85,13 +101,13 @@ pub fn connect_or_start(runtime: &RuntimeDir) -> Result<Client, LaunchError> {
 
     let deadline = Instant::now() + DEADLINE;
     loop {
-        match Client::connect(&socket) {
-            Ok(client) => return Ok(client),
-            Err(ClientError::Connect(_)) if Instant::now() < deadline => {
+        match UnixStream::connect(&socket) {
+            Ok(stream) => return Ok(stream),
+            Err(err) if not_running(&err) && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(1));
             }
-            Err(ClientError::Connect(_)) => return Err(LaunchError::DidNotStart(log_path)),
-            Err(err) => return Err(err.into()),
+            Err(err) if not_running(&err) => return Err(LaunchError::DidNotStart(log_path)),
+            Err(err) => return Err(ClientError::Connect(err).into()),
         }
     }
 }

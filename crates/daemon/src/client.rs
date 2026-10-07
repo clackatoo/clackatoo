@@ -11,6 +11,8 @@ use clackatoo_protocol::{
     ServerMessage, Size, TerminalId, TerminalInfo, View,
 };
 
+use crate::remote::Ssh;
+
 /// How long the daemon may take to answer a new connection's hello.
 const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -22,6 +24,8 @@ pub struct Client {
     stream: UnixStream,
     decoder: FrameDecoder,
     events: VecDeque<Event>,
+    /// The ssh process carrying the connection, for a remote daemon.
+    ssh: Option<Ssh>,
 }
 
 impl Client {
@@ -33,10 +37,21 @@ impl Client {
     /// If nothing is listening, or the daemon speaks another version.
     pub fn connect(socket_path: &Path) -> Result<Self, ClientError> {
         let stream = UnixStream::connect(socket_path).map_err(ClientError::Connect)?;
+        Self::over(stream)
+    }
+
+    /// Greets the daemon on the other end of `stream`, and checks that it
+    /// speaks our protocol version.
+    ///
+    /// # Errors
+    ///
+    /// If the daemon doesn't answer, or speaks another version.
+    pub fn over(stream: UnixStream) -> Result<Self, ClientError> {
         let mut client = Self {
             stream,
             decoder: FrameDecoder::new(),
             events: VecDeque::new(),
+            ssh: None,
         };
         // A socket nothing serves would otherwise hang the handshake.
         client.stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
@@ -54,6 +69,13 @@ impl Client {
             }),
             other => Err(ClientError::UnexpectedMessage(Box::new(other))),
         }
+    }
+
+    /// Keeps `ssh`, which carries the connection, running as long as the
+    /// connection is open.
+    pub(crate) fn carried_by(mut self, ssh: Ssh) -> Self {
+        self.ssh = Some(ssh);
+        self
     }
 
     /// Sends `request` and waits for the daemon's answer.
@@ -106,6 +128,7 @@ impl Client {
             stream: self.stream,
             decoder: self.decoder,
             events: self.events,
+            _ssh: self.ssh,
         };
         Ok((sender, receiver))
     }
@@ -288,6 +311,8 @@ pub struct Receiver {
     decoder: FrameDecoder,
     /// Events that arrived before the split.
     events: VecDeque<Event>,
+    /// The ssh process carrying the connection, for a remote daemon.
+    _ssh: Option<Ssh>,
 }
 
 impl Receiver {

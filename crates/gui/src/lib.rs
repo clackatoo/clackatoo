@@ -8,7 +8,7 @@
 //!
 //! Starting up overlaps the slow parts: fonts load and the GPU opens on
 //! threads of their own while the event loop starts, and a third thread
-//! connects to the daemon.
+//! connects to the daemon, on this machine or, over ssh, another.
 
 #![forbid(unsafe_code)]
 
@@ -32,6 +32,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use clackatoo_daemon::RuntimeDir;
+use clackatoo_daemon::remote::Remote;
 pub use fonts::FontOptions;
 use winit::event_loop::EventLoop;
 
@@ -40,6 +41,8 @@ use winit::event_loop::EventLoop;
 pub struct Options {
     /// Where the daemon is, or will be started.
     pub runtime: RuntimeDir,
+    /// The other machine whose daemon to use instead, if any.
+    pub remote: Option<Remote>,
     /// What to draw text with.
     pub font: FontOptions,
 }
@@ -65,7 +68,11 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     let event_loop = EventLoop::with_user_event()
         .build()
         .context("could not open a window")?;
-    let session = session::spawn(options.runtime, event_loop.create_proxy());
+    let location = match options.remote {
+        Some(remote) => session::Location::Remote(remote),
+        None => session::Location::Local(options.runtime),
+    };
+    let session = session::Session::start(location, event_loop.create_proxy());
     let mut app = app::App::new(started, fonts, gpu, session);
     event_loop.run_app(&mut app)?;
     app.result

@@ -24,7 +24,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use clackatoo_daemon::Client;
+use clackatoo_daemon::{Client, remote};
 use clackatoo_protocol::{Event, NewTerminal, Size, TerminalId, View, ViewUpdate};
 
 use crate::workloads::{self, Workload};
@@ -346,6 +346,22 @@ fn latency(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
         "keypress to view update, while another floods",
         Unit::Seconds,
         &during,
+    );
+
+    // The same through `clackatoo bridge`, as `--remote` connects, without
+    // ssh or a network: what the bridge itself costs.
+    let mut bridge = Command::new(binary);
+    bridge
+        .arg("bridge")
+        .env("XDG_RUNTIME_DIR", daemon.runtime_dir());
+    let mut client = remote::through(bridge, "the bridge")?;
+    let mut view = attach(&mut client, terminal)?;
+    let bridged = view_latency(&mut client, terminal, &mut view, KEYPRESSES)?;
+    report.record(
+        "latency/view-bridge",
+        "keypress to view update, through the bridge",
+        Unit::Seconds,
+        &bridged,
     );
     Ok(())
 }

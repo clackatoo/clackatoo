@@ -139,10 +139,25 @@ impl Pane {
         self.screen.as_ref()
     }
 
+    pub(crate) fn terminal(&self) -> TerminalId {
+        self.terminal
+    }
+
+    /// Starts over on a new connection to the daemon, which sends a fresh
+    /// snapshot. Whatever was sent on the old one is forgotten, unanswered.
+    pub(crate) fn reconnected(&mut self) {
+        self.outbox.clear();
+        self.pending.clear();
+        self.history.forget_fetch();
+        self.requested_size = None;
+        self.unacknowledged = false;
+    }
+
     /// Asks the daemon to make the terminal `size`, unless it was asked
-    /// already.
+    /// already and is that size.
     pub(crate) fn resize(&mut self, size: Size) {
-        if self.requested_size == Some(size) {
+        let current = self.screen.as_ref().map(|screen| screen.size);
+        if self.requested_size == Some(size) && current == Some(size) {
             return;
         }
         self.requested_size = Some(size);
@@ -674,6 +689,36 @@ mod tests {
                 Modifiers::default(),
             );
         }
+    }
+
+    /// Whether the pane asked the daemon to resize the terminal.
+    fn asked_to_resize(pane: &mut Pane) -> bool {
+        pane.take_outbox()
+            .iter()
+            .any(|message| matches!(message, ClientMessage::Request(Request::Resize { .. })))
+    }
+
+    #[test]
+    fn the_size_is_asked_for_again_after_reconnecting_or_another_resize() {
+        let size = Size::new(12, 5).unwrap();
+        let mut pane = pane(&terminal(""));
+        pane.resize(size);
+        assert!(asked_to_resize(&mut pane));
+        pane.resize(size);
+        assert!(!asked_to_resize(&mut pane), "it was asked already");
+
+        pane.reconnected();
+        pane.resize(size);
+        assert!(asked_to_resize(&mut pane), "a new connection asks again");
+
+        // Another window made it smaller.
+        let smaller = Terminal::new(Size::new(10, 4).unwrap(), &Config::default());
+        pane.view_changed(&ViewUpdate::Snapshot(View::capture(&smaller)));
+        pane.resize(size);
+        assert!(
+            asked_to_resize(&mut pane),
+            "the terminal changed size since"
+        );
     }
 
     fn normal_mode(pane: &mut Pane) {

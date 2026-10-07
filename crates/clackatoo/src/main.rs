@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
+use clackatoo_daemon::remote::{self, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, RuntimeDir};
 use clackatoo_protocol::{NewTerminal, Size, TerminalId};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -16,7 +17,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 /// A fast, lightweight terminal workspace.
 ///
 /// With no command, opens a window on your newest terminal, or a new one,
-/// starting the daemon first if it isn't running.
+/// starting the daemon first if it isn't running. With `--remote`, the
+/// terminal is on another machine.
 #[derive(Debug, Parser)]
 #[command(version, args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -40,6 +42,35 @@ struct WindowArgs {
         env = "CLACKATOO_FONT_SIZE"
     )]
     font_size: f32,
+    #[command(flatten)]
+    remote: RemoteArgs,
+}
+
+#[derive(Debug, Args)]
+struct RemoteArgs {
+    /// Use the daemon on another machine, reached with ssh, starting it
+    /// there if it isn't running. HOST is anything ssh takes: `host`,
+    /// `user@host`, or a name from your ssh config.
+    #[arg(long, value_name = "HOST")]
+    remote: Option<String>,
+    /// The shell command that runs clackatoo on the remote machine, if it
+    /// isn't on the PATH there.
+    #[arg(
+        long,
+        value_name = "COMMAND",
+        default_value = "clackatoo",
+        env = "CLACKATOO_REMOTE_COMMAND"
+    )]
+    remote_command: String,
+}
+
+impl RemoteArgs {
+    fn remote(&self) -> Option<Remote> {
+        self.remote.as_ref().map(|host| Remote {
+            host: host.clone(),
+            command: self.remote_command.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -65,6 +96,18 @@ enum Command {
     /// Stop the daemon, closing every terminal and hanging up their
     /// programs. Works on a daemon from any version of clackatoo.
     Stop,
+    /// Relay between standard input and output and the daemon, starting it
+    /// if it isn't running. `--remote` runs this on the remote machine,
+    /// through ssh.
+    Bridge(BridgeArgs),
+}
+
+#[derive(Debug, Args)]
+struct BridgeArgs {
+    /// Stop the daemon that's running first, closing its terminals, as
+    /// when it's from another version of clackatoo.
+    #[arg(long)]
+    replace: bool,
 }
 
 #[derive(Debug, Args)]
@@ -97,9 +140,10 @@ impl From<Compaction> for clackatoo_term::Compaction {
 #[derive(Debug, Args)]
 struct Connection {
     /// The daemon's socket. Defaults to the one in your runtime directory.
-    /// Point it at an SSH-forwarded socket to drive a remote daemon.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", conflicts_with = "remote")]
     socket: Option<PathBuf>,
+    #[command(flatten)]
+    remote: RemoteArgs,
 }
 
 #[derive(Debug, Args)]
@@ -207,6 +251,10 @@ fn run(command: Command) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::Bridge(args) => {
+            remote::bridge(&RuntimeDir::for_current_user(), args.replace)?;
+            Ok(())
+        }
     }
 }
 
@@ -214,6 +262,7 @@ fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     clackatoo_gui::run(clackatoo_gui::Options {
         runtime: RuntimeDir::for_current_user(),
+        remote: args.remote.remote(),
         font: clackatoo_gui::FontOptions {
             family: args.font.clone(),
             size: args.font_size,
@@ -234,6 +283,20 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
 }
 
 fn connect(connection: &Connection) -> anyhow::Result<Client> {
+    if let Some(remote) = connection.remote.remote() {
+        return match remote::connect(&remote, false) {
+            Ok(client) => Ok(client),
+            Err(RemoteError::Client(ClientError::VersionMismatch { daemon, ours })) => {
+                anyhow::bail!(
+                    "the daemon on {} is from another version of clackatoo (protocol \
+                     {daemon}, this is {ours}); `clackatoo stop` there stops it, closing its \
+                     terminals",
+                    remote.host
+                )
+            }
+            Err(err) => Err(err.into()),
+        };
+    }
     let socket = connection
         .socket
         .clone()

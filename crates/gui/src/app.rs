@@ -1,7 +1,7 @@
 //! The window: starting up, and turning window and daemon events into
 //! frames.
 
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -20,7 +20,7 @@ use crate::input;
 use crate::pane::{Mode, Pane};
 use crate::render::{CursorStyle, PADDING, Renderer, Scene};
 use crate::screen::Screen;
-use crate::session::{SessionCommand, SessionEvent};
+use crate::session::{Session, SessionEvent};
 
 /// Lines scrolled per notch of a mouse wheel.
 const WHEEL_LINES: f64 = 3.0;
@@ -170,9 +170,9 @@ pub(crate) struct App {
     wheel_remainder: f64,
     /// Opened on the first paste.
     clipboard: Option<Clipboard>,
-    /// Answers the session thread's questions.
-    session: mpsc::Sender<SessionCommand>,
-    /// Shown instead of a terminal, before one is attached.
+    /// The connection to the daemon.
+    session: Session,
+    /// Shown instead of the terminal, while there's no connection to it.
     notice: Option<Notice>,
     first_frame_drawn: bool,
     /// Why the window closed, if something went wrong.
@@ -184,7 +184,7 @@ impl App {
         started: Instant,
         fonts: JoinHandle<anyhow::Result<Fonts>>,
         gpu: JoinHandle<anyhow::Result<Gpu>>,
-        session: mpsc::Sender<SessionCommand>,
+        session: Session,
     ) -> Self {
         Self {
             started,
@@ -274,16 +274,21 @@ impl App {
     /// Handles a key press: a notice's keys, the window's own, then the
     /// pane's.
     fn key_pressed(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
-        if let Some(Notice::OlderDaemon { .. }) = self.notice {
+        if let Some(notice) = &self.notice {
+            let answerable = matches!(notice, Notice::OtherDaemon { .. } | Notice::Lost { .. });
             match &event.logical_key {
-                Key::Named(NamedKey::Enter) => {
-                    self.notice = Some(Notice::Replacing);
-                    // The session thread has gone if this fails, and has
-                    // said why.
-                    let _ = self.session.send(SessionCommand::ReplaceDaemon);
+                Key::Named(NamedKey::Enter) if answerable => {
+                    if let Notice::OtherDaemon { .. } = notice {
+                        self.notice = Some(Notice::Replacing);
+                        self.session.replace_daemon();
+                    } else {
+                        self.notice = Some(Notice::Connecting);
+                        self.session
+                            .reconnect(self.pane.as_ref().map(Pane::terminal));
+                    }
                     self.request_redraw();
                 }
-                Key::Named(NamedKey::Escape) => event_loop.exit(),
+                Key::Named(NamedKey::Escape) if answerable => event_loop.exit(),
                 _ => {}
             }
             return;
@@ -315,7 +320,7 @@ impl App {
     }
 
     fn wheel(&mut self, delta: MouseScrollDelta) {
-        let (Some(frame), Some(pane)) = (&self.frame, &mut self.pane) else {
+        let (Some(frame), Some(pane), None) = (&self.frame, &mut self.pane, &self.notice) else {
             return;
         };
         let lines = match delta {
@@ -352,8 +357,11 @@ impl App {
 
     fn draw(&mut self) {
         let started = Instant::now();
-        let message = match (&self.pane, &self.notice, self.grid_size()) {
-            (None, Some(notice), Some(size)) => Some(Screen::message(&notice.lines(), size)),
+        let message = match (&self.notice, self.grid_size()) {
+            (Some(notice), Some(size)) => Some(Screen::message(
+                &notice.lines(self.session.location().host(), usize::from(size.cols())),
+                size,
+            )),
             _ => None,
         };
         let Self {
@@ -464,34 +472,77 @@ fn present(frame: &mut Frame, scene: &Scene<'_>) -> bool {
     true
 }
 
-/// A message the window shows instead of a terminal.
+/// A message the window shows instead of the terminal.
 #[derive(Debug)]
 enum Notice {
-    /// An older daemon is running; replace it?
-    OlderDaemon { protocol: u32 },
+    /// A daemon from another build is running; replace it?
+    OtherDaemon { protocol: u32 },
     /// Replacing it.
     Replacing,
+    /// The connection was lost, or never made; try again?
+    Lost { reason: String },
+    /// Trying again.
+    Connecting,
 }
 
 impl Notice {
-    fn lines(&self) -> Vec<String> {
-        match self {
-            Self::OlderDaemon { protocol } => vec![
-                String::new(),
-                "  A clackatoo daemon from an older build is running.".into(),
+    /// The notice's text, for the daemon on `host`, or this machine's, in
+    /// lines of at most `width` characters.
+    fn lines(&self, host: Option<&str>, width: usize) -> Vec<String> {
+        let on_host = host.map(|host| format!(" on {host}")).unwrap_or_default();
+        let paragraphs = match self {
+            Self::OtherDaemon { protocol } => vec![
                 format!(
-                    "  It speaks protocol {protocol}, and this window speaks {PROTOCOL_VERSION}."
+                    "The clackatoo daemon{on_host} is from another build. It speaks \
+                     protocol {protocol}, and this window speaks {PROTOCOL_VERSION}."
                 ),
-                String::new(),
-                "  Replacing it closes every terminal running in it, and hangs".into(),
-                "  up their programs.".into(),
-                String::new(),
-                "    Enter  replace it".into(),
-                "    Esc    quit".into(),
+                "Replacing it closes every terminal running in it, and hangs up their \
+                 programs."
+                    .into(),
+                "  Enter  replace it\n  Esc    quit".into(),
             ],
-            Self::Replacing => vec![String::new(), "  Replacing the daemon…".into()],
+            Self::Replacing => vec![format!("Replacing the daemon{on_host}…")],
+            Self::Lost { reason } => vec![
+                format!("Lost the connection to the daemon{on_host}."),
+                reason.clone(),
+                "  Enter  reconnect\n  Esc    quit".into(),
+            ],
+            Self::Connecting => vec![format!("Connecting to the daemon{on_host}…")],
+        };
+        let mut lines = vec![String::new()];
+        for paragraph in paragraphs {
+            for line in paragraph.lines() {
+                lines.extend(wrap(line, width.saturating_sub(4).max(20), "  "));
+            }
+            lines.push(String::new());
         }
+        lines
     }
+}
+
+/// `text` in lines of at most `width` characters, each after `indent`. Text
+/// that fits is kept as it is; text that doesn't is broken between words.
+fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
+    if text.chars().count() <= width {
+        return vec![format!("{indent}{text}")];
+    }
+    let mut lines = Vec::new();
+    let mut line = indent.to_owned();
+    let mut empty = true;
+    for word in text.split_whitespace() {
+        let length = line.chars().count() - indent.len();
+        if !empty && length + 1 + word.chars().count() > width {
+            lines.push(std::mem::replace(&mut line, indent.to_owned()));
+            empty = true;
+        }
+        if !empty {
+            line.push(' ');
+        }
+        line.push_str(word);
+        empty = false;
+    }
+    lines.push(line);
+    lines
 }
 
 /// The new window's title, size and app ID. Desktops find the window's
@@ -567,8 +618,8 @@ impl ApplicationHandler<SessionEvent> for App {
         self.send_outbox();
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
-        self.handle_session_event(event_loop, event);
+    fn user_event(&mut self, _: &ActiveEventLoop, event: SessionEvent) {
+        self.handle_session_event(event);
         self.send_outbox();
     }
 }
@@ -614,22 +665,32 @@ impl App {
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                // Another window on the terminal may have resized it: the
+                // focused one decides.
+                if focused {
+                    self.fit_terminal();
+                }
                 self.request_redraw();
             }
             _ => {}
         }
     }
 
-    fn handle_session_event(&mut self, event_loop: &ActiveEventLoop, event: SessionEvent) {
+    fn handle_session_event(&mut self, event: SessionEvent) {
         match event {
             SessionEvent::Attached { sender, terminal } => {
                 self.notice = None;
-                self.pane = Some(Pane::new(terminal));
+                match &mut self.pane {
+                    // Reconnected: keep the mode, scroll and history.
+                    Some(pane) if pane.terminal() == terminal => pane.reconnected(),
+                    _ => self.pane = Some(Pane::new(terminal)),
+                }
                 self.sender = Some(sender);
                 self.fit_terminal();
+                self.request_redraw();
             }
-            SessionEvent::OlderDaemon { protocol } => {
-                self.notice = Some(Notice::OlderDaemon { protocol });
+            SessionEvent::OtherDaemon { protocol } => {
+                self.notice = Some(Notice::OtherDaemon { protocol });
                 self.request_redraw();
             }
             SessionEvent::Message(ServerMessage::Event(Event::View { update, .. })) => {
@@ -645,7 +706,10 @@ impl App {
                     } else {
                         &screen.title
                     };
-                    frame.window.set_title(title);
+                    match self.session.location().host() {
+                        Some(host) => frame.window.set_title(&format!("{title} — {host}")),
+                        None => frame.window.set_title(title),
+                    }
                     frame.window.request_redraw();
                 }
             }
@@ -665,8 +729,28 @@ impl App {
             }
             SessionEvent::Message(ServerMessage::Hello { .. }) => {}
             SessionEvent::Lost(reason) => {
-                self.fail(event_loop, anyhow!("lost the daemon: {reason}"));
+                log::warn!("lost the daemon: {reason}");
+                self.sender = None;
+                self.notice = Some(Notice::Lost { reason });
+                self.request_redraw();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notices_wrap_between_words_and_keep_lines_that_fit() {
+        assert_eq!(
+            wrap("one two three four", 9, "  "),
+            ["  one two", "  three", "  four"]
+        );
+        assert_eq!(wrap("  Enter  go", 20, "  "), ["    Enter  go"]);
+        assert_eq!(wrap("", 9, "  "), ["  "]);
+        // A word longer than a line gets a line of its own.
+        assert_eq!(wrap("a abcdefghijk b", 5, ""), ["a", "abcdefghijk", "b"]);
     }
 }

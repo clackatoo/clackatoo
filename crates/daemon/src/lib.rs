@@ -3,7 +3,8 @@
 //! The daemon owns every terminal: the PTYs, the programs running on them,
 //! and the grids their output builds. Windows, the CLI, remote viewers and
 //! agents are all clients, speaking [`clackatoo_protocol`] over a Unix
-//! socket. Terminals outlive any client, so closing a window closes nothing.
+//! socket, or over SSH to a daemon on another machine (see [`remote`]).
+//! Terminals outlive any client, so closing a window closes nothing.
 
 // The only unsafe code is the pre-exec hook in `pty::spawn` and the
 // declaration of glibc's `malloc_trim` in `memory`, which opt out of this
@@ -16,6 +17,7 @@ mod hosted;
 pub mod launch;
 mod memory;
 mod pty;
+pub mod remote;
 mod runtime;
 mod server;
 

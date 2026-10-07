@@ -39,6 +39,11 @@ impl History {
         *self = Self::default();
     }
 
+    /// Forgets the fetch on its way, which will never arrive.
+    pub(crate) fn forget_fetch(&mut self) {
+        self.pending = None;
+    }
+
     /// The fetch to send, if any of `shown` (lines before `end`, the newest
     /// number plus one) is missing and not already on its way: the shown
     /// lines plus a margin either side.
