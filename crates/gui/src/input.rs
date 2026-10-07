@@ -40,6 +40,26 @@ pub(crate) struct KeyPress<'a> {
     pub(crate) modifiers: Modifiers,
 }
 
+/// Whether `key` is only a modifier, such as Shift or Ctrl, which programs
+/// are never sent on its own.
+pub(crate) fn is_modifier(key: &Key) -> bool {
+    matches!(
+        key,
+        Key::Named(
+            NamedKey::Shift
+                | NamedKey::Control
+                | NamedKey::Alt
+                | NamedKey::AltGraph
+                | NamedKey::Super
+                | NamedKey::Meta
+                | NamedKey::Hyper
+                | NamedKey::CapsLock
+                | NamedKey::NumLock
+                | NamedKey::Fn
+        )
+    )
+}
+
 /// Appends what `press` sends to the program to `out`. Keys that send
 /// nothing, such as a modifier pressed alone, append nothing.
 pub(crate) fn encode(press: &KeyPress<'_>, modes: InputModes, out: &mut Vec<u8>) {

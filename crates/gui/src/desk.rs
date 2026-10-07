@@ -23,7 +23,7 @@ use winit::keyboard::{Key, NamedKey};
 
 use crate::chrome::Status;
 use crate::command::{self, Command, Kind, Place};
-use crate::input::{KeyPress, Modifiers};
+use crate::input::{self, KeyPress, Modifiers};
 use crate::layout::{Area, Direction, Divider, Placement};
 use crate::pane::{Copy, Mode, Pane, PaneMouse};
 
@@ -521,9 +521,7 @@ impl Desk {
     /// their mode, scroll and history.
     pub(crate) fn connected(&mut self, workspaces: Workspaces) {
         self.connected = true;
-        self.attached.clear();
-        self.asked.clear();
-        self.outbox.clear();
+        self.forget_asked();
         for pane in self.panes.values_mut() {
             pane.reconnected();
         }
@@ -534,9 +532,21 @@ impl Desk {
     /// will be answered.
     pub(crate) fn lost(&mut self) {
         self.connected = false;
+        self.forget_asked();
+    }
+
+    /// Forgets everything sent on the last connection, which will never be
+    /// answered, and what was waiting on it: a split's new shares, and
+    /// drags under way.
+    fn forget_asked(&mut self) {
         self.attached.clear();
         self.asked.clear();
         self.outbox.clear();
+        self.resizes_pending = 0;
+        self.split_shares = None;
+        self.dragging_divider = None;
+        self.dragging = None;
+        self.mouse_cell = None;
     }
 
     /// Takes the daemon's workspaces, as they are now.
@@ -662,6 +672,13 @@ impl Desk {
     /// Handles a key press: the command line's, the window's own, then the
     /// focused pane's. Returns whether the window must be redrawn.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> bool {
+        // The keyboard reports Shift, Ctrl and the like as keys of their
+        // own, on the way to a chord such as Ctrl+Shift+C. They mustn't
+        // count as the next key: that would drop a selection or a message,
+        // or the first key of a two-key command, before the chord arrives.
+        if input::is_modifier(press.key) {
+            return false;
+        }
         if self.input.is_some() {
             self.input_key(press);
             return true;
@@ -693,7 +710,11 @@ impl Desk {
     /// Scrolls the pane at `point` `lines` up, or down if negative, as the
     /// mouse wheel does. Returns whether the window must be redrawn.
     pub(crate) fn wheel(&mut self, point: [f32; 2], lines: i64, modifiers: Modifiers) -> bool {
-        let Some((terminal, cell)) = self.cell_at(point, None) else {
+        // Away from the panes, as over the bars, the focused pane scrolls.
+        let Some((terminal, cell)) = self
+            .cell_at(point, None)
+            .or_else(|| Some((self.focused_terminal()?, [0, 0])))
+        else {
             return false;
         };
         self.panes
@@ -1653,5 +1674,55 @@ mod tests {
         assert!(desk.grab_divider([405.0, 100.0], 2));
         desk.drop_divider();
         assert_eq!(resizes(&mut desk), [vec![1, 1]]);
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_a_mouse_selection_typed_a_key_at_a_time() {
+        let mut desk = desk(two_side_by_side());
+        let mut screen = Terminal::new(Size::new(40, 24).unwrap(), &Config::default());
+        screen.advance(b"hello world");
+        desk.view_changed(TerminalId(1), &ViewUpdate::Snapshot(View::capture(&screen)));
+        answer_all(&mut desk);
+        let left = MouseButton::Left;
+        // Cells start 5 pixels in, and are 10 × 20: "hello" is 7 to 47.
+        desk.mouse(
+            [7.0, 10.0],
+            MouseAction::Press(left),
+            1,
+            Modifiers::default(),
+        );
+        desk.mouse(
+            [47.0, 10.0],
+            MouseAction::Motion(None),
+            1,
+            Modifiers::default(),
+        );
+        desk.mouse(
+            [47.0, 10.0],
+            MouseAction::Release(left),
+            1,
+            Modifiers::default(),
+        );
+        // As a keyboard sends it: Shift, then Ctrl, then C, each a key.
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        let both = Modifiers {
+            ctrl: true,
+            ..shift
+        };
+        press(&mut desk, Key::Named(NamedKey::Shift), None, shift);
+        press(&mut desk, Key::Named(NamedKey::Control), None, both);
+        press(&mut desk, Key::Character("C".into()), None, both);
+        let copies: Vec<_> = answer_all(&mut desk)
+            .into_iter()
+            .filter(|request| matches!(request, Request::Text { .. }))
+            .collect();
+        assert_eq!(
+            copies.len(),
+            2,
+            "to the primary selection, then the clipboard"
+        );
     }
 }

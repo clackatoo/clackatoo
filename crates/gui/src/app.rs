@@ -281,9 +281,9 @@ pub(crate) struct App {
     hover: Hit,
     /// The mouse cursor's shape, as last set.
     cursor_icon: CursorIcon,
-    /// The last click, what it was on, and how many came quickly one after
-    /// another there, to spot double and triple clicks.
-    last_click: Option<(Instant, Hit, u8)>,
+    /// The last click, what it was on and where, and how many came quickly
+    /// one after another there, to spot double and triple clicks.
+    last_click: Option<(Instant, Hit, [f32; 2], u8)>,
     /// The menu open, if any.
     menu: Option<Menu>,
     /// The window's title, as last set.
@@ -606,17 +606,26 @@ impl App {
             return;
         };
         let window = Arc::clone(&frame.window);
+        #[allow(clippy::cast_precision_loss)]
+        let cell = [
+            frame.fonts.cell.width as f32,
+            frame.fonts.cell.height as f32,
+        ];
         let hit = self.hit(point);
-        // Twice on the same thing, soon enough, is a double click, and
-        // three times a triple.
+        // Twice on the same thing, soon enough and within a cell of each
+        // other, is a double click, and three times a triple.
         let now = Instant::now();
+        let near =
+            |[x, y]: [f32; 2]| (x - point[0]).abs() < cell[0] && (y - point[1]).abs() < cell[1];
         let clicks = match self.last_click {
-            Some((at, last, clicks)) if last == hit && now.duration_since(at) < DOUBLE_CLICK => {
+            Some((at, last, where_, clicks))
+                if last == hit && near(where_) && now.duration_since(at) < DOUBLE_CLICK =>
+            {
                 clicks % 3 + 1
             }
             _ => 1,
         };
-        self.last_click = Some((now, hit, clicks));
+        self.last_click = Some((now, hit, point, clicks));
         let double = clicks == 2;
         // With a menu open, a click picks one of its items or, anywhere
         // else, just closes it.
