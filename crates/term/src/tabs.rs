@@ -16,6 +16,15 @@ impl TabStops {
         }
     }
 
+    /// Fits the stops to a new width: existing columns keep theirs, and new
+    /// ones get the default stops.
+    pub(crate) fn resize(&mut self, width: usize) {
+        let old = self.stops.len();
+        self.stops.truncate(width);
+        self.stops
+            .extend((old..width).map(|col| col % Self::INTERVAL == 0));
+    }
+
     /// The first stop after `col`, or `None` if there is none before the edge.
     pub(crate) fn next(&self, col: usize) -> Option<usize> {
         (col + 1..self.stops.len()).find(|&c| self.stops[c])

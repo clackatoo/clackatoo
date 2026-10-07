@@ -122,6 +122,114 @@ impl Grid {
         }
     }
 
+    /// Resizes the screen, rewrapping its lines to the new width, and returns
+    /// where the cell at `cursor` ended up. Rows that no longer fit above
+    /// the cursor go into scrollback; blank rows below it go first.
+    ///
+    /// A line that started in scrollback keeps that part there; its rest is
+    /// rewrapped from the top of the screen.
+    pub(crate) fn reflow(
+        &mut self,
+        width: usize,
+        height: usize,
+        cursor: (usize, usize),
+    ) -> (usize, usize) {
+        let old: Vec<Row> = self.rows.drain(..).collect();
+        let mut rows = Vec::with_capacity(old.len());
+        let mut moved = (0, 0);
+        let mut out = Row::new(width);
+        let mut out_col = 0;
+        for (line, row) in old.iter().enumerate() {
+            let starts_line = line == 0 || !old[line - 1].is_wrapped();
+            if starts_line && line > 0 {
+                rows.push(std::mem::replace(&mut out, Row::new(width)));
+                out_col = 0;
+            }
+            let mut end = if row.is_wrapped() {
+                row.width() - usize::from(is_padded(row, old.get(line + 1)))
+            } else {
+                content_end(row)
+            };
+            // Keep the cursor's cell, even in the blank tail of its line.
+            if line == cursor.0 {
+                end = end.max(cursor.1 + 1).min(row.width());
+            }
+            for col in 0..end {
+                let cell = row.cells()[col];
+                if cell.is_wide_spacer() {
+                    continue;
+                }
+                let cells = if cell.is_wide() { 2 } else { 1 };
+                if cells > width {
+                    continue;
+                }
+                if out_col + cells > width {
+                    out.set_wrapped(true);
+                    rows.push(std::mem::replace(&mut out, Row::new(width)));
+                    out_col = 0;
+                }
+                if line == cursor.0 && (col == cursor.1 || col + 1 == cursor.1 && cells == 2) {
+                    moved = (rows.len(), (out_col + cursor.1 - col).min(width - 1));
+                }
+                copy_cell(&mut out, out_col, row, col);
+                out_col += cells;
+            }
+        }
+        rows.push(out);
+
+        // Fit the rows to the new height. Blank rows below the cursor are
+        // just space, so they go before anything scrolls away. Rows above
+        // the cursor go into scrollback; if the cursor is too high for that,
+        // rows below it are lost instead.
+        while rows.len() > height
+            && rows.len() > moved.0 + 1
+            && content_end(&rows[rows.len() - 1]) == 0
+        {
+            rows.pop();
+        }
+        let overflow = rows.len().saturating_sub(height).min(moved.0);
+        for index in 0..overflow {
+            self.scrollback
+                .push(&rows[index], is_padded(&rows[index], rows.get(index + 1)));
+        }
+        rows.drain(..overflow);
+        rows.truncate(height);
+        rows.resize_with(height, || Row::new(width));
+        self.rows = rows.into();
+        self.width = width;
+        self.height = height;
+        (moved.0 - overflow, moved.1)
+    }
+
+    /// Resizes the screen without rewrapping: rows are cut off or extended
+    /// on the right, and lost or added at the bottom. Full-screen programs,
+    /// which use the alternate screen, redraw after a resize anyway.
+    pub(crate) fn crop(&mut self, width: usize, height: usize) {
+        let old: Vec<Row> = self.rows.drain(..).collect();
+        let mut rows: Vec<Row> = old
+            .iter()
+            .take(height)
+            .map(|row| {
+                let mut cropped = Row::new(width);
+                for col in 0..row.width().min(width) {
+                    let cell = row.cells()[col];
+                    // Half a wide character can't be kept.
+                    if cell.is_wide_spacer() || (cell.is_wide() && col + 1 >= width) {
+                        continue;
+                    }
+                    if cell != crate::Cell::BLANK {
+                        copy_cell(&mut cropped, col, row, col);
+                    }
+                }
+                cropped
+            })
+            .collect();
+        rows.resize_with(height, || Row::new(width));
+        self.rows = rows.into();
+        self.width = width;
+        self.height = height;
+    }
+
     /// Blanks every screen row in `blank`.
     pub(crate) fn clear(&mut self, blank: &Style) {
         for row in &mut self.rows {
@@ -165,6 +273,37 @@ impl Grid {
             high -= 1;
             self.rows.swap(low, high);
             low += 1;
+        }
+    }
+}
+
+/// Whether `row` wrapped early because a wide character didn't fit in its
+/// last column, leaving padding there rather than text.
+fn is_padded(row: &Row, next: Option<&Row>) -> bool {
+    row.is_wrapped()
+        && row
+            .cells()
+            .last()
+            .is_some_and(|&cell| cell == crate::Cell::BLANK)
+        && next.is_some_and(|next| next.cells().first().is_some_and(|cell| cell.is_wide()))
+}
+
+/// Where a row's content ends: everything after is blank.
+fn content_end(row: &Row) -> usize {
+    row.cells()[..row.written()]
+        .iter()
+        .rposition(|&cell| cell != crate::Cell::BLANK)
+        .map_or(0, |last| last + 1)
+}
+
+/// Copies the cell at `src_col` of `src`, with its style and grapheme, to
+/// `dst_col` of `dst`.
+fn copy_cell(dst: &mut Row, dst_col: usize, src: &Row, src_col: usize) {
+    let cell = src.cells()[src_col];
+    dst.write(dst_col, cell.ch(), cell.is_wide(), src.style(cell));
+    if let Some(extra) = src.grapheme(src_col) {
+        for &ch in extra {
+            dst.append_to_grapheme(dst_col, ch);
         }
     }
 }

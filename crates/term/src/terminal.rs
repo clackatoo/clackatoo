@@ -83,6 +83,14 @@ impl Terminal {
         self.emulator.size
     }
 
+    /// Changes the terminal's size. Lines on the primary screen are rewrapped
+    /// to the new width, and the cursor stays on the same character; the
+    /// alternate screen is cropped or extended, since the programs that use
+    /// it redraw after a resize.
+    pub fn resize(&mut self, size: Size) {
+        self.emulator.resize(size);
+    }
+
     /// The screen being shown: the primary screen, or the alternate screen
     /// that full-screen programs switch to.
     #[must_use]
@@ -137,8 +145,8 @@ impl Terminal {
         let emulator = &self.emulator;
         for grid in std::iter::once(&emulator.primary).chain(&emulator.alternate) {
             assert_eq!(grid.rows().len(), emulator.height());
+            // History keeps the width each row had when it scrolled off.
             for row in grid.scrollback() {
-                assert_eq!(row.width(), emulator.width());
                 row.assert_invariants();
             }
             for row in grid.rows() {
@@ -1040,6 +1048,42 @@ impl Emulator {
         let replies = std::mem::take(&mut self.replies);
         *self = Self::new(self.size, &self.config);
         self.replies = replies;
+    }
+
+    fn resize(&mut self, size: Size) {
+        if size == self.size {
+            return;
+        }
+        let (width, height) = (usize::from(size.cols()), usize::from(size.rows()));
+        let on_primary = self.screen == Screen::Primary;
+        // The primary screen's cursor is the live one, or the one saved when
+        // a program switched to the alternate screen.
+        let primary_cursor = if on_primary {
+            &mut self.cursor
+        } else {
+            &mut self.saved_primary.cursor
+        };
+        let (line, col) =
+            self.primary
+                .reflow(width, height, (primary_cursor.line, primary_cursor.col));
+        primary_cursor.line = line;
+        primary_cursor.col = col;
+        if let Some(alternate) = &mut self.alternate {
+            alternate.crop(width, height);
+        }
+
+        self.size = size;
+        self.scroll_region = 0..height;
+        self.tabs.resize(width);
+        self.cursor.pending_wrap = false;
+        for cursor in [
+            &mut self.cursor,
+            &mut self.saved_primary.cursor,
+            &mut self.saved_alternate.cursor,
+        ] {
+            cursor.line = cursor.line.min(height - 1);
+            cursor.col = cursor.col.min(width - 1);
+        }
     }
 
     pub(crate) fn reply(&mut self, bytes: &[u8]) {

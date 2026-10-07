@@ -440,6 +440,126 @@ mod queries {
     }
 }
 
+mod resizing {
+    use super::*;
+
+    fn size(cols: u16, rows: u16) -> Size {
+        Size::new(cols, rows).unwrap()
+    }
+
+    fn resized(mut t: Terminal, cols: u16, rows: u16) -> Terminal {
+        t.resize(size(cols, rows));
+        t.assert_invariants();
+        t
+    }
+
+    #[test]
+    fn narrowing_rewraps_long_lines_and_widening_joins_them_again() {
+        let t = after(10, 4, "abcdefghij\r\nxy");
+        let t = resized(t, 5, 4);
+        assert_eq!(t.screen_text(), "abcde\nfghij\nxy");
+        assert!(t.grid().row(0).is_wrapped());
+
+        let t = resized(t, 20, 4);
+        assert_eq!(t.screen_text(), "abcdefghij\nxy");
+        assert!(!t.grid().row(0).is_wrapped());
+    }
+
+    #[test]
+    fn the_cursor_stays_on_its_character() {
+        // The cursor sits after "hello" on a wrapped line.
+        let t = after(4, 4, "$ hello");
+        assert_eq!(cursor(&t), (1, 3));
+        let t = resized(t, 10, 4);
+        assert_eq!(t.screen_text(), "$ hello");
+        assert_eq!(cursor(&t), (0, 7));
+        let t = resized(t, 3, 4);
+        assert_eq!(cursor(&t), (2, 1));
+    }
+
+    #[test]
+    fn the_cursor_keeps_its_place_in_blank_space() {
+        let t = after(10, 3, "ab\x1b[1;7H");
+        let t = resized(t, 20, 3);
+        assert_eq!(cursor(&t), (0, 6));
+    }
+
+    #[test]
+    fn shrinking_drops_blank_rows_below_the_cursor_first() {
+        let t = after(10, 6, "one\r\ntwo");
+        let t = resized(t, 10, 2);
+        assert_eq!(t.screen_text(), "one\ntwo");
+        assert!(scrollback_text(&t).is_empty());
+    }
+
+    #[test]
+    fn rows_above_the_cursor_go_into_scrollback() {
+        let t = after(10, 4, "1\r\n2\r\n3\r\n4");
+        let t = resized(t, 10, 2);
+        assert_eq!(t.screen_text(), "3\n4");
+        assert_eq!(scrollback_text(&t), ["1", "2"]);
+        assert_eq!(cursor(&t), (1, 1));
+    }
+
+    #[test]
+    fn wide_characters_wrap_whole() {
+        let t = after(6, 3, "ab字字");
+        let t = resized(t, 5, 3);
+        // The second wide character can't start in the last column.
+        assert_eq!(t.screen_text(), "ab字\n字");
+        let t = resized(t, 6, 3);
+        assert_eq!(t.screen_text(), "ab字字");
+    }
+
+    #[test]
+    fn styles_and_graphemes_survive_rewrapping() {
+        let t = after(4, 3, "ab\x1b[31mce\u{301}");
+        let t = resized(t, 2, 3);
+        assert_eq!(t.screen_text(), "ab\nce\u{301}");
+        assert_eq!(style_at(&t, 1, 1), red_fg());
+    }
+
+    #[test]
+    fn the_alternate_screen_is_cropped_not_rewrapped() {
+        let t = after(6, 3, "prompt\x1b[?1049h\x1b[Habcdef");
+        let t = resized(t, 3, 2);
+        assert_eq!(t.screen_text(), "abc");
+        let t = resized(t, 6, 3);
+        assert_eq!(t.screen_text(), "abc");
+        let mut t = t;
+        t.advance(b"\x1b[?1049l");
+        assert_eq!(t.screen_text(), "prompt");
+    }
+
+    proptest! {
+        #[test]
+        fn resizing_between_any_output_keeps_the_invariants(
+            first in output(),
+            second in output(),
+            cols in 1u16..12,
+            rows in 1u16..6,
+            new_cols in 1u16..12,
+            new_rows in 1u16..6,
+        ) {
+            let mut t = terminal(cols, rows);
+            t.advance(&first);
+            t.resize(size(new_cols, new_rows));
+            t.assert_invariants();
+            t.advance(&second);
+            t.assert_invariants();
+        }
+
+        #[test]
+        fn widening_keeps_the_text_of_lines_that_fit(text in "[a-z ]{0,30}", cols in 1u16..10) {
+            // Tall enough that nothing scrolls into history.
+            let mut t = terminal(cols, 40);
+            t.advance(text.as_bytes());
+            t.resize(size(40, 40));
+            prop_assert_eq!(t.screen_text(), text.trim_end());
+        }
+    }
+}
+
 mod other_sequences {
     use super::*;
 
