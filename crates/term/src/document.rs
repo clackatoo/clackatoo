@@ -64,7 +64,8 @@ impl Terminal {
 
     /// The text from `from` to `to`, both included, as it would be typed:
     /// lines end in newlines unless they wrapped onto the next, and blanks
-    /// at the ends of lines are left out. With `whole_lines`, every line is
+    /// at the ends of lines are left out (blanks before more text on the
+    /// line are kept). With `whole_lines`, every line is
     /// taken whole.
     #[must_use]
     pub fn text(&self, from: Position, to: Position, whole_lines: bool) -> String {
@@ -91,7 +92,10 @@ impl Terminal {
             }
             let wrapped = row.is_wrapped() && end == row.width();
             if !wrapped {
-                text.truncate(at + text[at..].trim_end_matches(' ').len());
+                // Blanks up to the end of the line aren't text.
+                if end >= text_end(&row) {
+                    text.truncate(at + text[at..].trim_end_matches(' ').len());
+                }
                 if line != to.line.min(last) {
                     text.push('\n');
                 }
@@ -140,6 +144,15 @@ impl Terminal {
         }
         None
     }
+}
+
+/// Where the row's text ends: one past its last character that isn't a
+/// blank.
+fn text_end(row: &Row) -> usize {
+    row.cells()
+        .iter()
+        .rposition(|cell| cell.ch() != ' ' || cell.is_wide_spacer())
+        .map_or(0, |last| last + 1)
 }
 
 /// Every place `query` starts in `row`, as a column and the cells it
@@ -211,6 +224,9 @@ mod tests {
         assert_eq!(t.text(at(2, 1), at(1, 2), true), "e\nsecond");
         // Backwards ranges are the same as forwards.
         assert_eq!(t.text(at(2, 2), at(2, 0), false), "sec");
+        // Blanks are text, unless only blanks follow them.
+        assert_eq!(t.text(at(0, 0), at(0, 5), false), "hello ");
+        assert_eq!(t.text(at(2, 0), at(2, 8), false), "second");
     }
 
     #[test]
