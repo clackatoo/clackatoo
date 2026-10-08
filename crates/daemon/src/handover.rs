@@ -14,7 +14,8 @@
 //! Versions:
 //! 1. The first.
 //! 2. Each terminal's shell blocks ([`clackatoo_term::BlocksSnapshot`]).
-//! 3. Chats with agents.
+//! 3. Chats with agents, as the screens they were written into.
+//! 4. Chats as their turns.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -27,10 +28,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 3;
+pub(crate) const VERSION: u32 = 4;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -69,7 +70,7 @@ impl Fds {
     }
 }
 
-/// The daemon's state, version 3.
+/// The daemon's state, version 4.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The listening socket.
@@ -109,19 +110,58 @@ pub(crate) struct Terminal {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Chat {
     pub(crate) id: u32,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+    pub(crate) title: String,
     /// The directory the agent works in.
     pub(crate) cwd: String,
     /// The agent's session, if it had made one.
     pub(crate) session: Option<String>,
-    /// Whether the agent was answering, which the upgrade cut off.
-    pub(crate) answering: bool,
     /// Why the agent couldn't start, if it couldn't.
     pub(crate) failure: Option<String>,
-    /// The message being typed.
-    pub(crate) input: String,
-    /// The conversation, without its live end.
-    pub(crate) screen: Snapshot,
-    pub(crate) blocks: BlocksSnapshot,
+    /// The turns. A turn the upgrade cut off is handed over ended.
+    pub(crate) turns: Vec<ChatTurn>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatTurn {
+    pub(crate) prompt: String,
+    /// Milliseconds since the Unix epoch.
+    pub(crate) sent: u64,
+    pub(crate) items: Vec<ChatItem>,
+    pub(crate) end: Option<ChatEnd>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum ChatItem {
+    Words(String),
+    Thought(String),
+    Tool {
+        id: String,
+        title: String,
+        status: ToolStatus,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) enum ToolStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatEnd {
+    /// Milliseconds since the Unix epoch.
+    pub(crate) at: u64,
+    pub(crate) outcome: ChatOutcome,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum ChatOutcome {
+    Done,
+    Stopped,
+    Failed(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -216,6 +256,7 @@ impl State {
         match u32::from_le_bytes(*version) {
             1 => Ok(postcard::from_bytes::<v1::State>(body)?.into()),
             2 => Ok(postcard::from_bytes::<v2::State>(body)?.into()),
+            3 => postcard::from_bytes::<v3::State>(body)?.try_into(),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -280,7 +321,7 @@ mod v1 {
 }
 
 /// Version 2, as the builds that wrote it wrote it, sharing the types
-/// version 3 left as they were.
+/// later versions left as they were.
 mod v2 {
     use serde::Deserialize;
 
@@ -311,6 +352,106 @@ mod v2 {
     }
 }
 
+/// Version 3, as the builds that wrote it wrote it: chats as the screens
+/// they were written into, which become one turn of their text.
+mod v3 {
+    use clackatoo_term::{BlocksSnapshot, Position, Snapshot};
+    use serde::Deserialize;
+
+    use super::{
+        ChatEnd, ChatItem, ChatOutcome, ChatTurn, HandoverError, Process, Terminal, Workspaces,
+    };
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct Chat {
+        pub(super) id: u32,
+        pub(super) cwd: String,
+        pub(super) session: Option<String>,
+        pub(super) answering: bool,
+        pub(super) failure: Option<String>,
+        pub(super) input: String,
+        pub(super) screen: Snapshot,
+        pub(super) blocks: BlocksSnapshot,
+    }
+
+    impl TryFrom<State> for super::State {
+        type Error = HandoverError;
+
+        fn try_from(state: State) -> Result<Self, HandoverError> {
+            let chats = (state.chats.into_iter())
+                .map(super::Chat::try_from)
+                .collect::<Result<_, _>>()?;
+            Ok(Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+            })
+        }
+    }
+
+    impl TryFrom<Chat> for super::Chat {
+        type Error = HandoverError;
+
+        /// The chat's text, as written into its screen and history, in
+        /// one turn of its own, as a block of text.
+        fn try_from(chat: Chat) -> Result<Self, HandoverError> {
+            let screen = clackatoo_term::Terminal::restore(
+                &chat.screen,
+                &clackatoo_term::Config::default(),
+            )?;
+            let size = screen.size();
+            let text = screen.text(
+                Position { line: 0, col: 0 },
+                Position {
+                    line: u64::MAX,
+                    col: usize::MAX,
+                },
+                true,
+            );
+            let text = text.trim_end();
+            let turns = if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![ChatTurn {
+                    prompt: String::new(),
+                    sent: 0,
+                    items: vec![ChatItem::Words(format!("```text\n{text}\n```"))],
+                    end: Some(ChatEnd {
+                        at: 0,
+                        outcome: ChatOutcome::Done,
+                    }),
+                }]
+            };
+            let _ = (chat.answering, chat.input, chat.blocks);
+            Ok(Self {
+                id: chat.id,
+                cols: size.cols(),
+                rows: size.rows(),
+                title: screen.title().to_owned(),
+                cwd: chat.cwd,
+                session: chat.session,
+                failure: chat.failure,
+                turns,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,17 +464,28 @@ mod tests {
             terminals: Vec::new(),
             chats: vec![Chat {
                 id: 2,
+                cols: 40,
+                rows: 10,
+                title: "fixing the build".to_owned(),
                 cwd: "/src".to_owned(),
                 session: Some("s".to_owned()),
-                answering: false,
                 failure: None,
-                input: "half typed".to_owned(),
-                screen: clackatoo_term::Terminal::new(
-                    clackatoo_term::Size::new(4, 2).unwrap(),
-                    &clackatoo_term::Config::default(),
-                )
-                .snapshot(),
-                blocks: BlocksSnapshot::default(),
+                turns: vec![ChatTurn {
+                    prompt: "why?".to_owned(),
+                    sent: 1,
+                    items: vec![
+                        ChatItem::Words("Because".to_owned()),
+                        ChatItem::Tool {
+                            id: "t".to_owned(),
+                            title: "Read".to_owned(),
+                            status: ToolStatus::Done,
+                        },
+                    ],
+                    end: Some(ChatEnd {
+                        at: 2,
+                        outcome: ChatOutcome::Failed("no".to_owned()),
+                    }),
+                }],
             }],
             orphans: vec![Process { pid: 42, pidfd: 2 }],
             workspaces: Workspaces {
@@ -382,10 +534,10 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(MAGIC).unwrap();
-        file.write_all(&4u32.to_le_bytes()).unwrap();
+        file.write_all(&5u32.to_le_bytes()).unwrap();
         assert!(matches!(
             State::read(&mut file),
-            Err(HandoverError::Version(4))
+            Err(HandoverError::Version(5))
         ));
     }
 
@@ -428,6 +580,30 @@ mod tests {
         emulator.restore_blocks(&terminal.blocks);
         let block = emulator.block(0, clackatoo_term::Which::At).unwrap();
         assert_eq!(block.command.as_deref(), Some("ls"));
+    }
+
+    /// Written by a build that wrote version 3. It must always be read.
+    #[test]
+    fn version_3_is_read_with_each_chat_as_its_text() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v3.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!((state.next_terminal, state.orphans[0].pid), (4, 97));
+        let chat = &state.chats[0];
+        assert_eq!((chat.id, chat.cols, chat.rows), (3, 30, 6));
+        assert_eq!(
+            (chat.cwd.as_str(), chat.session.as_deref()),
+            ("/src/project", Some("s1"))
+        );
+        let [ChatTurn { prompt, items, .. }] = chat.turns.as_slice() else {
+            panic!("one turn: {:?}", chat.turns);
+        };
+        assert!(prompt.is_empty());
+        let [ChatItem::Words(text)] = items.as_slice() else {
+            panic!("{items:?}");
+        };
+        assert_eq!(text, "```text\n› hi\n\necho: hi\n```");
     }
 
     #[test]

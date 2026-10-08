@@ -70,6 +70,7 @@ fn render(
         fills: &[],
         over: &[],
         texts: &[],
+        glyphs: &[],
         transparent: false,
     };
     Some((size, draw(&gpu, size, &picture, &mut fonts)))
@@ -80,7 +81,7 @@ fn render(
 fn screen(cols: u16, rows: u16, output: &str) -> Screen {
     let mut terminal = Terminal::new(Size::new(cols, rows).unwrap(), &Config::default());
     terminal.advance(output.as_bytes());
-    Screen::new(&View::capture(&terminal))
+    Screen::new(&View::capture(&terminal)).expect("a terminal's view is a grid")
 }
 
 fn fonts(scale: f64) -> Fonts {
@@ -342,6 +343,7 @@ fn draw_window_shaped(
         fills: &fills,
         over: &over,
         texts: &texts,
+        glyphs: &[],
         transparent: rounded,
     };
     draw(gpu, *size, &picture, fonts)
@@ -573,4 +575,168 @@ fn joined_emoji_are_shaped_into_one_glyph() {
     assert_eq!(shaped(&mut fonts, "#\u{FE0F}\u{20E3}").len(), 1);
     // ❤ is in text fonts too, but the selector asks for the emoji.
     assert_eq!(shaped(&mut fonts, "❤\u{FE0F}")[0].0, emoji);
+}
+
+/// A chat, as a pane shows it: messages, Markdown, tool calls, and the
+/// box a message is typed in, or the agent's question.
+fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
+    use clackatoo_protocol::{
+        ChatNode, ChatState, Choice, ChoiceKind, Item, Outcome, Question, Tool, ToolStatus, Turn,
+        TurnEnd,
+    };
+    let tool = |title: &str, status| {
+        Item::Tool(Tool {
+            id: title.into(),
+            title: title.into(),
+            status,
+        })
+    };
+    ChatNode {
+        turns: vec![
+            Turn {
+                prompt: "Why is the build failing?".into(),
+                sent: 0,
+                items: vec![
+                    tool("Read Cargo.toml", ToolStatus::Done),
+                    tool("cargo build", ToolStatus::Failed),
+                    Item::Words(
+                        "The linker can't find **libssl**. Your `Cargo.toml` asks for \
+                         `openssl` 0.10 without the `vendored` feature, so it looks for the \
+                         system's copy:\n\n```toml\n[dependencies]\nopenssl = \"0.10\"\n```\n\n\
+                         Two ways out:\n\n- install `libssl-dev`, or\n- turn on `vendored`.\n"
+                            .into(),
+                    ),
+                ],
+                end: Some(TurnEnd {
+                    at: 1,
+                    outcome: Outcome::Done,
+                }),
+            },
+            Turn {
+                prompt: "Turn on vendored and try again".into(),
+                sent: 2,
+                items: vec![tool("Edit Cargo.toml", ToolStatus::Running)],
+                end: None,
+            },
+        ],
+        state: ChatState::Answering,
+        question: question.then(|| Question {
+            title: "run cargo build --release".into(),
+            choices: vec![
+                Choice {
+                    id: "a".into(),
+                    name: "Allow".into(),
+                    kind: ChoiceKind::AllowOnce,
+                },
+                Choice {
+                    id: "b".into(),
+                    name: "Always allow".into(),
+                    kind: ChoiceKind::AllowAlways,
+                },
+                Choice {
+                    id: "c".into(),
+                    name: "Reject".into(),
+                    kind: ChoiceKind::RejectOnce,
+                },
+            ],
+        }),
+        notice: None,
+    }
+}
+
+/// Renders a chat pane `size` pixels, and saves it as `name`.
+fn render_chat(
+    name: &str,
+    node: clackatoo_protocol::ChatNode,
+    typed: &str,
+    scale: f64,
+) -> Option<Vec<u8>> {
+    let gpu = gpu()?;
+    let mut fonts = fonts(scale);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let size = [(720.0 * scale) as u32, (640.0 * scale) as u32];
+    let mut chat = crate::chat::ChatView::new("chat".into(), node);
+    if !typed.is_empty() {
+        chat.paste(typed);
+        chat.settle(&mut fonts);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let paint = chat.paint(&mut fonts, [0.0; 2], [size[0] as f32, size[1] as f32], true);
+    let mut fills = vec![crate::render::Fill::solid(
+        #[allow(clippy::cast_precision_loss)]
+        [0.0, 0.0, size[0] as f32, size[1] as f32],
+        crate::render::Paint::Tile,
+    )];
+    fills.extend(paint.fills);
+    let picture = Picture {
+        scenes: &[],
+        fills: &fills,
+        over: &paint.over,
+        texts: &[],
+        glyphs: &paint.glyphs,
+        transparent: false,
+    };
+    let pixels = draw(&gpu, size, &picture, &mut fonts);
+    save(name, size, &pixels);
+    Some(pixels)
+}
+
+#[test]
+fn renders_a_chat_with_its_box_and_question() {
+    let Some(pixels) = render_chat("chat", chat_node(false), "Also run the tests", 1.0) else {
+        return;
+    };
+    // Something was drawn: not all one colour.
+    assert!(pixels.chunks(4).any(|pixel| pixel != &pixels[..4]));
+    render_chat("chat-question", chat_node(true), "", 1.0);
+    render_chat("chat-hidpi", chat_node(false), "", 2.0);
+}
+
+#[test]
+fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
+    use clackatoo_protocol::{
+        ChatAction, ChatNode, ChatState, ClientMessage, Node, Request, ViewUpdate,
+    };
+    use winit::keyboard::{Key, KeyLocation, NamedKey};
+
+    use crate::input::{KeyPress, Modifiers};
+    use crate::pane::{Mode, Pane};
+
+    let press = |pane: &mut Pane, key: Key, text: Option<&str>| {
+        pane.key(&KeyPress {
+            key: &key,
+            text,
+            location: KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers::default(),
+        })
+    };
+    let mut pane = Pane::new(TerminalId(3));
+    pane.view_changed(&ViewUpdate::Snapshot(View {
+        title: "agent".into(),
+        root: Node::Chat(ChatNode {
+            state: ChatState::Ready,
+            ..ChatNode::default()
+        }),
+    }));
+    assert!(pane.is_chat());
+    for ch in ["h", "i"] {
+        press(&mut pane, Key::Character(ch.into()), Some(ch));
+    }
+    press(&mut pane, Key::Named(NamedKey::Enter), Some("\r"));
+    // Nothing goes until the window settles it, with the fonts.
+    assert!(pane.take_outbox().is_empty());
+    assert!(pane.settle_chat(&mut fonts(1.0)));
+    let sent = pane.take_outbox();
+    assert!(
+        sent.contains(&ClientMessage::Request(Request::Chat {
+            terminal: TerminalId(3),
+            action: ChatAction::Send("hi".into()),
+        })),
+        "{sent:?}"
+    );
+    press(&mut pane, Key::Named(NamedKey::Escape), None);
+    assert_eq!(pane.mode, Mode::Normal);
+    press(&mut pane, Key::Character("i".into()), Some("i"));
+    assert_eq!(pane.mode, Mode::Insert);
 }

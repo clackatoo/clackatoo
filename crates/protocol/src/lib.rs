@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod chat;
 pub mod frame;
 mod view;
 mod workspace;
@@ -50,6 +51,10 @@ pub use clackatoo_term::{
 };
 use serde::{Deserialize, Serialize};
 
+pub use chat::{
+    ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Item, Outcome, Question, Tool,
+    ToolStatus, Turn, TurnEnd,
+};
 pub use view::{
     CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, Node, NodeId, Patch, Run,
     View, ViewUpdate,
@@ -61,7 +66,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -144,6 +149,14 @@ pub enum Request {
     ListTerminals,
     /// Starts a terminal. Answered with [`Response::TerminalCreated`].
     NewTerminal(NewTerminal),
+    /// Asks a chat with an agent to do something: send a message, stop
+    /// the agent answering, or answer its question.
+    Chat {
+        /// The chat.
+        terminal: TerminalId,
+        /// What to do.
+        action: ChatAction,
+    },
     /// Writes bytes to a terminal, as if typed.
     SendInput {
         /// The terminal to write to.
@@ -340,9 +353,9 @@ pub struct NewTerminal {
 
 /// How to start a chat with an agent, such as Claude Code, in a pane.
 ///
-/// The chat is a terminal whose program is the daemon itself: it writes
-/// the conversation into the terminal, and what's typed into it becomes
-/// the next message. So it scrolls, searches and copies like any terminal.
+/// A chat has a terminal's ID, and goes in panes as terminals do, but its
+/// view is a [`ChatNode`], not a grid, and it's sent messages with
+/// [`Request::Chat`], not input.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewAgent {
     /// The terminal's size.
@@ -447,6 +460,13 @@ pub enum Error {
     /// A part's share of a split can't be 0.
     #[error("every part of a split needs some of its space")]
     EmptyShare,
+    /// The terminal is a chat with an agent, which has no grid and takes
+    /// no input: it's sent messages with [`Request::Chat`].
+    #[error("terminal {0} is a chat with an agent")]
+    IsAChat(TerminalId),
+    /// The terminal isn't a chat with an agent.
+    #[error("terminal {0} isn't a chat")]
+    NotAChat(TerminalId),
     /// The terminal is already shown in a pane.
     #[error("terminal {0} is already in a pane")]
     TerminalInPane(TerminalId),

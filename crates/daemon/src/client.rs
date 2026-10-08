@@ -8,9 +8,9 @@ use std::path::Path;
 
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
 use clackatoo_protocol::{
-    Block, ClientMessage, Error, Event, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId,
-    PaneTerminal, Request, Response, ServerMessage, Side, Size, TerminalId, TerminalInfo, Udp,
-    View, Which, WorkspaceId, Workspaces,
+    Block, ChatAction, ClientMessage, Error, Event, HistoryLines, NewTerminal, PROTOCOL_VERSION,
+    PaneId, PaneTerminal, Request, Response, ServerMessage, Side, Size, TerminalId, TerminalInfo,
+    Udp, View, Which, WorkspaceId, Workspaces,
 };
 
 use crate::quic::{self, Carried, Contact, Route};
@@ -274,6 +274,19 @@ impl Client {
             bytes: bytes.to_vec(),
         };
         match self.request(&request)? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Asks a chat with an agent to do something: send a message, stop
+    /// the agent answering, or answer its question.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn chat(&mut self, terminal: TerminalId, action: ChatAction) -> Result<(), ClientError> {
+        match self.request(&Request::Chat { terminal, action })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
         }

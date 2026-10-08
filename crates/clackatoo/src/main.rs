@@ -512,13 +512,12 @@ fn send(target: &Target, bytes: &[u8]) -> anyhow::Result<()> {
 fn capture(capture: &Capture) -> anyhow::Result<()> {
     let target = &capture.target;
     let view = connect(&target.connection)?.capture(TerminalId(target.terminal))?;
-    let grid = view
-        .grid()
-        .context("the terminal shows something other than a grid")?;
-    let text = if capture.ansi {
-        render::ansi(grid)
-    } else {
-        render::plain(grid)
+    let text = match (view.grid(), view.chat()) {
+        (Some(grid), _) if capture.ansi => render::ansi(grid),
+        (Some(grid), _) => render::plain(grid),
+        // A chat's turns, as text.
+        (None, Some(chat)) => chat.text(),
+        (None, None) => anyhow::bail!("the terminal shows something this build can't print"),
     };
     io::stdout().lock().write_all(text.as_bytes())?;
     Ok(())

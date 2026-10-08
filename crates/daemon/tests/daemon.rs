@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    ClientMessage, Error, Event, NewAgent, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal,
-    Patch, Request, Response, ServerMessage, Side, Size, TerminalId, TerminalStatus, View,
-    ViewUpdate, Workspaces,
+    ChatAction, ChatNode, ChatState, ClientMessage, Error, Event, Item, NewAgent, NewTerminal,
+    Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Request, Response, ServerMessage, Side,
+    Size, TerminalId, TerminalStatus, Tool, ToolStatus, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -485,7 +485,7 @@ fn changed_lines(update: &ViewUpdate) -> Vec<u16> {
         .iter()
         .flat_map(|patch| match patch {
             Patch::Grid { lines, .. } => lines.iter().map(|(line, _)| *line).collect(),
-            Patch::Title(_) => Vec::new(),
+            Patch::Title(_) | Patch::Chat(_) => Vec::new(),
         })
         .collect()
 }
@@ -1141,34 +1141,106 @@ fn new_chat() -> PaneTerminal {
     })
 }
 
+/// Captures `chat` until it satisfies `done`, failing after `limit`.
+fn wait_for_chat_for(
+    client: &mut Client,
+    chat: TerminalId,
+    limit: Duration,
+    done: impl Fn(&ChatNode) -> bool,
+) -> ChatNode {
+    let deadline = Instant::now() + limit;
+    loop {
+        let view = client.capture(chat).expect("capture");
+        let node = view.chat().expect("a chat's view is a chat").clone();
+        if done(&node) {
+            return node;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out; the chat was:\n{node:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// As [`wait_for_chat_for`], for a few seconds.
+fn wait_for_chat(
+    client: &mut Client,
+    chat: TerminalId,
+    done: impl Fn(&ChatNode) -> bool,
+) -> ChatNode {
+    wait_for_chat_for(client, chat, Duration::from_secs(5), done)
+}
+
+/// Whether `chat`'s last turn has ended, and how.
+fn last_outcome(chat: &ChatNode) -> Option<&Outcome> {
+    chat.turns.last()?.end.as_ref().map(|end| &end.outcome)
+}
+
+/// What the agent said in `chat`'s last turn.
+fn last_words(chat: &ChatNode) -> String {
+    let Some(turn) = chat.turns.last() else {
+        return String::new();
+    };
+    (turn.items.iter())
+        .filter_map(|item| match item {
+            Item::Words(words) => Some(words.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Sends `text` to `chat`, and waits for the answer to end.
+fn ask(client: &mut Client, chat: TerminalId, text: &str) -> ChatNode {
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    wait_for_chat(client, chat, |node| {
+        node.turns.last().is_some_and(|turn| turn.prompt == text) && last_outcome(node).is_some()
+    })
+}
+
 /// Starts a workspace with a chat, and waits for it to be ready.
 fn start_chat(client: &mut Client) -> TerminalId {
     client.new_workspace(None, new_chat()).unwrap();
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
-    wait_for_screen(client, chat, |text| !text.contains("starting"));
+    wait_for_chat(client, chat, |node| node.state == ChatState::Ready);
     chat
 }
 
 #[test]
-fn a_chat_answers_what_is_typed() {
+fn a_chat_answers_what_is_sent() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
     let info = &client.list_terminals().unwrap()[0];
     assert_eq!((info.id, info.pid), (chat, None));
-    client.send_input(chat, b"hello there\r").unwrap();
-    let text = wait_for_screen(&mut client, chat, |text| text.contains("echo: hello there"));
-    assert!(
-        text.starts_with("› hello there\n\necho: hello there\n"),
-        "{text}"
+    let node = ask(&mut client, chat, "hello there");
+    assert_eq!(last_words(&node), "echo: hello there\n");
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    // A chat has no grid, and takes no input.
+    assert_eq!(
+        client.send_input(chat, b"x").unwrap_err().to_string(),
+        Error::IsAChat(chat).to_string()
     );
-    // The exchange is a block, whose command is the message.
-    let block = client
-        .block(chat, 0, clackatoo_protocol::Which::At)
-        .unwrap()
-        .expect("a block");
-    assert_eq!(block.command.as_deref(), Some("hello there"));
-    assert_eq!(block.exit, Some(0));
+}
+
+#[test]
+fn a_chat_is_kept_current_by_patches() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let mut view = attach(&mut client, chat);
+    client.frame_done(chat).unwrap();
+    client
+        .chat(chat, ChatAction::Send("stream".to_owned()))
+        .unwrap();
+    while view.chat().and_then(last_outcome).is_none() {
+        let update = next_update(&mut client, chat);
+        view.apply(update);
+        client.frame_done(chat).unwrap();
+    }
+    assert_eq!(view, client.capture(chat).unwrap());
 }
 
 #[test]
@@ -1185,39 +1257,55 @@ fn a_chat_starts_where_the_pane_beside_it_is() {
 
     client.split_pane(shell, Side::Right, new_chat()).unwrap();
     let chat = next_workspaces(&mut client).list[0].terminals()[1];
-    client.send_input(chat, b"cwd\r").unwrap();
-    wait_for_screen(&mut client, chat, |text| text.contains("/project"));
+    let node = ask(&mut client, chat, "cwd");
+    assert!(last_words(&node).ends_with("/project\n"), "{node:#?}");
 }
 
 #[test]
-fn tool_calls_are_shown_and_the_agent_asks_before_using_one() {
+fn tool_calls_are_kept_and_the_agent_asks_before_using_one() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
-    client.send_input(chat, b"tool\r").unwrap();
-    wait_for_screen(&mut client, chat, |text| {
-        text.contains("✓ Read notes.txt\ndone")
-    });
-    client.send_input(chat, b"ask\r").unwrap();
-    wait_for_screen(&mut client, chat, |text| {
-        text.contains("May the agent Write notes.txt?")
-    });
-    client.send_input(chat, b"1").unwrap();
-    wait_for_screen(&mut client, chat, |text| text.contains("picked allow"));
+    let node = ask(&mut client, chat, "tool");
+    assert_eq!(
+        node.turns[0].items,
+        [
+            Item::Tool(Tool {
+                id: "t1".into(),
+                title: "Read notes.txt".into(),
+                status: ToolStatus::Done,
+            }),
+            Item::Words("done\n".into()),
+        ]
+    );
+
+    client
+        .chat(chat, ChatAction::Send("ask".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let question = node.question.unwrap();
+    assert_eq!(question.title, "Write notes.txt");
+    let allow = question.choices[0].id.clone();
+    client.chat(chat, ChatAction::Answer(Some(allow))).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert_eq!(last_words(&node), "picked allow\n");
+    assert_eq!(node.question, None);
 }
 
 #[test]
-fn ctrl_c_stops_the_answer() {
+fn stopping_ends_the_answer() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
-    client.send_input(chat, b"wait\r").unwrap();
-    wait_for_screen(&mut client, chat, |text| text.contains("Ctrl+C stops it"));
-    client.send_input(chat, b"\x03").unwrap();
-    wait_for_screen(&mut client, chat, |text| text.contains("stopped"));
+    client
+        .chat(chat, ChatAction::Send("wait".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Answering);
+    client.chat(chat, ChatAction::Stop).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
     // And the next message goes.
-    client.send_input(chat, b"next\r").unwrap();
-    wait_for_screen(&mut client, chat, |text| text.contains("echo: next"));
+    assert_eq!(last_words(&ask(&mut client, chat, "next")), "echo: next\n");
 }
 
 #[test]
@@ -1225,10 +1313,12 @@ fn when_the_agent_stops_the_next_message_starts_it_again() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
     let chat = start_chat(&mut client);
-    client.send_input(chat, b"exit\r").unwrap();
-    wait_for_screen(&mut client, chat, |text| text.contains("the agent stopped"));
-    client.send_input(chat, b"back\r").unwrap();
-    wait_for_screen(&mut client, chat, |text| text.contains("echo: back"));
+    let node = ask(&mut client, chat, "exit");
+    assert_eq!(
+        last_outcome(&node),
+        Some(&Outcome::Failed("the agent stopped".into()))
+    );
+    assert_eq!(last_words(&ask(&mut client, chat, "back")), "echo: back\n");
 }
 
 #[test]
@@ -1239,7 +1329,7 @@ fn closing_a_chat_ends_its_session() {
     client.split_pane(first, Side::Right, new_chat()).unwrap();
     let chats = client.watch_workspaces().unwrap().list[0].terminals();
     for &chat in &chats {
-        wait_for_screen(&mut client, chat, |text| !text.contains("starting"));
+        wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
     }
     client.close_pane(first).unwrap();
     let log = daemon.dir.path().join("agent.log");
@@ -1249,10 +1339,8 @@ fn closing_a_chat_ends_its_session() {
         std::thread::sleep(Duration::from_millis(10));
     }
     // The other chat carries on.
-    client.send_input(chats[1], b"still here\r").unwrap();
-    wait_for_screen(&mut client, chats[1], |text| {
-        text.contains("echo: still here")
-    });
+    let node = ask(&mut client, chats[1], "still here");
+    assert_eq!(last_words(&node), "echo: still here\n");
 }
 
 /// Claude Code, through its adapter, on the cheapest model. Run by hand,
@@ -1276,17 +1364,27 @@ fn a_real_agent_answers_and_asks_before_running_commands() {
     client.new_workspace(None, new_chat()).unwrap();
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
     let minute = Duration::from_mins(1);
-    wait_for_screen_for(&mut client, chat, minute, |text| !text.contains("starting"));
-
-    client
-        .send_input(
-            chat,
-            b"Reply with exactly one word, pong, and use no tools.\r",
-        )
-        .unwrap();
-    wait_for_screen_for(&mut client, chat, minute, |text| {
-        text.to_lowercase().contains("\npong") && !text.contains("answering")
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.state == ChatState::Ready
     });
+    let send = |client: &mut Client, text: &str| {
+        client
+            .chat(chat, ChatAction::Send(text.to_owned()))
+            .unwrap();
+        wait_for_chat_for(client, chat, minute, |node| {
+            node.turns.last().is_some_and(|turn| turn.prompt == text)
+                && (last_outcome(node).is_some() || node.question.is_some())
+        })
+    };
+
+    let node = send(
+        &mut client,
+        "Reply with exactly one word, pong, and use no tools.",
+    );
+    assert!(
+        last_words(&node).to_lowercase().contains("pong"),
+        "{node:#?}"
+    );
 
     // The agent crashes: the chat says so, and the next message starts it
     // again, carrying on the same conversation. The daemon runs in this
@@ -1307,31 +1405,31 @@ fn a_real_agent_answers_and_asks_before_running_commands() {
         .status()
         .unwrap();
     assert!(killed.success());
-    wait_for_screen_for(&mut client, chat, minute, |text| {
-        text.contains("the agent stopped")
-    });
-    client
-        .send_input(
-            chat,
-            b"What one word did you reply with before? Reply with it alone.\r",
-        )
-        .unwrap();
-    wait_for_screen_for(&mut client, chat, minute, |text| {
-        text.to_lowercase().matches("pong").count() >= 2 && !text.contains("answering")
-    });
+    wait_for_chat_for(&mut client, chat, minute, |node| node.notice.is_some());
+    let node = send(
+        &mut client,
+        "What one word did you reply with before? Reply with it alone.",
+    );
+    assert!(
+        last_words(&node).to_lowercase().contains("pong"),
+        "{node:#?}"
+    );
 
     // A command that changes something, which Claude Code asks about,
-    // unlike reading ones.
+    // unlike reading ones. No: the reject choice, and the answer ends.
+    let node = send(
+        &mut client,
+        "Use your Bash tool to run: touch made-by-claude",
+    );
+    let question = node.question.expect("asked");
+    let reject = (question.choices.iter())
+        .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::RejectOnce)
+        .expect("a way to say no");
     client
-        .send_input(chat, b"Use your Bash tool to run: touch made-by-claude\r")
+        .chat(chat, ChatAction::Answer(Some(reject.id.clone())))
         .unwrap();
-    wait_for_screen_for(&mut client, chat, minute, |text| {
-        text.contains("May the agent")
-    });
-    // No: Esc turns it down, and the answer ends.
-    client.send_input(chat, b"\x1b").unwrap();
-    wait_for_screen_for(&mut client, chat, minute, |text| {
-        !text.contains("answering") && !text.contains("May the agent")
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        last_outcome(node).is_some()
     });
     assert!(!daemon.dir.path().join("made-by-claude").exists());
 }

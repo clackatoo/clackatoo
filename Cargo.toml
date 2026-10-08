@@ -32,6 +32,10 @@ env_logger = { version = "0.11", default-features = false }
 # and the daemon don't pay for linking it and its dependencies.
 fontique = { version = "0.11", features = ["fontconfig-dlopen"] }
 log = "0.4"
+# Lays out a chat's text: line breaking, mixed styles, and the box a
+# message is typed in. Built on fontique, as our own fonts are, so there's
+# one collection of them.
+parley = { version = "0.11", default-features = false, features = ["std"] }
 mio = { version = "1.2", features = ["os-poll", "os-ext", "net"] }
 pollster = "1.0"
 # The QUIC engine with no networking of its own, driven from our own event
@@ -39,6 +43,8 @@ pollster = "1.0"
 quinn-proto = { version = "0.11", default-features = false, features = ["rustls-ring", "log"] }
 # A self-signed certificate for each daemon's QUIC endpoint.
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+# Reads the agent's words in a chat as Markdown.
+pulldown-cmark = { version = "0.13", default-features = false }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # TLS for QUIC: the same version and backend as quinn-proto's.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

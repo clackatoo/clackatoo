@@ -134,6 +134,9 @@ impl Theme {
             Paint::PaletteEdge => self.palette_edge,
             Paint::Warning => faint(self.warning, 0.14),
             Paint::WarningEdge => faint(self.warning, 0.4),
+            Paint::Raised => white(0.07),
+            Paint::RaisedEdge => white(0.09),
+            Paint::Code => white(0.05),
         }
     }
 

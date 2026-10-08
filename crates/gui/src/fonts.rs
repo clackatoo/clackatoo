@@ -155,8 +155,16 @@ pub(crate) struct ShapedGlyph {
 
 /// The fonts a window draws with, at one pixel size.
 pub(crate) struct Fonts {
-    collection: Collection,
-    source_cache: SourceCache,
+    /// Every font on the system, found once, for us and for laying out
+    /// text with parley.
+    pub(crate) font_cx: parley::FontContext,
+    /// The faces parley laid text out in, as we know them.
+    laid_out: HashMap<(u64, u32, bool, bool), FaceId>,
+    /// The terminal's family, as configured, or `None` for the system's
+    /// monospace font.
+    pub(crate) mono_family: Option<String>,
+    /// The interface's family, or `None` for the system's sans-serif font.
+    pub(crate) ui_family: Option<String>,
     faces: Vec<Face>,
     /// The four primary faces, by variant, as indices into `faces`.
     primary: [FaceId; 4],
@@ -186,8 +194,10 @@ impl Fonts {
     /// Loads the configured family at `options.size` points, on a display
     /// with `scale` physical pixels per logical pixel.
     pub(crate) fn load(options: &FontOptions, scale: f64) -> anyhow::Result<Self> {
-        let mut collection = Collection::new(CollectionOptions::default());
-        let mut source_cache = SourceCache::default();
+        let mut font_cx = parley::FontContext {
+            collection: Collection::new(CollectionOptions::default()),
+            source_cache: SourceCache::default(),
+        };
         let family = match &options.family {
             Some(name) => QueryFamily::Named(name),
             None => QueryFamily::Generic(GenericFamily::Monospace),
@@ -203,8 +213,13 @@ impl Fonts {
         .into_iter()
         .enumerate()
         {
-            let face = query(&mut collection, &mut source_cache, family, variant)
-                .with_context(|| format!("no font found for {family:?}"))?;
+            let face = query(
+                &mut font_cx.collection,
+                &mut font_cx.source_cache,
+                family,
+                variant,
+            )
+            .with_context(|| format!("no font found for {family:?}"))?;
             primary[slot] = push_face(&mut faces, face);
         }
 
@@ -218,8 +233,10 @@ impl Fonts {
             height: 1.0,
         };
         let mut fonts = Self {
-            collection,
-            source_cache,
+            font_cx,
+            laid_out: HashMap::new(),
+            mono_family: options.family.clone(),
+            ui_family: None,
             faces,
             primary,
             ui,
@@ -272,8 +289,8 @@ impl Fonts {
         };
         let mut load = |variant| {
             let face = query(
-                &mut self.collection,
-                &mut self.source_cache,
+                &mut self.font_cx.collection,
+                &mut self.font_cx.source_cache,
                 family,
                 variant,
             )?;
@@ -285,6 +302,7 @@ impl Fonts {
         };
         self.ui.regular = regular;
         self.ui.bold = bold.unwrap_or(regular);
+        self.ui_family = family_name(family);
         self.ui.points = points;
         self.set_scale(scale);
     }
@@ -329,6 +347,38 @@ impl Fonts {
             .filter_map(|ch| self.ui_glyph(ch, bold))
             .map(|glyph| glyph.advance.round())
             .sum()
+    }
+
+    /// The face parley laid text out in: `font`, drawn thicker or
+    /// slanted as `synthesis` says.
+    pub(crate) fn face_for(
+        &mut self,
+        font: &parley::FontData,
+        synthesis: fontique::Synthesis,
+    ) -> Option<FaceId> {
+        let key = (
+            font.data.id(),
+            font.index,
+            synthesis.embolden(),
+            synthesis.skew().is_some(),
+        );
+        if let Some(&id) = self.laid_out.get(&key) {
+            return Some(id);
+        }
+        let font_ref = FontRef::from_index(font.data.as_ref(), usize::try_from(font.index).ok()?)?;
+        let id = push_face(
+            &mut self.faces,
+            Face {
+                blob: font.data.clone(),
+                offset: font_ref.offset,
+                key: font_ref.key,
+                offset_index: font.index,
+                embolden: key.2,
+                skew: key.3,
+            },
+        );
+        self.laid_out.insert(key, id);
+        Some(id)
     }
 
     pub(crate) fn face(&self, id: FaceId) -> &Face {
@@ -377,7 +427,10 @@ impl Fonts {
         fallbacks: Option<FallbackKey>,
     ) -> Option<(FaceId, GlyphId)> {
         let mut found = None;
-        let mut query = self.collection.query(&mut self.source_cache);
+        let mut query = self
+            .font_cx
+            .collection
+            .query(&mut self.font_cx.source_cache);
         query.set_families(families.iter().copied());
         query.set_attributes(variant.attributes());
         if let Some(fallbacks) = fallbacks {
@@ -499,6 +552,14 @@ fn query(
         }
     });
     found
+}
+
+/// The name of `family`, if it's named, rather than generic.
+fn family_name(family: QueryFamily<'_>) -> Option<String> {
+    match family {
+        QueryFamily::Named(name) => Some(name.to_owned()),
+        _ => None,
+    }
 }
 
 fn push_face(faces: &mut Vec<Face>, face: Face) -> FaceId {

@@ -21,6 +21,8 @@ use clackatoo_protocol::{
 use clackatoo_term::{Row, RowBuilder};
 use winit::keyboard::{Key, KeyCode, NamedKey};
 
+use crate::chat::{ChatPaint, ChatView};
+use crate::fonts::Fonts;
 use crate::history::History;
 use crate::input::{self, KeyPress};
 use crate::motion::{Cursor, Lines, Point};
@@ -110,6 +112,8 @@ pub(crate) struct Pane {
     /// The size last asked of the daemon.
     requested_size: Option<Size>,
     screen: Option<Screen>,
+    /// For a chat with an agent, which has no screen, its view.
+    chat: Option<Box<ChatView>>,
     history: History,
     /// How many lines up from the live screen the view is: 0 shows the
     /// screen as the program draws it.
@@ -149,6 +153,7 @@ impl Pane {
             outbox: Vec::new(),
             requested_size: None,
             screen: None,
+            chat: None,
             history: History::default(),
             scroll: 0,
             mode: Mode::Insert,
@@ -170,6 +175,111 @@ impl Pane {
 
     pub(crate) fn screen(&self) -> Option<&Screen> {
         self.screen.as_ref()
+    }
+
+    /// Whether the pane shows a chat, rather than a terminal's screen.
+    pub(crate) fn is_chat(&self) -> bool {
+        self.chat.is_some()
+    }
+
+    /// The title its program set, or its chat has.
+    pub(crate) fn title(&self) -> Option<&str> {
+        match (&self.screen, &self.chat) {
+            (Some(screen), _) => Some(&screen.title),
+            (None, Some(chat)) => Some(&chat.title),
+            (None, None) => None,
+        }
+    }
+
+    /// Lays out and draws the chat it shows, if it shows one, in a pane
+    /// `size` pixels with its top left at `origin`. `caret` draws the
+    /// cursor in the message being typed.
+    pub(crate) fn paint_chat(
+        &mut self,
+        fonts: &mut Fonts,
+        origin: [f32; 2],
+        size: [f32; 2],
+        caret: bool,
+    ) -> Option<ChatPaint> {
+        self.chat.as_ref()?;
+        self.settle_chat(fonts);
+        let chat = self.chat.as_mut()?;
+        Some(chat.paint(fonts, origin, size, caret))
+    }
+
+    /// Carries out what was typed or clicked in the chat it shows, if it
+    /// shows one: for that, the fonts are needed. Returns whether the pane
+    /// must be redrawn.
+    pub(crate) fn settle_chat(&mut self, fonts: &mut Fonts) -> bool {
+        let Some(chat) = self.chat.as_mut().filter(|chat| chat.unsettled()) else {
+            return false;
+        };
+        let settled = chat.settle(fonts);
+        for action in settled.actions {
+            self.request(
+                Request::Chat {
+                    terminal: self.terminal,
+                    action,
+                },
+                Pending::Other,
+            );
+        }
+        if let Some(copied) = settled.copied {
+            self.yanked = Some((copied, Copy::Clipboard));
+        }
+        settled.redraw
+    }
+
+    /// A key in a chat: in insert mode, it edits the message, and in
+    /// normal mode, it scrolls. Esc goes to normal mode, as there's no
+    /// program to need it, unless the agent is asking something.
+    fn chat_key(&mut self, press: &KeyPress<'_>) -> bool {
+        let Some(chat) = self.chat.as_mut() else {
+            return false;
+        };
+        let modifiers = press.modifiers;
+        let escape = *press.key == Key::Named(NamedKey::Escape);
+        if self.mode == Mode::Insert {
+            if enters_normal_mode(press) || (escape && chat.node.question.is_none()) {
+                self.mode = Mode::Normal;
+                return true;
+            }
+            chat.key(press);
+            return true;
+        }
+        let prefix = self.prefix.take();
+        let character = match press.key {
+            Key::Character(text) => text.chars().next(),
+            _ => None,
+        };
+        match (modifiers.ctrl, character, press.key) {
+            (false, Some('i' | 'a' | 'I' | 'A' | 'o'), _)
+            | (false, _, Key::Named(NamedKey::Enter)) => {
+                self.mode = Mode::Insert;
+                true
+            }
+            (false, Some('j'), _) | (false, _, Key::Named(NamedKey::ArrowDown)) => {
+                chat.scroll_lines(-1.0)
+            }
+            (false, Some('k'), _) | (false, _, Key::Named(NamedKey::ArrowUp)) => {
+                chat.scroll_lines(1.0)
+            }
+            (true, Some('e'), _) => chat.scroll_lines(-1.0),
+            (true, Some('y'), _) => chat.scroll_lines(1.0),
+            (true, Some('d'), _) | (false, _, Key::Named(NamedKey::PageDown)) => {
+                chat.scroll_half(false)
+            }
+            (true, Some('u'), _) | (false, _, Key::Named(NamedKey::PageUp)) => {
+                chat.scroll_half(true)
+            }
+            (false, Some('g'), _) if prefix == Some(Prefix::G) => chat.scroll_to_end(false),
+            (false, Some('g'), _) => {
+                self.prefix = Some(Prefix::G);
+                false
+            }
+            (false, Some('G'), _) => chat.scroll_to_end(true),
+            _ => false,
+        }
     }
 
     /// Whether a search is being typed, which takes every key.
@@ -214,10 +324,23 @@ impl Pane {
 
     /// Applies a view update. Returns whether the pane must be redrawn.
     pub(crate) fn view_changed(&mut self, update: &ViewUpdate) -> bool {
+        if let ViewUpdate::Snapshot(view) = update
+            && let Some(node) = view.chat()
+            && self.chat.is_none()
+        {
+            self.chat = Some(Box::new(ChatView::new(view.title.clone(), node.clone())));
+            self.unacknowledged = true;
+            return true;
+        }
+        if let Some(chat) = &mut self.chat {
+            chat.apply(update);
+            self.unacknowledged = true;
+            return true;
+        }
         let old_end = self.screen.as_ref().map(|screen| screen.state.history_end);
         match (&mut self.screen, update) {
             (Some(screen), _) => screen.apply(update),
-            (None, ViewUpdate::Snapshot(view)) => self.screen = Some(Screen::new(view)),
+            (None, ViewUpdate::Snapshot(view)) => self.screen = Screen::new(view),
             (None, ViewUpdate::Patch(_)) => return false,
         }
         let end = self.history_end();
@@ -293,6 +416,9 @@ impl Pane {
 
     /// Handles a key press. Returns whether the pane must be redrawn.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> bool {
+        if self.chat.is_some() {
+            return self.chat_key(press);
+        }
         let modifiers = press.modifiers;
         let ctrl_backslash = is_ctrl_backslash(press);
         let to_normal = enters_normal_mode(press);
@@ -342,6 +468,10 @@ impl Pane {
 
     /// Sends pasted text, marked as a paste if the program asked for that.
     pub(crate) fn paste(&mut self, text: &str) {
+        if let Some(chat) = &mut self.chat {
+            chat.paste(text);
+            return;
+        }
         let Some(screen) = &self.screen else {
             return;
         };
@@ -366,6 +496,10 @@ impl Pane {
     /// history, other programs get arrow keys, as other terminals send
     /// them. Returns whether the pane must be redrawn.
     pub(crate) fn wheel(&mut self, lines: i64, at: [i64; 2], modifiers: input::Modifiers) -> bool {
+        if let Some(chat) = &mut self.chat {
+            #[allow(clippy::cast_precision_loss)]
+            return chat.scroll_lines(lines as f32 * 3.0);
+        }
         if self.reports_mouse(modifiers.shift) {
             let button = if lines > 0 {
                 clackatoo_term::mouse::MouseButton::WheelUp
@@ -377,6 +511,7 @@ impl Pane {
                     action: clackatoo_term::mouse::MouseAction::Press(button),
                     line: at[0],
                     col: at[1],
+                    pixel: [0.0; 2],
                     clicks: 1,
                     modifiers,
                 });
@@ -531,6 +666,9 @@ impl Pane {
     /// The note for the bottom bar: a search being typed, or a message,
     /// with how far up the view is scrolled.
     pub(crate) fn label(&self) -> Option<String> {
+        if let Some(chat) = &self.chat {
+            return chat.label();
+        }
         if let Some(prompt) = &self.prompt {
             let slash = if prompt.backward { '?' } else { '/' };
             return Some(format!("{slash}{}▏", prompt.query));
@@ -1248,6 +1386,7 @@ mod mouse_tests {
         modifiers: Modifiers,
     ) -> bool {
         pane.mouse(&PaneMouse {
+            pixel: [0.0; 2],
             action,
             line,
             col,

@@ -1,46 +1,33 @@
-//! Chats with agents: terminals whose program is the daemon itself.
+//! Chats with agents: the daemon's side of a chat pane.
 //!
-//! A chat's terminal holds the conversation. The daemon writes it there as
-//! a program would, with escape sequences, so clients show, scroll, search
-//! and copy it as they do any terminal's, knowing nothing about agents.
-//! What's typed into it arrives as a terminal's input does, and is edited
-//! here into the next message.
+//! A chat has a terminal's ID and goes in panes as terminals do, but it
+//! has no grid: it keeps the conversation as turns (a [`ChatNode`]), and
+//! clients draw them. Every change to the turns goes into a journal of
+//! [`ChatPatch`]es, which each viewer is sent from where it last was.
 //!
-//! The conversation is written once, top to bottom, and scrolls into the
-//! terminal's history like a shell's output. Only its live end changes:
-//! the line of the agent's message being written, tool calls still
-//! running, a question the agent is asking, and the message being typed.
-//! That end is redrawn below everything else whenever it changes.
-//!
-//! Each exchange is a block, as a shell's commands are (see
-//! [`clackatoo_term`]'s blocks): the message is its command, and the
-//! answer its output.
+//! The agent behind the chat is the server's: a chat asks for what it
+//! needs with [`Action`]s, and is told what the agent said.
 
-use std::fmt::Write as _;
+use std::collections::VecDeque;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol_schema::MaybeUndefined;
 use agent_client_protocol_schema::v1::{
-    ContentBlock, PermissionOption, PermissionOptionKind, PlanEntryStatus, SessionUpdate,
-    StopReason, ToolCallStatus, ToolCallUpdate,
+    ContentBlock, PermissionOption, PermissionOptionKind, SessionUpdate, StopReason,
+    ToolCallStatus, ToolCallUpdate,
 };
-use clackatoo_protocol::{Size, TerminalId, TerminalInfo, TerminalStatus, View};
-use clackatoo_term::{Damage, Terminal};
+use clackatoo_protocol::{
+    ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Item, Node, Outcome, Patch,
+    Question, Size, TerminalId, TerminalInfo, TerminalStatus, Tool, ToolStatus, Turn, TurnEnd,
+    View, ViewUpdate,
+};
 use serde_json::Value;
-use unicode_width::UnicodeWidthStr;
 
-use crate::DaemonConfig;
-use crate::handover::{self, HandoverError};
+use crate::handover;
 
-/// Styles, as SGR parameters.
-const PLAIN: &str = "0";
-const DIM: &str = "2";
-const THOUGHT: &str = "2;3";
-const BOLD: &str = "1";
-const CODE: &str = "36";
-const USER: &str = "1;34";
-const DONE: &str = "32";
-const FAILED: &str = "31";
-const ASKING: &str = "1;33";
+/// How many changes a chat keeps for viewers that are behind. One further
+/// behind gets the whole chat again.
+const JOURNAL: usize = 4096;
 
 /// What a chat asks the server to do.
 #[derive(Debug, PartialEq)]
@@ -58,53 +45,6 @@ pub(crate) enum Action {
     },
 }
 
-/// A chat with an agent.
-#[derive(Debug)]
-pub(crate) struct HostedChat {
-    id: TerminalId,
-    emulator: Terminal,
-    cwd: String,
-    /// The agent's session, once it has made one.
-    session: Option<String>,
-    /// Whether the session is open in the agent now. It isn't before it's
-    /// made, after an upgrade, or once the agent has gone.
-    link: Link,
-    /// Whether a message has been sent and not yet answered.
-    answering: bool,
-    /// A message sent while there's no session, to go once there is.
-    queued: Option<String>,
-    /// Why the agent couldn't be started, until it is.
-    failure: Option<String>,
-    editor: Editor,
-    /// A paste began and hasn't ended yet.
-    pasting: bool,
-    /// A note under the message being typed, until the next key.
-    notice: Option<&'static str>,
-    words: Words,
-    tools: Vec<Tool>,
-    plan: Vec<(String, PlanEntryStatus)>,
-    question: Option<Question>,
-    /// Where the live end starts while it's drawn: its row's number,
-    /// counting history's rows first.
-    live: Option<u64>,
-    /// The command of the exchange whose answer hasn't started yet: its
-    /// row is marked once it does.
-    unanswered: Option<String>,
-    /// What's to be written above the live end, at the next redraw.
-    pending: String,
-}
-
-/// The agent's words as they're written.
-#[derive(Debug, Default)]
-struct Words {
-    /// The line being written, not yet ended.
-    partial: String,
-    /// What `partial` is: a message, or the agent's thinking.
-    thinking: bool,
-    /// Whether the message is inside a fenced code block.
-    code: bool,
-}
-
 /// Whether a chat's session is open in the agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Link {
@@ -114,98 +54,118 @@ enum Link {
     Open,
 }
 
-/// A tool call still running.
+/// A chat with an agent.
 #[derive(Debug)]
-struct Tool {
-    id: String,
+pub(crate) struct HostedChat {
+    id: TerminalId,
+    /// The size of the pane it's in, for listing.
+    size: Size,
     title: String,
-    status: ToolCallStatus,
+    cwd: String,
+    /// The agent's session, once it has made one.
+    session: Option<String>,
+    /// Whether the session is open in the agent now. It isn't before it's
+    /// made, after an upgrade, or once the agent has gone.
+    link: Link,
+    /// A message sent while there's no session, to go once there is.
+    queued: Option<String>,
+    node: ChatNode,
+    /// The JSON-RPC ID of the request the agent's question came in.
+    asking: Option<Value>,
+    journal: Journal,
 }
 
-/// The agent asking whether it may use a tool.
-#[derive(Debug)]
-struct Question {
-    request: Value,
+/// The changes made to a chat, numbered, for viewers to catch up with.
+#[derive(Debug, Default)]
+struct Journal {
+    /// The number of the first change kept.
+    first: u64,
+    patches: VecDeque<ChatPatch>,
+}
+
+impl Journal {
+    fn push(&mut self, patch: ChatPatch) {
+        if self.patches.len() == JOURNAL {
+            self.patches.pop_front();
+            self.first += 1;
+        }
+        self.patches.push_back(patch);
+    }
+
+    /// The number the next change will get.
+    fn end(&self) -> u64 {
+        self.first + self.patches.len() as u64
+    }
+}
+
+/// What a viewer was last sent of a chat.
+#[derive(Debug, Default)]
+pub(crate) struct ChatSent {
+    /// The number of the next change it hasn't had, once it has had the
+    /// chat whole.
+    next: Option<u64>,
     title: String,
-    options: Vec<PermissionOption>,
 }
 
 impl HostedChat {
     /// A chat in `cwd`, not yet with a session: the server is to get it
     /// one.
-    pub(crate) fn new(id: TerminalId, size: Size, cwd: String, config: &DaemonConfig) -> Self {
-        let mut chat = Self::blank(id, Terminal::new(size, &config.terminal), cwd);
-        chat.link = Link::Opening;
-        // Pastes come marked, so their lines aren't each sent.
-        chat.pending.push_str("\x1b[?2004h\x1b]2;agent\x07");
-        chat.redraw();
-        chat
-    }
-
-    fn blank(id: TerminalId, emulator: Terminal, cwd: String) -> Self {
+    pub(crate) fn new(id: TerminalId, size: Size, cwd: String) -> Self {
         Self {
             id,
-            emulator,
+            size,
+            title: "agent".to_owned(),
             cwd,
             session: None,
-            link: Link::Closed,
-            answering: false,
+            link: Link::Opening,
             queued: None,
-            failure: None,
-            editor: Editor::default(),
-            pasting: false,
-            notice: None,
-            words: Words::default(),
-            unanswered: None,
-            tools: Vec::new(),
-            plan: Vec::new(),
-            question: None,
-            live: None,
-            pending: String::new(),
+            node: ChatNode::default(),
+            asking: None,
+            journal: Journal::default(),
         }
     }
 
     /// Hands the chat over to the next build. The agent doesn't go with
-    /// it: the next build opens the session again when it's next needed.
+    /// it: the next build opens the session again when it's next needed,
+    /// and an answer under way is cut off.
     pub(crate) fn hand_over(mut self) -> handover::Chat {
-        self.erase_live();
+        if self.answering() {
+            self.end_turn(Outcome::Failed("cut off by an upgrade".to_owned()));
+        }
+        let failure = match self.node.state {
+            ChatState::Failed(why) => Some(why),
+            _ => None,
+        };
         handover::Chat {
             id: self.id.0,
+            cols: self.size.cols(),
+            rows: self.size.rows(),
+            title: self.title,
             cwd: self.cwd,
             session: self.session,
-            answering: self.answering,
-            failure: self.failure,
-            input: self.editor.text,
-            screen: self.emulator.snapshot(),
-            blocks: self.emulator.blocks_snapshot(),
+            failure,
+            turns: self.node.turns.into_iter().map(turn_to_handover).collect(),
         }
     }
 
     /// A chat the last build handed over.
-    pub(crate) fn resume(
-        chat: &handover::Chat,
-        config: &DaemonConfig,
-    ) -> Result<Self, HandoverError> {
-        let mut emulator = Terminal::restore(&chat.screen, &config.terminal)?;
-        emulator.restore_blocks(&chat.blocks);
-        let mut resumed = Self::blank(TerminalId(chat.id), emulator, chat.cwd.clone());
-        resumed.session.clone_from(&chat.session);
-        resumed.failure.clone_from(&chat.failure);
-        resumed.editor.insert(&chat.input);
-        if chat.answering {
-            resumed.answering = true;
-            resumed.end_turn(Some(("the answer was cut off by an upgrade", FAILED)), 1);
-        }
-        resumed.redraw();
-        Ok(resumed)
+    pub(crate) fn resume(chat: handover::Chat) -> Self {
+        let size = Size::new(chat.cols, chat.rows).unwrap_or(Size::new(80, 24).expect("valid"));
+        let mut resumed = Self::new(TerminalId(chat.id), size, chat.cwd);
+        resumed.link = Link::Closed;
+        resumed.title = chat.title;
+        resumed.session = chat.session;
+        resumed.node.turns = chat.turns.into_iter().map(turn_from_handover).collect();
+        resumed.node.state = chat.failure.map_or(ChatState::Ready, ChatState::Failed);
+        resumed
     }
 
     pub(crate) fn info(&self) -> TerminalInfo {
         TerminalInfo {
             id: self.id,
             pid: None,
-            size: self.emulator.size(),
-            title: self.emulator.title().to_owned(),
+            size: self.size,
+            title: self.title.clone(),
             status: TerminalStatus::Running,
         }
     }
@@ -220,181 +180,149 @@ impl HostedChat {
     }
 
     pub(crate) fn view(&self) -> View {
-        View::capture(&self.emulator)
-    }
-
-    pub(crate) fn emulator(&self) -> &Terminal {
-        &self.emulator
-    }
-
-    pub(crate) fn take_damage(&mut self, into: &mut Damage) {
-        self.emulator.take_damage(into);
-    }
-
-    /// Whether scrollback has rows to compact, or memory freed by history
-    /// being cleared to hand back.
-    pub(crate) fn scrollback_needs_compaction(&mut self) -> bool {
-        self.emulator.take_history_cleared() | self.emulator.scrollback_needs_compaction()
-    }
-
-    pub(crate) fn compact_scrollback(&mut self) {
-        self.emulator.compact_scrollback();
+        View {
+            title: self.title.clone(),
+            root: Node::Chat(self.node.clone()),
+        }
     }
 
     pub(crate) fn resize(&mut self, size: Size) {
-        if size == self.emulator.size() {
-            return;
-        }
-        // The live end is drawn for one width: it goes, and comes back
-        // drawn for the new one.
-        self.erase_live();
-        self.emulator.resize(size);
-        self.redraw();
+        self.size = size;
     }
 
-    // --- What's typed -----------------------------------------------------
-
-    /// Takes what was typed into the chat, as a terminal's program would
-    /// get it, and returns what the server must do about it.
-    pub(crate) fn input(&mut self, bytes: &[u8]) -> Vec<Action> {
-        let mut actions = Vec::new();
-        for key in keys(bytes, &mut self.pasting) {
-            self.notice = None;
-            if self.question.is_some() {
-                self.answer_key(&key, &mut actions);
+    /// What brings a viewer from what it was last sent to the chat now:
+    /// the changes since, or the chat whole if it's had none or is too far
+    /// behind. `None` if nothing changed.
+    pub(crate) fn catch_up(&self, sent: &mut ChatSent) -> Option<ViewUpdate> {
+        let end = self.journal.end();
+        let Some(next) = sent.next.filter(|&next| next >= self.journal.first) else {
+            sent.next = Some(end);
+            self.title.clone_into(&mut sent.title);
+            return Some(ViewUpdate::Snapshot(self.view()));
+        };
+        let mut patches = Vec::new();
+        if self.title != sent.title {
+            self.title.clone_into(&mut sent.title);
+            patches.push(Patch::Title(self.title.clone()));
+        }
+        let skip = usize::try_from(next - self.journal.first).expect("the journal is short");
+        for patch in self.journal.patches.iter().skip(skip) {
+            // Pieces of the same words, streamed, go as one.
+            if let (
+                ChatPatch::Append { turn, item, text },
+                Some(Patch::Chat(ChatPatch::Append {
+                    turn: last_turn,
+                    item: last_item,
+                    text: last_text,
+                })),
+            ) = (patch, patches.last_mut())
+                && (turn, item) == (last_turn, last_item)
+            {
+                last_text.push_str(text);
                 continue;
             }
-            match key {
-                Key::Text(text) => self.editor.insert(&text),
-                Key::Newline => self.editor.insert("\n"),
-                Key::Enter => self.send(&mut actions),
-                Key::Interrupt if self.answering => self.interrupt(&mut actions),
-                Key::Interrupt | Key::ClearLine => self.editor.clear_before(),
-                Key::Backspace => self.editor.backspace(),
-                Key::DeleteWord => self.editor.delete_word(),
-                Key::Delete => self.editor.delete(),
-                Key::Left => self.editor.left(),
-                Key::Right => self.editor.right(),
-                Key::Home => self.editor.cursor = 0,
-                Key::End => self.editor.cursor = self.editor.text.len(),
-                Key::Escape => {}
+            patches.push(Patch::Chat(patch.clone()));
+        }
+        sent.next = Some(end);
+        (!patches.is_empty()).then_some(ViewUpdate::Patch(patches))
+    }
+
+    // --- What the user asks -------------------------------------------------
+
+    /// Takes what a client asks of the chat, and returns what the server
+    /// must do about it.
+    pub(crate) fn act(&mut self, action: ChatAction) -> Vec<Action> {
+        let mut actions = Vec::new();
+        match action {
+            ChatAction::Send(text) => self.send(text, &mut actions),
+            ChatAction::Stop => self.stop(&mut actions),
+            ChatAction::Answer(option) => {
+                if let Some(request) = self.asking.take() {
+                    self.set_question(None);
+                    actions.push(Action::Answer { request, option });
+                }
             }
         }
-        self.redraw();
         actions
     }
 
-    /// Enter: sends the message typed, if there is one and the agent isn't
-    /// still answering the last.
-    fn send(&mut self, actions: &mut Vec<Action>) {
-        if self.editor.text.trim().is_empty() {
+    /// Sends a message, if there is one and the agent isn't still
+    /// answering the last.
+    fn send(&mut self, text: String, actions: &mut Vec<Action>) {
+        if text.trim().is_empty() || self.answering() {
             return;
         }
-        if self.answering {
-            self.notice = Some("the agent is still answering; Ctrl+C stops it");
-            return;
-        }
-        let text = std::mem::take(&mut self.editor.text);
-        self.editor.cursor = 0;
-        self.begin_turn(&text);
+        self.set_notice(None);
+        self.push_turn(Turn {
+            prompt: text.clone(),
+            sent: now(),
+            items: Vec::new(),
+            end: None,
+        });
         match self.link {
-            Link::Open => actions.push(Action::Prompt(text)),
+            Link::Open => {
+                self.set_state(ChatState::Answering);
+                actions.push(Action::Prompt(text));
+            }
             Link::Opening => self.queued = Some(text),
             Link::Closed => {
                 self.queued = Some(text);
                 self.link = Link::Opening;
-                self.failure = None;
+                self.set_state(ChatState::Starting);
                 actions.push(Action::Connect);
             }
         }
     }
 
-    /// Ctrl+C while the agent answers: asks it to stop, or takes back the
-    /// message if it hasn't gone yet.
-    fn interrupt(&mut self, actions: &mut Vec<Action>) {
+    /// Stops the agent answering, or takes back the message if it hasn't
+    /// gone yet.
+    fn stop(&mut self, actions: &mut Vec<Action>) {
+        if !self.answering() {
+            return;
+        }
+        // A question waiting is answered with none, as the protocol asks.
+        if let Some(request) = self.asking.take() {
+            self.set_question(None);
+            actions.push(Action::Answer {
+                request,
+                option: None,
+            });
+        }
         if self.link == Link::Open {
             actions.push(Action::Cancel);
-            self.notice = Some("stopping…");
         } else if self.queued.take().is_some() {
-            self.end_turn(Some(("stopped", DIM)), 1);
+            self.end_turn(Outcome::Stopped);
         }
     }
 
-    /// A key while the agent waits for an answer to its question: an
-    /// option's number picks it, and Esc or Ctrl+C turns it down.
-    fn answer_key(&mut self, key: &Key, actions: &mut Vec<Action>) {
-        let Some(question) = &self.question else {
-            return;
-        };
-        let option = match key {
-            Key::Text(text) => {
-                let picked = text
-                    .chars()
-                    .next()
-                    .and_then(|ch| ch.to_digit(10))
-                    .and_then(|digit| usize::try_from(digit).ok())
-                    .and_then(|digit| digit.checked_sub(1))
-                    .and_then(|index| question.options.get(index));
-                let Some(option) = picked else {
-                    self.notice = Some("pick an option by its number, or Esc to say no");
-                    return;
-                };
-                Some(option.option_id.0.to_string())
-            }
-            Key::Escape | Key::Interrupt => question
-                .options
-                .iter()
-                .find(|option| option.kind == PermissionOptionKind::RejectOnce)
-                .map(|option| option.option_id.0.to_string()),
-            _ => return,
-        };
-        let question = self.question.take().expect("checked above");
-        let name = option.as_deref().and_then(|picked| {
-            question
-                .options
-                .iter()
-                .find(|option| *option.option_id.0 == *picked)
-                .map(|option| option.name.clone())
-        });
-        let answer = format!(
-            "  ? {}: {}",
-            question.title,
-            name.as_deref().unwrap_or("no")
-        );
-        self.commit_line(&answer, DIM);
-        actions.push(Action::Answer {
-            request: question.request,
-            option,
-        });
-    }
-
-    // --- What the agent says ----------------------------------------------
+    // --- What the agent says ------------------------------------------------
 
     /// The session asked for was made, or opened again. Returns the
     /// message waiting for it, to send.
     pub(crate) fn connected(&mut self, session: String) -> Option<String> {
         self.link = Link::Open;
-        self.failure = None;
         // Opening one again answers with no ID: it's the one asked for.
         if !session.is_empty() {
             self.session = Some(session);
         }
         let queued = self.queued.take();
-        self.redraw();
+        self.set_state(if queued.is_some() {
+            ChatState::Answering
+        } else {
+            ChatState::Ready
+        });
         queued
     }
 
     /// The session couldn't be made or opened.
     pub(crate) fn failed_to_connect(&mut self, reason: &str) {
         self.link = Link::Closed;
-        let note = format!("the agent couldn't start: {reason}");
         if self.queued.take().is_some() {
-            self.end_turn(Some((&note, FAILED)), 1);
-        } else {
-            self.commit_line(&note, FAILED);
+            self.end_turn(Outcome::Failed(format!(
+                "the agent couldn't start: {reason}"
+            )));
         }
-        self.failure = Some(reason.to_owned());
-        self.redraw();
+        self.set_state(ChatState::Failed(reason.to_owned()));
     }
 
     /// The agent has gone: it exited, or stopped answering.
@@ -402,39 +330,37 @@ impl HostedChat {
         let was_opening = self.link == Link::Opening;
         self.link = Link::Closed;
         self.queued = None;
-        if self.answering {
-            self.end_turn(Some(("the agent stopped", FAILED)), 1);
+        if self.answering() {
+            self.end_turn(Outcome::Failed("the agent stopped".to_owned()));
+            self.set_state(ChatState::Ready);
         } else if was_opening {
-            self.commit_line("the agent stopped before it started", FAILED);
-            self.failure = Some("it stopped".to_owned());
+            self.set_state(ChatState::Failed("it stopped before it started".to_owned()));
         } else if self.session.is_some() {
-            self.commit_line("the agent stopped; the next message starts it again", DIM);
+            self.set_notice(Some(
+                "The agent stopped. The next message starts it again.".to_owned(),
+            ));
         }
-        self.redraw();
     }
 
     /// The agent finished answering, or failed to.
     pub(crate) fn answered(&mut self, result: Result<StopReason, String>) {
-        let note = match result {
-            Ok(StopReason::Cancelled) => Some(("stopped".to_owned(), DIM)),
+        let outcome = match result {
+            Ok(StopReason::Cancelled) => Outcome::Stopped,
             Ok(StopReason::MaxTokens) => {
-                Some(("the answer hit its length limit".to_owned(), FAILED))
+                Outcome::Failed("the answer hit its length limit".to_owned())
             }
             Ok(StopReason::MaxTurnRequests) => {
-                Some(("the answer took too many steps".to_owned(), FAILED))
+                Outcome::Failed("the answer took too many steps".to_owned())
             }
-            Ok(StopReason::Refusal) => Some(("the agent refused".to_owned(), FAILED)),
+            Ok(StopReason::Refusal) => Outcome::Failed("the agent refused".to_owned()),
             // Done, or a reason newer than this build knows.
-            Ok(_) => None,
-            Err(err) => Some((format!("the agent failed: {err}"), FAILED)),
+            Ok(_) => Outcome::Done,
+            Err(err) => Outcome::Failed(format!("the agent failed: {err}")),
         };
-        // Only a finished answer is a success, as a command's exit 0 is.
-        let status = i32::from(note.is_some());
-        self.end_turn(
-            note.as_ref().map(|(text, style)| (text.as_str(), *style)),
-            status,
-        );
-        self.redraw();
+        if self.answering() {
+            self.end_turn(outcome);
+        }
+        self.set_state(ChatState::Ready);
     }
 
     /// The agent asks whether it may use a tool.
@@ -442,593 +368,309 @@ impl HostedChat {
         &mut self,
         request: Value,
         tool: &ToolCallUpdate,
-        options: Vec<PermissionOption>,
+        options: &[PermissionOption],
     ) {
+        let id = tool.tool_call_id.0.to_string();
         let title = tool
             .fields
             .title
             .clone()
-            .or_else(|| {
-                self.tool(&tool.tool_call_id.0)
-                    .map(|tool| tool.title.clone())
-            })
+            .or_else(|| self.tool(&id).map(|tool| tool.title.clone()))
             .unwrap_or_else(|| "use a tool".to_owned());
-        self.question = Some(Question {
-            request,
+        let choices = options
+            .iter()
+            .map(|option| Choice {
+                id: option.option_id.0.to_string(),
+                name: option.name.clone(),
+                kind: match option.kind {
+                    PermissionOptionKind::AllowAlways => ChoiceKind::AllowAlways,
+                    PermissionOptionKind::RejectOnce => ChoiceKind::RejectOnce,
+                    PermissionOptionKind::RejectAlways => ChoiceKind::RejectAlways,
+                    // Allowing once, or a kind newer than this build knows.
+                    _ => ChoiceKind::AllowOnce,
+                },
+            })
+            .collect();
+        self.asking = Some(request);
+        self.set_question(Some(Question {
             title: clean(&title),
-            options,
-        });
-        self.redraw();
+            choices,
+        }));
     }
 
     /// Takes a change to the session.
     pub(crate) fn update(&mut self, update: SessionUpdate) {
         match update {
-            SessionUpdate::AgentMessageChunk(chunk) => self.write_words(&chunk.content, false),
-            SessionUpdate::AgentThoughtChunk(chunk) => self.write_words(&chunk.content, true),
-            SessionUpdate::ToolCall(call) => {
-                self.end_partial();
-                let id = call.tool_call_id.0.to_string();
-                let tool = Tool {
-                    id,
-                    title: clean(&call.title),
-                    status: call.status,
-                };
-                self.tools.retain(|old| old.id != tool.id);
-                self.settle_or_keep(tool);
-            }
+            SessionUpdate::AgentMessageChunk(chunk) => self.write(&chunk.content, false),
+            SessionUpdate::AgentThoughtChunk(chunk) => self.write(&chunk.content, true),
+            SessionUpdate::ToolCall(call) => self.set_tool(Tool {
+                id: call.tool_call_id.0.to_string(),
+                title: clean(&call.title),
+                status: tool_status(call.status),
+            }),
             SessionUpdate::ToolCallUpdate(update) => {
                 let id = update.tool_call_id.0.to_string();
-                let index = self.tools.iter().position(|tool| tool.id == id);
-                let mut tool = match index {
-                    Some(index) => self.tools.remove(index),
-                    None => Tool {
-                        id,
-                        title: "a tool".to_owned(),
-                        status: ToolCallStatus::Pending,
-                    },
-                };
+                let mut tool = self.tool(&id).cloned().unwrap_or(Tool {
+                    id,
+                    title: "a tool".to_owned(),
+                    status: ToolStatus::Running,
+                });
                 if let Some(title) = &update.fields.title {
                     tool.title = clean(title);
                 }
                 if let Some(status) = update.fields.status {
-                    tool.status = status;
+                    tool.status = tool_status(status);
                 }
-                if matches!(
-                    tool.status,
-                    ToolCallStatus::Completed | ToolCallStatus::Failed
-                ) {
-                    self.end_partial();
-                }
-                // Back where it was, unless it's finished.
-                match index {
-                    Some(index)
-                        if !matches!(
-                            tool.status,
-                            ToolCallStatus::Completed | ToolCallStatus::Failed
-                        ) =>
-                    {
-                        self.tools.insert(index, tool);
-                    }
-                    _ => self.settle_or_keep(tool),
-                }
-            }
-            SessionUpdate::Plan(plan) => {
-                self.plan = plan
-                    .entries
-                    .into_iter()
-                    .map(|entry| (clean(&entry.content), entry.status))
-                    .collect();
+                self.set_tool(tool);
             }
             SessionUpdate::SessionInfoUpdate(info) => {
+                // Not a change to the turns: viewers pick it up anyway.
                 if let MaybeUndefined::Value(title) = info.title {
-                    let _ = write!(self.pending, "\x1b]2;{}\x07", clean(&title));
+                    self.title = clean(&title);
                 }
             }
-            // Its usage, modes, settings and commands, which the chat
+            // Its plan, usage, modes, settings and commands, which the chat
             // doesn't show yet (CLACKA-25), and the user's own words,
-            // already written.
-            _ => return,
+            // already kept.
+            _ => {}
         }
-        self.redraw();
     }
 
-    fn tool(&self, id: &str) -> Option<&Tool> {
-        self.tools.iter().find(|tool| tool.id == id)
-    }
-
-    /// Writes down a finished tool call above the live end, or keeps one
-    /// still running in it.
-    fn settle_or_keep(&mut self, tool: Tool) {
-        let (mark, style) = match tool.status {
-            ToolCallStatus::Completed => ("✓", DONE),
-            ToolCallStatus::Failed => ("✗", FAILED),
-            _ => {
-                self.tools.push(tool);
-                return;
-            }
-        };
-        self.answer_starts();
-        let _ = write!(
-            self.pending,
-            "  \x1b[{style}m{mark}\x1b[0m \x1b[{DIM}m{}\x1b[0m\r\n",
-            tool.title
-        );
-    }
-
-    /// A piece of the agent's message, or of its thinking.
-    fn write_words(&mut self, content: &ContentBlock, thinking: bool) {
+    /// A piece of the agent's words, or of its thinking, on the end of the
+    /// turn answering.
+    fn write(&mut self, content: &ContentBlock, thinking: bool) {
         let ContentBlock::Text(text) = content else {
             return;
         };
-        if thinking != self.words.thinking {
-            self.end_partial();
-            self.words.thinking = thinking;
-        }
-        self.words.partial.push_str(&text.text);
-        while let Some(end) = self.words.partial.find('\n') {
-            let line: String = self.words.partial.drain(..=end).collect();
-            self.commit_words(line.trim_end_matches(['\n', '\r']));
-        }
-    }
-
-    /// Writes down the line of words being written, though it hasn't
-    /// ended, as something else comes after it.
-    fn end_partial(&mut self) {
-        if !self.words.partial.is_empty() {
-            let line = std::mem::take(&mut self.words.partial);
-            self.commit_words(&line);
-        }
-    }
-
-    /// Writes down one line of the agent's words, styled as Markdown
-    /// would show it.
-    fn commit_words(&mut self, line: &str) {
-        let style = self.words_style(line);
-        if line.trim_start().starts_with("```") && !self.words.thinking {
-            self.words.code = !self.words.code;
-        }
-        self.commit_line(line, style);
-    }
-
-    /// How a line of the agent's words is shown.
-    fn words_style(&self, line: &str) -> &'static str {
-        if self.words.thinking {
-            THOUGHT
-        } else if line.trim_start().starts_with("```") {
-            DIM
-        } else if self.words.code {
-            CODE
-        } else if line.starts_with('#') {
-            BOLD
-        } else {
-            PLAIN
-        }
-    }
-
-    // --- Exchanges ----------------------------------------------------------
-
-    /// Writes down the user's message, starting an exchange.
-    fn begin_turn(&mut self, text: &str) {
-        self.answering = true;
-        self.words.code = false;
-        self.words.thinking = false;
-        // Where what's written down ends: the live end starts there.
-        let end = self
-            .live
-            .unwrap_or_else(|| self.emulator.primary().scrollback_end() + self.cursor_line());
-        if end > 0 {
-            self.pending.push_str("\r\n");
-        }
-        self.pending.push_str("\x1b]133;A\x07");
-        for (index, line) in text.lines().enumerate() {
-            let lead = if index == 0 { "›" } else { " " };
-            let _ = write!(
-                self.pending,
-                "\x1b[{USER}m{lead}\x1b[0m {}\r\n",
-                clean(line)
-            );
-        }
-        self.pending.push_str("\r\n");
-        self.unanswered = Some(text.to_owned());
-    }
-
-    /// Ends the exchange: what's left of the answer is written down, with
-    /// `note`, and the block gets `status`, as a command's exit status.
-    fn end_turn(&mut self, note: Option<(&str, &str)>, status: i32) {
-        self.end_partial();
-        for tool in std::mem::take(&mut self.tools) {
-            self.answer_starts();
-            let _ = write!(self.pending, "  \x1b[{DIM}m○ {}\x1b[0m\r\n", tool.title);
-        }
-        if let Some((note, style)) = note {
-            self.commit_line(note, style);
-        }
-        self.plan.clear();
-        self.question = None;
-        self.answering = false;
-        self.unanswered = None;
-        let _ = write!(self.pending, "\x1b]133;D;{status}\x07");
-    }
-
-    /// Marks the row this exchange's answer starts on, if it hasn't
-    /// started yet. The row being written down, not the live end, which is
-    /// erased with its marks.
-    fn answer_starts(&mut self) {
-        if let Some(command) = self.unanswered.take() {
-            let _ = write!(
-                self.pending,
-                "\x1b]133;C;cmdline_url={}\x07",
-                percent_encode(&command)
-            );
-        }
-    }
-
-    fn commit_line(&mut self, line: &str, style: &str) {
-        self.answer_starts();
-        let _ = write!(self.pending, "\x1b[{style}m{}\x1b[0m\r\n", clean(line));
-    }
-
-    // --- Drawing ------------------------------------------------------------
-
-    /// Takes the live end away, leaving the cursor where it started.
-    fn erase_live(&mut self) {
-        if let Some(start) = self.live.take() {
-            let top = self.emulator.primary().scrollback_end();
-            let line = start.saturating_sub(top);
-            self.emulator
-                .advance(format!("\x1b[{};1H\x1b[J", line + 1).as_bytes());
-        }
-    }
-
-    /// Writes down what's pending, and draws the live end below it.
-    fn redraw(&mut self) {
-        self.erase_live();
-        self.emulator.advance(self.pending.as_bytes());
-        self.pending.clear();
-
-        let size = self.emulator.size();
-        let (width, height) = (usize::from(size.cols()), usize::from(size.rows()));
-        let start = self.emulator.primary().scrollback_end() + self.cursor_line();
-        self.live = Some(start);
-
-        let mut lines = self.live_lines();
-        // The live end fits on the screen, or it couldn't be erased: what
-        // doesn't fit goes, from the top, but the message being typed.
-        let rows = |line: &(String, &str)| {
-            UnicodeWidthStr::width(line.0.as_str())
-                .div_ceil(width)
-                .max(1)
+        let Some(index) = self.answering_turn() else {
+            return;
         };
-        let input_rows: usize = self
-            .editor
-            .lines()
-            .map(|line| (line.width() + 2).div_ceil(width).max(1))
-            .sum();
-        let mut total: usize = lines.iter().map(rows).sum::<usize>() + input_rows;
-        while total >= height && !lines.is_empty() {
-            total -= rows(&lines.remove(0));
-        }
-
-        let mut out = String::new();
-        for (text, style) in &lines {
-            let _ = write!(out, "\x1b[{style}m{text}\x1b[0m\r\n");
-        }
-        // The message being typed, with the cursor at its caret.
-        let caret = self.editor.cursor;
-        let (before, after) = self.editor.text.split_at(caret);
-        let prompt_style = if self.answering || self.link == Link::Opening {
-            DIM
-        } else {
-            USER
+        let text = clean_text(&text.text);
+        let items = &mut self.node.turns[index].items;
+        let continues = match items.last() {
+            Some(Item::Words(_)) => !thinking,
+            Some(Item::Thought(_)) => thinking,
+            _ => false,
         };
-        let _ = write!(out, "\x1b[{prompt_style}m›\x1b[0m ");
-        push_input(&mut out, before);
-        self.emulator.advance(out.as_bytes());
-        let caret_row = self.emulator.primary().scrollback_end() + self.cursor_line();
-        let caret_col = self.emulator.cursor().col;
-        out.clear();
-        push_input(&mut out, after);
-        self.emulator.advance(out.as_bytes());
-        let top = self.emulator.primary().scrollback_end();
-        let row = caret_row.saturating_sub(top);
-        self.emulator
-            .advance(format!("\x1b[{};{}H", row + 1, caret_col + 1).as_bytes());
+        if !continues {
+            // A new item goes whole, empty, with the text appended after.
+            items.push(if thinking {
+                Item::Thought(String::new())
+            } else {
+                Item::Words(String::new())
+            });
+            self.patch_turn(index);
+        }
+        let items = &mut self.node.turns[index].items;
+        if let Some(Item::Words(words) | Item::Thought(words)) = items.last_mut() {
+            words.push_str(&text);
+        }
+        let item = items.len() - 1;
+        self.journal.push(ChatPatch::Append {
+            turn: index_u32(index),
+            item: index_u32(item),
+            text,
+        });
     }
 
-    fn cursor_line(&self) -> u64 {
-        u64::try_from(self.emulator.cursor().line).expect("screen lines fit in a u64")
+    /// Adds `tool` to the turn answering, or changes the one with its ID.
+    fn set_tool(&mut self, tool: Tool) {
+        let Some(index) = self.answering_turn() else {
+            return;
+        };
+        let items = &mut self.node.turns[index].items;
+        let existing = items
+            .iter_mut()
+            .find(|item| matches!(item, Item::Tool(old) if old.id == tool.id));
+        match existing {
+            Some(item) => *item = Item::Tool(tool),
+            None => items.push(Item::Tool(tool)),
+        }
+        self.patch_turn(index);
     }
 
-    /// The lines of the live end above the message being typed, each with
-    /// its style.
-    fn live_lines(&self) -> Vec<(String, &'static str)> {
-        let mut lines = Vec::new();
-        if !self.words.partial.is_empty() {
-            lines.push((
-                clean(&self.words.partial),
-                self.words_style(&self.words.partial),
-            ));
-        }
-        for tool in &self.tools {
-            lines.push((format!("  ○ {}", tool.title), DIM));
-        }
-        if self.answering {
-            for (entry, status) in &self.plan {
-                let mark = match status {
-                    PlanEntryStatus::Completed => "☑",
-                    PlanEntryStatus::InProgress => "◐",
-                    _ => "☐",
-                };
-                lines.push((format!("  {mark} {entry}"), DIM));
+    /// The tool with `id`, in the turn answering.
+    fn tool(&self, id: &str) -> Option<&Tool> {
+        let turn = self.node.turns.get(self.answering_turn()?)?;
+        turn.items.iter().find_map(|item| match item {
+            Item::Tool(tool) if tool.id == id => Some(tool),
+            _ => None,
+        })
+    }
+
+    // --- Changes ------------------------------------------------------------
+
+    /// Whether a message has been sent and not yet answered.
+    fn answering(&self) -> bool {
+        self.answering_turn().is_some()
+    }
+
+    /// The turn being answered, if one is.
+    fn answering_turn(&self) -> Option<usize> {
+        let last = self.node.turns.len().checked_sub(1)?;
+        self.node.turns[last].end.is_none().then_some(last)
+    }
+
+    /// Ends the turn being answered. Tools still running then never
+    /// finished.
+    fn end_turn(&mut self, outcome: Outcome) {
+        let Some(index) = self.answering_turn() else {
+            return;
+        };
+        let turn = &mut self.node.turns[index];
+        for item in &mut turn.items {
+            if let Item::Tool(tool) = item
+                && tool.status == ToolStatus::Running
+            {
+                tool.status = ToolStatus::Failed;
             }
         }
-        if let Some(question) = &self.question {
-            lines.push((format!("  ? May the agent {}?", question.title), ASKING));
-            let options: Vec<String> = (question.options.iter().enumerate())
-                .map(|(index, option)| format!("{} {}", index + 1, clean(&option.name)))
-                .collect();
-            lines.push((format!("    {}  ·  Esc no", options.join("  ·  ")), BOLD));
+        turn.end = Some(TurnEnd { at: now(), outcome });
+        self.patch_turn(index);
+        self.asking = None;
+        self.set_question(None);
+    }
+
+    fn push_turn(&mut self, turn: Turn) {
+        self.node.turns.push(turn);
+        self.patch_turn(self.node.turns.len() - 1);
+    }
+
+    /// Records that turn `index` changed, sending it whole.
+    fn patch_turn(&mut self, index: usize) {
+        self.journal.push(ChatPatch::Turn {
+            index: index_u32(index),
+            turn: self.node.turns[index].clone(),
+        });
+    }
+
+    fn set_state(&mut self, state: ChatState) {
+        if self.node.state != state {
+            self.node.state = state.clone();
+            self.journal.push(ChatPatch::State(state));
         }
-        let status = if let Some(notice) = self.notice {
-            Some(notice.to_owned())
-        } else if self.question.is_some() {
-            None
-        } else if self.link == Link::Opening {
-            Some("starting the agent…".to_owned())
-        } else if self.answering {
-            Some("answering · Ctrl+C stops it".to_owned())
-        } else if self.failure.is_some() {
-            Some("send a message to try again".to_owned())
-        } else {
-            None
-        };
-        if let Some(status) = status {
-            lines.push((format!("  {status}"), DIM));
+    }
+
+    fn set_question(&mut self, question: Option<Question>) {
+        if self.node.question != question {
+            self.node.question.clone_from(&question);
+            self.journal.push(ChatPatch::Question(question));
         }
-        lines
+    }
+
+    fn set_notice(&mut self, notice: Option<String>) {
+        if self.node.notice != notice {
+            self.node.notice.clone_from(&notice);
+            self.journal.push(ChatPatch::Notice(notice));
+        }
     }
 }
 
-/// Writes the message being typed: its first line after the prompt, the
-/// rest each under it.
-fn push_input(out: &mut String, text: &str) {
-    for (index, line) in text.split('\n').enumerate() {
-        if index > 0 {
-            out.push_str("\r\n  ");
-        }
-        out.push_str(&clean(line));
+/// Now, in milliseconds since the Unix epoch.
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn index_u32(index: usize) -> u32 {
+    u32::try_from(index).expect("far fewer than 4 billion turns or items")
+}
+
+fn tool_status(status: ToolCallStatus) -> ToolStatus {
+    match status {
+        ToolCallStatus::Completed => ToolStatus::Done,
+        ToolCallStatus::Failed => ToolStatus::Failed,
+        _ => ToolStatus::Running,
     }
 }
 
-/// `text` without anything that would control the terminal rather than
-/// show, so an agent can't move the cursor, retitle the window or ring the
-/// bell by what it writes. Tabs become spaces.
+/// A title or name on one line, without control characters.
 fn clean(text: &str) -> String {
     text.chars()
-        .filter_map(|ch| match ch {
-            '\t' => Some(' '),
-            ch if ch.is_control() => None,
-            ch => Some(ch),
-        })
+        .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
+        .filter(|ch| !ch.is_control())
         .collect()
 }
 
-/// `text` percent-encoded, as OSC 133's `cmdline_url` takes it.
-fn percent_encode(text: &str) -> String {
-    let mut encoded = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
-            encoded.push(char::from(byte));
-        } else {
-            let _ = write!(encoded, "%{byte:02X}");
-        }
-    }
-    encoded
+/// The agent's words without control characters, but with their line
+/// breaks and tabs.
+fn clean_text(text: &str) -> String {
+    text.chars()
+        .filter(|&ch| matches!(ch, '\n' | '\t') || !ch.is_control())
+        .collect()
 }
 
-/// The message being typed.
-#[derive(Debug, Default)]
-struct Editor {
-    text: String,
-    /// Where the caret is, in bytes.
-    cursor: usize,
-}
-
-impl Editor {
-    fn lines(&self) -> impl Iterator<Item = &str> {
-        self.text.split('\n')
-    }
-
-    fn insert(&mut self, text: &str) {
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        self.text.insert_str(self.cursor, &text);
-        self.cursor += text.len();
-    }
-
-    fn previous(&self) -> Option<usize> {
-        self.text[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map(|(index, _)| index)
-    }
-
-    fn next(&self) -> Option<usize> {
-        self.text[self.cursor..]
-            .chars()
-            .next()
-            .map(|ch| self.cursor + ch.len_utf8())
-    }
-
-    fn backspace(&mut self) {
-        if let Some(previous) = self.previous() {
-            self.text.replace_range(previous..self.cursor, "");
-            self.cursor = previous;
-        }
-    }
-
-    fn delete(&mut self) {
-        if let Some(next) = self.next() {
-            self.text.replace_range(self.cursor..next, "");
-        }
-    }
-
-    fn left(&mut self) {
-        if let Some(previous) = self.previous() {
-            self.cursor = previous;
-        }
-    }
-
-    fn right(&mut self) {
-        if let Some(next) = self.next() {
-            self.cursor = next;
-        }
-    }
-
-    /// Deletes the word before the caret, and the spaces after it.
-    fn delete_word(&mut self) {
-        let before = &self.text[..self.cursor];
-        let trimmed = before.trim_end();
-        let start = trimmed
-            .char_indices()
-            .rev()
-            .find(|(_, ch)| ch.is_whitespace())
-            .map_or(0, |(index, ch)| index + ch.len_utf8());
-        self.text.replace_range(start..self.cursor, "");
-        self.cursor = start;
-    }
-
-    /// Deletes everything before the caret.
-    fn clear_before(&mut self) {
-        self.text.replace_range(..self.cursor, "");
-        self.cursor = 0;
+fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
+    handover::ChatTurn {
+        prompt: turn.prompt,
+        sent: turn.sent,
+        items: (turn.items.into_iter())
+            .map(|item| match item {
+                Item::Words(words) => handover::ChatItem::Words(words),
+                Item::Thought(words) => handover::ChatItem::Thought(words),
+                Item::Tool(tool) => handover::ChatItem::Tool {
+                    id: tool.id,
+                    title: tool.title,
+                    status: match tool.status {
+                        ToolStatus::Running => handover::ToolStatus::Running,
+                        ToolStatus::Done => handover::ToolStatus::Done,
+                        ToolStatus::Failed => handover::ToolStatus::Failed,
+                    },
+                },
+            })
+            .collect(),
+        end: turn.end.map(|end| handover::ChatEnd {
+            at: end.at,
+            outcome: match end.outcome {
+                Outcome::Done => handover::ChatOutcome::Done,
+                Outcome::Stopped => handover::ChatOutcome::Stopped,
+                Outcome::Failed(why) => handover::ChatOutcome::Failed(why),
+            },
+        }),
     }
 }
 
-/// A key typed into a chat.
-#[derive(Debug, PartialEq, Eq)]
-enum Key {
-    /// Text to type: keys, or a paste.
-    Text(String),
-    /// Enter, which sends the message.
-    Enter,
-    /// A new line in the message: Alt+Enter or Ctrl+J.
-    Newline,
-    Backspace,
-    /// Ctrl+W, or Ctrl+Backspace.
-    DeleteWord,
-    Delete,
-    Left,
-    Right,
-    Home,
-    End,
-    /// Ctrl+C.
-    Interrupt,
-    /// Ctrl+U.
-    ClearLine,
-    Escape,
-}
-
-const PASTE_START: &[u8] = b"\x1b[200~";
-const PASTE_END: &[u8] = b"\x1b[201~";
-
-/// The keys in `bytes`, encoded as a terminal sends them to its program.
-/// `pasting` says whether a paste is under way, across calls.
-fn keys(mut bytes: &[u8], pasting: &mut bool) -> Vec<Key> {
-    let mut keys = Vec::new();
-    let mut text = Vec::new();
-    let flush = |text: &mut Vec<u8>, keys: &mut Vec<Key>| {
-        if !text.is_empty() {
-            keys.push(Key::Text(String::from_utf8_lossy(text).into_owned()));
-            text.clear();
-        }
-    };
-    while !bytes.is_empty() {
-        if *pasting {
-            let end = find(bytes, PASTE_END);
-            text.extend_from_slice(&bytes[..end.unwrap_or(bytes.len())]);
-            match end {
-                Some(end) => {
-                    *pasting = false;
-                    bytes = &bytes[end + PASTE_END.len()..];
-                }
-                None => bytes = &[],
-            }
-            continue;
-        }
-        if let Some(rest) = bytes.strip_prefix(PASTE_START) {
-            *pasting = true;
-            bytes = rest;
-            continue;
-        }
-        let (key, len) = match bytes {
-            [b'\r', ..] => (Some(Key::Enter), 1),
-            [b'\n', ..] => (Some(Key::Newline), 1),
-            [0x7f, ..] => (Some(Key::Backspace), 1),
-            [0x08 | 0x17, ..] => (Some(Key::DeleteWord), 1),
-            [0x03, ..] => (Some(Key::Interrupt), 1),
-            [0x15, ..] => (Some(Key::ClearLine), 1),
-            [0x01, ..] => (Some(Key::Home), 1),
-            [0x05, ..] => (Some(Key::End), 1),
-            [0x1b, b'\r', ..] => (Some(Key::Newline), 2),
-            [0x1b, b'[' | b'O', rest @ ..] => {
-                // A control sequence: parameters, then its final byte.
-                let end = rest.iter().position(|byte| (0x40..=0x7e).contains(byte));
-                match end {
-                    Some(end) => {
-                        let key = match (&rest[..end], rest[end]) {
-                            (b"" | b"1", b'D') => Some(Key::Left),
-                            (b"" | b"1", b'C') => Some(Key::Right),
-                            (b"" | b"1", b'H') | (b"1" | b"7", b'~') => Some(Key::Home),
-                            (b"" | b"1", b'F') | (b"4" | b"8", b'~') => Some(Key::End),
-                            (b"3", b'~') => Some(Key::Delete),
-                            _ => None,
-                        };
-                        (key, end + 3)
-                    }
-                    None => (None, bytes.len()),
-                }
-            }
-            [0x1b, ..] => (Some(Key::Escape), 1),
-            [byte, ..] if *byte < 0x20 => (None, 1),
-            [byte, ..] => {
-                text.push(*byte);
-                bytes = &bytes[1..];
-                let _ = byte;
-                continue;
-            }
-            [] => unreachable!("bytes isn't empty"),
-        };
-        flush(&mut text, &mut keys);
-        keys.extend(key);
-        bytes = &bytes[len..];
+fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
+    Turn {
+        prompt: turn.prompt,
+        sent: turn.sent,
+        items: (turn.items.into_iter())
+            .map(|item| match item {
+                handover::ChatItem::Words(words) => Item::Words(words),
+                handover::ChatItem::Thought(words) => Item::Thought(words),
+                handover::ChatItem::Tool { id, title, status } => Item::Tool(Tool {
+                    id,
+                    title,
+                    status: match status {
+                        handover::ToolStatus::Running => ToolStatus::Running,
+                        handover::ToolStatus::Done => ToolStatus::Done,
+                        handover::ToolStatus::Failed => ToolStatus::Failed,
+                    },
+                }),
+            })
+            .collect(),
+        end: turn.end.map(|end| TurnEnd {
+            at: end.at,
+            outcome: match end.outcome {
+                handover::ChatOutcome::Done => Outcome::Done,
+                handover::ChatOutcome::Stopped => Outcome::Stopped,
+                handover::ChatOutcome::Failed(why) => Outcome::Failed(why),
+            },
+        }),
     }
-    flush(&mut text, &mut keys);
-    keys
-}
-
-/// Where `needle` first is in `haystack`.
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 #[cfg(test)]
 mod tests {
     use agent_client_protocol_schema::v1::SessionNotification;
-    use clackatoo_term::Which;
 
     use super::*;
 
     fn chat() -> HostedChat {
-        let config = DaemonConfig::from_env();
-        HostedChat::new(
-            TerminalId(1),
-            Size::new(40, 12).unwrap(),
-            "/tmp".to_owned(),
-            &config,
-        )
+        HostedChat::new(TerminalId(1), Size::new(40, 12).unwrap(), "/tmp".to_owned())
     }
 
     fn update(chat: &mut HostedChat, json: &str) {
@@ -1037,213 +679,254 @@ mod tests {
         chat.update(notification.update);
     }
 
-    fn screen(chat: &HostedChat) -> String {
-        chat.emulator.screen_text()
-    }
-
-    #[test]
-    fn keys_are_decoded_as_a_terminal_sends_them() {
-        let mut pasting = false;
-        assert_eq!(
-            keys(b"hi\x1b[D\x7f\r\x1b\r\x03\x1b[3~\x1b", &mut pasting),
-            [
-                Key::Text("hi".into()),
-                Key::Left,
-                Key::Backspace,
-                Key::Enter,
-                Key::Newline,
-                Key::Interrupt,
-                Key::Delete,
-                Key::Escape,
-            ]
-        );
-        assert_eq!(
-            keys("a\x1b[200~x\ry\x1b[201~é".as_bytes(), &mut pasting),
-            [Key::Text("ax\ryé".into())]
-        );
-        // A paste split between two inputs.
-        assert_eq!(
-            keys(b"\x1b[200~one\r", &mut pasting),
-            [Key::Text("one\r".into())]
-        );
-        assert!(pasting);
-        assert_eq!(
-            keys(b"two\x1b[201~\r", &mut pasting),
-            [Key::Text("two".into()), Key::Enter]
+    fn words(chat: &mut HostedChat, text: &str) {
+        let text = serde_json::to_string(text).unwrap();
+        update(
+            chat,
+            &format!(
+                r#"{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":{text}}}}}"#
+            ),
         );
     }
 
-    #[test]
-    fn the_editor_moves_and_deletes_by_character_and_word() {
-        let mut editor = Editor::default();
-        editor.insert("héllo wörld");
-        editor.left();
-        editor.backspace();
-        assert_eq!((editor.text.as_str(), editor.cursor), ("héllo wörd", 11));
-        editor.delete_word();
-        assert_eq!(editor.text, "héllo d");
-        editor.insert("a\r\nb");
-        assert_eq!(editor.text, "héllo a\nbd");
+    fn send(chat: &mut HostedChat, text: &str) -> Vec<Action> {
+        chat.act(ChatAction::Send(text.to_owned()))
+    }
+
+    fn outcome(turn: &Turn) -> Option<&Outcome> {
+        turn.end.as_ref().map(|end| &end.outcome)
+    }
+
+    /// A viewer's copy of the chat, kept with the updates it's sent.
+    struct Viewer {
+        sent: ChatSent,
+        view: Option<View>,
+    }
+
+    impl Viewer {
+        fn new() -> Self {
+            Self {
+                sent: ChatSent::default(),
+                view: None,
+            }
+        }
+
+        /// Catches up, returning the update it got.
+        fn catch_up(&mut self, chat: &HostedChat) -> Option<ViewUpdate> {
+            let update = chat.catch_up(&mut self.sent)?;
+            match (&mut self.view, update.clone()) {
+                (Some(view), update) => view.apply(update),
+                (None, ViewUpdate::Snapshot(view)) => self.view = Some(view),
+                (None, ViewUpdate::Patch(_)) => panic!("a patch before a snapshot"),
+            }
+            Some(update)
+        }
     }
 
     #[test]
     fn a_message_waits_for_the_session_then_goes() {
         let mut chat = chat();
-        assert!(screen(&chat).contains("starting the agent"));
-        // Typed before the session is made: it waits.
-        assert_eq!(chat.input(b"hello\r"), []);
-        assert!(screen(&chat).contains("› hello"));
+        assert_eq!(chat.node.state, ChatState::Starting);
+        // Sent before the session is made: it waits.
+        assert_eq!(send(&mut chat, "hello"), []);
+        assert_eq!(chat.node.turns[0].prompt, "hello");
         assert_eq!(chat.connected("s1".into()).as_deref(), Some("hello"));
-        assert_eq!(chat.session(), Some("s1"));
-        // Typed once there's a session: it goes at once.
+        assert_eq!(
+            (chat.session(), &chat.node.state),
+            (Some("s1"), &ChatState::Answering)
+        );
         chat.answered(Ok(StopReason::EndTurn));
-        assert_eq!(chat.input(b"again\r"), [Action::Prompt("again".into())]);
+        // Sent once there's a session: it goes at once.
+        assert_eq!(send(&mut chat, "again"), [Action::Prompt("again".into())]);
+        // And not while it's being answered.
+        assert_eq!(send(&mut chat, "more"), []);
     }
 
     #[test]
-    fn ctrl_c_takes_back_a_message_still_waiting_for_its_session() {
-        let mut chat = chat();
-        chat.input(b"hello\r");
-        assert_eq!(chat.input(b"\x03"), []);
-        assert!(screen(&chat).contains("stopped"));
-        assert_eq!(chat.connected("s".into()), None);
-    }
-
-    #[test]
-    fn the_answer_streams_in_and_lines_are_written_down_as_they_end() {
+    fn words_stream_into_the_turn_and_tools_go_between_them() {
         let mut chat = chat();
         chat.connected("s".into());
-        chat.input(b"hi\r");
-        update(
-            &mut chat,
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hel"}}"#,
-        );
-        update(
-            &mut chat,
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"lo\nwor"}}"#,
-        );
-        let text = screen(&chat);
-        assert!(text.contains("Hello\nwor"), "{text}");
-        assert!(text.contains("answering"));
-        chat.answered(Ok(StopReason::EndTurn));
-        let text = screen(&chat);
-        assert!(text.contains("Hello\nwor\n"), "{text}");
-        assert!(!text.contains("answering"));
-        // The exchange is a block: the message is its command.
-        let block = chat.emulator.block(0, Which::At).expect("a block");
-        assert_eq!(block.command.as_deref(), Some("hi"));
-    }
-
-    #[test]
-    fn tool_calls_run_in_the_live_end_and_are_written_down_when_done() {
-        let mut chat = chat();
-        chat.connected("s".into());
-        chat.input(b"go\r");
+        send(&mut chat, "hi");
+        words(&mut chat, "Let me ");
+        words(&mut chat, "look.\n");
         update(
             &mut chat,
             r#"{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Read a.rs","status":"in_progress"}"#,
         );
-        assert!(screen(&chat).contains("○ Read a.rs"));
         update(
             &mut chat,
             r#"{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed"}"#,
         );
-        let text = screen(&chat);
-        assert!(
-            text.contains("✓ Read a.rs") && !text.contains("○"),
-            "{text}"
+        words(&mut chat, "Done.");
+        chat.answered(Ok(StopReason::EndTurn));
+        let turn = &chat.node.turns[0];
+        assert_eq!(
+            turn.items,
+            [
+                Item::Words("Let me look.\n".into()),
+                Item::Tool(Tool {
+                    id: "t1".into(),
+                    title: "Read a.rs".into(),
+                    status: ToolStatus::Done,
+                }),
+                Item::Words("Done.".into()),
+            ]
         );
+        assert_eq!(outcome(turn), Some(&Outcome::Done));
     }
 
     #[test]
-    fn the_agent_asks_and_a_number_answers() {
+    fn viewers_get_the_chat_then_its_changes_with_streamed_words_as_one() {
+        let mut chat = chat();
+        let mut viewer = Viewer::new();
+        assert!(matches!(
+            viewer.catch_up(&chat),
+            Some(ViewUpdate::Snapshot(_))
+        ));
+        assert_eq!(viewer.catch_up(&chat), None);
+        chat.connected("s".into());
+        send(&mut chat, "hi");
+        words(&mut chat, "Hel");
+        words(&mut chat, "lo");
+        words(&mut chat, " there");
+        let Some(ViewUpdate::Patch(patches)) = viewer.catch_up(&chat) else {
+            panic!("patches");
+        };
+        let appends: Vec<&Patch> = (patches.iter())
+            .filter(|patch| matches!(patch, Patch::Chat(ChatPatch::Append { .. })))
+            .collect();
+        assert_eq!(
+            appends,
+            [&Patch::Chat(ChatPatch::Append {
+                turn: 0,
+                item: 0,
+                text: "Hello there".into(),
+            })]
+        );
+        assert_eq!(viewer.view.as_ref(), Some(&chat.view()));
+    }
+
+    #[test]
+    fn a_viewer_too_far_behind_gets_the_chat_whole() {
         let mut chat = chat();
         chat.connected("s".into());
-        chat.input(b"go\r");
+        let mut viewer = Viewer::new();
+        viewer.catch_up(&chat);
+        send(&mut chat, "hi");
+        for _ in 0..=JOURNAL {
+            words(&mut chat, "x");
+        }
+        assert!(matches!(
+            viewer.catch_up(&chat),
+            Some(ViewUpdate::Snapshot(_))
+        ));
+        assert_eq!(viewer.view.as_ref(), Some(&chat.view()));
+    }
+
+    #[test]
+    fn the_agent_asks_and_the_answer_goes_back() {
+        let mut chat = chat();
+        chat.connected("s".into());
+        send(&mut chat, "go");
         let options: Vec<PermissionOption> = serde_json::from_str(
             r#"[{"optionId":"yes","name":"Allow","kind":"allow_once"},
                 {"optionId":"no","name":"Reject","kind":"reject_once"}]"#,
         )
         .unwrap();
         let tool: ToolCallUpdate =
-            serde_json::from_str(r#"{"toolCallId":"t","title":"run ls"}"#).unwrap();
-        chat.ask(Value::from(7), &tool, options);
-        assert!(screen(&chat).contains("May the agent run ls?"));
-        assert_eq!(chat.input(b"x"), []);
+            serde_json::from_str(r#"{"toolCallId":"t","title":"run\nls"}"#).unwrap();
+        chat.ask(Value::from(7), &tool, &options);
+        let question = chat.node.question.clone().expect("a question");
+        assert_eq!(question.title, "run ls");
+        assert_eq!(question.choices[1].kind, ChoiceKind::RejectOnce);
         assert_eq!(
-            chat.input(b"1"),
+            chat.act(ChatAction::Answer(Some("yes".into()))),
             [Action::Answer {
                 request: Value::from(7),
-                option: Some("yes".into())
+                option: Some("yes".into()),
             }]
         );
-        assert!(screen(&chat).contains("? run ls: Allow"));
+        assert_eq!(chat.node.question, None);
+        // Nothing asked: an answer goes nowhere.
+        assert_eq!(chat.act(ChatAction::Answer(None)), []);
     }
 
     #[test]
-    fn what_the_agent_writes_cant_control_the_terminal() {
+    fn stopping_cancels_turns_down_the_question_or_takes_back_the_message() {
+        let mut chat = chat();
+        // Not yet sent: taken back.
+        send(&mut chat, "hello");
+        assert_eq!(chat.act(ChatAction::Stop), []);
+        assert_eq!(outcome(&chat.node.turns[0]), Some(&Outcome::Stopped));
+        // Sent, with a question waiting: none for it, and a cancel.
+        chat.connected("s".into());
+        send(&mut chat, "go");
+        let tool: ToolCallUpdate = serde_json::from_str(r#"{"toolCallId":"t"}"#).unwrap();
+        chat.ask(Value::from(3), &tool, &[]);
+        assert_eq!(
+            chat.act(ChatAction::Stop),
+            [
+                Action::Answer {
+                    request: Value::from(3),
+                    option: None,
+                },
+                Action::Cancel,
+            ]
+        );
+        chat.answered(Ok(StopReason::Cancelled));
+        assert_eq!(outcome(&chat.node.turns[1]), Some(&Outcome::Stopped));
+    }
+
+    #[test]
+    fn the_agent_stopping_ends_the_answer_or_says_so() {
         let mut chat = chat();
         chat.connected("s".into());
-        chat.input(b"hi\r");
+        send(&mut chat, "go");
         update(
             &mut chat,
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"a\u001b]2;owned\u0007b\n"}}"#,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"t","title":"Run","status":"in_progress"}"#,
         );
-        assert_eq!(chat.emulator.title(), "agent");
-        assert!(screen(&chat).contains("a]2;ownedb"));
-    }
-
-    #[test]
-    fn a_resize_redraws_the_live_end_at_the_new_width() {
-        let mut chat = chat();
-        chat.connected("s".into());
-        chat.input(b"some words typed");
-        chat.resize(Size::new(10, 12).unwrap());
-        assert_eq!(screen(&chat).trim_end(), "› some wor\nds typed");
-        chat.resize(Size::new(40, 12).unwrap());
-        assert_eq!(screen(&chat).trim_end(), "› some words typed");
-    }
-
-    #[test]
-    fn the_agent_stopping_while_idle_is_said() {
-        let mut chat = chat();
-        chat.connected("s".into());
         chat.disconnected();
-        assert!(screen(&chat).contains("the agent stopped"));
-        assert_eq!(chat.input(b"hi\r"), [Action::Connect]);
-    }
-
-    #[test]
-    fn a_chat_handed_over_keeps_its_conversation_and_what_was_typed() {
-        let mut chat = chat();
-        chat.connected("s".into());
-        chat.input(b"hi\r");
-        update(
-            &mut chat,
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello\n"}}"#,
+        let turn = &chat.node.turns[0];
+        assert_eq!(
+            outcome(turn),
+            Some(&Outcome::Failed("the agent stopped".into()))
         );
-        chat.answered(Ok(StopReason::EndTurn));
-        chat.input(b"half typ");
-        let before = screen(&chat);
-
-        let config = DaemonConfig::from_env();
-        let mut chat = HostedChat::resume(&chat.hand_over(), &config).unwrap();
-        assert_eq!(screen(&chat), before);
-        assert_eq!(chat.session(), Some("s"));
-        // Not connected: the next message opens the session again.
-        assert_eq!(chat.input(b"ed\r"), [Action::Connect]);
-        assert_eq!(chat.connected(String::new()).as_deref(), Some("half typed"));
-        assert_eq!(chat.session(), Some("s"));
+        assert!(matches!(&turn.items[0], Item::Tool(tool) if tool.status == ToolStatus::Failed));
+        // Idle, it says so, and the next message opens the session again.
+        chat.connected(String::new());
+        chat.disconnected();
+        assert!(chat.node.notice.is_some());
+        assert_eq!(send(&mut chat, "hi"), [Action::Connect]);
+        assert_eq!(chat.node.notice, None);
     }
 
     #[test]
-    fn an_answer_an_upgrade_cut_off_says_so() {
+    fn what_the_agent_writes_keeps_its_lines_but_no_controls() {
         let mut chat = chat();
         chat.connected("s".into());
-        chat.input(b"hi\r");
-        let config = DaemonConfig::from_env();
-        let chat = HostedChat::resume(&chat.hand_over(), &config).unwrap();
-        assert!(screen(&chat).contains("cut off by an upgrade"));
-        assert!(!screen(&chat).contains("answering"));
+        send(&mut chat, "hi");
+        words(&mut chat, "a\u{1b}]2;x\u{7}b\n\tc");
+        assert_eq!(
+            chat.node.turns[0].items,
+            [Item::Words("a]2;xb\n\tc".into())]
+        );
+    }
+
+    #[test]
+    fn a_chat_handed_over_keeps_its_turns_and_cuts_off_an_answer() {
+        let mut chat = chat();
+        chat.connected("s".into());
+        send(&mut chat, "hi");
+        words(&mut chat, "hello");
+        let resumed = HostedChat::resume(chat.hand_over());
+        assert_eq!(resumed.session(), Some("s"));
+        let turn = &resumed.node.turns[0];
+        assert_eq!(turn.items, [Item::Words("hello".into())]);
+        assert_eq!(
+            outcome(turn),
+            Some(&Outcome::Failed("cut off by an upgrade".into()))
+        );
+        assert_eq!(resumed.node.state, ChatState::Ready);
     }
 }

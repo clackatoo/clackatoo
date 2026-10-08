@@ -1,7 +1,9 @@
 // Draws the window: rectangles, square or rounded and perhaps bordered
 // (backgrounds, the cursor, underlines, cards, bars), and glyphs from the
 // atlas. Every shape is an instanced quad, positioned
-// in physical pixels from the top left. Colours are premultiplied.
+// in physical pixels from the top left. Colours are premultiplied. Each
+// shape is cut off outside its clip box (left, top, right, bottom), as a
+// chat pane's are at its edges.
 
 struct Uniforms {
     viewport: vec2<f32>,
@@ -31,6 +33,13 @@ struct RectOut {
     @location(3) @interpolate(flat) radius: f32,
     @location(4) @interpolate(flat) border: f32,
     @location(5) border_color: vec4<f32>,
+    @location(6) @interpolate(flat) clip: vec4<f32>,
+}
+
+// Whether a fragment at `position` falls outside `clip`.
+fn clipped(position: vec4<f32>, clip: vec4<f32>) -> bool {
+    return position.x < clip.x || position.y < clip.y || position.x >= clip.z
+        || position.y >= clip.w;
 }
 
 @vertex
@@ -42,6 +51,7 @@ fn rect_vs(
     @location(3) radius: f32,
     @location(4) border: f32,
     @location(5) border_color: vec4<f32>,
+    @location(6) clip: vec4<f32>,
 ) -> RectOut {
     let at = corner(vertex);
     var out: RectOut;
@@ -52,6 +62,7 @@ fn rect_vs(
     out.radius = radius;
     out.border = border;
     out.border_color = vec4<f32>(border_color.rgb * border_color.a, border_color.a);
+    out.clip = clip;
     return out;
 }
 
@@ -63,6 +74,9 @@ fn rounded_box(offset: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
 
 @fragment
 fn rect_fs(in: RectOut) -> @location(0) vec4<f32> {
+    if clipped(in.position, in.clip) {
+        discard;
+    }
     // Cells, underlines and the cursor: square and solid.
     if in.radius <= 0.0 && in.border <= 0.0 {
         return in.color;
@@ -83,6 +97,7 @@ struct GlyphOut {
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) colored: u32,
+    @location(3) @interpolate(flat) clip: vec4<f32>,
 }
 
 @vertex
@@ -94,6 +109,7 @@ fn glyph_vs(
     @location(3) uv_size: vec2<f32>,
     @location(4) color: vec4<f32>,
     @location(5) colored: u32,
+    @location(6) clip: vec4<f32>,
 ) -> GlyphOut {
     let at = corner(vertex);
     var out: GlyphOut;
@@ -101,11 +117,15 @@ fn glyph_vs(
     out.uv = (uv_origin + at * uv_size) / uniforms.atlas_size;
     out.color = vec4<f32>(color.rgb * color.a, color.a);
     out.colored = colored;
+    out.clip = clip;
     return out;
 }
 
 @fragment
 fn glyph_fs(in: GlyphOut) -> @location(0) vec4<f32> {
+    if clipped(in.position, in.clip) {
+        discard;
+    }
     let texel = textureSample(atlas, atlas_sampler, in.uv);
     if in.colored == 1u {
         return texel;

@@ -23,6 +23,7 @@ use winit::keyboard::{Key, KeyLocation, NamedKey};
 use winit::window::{CursorIcon, ImePurpose, ResizeDirection, Window, WindowAttributes, WindowId};
 
 use crate::GraphicsApi;
+use crate::chat::ChatPaint;
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, Status};
 use crate::desk::{Desk, TextTarget};
 use crate::desktop::{Button, ButtonLayout, Desktop};
@@ -742,6 +743,13 @@ impl App {
 
     /// Sends what the desk has for the daemon.
     fn send_outbox(&mut self) {
+        // What was typed or clicked in a chat goes first, as it needs the
+        // fonts, which the desk hasn't got.
+        if let Some(frame) = &mut self.frame
+            && self.desk.settle_chats(&mut frame.fonts)
+        {
+            frame.window.request_redraw();
+        }
         let messages = self.desk.take_outbox();
         let Some(sender) = &mut self.sender else {
             return;
@@ -1021,6 +1029,7 @@ impl App {
                     fills: &fills,
                     over: &painted.over,
                     texts: &texts,
+                    glyphs: &[],
                     transparent,
                 },
             );
@@ -1030,6 +1039,7 @@ impl App {
     /// Draws the frame and the shown tab's panes. Returns the terminals
     /// drawn, or `None` if the frame wasn't shown.
     fn draw_panes(&mut self, chrome: &Chrome) -> Option<Vec<TerminalId>> {
+        let (chats, chat_paint) = self.paint_chats(chrome);
         let geometry = &chrome.geometry;
         let desk = &self.desk;
         let shown = desk.shown()?;
@@ -1040,35 +1050,8 @@ impl App {
         let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
         fills.extend(painted.fills);
         fills.extend(chrome::paint_panes(geometry, &placement, Some(shown.pane)));
-        let mut drawings = Vec::new();
-        for &(id, tile) in &placement.panes {
-            let Some(pane) = layout_panes.iter().find(|pane| pane.id == id) else {
-                continue;
-            };
-            let Content::Terminal(terminal) = pane.content;
-            let state = desk.pane(terminal);
-            let focused = id == shown.pane;
-            let normal = state.is_some_and(|state| state.mode != Mode::Insert);
-            let Some(state) = state.filter(|state| state.screen().is_some()) else {
-                continue;
-            };
-            let height = usize::from(tile.rows);
-            let (rows, mut cursor) = state.scene(height);
-            if let Some(cursor) = &mut cursor
-                && !(focused && self.focused)
-            {
-                cursor.style = CursorStyle::Hollow;
-            }
-            drawings.push(Drawing {
-                terminal,
-                tile,
-                rows,
-                cursor,
-                highlights: state.highlights(height),
-                normal_mode: focused && normal,
-                focused,
-            });
-        }
+        fills.extend(chat_paint.fills);
+        let drawings = drawings(desk, self.focused, &placement, &layout_panes, shown.pane);
         let focused = drawings.iter().find(|drawing| drawing.focused);
         let cell = geometry.area.cell;
         let preedit = self
@@ -1077,6 +1060,7 @@ impl App {
             .filter(|_| desk.text_goes_to() == Some(TextTarget::Pane));
         let (ime_area, composed) =
             focused.map_or((None, None), |drawing| compose(preedit, drawing, cell));
+        let ime_area = ime_area.or(chat_paint.ime);
         let composed_rows = composed
             .as_ref()
             .zip(focused)
@@ -1104,7 +1088,7 @@ impl App {
             .collect();
         let mut texts = painted.texts;
         texts.extend(painted.over_texts);
-        let mut over = painted.over;
+        let mut over: Vec<Fill> = painted.over.into_iter().chain(chat_paint.over).collect();
         // Ctrl+B p: each pane's number, over it, to pick it by.
         if desk.numbering_panes() {
             let (fills, numbers) = chrome::paint_pane_numbers(geometry, &placement);
@@ -1117,16 +1101,107 @@ impl App {
             fills: &fills,
             over: &over,
             texts: &texts,
+            glyphs: &chat_paint.glyphs,
             transparent,
         };
         let frame = self.frame.as_mut()?;
         if !present(frame, &picture) {
             return None;
         }
-        let drawn = drawings.iter().map(|drawing| drawing.terminal).collect();
+        let drawn = drawings
+            .iter()
+            .map(|drawing| drawing.terminal)
+            .chain(chats)
+            .collect();
         self.update_ime(ime_area);
         Some(drawn)
     }
+}
+
+impl App {
+    /// Lays out and paints the shown tab's chats, which needs the fonts and
+    /// each chat's view mutably, before the terminals are drawn. Returns
+    /// the chats' terminals, and what to draw.
+    fn paint_chats(&mut self, chrome: &Chrome) -> (Vec<TerminalId>, ChatPaint) {
+        let mut all = ChatPaint::default();
+        let mut chats = Vec::new();
+        let (Some(frame), Some(shown), Some(tab)) = (
+            self.frame.as_mut(),
+            self.desk.shown(),
+            self.desk.shown_tab(),
+        ) else {
+            return (chats, all);
+        };
+        let cell = chrome.geometry.area.cell;
+        let placement = Placement::new(&tab.layout, &chrome.geometry.area);
+        let layout_panes = tab.layout.panes();
+        let tiles: Vec<(TerminalId, Tile, bool)> = (placement.panes.iter())
+            .filter_map(|&(id, tile)| {
+                let pane = layout_panes.iter().find(|pane| pane.id == id)?;
+                let Content::Terminal(terminal) = pane.content;
+                Some((terminal, tile, id == shown.pane))
+            })
+            .collect();
+        for (terminal, tile, focused) in tiles {
+            let Some(pane) = self.desk.pane_mut(terminal).filter(|pane| pane.is_chat()) else {
+                continue;
+            };
+            let caret = focused && self.focused && pane.mode == Mode::Insert;
+            let size = tile.cells_size(cell);
+            if let Some(paint) = pane.paint_chat(&mut frame.fonts, tile.origin, size, caret) {
+                all.fills.extend(paint.fills);
+                all.glyphs.extend(paint.glyphs);
+                all.over.extend(paint.over);
+                if focused {
+                    all.ime = paint.ime;
+                }
+                chats.push(terminal);
+            }
+        }
+        (chats, all)
+    }
+}
+
+/// What each of the shown tab's terminals draws, as `placement` lays out
+/// `panes`, `focused` having the focus, and the window having it if
+/// `window_focused`.
+fn drawings<'a>(
+    desk: &'a Desk,
+    window_focused: bool,
+    placement: &Placement,
+    panes: &[LayoutPane],
+    focused: PaneId,
+) -> Vec<Drawing<'a>> {
+    let mut drawings = Vec::new();
+    for &(id, tile) in &placement.panes {
+        let Some(pane) = panes.iter().find(|pane| pane.id == id) else {
+            continue;
+        };
+        let Content::Terminal(terminal) = pane.content;
+        let state = desk.pane(terminal);
+        let has_focus = id == focused;
+        let normal = state.is_some_and(|state| state.mode != Mode::Insert);
+        let Some(state) = state.filter(|state| state.screen().is_some()) else {
+            continue;
+        };
+        let height = usize::from(tile.rows);
+        let (rows, mut cursor) = state.scene(height);
+        if let Some(cursor) = &mut cursor
+            && !(has_focus && window_focused)
+        {
+            cursor.style = CursorStyle::Hollow;
+        }
+        drawings.push(Drawing {
+            terminal,
+            tile,
+            rows,
+            cursor,
+            highlights: state.highlights(height),
+            normal_mode: has_focus && normal,
+            focused: has_focus,
+        });
+    }
+    drawings
 }
 
 /// The sizes the window's frame is worked out from, for `fonts` and

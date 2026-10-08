@@ -1,12 +1,14 @@
 //! Views: what a pane shows, sent to clients and kept current with patches.
 //!
 //! A view is a tree of nodes, which clients render without knowing what
-//! kind of pane it is. Today the only node is a [`GridNode`], the cells of
-//! a terminal, so every view is a single grid. Other nodes (text, lists,
-//! images…) will join it as panes other than terminals need them.
+//! kind of pane it is. A terminal's is a [`GridNode`], its cells, and a
+//! chat's a [`ChatNode`], its turns. Other nodes will join them as panes
+//! other than these need them.
 
 use clackatoo_term::{CursorShape, InputModes, Row, RowBuilder, Size, Style, Terminal};
 use serde::{Deserialize, Serialize};
+
+use crate::chat::{ChatNode, ChatPatch};
 
 /// What a pane shows at one moment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +24,8 @@ pub struct View {
 pub enum Node {
     /// A grid of character cells.
     Grid(GridNode),
+    /// A chat with an agent.
+    Chat(ChatNode),
 }
 
 /// Names a node within a view, so patches can say which one they change.
@@ -142,6 +146,8 @@ pub enum Patch {
         /// The lines that changed, each with its line number.
         lines: Vec<(u16, Line)>,
     },
+    /// The chat changed.
+    Chat(ChatPatch),
 }
 
 impl View {
@@ -159,6 +165,16 @@ impl View {
     pub fn grid(&self) -> Option<&GridNode> {
         match &self.root {
             Node::Grid(grid) => Some(grid),
+            Node::Chat(_) => None,
+        }
+    }
+
+    /// The root chat, if the view is one.
+    #[must_use]
+    pub fn chat(&self) -> Option<&ChatNode> {
+        match &self.root {
+            Node::Chat(chat) => Some(chat),
+            Node::Grid(_) => None,
         }
     }
 
@@ -190,7 +206,8 @@ impl View {
                         }
                     }
                 }
-                (Patch::Grid { .. }, _) => {}
+                (Patch::Chat(patch), Node::Chat(chat)) => chat.apply(patch),
+                (Patch::Grid { .. } | Patch::Chat(_), _) => {}
             }
         }
     }

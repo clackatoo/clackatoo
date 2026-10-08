@@ -15,8 +15,9 @@ use clackatoo_term::Cell;
 
 use crate::boxdraw;
 use crate::colors::{Rgba, Theme};
-use crate::fonts::{Fonts, Variant};
+use crate::fonts::{FaceId, Fonts, Variant};
 use crate::glyphs::{ATLAS_SIZE, AtlasGlyph, GlyphCache};
+use swash::GlyphId;
 
 /// Everything one frame shows.
 #[derive(Debug)]
@@ -35,6 +36,23 @@ pub(crate) struct Picture<'a> {
     /// Text of the window's own, such as the names in the bars, over
     /// everything.
     pub(crate) texts: &'a [Text<'a>],
+    /// Glyphs laid out already, as a chat pane's text is, drawn over the
+    /// fills and under the overlays.
+    pub(crate) glyphs: &'a [PlacedGlyph],
+}
+
+/// A glyph laid out already: which, at what size, and where.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PlacedGlyph {
+    pub(crate) face: FaceId,
+    pub(crate) glyph: GlyphId,
+    /// The size, in pixels per em.
+    pub(crate) ppem: f32,
+    /// Its pen: the left of its advance, on the baseline, in pixels.
+    pub(crate) pen: [f32; 2],
+    pub(crate) ink: Ink,
+    /// What it's cut off outside: left, top, width and height.
+    pub(crate) clip: [f32; 4],
 }
 
 /// A rectangle of the window's own: perhaps rounded, perhaps bordered.
@@ -47,6 +65,9 @@ pub(crate) struct Fill {
     pub(crate) radius: f32,
     /// A border inside its edge: how thick, and its colour.
     pub(crate) border: Option<(f32, Paint)>,
+    /// What it's cut off outside, if anything: left, top, width and
+    /// height.
+    pub(crate) clip: Option<[f32; 4]>,
 }
 
 impl Fill {
@@ -57,6 +78,7 @@ impl Fill {
             paint,
             radius: 0.0,
             border: None,
+            clip: None,
         }
     }
 
@@ -67,6 +89,7 @@ impl Fill {
             paint,
             radius,
             border: None,
+            clip: None,
         }
     }
 
@@ -74,6 +97,14 @@ impl Fill {
     pub(crate) fn bordered(self, width: f32, paint: Paint) -> Self {
         Self {
             border: Some((width, paint)),
+            ..self
+        }
+    }
+
+    /// Cut off outside `clip`: left, top, width and height.
+    pub(crate) fn clipped(self, clip: [f32; 4]) -> Self {
+        Self {
+            clip: Some(clip),
             ..self
         }
     }
@@ -120,6 +151,13 @@ pub(crate) enum Paint {
     Warning,
     /// ...and its edge.
     WarningEdge,
+    /// Behind what's raised off a pane, such as a message sent in a chat,
+    /// or the box a message is typed in...
+    Raised,
+    /// ...and its edge.
+    RaisedEdge,
+    /// Behind code, in a chat.
+    Code,
 }
 
 /// A line of text of the window's own.
@@ -143,6 +181,8 @@ pub(crate) enum Ink {
     OnColor,
     /// In the warning colour, for what's gone wrong.
     Warning,
+    /// In clackatoo's own colour, as links are.
+    Accent,
 }
 
 /// Which font text of the window's own is drawn in.
@@ -229,6 +269,16 @@ struct Rect {
     /// How thick its border is, in pixels, inside its edge.
     border: f32,
     border_color: Rgba,
+    /// Left, top, right and bottom: it's cut off outside.
+    clip: [f32; 4],
+}
+
+/// A clip box that cuts nothing off.
+const NO_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
+
+/// A clip box from a left, top, width and height.
+fn clip_box([left, top, width, height]: [f32; 4]) -> [f32; 4] {
+    [left, top, left + width, top + height]
 }
 
 impl Rect {
@@ -241,6 +291,7 @@ impl Rect {
             radius: 0.0,
             border: 0.0,
             border_color: [0.0; 4],
+            clip: NO_CLIP,
         }
     }
 }
@@ -256,6 +307,8 @@ struct Glyph {
     color: Rgba,
     /// 1 if the glyph has its own colours.
     colored: u32,
+    /// Left, top, right and bottom: it's cut off outside.
+    clip: [f32; 4],
 }
 
 #[repr(C)]
@@ -391,7 +444,7 @@ impl Renderer {
             ("rect_vs", "rect_fs"),
             &wgpu::vertex_attr_array![
                 0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
-                4 => Float32, 5 => Float32x4,
+                4 => Float32, 5 => Float32x4, 6 => Float32x4,
             ],
             std::mem::size_of::<Rect>() as u64,
         );
@@ -400,7 +453,7 @@ impl Renderer {
             ("glyph_vs", "glyph_fs"),
             &wgpu::vertex_attr_array![
                 0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2,
-                4 => Float32x4, 5 => Uint32,
+                4 => Float32x4, 5 => Uint32, 6 => Float32x4,
             ],
             std::mem::size_of::<Glyph>() as u64,
         );
@@ -578,6 +631,7 @@ impl Renderer {
                 radius: fill.radius,
                 border,
                 border_color,
+                clip: fill.clip.map_or(NO_CLIP, clip_box),
             }
         };
         let (under, over): (Vec<Rect>, Vec<Rect>) = (
@@ -589,6 +643,36 @@ impl Renderer {
         self.overlays.extend(over);
         for text in picture.texts {
             self.push_text(text, fonts);
+        }
+        for placed in picture.glyphs {
+            self.push_placed(placed, fonts);
+        }
+    }
+
+    /// Adds a glyph laid out already.
+    fn push_placed(&mut self, placed: &PlacedGlyph, fonts: &mut Fonts) {
+        let Some(atlas) = self
+            .glyphs
+            .get_sized(fonts, placed.face, placed.glyph, placed.ppem)
+        else {
+            return;
+        };
+        let color = self.ink(placed.ink);
+        // Whole pixels, so glyphs stay sharp.
+        let pen = [placed.pen[0].round(), placed.pen[1].round()];
+        let mut glyph = place(&atlas, pen, [placed.ppem; 2], color, 0.0);
+        glyph.clip = clip_box(placed.clip);
+        self.glyph_instances.push(glyph);
+    }
+
+    /// The colour text in `ink` is drawn in.
+    fn ink(&self, ink: Ink) -> Rgba {
+        match ink {
+            Ink::Plain => self.theme.foreground,
+            Ink::OnColor => self.theme.bar,
+            Ink::Muted => self.theme.muted,
+            Ink::Warning => self.theme.warning,
+            Ink::Accent => self.theme.accent,
         }
     }
 
@@ -731,12 +815,7 @@ impl Renderer {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
         let bold = text.ink == Ink::OnColor;
-        let color = match text.ink {
-            Ink::Plain => self.theme.foreground,
-            Ink::OnColor => self.theme.bar,
-            Ink::Muted => self.theme.muted,
-            Ink::Warning => self.theme.warning,
-        };
+        let color = self.ink(text.ink);
         let [mut pen_x, top] = text.origin;
         match text.font {
             TextFont::Mono => {
@@ -989,6 +1068,7 @@ fn place(
         uv_size: [width, height],
         color,
         colored: u32::from(atlas.color),
+        clip: NO_CLIP,
     }
 }
 

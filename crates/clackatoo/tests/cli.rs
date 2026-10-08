@@ -439,7 +439,7 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
 #[test]
 fn upgrading_keeps_chats_and_reaps_their_agent() {
     use clackatoo_daemon::Client;
-    use clackatoo_protocol::{NewAgent, PaneTerminal};
+    use clackatoo_protocol::{ChatState, NewAgent, PaneTerminal};
 
     let runtime = Runtime::new();
     // `cat` for the agent, which sends back whatever it's sent: the daemon
@@ -466,16 +466,10 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
         )
         .unwrap();
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
-    let shows = |client: &mut Client, text: &str| {
-        let view = client.capture(chat).unwrap();
-        let grid = view.grid().unwrap();
-        grid.lines.iter().any(|line| line.text().contains(text))
-    };
     eventually("the chat says the agent couldn't start", || {
-        shows(&mut client, "couldn't start")
+        let view = client.capture(chat).unwrap();
+        matches!(view.chat().unwrap().state, ChatState::Failed(_))
     });
-    client.send_input(chat, b"half typed").unwrap();
-    eventually("the typing shows", || shows(&mut client, "half typed"));
     let agent = children(daemon.id());
     assert_eq!(agent.len(), 1, "the agent is the daemon's one child");
     let screen = client.capture(chat).unwrap();
@@ -563,7 +557,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let flagless = script(
         bin.path(),
         "flagless",
-        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3"#,
+        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4"#,
     );
     not_upgrading(ask_to_upgrade(runtime.path(), &flagless), "can't take over");
     // Failed after everything was handed over: it says it can take over,
@@ -572,7 +566,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"case " $* " in *" --handover-versions "*) echo 1 2 3; rm -- "$0";; esac"#,
+        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),

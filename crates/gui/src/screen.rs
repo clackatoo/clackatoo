@@ -14,15 +14,18 @@ pub(crate) struct Screen {
 }
 
 impl Screen {
-    pub(crate) fn new(view: &View) -> Self {
-        let Node::Grid(grid) = &view.root;
+    /// The screen `view` shows, if it's a grid.
+    pub(crate) fn new(view: &View) -> Option<Self> {
+        let Node::Grid(grid) = &view.root else {
+            return None;
+        };
         let width = usize::from(grid.size.cols());
-        Self {
+        Some(Self {
             title: view.title.clone(),
             size: grid.size,
             state: grid.state,
             rows: grid.lines.iter().map(|line| line.to_row(width)).collect(),
-        }
+        })
     }
 
     /// A screen of `size` showing `lines` of text, for the window's own
@@ -51,7 +54,9 @@ impl Screen {
     pub(crate) fn apply(&mut self, update: &ViewUpdate) {
         let patches = match update {
             ViewUpdate::Snapshot(view) => {
-                *self = Self::new(view);
+                if let Some(screen) = Self::new(view) {
+                    *self = screen;
+                }
                 return;
             }
             ViewUpdate::Patch(patches) => patches,
@@ -72,7 +77,7 @@ impl Screen {
                         }
                     }
                 }
-                Patch::Grid { .. } => {}
+                Patch::Grid { .. } | Patch::Chat(_) => {}
             }
         }
     }

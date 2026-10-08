@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    ClientMessage, Error, GridState, HistoryLine, HistoryLines, Line, NewAgent, NodeId,
+    ChatAction, ClientMessage, Error, GridState, HistoryLine, HistoryLines, Line, NewAgent, NodeId,
     PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size,
     TerminalId, TerminalInfo, TerminalStatus, Udp, View, ViewUpdate, WorkspaceId,
 };
@@ -43,7 +43,7 @@ use slab::Slab;
 
 use crate::DaemonConfig;
 use crate::agent::{Agent, Incoming};
-use crate::chat::{Action, HostedChat};
+use crate::chat::{Action, ChatSent, HostedChat};
 use crate::handover::{self, Fds, Handover, HandoverError};
 use crate::hosted::{HostedTerminal, Orphan, ReadOutcome};
 use crate::memory;
@@ -110,10 +110,11 @@ impl Hosted {
         }
     }
 
-    fn emulator(&self) -> &Terminal {
+    /// The terminal's emulator: its screen and history. A chat has none.
+    fn grid(&self) -> Option<&Terminal> {
         match self {
-            Self::Pty(terminal) => terminal.emulator(),
-            Self::Chat(chat) => chat.emulator(),
+            Self::Pty(terminal) => Some(terminal.emulator()),
+            Self::Chat(_) => None,
         }
     }
 
@@ -127,7 +128,8 @@ impl Hosted {
     fn take_damage(&mut self, into: &mut Damage) {
         match self {
             Self::Pty(terminal) => terminal.take_damage(into),
-            Self::Chat(chat) => chat.take_damage(into),
+            // A chat's viewers catch up from its journal.
+            Self::Chat(_) => {}
         }
     }
 
@@ -141,14 +143,14 @@ impl Hosted {
     fn scrollback_needs_compaction(&mut self) -> bool {
         match self {
             Self::Pty(terminal) => terminal.scrollback_needs_compaction(),
-            Self::Chat(chat) => chat.scrollback_needs_compaction(),
+            Self::Chat(_) => false,
         }
     }
 
     fn compact_scrollback(&mut self) {
         match self {
             Self::Pty(terminal) => terminal.compact_scrollback(),
-            Self::Chat(chat) => chat.compact_scrollback(),
+            Self::Chat(_) => {}
         }
     }
 
@@ -277,6 +279,8 @@ struct Subscription {
     size: Option<Size>,
     title: String,
     state: GridState,
+    /// For a chat: what was last sent of it.
+    chat: ChatSent,
     /// An update was sent and not yet acknowledged with `FrameDone`.
     awaiting_ack: bool,
 }
@@ -288,7 +292,17 @@ impl Subscription {
             size: None,
             title: String::new(),
             state: GridState::default(),
+            chat: ChatSent::default(),
             awaiting_ack: false,
+        }
+    }
+
+    /// The update that brings the client from what it was last sent to what
+    /// `hosted` shows now, recorded as sent. `None` if nothing changed.
+    fn update_from(&mut self, hosted: &Hosted) -> Option<ViewUpdate> {
+        match hosted {
+            Hosted::Pty(terminal) => self.update(terminal.emulator()),
+            Hosted::Chat(chat) => chat.catch_up(&mut self.chat),
         }
     }
 
@@ -462,6 +476,7 @@ impl Daemon {
         mut handover: Handover,
         config: DaemonConfig,
     ) -> Result<Self, HandoverError> {
+        let chats = std::mem::take(&mut handover.state.chats);
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
@@ -482,15 +497,8 @@ impl Daemon {
                 daemon.workspaces.remove_terminal(id);
             }
         }
-        for chat in &state.chats {
-            let id = TerminalId(chat.id);
-            match HostedChat::resume(chat, &daemon.config) {
-                Ok(chat) => daemon.add_chat(chat),
-                Err(err) => {
-                    log::error!("chat {id} couldn't be taken over: {err}");
-                    daemon.workspaces.remove_terminal(id);
-                }
-            }
+        for chat in chats {
+            daemon.add_chat(HostedChat::resume(chat));
         }
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
@@ -769,7 +777,7 @@ impl Daemon {
                     None if quic.is_some() && !client.outgoing.is_empty() => continue,
                     None => &mut client.outgoing,
                 };
-                if let Some(update) = subscription.update(slot.terminal.emulator()) {
+                if let Some(update) = subscription.update_from(&slot.terminal) {
                     subscription.awaiting_ack = true;
                     let event = ServerMessage::Event(clackatoo_protocol::Event::View {
                         terminal: id,
@@ -1143,7 +1151,7 @@ impl Daemon {
             .cwd
             .or_else(|| beside.and_then(|pane| self.working_directory(pane)))
             .unwrap_or_else(|| self.config.home.to_string_lossy().into_owned());
-        let chat = HostedChat::new(id, request.size, cwd, &self.config);
+        let chat = HostedChat::new(id, request.size, cwd);
         log::info!("chat {id} started");
         self.add_chat(chat);
         self.connect(id);
@@ -1344,7 +1352,7 @@ impl Daemon {
                     }
                     return;
                 };
-                chat.ask(request, &tool, options);
+                chat.ask(request, &tool, &options);
                 id
             }
         };
@@ -1639,41 +1647,34 @@ impl Daemon {
                 end,
                 count,
             } => self
-                .terminals
-                .get(&terminal)
-                .map(|slot| Response::History(history(slot.terminal.emulator(), end, count)))
-                .ok_or(Error::NoSuchTerminal(terminal)),
+                .grid(terminal)
+                .map(|grid| Response::History(history(grid, end, count))),
             Request::Text {
                 terminal,
                 from,
                 to,
                 whole_lines,
             } => self
-                .terminals
-                .get(&terminal)
-                .map(|slot| Response::Text(slot.terminal.emulator().text(from, to, whole_lines)))
-                .ok_or(Error::NoSuchTerminal(terminal)),
+                .grid(terminal)
+                .map(|grid| Response::Text(grid.text(from, to, whole_lines))),
             Request::Search {
                 terminal,
                 query,
                 from,
                 backward,
             } => self
-                .terminals
-                .get(&terminal)
-                .map(|slot| {
-                    Response::Found(slot.terminal.emulator().search(&query, from, backward))
-                })
-                .ok_or(Error::NoSuchTerminal(terminal)),
+                .grid(terminal)
+                .map(|grid| Response::Found(grid.search(&query, from, backward))),
             Request::Block {
                 terminal,
                 line,
                 which,
             } => self
-                .terminals
-                .get(&terminal)
-                .map(|slot| Response::Block(slot.terminal.emulator().block(line, which)))
-                .ok_or(Error::NoSuchTerminal(terminal)),
+                .grid(terminal)
+                .map(|grid| Response::Block(grid.block(line, which))),
+            Request::Chat { terminal, action } => {
+                self.chat_action(terminal, action).map(|()| Response::Done)
+            }
             request @ (Request::WatchWorkspaces
             | Request::NewWorkspace { .. }
             | Request::NewTab { .. }
@@ -1790,12 +1791,27 @@ impl Daemon {
                 terminal.send_input(bytes)?;
                 self.update_pty_interest(id);
             }
-            Hosted::Chat(chat) => {
-                let actions = chat.input(bytes);
-                self.act(id, actions);
-                self.collect_damage(id);
-            }
+            Hosted::Chat(_) => return Err(Error::IsAChat(id)),
         }
+        Ok(())
+    }
+
+    /// The emulator of terminal `id`: its screen and history.
+    fn grid(&self, id: TerminalId) -> Result<&Terminal, Error> {
+        let slot = self.terminals.get(&id).ok_or(Error::NoSuchTerminal(id))?;
+        slot.terminal.grid().ok_or(Error::IsAChat(id))
+    }
+
+    /// Does what a client asked of the chat `id`.
+    fn chat_action(&mut self, id: TerminalId, action: ChatAction) -> Result<(), Error> {
+        let slot = self
+            .terminals
+            .get_mut(&id)
+            .ok_or(Error::NoSuchTerminal(id))?;
+        let chat = slot.terminal.chat().ok_or(Error::NotAChat(id))?;
+        let actions = chat.act(action);
+        self.act(id, actions);
+        self.collect_damage(id);
         Ok(())
     }
 

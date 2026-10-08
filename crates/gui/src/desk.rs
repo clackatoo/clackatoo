@@ -180,6 +180,20 @@ impl Desk {
         self.panes.get(&terminal)
     }
 
+    pub(crate) fn pane_mut(&mut self, terminal: TerminalId) -> Option<&mut Pane> {
+        self.panes.get_mut(&terminal)
+    }
+
+    /// Carries out what was typed or clicked in chats, which needs the
+    /// fonts. Returns whether the window must be redrawn.
+    pub(crate) fn settle_chats(&mut self, fonts: &mut crate::fonts::Fonts) -> bool {
+        let mut redraw = false;
+        for pane in self.panes.values_mut() {
+            redraw |= pane.settle_chat(fonts);
+        }
+        redraw
+    }
+
     /// Where typed text goes now, if keys type text rather than being
     /// commands, as they are in normal mode.
     pub(crate) fn text_goes_to(&self) -> Option<TextTarget> {
@@ -251,8 +265,8 @@ impl Desk {
     /// The title for the window: the focused pane's program's.
     pub(crate) fn title(&self) -> Option<&str> {
         let terminal = self.focused_terminal()?;
-        let title = &self.panes.get(&terminal)?.screen()?.title;
-        (!title.is_empty()).then_some(title.as_str())
+        let title = self.panes.get(&terminal)?.title()?;
+        (!title.is_empty()).then_some(title)
     }
 
     /// Every workspace, by name, and whether it's the one shown.
@@ -375,9 +389,9 @@ impl Desk {
             .find_pane(tab.focused)
             .and_then(|(_, _, pane)| {
                 let Content::Terminal(terminal) = pane.content;
-                self.panes.get(&terminal)?.screen()
+                self.panes.get(&terminal)?.title()
             })
-            .map(|screen| screen.title.trim())
+            .map(str::trim)
             .filter(|title| !title.is_empty())
     }
 
@@ -851,9 +865,9 @@ impl Desk {
     /// mouse wheel does. Returns whether the window must be redrawn.
     pub(crate) fn wheel(&mut self, point: [f32; 2], lines: i64, modifiers: Modifiers) -> bool {
         // Away from the panes, as over the bars, the focused pane scrolls.
-        let Some((terminal, cell)) = self
+        let Some((terminal, cell, _)) = self
             .cell_at(point, None)
-            .or_else(|| Some((self.focused_terminal()?, [0, 0])))
+            .or_else(|| Some((self.focused_terminal()?, [0, 0], [0.0; 2])))
         else {
             return false;
         };
@@ -877,7 +891,7 @@ impl Desk {
     ) -> MouseOutcome {
         let mut outcome = MouseOutcome::default();
         let dragging = self.dragging.map(|(terminal, _)| terminal);
-        let Some((terminal, cell)) = self.cell_at(point, dragging) else {
+        let Some((terminal, cell, pixel)) = self.cell_at(point, dragging) else {
             return outcome;
         };
         let action = match action {
@@ -913,6 +927,7 @@ impl Desk {
             action,
             line: cell[0],
             col: cell[1],
+            pixel,
             clicks,
             modifiers,
         };
@@ -924,7 +939,7 @@ impl Desk {
     /// than clackatoo.
     pub(crate) fn reports_mouse_at(&self, point: [f32; 2], shift: bool) -> bool {
         self.cell_at(point, None)
-            .and_then(|(terminal, _)| self.panes.get(&terminal))
+            .and_then(|(terminal, _, _)| self.panes.get(&terminal))
             .is_some_and(|pane| pane.reports_mouse(shift))
     }
 
@@ -1067,12 +1082,13 @@ impl Desk {
 
     /// The terminal of the pane at `point`, or of the pane showing `within`
     /// wherever `point` is, and the cell of its view under `point`, which
-    /// is off the view if `point` is off the pane.
+    /// is off the view if `point` is off the pane, and `point` from the
+    /// pane's top left.
     fn cell_at(
         &self,
         point: [f32; 2],
         within: Option<TerminalId>,
-    ) -> Option<(TerminalId, [i64; 2])> {
+    ) -> Option<(TerminalId, [i64; 2], [f32; 2])> {
         let area = self.area.as_ref()?;
         let placement = self.placement()?;
         let tab = self.shown_tab()?;
@@ -1093,12 +1109,11 @@ impl Desk {
         };
         #[allow(clippy::cast_possible_truncation)]
         let cell = |offset: f32, size: f32| (offset / size).floor() as i64;
+        let pixel = [point[0] - tile.origin[0], point[1] - tile.origin[1]];
         Some((
             terminal,
-            [
-                cell(point[1] - tile.origin[1], area.cell[1]),
-                cell(point[0] - tile.origin[0], area.cell[0]),
-            ],
+            [cell(pixel[1], area.cell[1]), cell(pixel[0], area.cell[0])],
+            pixel,
         ))
     }
 
