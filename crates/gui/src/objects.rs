@@ -13,7 +13,7 @@ use clackatoo_term::Row;
 
 use crate::motion::{Class, Lines, Point, Walk, class_at, next_cell, previous_cell, text_end};
 
-/// How far a bracket object looks for its brackets, in cells.
+/// How far a bracket object looks for each of its brackets, in cells.
 const BRACKET_SEARCH: usize = 100_000;
 
 /// A kind of text object.
@@ -165,8 +165,8 @@ fn bracketed(
     let mut walk = Walk::new(lines, at);
     if ch(at) != Some(open) {
         let mut depth = 0usize;
-        loop {
-            if !walk.back() {
+        for steps in 0.. {
+            if steps == BRACKET_SEARCH || !walk.back() {
                 return None;
             }
             match ch(walk.at()) {

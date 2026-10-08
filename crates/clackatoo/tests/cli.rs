@@ -527,6 +527,15 @@ fn shells_mark_their_commands() {
             eprintln!("{shell} isn't installed: skipped");
             continue;
         }
+        // fish marks its commands by itself only from version 4.
+        if shell.ends_with("fish") {
+            let version = Command::new(shell).arg("--version").output().unwrap();
+            let version = stdout(&version);
+            if !version.contains("version 4") && !version.contains("version 5") {
+                eprintln!("{} is before 4: skipped", version.trim());
+                continue;
+            }
+        }
         let runtime = Runtime::new();
         let home = tempfile::tempdir().unwrap();
         let mut daemon = Command::new(BINARY)
