@@ -45,7 +45,8 @@ mod workspace;
 use std::fmt;
 
 pub use clackatoo_term::{
-    Attributes, Color, CursorShape, InputModes, Match, Position, Size, Style, Underline,
+    Attributes, Block, Color, CursorShape, InputModes, Match, Position, Size, Style, Underline,
+    Which,
 };
 use serde::{Deserialize, Serialize};
 
@@ -60,7 +61,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -220,6 +221,17 @@ pub enum Request {
         /// Search towards the start of the document.
         backward: bool,
     },
+    /// Finds the block (the prompt, command and output of one command,
+    /// as the shell marked them) at the document's line `line`, or the one
+    /// before or after it. Answered with [`Response::Block`].
+    Block {
+        /// The terminal.
+        terminal: TerminalId,
+        /// The line, numbered as [`Request::Text`] numbers them.
+        line: u64,
+        /// The line's own block, or the one before or after.
+        which: Which,
+    },
     /// Asks for every workspace, and for an [`Event::Workspaces`] whenever
     /// they change. Answered with [`Response::Workspaces`].
     WatchWorkspaces,
@@ -345,6 +357,8 @@ pub enum Response {
     Text(String),
     /// Answers [`Request::Search`]: where the text is, if anywhere.
     Found(Option<Match>),
+    /// Answers [`Request::Block`]: the block, if there is one.
+    Block(Option<Block>),
     /// Answers [`Request::WatchWorkspaces`].
     Workspaces(Workspaces),
     /// Answers requests that make a pane.

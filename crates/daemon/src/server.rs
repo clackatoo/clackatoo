@@ -1217,6 +1217,15 @@ impl Daemon {
                     Response::Found(slot.terminal.emulator().search(&query, from, backward))
                 })
                 .ok_or(Error::NoSuchTerminal(terminal)),
+            Request::Block {
+                terminal,
+                line,
+                which,
+            } => self
+                .terminals
+                .get(&terminal)
+                .map(|slot| Response::Block(slot.terminal.emulator().block(line, which)))
+                .ok_or(Error::NoSuchTerminal(terminal)),
             request @ (Request::WatchWorkspaces
             | Request::NewWorkspace { .. }
             | Request::NewTab { .. }
