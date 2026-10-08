@@ -1264,6 +1264,9 @@ impl Daemon {
                     agent.agent.prompt(id, &session, &text);
                 }
                 (Action::Cancel, Some(agent), Some(session)) => agent.agent.cancel(&session),
+                (Action::Set { setting, value }, Some(agent), Some(session)) => {
+                    agent.agent.set_setting(id, &session, &setting, &value);
+                }
                 (Action::Answer { request, option }, Some(agent), _) => {
                     agent.agent.answer_permission(&request, option.as_deref());
                 }
@@ -1308,22 +1311,27 @@ impl Daemon {
             Incoming::Session { terminal, result } => {
                 let Some(chat) = self.chat(terminal) else {
                     // The chat closed while its session was being made.
-                    if let (Ok(session), Some(agent)) = (result, &mut self.agent) {
-                        agent.agent.close_session(&session);
+                    if let (Ok(opened), Some(agent)) = (result, &mut self.agent)
+                        && !opened.session.is_empty()
+                    {
+                        agent.agent.close_session(&opened.session);
                     }
                     return;
                 };
                 match result {
-                    Ok(session) => {
-                        if let Some(text) = chat.connected(session)
-                            && let Some(session) = chat.session().map(str::to_owned)
-                            && let Some(agent) = &mut self.agent
-                        {
-                            agent.agent.prompt(terminal, &session, &text);
-                        }
+                    Ok(opened) => {
+                        let actions = chat.connected(opened);
+                        self.act(terminal, actions);
                     }
                     Err(err) => chat.failed_to_connect(&err),
                 }
+                terminal
+            }
+            Incoming::Settings { terminal, result } => {
+                let Some(chat) = self.chat(terminal) else {
+                    return;
+                };
+                chat.settings_changed(result);
                 terminal
             }
             Incoming::Update { session, update } => {

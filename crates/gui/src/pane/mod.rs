@@ -230,6 +230,21 @@ impl Pane {
         settled.redraw
     }
 
+    /// Shows what an input method is composing in the chat's box, if it
+    /// shows a chat being typed in. Returns whether it does.
+    pub(crate) fn compose_in_chat(
+        &mut self,
+        composing: Option<(String, Option<(usize, usize)>)>,
+    ) -> bool {
+        match &mut self.chat {
+            Some(chat) if self.mode == Mode::Insert => {
+                chat.compose(composing);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// A key in a chat: in insert mode, it edits the message, and in
     /// normal mode, it scrolls. Esc goes to normal mode, as there's no
     /// program to need it, unless the agent is asking something.

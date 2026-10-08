@@ -16,6 +16,7 @@
 //! 2. Each terminal's shell blocks ([`clackatoo_term::BlocksSnapshot`]).
 //! 3. Chats with agents, as the screens they were written into.
 //! 4. Chats as their turns.
+//! 5. Chats' settings, and the values the user chose for them.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -28,10 +29,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 4;
+pub(crate) const VERSION: u32 = 5;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -70,7 +71,7 @@ impl Fds {
     }
 }
 
-/// The daemon's state, version 4.
+/// The daemon's state, version 5.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The listening socket.
@@ -121,6 +122,34 @@ pub(crate) struct Chat {
     pub(crate) failure: Option<String>,
     /// The turns. A turn the upgrade cut off is handed over ended.
     pub(crate) turns: Vec<ChatTurn>,
+    /// The agent's settings, as it last gave them.
+    pub(crate) settings: Vec<ChatSetting>,
+    /// The values the user gave settings, by their IDs.
+    pub(crate) chosen: Vec<(String, String)>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatSetting {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) kind: SettingKind,
+    pub(crate) value: String,
+    pub(crate) choices: Vec<ChatChoice>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) enum SettingKind {
+    Mode,
+    Model,
+    Effort,
+    Other,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatChoice {
+    pub(crate) value: String,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -257,6 +286,7 @@ impl State {
             1 => Ok(postcard::from_bytes::<v1::State>(body)?.into()),
             2 => Ok(postcard::from_bytes::<v2::State>(body)?.into()),
             3 => postcard::from_bytes::<v3::State>(body)?.try_into(),
+            4 => Ok(postcard::from_bytes::<v4::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -447,7 +477,67 @@ mod v3 {
                 session: chat.session,
                 failure: chat.failure,
                 turns,
+                settings: Vec::new(),
+                chosen: Vec::new(),
             })
+        }
+    }
+}
+
+/// Version 4, as the builds that wrote it wrote it: chats without their
+/// settings, which they get again from the agent.
+mod v4 {
+    use serde::Deserialize;
+
+    use super::{ChatTurn, Process, Terminal, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Chat {
+        id: u32,
+        cols: u16,
+        rows: u16,
+        title: String,
+        cwd: String,
+        session: Option<String>,
+        failure: Option<String>,
+        turns: Vec<ChatTurn>,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: (state.chats.into_iter())
+                    .map(|chat| super::Chat {
+                        id: chat.id,
+                        cols: chat.cols,
+                        rows: chat.rows,
+                        title: chat.title,
+                        cwd: chat.cwd,
+                        session: chat.session,
+                        failure: chat.failure,
+                        turns: chat.turns,
+                        settings: Vec::new(),
+                        chosen: Vec::new(),
+                    })
+                    .collect(),
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+            }
         }
     }
 }
@@ -486,6 +576,18 @@ mod tests {
                         outcome: ChatOutcome::Failed("no".to_owned()),
                     }),
                 }],
+                settings: vec![ChatSetting {
+                    id: "mode".to_owned(),
+                    name: "Mode".to_owned(),
+                    kind: SettingKind::Mode,
+                    value: "auto".to_owned(),
+                    choices: vec![ChatChoice {
+                        value: "auto".to_owned(),
+                        name: "Auto".to_owned(),
+                        description: None,
+                    }],
+                }],
+                chosen: vec![("model".to_owned(), "haiku".to_owned())],
             }],
             orphans: vec![Process { pid: 42, pidfd: 2 }],
             workspaces: Workspaces {
@@ -534,10 +636,10 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(MAGIC).unwrap();
-        file.write_all(&5u32.to_le_bytes()).unwrap();
+        file.write_all(&6u32.to_le_bytes()).unwrap();
         assert!(matches!(
             State::read(&mut file),
-            Err(HandoverError::Version(5))
+            Err(HandoverError::Version(6))
         ));
     }
 
@@ -604,6 +706,20 @@ mod tests {
             panic!("{items:?}");
         };
         assert_eq!(text, "```text\n› hi\n\necho: hi\n```");
+    }
+
+    /// Written by a build that wrote version 4. It must always be read.
+    #[test]
+    fn version_4_is_read() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v4.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!((state.next_terminal, state.orphans[0].pid), (5, 96));
+        let chat = &state.chats[0];
+        assert_eq!((chat.id, chat.session.as_deref()), (4, Some("s4")));
+        assert_eq!(chat.turns[0].prompt, "why?");
+        assert!(chat.settings.is_empty() && chat.chosen.is_empty());
     }
 
     #[test]

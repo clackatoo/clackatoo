@@ -71,6 +71,7 @@ fn render(
         over: &[],
         texts: &[],
         glyphs: &[],
+        over_glyphs: &[],
         transparent: false,
     };
     Some((size, draw(&gpu, size, &picture, &mut fonts)))
@@ -344,6 +345,7 @@ fn draw_window_shaped(
         over: &over,
         texts: &texts,
         glyphs: &[],
+        over_glyphs: &[],
         transparent: rounded,
     };
     draw(gpu, *size, &picture, fonts)
@@ -641,7 +643,74 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
             ],
         }),
         notice: None,
+        settings: claude_settings(),
+        usage: Some(clackatoo_protocol::Usage {
+            used: 38_400,
+            size: 200_000,
+        }),
     }
+}
+
+/// Settings as Claude Code's adapter offers them.
+fn claude_settings() -> Vec<clackatoo_protocol::Setting> {
+    use clackatoo_protocol::{Setting, SettingChoice, SettingKind};
+    let choice = |value: &str, name: &str, description: Option<&str>| SettingChoice {
+        value: value.into(),
+        name: name.into(),
+        description: description.map(str::to_owned),
+    };
+    vec![
+        Setting {
+            id: "mode".into(),
+            name: "Mode".into(),
+            kind: SettingKind::Mode,
+            value: "auto".into(),
+            choices: vec![
+                choice(
+                    "default",
+                    "Manual",
+                    Some("Always ask before making changes"),
+                ),
+                choice(
+                    "acceptEdits",
+                    "Accept edits",
+                    Some("Automatically accept all file edits"),
+                ),
+                choice("plan", "Plan", Some("Create a plan before making changes")),
+                choice("auto", "Auto", Some("Claude handles permission decisions")),
+            ],
+        },
+        Setting {
+            id: "model".into(),
+            name: "Model".into(),
+            kind: SettingKind::Model,
+            value: "sonnet".into(),
+            choices: vec![
+                choice(
+                    "opus",
+                    "Opus 5.5",
+                    Some("For complex work and everyday tasks"),
+                ),
+                choice(
+                    "sonnet",
+                    "Sonnet 5.5",
+                    Some("Most efficient for simpler tasks"),
+                ),
+                choice("haiku", "Haiku 5.5", Some("Fastest for quick answers")),
+            ],
+        },
+        Setting {
+            id: "effort".into(),
+            name: "Effort".into(),
+            kind: SettingKind::Effort,
+            value: "high".into(),
+            choices: vec![
+                choice("low", "Low", None),
+                choice("medium", "Medium", None),
+                choice("high", "High", None),
+            ],
+        },
+    ]
 }
 
 /// Renders a chat pane `size` pixels, and saves it as `name`.
@@ -650,6 +719,17 @@ fn render_chat(
     node: clackatoo_protocol::ChatNode,
     typed: &str,
     scale: f64,
+) -> Option<Vec<u8>> {
+    render_chat_with(name, node, typed, scale, |_| {})
+}
+
+/// As [`render_chat`], doing `then` to the chat before drawing it.
+fn render_chat_with(
+    name: &str,
+    node: clackatoo_protocol::ChatNode,
+    typed: &str,
+    scale: f64,
+    then: impl FnOnce(&mut crate::chat::ChatView),
 ) -> Option<Vec<u8>> {
     let gpu = gpu()?;
     let mut fonts = fonts(scale);
@@ -660,6 +740,7 @@ fn render_chat(
         chat.paste(typed);
         chat.settle(&mut fonts);
     }
+    then(&mut chat);
     #[allow(clippy::cast_precision_loss)]
     let paint = chat.paint(&mut fonts, [0.0; 2], [size[0] as f32, size[1] as f32], true);
     let mut fills = vec![crate::render::Fill::solid(
@@ -674,6 +755,7 @@ fn render_chat(
         over: &paint.over,
         texts: &[],
         glyphs: &paint.glyphs,
+        over_glyphs: &paint.over_glyphs,
         transparent: false,
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
@@ -690,6 +772,10 @@ fn renders_a_chat_with_its_box_and_question() {
     assert!(pixels.chunks(4).any(|pixel| pixel != &pixels[..4]));
     render_chat("chat-question", chat_node(true), "", 1.0);
     render_chat("chat-hidpi", chat_node(false), "", 2.0);
+    render_chat_with("chat-menu", chat_node(false), "", 1.0, |chat| {
+        use clackatoo_protocol::SettingKind;
+        chat.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+    });
 }
 
 #[test]

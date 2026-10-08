@@ -13,17 +13,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol_schema::MaybeUndefined;
 use agent_client_protocol_schema::v1::{
-    ContentBlock, PermissionOption, PermissionOptionKind, SessionUpdate, StopReason,
+    ContentBlock, PermissionOption, PermissionOptionKind, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionUpdate, StopReason,
     ToolCallStatus, ToolCallUpdate,
 };
 use clackatoo_protocol::{
     ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Item, Node, Outcome, Patch,
-    Question, Size, TerminalId, TerminalInfo, TerminalStatus, Tool, ToolStatus, Turn, TurnEnd,
-    View, ViewUpdate,
+    Question, Setting, SettingChoice, SettingKind, Size, TerminalId, TerminalInfo, TerminalStatus,
+    Tool, ToolStatus, Turn, TurnEnd, Usage, View, ViewUpdate,
 };
 use serde_json::Value;
 
+use crate::agent::Opened;
 use crate::handover;
+
+/// The mode a new chat asks for, if the agent offers it: Claude Code's
+/// Auto, which decides itself what needs asking about (jack, 2026-10-08).
+const STARTING_MODE: &str = "auto";
 
 /// How many changes a chat keeps for viewers that are behind. One further
 /// behind gets the whole chat again.
@@ -43,6 +49,8 @@ pub(crate) enum Action {
         request: Value,
         option: Option<String>,
     },
+    /// Change one of the agent's settings for the chat.
+    Set { setting: String, value: String },
 }
 
 /// Whether a chat's session is open in the agent.
@@ -72,6 +80,12 @@ pub(crate) struct HostedChat {
     node: ChatNode,
     /// The JSON-RPC ID of the request the agent's question came in.
     asking: Option<Value>,
+    /// The values the user gave settings, by their IDs, which the chat
+    /// asks for again whenever its session opens: the agent forgets them
+    /// when it stops.
+    chosen: Vec<(String, String)>,
+    /// The mode a new chat asks for when its session first opens.
+    starting_mode: Option<&'static str>,
     journal: Journal,
 }
 
@@ -121,6 +135,8 @@ impl HostedChat {
             queued: None,
             node: ChatNode::default(),
             asking: None,
+            chosen: Vec::new(),
+            starting_mode: Some(STARTING_MODE),
             journal: Journal::default(),
         }
     }
@@ -145,6 +161,10 @@ impl HostedChat {
             session: self.session,
             failure,
             turns: self.node.turns.into_iter().map(turn_to_handover).collect(),
+            settings: (self.node.settings.into_iter())
+                .map(setting_to_handover)
+                .collect(),
+            chosen: self.chosen,
         }
     }
 
@@ -156,6 +176,11 @@ impl HostedChat {
         resumed.title = chat.title;
         resumed.session = chat.session;
         resumed.node.turns = chat.turns.into_iter().map(turn_from_handover).collect();
+        resumed.node.settings = (chat.settings.into_iter())
+            .map(setting_from_handover)
+            .collect();
+        resumed.chosen = chat.chosen;
+        resumed.starting_mode = None;
         resumed.node.state = chat.failure.map_or(ChatState::Ready, ChatState::Failed);
         resumed
     }
@@ -242,8 +267,40 @@ impl HostedChat {
                     actions.push(Action::Answer { request, option });
                 }
             }
+            // Only a value the agent offers is kept, and asked for.
+            ChatAction::Set { setting, value } => {
+                if self.set_value(&setting, &value) {
+                    self.chosen.retain(|(id, _)| *id != setting);
+                    self.chosen.push((setting.clone(), value.clone()));
+                    if self.link == Link::Open {
+                        actions.push(Action::Set { setting, value });
+                    }
+                }
+            }
         }
         actions
+    }
+
+    /// Gives setting `id` the value `value`, as far as the chat's view
+    /// goes. Returns whether it has that setting, with that choice.
+    fn set_value(&mut self, id: &str, value: &str) -> bool {
+        let Some(setting) = self
+            .node
+            .settings
+            .iter_mut()
+            .find(|setting| setting.id == id)
+        else {
+            return false;
+        };
+        if !setting.choices.iter().any(|choice| choice.value == value) {
+            return false;
+        }
+        if setting.value != value {
+            value.clone_into(&mut setting.value);
+            self.journal
+                .push(ChatPatch::Settings(self.node.settings.clone()));
+        }
+        true
     }
 
     /// Sends a message, if there is one and the agent isn't still
@@ -299,11 +356,34 @@ impl HostedChat {
 
     /// The session asked for was made, or opened again. Returns the
     /// message waiting for it, to send.
-    pub(crate) fn connected(&mut self, session: String) -> Option<String> {
+    ///
+    /// The settings the user chose go first, as the agent forgot them if
+    /// it stopped, and a new chat asks for its starting mode.
+    pub(crate) fn connected(&mut self, opened: Opened) -> Vec<Action> {
         self.link = Link::Open;
         // Opening one again answers with no ID: it's the one asked for.
-        if !session.is_empty() {
-            self.session = Some(session);
+        if !opened.session.is_empty() {
+            self.session = Some(opened.session);
+        }
+        if let Some(options) = &opened.settings {
+            self.set_settings(settings_of(options));
+        }
+        if let Some(mode) = self.starting_mode.take()
+            && let Some(setting) = (self.node.settings.iter()).find(|setting| {
+                setting.kind == SettingKind::Mode
+                    && setting.choices.iter().any(|choice| choice.value == mode)
+            })
+            && !self.chosen.iter().any(|(id, _)| *id == setting.id)
+        {
+            self.chosen.push((setting.id.clone(), mode.to_owned()));
+        }
+        let mut actions = Vec::new();
+        for (setting, value) in self.chosen.clone() {
+            let differs = (self.node.settings.iter())
+                .any(|known| known.id == setting && known.value != value);
+            if differs && self.set_value(&setting, &value) {
+                actions.push(Action::Set { setting, value });
+            }
         }
         let queued = self.queued.take();
         self.set_state(if queued.is_some() {
@@ -311,7 +391,18 @@ impl HostedChat {
         } else {
             ChatState::Ready
         });
-        queued
+        actions.extend(queued.map(Action::Prompt));
+        actions
+    }
+
+    /// The agent's settings after the chat asked to change one, or why it
+    /// couldn't.
+    pub(crate) fn settings_changed(&mut self, result: Result<Vec<SessionConfigOption>, String>) {
+        match result {
+            Ok(options) if !options.is_empty() => self.set_settings(settings_of(&options)),
+            Ok(_) => {}
+            Err(err) => self.set_notice(Some(format!("The setting couldn't be changed: {err}"))),
+        }
     }
 
     /// The session couldn't be made or opened.
@@ -429,9 +520,24 @@ impl HostedChat {
                     self.title = clean(&title);
                 }
             }
-            // Its plan, usage, modes, settings and commands, which the chat
-            // doesn't show yet (CLACKA-25), and the user's own words,
-            // already kept.
+            SessionUpdate::ConfigOptionUpdate(update) => {
+                self.set_settings(settings_of(&update.config_options));
+            }
+            SessionUpdate::CurrentModeUpdate(update) => {
+                let mode = update.current_mode_id.0.to_string();
+                let id = (self.node.settings.iter())
+                    .find(|setting| setting.kind == SettingKind::Mode)
+                    .map(|setting| setting.id.clone());
+                if let Some(id) = id {
+                    self.set_value(&id, &mode);
+                }
+            }
+            SessionUpdate::UsageUpdate(usage) => self.set_usage(Some(Usage {
+                used: usage.used,
+                size: usage.size,
+            })),
+            // Its plan and commands, which the chat doesn't show yet, and
+            // the user's own words, already kept.
             _ => {}
         }
     }
@@ -558,6 +664,20 @@ impl HostedChat {
         }
     }
 
+    fn set_settings(&mut self, settings: Vec<Setting>) {
+        if self.node.settings != settings {
+            self.node.settings.clone_from(&settings);
+            self.journal.push(ChatPatch::Settings(settings));
+        }
+    }
+
+    fn set_usage(&mut self, usage: Option<Usage>) {
+        if self.node.usage != usage {
+            self.node.usage = usage;
+            self.journal.push(ChatPatch::Usage(usage));
+        }
+    }
+
     fn set_notice(&mut self, notice: Option<String>) {
         if self.node.notice != notice {
             self.node.notice.clone_from(&notice);
@@ -573,6 +693,46 @@ fn now() -> u64 {
         .map_or(0, |since| {
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+/// The settings the agent offers, as the chat shows them. Only those that
+/// pick from a list: on/off ones aren't shown yet.
+fn settings_of(options: &[SessionConfigOption]) -> Vec<Setting> {
+    options
+        .iter()
+        .filter_map(|option| {
+            let SessionConfigKind::Select(select) = &option.kind else {
+                return None;
+            };
+            let listed: Vec<_> = match &select.options {
+                SessionConfigSelectOptions::Ungrouped(choices) => choices.iter().collect(),
+                SessionConfigSelectOptions::Grouped(groups) => {
+                    groups.iter().flat_map(|group| &group.options).collect()
+                }
+                // A shape newer than this build knows.
+                _ => Vec::new(),
+            };
+            Some(Setting {
+                id: option.id.0.to_string(),
+                name: clean(&option.name),
+                kind: match option.category {
+                    Some(SessionConfigOptionCategory::Mode) => SettingKind::Mode,
+                    Some(SessionConfigOptionCategory::Model) => SettingKind::Model,
+                    Some(SessionConfigOptionCategory::ThoughtLevel) => SettingKind::Effort,
+                    _ => SettingKind::Other,
+                },
+                value: select.current_value.0.to_string(),
+                choices: listed
+                    .into_iter()
+                    .map(|choice| SettingChoice {
+                        value: choice.value.0.to_string(),
+                        name: clean(&choice.name),
+                        description: choice.description.as_deref().map(clean),
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 fn index_u32(index: usize) -> u32 {
@@ -601,6 +761,48 @@ fn clean_text(text: &str) -> String {
     text.chars()
         .filter(|&ch| matches!(ch, '\n' | '\t') || !ch.is_control())
         .collect()
+}
+
+fn setting_to_handover(setting: Setting) -> handover::ChatSetting {
+    handover::ChatSetting {
+        id: setting.id,
+        name: setting.name,
+        kind: match setting.kind {
+            SettingKind::Mode => handover::SettingKind::Mode,
+            SettingKind::Model => handover::SettingKind::Model,
+            SettingKind::Effort => handover::SettingKind::Effort,
+            SettingKind::Other => handover::SettingKind::Other,
+        },
+        value: setting.value,
+        choices: (setting.choices.into_iter())
+            .map(|choice| handover::ChatChoice {
+                value: choice.value,
+                name: choice.name,
+                description: choice.description,
+            })
+            .collect(),
+    }
+}
+
+fn setting_from_handover(setting: handover::ChatSetting) -> Setting {
+    Setting {
+        id: setting.id,
+        name: setting.name,
+        kind: match setting.kind {
+            handover::SettingKind::Mode => SettingKind::Mode,
+            handover::SettingKind::Model => SettingKind::Model,
+            handover::SettingKind::Effort => SettingKind::Effort,
+            handover::SettingKind::Other => SettingKind::Other,
+        },
+        value: setting.value,
+        choices: (setting.choices.into_iter())
+            .map(|choice| SettingChoice {
+                value: choice.value,
+                name: choice.name,
+                description: choice.description,
+            })
+            .collect(),
+    }
 }
 
 fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
@@ -689,6 +891,26 @@ mod tests {
         );
     }
 
+    /// Opens `chat`'s session, `session`, with no settings.
+    fn connect(chat: &mut HostedChat, session: &str) -> Vec<Action> {
+        chat.connected(Opened {
+            session: session.to_owned(),
+            settings: None,
+        })
+    }
+
+    /// Settings as Claude Code's adapter gives them: its mode, Manual, and
+    /// its model, `model`.
+    fn claude_settings(model: &str) -> Vec<SessionConfigOption> {
+        serde_json::from_str(&format!(
+            r#"[{{"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":"default",
+                  "options":[{{"value":"default","name":"Manual"}},{{"value":"auto","name":"Auto"}}]}},
+                {{"id":"model","name":"Model","category":"model","type":"select","currentValue":"{model}",
+                  "options":[{{"value":"haiku","name":"Haiku"}},{{"value":"sonnet","name":"Sonnet"}}]}}]"#
+        ))
+        .unwrap()
+    }
+
     fn send(chat: &mut HostedChat, text: &str) -> Vec<Action> {
         chat.act(ChatAction::Send(text.to_owned()))
     }
@@ -730,7 +952,7 @@ mod tests {
         // Sent before the session is made: it waits.
         assert_eq!(send(&mut chat, "hello"), []);
         assert_eq!(chat.node.turns[0].prompt, "hello");
-        assert_eq!(chat.connected("s1".into()).as_deref(), Some("hello"));
+        assert_eq!(connect(&mut chat, "s1"), [Action::Prompt("hello".into())]);
         assert_eq!(
             (chat.session(), &chat.node.state),
             (Some("s1"), &ChatState::Answering)
@@ -745,7 +967,7 @@ mod tests {
     #[test]
     fn words_stream_into_the_turn_and_tools_go_between_them() {
         let mut chat = chat();
-        chat.connected("s".into());
+        connect(&mut chat, "s");
         send(&mut chat, "hi");
         words(&mut chat, "Let me ");
         words(&mut chat, "look.\n");
@@ -784,7 +1006,7 @@ mod tests {
             Some(ViewUpdate::Snapshot(_))
         ));
         assert_eq!(viewer.catch_up(&chat), None);
-        chat.connected("s".into());
+        connect(&mut chat, "s");
         send(&mut chat, "hi");
         words(&mut chat, "Hel");
         words(&mut chat, "lo");
@@ -809,7 +1031,7 @@ mod tests {
     #[test]
     fn a_viewer_too_far_behind_gets_the_chat_whole() {
         let mut chat = chat();
-        chat.connected("s".into());
+        connect(&mut chat, "s");
         let mut viewer = Viewer::new();
         viewer.catch_up(&chat);
         send(&mut chat, "hi");
@@ -826,7 +1048,7 @@ mod tests {
     #[test]
     fn the_agent_asks_and_the_answer_goes_back() {
         let mut chat = chat();
-        chat.connected("s".into());
+        connect(&mut chat, "s");
         send(&mut chat, "go");
         let options: Vec<PermissionOption> = serde_json::from_str(
             r#"[{"optionId":"yes","name":"Allow","kind":"allow_once"},
@@ -859,7 +1081,7 @@ mod tests {
         assert_eq!(chat.act(ChatAction::Stop), []);
         assert_eq!(outcome(&chat.node.turns[0]), Some(&Outcome::Stopped));
         // Sent, with a question waiting: none for it, and a cancel.
-        chat.connected("s".into());
+        connect(&mut chat, "s");
         send(&mut chat, "go");
         let tool: ToolCallUpdate = serde_json::from_str(r#"{"toolCallId":"t"}"#).unwrap();
         chat.ask(Value::from(3), &tool, &[]);
@@ -880,7 +1102,7 @@ mod tests {
     #[test]
     fn the_agent_stopping_ends_the_answer_or_says_so() {
         let mut chat = chat();
-        chat.connected("s".into());
+        connect(&mut chat, "s");
         send(&mut chat, "go");
         update(
             &mut chat,
@@ -894,7 +1116,7 @@ mod tests {
         );
         assert!(matches!(&turn.items[0], Item::Tool(tool) if tool.status == ToolStatus::Failed));
         // Idle, it says so, and the next message opens the session again.
-        chat.connected(String::new());
+        connect(&mut chat, "");
         chat.disconnected();
         assert!(chat.node.notice.is_some());
         assert_eq!(send(&mut chat, "hi"), [Action::Connect]);
@@ -904,7 +1126,7 @@ mod tests {
     #[test]
     fn what_the_agent_writes_keeps_its_lines_but_no_controls() {
         let mut chat = chat();
-        chat.connected("s".into());
+        connect(&mut chat, "s");
         send(&mut chat, "hi");
         words(&mut chat, "a\u{1b}]2;x\u{7}b\n\tc");
         assert_eq!(
@@ -916,7 +1138,7 @@ mod tests {
     #[test]
     fn a_chat_handed_over_keeps_its_turns_and_cuts_off_an_answer() {
         let mut chat = chat();
-        chat.connected("s".into());
+        connect(&mut chat, "s");
         send(&mut chat, "hi");
         words(&mut chat, "hello");
         let resumed = HostedChat::resume(chat.hand_over());
@@ -928,5 +1150,93 @@ mod tests {
             Some(&Outcome::Failed("cut off by an upgrade".into()))
         );
         assert_eq!(resumed.node.state, ChatState::Ready);
+    }
+
+    fn set(setting: &str, value: &str) -> Action {
+        Action::Set {
+            setting: setting.into(),
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn a_new_chat_asks_for_auto_mode_and_choices_outlast_the_agent() {
+        let mut chat = chat();
+        let opened = |model: &str| Opened {
+            session: "s".into(),
+            settings: Some(claude_settings(model)),
+        };
+        assert_eq!(chat.connected(opened("haiku")), [set("mode", "auto")]);
+        let modes: Vec<(SettingKind, &str)> = (chat.node.settings.iter())
+            .map(|setting| (setting.kind, setting.value.as_str()))
+            .collect();
+        assert_eq!(
+            modes,
+            [(SettingKind::Mode, "auto"), (SettingKind::Model, "haiku")]
+        );
+
+        // A choice goes to the agent, and the view shows it at once.
+        assert_eq!(
+            chat.act(ChatAction::Set {
+                setting: "model".into(),
+                value: "sonnet".into(),
+            }),
+            [set("model", "sonnet")]
+        );
+        // A value it doesn't offer goes nowhere.
+        assert_eq!(
+            chat.act(ChatAction::Set {
+                setting: "model".into(),
+                value: "gpt".into(),
+            }),
+            []
+        );
+
+        // The agent stops, and comes back having forgotten: the choices go
+        // again, but Auto only as the user had it.
+        chat.disconnected();
+        assert_eq!(
+            chat.connected(opened("haiku")),
+            [set("mode", "auto"), set("model", "sonnet")]
+        );
+    }
+
+    #[test]
+    fn a_chat_without_auto_asks_for_nothing() {
+        let mut chat = chat();
+        let settings: Vec<SessionConfigOption> = serde_json::from_str(
+            r#"[{"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":"ask",
+                 "options":[{"value":"ask","name":"Ask"}]}]"#,
+        )
+        .unwrap();
+        let opened = Opened {
+            session: "s".into(),
+            settings: Some(settings),
+        };
+        assert_eq!(chat.connected(opened), []);
+    }
+
+    #[test]
+    fn usage_and_settings_follow_the_agent() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"usage_update","used":22118,"size":1000000}"#,
+        );
+        assert_eq!(
+            chat.node.usage,
+            Some(Usage {
+                used: 22118,
+                size: 1_000_000,
+            })
+        );
+        chat.settings_changed(Ok(claude_settings("sonnet")));
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"current_mode_update","currentModeId":"auto"}"#,
+        );
+        assert_eq!(chat.node.settings[0].value, "auto");
+        assert_eq!(chat.node.settings[1].value, "sonnet");
     }
 }

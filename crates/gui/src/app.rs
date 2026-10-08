@@ -816,17 +816,26 @@ impl App {
     fn ime_event(&mut self, ime: Ime) {
         match ime {
             Ime::Enabled => {}
+            // A chat shows what's being composed in its own box.
             Ime::Preedit(text, cursor) => {
-                self.preedit = (!text.is_empty()).then(|| Preedit {
-                    text,
-                    cursor: cursor.map(|(start, _)| start),
-                });
+                let composing = (!text.is_empty()).then_some((text, cursor));
+                self.preedit = None;
+                if !self.desk.compose_in_chat(composing.clone()) {
+                    self.preedit = composing.map(|(text, cursor)| Preedit {
+                        text,
+                        cursor: cursor.map(|(start, _)| start),
+                    });
+                }
             }
             Ime::Commit(text) => {
                 self.preedit = None;
+                self.desk.compose_in_chat(None);
                 self.type_text(&text);
             }
-            Ime::Disabled => self.preedit = None,
+            Ime::Disabled => {
+                self.preedit = None;
+                self.desk.compose_in_chat(None);
+            }
         }
         self.request_redraw();
     }
@@ -1030,6 +1039,7 @@ impl App {
                     over: &painted.over,
                     texts: &texts,
                     glyphs: &[],
+                    over_glyphs: &[],
                     transparent,
                 },
             );
@@ -1102,6 +1112,7 @@ impl App {
             over: &over,
             texts: &texts,
             glyphs: &chat_paint.glyphs,
+            over_glyphs: &chat_paint.over_glyphs,
             transparent,
         };
         let frame = self.frame.as_mut()?;
@@ -1152,6 +1163,7 @@ impl App {
                 all.fills.extend(paint.fills);
                 all.glyphs.extend(paint.glyphs);
                 all.over.extend(paint.over);
+                all.over_glyphs.extend(paint.over_glyphs);
                 if focused {
                     all.ime = paint.ime;
                 }

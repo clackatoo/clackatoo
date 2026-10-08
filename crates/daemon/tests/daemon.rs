@@ -1343,6 +1343,41 @@ fn closing_a_chat_ends_its_session() {
     assert_eq!(last_words(&node), "echo: still here\n");
 }
 
+#[test]
+fn a_chat_starts_in_auto_mode_and_keeps_the_settings_chosen() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let node = wait_for_chat(&mut client, chat, |node| {
+        node.settings.iter().any(|setting| setting.value == "auto")
+    });
+    assert_eq!(node.settings.len(), 2);
+    assert_eq!(
+        last_words(&ask(&mut client, chat, "settings")),
+        "auto haiku\n"
+    );
+    client
+        .chat(
+            chat,
+            ChatAction::Set {
+                setting: "model".into(),
+                value: "sonnet".into(),
+            },
+        )
+        .unwrap();
+    let node = ask(&mut client, chat, "settings");
+    assert_eq!(last_words(&node), "auto sonnet\n");
+    assert_eq!(node.usage.map(|usage| usage.used), Some(1000));
+
+    // The agent crashes, and comes back with its settings where they
+    // started: the chat asks for its own again before the next message.
+    ask(&mut client, chat, "exit");
+    assert_eq!(
+        last_words(&ask(&mut client, chat, "settings")),
+        "auto sonnet\n"
+    );
+}
+
 /// Claude Code, through its adapter, on the cheapest model. Run by hand,
 /// with the adapter's command in `CLACKATOO_REAL_AGENT`, such as
 /// `npx --yes @agentclientprotocol/claude-agent-acp@0.88.0`: it uses the
@@ -1414,6 +1449,29 @@ fn a_real_agent_answers_and_asks_before_running_commands() {
         last_words(&node).to_lowercase().contains("pong"),
         "{node:#?}"
     );
+
+    // A new chat starts in Auto mode, if the model has it. Manual asks
+    // before anything that changes something, which the next part needs.
+    let node = client.capture(chat).unwrap();
+    let mode = (node.chat().unwrap().settings.iter())
+        .find(|setting| setting.kind == clackatoo_protocol::SettingKind::Mode)
+        .cloned()
+        .expect("Claude Code has modes");
+    assert_ne!(mode.value, "default", "a new chat leaves Manual");
+    client
+        .chat(
+            chat,
+            ChatAction::Set {
+                setting: mode.id.clone(),
+                value: "default".into(),
+            },
+        )
+        .unwrap();
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.settings
+            .iter()
+            .any(|setting| setting.id == mode.id && setting.value == "default")
+    });
 
     // A command that changes something, which Claude Code asks about,
     // unlike reading ones. No: the reject choice, and the answer ends.

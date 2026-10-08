@@ -22,6 +22,70 @@ pub struct ChatNode {
     /// Something to tell the user that belongs to no turn, such as that
     /// the agent stopped while the chat was idle.
     pub notice: Option<String>,
+    /// The agent's settings for the chat, such as its mode and model, as
+    /// the agent offers them.
+    pub settings: Vec<Setting>,
+    /// How much of the agent's context the chat fills, once it has said.
+    pub usage: Option<Usage>,
+}
+
+/// One of the agent's settings for a chat, and the values it can take.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Setting {
+    /// What the agent calls it, to change it with.
+    pub id: String,
+    /// What to show: "Mode", "Model"…
+    pub name: String,
+    /// What it's about.
+    pub kind: SettingKind,
+    /// The value it has, by its ID.
+    pub value: String,
+    /// The values it can take.
+    pub choices: Vec<SettingChoice>,
+}
+
+/// What a setting is about, so clients know where to put it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SettingKind {
+    /// How much the agent may do without asking, such as Claude Code's
+    /// Manual, Accept edits, Plan and Auto.
+    Mode,
+    /// The model it runs on.
+    Model,
+    /// How hard it thinks.
+    Effort,
+    /// Anything else.
+    Other,
+}
+
+/// One value a setting can take.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingChoice {
+    /// What the agent calls it.
+    pub value: String,
+    /// What to show: "Auto", "Sonnet 5.5"…
+    pub name: String,
+    /// More about it, if the agent says: "Fastest for quick answers".
+    pub description: Option<String>,
+}
+
+/// How much of the agent's context a chat fills.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    /// Tokens in the context.
+    pub used: u64,
+    /// The most it holds.
+    pub size: u64,
+}
+
+impl Setting {
+    /// The choice it has now, if it's one of its choices.
+    #[must_use]
+    pub fn current(&self) -> Option<&SettingChoice> {
+        self.choices
+            .iter()
+            .find(|choice| choice.value == self.value)
+    }
 }
 
 /// A message the user sent, and what the agent did with it.
@@ -165,6 +229,10 @@ pub enum ChatPatch {
     Question(Option<Question>),
     /// The notice is now this.
     Notice(Option<String>),
+    /// The settings are now these.
+    Settings(Vec<Setting>),
+    /// The usage is now this.
+    Usage(Option<Usage>),
 }
 
 /// What a client asks of a chat.
@@ -177,6 +245,13 @@ pub enum ChatAction {
     /// Answer the agent's question with the choice with this ID, or
     /// with none.
     Answer(Option<String>),
+    /// Change one of the agent's settings for the chat.
+    Set {
+        /// The setting's ID.
+        setting: String,
+        /// The value to give it, by its ID.
+        value: String,
+    },
 }
 
 impl ChatNode {
@@ -204,6 +279,8 @@ impl ChatNode {
             ChatPatch::State(state) => self.state = state,
             ChatPatch::Question(question) => self.question = question,
             ChatPatch::Notice(notice) => self.notice = notice,
+            ChatPatch::Settings(settings) => self.settings = settings,
+            ChatPatch::Usage(usage) => self.usage = usage,
         }
     }
 

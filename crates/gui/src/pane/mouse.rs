@@ -81,6 +81,7 @@ impl Pane {
                     chat.press(event.pixel, event.clicks, event.modifiers.shift);
                 }
                 MouseAction::Motion(Some(MouseButton::Left)) => chat.drag(event.pixel),
+                MouseAction::Motion(None) => return chat.hover(event.pixel),
                 MouseAction::Release(_) => chat.release(),
                 _ => return false,
             }

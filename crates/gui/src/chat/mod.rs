@@ -15,7 +15,7 @@
 mod markdown;
 mod paint;
 
-use clackatoo_protocol::{ChatAction, ChatNode, ChoiceKind, ViewUpdate};
+use clackatoo_protocol::{ChatAction, ChatNode, ChoiceKind, Setting, SettingKind, ViewUpdate};
 use parley::{LayoutContext, PlainEditor};
 use winit::keyboard::{Key, NamedKey};
 
@@ -61,6 +61,9 @@ enum Input {
     },
     /// The mouse moved to a point, with a button held.
     Drag([f32; 2]),
+    /// The input method is composing this text, with its cursor over this
+    /// stretch of it, or has stopped.
+    Compose(Option<(String, Option<(usize, usize)>)>),
 }
 
 /// What settling the chat's queue came to.
@@ -83,6 +86,22 @@ enum Hit {
     Choice(String),
     /// The message being typed.
     Editor,
+    /// A button that opens the menu for these settings, by their IDs.
+    Chip(Vec<String>),
+    /// One of a setting's choices, in its menu.
+    Pick {
+        setting: String,
+        value: String,
+    },
+}
+
+/// A menu open over the box, to pick the agent's settings.
+#[derive(Clone, Debug, PartialEq)]
+struct Menu {
+    /// The settings it picks from, by their IDs: a section each.
+    settings: Vec<String>,
+    /// The choice the keyboard or the mouse is on: its setting and value.
+    highlighted: Option<(String, String)>,
 }
 
 /// The window's side of a chat.
@@ -114,6 +133,11 @@ pub(crate) struct ChatView {
     editor_origin: [f32; 2],
     /// A drag that started in the editor selects as it goes.
     selecting: bool,
+    /// The settings menu, while it's open.
+    menu: Option<Menu>,
+    /// Where the chip that opened the menu was drawn, for the menu to open
+    /// from, while drawing.
+    menu_anchor: Option<[f32; 4]>,
 }
 
 impl std::fmt::Debug for ChatView {
@@ -145,6 +169,8 @@ impl ChatView {
             hits: Vec::new(),
             editor_origin: [0.0; 2],
             selecting: false,
+            menu: None,
+            menu_anchor: None,
         }
     }
 
@@ -209,6 +235,31 @@ impl ChatView {
         self.selecting = false;
     }
 
+    /// The input method is composing `text`, with its cursor over that
+    /// stretch of it, or has stopped, with `None`.
+    pub(crate) fn compose(&mut self, composing: Option<(String, Option<(usize, usize)>)>) {
+        self.queued.push(Input::Compose(composing));
+    }
+
+    /// The mouse moved to `at` with no button held: over a menu, its
+    /// choice there lights up. Returns whether the chat must be redrawn.
+    pub(crate) fn hover(&mut self, at: [f32; 2]) -> bool {
+        let Some(menu) = &mut self.menu else {
+            return false;
+        };
+        let under = (self.hits.iter())
+            .find(|(_, rect)| contains(*rect, at))
+            .and_then(|(hit, _)| match hit {
+                Hit::Pick { setting, value } => Some((setting.clone(), value.clone())),
+                _ => None,
+            });
+        if under.is_some() && under != menu.highlighted {
+            menu.highlighted = under;
+            return true;
+        }
+        false
+    }
+
     /// Whether input waits to be settled.
     pub(crate) fn unsettled(&self) -> bool {
         !self.queued.is_empty()
@@ -243,6 +294,12 @@ impl ChatView {
                     let [x, y] = self.in_editor(at);
                     self.drive(fonts, |driver| driver.extend_selection_to_point(x, y));
                 }
+                Input::Compose(Some((text, cursor))) => {
+                    self.drive(fonts, |driver| driver.set_compose(&text, cursor));
+                }
+                Input::Compose(None) => self.drive(fonts, |driver| {
+                    driver.clear_compose();
+                }),
             }
         }
         settled
@@ -267,11 +324,19 @@ impl ChatView {
         modifiers: Modifiers,
         settled: &mut Settled,
     ) {
+        if self.menu.is_some() && self.menu_key(key, settled) {
+            return;
+        }
         if self.node.question.is_some() {
             self.answer_key(key, text, modifiers, settled);
             return;
         }
         let (shift, ctrl) = (modifiers.shift, modifiers.ctrl);
+        // Shift+Tab steps through the agent's modes, as in Claude Code.
+        if shift && *key == Key::Named(NamedKey::Tab) {
+            self.next_mode(settled);
+            return;
+        }
         let character = match key {
             Key::Character(character) => Some(character.as_str()),
             _ => None,
@@ -395,6 +460,106 @@ impl ChatView {
         }
     }
 
+    /// A key while the settings menu is open: Up and Down move through
+    /// its choices, Enter picks one, and Esc closes it, as does any other
+    /// key, which then does what it would have. Returns whether it took
+    /// the key.
+    fn menu_key(&mut self, key: &Key, settled: &mut Settled) -> bool {
+        let Some(menu) = self.menu.clone() else {
+            return false;
+        };
+        let choices = self.menu_choices(&menu);
+        let at = (menu.highlighted.as_ref())
+            .and_then(|highlighted| choices.iter().position(|choice| choice == highlighted));
+        match key {
+            Key::Named(direction @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) => {
+                if choices.is_empty() {
+                    return true;
+                }
+                let last = choices.len() - 1;
+                let next = match (at, *direction == NamedKey::ArrowUp) {
+                    (None, true) => last,
+                    (None, false) => 0,
+                    (Some(at), true) => at.checked_sub(1).unwrap_or(last),
+                    (Some(at), false) => {
+                        if at == last {
+                            0
+                        } else {
+                            at + 1
+                        }
+                    }
+                };
+                if let Some(menu) = &mut self.menu {
+                    menu.highlighted = Some(choices[next].clone());
+                }
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                if let Some((setting, value)) = menu.highlighted {
+                    settled.actions.push(ChatAction::Set { setting, value });
+                }
+                self.menu = None;
+                true
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.menu = None;
+                true
+            }
+            _ => {
+                self.menu = None;
+                false
+            }
+        }
+    }
+
+    /// Every choice in `menu`, in order: each setting's, by its ID and the
+    /// choice's value.
+    fn menu_choices(&self, menu: &Menu) -> Vec<(String, String)> {
+        (menu.settings.iter())
+            .filter_map(|id| self.node.settings.iter().find(|setting| setting.id == *id))
+            .flat_map(|setting| {
+                (setting.choices.iter()).map(|choice| (setting.id.clone(), choice.value.clone()))
+            })
+            .collect()
+    }
+
+    /// Opens the menu for `settings`, on the choice of the first, or closes
+    /// it if it's open for them.
+    fn toggle_menu(&mut self, settings: Vec<String>) {
+        if self
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.settings == settings)
+        {
+            self.menu = None;
+            return;
+        }
+        let highlighted = (settings.first())
+            .and_then(|id| self.node.settings.iter().find(|setting| setting.id == *id))
+            .map(|setting| (setting.id.clone(), setting.value.clone()));
+        self.menu = Some(Menu {
+            settings,
+            highlighted,
+        });
+    }
+
+    /// Moves the agent's mode on to the next it offers, round to the first.
+    fn next_mode(&mut self, settled: &mut Settled) {
+        let Some(mode) =
+            (self.node.settings.iter()).find(|setting| setting.kind == SettingKind::Mode)
+        else {
+            return;
+        };
+        let at = (mode.choices.iter()).position(|choice| choice.value == mode.value);
+        let next = at.map_or(0, |at| (at + 1) % mode.choices.len());
+        if let Some(choice) = mode.choices.get(next) {
+            settled.actions.push(ChatAction::Set {
+                setting: mode.id.clone(),
+                value: choice.value.clone(),
+            });
+        }
+    }
+
     /// The answer that says no: the agent's own, or none.
     fn refusal(&self) -> Option<String> {
         let choices = &self.node.question.as_ref()?.choices;
@@ -414,12 +579,20 @@ impl ChatView {
         shift: bool,
         settled: &mut Settled,
     ) {
-        let hit = (self.hits.iter())
-            .find(|(_, [left, top, width, height])| {
-                at[0] >= *left && at[0] < left + width && at[1] >= *top && at[1] < top + height
-            })
+        // Over everything, a menu takes the click first.
+        let hit = (self.hits.iter().rev())
+            .find(|(_, rect)| contains(*rect, at))
             .map(|(hit, _)| hit.clone());
+        // A click anywhere else closes the menu.
+        if !matches!(hit, Some(Hit::Pick { .. } | Hit::Chip(_))) {
+            self.menu = None;
+        }
         match hit {
+            Some(Hit::Chip(settings)) => self.toggle_menu(settings),
+            Some(Hit::Pick { setting, value }) => {
+                self.menu = None;
+                settled.actions.push(ChatAction::Set { setting, value });
+            }
             Some(Hit::Send) => self.send(settled),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
             Some(Hit::Choice(id)) => settled.actions.push(ChatAction::Answer(Some(id))),
@@ -435,6 +608,11 @@ impl ChatView {
             }
             None => {}
         }
+    }
+
+    /// The setting with `id`, if the agent offers it.
+    fn setting(&self, id: &str) -> Option<&Setting> {
+        self.node.settings.iter().find(|setting| setting.id == id)
     }
 
     /// `at`, from the pane's top left, from the editor's text's instead.
@@ -489,6 +667,28 @@ impl ChatView {
     pub(crate) fn label(&self) -> Option<String> {
         (!self.follow && self.max_scroll > 0.0).then(|| "↑ scrolled".to_owned())
     }
+}
+
+#[cfg(test)]
+impl ChatView {
+    /// Opens the menu for the setting of `kind`, as clicking its chip does.
+    pub(crate) fn open_menu(&mut self, kinds: &[SettingKind]) {
+        let ids = (kinds.iter())
+            .filter_map(|kind| {
+                self.node
+                    .settings
+                    .iter()
+                    .find(|setting| setting.kind == *kind)
+            })
+            .map(|setting| setting.id.clone())
+            .collect();
+        self.toggle_menu(ids);
+    }
+}
+
+/// Whether `rect` (left, top, width and height) holds `at`.
+fn contains([left, top, width, height]: [f32; 4], at: [f32; 2]) -> bool {
+    at[0] >= left && at[0] < left + width && at[1] >= top && at[1] < top + height
 }
 
 #[cfg(test)]
@@ -611,5 +811,92 @@ mod tests {
         );
         // Typing went to the answer, not the message.
         assert_eq!(view.editor.raw_text(), "");
+    }
+
+    fn with_settings() -> ChatView {
+        use clackatoo_protocol::SettingChoice;
+        let choice = |value: &str| SettingChoice {
+            value: value.into(),
+            name: value.into(),
+            description: None,
+        };
+        let node = ChatNode {
+            settings: vec![
+                Setting {
+                    id: "mode".into(),
+                    name: "Mode".into(),
+                    kind: SettingKind::Mode,
+                    value: "auto".into(),
+                    choices: vec![choice("default"), choice("plan"), choice("auto")],
+                },
+                Setting {
+                    id: "model".into(),
+                    name: "Model".into(),
+                    kind: SettingKind::Model,
+                    value: "haiku".into(),
+                    choices: vec![choice("haiku"), choice("sonnet")],
+                },
+            ],
+            ..ChatNode::default()
+        };
+        ChatView::new(String::new(), node)
+    }
+
+    fn set(setting: &str, value: &str) -> ChatAction {
+        ChatAction::Set {
+            setting: setting.into(),
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn shift_tab_steps_through_the_modes() {
+        let mut fonts = fonts();
+        let mut view = with_settings();
+        press(
+            &mut view,
+            &Key::Named(NamedKey::Tab),
+            None,
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+        // From the last, round to the first.
+        assert_eq!(view.settle(&mut fonts).actions, [set("mode", "default")]);
+    }
+
+    #[test]
+    fn a_menu_is_picked_from_with_the_keyboard() {
+        let mut fonts = fonts();
+        let mut view = with_settings();
+        view.open_menu(&[SettingKind::Model]);
+        press(
+            &mut view,
+            &Key::Named(NamedKey::ArrowDown),
+            None,
+            Modifiers::default(),
+        );
+        press(
+            &mut view,
+            &Key::Named(NamedKey::Enter),
+            Some("\r"),
+            Modifiers::default(),
+        );
+        assert_eq!(view.settle(&mut fonts).actions, [set("model", "sonnet")]);
+        assert!(view.menu.is_none());
+        // Esc closes it, picking nothing; any other key closes it and
+        // types.
+        view.open_menu(&[SettingKind::Model]);
+        press(
+            &mut view,
+            &Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        view.open_menu(&[SettingKind::Model]);
+        typed(&mut view, "x");
+        assert_eq!(view.settle(&mut fonts).actions, []);
+        assert_eq!((view.menu.as_ref(), view.editor.raw_text()), (None, "x"));
     }
 }

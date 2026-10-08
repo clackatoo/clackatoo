@@ -184,6 +184,17 @@ impl Desk {
         self.panes.get_mut(&terminal)
     }
 
+    /// Passes what an input method is composing to the focused pane, if
+    /// it's a chat being typed in, which shows it in its box. Returns
+    /// whether it was: the window shows it over a terminal itself.
+    pub(crate) fn compose_in_chat(
+        &mut self,
+        composing: Option<(String, Option<(usize, usize)>)>,
+    ) -> bool {
+        self.focused_pane()
+            .is_some_and(|pane| pane.compose_in_chat(composing))
+    }
+
     /// Carries out what was typed or clicked in chats, which needs the
     /// fonts. Returns whether the window must be redrawn.
     pub(crate) fn settle_chats(&mut self, fonts: &mut crate::fonts::Fonts) -> bool {
@@ -905,8 +916,10 @@ impl Desk {
                 action
             }
             // Motion is passed on once per cell, with the button held.
+            // A chat follows the mouse by the pixel.
             MouseAction::Motion(_) => {
-                if self.mouse_cell == Some((terminal, cell)) {
+                let chat = self.panes.get(&terminal).is_some_and(Pane::is_chat);
+                if self.mouse_cell == Some((terminal, cell)) && !chat {
                     return outcome;
                 }
                 MouseAction::Motion(self.dragging.map(|(_, button)| button))

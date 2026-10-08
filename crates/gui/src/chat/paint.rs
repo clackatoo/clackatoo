@@ -9,14 +9,16 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use clackatoo_protocol::{ChatState, ChoiceKind, Item, Outcome, ToolStatus, Turn};
+use clackatoo_protocol::{
+    ChatState, ChoiceKind, Item, Outcome, Setting, SettingKind, ToolStatus, Turn,
+};
 use parley::{
     Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontStyle, FontWeight, GenericFamily,
     Layout, LineHeight, PositionedLayoutItem, StyleProperty,
 };
 
 use super::markdown::{self, BlockKind};
-use super::{Brush, ChatView, Hit, Tone};
+use super::{Brush, ChatView, Hit, Menu, Tone};
 use crate::fonts::Fonts;
 use crate::render::{Fill, Ink, Paint, PlacedGlyph};
 
@@ -32,8 +34,10 @@ const EDITOR_LINES: f32 = 10.0;
 pub(crate) struct ChatPaint {
     pub(crate) fills: Vec<Fill>,
     pub(crate) glyphs: Vec<PlacedGlyph>,
-    /// Fills over the text, as the cursor is.
+    /// Fills over the text, as the cursor and a menu are.
     pub(crate) over: Vec<Fill>,
+    /// Glyphs over those, as a menu's text is.
+    pub(crate) over_glyphs: Vec<PlacedGlyph>,
     /// Where the cursor in the message being typed is, for an input
     /// method's window: left, top, width and height.
     pub(crate) ime: Option<[f32; 4]>,
@@ -139,11 +143,18 @@ struct Canvas<'a> {
     clip: [f32; 4],
     /// The text's size, which spacing is a share of.
     em: f32,
+    /// What it draws goes over everything, as a menu does.
+    over: bool,
 }
 
 impl Canvas<'_> {
     fn fill(&mut self, fill: Fill) {
-        self.paint.fills.push(fill.clipped(self.clip));
+        let fill = fill.clipped(self.clip);
+        if self.over {
+            self.paint.over.push(fill);
+        } else {
+            self.paint.fills.push(fill);
+        }
     }
 
     /// Draws `layout` with its top left at `origin`.
@@ -186,7 +197,12 @@ impl Canvas<'_> {
                     let Ok(id) = u16::try_from(glyph.id) else {
                         continue;
                     };
-                    self.paint.glyphs.push(PlacedGlyph {
+                    let glyphs = if self.over {
+                        &mut self.paint.over_glyphs
+                    } else {
+                        &mut self.paint.glyphs
+                    };
+                    glyphs.push(PlacedGlyph {
                         face,
                         glyph: id,
                         ppem,
@@ -263,6 +279,7 @@ impl ChatView {
                 fonts,
                 clip: [origin[0], origin[1], size[0], size[1]],
                 em,
+                over: false,
             };
             for block in &laid.blocks {
                 canvas.text(&block.layout, [x, top + block.top]);
@@ -286,6 +303,7 @@ impl ChatView {
             fonts,
             clip,
             em,
+            over: false,
         };
         for span in &spans {
             // Out of view: nothing to draw.
@@ -304,6 +322,10 @@ impl ChatView {
             self.cache
                 .notes
                 .insert((EMPTY.to_owned(), Tone::Muted), laid);
+        }
+        // The menu goes over everything, the box included.
+        if let Some(anchor) = self.menu_anchor.take() {
+            self.draw_menu(&mut paint, fonts, m, place, anchor);
         }
         paint
     }
@@ -550,6 +572,7 @@ impl ChatView {
                 place.size[1],
             ],
             em: m.em,
+            over: false,
         };
         let bounds = [frame.left, frame.top, place.column, height];
         let shadow = [bounds[0], bounds[1] + m.em(0.15), bounds[2], bounds[3]];
@@ -561,6 +584,7 @@ impl ChatView {
             None => self.draw_editor(&mut canvas, m, &frame, editor_height, caret),
         }
         self.draw_send(&mut canvas, m, &frame);
+        self.draw_controls(&mut canvas, m, &frame);
         height + m.em(1.0)
     }
 
@@ -685,6 +709,7 @@ impl ChatView {
             fonts: canvas.fonts,
             clip,
             em: m.em,
+            over: false,
         };
         let shown = [origin[0], origin[1] - offset];
         let [left, top, _, _] = frame.place.in_pane([shown[0], shown[1], 0.0, 0.0]);
@@ -761,6 +786,322 @@ impl ChatView {
         draw_laid(canvas, m, &laid, text, size);
         self.hits.push((hit, frame.place.in_pane(rect)));
     }
+}
+
+impl ChatView {
+    /// Draws the box's controls along its bottom: the mode on the left,
+    /// and on the right, by the send button, how much context the chat
+    /// fills and the model and effort.
+    fn draw_controls(&mut self, canvas: &mut Canvas<'_>, m: Measures, frame: &BoxFrame) {
+        let size = m.em(2.0);
+        let top = frame.top + frame.height - m.em(0.5) - size;
+        let mut right = frame.left + frame.place.column - frame.pad * 0.7 - size - m.em(0.4);
+        let of = |kind| {
+            (self.node.settings.iter())
+                .find(|setting| setting.kind == kind)
+                .cloned()
+        };
+        let (mode, model, effort) = (
+            of(SettingKind::Mode),
+            of(SettingKind::Model),
+            of(SettingKind::Effort),
+        );
+
+        let picked: Vec<Setting> = model.into_iter().chain(effort).collect();
+        if !picked.is_empty() {
+            let label = picked
+                .iter()
+                .map(chosen_name)
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let laid = lay_out(
+                &mut self.layout_cx,
+                canvas.fonts,
+                m,
+                &format!("{label}  ▾"),
+                Look::Plain(Tone::Muted),
+                frame.inner,
+            );
+            let width = laid.width + m.em(1.2);
+            let rect = [right - width, top, width, size];
+            let ids = picked.into_iter().map(|setting| setting.id).collect();
+            self.draw_chip(canvas, m, frame, rect, &laid, ids);
+            right = rect[0] - m.em(0.6);
+        }
+        if let Some(usage) = self.node.usage {
+            let text = format!("{} / {}", tokens(usage.used), tokens(usage.size));
+            let laid = lay_out(
+                &mut self.layout_cx,
+                canvas.fonts,
+                m,
+                &text,
+                Look::Plain(Tone::Muted),
+                frame.inner,
+            );
+            let at = [right - laid.width, top + (size - laid.height) / 2.0];
+            draw_laid(canvas, m, &laid, at, laid.width);
+        }
+        if let Some(mode) = mode {
+            let label = format!("{}  ▾", chosen_name(&mode));
+            let laid = lay_out(
+                &mut self.layout_cx,
+                canvas.fonts,
+                m,
+                &label,
+                Look::Plain(Tone::Muted),
+                frame.inner,
+            );
+            let width = laid.width + m.em(1.2);
+            let rect = [frame.left + frame.pad * 0.4, top, width, size];
+            self.draw_chip(canvas, m, frame, rect, &laid, vec![mode.id]);
+        }
+    }
+
+    /// Draws a chip that opens the menu for `settings`, lit while it's
+    /// open, which then opens from it.
+    fn draw_chip(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        frame: &BoxFrame,
+        rect: [f32; 4],
+        laid: &Laid,
+        settings: Vec<String>,
+    ) {
+        let open = self
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.settings == settings);
+        // The menu opens above the box, lined up with the chip.
+        if open {
+            canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(1.0)));
+            self.menu_anchor = Some([rect[0], frame.top, rect[2], rect[3]]);
+        }
+        let at = [rect[0] + m.em(0.6), rect[1] + (rect[3] - laid.height) / 2.0];
+        draw_laid(canvas, m, laid, at, rect[2]);
+        self.hits
+            .push((Hit::Chip(settings), frame.place.in_pane(rect)));
+    }
+
+    /// Draws one of a menu's choices in `rect`: lit if the keyboard or the
+    /// mouse is on it, ticked if it's the setting's value.
+    fn draw_choice(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        rect: [f32; 4],
+        choice: &MenuChoice<'_>,
+    ) {
+        if choice.lit {
+            canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.5)));
+        }
+        let mark = m.em(1.6);
+        let left = rect[0] + m.em(0.4);
+        let top = rect[1] + (rect[3] - choice.name.height) / 2.0;
+        if choice.current {
+            let tick = lay_out(
+                &mut self.layout_cx,
+                canvas.fonts,
+                m,
+                "✓",
+                Look::Plain(Tone::Accent),
+                mark,
+            );
+            draw_laid(canvas, m, &tick, [left, top], mark);
+        }
+        draw_laid(canvas, m, choice.name, [left + mark, top], rect[2]);
+        if let Some(description) = choice.description {
+            let at = [left + mark + choice.name.width + m.em(1.2), top];
+            draw_laid(canvas, m, description, at, rect[2]);
+        }
+    }
+
+    /// The rows of `menu`, laid out at most `wide`: each setting's
+    /// choices, under its name when there are several.
+    fn menu_rows(
+        &mut self,
+        fonts: &mut Fonts,
+        m: Measures,
+        menu: &Menu,
+        wide: f32,
+    ) -> Vec<MenuRow> {
+        let settings: Vec<Setting> = (menu.settings.iter())
+            .filter_map(|id| self.setting(id).cloned())
+            .collect();
+        let mut rows = Vec::new();
+        let mut text = |text: &str, tone| {
+            lay_out(&mut self.layout_cx, fonts, m, text, Look::Plain(tone), wide)
+        };
+        for setting in &settings {
+            if settings.len() > 1 {
+                rows.push(MenuRow::Heading(text(&setting.name, Tone::Muted)));
+            }
+            for choice in &setting.choices {
+                let description = (choice.description.as_deref())
+                    .filter(|description| !description.is_empty())
+                    .map(|description| text(description, Tone::Muted));
+                rows.push(MenuRow::Choice {
+                    setting: setting.id.clone(),
+                    value: choice.value.clone(),
+                    name: text(&choice.name, Tone::Plain),
+                    description,
+                    current: choice.value == setting.value,
+                });
+            }
+        }
+        rows
+    }
+
+    /// Draws the settings menu, opening upward from `anchor`: the left of
+    /// the chip that opened it, and the top of the box.
+    fn draw_menu(
+        &mut self,
+        paint: &mut ChatPaint,
+        fonts: &mut Fonts,
+        m: Measures,
+        place: Place,
+        anchor: [f32; 4],
+    ) {
+        let Some(menu) = self.menu.clone() else {
+            return;
+        };
+        let rows = self.menu_rows(fonts, m, &menu, place.size[0]);
+        let (row, heading, pad, mark) = (m.em(1.9), m.em(1.6), m.em(0.4), m.em(1.6));
+        let width = (rows.iter())
+            .map(|row| match row {
+                MenuRow::Heading(laid) => laid.width,
+                MenuRow::Choice {
+                    name, description, ..
+                } => {
+                    name.width
+                        + description
+                            .as_ref()
+                            .map_or(0.0, |laid| m.em(1.2) + laid.width)
+                }
+            })
+            .fold(0.0, f32::max)
+            + mark
+            + m.em(1.4);
+        let height: f32 = 2.0 * pad
+            + (rows.iter())
+                .map(|menu_row| match menu_row {
+                    MenuRow::Heading(_) => heading,
+                    MenuRow::Choice { .. } => row,
+                })
+                .sum::<f32>();
+        let width = width.min(place.size[0] - m.em(1.0));
+        let left = anchor[0].clamp(
+            place.origin[0] + m.em(0.5),
+            (place.origin[0] + place.size[0] - width - m.em(0.5)).max(place.origin[0]),
+        );
+        let bottom = anchor[1] - m.em(0.4);
+        let top = (bottom - height).max(place.origin[1] + m.em(0.5));
+        let bounds = [left, top, width, bottom - top];
+        let mut canvas = Canvas {
+            paint,
+            fonts,
+            clip: [
+                place.origin[0],
+                place.origin[1],
+                place.size[0],
+                place.size[1],
+            ],
+            em: m.em,
+            over: true,
+        };
+        canvas.fill(Fill::rounded(
+            [bounds[0], bounds[1] + m.em(0.2), bounds[2], bounds[3]],
+            Paint::Shadow,
+            m.em(0.8),
+        ));
+        canvas.fill(
+            Fill::rounded(bounds, Paint::Palette, m.em(0.8)).bordered(1.0, Paint::PaletteEdge),
+        );
+        canvas.clip = bounds;
+        let mut y = top + pad;
+        for menu_row in rows {
+            match menu_row {
+                MenuRow::Heading(laid) => {
+                    draw_laid(
+                        &mut canvas,
+                        m,
+                        &laid,
+                        [left + m.em(0.8), y + (heading - laid.height) / 2.0],
+                        width,
+                    );
+                    y += heading;
+                }
+                MenuRow::Choice {
+                    setting,
+                    value,
+                    name,
+                    description,
+                    current,
+                } => {
+                    let rect = [left + pad, y, width - 2.0 * pad, row];
+                    let lit = menu.highlighted.as_ref() == Some(&(setting.clone(), value.clone()));
+                    let choice = MenuChoice {
+                        name: &name,
+                        description: description.as_ref(),
+                        current,
+                        lit,
+                    };
+                    self.draw_choice(&mut canvas, m, rect, &choice);
+                    self.hits
+                        .push((Hit::Pick { setting, value }, place.in_pane(rect)));
+                    y += row;
+                }
+            }
+        }
+    }
+}
+
+/// A setting's choice as a chip says it: the name of the choice it has.
+fn chosen_name(setting: &Setting) -> String {
+    setting
+        .current()
+        .map_or_else(|| setting.value.clone(), |choice| choice.name.clone())
+}
+
+/// A count of tokens, short: "830", "38k", "1M", "1.2M".
+fn tokens(count: u64) -> String {
+    match count {
+        0..1_000 => count.to_string(),
+        1_000..1_000_000 => format!("{}k", (count + 500) / 1_000),
+        _ => {
+            let tenths = (count + 50_000) / 100_000;
+            if tenths.is_multiple_of(10) {
+                format!("{}M", tenths / 10)
+            } else {
+                format!("{}.{}M", tenths / 10, tenths % 10)
+            }
+        }
+    }
+}
+
+/// One of a menu's choices, to draw.
+struct MenuChoice<'a> {
+    name: &'a Laid,
+    description: Option<&'a Laid>,
+    /// It's the setting's value now.
+    current: bool,
+    /// The keyboard or the mouse is on it.
+    lit: bool,
+}
+
+/// One row of the settings menu.
+enum MenuRow {
+    /// A section's heading: its setting's name.
+    Heading(Laid),
+    /// A choice: its setting and value, laid out, with its description,
+    /// and whether it's the setting's value now.
+    Choice {
+        setting: String,
+        value: String,
+        name: Laid,
+        description: Option<Laid>,
+        current: bool,
+    },
 }
 
 /// What the box says while nothing's typed.

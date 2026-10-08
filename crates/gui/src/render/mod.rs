@@ -39,6 +39,8 @@ pub(crate) struct Picture<'a> {
     /// Glyphs laid out already, as a chat pane's text is, drawn over the
     /// fills and under the overlays.
     pub(crate) glyphs: &'a [PlacedGlyph],
+    /// The same, over the overlays, as a chat's menu's text is.
+    pub(crate) over_glyphs: &'a [PlacedGlyph],
 }
 
 /// A glyph laid out already: which, at what size, and where.
@@ -645,24 +647,29 @@ impl Renderer {
             self.push_text(text, fonts);
         }
         for placed in picture.glyphs {
-            self.push_placed(placed, fonts);
+            if let Some(glyph) = self.placed(placed, fonts) {
+                self.glyph_instances.push(glyph);
+            }
+        }
+        for placed in picture.over_glyphs {
+            if let Some(glyph) = self.placed(placed, fonts) {
+                self.text_glyphs.push(glyph);
+            }
         }
     }
 
-    /// Adds a glyph laid out already.
-    fn push_placed(&mut self, placed: &PlacedGlyph, fonts: &mut Fonts) {
-        let Some(atlas) = self
+    /// A glyph laid out already, ready to draw.
+    fn placed(&mut self, placed: &PlacedGlyph, fonts: &mut Fonts) -> Option<Glyph> {
+        let atlas = self
             .glyphs
-            .get_sized(fonts, placed.face, placed.glyph, placed.ppem)
-        else {
-            return;
-        };
+            .get_sized(fonts, placed.face, placed.glyph, placed.ppem)?;
         let color = self.ink(placed.ink);
-        // Whole pixels, so glyphs stay sharp.
+        // Whole pixels, so glyphs stay sharp. An emoji, which `place` fits
+        // to a box, gets one an em tall, its baseline most of the way down.
         let pen = [placed.pen[0].round(), placed.pen[1].round()];
-        let mut glyph = place(&atlas, pen, [placed.ppem; 2], color, 0.0);
+        let mut glyph = place(&atlas, pen, [placed.ppem; 2], color, placed.ppem * 0.8);
         glyph.clip = clip_box(placed.clip);
-        self.glyph_instances.push(glyph);
+        Some(glyph)
     }
 
     /// The colour text in `ink` is drawn in.

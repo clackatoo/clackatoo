@@ -8,7 +8,12 @@
 //! | `ask` | Asks permission first, then says which option was picked |
 //! | `wait` | Nothing until the message is cancelled |
 //! | `exit` | Exits, as if it crashed |
+//! | `settings` | Its mode and model, as `mode model` |
 //! | anything else | `echo:` and the message, in two pieces |
+//!
+//! Each session has a mode (Manual, `default`, or Auto) and a model
+//! (`haiku` or `sonnet`), as Claude Code's adapter offers them, starting
+//! as Manual and Haiku, and each answer ends with how much context it uses.
 //!
 //! Run with `--log FILE`, it notes each session it's asked to close there.
 
@@ -25,6 +30,7 @@ fn main() {
             _ => None,
         },
         sessions: BTreeMap::new(),
+        settings: BTreeMap::new(),
         waiting: None,
     };
     for line in std::io::stdin().lock().lines() {
@@ -39,6 +45,8 @@ struct Fake {
     log: Option<String>,
     /// Each session's working directory.
     sessions: BTreeMap<String, String>,
+    /// Each session's mode and model.
+    settings: BTreeMap<String, (String, String)>,
     /// A message waiting to be answered: its request's ID and session.
     waiting: Option<(Value, String)>,
 }
@@ -70,6 +78,16 @@ fn done(id: &Value, reason: &str) {
     reply(id, &json!({ "stopReason": reason }));
 }
 
+/// A session's settings, as Claude Code's adapter gives them.
+fn config_options((mode, model): &(String, String)) -> Value {
+    json!([
+        { "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": mode,
+          "options": [{ "value": "default", "name": "Manual" }, { "value": "auto", "name": "Auto" }] },
+        { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
+          "options": [{ "value": "haiku", "name": "Haiku" }, { "value": "sonnet", "name": "Sonnet" }] },
+    ])
+}
+
 impl Fake {
     /// Acts on a message. Returns whether to carry on.
     fn receive(&mut self, message: &Value) -> bool {
@@ -90,12 +108,32 @@ impl Fake {
                 let session = format!("s{}", self.sessions.len() + 1);
                 self.sessions
                     .insert(session.clone(), params["cwd"].as_str().unwrap().to_owned());
-                reply(&id, &json!({ "sessionId": session }));
+                let settings = ("default".to_owned(), "haiku".to_owned());
+                let options = config_options(&settings);
+                self.settings.insert(session.clone(), settings);
+                reply(
+                    &id,
+                    &json!({ "sessionId": session, "configOptions": options }),
+                );
             }
+            // As after a crash: the settings are back where they started.
             Some("session/resume") => {
                 self.sessions
-                    .insert(session, params["cwd"].as_str().unwrap().to_owned());
-                reply(&id, &json!({}));
+                    .insert(session.clone(), params["cwd"].as_str().unwrap().to_owned());
+                let settings = ("default".to_owned(), "haiku".to_owned());
+                let options = config_options(&settings);
+                self.settings.insert(session, settings);
+                reply(&id, &json!({ "configOptions": options }));
+            }
+            Some("session/set_config_option") => {
+                let value = params["value"].as_str().unwrap_or_default().to_owned();
+                let settings = self.settings.entry(session).or_default();
+                match params["configId"].as_str() {
+                    Some("mode") => settings.0 = value,
+                    Some("model") => settings.1 = value,
+                    _ => {}
+                }
+                reply(&id, &json!({ "configOptions": config_options(settings) }));
             }
             Some("session/close") => {
                 if let Some(log) = &self.log {
@@ -135,6 +173,11 @@ impl Fake {
     /// Answers a message by the script its words choose. Returns whether
     /// to carry on.
     fn prompt(&mut self, id: Value, session: String, text: &str) -> bool {
+        // How much context it uses, as the adapter says before it answers.
+        if !matches!(text, "ask" | "wait" | "exit") {
+            let usage = json!({ "sessionUpdate": "usage_update", "used": 1000, "size": 200_000 });
+            update(&session, &usage);
+        }
         match text {
             "cwd" => {
                 say(&session, &format!("in {}\n", self.sessions[&session]));
@@ -168,6 +211,11 @@ impl Fake {
             }
             "wait" => self.waiting = Some((id, session)),
             "exit" => return false,
+            "settings" => {
+                let (mode, model) = self.settings.get(&session).cloned().unwrap_or_default();
+                say(&session, &format!("{mode} {model}\n"));
+                done(&id, "end_turn");
+            }
             _ => {
                 let (first, second) = text.split_at(text.len() / 2);
                 say(&session, &format!("echo: {first}"));

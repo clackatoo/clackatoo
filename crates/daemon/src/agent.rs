@@ -21,8 +21,8 @@ use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 use agent_client_protocol_schema::v1::{
-    PermissionOption, PromptResponse, RequestPermissionRequest, SessionNotification, SessionUpdate,
-    StopReason, ToolCallUpdate,
+    PermissionOption, PromptResponse, RequestPermissionRequest, SessionConfigOption,
+    SessionNotification, SessionUpdate, StopReason, ToolCallUpdate,
 };
 use clackatoo_protocol::TerminalId;
 use serde::Deserialize;
@@ -46,6 +46,8 @@ enum Pending {
     Session(TerminalId),
     /// A message from the chat in this terminal.
     Prompt(TerminalId),
+    /// A change to a setting of the chat in this terminal.
+    Setting(TerminalId),
     /// Nothing waits for the answer.
     Ignored,
 }
@@ -56,7 +58,13 @@ pub(crate) enum Incoming {
     /// The chat in `terminal` has a session, or couldn't get one.
     Session {
         terminal: TerminalId,
-        result: Result<String, String>,
+        result: Result<Opened, String>,
+    },
+    /// The settings of the chat in `terminal`, after it asked to change
+    /// one, or why it couldn't.
+    Settings {
+        terminal: TerminalId,
+        result: Result<Vec<SessionConfigOption>, String>,
     },
     /// A session's chat changed: a piece of a message, a tool call, a
     /// plan…
@@ -77,6 +85,15 @@ pub(crate) enum Incoming {
         tool: Box<ToolCallUpdate>,
         options: Vec<PermissionOption>,
     },
+}
+
+/// A session made or opened again.
+#[derive(Debug)]
+pub(crate) struct Opened {
+    /// Its ID: empty for one opened again, which keeps the ID asked for.
+    pub(crate) session: String,
+    /// Its settings, if the agent offers any.
+    pub(crate) settings: Option<Vec<SessionConfigOption>>,
 }
 
 /// One JSON-RPC message from the agent, of any kind.
@@ -188,6 +205,21 @@ impl Agent {
             Pending::Prompt(terminal),
             "session/prompt",
             &json!({ "sessionId": session, "prompt": [{ "type": "text", "text": text }] }),
+        );
+    }
+
+    /// Changes setting `setting` of the chat in `terminal` to `value`.
+    pub(crate) fn set_setting(
+        &mut self,
+        terminal: TerminalId,
+        session: &str,
+        setting: &str,
+        value: &str,
+    ) {
+        self.request(
+            Pending::Setting(terminal),
+            "session/set_config_option",
+            &json!({ "sessionId": session, "configId": setting, "value": value }),
         );
     }
 
@@ -409,13 +441,18 @@ impl Agent {
                 terminal,
                 // A resumed session's ID is the one asked for, which the
                 // answer leaves out: the chat keeps it.
-                result: result.map(|result| {
-                    result
+                result: result.map(|result| Opened {
+                    session: result
                         .get("sessionId")
                         .and_then(Value::as_str)
                         .unwrap_or_default()
-                        .to_owned()
+                        .to_owned(),
+                    settings: settings(&result),
                 }),
+            }),
+            Pending::Setting(terminal) => incoming.push(Incoming::Settings {
+                terminal,
+                result: result.map(|result| settings(&result).unwrap_or_default()),
             }),
             Pending::Prompt(terminal) => incoming.push(Incoming::Answered {
                 terminal,
@@ -433,7 +470,9 @@ impl Agent {
     /// terminals: a session, or the answer to a message.
     pub(crate) fn waiting(&self) -> impl Iterator<Item = TerminalId> + '_ {
         self.pending.values().filter_map(|pending| match pending {
-            Pending::Session(terminal) | Pending::Prompt(terminal) => Some(*terminal),
+            Pending::Session(terminal) | Pending::Prompt(terminal) | Pending::Setting(terminal) => {
+                Some(*terminal)
+            }
             Pending::Initialize | Pending::Ignored => None,
         })
     }
@@ -460,6 +499,18 @@ impl Agent {
         log::info!("agent stopped");
         self.process
     }
+}
+
+/// The settings an answer gives, if it gives any.
+fn settings(result: &Value) -> Option<Vec<SessionConfigOption>> {
+    let options = result.get("configOptions")?.as_array()?;
+    // Settings newer than this build knows are left out.
+    Some(
+        options
+            .iter()
+            .filter_map(|option| serde_json::from_value(option.clone()).ok())
+            .collect(),
+    )
 }
 
 /// A line from the agent as a message, or `None` if it isn't one.
