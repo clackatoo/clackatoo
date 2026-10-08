@@ -1818,6 +1818,11 @@ mod tests {
         assert_eq!(sent(&mut desk), b"", "stopped");
         type_keys(&mut desk, "jkw");
         assert_eq!(sent(&mut desk), b"jkw", "let go on, in order");
+        // Keys given up on, as a click gives up on Ctrl+B, aren't.
+        ctrl(&mut desk, "b");
+        assert!(desk.cancel_keys());
+        type_keys(&mut desk, "jk");
+        assert_eq!(sent(&mut desk), b"jk");
 
         // A reload starts again from the window's own keys.
         normal_mode(&mut desk);

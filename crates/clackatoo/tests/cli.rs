@@ -318,7 +318,7 @@ fn config_sets_shows_and_unsets_settings() {
     stdout(&config(&["renderer", "opengl"]));
     assert_eq!(stdout(&config(&["renderer"])), "opengl\n");
     assert_eq!(
-        std::fs::read_to_string(home.path().join("clackatoo/client.toml")).unwrap(),
+        std::fs::read_to_string(home.path().join("clackatoo/client/startup.toml")).unwrap(),
         "renderer = \"opengl\"\n"
     );
     let refused = config(&["renderer", "metal"]);

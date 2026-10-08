@@ -33,8 +33,8 @@ struct Cli {
     window: WindowArgs,
 }
 
-/// The window's options. Each defaults to the setting in `client.toml`
-/// (see `clackatoo config`).
+/// The window's options. Each defaults to the setting in
+/// `client/startup.toml` (see `clackatoo config`).
 #[derive(Debug, Args)]
 struct WindowArgs {
     /// The font family to draw text with. Defaults to your system's
@@ -125,7 +125,7 @@ enum Command {
     /// terminals and their programs running. Daemons from before protocol
     /// 11 can't be upgraded, only stopped.
     Upgrade,
-    /// Show or change the window's settings in client.toml. With no
+    /// Show or change the window's settings in client/startup.toml. With no
     /// arguments, shows them all.
     Config(ConfigArgs),
     /// Relay between standard input and output and the daemon, starting it

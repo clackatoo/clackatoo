@@ -210,6 +210,7 @@ impl Desk {
     /// Stops waiting for the rest of a binding's keys, as when the mouse
     /// is clicked. Returns whether it was waiting.
     pub(crate) fn cancel_keys(&mut self) -> bool {
+        self.forget_waiting();
         self.keymap.cancel()
     }
 

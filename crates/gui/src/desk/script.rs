@@ -46,6 +46,13 @@ impl Desk {
     /// old one bound, or listened for, goes with it.
     pub(super) fn reload_lua(&mut self) {
         let start = self.script.start.take();
+        // The new Lua numbers its requests afresh, so answers to the old
+        // one's go nowhere.
+        for asker in &mut self.asked {
+            if let super::Asker::Window(Asked::Lua(_)) = asker {
+                *asker = super::Asker::Window(Asked::Quiet);
+            }
+        }
         self.script = super::script::Script::default();
         self.keymap = super::bindings::Keys::default();
         self.script.lua = start.as_ref().and_then(|start| (start.0)());

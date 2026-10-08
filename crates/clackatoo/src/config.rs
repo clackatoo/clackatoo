@@ -1,4 +1,4 @@
-//! `client.toml`: the window's settings that are rarely changed, or are
+//! `client/startup.toml`: the window's settings that are rarely changed, or are
 //! needed before anything starts, such as the graphics API.
 //!
 //! The window reads it before starting its GPU and font threads, so it
@@ -69,9 +69,10 @@ pub(crate) fn dir() -> Option<PathBuf> {
     Some(config.join("clackatoo"))
 }
 
-/// Where the file is: `client.toml` in the [config directory](dir).
+/// Where the file is: `client/startup.toml` in the [config
+/// directory](dir), beside the window's `init.lua`.
 pub(crate) fn path() -> Option<PathBuf> {
-    Some(dir()?.join("client.toml"))
+    Some(dir()?.join("client/startup.toml"))
 }
 
 /// Reads the file, printing what's wrong with it, if anything, to stderr.
@@ -327,7 +328,7 @@ mod tests {
     #[test]
     fn setting_keeps_the_rest_of_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("clackatoo/client.toml");
+        let path = dir.path().join("clackatoo/client/startup.toml");
         set(&path, "renderer", "opengl").unwrap();
         assert_eq!(get(&path, "renderer").unwrap(), "opengl");
         assert_eq!(get(&path, "font-size").unwrap(), "12 (the default)");
