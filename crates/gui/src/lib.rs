@@ -23,6 +23,7 @@ mod desktop;
 mod fonts;
 mod glyphs;
 mod history;
+mod ime;
 mod input;
 mod layout;
 mod motion;

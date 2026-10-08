@@ -17,16 +17,17 @@ use clackatoo_term::Row;
 use clackatoo_term::mouse::MouseAction;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, OwnedDisplayHandle};
-use winit::keyboard::{Key, NamedKey};
-use winit::window::{CursorIcon, ResizeDirection, Window, WindowAttributes, WindowId};
+use winit::keyboard::{Key, KeyLocation, NamedKey};
+use winit::window::{CursorIcon, ImePurpose, ResizeDirection, Window, WindowAttributes, WindowId};
 
 use crate::GraphicsApi;
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, Status};
-use crate::desk::Desk;
+use crate::desk::{Desk, TextTarget};
 use crate::desktop::{Button, ButtonLayout, Desktop};
 use crate::fonts::Fonts;
+use crate::ime::Preedit;
 use crate::input;
 use crate::layout::{Placement, Tile};
 use crate::pane::{Copy, Mode};
@@ -304,6 +305,12 @@ pub(crate) struct App {
     contact: Option<Contact>,
     /// Whether a frame has shown a terminal, rather than a notice.
     first_frame_drawn: bool,
+    /// Whether the input method is on: while keys type text.
+    ime_allowed: bool,
+    /// Where the input method was last told the cursor is, in pixels.
+    ime_area: Option<[f32; 4]>,
+    /// Text the input method is composing.
+    preedit: Option<Preedit>,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
 }
@@ -338,6 +345,9 @@ impl App {
             notice: Some(Notice::Connecting),
             contact: None,
             first_frame_drawn: false,
+            ime_allowed: false,
+            ime_area: None,
+            preedit: None,
             result: Ok(()),
         }
     }
@@ -360,6 +370,7 @@ impl App {
         let [width, height] = Geometry::window_size(cols, rows, metrics(&fonts, PADDING as f32));
         let size = LogicalSize::new(f64::from(width), f64::from(height));
         let window = Arc::new(event_loop.create_window(window_attributes(size))?);
+        window.set_ime_purpose(ImePurpose::Terminal);
         log::debug!(
             "asked for a {size:?} window; got {:?} at scale {}",
             window.inner_size(),
@@ -794,6 +805,66 @@ impl App {
         }
     }
 
+    fn ime_event(&mut self, ime: Ime) {
+        match ime {
+            Ime::Enabled => {}
+            Ime::Preedit(text, cursor) => {
+                self.preedit = (!text.is_empty()).then(|| Preedit {
+                    text,
+                    cursor: cursor.map(|(start, _)| start),
+                });
+            }
+            Ime::Commit(text) => {
+                self.preedit = None;
+                self.type_text(&text);
+            }
+            Ime::Disabled => self.preedit = None,
+        }
+        self.request_redraw();
+    }
+
+    /// Types `text`, as the input method committed it, as if keyed.
+    fn type_text(&mut self, text: &str) {
+        if let Some(notice) = &mut self.notice {
+            if let Notice::Ask { input, .. } = notice {
+                input.push(text);
+            }
+            return;
+        }
+        let key = Key::Character(text.into());
+        self.desk.key(&input::KeyPress {
+            key: &key,
+            text: Some(text),
+            location: KeyLocation::Standard,
+            code: None,
+            modifiers: input::Modifiers::default(),
+        });
+        self.update_title();
+    }
+
+    /// Turns the input method on while keys type text, and off otherwise,
+    /// as in normal mode, whose keys are commands. Tells it where the
+    /// cursor is, at `area`, so its choices show beside it.
+    fn update_ime(&mut self, area: Option<[f32; 4]>) {
+        let Some(frame) = &self.frame else { return };
+        let allowed = self.desk.text_goes_to().is_some();
+        if allowed != self.ime_allowed {
+            frame.window.set_ime_allowed(allowed);
+            self.ime_allowed = allowed;
+            self.ime_area = None;
+            if !allowed {
+                self.preedit = None;
+            }
+        }
+        if let Some([x, y, width, height]) = area.filter(|_| allowed && area != self.ime_area) {
+            frame.window.set_ime_cursor_area(
+                PhysicalPosition::new(x, y),
+                PhysicalSize::new(width, height),
+            );
+            self.ime_area = area;
+        }
+    }
+
     /// Handles a key while a notice is shown: answering its question, or
     /// typing the answer to ssh's.
     fn notice_key(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
@@ -995,17 +1066,40 @@ impl App {
                 cursor,
                 highlights: state.highlights(height),
                 normal_mode: focused && normal,
+                focused,
             });
         }
+        let focused = drawings.iter().find(|drawing| drawing.focused);
+        let cell = geometry.area.cell;
+        let preedit = self
+            .preedit
+            .as_ref()
+            .filter(|_| desk.text_goes_to() == Some(TextTarget::Pane));
+        let (ime_area, composed) =
+            focused.map_or((None, None), |drawing| compose(preedit, drawing, cell));
+        let composed_rows = composed
+            .as_ref()
+            .zip(focused)
+            .map(|((row, cursor), drawing)| {
+                let mut rows = drawing.rows.clone();
+                rows[cursor.line] = row;
+                rows
+            });
         let scenes: Vec<Scene<'_>> = drawings
             .iter()
-            .map(|drawing| Scene {
-                origin: drawing.tile.origin,
-                size: drawing.tile.cells_size(geometry.area.cell),
-                rows: &drawing.rows,
-                cursor: drawing.cursor,
-                normal_mode: drawing.normal_mode,
-                highlights: &drawing.highlights,
+            .map(|drawing| {
+                let composing = composed.as_ref().filter(|_| drawing.focused);
+                Scene {
+                    origin: drawing.tile.origin,
+                    size: drawing.tile.cells_size(cell),
+                    rows: composed_rows
+                        .as_deref()
+                        .filter(|_| drawing.focused)
+                        .unwrap_or(&drawing.rows),
+                    cursor: composing.map_or(drawing.cursor, |&(_, cursor)| Some(cursor)),
+                    normal_mode: drawing.normal_mode,
+                    highlights: &drawing.highlights,
+                }
             })
             .collect();
         let mut texts = painted.texts;
@@ -1029,7 +1123,9 @@ impl App {
         if !present(frame, &picture) {
             return None;
         }
-        Some(drawings.iter().map(|drawing| drawing.terminal).collect())
+        let drawn = drawings.iter().map(|drawing| drawing.terminal).collect();
+        self.update_ime(ime_area);
+        Some(drawn)
     }
 }
 
@@ -1066,6 +1162,34 @@ fn resize_icon(direction: ResizeDirection) -> CursorIcon {
     }
 }
 
+/// Where the input method's choices go, beside the focused pane's cursor,
+/// and the cursor's row with `preedit`, the text the input method is
+/// composing, over it, with where the cursor goes then.
+#[allow(clippy::cast_precision_loss)]
+fn compose(
+    preedit: Option<&Preedit>,
+    focused: &Drawing<'_>,
+    cell: [f32; 2],
+) -> (Option<[f32; 4]>, Option<(Row, SceneCursor)>) {
+    let Some(cursor) = focused.cursor else {
+        return (None, None);
+    };
+    let [left, top] = focused.tile.origin;
+    let area = [
+        left + cursor.col as f32 * cell[0],
+        top + cursor.line as f32 * cell[1],
+        cell[0],
+        cell[1],
+    ];
+    let composed = preedit
+        .zip(focused.rows.get(cursor.line))
+        .map(|(preedit, row)| {
+            let (row, col) = preedit.over(row, cursor.col);
+            (row, SceneCursor { col, ..cursor })
+        });
+    (Some(area), composed)
+}
+
 /// One pane, ready to draw.
 struct Drawing<'a> {
     terminal: TerminalId,
@@ -1074,6 +1198,7 @@ struct Drawing<'a> {
     cursor: Option<SceneCursor>,
     highlights: Vec<Highlight>,
     normal_mode: bool,
+    focused: bool,
 }
 
 /// The format to draw the window in, from those it supports. Colours are
@@ -1450,7 +1575,11 @@ impl App {
                 event,
                 is_synthetic: false,
                 ..
-            } if event.state.is_pressed() => self.key_pressed(event_loop, &event),
+            // While the input method composes, keys are its.
+            } if event.state.is_pressed() && self.preedit.is_none() => {
+                self.key_pressed(event_loop, &event);
+            }
+            WindowEvent::Ime(ime) => self.ime_event(ime),
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             #[allow(clippy::cast_possible_truncation)]
             WindowEvent::CursorMoved { position, .. } => {

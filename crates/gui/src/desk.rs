@@ -45,6 +45,15 @@ pub(crate) struct Shown {
     pub(crate) pane: PaneId,
 }
 
+/// Where typed text goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextTarget {
+    /// The focused pane's program, in insert mode.
+    Pane,
+    /// The bottom bar: the command line, or a search being typed.
+    Bar,
+}
+
 /// Who sent a request, and so gets its answer.
 #[derive(Clone, Copy, Debug)]
 enum Asker {
@@ -169,6 +178,20 @@ impl Desk {
 
     pub(crate) fn pane(&self, terminal: TerminalId) -> Option<&Pane> {
         self.panes.get(&terminal)
+    }
+
+    /// Where typed text goes now, if keys type text rather than being
+    /// commands, as they are in normal mode.
+    pub(crate) fn text_goes_to(&self) -> Option<TextTarget> {
+        if self.input.is_some() {
+            return Some(TextTarget::Bar);
+        }
+        let pane = self.pane(self.focused_terminal()?)?;
+        if pane.prompting() {
+            Some(TextTarget::Bar)
+        } else {
+            (pane.mode == Mode::Insert).then_some(TextTarget::Pane)
+        }
     }
 
     pub(crate) fn finished(&self) -> bool {

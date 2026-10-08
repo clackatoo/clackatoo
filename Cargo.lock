@@ -496,6 +496,7 @@ dependencies = [
  "png",
  "pollster",
  "swash",
+ "unicode-width",
  "wgpu",
  "winit",
 ]

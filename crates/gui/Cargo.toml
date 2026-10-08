@@ -21,6 +21,7 @@ fontique.workspace = true
 log.workspace = true
 pollster.workspace = true
 swash.workspace = true
+unicode-width.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 
