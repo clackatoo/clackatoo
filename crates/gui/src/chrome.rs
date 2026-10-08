@@ -294,13 +294,18 @@ impl Chrome {
             (text, rect)
         });
 
-        // A workspace: its dot, its name, and quieter, how many tabs it has.
+        // A workspace: its dot, its name, and quieter, how many tabs it has,
+        // unless it's named with a number, as workspaces are by default:
+        // "1 3" would read as nonsense.
         let dot = metrics.dot();
         let workspaces = lay_out(
             contents
                 .workspaces
                 .into_iter()
-                .map(|(id, text, tabs, active)| (id, text, Some(tabs.to_string()), active)),
+                .map(|(id, text, tabs, active)| {
+                    let numbered = !text.is_empty() && text.chars().all(|ch| ch.is_ascii_digit());
+                    (id, text, (!numbered).then(|| tabs.to_string()), active)
+                }),
             workspaces_start..workspaces_end - pill_height - padding,
             padding,
             |text, detail, active| {
@@ -1239,6 +1244,36 @@ mod tests {
         assert_eq!(notes, ["2 panes", ": command"]);
         assert_eq!(chrome.hit([400.0, 584.0], false), Hit::Nothing);
         assert_eq!(chrome.hit([100.0, 100.0], false), Hit::Panes);
+    }
+
+    #[test]
+    fn workspaces_named_with_a_number_dont_count_their_tabs() {
+        let buttons = ButtonLayout::default();
+        let chrome = Chrome::new(
+            Geometry::new([800, 600], METRICS),
+            Contents {
+                workspaces: vec![
+                    (WorkspaceId(1), "1".into(), 3, true),
+                    (WorkspaceId(2), "work 2".into(), 3, false),
+                ],
+                tabs: Vec::new(),
+                status: Status::tabs(),
+                buttons: &buttons,
+                bottom_shown: true,
+                menu: None,
+                alert: None,
+                rounded: false,
+            },
+            &mut measure,
+        );
+        assert_eq!(chrome.workspaces[0].detail, None);
+        assert_eq!(
+            chrome.workspaces[1]
+                .detail
+                .as_ref()
+                .map(|(count, _)| count.as_str()),
+            Some("3")
+        );
     }
 
     #[test]
