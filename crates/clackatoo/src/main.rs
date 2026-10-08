@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use clackatoo_daemon::remote::{self, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, DaemonConfig, RuntimeDir, launch, upgrade};
-use clackatoo_protocol::{NewTerminal, Size, TerminalId};
+use clackatoo_protocol::{NewTerminal, OpenFile, PaneTerminal, Size, TerminalId};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// A fast, lightweight terminal workspace.
@@ -104,6 +104,8 @@ enum Command {
     List(Connection),
     /// Start a terminal and print its ID.
     New(New),
+    /// Edit a file, in a new tab of the workspace last used.
+    Edit(Edit),
     /// Type a command into a terminal and press Enter.
     Run(Run),
     /// Send text to a terminal exactly as given, without pressing Enter.
@@ -226,6 +228,14 @@ struct New {
 }
 
 #[derive(Debug, Args)]
+struct Edit {
+    /// The file. A relative path is from the current directory.
+    path: PathBuf,
+    #[command(flatten)]
+    connection: Connection,
+}
+
+#[derive(Debug, Args)]
 struct Ping {
     /// How many rounds to time.
     #[arg(short, long, default_value_t = 10)]
@@ -300,6 +310,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::Daemon(args) => run_daemon(&args),
         Command::List(connection) => list(&connection),
         Command::New(new) => new_terminal(new),
+        Command::Edit(edit) => edit_file(edit),
         Command::Run(run) => {
             let mut line = run.words.join(" ").into_bytes();
             line.push(b'\r');
@@ -502,6 +513,24 @@ fn new_terminal(new: New) -> anyhow::Result<()> {
     };
     let id = connect(&new.connection)?.new_terminal(request)?;
     println!("{id}");
+    Ok(())
+}
+
+fn edit_file(edit: Edit) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("could not read the current directory")?;
+    let file = PaneTerminal::File(OpenFile {
+        path: path_string(edit.path, "the path")?,
+        cwd: Some(path_string(cwd, "the current directory")?),
+    });
+    let mut client = connect(&edit.connection)?;
+    let workspaces = client.watch_workspaces()?;
+    let active =
+        (workspaces.active).or_else(|| workspaces.list.first().map(|workspace| workspace.id));
+    let pane = match active {
+        Some(workspace) => client.new_tab(workspace, file)?,
+        None => client.new_workspace(None, file)?,
+    };
+    client.focus(pane)?;
     Ok(())
 }
 

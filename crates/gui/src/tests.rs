@@ -932,3 +932,60 @@ fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
     press(&mut pane, Key::Character("i".into()), Some("i"));
     assert_eq!(pane.mode, Mode::Insert);
 }
+
+#[test]
+fn renders_an_editor_pane() {
+    use clackatoo_protocol::{BufferId, BufferSnapshot, BufferUpdate};
+
+    use crate::editor::{BufferCopy, Editor};
+
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut copy = BufferCopy::new(BufferId(1));
+    copy.update(BufferUpdate::Snapshot(BufferSnapshot {
+        path: "/src/main.rs".into(),
+        text: "fn main() {\n\tprintln!(\"hello, 世界\");\n}\n".into(),
+        version: 0,
+        modified: false,
+    }));
+    let (cols, rows) = (32u16, 5u16);
+    let mut editor = Editor::new(BufferId(1));
+    editor.resize(Size::new(cols, rows).unwrap());
+    editor.settle(&copy);
+    let (lines, cursor) = editor.scene();
+    let mut fonts = fonts(2.0);
+    let padding = 4;
+    let size = [
+        u32::from(cols) * fonts.cell.width + 2 * padding,
+        u32::from(rows) * fonts.cell.height + 2 * padding,
+    ];
+    #[allow(clippy::cast_precision_loss)]
+    let scene = Scene {
+        origin: [padding as f32; 2],
+        size: [
+            (size[0] - 2 * padding) as f32,
+            (size[1] - 2 * padding) as f32,
+        ],
+        rows: &lines,
+        cursor,
+        normal_mode: true,
+        highlights: &editor.highlights(),
+    };
+    let picture = Picture {
+        scenes: &[scene],
+        fills: &[],
+        over: &[],
+        texts: &[],
+        glyphs: &[],
+        over_glyphs: &[],
+        transparent: false,
+    };
+    let pixels = draw(&gpu, size, &picture, &mut fonts);
+    save("editor", size, &pixels);
+    assert_eq!(lines[1].text().trim_start(), "println!(\"hello, 世界\");");
+    assert_eq!(lines[3].text(), "~", "past the end");
+    let background = &pixels[..4];
+    assert!(pixels.chunks(4).any(|pixel| pixel != background));
+}

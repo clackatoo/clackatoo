@@ -16,9 +16,15 @@ pub(crate) struct Point {
 
 /// The lines the cursor moves over.
 pub(crate) trait Lines {
+    /// A line: borrowed from a terminal's screen or history, or for a
+    /// file's text, made as it's asked for.
+    type Row<'a>: std::ops::Deref<Target = Row>
+    where
+        Self: 'a;
+
     /// Line `line`, or `None` if it isn't to hand (not fetched yet), which
     /// counts as blank.
-    fn row(&self, line: u64) -> Option<&Row>;
+    fn row(&self, line: u64) -> Option<Self::Row<'_>>;
     /// The first and last lines, inclusive.
     fn bounds(&self) -> (u64, u64);
 }
@@ -45,6 +51,21 @@ pub(crate) enum Motion {
     First,
     /// `G`: the last line.
     Last,
+    /// `^`: the line's first character that isn't blank.
+    FirstNonBlank,
+    /// `W`: the start of the next run of anything but blanks.
+    BigWordStart,
+    /// `B`: the start of this run of anything but blanks, or the previous.
+    BigWordBack,
+    /// `E`: the end of this run of anything but blanks, or the next.
+    BigWordEnd,
+    /// `f`, `t`, `F` and `T`: the next `ch` on the line, or the previous
+    /// one if not `forward`, or the character just before it if `till`.
+    Find {
+        ch: char,
+        forward: bool,
+        till: bool,
+    },
 }
 
 /// What an operator such as `y` takes when given a motion, as in Vim.
@@ -61,10 +82,22 @@ pub(crate) enum Reach {
 impl Motion {
     pub(crate) fn reach(self) -> Reach {
         match self {
-            Self::Left | Self::Right | Self::LineStart | Self::WordStart | Self::WordBack => {
-                Reach::Exclusive
+            Self::Left
+            | Self::Right
+            | Self::LineStart
+            | Self::FirstNonBlank
+            | Self::WordStart
+            | Self::WordBack
+            | Self::BigWordStart
+            | Self::BigWordBack => Reach::Exclusive,
+            Self::Find { forward, .. } => {
+                if forward {
+                    Reach::Inclusive
+                } else {
+                    Reach::Exclusive
+                }
             }
-            Self::LineEnd | Self::WordEnd => Reach::Inclusive,
+            Self::LineEnd | Self::WordEnd | Self::BigWordEnd => Reach::Inclusive,
             Self::Up(_) | Self::Down(_) | Self::First | Self::Last => Reach::Lines,
         }
     }
@@ -94,17 +127,24 @@ impl Cursor {
         Self { at, want: at.col }
     }
 
+    /// A cursor at `at`, aiming for column `want` moving up and down.
+    pub(crate) fn wanting(at: Point, want: usize) -> Self {
+        Self { at, want }
+    }
+
     /// Moves by `motion`, staying within `lines`.
     pub(crate) fn apply(&mut self, motion: Motion, lines: &impl Lines) {
         let (first, last) = lines.bounds();
         let at = self.at;
         match motion {
             Motion::Left => {
-                self.at.col = previous_cell(lines.row(at.line), at.col).unwrap_or(at.col);
+                let row = lines.row(at.line);
+                self.at.col = previous_cell(row.as_deref(), at.col).unwrap_or(at.col);
                 self.want = self.at.col;
             }
             Motion::Right => {
                 let row = lines.row(at.line);
+                let row = row.as_deref();
                 if let Some(col) = next_cell(row, at.col).filter(|&col| col < text_end(row)) {
                     self.at.col = col;
                 }
@@ -117,8 +157,26 @@ impl Cursor {
                 self.want = 0;
             }
             Motion::LineEnd => {
-                self.at.col = last_char(lines.row(at.line));
+                self.at.col = last_char(lines.row(at.line).as_deref());
                 self.want = usize::MAX;
+            }
+            Motion::FirstNonBlank => {
+                let row = lines.row(at.line);
+                let row = row.as_deref();
+                let end = text_end(row);
+                let mut col = 0;
+                while col < end && class_at(row, col) == Class::Blank {
+                    col = next_cell(row, col).unwrap_or(end);
+                }
+                self.at.col = start_of_cell(row, col.min(end.saturating_sub(1)));
+                self.want = self.at.col;
+            }
+            Motion::Find { ch, forward, till } => {
+                let row = lines.row(at.line);
+                if let Some(col) = find(row.as_deref(), at.col, ch, forward, till) {
+                    self.at.col = col;
+                    self.want = col;
+                }
             }
             Motion::First => {
                 self.at = Point {
@@ -131,15 +189,19 @@ impl Cursor {
                 self.at = Point { line: last, col: 0 };
                 self.want = 0;
             }
-            Motion::WordStart => self.word_start(lines),
-            Motion::WordBack => self.word_back(lines),
-            Motion::WordEnd => self.word_end(lines),
+            Motion::WordStart => self.word_start(lines, Class::of),
+            Motion::WordBack => self.word_back(lines, Class::of),
+            Motion::WordEnd => self.word_end(lines, Class::of),
+            Motion::BigWordStart => self.word_start(lines, Class::big),
+            Motion::BigWordBack => self.word_back(lines, Class::big),
+            Motion::BigWordEnd => self.word_end(lines, Class::big),
         }
     }
 
     /// Moves to `line`, aiming for the wanted column.
     fn go_to_line(&mut self, line: u64, lines: &impl Lines) {
         let row = lines.row(line);
+        let row = row.as_deref();
         let col = self.want.min(last_char(row));
         self.at = Point {
             line,
@@ -147,8 +209,8 @@ impl Cursor {
         };
     }
 
-    fn word_start(&mut self, lines: &impl Lines) {
-        let mut walk = Walk::new(lines, self.at);
+    fn word_start(&mut self, lines: &impl Lines, kind: fn(Class) -> Class) {
+        let mut walk = Walk::new(lines, self.at).seeing(kind);
         let class = walk.class();
         while class != Class::Blank && walk.class() == class {
             if !walk.forward() {
@@ -163,8 +225,8 @@ impl Cursor {
         self.settle(walk.at);
     }
 
-    fn word_end(&mut self, lines: &impl Lines) {
-        let mut walk = Walk::new(lines, self.at);
+    fn word_end(&mut self, lines: &impl Lines, kind: fn(Class) -> Class) {
+        let mut walk = Walk::new(lines, self.at).seeing(kind);
         if !walk.forward() {
             return;
         }
@@ -180,8 +242,8 @@ impl Cursor {
         self.settle(walk.at);
     }
 
-    fn word_back(&mut self, lines: &impl Lines) {
-        let mut walk = Walk::new(lines, self.at);
+    fn word_back(&mut self, lines: &impl Lines, kind: fn(Class) -> Class) {
+        let mut walk = Walk::new(lines, self.at).seeing(kind);
         if !walk.back() {
             return;
         }
@@ -205,16 +267,40 @@ impl Cursor {
     }
 }
 
+impl Class {
+    fn of(class: Self) -> Self {
+        class
+    }
+
+    /// For `W`, `B` and `E`: anything but blanks is one kind.
+    fn big(class: Self) -> Self {
+        match class {
+            Self::Blank => Self::Blank,
+            Self::Word | Self::Punctuation => Self::Word,
+        }
+    }
+}
+
 /// A position moving cell by cell through the document, with each line's
 /// end as a blank between it and the next.
 pub(crate) struct Walk<'a, L> {
     lines: &'a L,
     at: Point,
+    kind: fn(Class) -> Class,
 }
 
 impl<'a, L: Lines> Walk<'a, L> {
     pub(crate) fn new(lines: &'a L, at: Point) -> Self {
-        Self { lines, at }
+        Self {
+            lines,
+            at,
+            kind: Class::of,
+        }
+    }
+
+    /// Sees classes as `kind` does: as `W` sees them, say.
+    fn seeing(self, kind: fn(Class) -> Class) -> Self {
+        Self { kind, ..self }
     }
 
     pub(crate) fn at(&self) -> Point {
@@ -222,7 +308,11 @@ impl<'a, L: Lines> Walk<'a, L> {
     }
 
     fn class(&self) -> Class {
-        class_at(self.lines.row(self.at.line), self.at.col)
+        self.class_of(self.at)
+    }
+
+    fn class_of(&self, at: Point) -> Class {
+        (self.kind)(class_at(self.lines.row(at.line).as_deref(), at.col))
     }
 
     /// Steps to the next cell, or the next line's start. Returns false at
@@ -248,17 +338,16 @@ impl<'a, L: Lines> Walk<'a, L> {
     }
 
     fn peek_forward(&self) -> Option<Class> {
-        self.next()
-            .map(|at| class_at(self.lines.row(at.line), at.col))
+        self.next().map(|at| self.class_of(at))
     }
 
     fn peek_back(&self) -> Option<Class> {
-        self.previous()
-            .map(|at| class_at(self.lines.row(at.line), at.col))
+        self.previous().map(|at| self.class_of(at))
     }
 
     fn next(&self) -> Option<Point> {
         let row = self.lines.row(self.at.line);
+        let row = row.as_deref();
         // A line's end is the position just past its text.
         match next_cell(row, self.at.col) {
             Some(col) if col <= text_end(row) && self.at.col < text_end(row) => Some(Point {
@@ -276,7 +365,7 @@ impl<'a, L: Lines> Walk<'a, L> {
     fn previous(&self) -> Option<Point> {
         if self.at.col > 0 {
             let row = self.lines.row(self.at.line);
-            return previous_cell(row, self.at.col).map(|col| Point {
+            return previous_cell(row.as_deref(), self.at.col).map(|col| Point {
                 line: self.at.line,
                 col,
             });
@@ -285,7 +374,7 @@ impl<'a, L: Lines> Walk<'a, L> {
             let line = self.at.line - 1;
             return Some(Point {
                 line,
-                col: text_end(self.lines.row(line)),
+                col: text_end(self.lines.row(line).as_deref()),
             });
         }
         None
@@ -340,9 +429,50 @@ pub(crate) fn previous_cell(row: Option<&Row>, col: usize) -> Option<usize> {
     Some(start_of_cell(row, previous))
 }
 
+/// The cell of `ch` after `col` on the row, or before it if not `forward`,
+/// or the cell next to that one, towards `col`, if `till`.
+fn find(row: Option<&Row>, col: usize, ch: char, forward: bool, till: bool) -> Option<usize> {
+    let cells = row?.cells();
+    let found = if forward {
+        (col + 1..cells.len()).find(|&at| cells[at].ch() == ch && !cells[at].is_wide_spacer())?
+    } else {
+        (0..col)
+            .rev()
+            .find(|&at| cells[at].ch() == ch && !cells[at].is_wide_spacer())?
+    };
+    if !till {
+        return Some(found);
+    }
+    let near = if forward {
+        previous_cell(row, found)?
+    } else {
+        next_cell(row, found)?
+    };
+    (near != col).then_some(near)
+}
+
+/// The last character before `end`, from `start`, for an exclusive
+/// motion: none if they're the same place. As in Vim, a motion that ends
+/// at the start of a line stops at the end of the line before.
+pub(crate) fn before(lines: &impl Lines, start: Point, end: Point) -> Option<Point> {
+    if end <= start {
+        return None;
+    }
+    if end.col == 0 && end.line > start.line {
+        let line = end.line - 1;
+        let col = text_end(lines.row(line).as_deref()).saturating_sub(1);
+        return Some(Point { line, col }.max(start));
+    }
+    let col = previous_cell(lines.row(end.line).as_deref(), end.col)?;
+    Some(Point {
+        line: end.line,
+        col,
+    })
+}
+
 /// `col`, moved left onto a wide character's left half if it's on the
 /// right.
-fn start_of_cell(row: Option<&Row>, col: usize) -> usize {
+pub(crate) fn start_of_cell(row: Option<&Row>, col: usize) -> usize {
     let spacer = row
         .and_then(|row| row.cells().get(col))
         .is_some_and(|cell| cell.is_wide_spacer());
@@ -374,6 +504,8 @@ pub(crate) mod tests {
     }
 
     impl Lines for Text {
+        type Row<'a> = &'a Row;
+
         fn row(&self, line: u64) -> Option<&Row> {
             self.0.get(usize::try_from(line).ok()?)
         }

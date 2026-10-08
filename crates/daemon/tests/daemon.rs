@@ -9,10 +9,11 @@ use std::time::{Duration, Instant};
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    ChatAction, ChatNode, ChatState, ClientMessage, Diff, Error, Event, Item, Location, NewAgent,
-    NewTerminal, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Request, Response,
-    ServerMessage, Side, Size, TerminalId, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus,
-    View, ViewUpdate, Workspaces,
+    BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode, ChatState, ClientMessage,
+    Diff, Edit, Error, Event, Item, Location, NewAgent, NewTerminal, OpenFile, Outcome,
+    PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size,
+    TerminalId, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, View, ViewUpdate,
+    Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -453,7 +454,7 @@ fn next_update(client: &mut Client, terminal: TerminalId) -> ViewUpdate {
             assert_eq!(from, terminal);
             update
         }
-        Event::Workspaces(_) => panic!("expected a view update, got the workspaces"),
+        other => panic!("expected a view update, got {other:?}"),
     }
 }
 
@@ -1518,4 +1519,191 @@ fn a_real_agent_answers_and_asks_before_running_commands() {
         last_outcome(node).is_some()
     });
     assert!(!daemon.dir.path().join("made-by-claude").exists());
+}
+
+// --- Buffers -------------------------------------------------------------
+
+fn open_file(dir: &Path, path: &str) -> PaneTerminal {
+    PaneTerminal::File(OpenFile {
+        path: path.to_owned(),
+        cwd: Some(dir.display().to_string()),
+    })
+}
+
+/// The buffer the pane `pane` shows, once the workspaces have it.
+fn buffer_in(client: &mut Client, pane: PaneId) -> BufferId {
+    loop {
+        let workspaces = next_workspaces(client);
+        if let Some((_, _, pane)) = workspaces.find_pane(pane) {
+            return pane.content.buffer().expect("a buffer");
+        }
+    }
+}
+
+/// The next update about a buffer, skipping the workspaces.
+fn next_buffer_update(client: &mut Client) -> BufferUpdate {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    loop {
+        match client.next_event().expect("a buffer update") {
+            Event::Buffer { update, .. } => return update,
+            Event::Workspaces(_) => {}
+            other @ Event::View { .. } => panic!("expected a buffer update, got {other:?}"),
+        }
+    }
+}
+
+/// Attaches to `buffer`, or again, returning the snapshot that comes.
+fn attach_buffer(client: &mut Client, buffer: BufferId) -> BufferSnapshot {
+    client.attach_buffer(buffer).unwrap();
+    loop {
+        if let BufferUpdate::Snapshot(snapshot) = next_buffer_update(client) {
+            return snapshot;
+        }
+    }
+}
+
+fn send_change(client: &mut Client, buffer: BufferId, seq: u64, change: Change) {
+    client.edit(buffer, seq, change).unwrap();
+}
+
+fn insert(len: usize, at: usize, text: &str, base: u64) -> Change {
+    Change::Edit {
+        edit: Edit::replace(len, at, "", text),
+        base,
+        step: true,
+    }
+}
+
+#[test]
+fn a_buffer_is_shared_by_windows_editing_it_at_once() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("notes.txt"), "hello\n").unwrap();
+    let mut one = daemon.client();
+    one.watch_workspaces().unwrap();
+    let pane = one
+        .new_workspace(None, open_file(dir, "notes.txt"))
+        .unwrap();
+    let buffer = buffer_in(&mut one, pane);
+    let snapshot = attach_buffer(&mut one, buffer);
+    assert_eq!((snapshot.text.as_str(), snapshot.version), ("hello\n", 0));
+    assert!(snapshot.path.ends_with("/notes.txt") && !snapshot.modified);
+    let mut two = daemon.client();
+    attach_buffer(&mut two, buffer);
+
+    // Both type at once, each to version 0.
+    send_change(&mut one, buffer, 0, insert(6, 5, " world", 0));
+    send_change(&mut two, buffer, 0, insert(6, 0, "> ", 0));
+    for client in [&mut one, &mut two] {
+        // Each hears its own edit acknowledged, and the other's edit, in
+        // whichever order the daemon took them; and that it's modified.
+        let mut heard = Vec::new();
+        while heard.len() < 3 {
+            heard.push(next_buffer_update(client));
+        }
+        assert!(
+            heard
+                .iter()
+                .any(|update| matches!(update, BufferUpdate::Acked { seq: 0, .. }))
+        );
+        assert!(
+            heard
+                .iter()
+                .any(|update| matches!(update, BufferUpdate::Edited { answers: None, .. }))
+        );
+        assert!(heard.contains(&BufferUpdate::Modified(true)));
+    }
+    let mut three = daemon.client();
+    let snapshot = attach_buffer(&mut three, buffer);
+    assert_eq!(
+        (snapshot.text.as_str(), snapshot.version),
+        ("> hello world\n", 2)
+    );
+
+    // Undo takes back the last step, and saving writes the file.
+    send_change(&mut one, buffer, 1, Change::Undo);
+    let BufferUpdate::Edited {
+        version: 3,
+        answers: Some(1),
+        edit,
+        ..
+    } = next_buffer_update(&mut one)
+    else {
+        panic!("the undo's edit");
+    };
+    assert_eq!(
+        edit.apply_to("> hello world\n").unwrap().len(),
+        "hello world\n".len().max("> hello\n".len())
+    );
+    let answer = one
+        .request(&Request::Save {
+            buffer,
+            force: false,
+        })
+        .unwrap();
+    assert_eq!(answer, Response::Done);
+    let saved = std::fs::read_to_string(dir.join("notes.txt")).unwrap();
+    assert!(
+        saved == "hello world\n" || saved == "> hello\n",
+        "{saved:?}"
+    );
+    assert_eq!(attach_buffer(&mut three, buffer).text, saved);
+
+    // Opening the file again shows the same buffer.
+    let again = one
+        .split_pane(pane, Side::Right, open_file(dir, "./notes.txt"))
+        .unwrap();
+    assert_eq!(buffer_in(&mut one, again), buffer);
+}
+
+#[test]
+fn a_buffer_wont_write_over_changes_made_on_disk_and_outlives_its_panes_while_modified() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = client.new_workspace(None, open_file(dir, "a.rs")).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    send_change(&mut client, buffer, 0, insert(10, 0, "// mine\n", 0));
+    assert!(matches!(
+        next_buffer_update(&mut client),
+        BufferUpdate::Acked { version: 1, seq: 0 }
+    ));
+
+    std::fs::write(dir.join("a.rs"), "fn b() {}\n").unwrap();
+    let refused = client
+        .request(&Request::Save {
+            buffer,
+            force: false,
+        })
+        .unwrap();
+    assert!(
+        matches!(refused, Response::Error(Error::ChangedOnDisk(_))),
+        "{refused:?}"
+    );
+
+    // Closing its only pane keeps a modified buffer, unseen.
+    let other = client
+        .split_pane(pane, Side::Below, new_pane(&["cat"]))
+        .unwrap();
+    client.close_pane(pane).unwrap();
+    let reopened = client
+        .split_pane(other, Side::Right, open_file(dir, "a.rs"))
+        .unwrap();
+    assert_eq!(buffer_in(&mut client, reopened), buffer);
+    let snapshot = attach_buffer(&mut client, buffer);
+    assert_eq!(snapshot.text, "// mine\nfn a() {}\n");
+
+    // Discarding reads the file again; then, unmodified, it goes with its
+    // last pane.
+    let answer = client.request(&Request::Discard { buffer }).unwrap();
+    assert_eq!(answer, Response::Done);
+    assert_eq!(attach_buffer(&mut client, buffer).text, "fn b() {}\n");
+    client.close_pane(reopened).unwrap();
+    let gone = client.request(&Request::AttachBuffer { buffer }).unwrap();
+    assert_eq!(gone, Response::Error(Error::NoSuchBuffer(buffer)));
 }

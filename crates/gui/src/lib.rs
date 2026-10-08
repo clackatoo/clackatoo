@@ -21,6 +21,7 @@ mod colors;
 mod command;
 mod desk;
 mod desktop;
+mod editor;
 mod fonts;
 mod glyphs;
 mod history;

@@ -8,9 +8,9 @@ use std::path::Path;
 
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
 use clackatoo_protocol::{
-    Block, ChatAction, ClientMessage, Error, Event, HistoryLines, NewTerminal, PROTOCOL_VERSION,
-    PaneId, PaneTerminal, Request, Response, ServerMessage, Side, Size, TerminalId, TerminalInfo,
-    Udp, View, Which, WorkspaceId, Workspaces,
+    Block, BufferId, Change, ChatAction, ClientMessage, Error, Event, HistoryLines, NewTerminal,
+    PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response, ServerMessage, Side, Size,
+    TerminalId, TerminalInfo, Udp, View, Which, WorkspaceId, Workspaces,
 };
 
 use crate::quic::{self, Carried, Contact, Route};
@@ -218,6 +218,33 @@ impl Client {
     /// If the connection fails.
     pub fn frame_done(&mut self, terminal: TerminalId) -> Result<(), ClientError> {
         self.send(&ClientMessage::FrameDone { terminal })
+    }
+
+    /// Follows a buffer: an [`Event::Buffer`] snapshot arrives next, then
+    /// each change to it.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn attach_buffer(&mut self, buffer: BufferId) -> Result<(), ClientError> {
+        match self.request(&Request::AttachBuffer { buffer })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Sends a change to a buffer the client follows, numbered `seq`. The
+    /// daemon says how it went in an [`Event::Buffer`].
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn edit(&mut self, buffer: BufferId, seq: u64, change: Change) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Edit {
+            buffer,
+            seq,
+            change,
+        })
     }
 
     /// Limits how long [`next_event`](Self::next_event) and requests wait.

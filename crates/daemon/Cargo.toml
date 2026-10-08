@@ -15,6 +15,7 @@ agent-client-protocol-schema.workspace = true
 bytes.workspace = true
 clackatoo-protocol.workspace = true
 clackatoo-term = { workspace = true, features = ["serde"] }
+clackatoo-text.workspace = true
 log.workspace = true
 mio.workspace = true
 postcard.workspace = true

@@ -61,7 +61,8 @@ impl RowBuilder {
     }
 
     /// How many columns the text so far fills.
-    pub(crate) fn filled(&self) -> usize {
+    #[must_use]
+    pub fn filled(&self) -> usize {
         self.col
     }
 

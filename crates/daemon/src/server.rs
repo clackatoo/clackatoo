@@ -29,9 +29,10 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    ChatAction, ClientMessage, Error, GridState, HistoryLine, HistoryLines, Line, NewAgent, NodeId,
-    PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size,
-    TerminalId, TerminalInfo, TerminalStatus, Udp, View, ViewUpdate, WorkspaceId,
+    BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine, HistoryLines,
+    Line, NewAgent, NodeId, PROTOCOL_VERSION, Pane, PaneId, PaneTerminal, Patch, Request, Response,
+    ServerMessage, Side, Size, TerminalId, TerminalInfo, TerminalStatus, Udp, View, ViewUpdate,
+    WorkspaceId,
 };
 use clackatoo_term::{Damage, Terminal};
 use mio::event::Event;
@@ -43,6 +44,7 @@ use slab::Slab;
 
 use crate::DaemonConfig;
 use crate::agent::{Agent, Incoming};
+use crate::buffer::Buffer;
 use crate::chat::{Action, ChatSent, HostedChat};
 use crate::handover::{self, Fds, Handover, HandoverError};
 use crate::hosted::{HostedTerminal, Orphan, ReadOutcome};
@@ -50,6 +52,10 @@ use crate::memory;
 use crate::quic::{self, CarrierId, QuicEvent, QuicServer, Received};
 use crate::upgrade::Upgrade;
 use crate::workspaces::WorkspaceState;
+
+mod buffers;
+
+use buffers::BufferSlot;
 
 const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);
@@ -357,6 +363,9 @@ pub struct Daemon {
     terminals: BTreeMap<TerminalId, Slot>,
     next_id: u32,
     workspaces: WorkspaceState,
+    /// Files being edited.
+    buffers: BTreeMap<BufferId, BufferSlot>,
+    next_buffer: u32,
     /// The agent chats talk to, while any chat needs it.
     agent: Option<AgentSlot>,
     /// What the agent sent last, for the chats to act on.
@@ -447,6 +456,8 @@ impl Daemon {
             terminals: BTreeMap::new(),
             next_id: 1,
             workspaces: WorkspaceState::new(),
+            buffers: BTreeMap::new(),
+            next_buffer: 1,
             agent: None,
             incoming: Vec::new(),
             quic: None,
@@ -477,6 +488,7 @@ impl Daemon {
         config: DaemonConfig,
     ) -> Result<Self, HandoverError> {
         let chats = std::mem::take(&mut handover.state.chats);
+        let buffers = std::mem::take(&mut handover.state.buffers);
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
@@ -499,6 +511,15 @@ impl Daemon {
         }
         for chat in chats {
             daemon.add_chat(HostedChat::resume(chat));
+        }
+        daemon.next_buffer = state.next_buffer;
+        for buffer in buffers {
+            let id = BufferId(buffer.id);
+            let slot = BufferSlot {
+                buffer: Buffer::resume(buffer),
+                viewers: Vec::new(),
+            };
+            daemon.buffers.insert(id, slot);
         }
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
@@ -567,6 +588,10 @@ impl Daemon {
                 chats,
                 orphans,
                 workspaces: self.workspaces.hand_over(),
+                next_buffer: self.next_buffer,
+                buffers: (self.buffers.iter())
+                    .map(|(id, slot)| slot.buffer.hand_over(id.0))
+                    .collect(),
             },
             fds,
         })
@@ -1016,22 +1041,15 @@ impl Daemon {
         Ok(())
     }
 
-    /// Closes `terminals`, as closing their tab or workspace does.
-    fn close_terminals(&mut self, terminals: &[TerminalId]) -> Result<Response, Error> {
-        for &terminal in terminals {
-            self.close_terminal(terminal)?;
-        }
-        Ok(Response::Done)
-    }
-
-    /// The terminal for a new pane: a new one, starting by default in the
-    /// directory `beside`'s terminal is in, or an existing one in no pane.
-    fn pane_terminal(
+    /// What a new pane shows: a new terminal, starting by default in the
+    /// directory `beside`'s is in, an existing one in no pane, a chat, or
+    /// a file.
+    fn pane_content(
         &mut self,
-        terminal: PaneTerminal,
+        content: PaneTerminal,
         beside: Option<PaneId>,
-    ) -> Result<TerminalId, Error> {
-        match terminal {
+    ) -> Result<Content, Error> {
+        let terminal = match content {
             PaneTerminal::Existing(id) => {
                 let slot = self.terminals.get(&id).ok_or(Error::NoSuchTerminal(id))?;
                 if slot.terminal.info().status != TerminalStatus::Running {
@@ -1040,22 +1058,46 @@ impl Daemon {
                 if self.workspaces.get().pane_showing(id).is_some() {
                     return Err(Error::TerminalInPane(id));
                 }
-                Ok(id)
+                id
             }
             PaneTerminal::New(mut request) => {
                 if request.cwd.is_none() {
                     request.cwd = beside.and_then(|pane| self.working_directory(pane));
                 }
-                self.new_terminal(&request)
+                self.new_terminal(&request)?
             }
-            PaneTerminal::Agent(request) => Ok(self.new_chat(request, beside)),
+            PaneTerminal::Agent(request) => self.new_chat(request, beside),
+            PaneTerminal::File(file) => {
+                return self.open_buffer(file, beside).map(Content::Buffer);
+            }
+        };
+        Ok(Content::Terminal(terminal))
+    }
+
+    /// The directory `pane` works in: for a terminal, the one the program
+    /// in front is in; for a file, the one it was opened from.
+    fn working_directory(&self, pane: PaneId) -> Option<String> {
+        match self.workspaces.check_pane(pane).ok()? {
+            Content::Terminal(terminal) => {
+                self.terminals.get(&terminal)?.terminal.working_directory()
+            }
+            Content::Buffer(buffer) => {
+                let dir = self.buffers.get(&buffer)?.buffer.dir();
+                Some(dir.display().to_string())
+            }
         }
     }
 
-    /// The directory the program in front in `pane`'s terminal is in.
-    fn working_directory(&self, pane: PaneId) -> Option<String> {
-        let terminal = self.workspaces.check_pane(pane).ok()?;
-        self.terminals.get(&terminal)?.terminal.working_directory()
+    /// Closes `panes`, as closing their tab or workspace does: their
+    /// terminals, and their buffers that have no changes to save.
+    fn close_panes(&mut self, panes: &[Pane]) -> Result<Response, Error> {
+        for pane in panes {
+            match pane.content {
+                Content::Terminal(terminal) => self.close_terminal(terminal)?,
+                Content::Buffer(buffer) => self.close_buffer_pane(pane.id, buffer),
+            }
+        }
+        Ok(Response::Done)
     }
 
     fn new_workspace(
@@ -1064,8 +1106,8 @@ impl Daemon {
         terminal: PaneTerminal,
     ) -> Result<Response, Error> {
         let name = self.workspaces.name_for_new(name)?;
-        let terminal = self.pane_terminal(terminal, None)?;
-        let pane = self.workspaces.new_workspace(name, terminal);
+        let content = self.pane_content(terminal, None)?;
+        let pane = self.workspaces.new_workspace(name, content);
         self.workspaces_changed();
         Ok(Response::PaneCreated(pane))
     }
@@ -1077,8 +1119,8 @@ impl Daemon {
     ) -> Result<Response, Error> {
         self.workspaces.check_workspace(workspace)?;
         let beside = self.workspaces.focused_pane(workspace);
-        let terminal = self.pane_terminal(terminal, beside)?;
-        let pane = self.workspaces.new_tab(workspace, terminal);
+        let content = self.pane_content(terminal, beside)?;
+        let pane = self.workspaces.new_tab(workspace, content);
         self.workspaces_changed();
         Ok(Response::PaneCreated(pane))
     }
@@ -1090,8 +1132,8 @@ impl Daemon {
         terminal: PaneTerminal,
     ) -> Result<Response, Error> {
         self.workspaces.check_pane(pane)?;
-        let terminal = self.pane_terminal(terminal, Some(pane))?;
-        let new = self.workspaces.split(pane, side, terminal);
+        let content = self.pane_content(terminal, Some(pane))?;
+        let new = self.workspaces.split(pane, side, content);
         self.workspaces_changed();
         Ok(Response::PaneCreated(new))
     }
@@ -1517,6 +1559,14 @@ impl Daemon {
                 ClientMessage::Request(request) => {
                     ServerMessage::Response(self.respond(request, token))
                 }
+                ClientMessage::Edit {
+                    buffer,
+                    seq,
+                    change,
+                } => {
+                    self.serve_edit(token, buffer, seq, change);
+                    continue;
+                }
             };
 
             let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
@@ -1695,6 +1745,15 @@ impl Daemon {
             | Request::CloseWorkspace { .. }
             | Request::ResizeSplit { .. }) => self.respond_about_workspaces(request, token),
             Request::CarryQuic => self.carry_quic(token),
+            Request::AttachBuffer { buffer } => {
+                self.attach_buffer(token, buffer).map(|()| Response::Done)
+            }
+            Request::DetachBuffer { buffer } => {
+                self.detach_buffer(token, buffer);
+                Ok(Response::Done)
+            }
+            Request::Save { buffer, force } => self.save_buffer(buffer, force),
+            Request::Discard { buffer } => self.discard_buffer(buffer),
         };
         response.unwrap_or_else(Response::Error)
     }
@@ -1724,11 +1783,15 @@ impl Daemon {
                 side,
                 terminal,
             } => self.split(pane, side, terminal),
-            Request::ClosePane { pane } => self
-                .workspaces
-                .check_pane(pane)
-                .and_then(|terminal| self.close_terminal(terminal))
-                .map(|()| Response::Done),
+            Request::ClosePane { pane } => match self.workspaces.check_pane(pane)? {
+                Content::Terminal(terminal) => {
+                    self.close_terminal(terminal).map(|()| Response::Done)
+                }
+                Content::Buffer(buffer) => {
+                    self.close_buffer_pane(pane, buffer);
+                    Ok(Response::Done)
+                }
+            },
             Request::Focus { pane } => self.workspaces.focus(pane).map(|()| {
                 self.workspaces_changed();
                 Response::Done
@@ -1751,12 +1814,12 @@ impl Daemon {
                     Response::Done
                 }),
             Request::CloseTab { tab } => {
-                let terminals = self.workspaces.tab_terminals(tab)?;
-                self.close_terminals(&terminals)
+                let panes = self.workspaces.tab_panes(tab)?;
+                self.close_panes(&panes)
             }
             Request::CloseWorkspace { workspace } => {
-                let terminals = self.workspaces.workspace_terminals(workspace)?;
-                self.close_terminals(&terminals)
+                let panes = self.workspaces.workspace_panes(workspace)?;
+                self.close_panes(&panes)
             }
             other => unreachable!("{other:?} isn't about workspaces"),
         }
@@ -1892,6 +1955,9 @@ impl Daemon {
             if let Some(slot) = self.terminals.get_mut(id) {
                 slot.viewers.retain(|&viewer| viewer != token);
             }
+        }
+        for slot in self.buffers.values_mut() {
+            slot.viewers.retain(|&viewer| viewer != token);
         }
     }
 

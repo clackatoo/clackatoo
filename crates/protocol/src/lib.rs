@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod buffer;
 mod chat;
 pub mod frame;
 mod view;
@@ -51,11 +52,13 @@ pub use clackatoo_term::{
 };
 use serde::{Deserialize, Serialize};
 
+pub use buffer::{Author, BufferId, BufferSnapshot, BufferUpdate, Change, OpenFile};
 pub use chat::{
     ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome,
     Question, Setting, SettingChoice, SettingKind, Tool, ToolContent, ToolKind, ToolStatus, Turn,
     TurnEnd, Usage,
 };
+pub use clackatoo_text::{Edit, Op};
 pub use view::{
     CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, Node, NodeId, Patch, Run,
     View, ViewUpdate,
@@ -67,7 +70,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -105,6 +108,18 @@ pub enum ClientMessage {
         /// The terminal whose view was drawn.
         terminal: TerminalId,
     },
+    /// A change to a buffer the client attached to. Not answered as a
+    /// request is: the daemon tells the client how it went with a
+    /// [`BufferUpdate`]. Send the next change to a buffer once it has.
+    Edit {
+        /// The buffer.
+        buffer: BufferId,
+        /// The client's number for the change, counting up from 0 for each
+        /// buffer, by which the daemon says it's been made.
+        seq: u64,
+        /// The change.
+        change: Change,
+    },
 }
 
 /// Everything the daemon sends.
@@ -141,6 +156,13 @@ pub enum Event {
     /// The workspaces changed, for a client watching them. Sent to the
     /// client whose request changed them before that request's answer.
     Workspaces(Workspaces),
+    /// A buffer the client attached to changed.
+    Buffer {
+        /// The buffer.
+        buffer: BufferId,
+        /// The change.
+        update: BufferUpdate,
+    },
 }
 
 /// A message from a client to the daemon that expects an answer.
@@ -336,6 +358,31 @@ pub enum Request {
     /// without answering a `Hello` that came with it. Only a connection to
     /// the daemon's Unix socket can carry QUIC.
     CarryQuic,
+    /// Starts sending the buffer: a snapshot, then each change to it (see
+    /// [`BufferUpdate`]). Attaching twice sends a fresh snapshot.
+    AttachBuffer {
+        /// The buffer to follow.
+        buffer: BufferId,
+    },
+    /// Stops sending the buffer.
+    DetachBuffer {
+        /// The buffer to stop following.
+        buffer: BufferId,
+    },
+    /// Writes the buffer to its file. Refused if the file has changed since
+    /// it was read or last written, unless `force`.
+    Save {
+        /// The buffer.
+        buffer: BufferId,
+        /// Write over changes made to the file since.
+        force: bool,
+    },
+    /// Throws away the buffer's changes that aren't saved, reading its file
+    /// again: an edit by the user, which can be undone.
+    Discard {
+        /// The buffer.
+        buffer: BufferId,
+    },
 }
 
 /// How to start a terminal.
@@ -486,6 +533,28 @@ pub enum Error {
     /// the daemon couldn't set up its QUIC endpoint.
     #[error("can't carry QUIC: {0}")]
     CantCarry(String),
+    /// No buffer has this ID. It may have been closed.
+    #[error("no buffer {0}")]
+    NoSuchBuffer(BufferId),
+    /// The file couldn't be read, or isn't text.
+    #[error("can't open {path}: {reason}")]
+    OpenFailed {
+        /// The path asked for.
+        path: String,
+        /// Why not.
+        reason: String,
+    },
+    /// The file couldn't be written.
+    #[error("can't write {path}: {reason}")]
+    SaveFailed {
+        /// The file's path.
+        path: String,
+        /// Why not.
+        reason: String,
+    },
+    /// The file has changed since the buffer read it or last wrote it.
+    #[error("{0} has changed since it was read")]
+    ChangedOnDisk(String),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while

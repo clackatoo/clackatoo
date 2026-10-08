@@ -1,12 +1,12 @@
 //! The command line, opened with `:` in normal mode: what its commands
 //! mean.
 //!
-//! Capitalised words are kinds of pane, and open one: `Terminal`, or
-//! `Agent`, a chat with an agent such as Claude Code, in a new tab, and
-//! with a mark before it, beside the focused pane (`|` right, `|<` left,
-//! `-` below, `-^` above). `Terminal@host` asks for it on
-//! another machine's daemon. A number moves to that tab. Lowercase words
-//! are the window's own commands.
+//! Capitalised words are kinds of pane, and open one: `Terminal`, `Agent`,
+//! a chat with an agent such as Claude Code, or `Editor PATH`, in a new
+//! tab, and with a mark before it, beside the focused pane (`|` right, `|<`
+//! left, `-` below, `-^` above). `Terminal@host` asks for it on another
+//! machine's daemon. A number moves to that tab. Lowercase words are the
+//! window's own commands, and Vim's for files: `w`, `q`, `wq` and `e`.
 
 use clackatoo_protocol::Side;
 
@@ -23,12 +23,24 @@ pub(crate) enum Command {
     /// Switch to the workspace with this name, making it if there's none,
     /// or with no name, make a new one.
     Workspace(Option<String>),
+    /// A pane editing the file at this path, which is from the directory
+    /// of the focused pane.
+    Edit { place: Place, path: String },
     /// Move to this tab of the workspace shown, counting from 1.
     Tab(usize),
     /// Rename the workspace shown.
     Rename(String),
     /// Close the focused pane.
     Close,
+    /// `:q`: close the focused pane, unless it's the last showing a file
+    /// with changes that aren't saved, or if `force`, throwing them away.
+    Quit { force: bool },
+    /// `:w`: write the focused pane's file, over changes made to the file
+    /// since if `force`, then close the pane if `quit`, as `:wq` does.
+    Write { force: bool, quit: bool },
+    /// `:e!`: throw away the focused pane's file's changes that aren't
+    /// saved.
+    Discard,
     /// Run the config again, from the start.
     Reload,
 }
@@ -53,8 +65,11 @@ pub(crate) enum Kind {
 /// Every kind, by name.
 const KINDS: [(&str, Kind); 2] = [("Terminal", Kind::Terminal), ("Agent", Kind::Agent)];
 
+/// The kind of pane that edits a file, which needs the file's path.
+const EDITOR: &str = "Editor";
+
 /// The window's own commands, for messages.
-const COMMANDS: &str = "a tab's number, workspace, rename, close and reload";
+const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, w, q and e";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -71,9 +86,21 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
                 .map(|name| Command::Rename(name.to_owned()))
                 .ok_or_else(|| "rename needs a name: :rename NAME".to_owned());
         }
-        "close" | "q" => return Ok(Command::Close),
+        "close" => return Ok(Command::Close),
         "reload" => return Ok(Command::Reload),
         _ => {}
+    }
+    if let Some(command) = file_command(word, argument) {
+        return command;
+    }
+    let (place, rest) = place(word);
+    if rest == EDITOR {
+        return argument
+            .map(|path| Command::Edit {
+                place,
+                path: path.to_owned(),
+            })
+            .ok_or_else(|| format!("{word} needs a file: :{word} PATH"));
     }
     if let Some(argument) = argument {
         return Err(format!(
@@ -86,17 +113,6 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             Ok(number) => Ok(Command::Tab(number)),
         };
     }
-    let (place, rest) = if let Some(rest) = word.strip_prefix("|<") {
-        (Place::Beside(Side::Left), rest)
-    } else if let Some(rest) = word.strip_prefix('|') {
-        (Place::Beside(Side::Right), rest)
-    } else if let Some(rest) = word.strip_prefix("-^") {
-        (Place::Beside(Side::Above), rest)
-    } else if let Some(rest) = word.strip_prefix('-') {
-        (Place::Beside(Side::Below), rest)
-    } else {
-        (Place::Tab, word)
-    };
     let (name, daemon) = match rest.split_once('@') {
         Some((_, "")) => return Err(format!("{word} names no daemon after the @")),
         Some((name, daemon)) => (name, Some(daemon.to_owned())),
@@ -117,7 +133,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             daemon,
         });
     }
-    let kinds = KINDS.map(|(kind, _)| kind).join(", ");
+    let kinds = format!("{}, {EDITOR}", KINDS.map(|(kind, _)| kind).join(", "));
     if name.starts_with(char::is_uppercase) {
         Err(format!(
             "no kind of pane called {name}; the kinds are {kinds}"
@@ -130,6 +146,45 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         Err(format!(
             "no command called {name}; the commands are {COMMANDS}, and the kinds of pane {kinds}"
         ))
+    }
+}
+
+/// Vim's commands for files, if `word` is one: `w`, `q`, `wq`, `e` and
+/// their kin.
+fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
+    let write = |force, quit| Some(Ok(Command::Write { force, quit }));
+    match word {
+        "q" | "quit" => Some(Ok(Command::Quit { force: false })),
+        "q!" | "quit!" => Some(Ok(Command::Quit { force: true })),
+        "w" | "write" => write(false, false),
+        "w!" | "write!" => write(true, false),
+        "wq" | "x" => write(false, true),
+        "wq!" | "x!" => write(true, true),
+        "e!" | "edit!" => Some(Ok(Command::Discard)),
+        "e" | "edit" => Some(
+            argument
+                .map(|path| Command::Edit {
+                    place: Place::Tab,
+                    path: path.to_owned(),
+                })
+                .ok_or_else(|| "e needs a file: :e PATH".to_owned()),
+        ),
+        _ => None,
+    }
+}
+
+/// Where a word's mark puts a new pane, and the rest of the word.
+fn place(word: &str) -> (Place, &str) {
+    if let Some(rest) = word.strip_prefix("|<") {
+        (Place::Beside(Side::Left), rest)
+    } else if let Some(rest) = word.strip_prefix('|') {
+        (Place::Beside(Side::Right), rest)
+    } else if let Some(rest) = word.strip_prefix("-^") {
+        (Place::Beside(Side::Above), rest)
+    } else if let Some(rest) = word.strip_prefix('-') {
+        (Place::Beside(Side::Below), rest)
+    } else {
+        (Place::Tab, word)
     }
 }
 
@@ -191,6 +246,38 @@ mod tests {
     }
 
     #[test]
+    fn files_are_opened_written_and_closed_as_in_vim() {
+        let edit = |place| Command::Edit {
+            place,
+            path: "src/main.rs".to_owned(),
+        };
+        assert_eq!(parse("e src/main.rs"), Ok(edit(Place::Tab)));
+        assert_eq!(parse("Editor src/main.rs"), Ok(edit(Place::Tab)));
+        assert_eq!(
+            parse("|Editor src/main.rs"),
+            Ok(edit(Place::Beside(Side::Right)))
+        );
+        assert!(parse("e").is_err() && parse("-Editor").is_err());
+        assert_eq!(parse("e!"), Ok(Command::Discard));
+        assert_eq!(
+            parse("w"),
+            Ok(Command::Write {
+                force: false,
+                quit: false
+            })
+        );
+        assert_eq!(
+            parse("wq!"),
+            Ok(Command::Write {
+                force: true,
+                quit: true
+            })
+        );
+        assert_eq!(parse("q!"), Ok(Command::Quit { force: true }));
+        assert_eq!(parse("close"), Ok(Command::Close));
+    }
+
+    #[test]
     fn lowercase_words_are_the_windows_commands() {
         assert_eq!(parse("workspace"), Ok(Command::Workspace(None)));
         assert_eq!(
@@ -202,7 +289,7 @@ mod tests {
             Ok(Command::Rename("home lab".into()))
         );
         assert!(parse("rename").is_err());
-        assert_eq!(parse("q"), Ok(Command::Close));
+        assert_eq!(parse("q"), Ok(Command::Quit { force: false }));
         assert_eq!(parse("close"), Ok(Command::Close));
     }
 
@@ -218,9 +305,9 @@ mod tests {
     #[test]
     fn mistakes_say_what_there_is() {
         assert!(
-            parse("Editor")
+            parse("Browser")
                 .unwrap_err()
-                .contains("the kinds are Terminal, Agent")
+                .contains("the kinds are Terminal, Agent, Editor")
         );
         assert!(
             parse("split")

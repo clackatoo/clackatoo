@@ -1063,6 +1063,7 @@ impl App {
     /// drawn, or `None` if the frame wasn't shown.
     fn draw_panes(&mut self, chrome: &Chrome) -> Option<Vec<TerminalId>> {
         let (chats, chat_paint) = self.paint_chats(chrome);
+        self.desk.settle_editors();
         let geometry = &chrome.geometry;
         let desk = &self.desk;
         let shown = desk.shown()?;
@@ -1134,7 +1135,7 @@ impl App {
         }
         let drawn = drawings
             .iter()
-            .map(|drawing| drawing.terminal)
+            .filter_map(|drawing| drawing.terminal)
             .chain(chats)
             .collect();
         self.update_ime(ime_area);
@@ -1162,8 +1163,7 @@ impl App {
         let tiles: Vec<(TerminalId, Tile, bool)> = (placement.panes.iter())
             .filter_map(|&(id, tile)| {
                 let pane = layout_panes.iter().find(|pane| pane.id == id)?;
-                let Content::Terminal(terminal) = pane.content;
-                Some((terminal, tile, id == shown.pane))
+                Some((pane.content.terminal()?, tile, id == shown.pane))
             })
             .collect();
         for (terminal, tile, focused) in tiles {
@@ -1202,9 +1202,32 @@ fn drawings<'a>(
         let Some(pane) = panes.iter().find(|pane| pane.id == id) else {
             continue;
         };
-        let Content::Terminal(terminal) = pane.content;
-        let state = desk.pane(terminal);
         let has_focus = id == focused;
+        let terminal = match pane.content {
+            Content::Terminal(terminal) => terminal,
+            Content::Buffer(_) => {
+                let Some(editor) = desk.editor(id) else {
+                    continue;
+                };
+                let (rows, mut cursor) = editor.scene();
+                if let Some(cursor) = &mut cursor
+                    && !(has_focus && window_focused)
+                {
+                    cursor.style = CursorStyle::Hollow;
+                }
+                drawings.push(Drawing {
+                    terminal: None,
+                    tile,
+                    rows,
+                    cursor,
+                    highlights: editor.highlights(),
+                    normal_mode: has_focus && editor.mode != Mode::Insert,
+                    focused: has_focus,
+                });
+                continue;
+            }
+        };
+        let state = desk.pane(terminal);
         let normal = state.is_some_and(|state| state.mode != Mode::Insert);
         let Some(state) = state.filter(|state| state.screen().is_some()) else {
             continue;
@@ -1217,7 +1240,7 @@ fn drawings<'a>(
             cursor.style = CursorStyle::Hollow;
         }
         drawings.push(Drawing {
-            terminal,
+            terminal: Some(terminal),
             tile,
             rows,
             cursor,
@@ -1292,7 +1315,8 @@ fn compose(
 
 /// One pane, ready to draw.
 struct Drawing<'a> {
-    terminal: TerminalId,
+    /// The terminal drawn, or `None` for a file.
+    terminal: Option<TerminalId>,
     tile: Tile,
     rows: Vec<&'a Row>,
     cursor: Option<SceneCursor>,
@@ -1745,6 +1769,12 @@ impl App {
                 }
                 if self.desk.focused_terminal() == Some(terminal) {
                     self.update_title();
+                }
+            }
+            SessionEvent::Message(ServerMessage::Event(Event::Buffer { buffer, update })) => {
+                if self.desk.buffer_changed(buffer, update) {
+                    self.update_title();
+                    self.request_redraw();
                 }
             }
             SessionEvent::Message(ServerMessage::Event(Event::Workspaces(workspaces))) => {

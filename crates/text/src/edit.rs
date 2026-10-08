@@ -89,7 +89,10 @@ impl Edit {
             .and_then(|rest| rest.checked_sub(removed.len()))
             .expect("the text replaced is in the text");
         let mut edit = Self::new();
-        edit.retain(at).delete(removed).insert(inserted).retain(after);
+        edit.retain(at)
+            .delete(removed)
+            .insert(inserted)
+            .retain(after);
         edit
     }
 
@@ -325,8 +328,8 @@ impl Edit {
                 }
                 Op::Insert(inserted) => made.push_str(inserted),
                 Op::Delete(deleted) => {
-                    let (gone, after) = (rest.split_at_checked(deleted.len()))
-                        .ok_or(EditError::Boundary)?;
+                    let (gone, after) =
+                        (rest.split_at_checked(deleted.len())).ok_or(EditError::Boundary)?;
                     if gone != deleted {
                         return Err(EditError::Mismatch);
                     }
@@ -587,7 +590,10 @@ mod tests {
         let split = Edit::replace(6, 2, "", "x");
         assert_eq!(split.apply(&mut rope), Err(EditError::Boundary));
         let short = Edit::keep(3);
-        assert!(matches!(short.apply(&mut rope), Err(EditError::Length { .. })));
+        assert!(matches!(
+            short.apply(&mut rope),
+            Err(EditError::Length { .. })
+        ));
         assert_eq!(rope.to_string(), "héllo");
     }
 
@@ -596,7 +602,11 @@ mod tests {
         let edit = Edit::replace(10, 4, "ab", "xyz");
         assert_eq!(edit.map(2, Bias::After), 2);
         assert_eq!(edit.map(4, Bias::Before), 4);
-        assert_eq!(edit.map(4, Bias::After), 7, "a deletion follows the insertion");
+        assert_eq!(
+            edit.map(4, Bias::After),
+            7,
+            "a deletion follows the insertion"
+        );
         assert_eq!(edit.map(5, Bias::After), 7, "in the deleted text");
         assert_eq!(edit.map(6, Bias::After), 7);
         assert_eq!(edit.map(10, Bias::After), 11);
@@ -609,7 +619,13 @@ mod tests {
     #[test]
     fn changes_are_listed_where_they_were() {
         let mut edit = Edit::new();
-        edit.retain(1).delete("b").retain(2).insert("x").delete("e").retain(1).insert("!");
+        edit.retain(1)
+            .delete("b")
+            .retain(2)
+            .insert("x")
+            .delete("e")
+            .retain(1)
+            .insert("!");
         let changes: Vec<_> = edit.changes().collect();
         assert_eq!(changes, [(1, "b", ""), (4, "e", "x"), (6, "", "!")]);
     }
@@ -680,18 +696,15 @@ mod tests {
 
     fn two_edits() -> impl Strategy<Value = (String, Edit, Edit)> {
         text().prop_flat_map(|text| {
-            (edit_of(text.clone()), edit_of(text))
-                .prop_map(|((text, a), (_, b))| (text, a, b))
+            (edit_of(text.clone()), edit_of(text)).prop_map(|((text, a), (_, b))| (text, a, b))
         })
     }
 
     fn edit_and_next() -> impl Strategy<Value = (String, Edit, Edit)> {
-        text()
-            .prop_flat_map(edit_of)
-            .prop_flat_map(|(text, a)| {
-                let made = a.apply_to(&text).unwrap();
-                (Just(text), Just(a), edit_of(made).prop_map(|(_, b)| b))
-            })
+        text().prop_flat_map(edit_of).prop_flat_map(|(text, a)| {
+            let made = a.apply_to(&text).unwrap();
+            (Just(text), Just(a), edit_of(made).prop_map(|(_, b)| b))
+        })
     }
 
     proptest! {

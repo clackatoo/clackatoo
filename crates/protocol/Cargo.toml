@@ -12,6 +12,7 @@ bench = false
 
 [dependencies]
 clackatoo-term = { workspace = true, features = ["serde"] }
+clackatoo-text = { workspace = true, features = ["serde"] }
 postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true

@@ -191,7 +191,11 @@ impl<A: Clone + Eq> History<A> {
     /// made since down through them, and returns where they are.
     fn sync(&mut self, author: &A) -> Result<usize, HistoryError> {
         let version = self.version();
-        let Some(index) = self.authors.iter().position(|steps| steps.author == *author) else {
+        let Some(index) = self
+            .authors
+            .iter()
+            .position(|steps| steps.author == *author)
+        else {
             self.authors.push(Steps {
                 author: author.clone(),
                 version,

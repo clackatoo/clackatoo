@@ -6,7 +6,7 @@
 //! makes the change, which can't fail.
 
 use clackatoo_protocol::{
-    Axis, Content, Error, Layout, Pane, PaneId, Side, Tab, TabId, TerminalId, Workspace,
+    Axis, BufferId, Content, Error, Layout, Pane, PaneId, Side, Tab, TabId, TerminalId, Workspace,
     WorkspaceId, Workspaces,
 };
 
@@ -35,13 +35,16 @@ impl WorkspaceState {
     pub(crate) fn hand_over(&self) -> handover::Workspaces {
         fn layout(node: &Layout) -> handover::Layout {
             match node {
-                Layout::Pane(pane) => {
-                    let Content::Terminal(terminal) = pane.content;
-                    handover::Layout::Pane {
+                Layout::Pane(pane) => match pane.content {
+                    Content::Terminal(terminal) => handover::Layout::Pane {
                         id: pane.id.0,
                         terminal: terminal.0,
-                    }
-                }
+                    },
+                    Content::Buffer(buffer) => handover::Layout::Buffer {
+                        id: pane.id.0,
+                        buffer: buffer.0,
+                    },
+                },
                 Layout::Split {
                     axis,
                     parts,
@@ -83,6 +86,10 @@ impl WorkspaceState {
                 handover::Layout::Pane { id, terminal } => Layout::Pane(Pane {
                     id: PaneId(*id),
                     content: Content::Terminal(TerminalId(*terminal)),
+                }),
+                handover::Layout::Buffer { id, buffer } => Layout::Pane(Pane {
+                    id: PaneId(*id),
+                    content: Content::Buffer(BufferId(*buffer)),
                 }),
                 handover::Layout::Split {
                     left_to_right,
@@ -166,13 +173,13 @@ impl WorkspaceState {
     }
 
     /// Makes a workspace called `name`, which [`name_for_new`] checked, with
-    /// one tab showing `terminal`.
+    /// one tab showing `content`.
     ///
     /// [`name_for_new`]: Self::name_for_new
-    pub(crate) fn new_workspace(&mut self, name: String, terminal: TerminalId) -> PaneId {
+    pub(crate) fn new_workspace(&mut self, name: String, content: impl Into<Content>) -> PaneId {
         let id = WorkspaceId(self.next_workspace);
         self.next_workspace += 1;
-        let (tab, pane) = self.tab(terminal);
+        let (tab, pane) = self.tab(content.into());
         self.workspaces.list.push(Workspace {
             id,
             name,
@@ -190,30 +197,38 @@ impl WorkspaceState {
             .ok_or(Error::NoSuchWorkspace(workspace))
     }
 
-    /// Adds a tab showing `terminal` to `workspace`, which
+    /// Adds a tab showing `content` to `workspace`, which
     /// [`check_workspace`](Self::check_workspace) checked.
-    pub(crate) fn new_tab(&mut self, workspace: WorkspaceId, terminal: TerminalId) -> PaneId {
-        let (tab, pane) = self.tab(terminal);
+    pub(crate) fn new_tab(
+        &mut self,
+        workspace: WorkspaceId,
+        content: impl Into<Content>,
+    ) -> PaneId {
+        let (tab, pane) = self.tab(content.into());
         let workspace = self.workspace_mut(workspace);
         workspace.active_tab = tab.id;
         workspace.tabs.push(tab);
         pane
     }
 
-    /// Checks that `pane` exists, returning the terminal it shows.
-    pub(crate) fn check_pane(&self, pane: PaneId) -> Result<TerminalId, Error> {
+    /// Checks that `pane` exists, returning what it shows.
+    pub(crate) fn check_pane(&self, pane: PaneId) -> Result<Content, Error> {
         let (_, _, pane) = self
             .workspaces
             .find_pane(pane)
             .ok_or(Error::NoSuchPane(pane))?;
-        let Content::Terminal(terminal) = pane.content;
-        Ok(terminal)
+        Ok(pane.content)
     }
 
-    /// Puts a pane showing `terminal` on `side` of `pane`, which
+    /// Puts a pane showing `content` on `side` of `pane`, which
     /// [`check_pane`](Self::check_pane) checked.
-    pub(crate) fn split(&mut self, pane: PaneId, side: Side, terminal: TerminalId) -> PaneId {
-        let new = self.pane(terminal);
+    pub(crate) fn split(
+        &mut self,
+        pane: PaneId,
+        side: Side,
+        content: impl Into<Content>,
+    ) -> PaneId {
+        let new = self.pane(content.into());
         let tab = self.tab_mut(pane);
         split(&mut tab.layout, pane, side, new);
         tab.focused = new.id;
@@ -245,18 +260,26 @@ impl WorkspaceState {
         Ok(())
     }
 
-    /// The terminals of the tab `tab`'s panes.
-    pub(crate) fn tab_terminals(&self, tab: TabId) -> Result<Vec<TerminalId>, Error> {
+    /// The panes of the tab `tab`.
+    pub(crate) fn tab_panes(&self, tab: TabId) -> Result<Vec<Pane>, Error> {
         let (_, tab) = self.workspaces.find_tab(tab).ok_or(Error::NoSuchTab(tab))?;
-        Ok(tab.terminals())
+        Ok(tab.layout.panes())
     }
 
-    /// The terminals of every pane in `workspace`.
-    pub(crate) fn workspace_terminals(
-        &self,
-        workspace: WorkspaceId,
-    ) -> Result<Vec<TerminalId>, Error> {
-        Ok(self.check_workspace(workspace)?.terminals())
+    /// Every pane in `workspace`.
+    pub(crate) fn workspace_panes(&self, workspace: WorkspaceId) -> Result<Vec<Pane>, Error> {
+        let workspace = self.check_workspace(workspace)?;
+        Ok((workspace.tabs.iter())
+            .flat_map(|tab| tab.layout.panes())
+            .collect())
+    }
+
+    /// Whether any pane shows `buffer`.
+    pub(crate) fn shows(&self, buffer: BufferId) -> bool {
+        (self.workspaces.list.iter())
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.layout.panes())
+            .any(|pane| pane.content == Content::Buffer(buffer))
     }
 
     /// Names `tab`, or with an empty name, takes its name away.
@@ -315,14 +338,22 @@ impl WorkspaceState {
         Ok(())
     }
 
-    /// Takes the pane showing `terminal` out of its tab, if one does,
-    /// closing the tab if it was the last pane, and the workspace if that
-    /// was its last tab. Returns whether a pane did.
+    /// Takes the pane showing `terminal` out of its tab, if one does, as
+    /// [`remove_pane`](Self::remove_pane) does. Returns whether a pane did.
     pub(crate) fn remove_terminal(&mut self, terminal: TerminalId) -> bool {
-        let Some(pane) = self.workspaces.pane_showing(terminal) else {
+        match self.workspaces.pane_showing(terminal) {
+            Some(pane) => self.remove_pane(pane),
+            None => false,
+        }
+    }
+
+    /// Takes `pane` out of its tab, closing the tab if it was the last
+    /// pane, and the workspace if that was its last tab. Returns whether
+    /// there was such a pane.
+    pub(crate) fn remove_pane(&mut self, pane: PaneId) -> bool {
+        let Some((workspace, tab, _)) = self.workspaces.find_pane(pane) else {
             return false;
         };
-        let (workspace, tab, _) = self.workspaces.find_pane(pane).expect("it was just found");
         let (workspace, tab) = (workspace.id, tab.id);
         let tabs = &mut self.workspace_mut(workspace).tabs;
         let index = tabs.iter().position(|t| t.id == tab).expect("its tab");
@@ -381,18 +412,15 @@ impl WorkspaceState {
             .any(|workspace| workspace.name == name && Some(workspace.id) != except)
     }
 
-    fn pane(&mut self, terminal: TerminalId) -> Pane {
+    fn pane(&mut self, content: Content) -> Pane {
         let id = PaneId(self.next_pane);
         self.next_pane += 1;
-        Pane {
-            id,
-            content: Content::Terminal(terminal),
-        }
+        Pane { id, content }
     }
 
-    /// A new tab showing `terminal`, and its pane.
-    fn tab(&mut self, terminal: TerminalId) -> (Tab, PaneId) {
-        let pane = self.pane(terminal);
+    /// A new tab showing `content`, and its pane.
+    fn tab(&mut self, content: Content) -> (Tab, PaneId) {
+        let pane = self.pane(content);
         let id = TabId(self.next_tab);
         self.next_tab += 1;
         let tab = Tab {
@@ -767,7 +795,8 @@ mod tests {
             state.rename_tab(TabId(9), "x"),
             Err(Error::NoSuchTab(TabId(9)))
         );
-        assert_eq!(state.tab_terminals(tab).unwrap(), [TerminalId(1)]);
+        let panes = state.tab_panes(tab).unwrap();
+        assert_eq!(panes[0].content, Content::Terminal(TerminalId(1)));
     }
 
     #[test]

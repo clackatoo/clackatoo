@@ -20,6 +20,8 @@
 //! 6. What sort of tool each of a chat's tools is, and what it shows: a
 //!    command's output, a change to a file.
 //! 7. Where in files each tool works: their paths, and lines.
+//! 8. Buffers: files being edited, with their history, and panes showing
+//!    them.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -32,10 +34,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 7;
+pub(crate) const VERSION: u32 = 8;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -91,6 +93,10 @@ pub(crate) struct State {
     /// were stopped.
     pub(crate) orphans: Vec<Process>,
     pub(crate) workspaces: Workspaces,
+    /// The ID the next buffer gets.
+    pub(crate) next_buffer: u32,
+    /// Files being edited.
+    pub(crate) buffers: Vec<Buffer>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -269,6 +275,7 @@ pub(crate) struct Tab {
     pub(crate) name: Option<String>,
 }
 
+/// Every version reads this, so new kinds of pane only ever go on the end.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum Layout {
     /// A pane showing a terminal.
@@ -280,6 +287,65 @@ pub(crate) enum Layout {
         parts: Vec<Layout>,
         shares: Vec<u32>,
     },
+    /// A pane showing a buffer. Since version 8.
+    Buffer { id: u32, buffer: u32 },
+}
+
+/// A file being edited: its text, its history, and the file as it was
+/// when last read or written.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Buffer {
+    pub(crate) id: u32,
+    /// The file's path, as bytes.
+    pub(crate) path: Vec<u8>,
+    /// The directory paths opened beside it are from, as bytes.
+    pub(crate) dir: Vec<u8>,
+    pub(crate) text: String,
+    /// The text as last read or written, if it's changed since.
+    pub(crate) saved: Option<String>,
+    /// The file as last read or written, if it existed.
+    pub(crate) disk: Option<DiskStamp>,
+    pub(crate) history: BufferHistory,
+}
+
+/// What tells one version of a file from another without reading it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct DiskStamp {
+    pub(crate) seconds: i64,
+    pub(crate) nanoseconds: i64,
+    pub(crate) len: u64,
+    pub(crate) inode: u64,
+    pub(crate) device: u64,
+}
+
+/// A buffer's edits, and each author's undo and redo steps: see
+/// [`clackatoo_text::History`].
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BufferHistory {
+    pub(crate) first: u64,
+    pub(crate) edits: Vec<(Vec<EditOp>, Author)>,
+    pub(crate) steps: Vec<AuthorSteps>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum EditOp {
+    Retain(u64),
+    Insert(String),
+    Delete(String),
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) enum Author {
+    User,
+    Agent(u32),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AuthorSteps {
+    pub(crate) author: Author,
+    pub(crate) version: u64,
+    pub(crate) undo: Vec<Vec<EditOp>>,
+    pub(crate) redo: Vec<Vec<EditOp>>,
 }
 
 /// A handover couldn't be read.
@@ -321,12 +387,13 @@ impl State {
             .split_first_chunk::<4>()
             .ok_or(HandoverError::NotAHandover)?;
         match u32::from_le_bytes(*version) {
-            1 => Ok(postcard::from_bytes::<v1::State>(body)?.into()),
-            2 => Ok(postcard::from_bytes::<v2::State>(body)?.into()),
-            3 => postcard::from_bytes::<v3::State>(body)?.try_into(),
-            4 => Ok(postcard::from_bytes::<v4::State>(body)?.into()),
-            5 => Ok(postcard::from_bytes::<v5::State>(body)?.into()),
-            6 => Ok(postcard::from_bytes::<v6::State>(body)?.into()),
+            1 => Ok(v7::State::from(postcard::from_bytes::<v1::State>(body)?).into()),
+            2 => Ok(v7::State::from(postcard::from_bytes::<v2::State>(body)?).into()),
+            3 => Ok(v7::State::try_from(postcard::from_bytes::<v3::State>(body)?)?.into()),
+            4 => Ok(v7::State::from(postcard::from_bytes::<v4::State>(body)?).into()),
+            5 => Ok(v7::State::from(postcard::from_bytes::<v5::State>(body)?).into()),
+            6 => Ok(v7::State::from(postcard::from_bytes::<v6::State>(body)?).into()),
+            7 => Ok(postcard::from_bytes::<v7::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -362,7 +429,7 @@ mod v1 {
         screen: Snapshot,
     }
 
-    impl From<State> for super::State {
+    impl From<State> for super::v7::State {
         fn from(state: State) -> Self {
             Self {
                 listener: state.listener,
@@ -407,7 +474,7 @@ mod v2 {
         workspaces: Workspaces,
     }
 
-    impl From<State> for super::State {
+    impl From<State> for super::v7::State {
         fn from(state: State) -> Self {
             Self {
                 listener: state.listener,
@@ -455,7 +522,7 @@ mod v3 {
         pub(super) blocks: BlocksSnapshot,
     }
 
-    impl TryFrom<State> for super::State {
+    impl TryFrom<State> for super::v7::State {
         type Error = HandoverError;
 
         fn try_from(state: State) -> Result<Self, HandoverError> {
@@ -555,7 +622,7 @@ mod v4 {
         turns: Vec<ChatTurn>,
     }
 
-    impl From<State> for super::State {
+    impl From<State> for super::v7::State {
         fn from(state: State) -> Self {
             super::v5::State {
                 listener: state.listener,
@@ -659,7 +726,7 @@ mod v5 {
         }
     }
 
-    impl From<State> for super::State {
+    impl From<State> for super::v7::State {
         fn from(state: State) -> Self {
             super::v6::State {
                 listener: state.listener,
@@ -773,7 +840,7 @@ mod v6 {
         }
     }
 
-    impl From<State> for super::State {
+    impl From<State> for super::v7::State {
         fn from(state: State) -> Self {
             Self {
                 listener: state.listener,
@@ -796,6 +863,41 @@ mod v6 {
                     .collect(),
                 orphans: state.orphans,
                 workspaces: state.workspaces,
+            }
+        }
+    }
+}
+
+/// Version 7, as the builds that wrote it wrote it: no buffers. The older
+/// versions are read into this.
+mod v7 {
+    use serde::Deserialize;
+
+    use super::{Chat, Process, Terminal, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        pub(super) listener: u32,
+        pub(super) lock: Option<u32>,
+        pub(super) next_terminal: u32,
+        pub(super) terminals: Vec<Terminal>,
+        pub(super) chats: Vec<Chat>,
+        pub(super) orphans: Vec<Process>,
+        pub(super) workspaces: Workspaces,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: 1,
+                buffers: Vec::new(),
             }
         }
     }
@@ -873,8 +975,9 @@ mod tests {
                             parts: vec![
                                 Layout::Pane { id: 1, terminal: 1 },
                                 Layout::Pane { id: 2, terminal: 2 },
+                                Layout::Buffer { id: 3, buffer: 1 },
                             ],
-                            shares: vec![2, 1],
+                            shares: vec![2, 1, 1],
                         },
                         focused: 2,
                         name: None,
@@ -884,7 +987,45 @@ mod tests {
                 active: Some(1),
                 next_workspace: 2,
                 next_tab: 2,
-                next_pane: 3,
+                next_pane: 4,
+            },
+            next_buffer: 2,
+            buffers: vec![buffer()],
+        }
+    }
+
+    fn buffer() -> Buffer {
+        Buffer {
+            id: 1,
+            path: b"/src/a".to_vec(),
+            dir: b"/src".to_vec(),
+            text: "new".to_owned(),
+            saved: Some("old".to_owned()),
+            disk: Some(DiskStamp {
+                seconds: 1,
+                nanoseconds: 2,
+                len: 3,
+                inode: 4,
+                device: 5,
+            }),
+            history: BufferHistory {
+                first: 0,
+                edits: vec![(
+                    vec![
+                        EditOp::Delete("old".to_owned()),
+                        EditOp::Insert("new".to_owned()),
+                    ],
+                    Author::User,
+                )],
+                steps: vec![AuthorSteps {
+                    author: Author::User,
+                    version: 1,
+                    undo: vec![vec![
+                        EditOp::Insert("old".to_owned()),
+                        EditOp::Delete("new".to_owned()),
+                    ]],
+                    redo: Vec::new(),
+                }],
             },
         }
     }
@@ -908,10 +1049,10 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(MAGIC).unwrap();
-        file.write_all(&8u32.to_le_bytes()).unwrap();
+        file.write_all(&(VERSION + 1).to_le_bytes()).unwrap();
         assert!(matches!(
             State::read(&mut file),
-            Err(HandoverError::Version(8))
+            Err(HandoverError::Version(version)) if version == VERSION + 1
         ));
     }
 
@@ -1045,6 +1186,24 @@ mod tests {
         };
         assert!(matches!(kind, ToolKind::Edit) && content.len() == 2);
         assert!(locations.is_empty());
+    }
+
+    /// Written by a build that wrote version 7. It must always be read.
+    #[test]
+    fn version_7_is_read_with_no_buffers() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v7.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!((state.next_terminal, state.orphans[0].pid), (8, 93));
+        let chat = &state.chats[0];
+        assert_eq!((chat.id, chat.session.as_deref()), (7, Some("s7")));
+        let ChatItem::Tool { locations, .. } = &chat.turns[0].items[1] else {
+            panic!("{:?}", chat.turns[0].items);
+        };
+        assert_eq!(locations[0].line, Some(4));
+        assert!(state.buffers.is_empty());
+        assert_eq!(state.next_buffer, 1);
     }
 
     #[test]

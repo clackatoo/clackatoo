@@ -21,6 +21,7 @@ bytemuck.workspace = true
 clackatoo-daemon.workspace = true
 clackatoo-protocol.workspace = true
 clackatoo-term.workspace = true
+clackatoo-text.workspace = true
 fontique.workspace = true
 log.workspace = true
 pollster.workspace = true

@@ -870,8 +870,13 @@ impl<'a> Document<'a> {
     }
 }
 
-impl Lines for Document<'_> {
-    fn row(&self, line: u64) -> Option<&Row> {
+impl<'d> Lines for Document<'d> {
+    type Row<'a>
+        = &'d Row
+    where
+        Self: 'a;
+
+    fn row(&self, line: u64) -> Option<&'d Row> {
         self.line(line)
     }
 

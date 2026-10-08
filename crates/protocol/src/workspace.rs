@@ -13,7 +13,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{NewAgent, NewTerminal, TerminalId};
+use crate::{BufferId, NewAgent, NewTerminal, OpenFile, TerminalId};
 
 /// Identifies a workspace within one daemon. Never reused while it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -114,6 +114,40 @@ pub struct Pane {
 pub enum Content {
     /// A terminal. A terminal is in one pane at most.
     Terminal(TerminalId),
+    /// A buffer: a file being edited. Several panes can show one.
+    Buffer(BufferId),
+}
+
+impl From<TerminalId> for Content {
+    fn from(terminal: TerminalId) -> Self {
+        Self::Terminal(terminal)
+    }
+}
+
+impl From<BufferId> for Content {
+    fn from(buffer: BufferId) -> Self {
+        Self::Buffer(buffer)
+    }
+}
+
+impl Content {
+    /// The terminal it is, if it's one.
+    #[must_use]
+    pub fn terminal(self) -> Option<TerminalId> {
+        match self {
+            Self::Terminal(terminal) => Some(terminal),
+            Self::Buffer(_) => None,
+        }
+    }
+
+    /// The buffer it is, if it's one.
+    #[must_use]
+    pub fn buffer(self) -> Option<BufferId> {
+        match self {
+            Self::Buffer(buffer) => Some(buffer),
+            Self::Terminal(_) => None,
+        }
+    }
 }
 
 /// Which way a split's parts are side by side.
@@ -155,7 +189,7 @@ impl Side {
     }
 }
 
-/// The terminal a new pane shows.
+/// What a new pane shows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneTerminal {
     /// A new one. With no working directory given, it starts in the one
@@ -165,6 +199,8 @@ pub enum PaneTerminal {
     Existing(TerminalId),
     /// A new chat with an agent.
     Agent(NewAgent),
+    /// A file to edit.
+    File(OpenFile),
 }
 
 impl Workspaces {
@@ -214,12 +250,8 @@ impl Tab {
     /// The terminals its panes show.
     #[must_use]
     pub fn terminals(&self) -> Vec<TerminalId> {
-        self.layout
-            .panes()
-            .into_iter()
-            .map(|pane| match pane.content {
-                Content::Terminal(terminal) => terminal,
-            })
+        (self.layout.panes().into_iter())
+            .filter_map(|pane| pane.content.terminal())
             .collect()
     }
 }
@@ -237,9 +269,7 @@ impl Workspace {
         self.tabs
             .iter()
             .flat_map(|tab| tab.layout.panes())
-            .map(|pane| match pane.content {
-                Content::Terminal(terminal) => terminal,
-            })
+            .filter_map(|pane| pane.content.terminal())
             .collect()
     }
 }

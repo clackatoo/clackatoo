@@ -489,9 +489,12 @@ fn info(lua: &Lua, world: &World, kind: &str, id: u32) -> mlua::Result<Option<Ta
                 return Ok(None);
             };
             let known = world.panes.get(&pane.id);
-            let Content::Terminal(_) = pane.content;
-            let chat = known.is_some_and(|known| known.chat);
-            table.set("kind", if chat { "chat" } else { "terminal" })?;
+            let kind = match pane.content {
+                Content::Buffer(_) => "editor",
+                Content::Terminal(_) if known.is_some_and(|known| known.chat) => "chat",
+                Content::Terminal(_) => "terminal",
+            };
+            table.set("kind", kind)?;
             table.set("title", known.and_then(|known| known.title.as_deref()))?;
             table.set("tab", tab.id.0)?;
         }

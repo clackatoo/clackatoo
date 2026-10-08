@@ -11,7 +11,7 @@
 use clackatoo_protocol::{Block, Request, Which};
 
 use super::{Copy, Document, Mode, Pane, Pending, Selection};
-use crate::motion::{Cursor, Lines, Motion, Point, Reach, previous_cell, text_end};
+use crate::motion::{Cursor, Motion, Point, Reach, before};
 use crate::objects::Object;
 
 /// What a block asked of the daemon is for.
@@ -159,23 +159,4 @@ impl Pane {
         self.cursor = Some(Cursor::new(last));
         self.follow_cursor();
     }
-}
-
-/// The last character before `end`, from `start`, for an exclusive
-/// motion: none if they're the same place. As in Vim, a motion that ends
-/// at the start of a line stops at the end of the line before.
-fn before(lines: &impl Lines, start: Point, end: Point) -> Option<Point> {
-    if end <= start {
-        return None;
-    }
-    if end.col == 0 && end.line > start.line {
-        let line = end.line - 1;
-        let col = text_end(lines.row(line)).saturating_sub(1);
-        return Some(Point { line, col }.max(start));
-    }
-    let col = previous_cell(lines.row(end.line), end.col)?;
-    Some(Point {
-        line: end.line,
-        col,
-    })
 }

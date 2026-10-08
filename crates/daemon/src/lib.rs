@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 mod agent;
+mod buffer;
 mod chat;
 pub mod client;
 mod handover;

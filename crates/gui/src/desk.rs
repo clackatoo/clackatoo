@@ -15,8 +15,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use clackatoo_protocol::{
-    Axis, ClientMessage, Content, Layout, NewAgent, NewTerminal, PaneId, PaneTerminal, Request,
-    Response, Side, Size, Tab, TabId, TerminalId, ViewUpdate, WorkspaceId, Workspaces,
+    Axis, BufferId, ClientMessage, Content, Layout, NewAgent, NewTerminal, PaneId, PaneTerminal,
+    Request, Response, Side, Size, Tab, TabId, TerminalId, ViewUpdate, WorkspaceId, Workspaces,
 };
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
@@ -80,9 +80,15 @@ enum Asked {
     /// A pane made for the config's Lua, which waits for it by this
     /// request's number.
     Lua(u64),
+    /// A file written, and the pane to close once it is, as after `:wq`.
+    Saved {
+        buffer: BufferId,
+        then_close: Option<PaneId>,
+    },
 }
 
 mod bindings;
+mod editors;
 mod jumps;
 mod script;
 
@@ -162,6 +168,8 @@ pub(crate) struct Desk {
     keymap: bindings::Keys,
     /// The config's Lua, if there's a config.
     script: script::Script,
+    /// Panes editing files.
+    editors: editors::Editors,
     /// Where the focus has been.
     jumps: jumps::Jumps,
 }
@@ -215,6 +223,13 @@ impl Desk {
         if self.input.is_some() {
             return Some(TextTarget::Bar);
         }
+        if let Some((editor, _)) = self.focused_editor() {
+            return if editor.prompting() {
+                Some(TextTarget::Bar)
+            } else {
+                (editor.mode == Mode::Insert).then_some(TextTarget::Pane)
+            };
+        }
         let pane = self.pane(self.focused_terminal()?)?;
         if pane.prompting() {
             Some(TextTarget::Bar)
@@ -230,7 +245,8 @@ impl Desk {
     /// When a pane's highlight on text just copied goes, the soonest of
     /// them: the window must be drawn again then.
     pub(crate) fn flash_ends(&self) -> Option<std::time::Instant> {
-        self.panes.values().filter_map(Pane::flash_ends).min()
+        let panes = self.panes.values().filter_map(Pane::flash_ends);
+        panes.chain(self.editor_flash_ends()).min()
     }
 
     /// Takes text copied, for the window to put on the clipboard or the
@@ -243,8 +259,7 @@ impl Desk {
     pub(crate) fn focused_terminal(&self) -> Option<TerminalId> {
         let shown = self.shown?;
         let (_, _, pane) = self.workspaces.find_pane(shown.pane)?;
-        let Content::Terminal(terminal) = pane.content;
-        Some(terminal)
+        pane.content.terminal()
     }
 
     fn focused_pane(&mut self) -> Option<&mut Pane> {
@@ -277,8 +292,11 @@ impl Desk {
         Some(Placement::new(&tab.layout, area))
     }
 
-    /// The title for the window: the focused pane's program's.
+    /// The title for the window: the focused pane's program's, or file's.
     pub(crate) fn title(&self) -> Option<&str> {
+        if let Some(title) = self.shown.and_then(|shown| self.editor_title(shown.pane)) {
+            return Some(title);
+        }
         let terminal = self.focused_terminal()?;
         let title = self.panes.get(&terminal)?.title()?;
         (!title.is_empty()).then_some(title)
@@ -351,6 +369,23 @@ impl Desk {
                 choices,
             };
         }
+        if let Some((editor, copy)) = self.focused_editor() {
+            let label = editor.label(copy);
+            if editor.prompting() {
+                return Status::Typing {
+                    label: None,
+                    text: label,
+                    choices: Vec::new(),
+                };
+            }
+            return Status::Tabs {
+                mode: Some(mode_name(editor.mode)),
+                note: (self.keymap.hint())
+                    .or_else(|| self.message.clone())
+                    .or(Some(label)),
+                panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
+            };
+        }
         let pane = self
             .focused_terminal()
             .and_then(|terminal| self.panes.get(&terminal));
@@ -364,12 +399,7 @@ impl Desk {
                 choices: Vec::new(),
             };
         }
-        let mode = pane.map(|pane| match pane.mode {
-            Mode::Insert => ModeName::Insert,
-            Mode::Normal => ModeName::Normal,
-            Mode::Visual(Selection::Characters) => ModeName::Visual,
-            Mode::Visual(Selection::Lines) => ModeName::VisualLine,
-        });
+        let mode = pane.map(|pane| mode_name(pane.mode));
         Status::Tabs {
             mode,
             note: self
@@ -402,9 +432,9 @@ impl Desk {
     fn tab_title(&self, tab: &Tab) -> Option<&str> {
         self.workspaces
             .find_pane(tab.focused)
-            .and_then(|(_, _, pane)| {
-                let Content::Terminal(terminal) = pane.content;
-                self.panes.get(&terminal)?.title()
+            .and_then(|(_, _, pane)| match pane.content {
+                Content::Terminal(terminal) => self.panes.get(&terminal)?.title(),
+                Content::Buffer(_) => self.editor_title(pane.id),
             })
             .map(str::trim)
             .filter(|title| !title.is_empty())
@@ -576,15 +606,22 @@ impl Desk {
             self.jumps.moved(self.shown, shown);
         }
         let unfocused = self.unfocused;
-        let normal = self.focused_pane().is_some_and(|left| {
-            if !unfocused {
-                left.focus_changed(false);
-            }
-            left.mode != Mode::Insert
-        });
+        let left_editor = self
+            .shown
+            .and_then(|left| self.editor_in_normal_mode(left.pane));
+        let normal = left_editor.unwrap_or(false)
+            || self.focused_pane().is_some_and(|left| {
+                if !unfocused {
+                    left.focus_changed(false);
+                }
+                left.mode != Mode::Insert
+            });
         self.shown = Some(shown);
         // Before the mode: a pane of another workspace may not exist yet.
         self.attach_shown();
+        if normal {
+            self.editor_to_normal_mode(pane);
+        }
         if let Some(arrived) = self.focused_pane() {
             if normal {
                 arrived.enter_normal_mode();
@@ -618,6 +655,7 @@ impl Desk {
                 .entry(terminal)
                 .or_insert_with(|| Pane::new(terminal));
         }
+        self.attach_shown_buffers();
         if !self.connected {
             return;
         }
@@ -647,7 +685,15 @@ impl Desk {
             let Some(pane) = panes.iter().find(|pane| pane.id == id) else {
                 continue;
             };
-            let Content::Terminal(terminal) = pane.content;
+            let terminal = match pane.content {
+                Content::Terminal(terminal) => terminal,
+                Content::Buffer(_) => {
+                    if let Ok(size) = Size::new(tile.cols, tile.rows) {
+                        self.fit_editor(id, size);
+                    }
+                    continue;
+                }
+            };
             if let (Some(pane), Ok(size)) = (
                 self.panes.get_mut(&terminal),
                 Size::new(tile.cols, tile.rows),
@@ -683,6 +729,7 @@ impl Desk {
     /// drags under way.
     fn forget_asked(&mut self) {
         self.attached.clear();
+        self.editors_reconnected();
         self.asked.clear();
         self.outbox.clear();
         self.resizes_pending = 0;
@@ -763,6 +810,10 @@ impl Desk {
                 self.answer_lua(request, result);
                 true
             }
+            Some(Asker::Window(Asked::Saved { buffer, then_close })) => {
+                self.saved(buffer, then_close, &response);
+                true
+            }
             Some(Asker::Window(asked)) => match (asked, response) {
                 (Asked::Quiet, Response::Error(err)) => {
                     log::warn!("the daemon refused a request: {err}");
@@ -821,6 +872,7 @@ impl Desk {
                 messages.push(message);
             }
         }
+        messages.extend(self.take_buffer_outbox());
         messages
     }
 
@@ -875,6 +927,9 @@ impl Desk {
             }
         }
         let had_message = self.message.take().is_some();
+        if self.focused_editor().is_some() {
+            return self.editor_key(press) || had_message;
+        }
         let redraw = self.focused_pane().is_some_and(|pane| pane.key(press));
         redraw || had_message
     }
@@ -886,7 +941,9 @@ impl Desk {
             input
                 .text
                 .extend(text.chars().filter(|ch| !ch.is_control()));
-        } else if let Some(pane) = self.focused_pane() {
+        } else if !self.paste_into_editor(text)
+            && let Some(pane) = self.focused_pane()
+        {
             pane.paste(text);
         }
     }
@@ -894,6 +951,9 @@ impl Desk {
     /// Scrolls the pane at `point` `lines` up, or down if negative, as the
     /// mouse wheel does. Returns whether the window must be redrawn.
     pub(crate) fn wheel(&mut self, point: [f32; 2], lines: i64, modifiers: Modifiers) -> bool {
+        if let Some((pane, _)) = self.editor_at(point) {
+            return self.editor_wheel(pane, lines);
+        }
         // Away from the panes, as over the bars, the focused pane scrolls.
         let Some((terminal, cell, _)) = self
             .cell_at(point, None)
@@ -920,6 +980,14 @@ impl Desk {
         modifiers: Modifiers,
     ) -> MouseOutcome {
         let mut outcome = MouseOutcome::default();
+        if self.dragging.is_none()
+            && let Some((pane, cell)) = self.editor_at(point)
+        {
+            if let MouseAction::Press(MouseButton::Left) = action {
+                outcome.redraw = self.focus_at(point) | self.editor_click(pane, cell);
+            }
+            return outcome;
+        }
         let dragging = self.dragging.map(|(terminal, _)| terminal);
         let Some((terminal, cell, pixel)) = self.cell_at(point, dragging) else {
             return outcome;
@@ -1127,8 +1195,7 @@ impl Desk {
         let panes = tab.layout.panes();
         let terminal_of = |id: PaneId| {
             let pane = panes.iter().find(|pane| pane.id == id)?;
-            let Content::Terminal(terminal) = pane.content;
-            Some(terminal)
+            pane.content.terminal()
         };
         let (terminal, tile) = if let Some(within) = within {
             placement.panes.iter().find_map(|&(id, tile)| {
@@ -1146,6 +1213,22 @@ impl Desk {
             terminal,
             [cell(pixel[1], area.cell[1]), cell(pixel[0], area.cell[0])],
             pixel,
+        ))
+    }
+
+    /// The editor at `point`, and the cell of its view under it.
+    fn editor_at(&self, point: [f32; 2]) -> Option<(PaneId, [i64; 2])> {
+        let area = self.area.as_ref()?;
+        let placement = self.placement()?;
+        let id = placement.pane_at(point)?;
+        self.editor(id)?;
+        let tile = placement.panes.iter().find(|(pane, _)| *pane == id)?.1;
+        #[allow(clippy::cast_possible_truncation)]
+        let cell = |offset: f32, size: f32| (offset / size).floor() as i64;
+        let pixel = [point[0] - tile.origin[0], point[1] - tile.origin[1]];
+        Some((
+            id,
+            [cell(pixel[1], area.cell[1]), cell(pixel[0], area.cell[0])],
         ))
     }
 
@@ -1321,6 +1404,10 @@ impl Desk {
             Command::Close => {
                 self.request(Request::ClosePane { pane: shown.pane }, Asked::Command);
             }
+            Command::Edit { place, path } => self.open_file(place, path),
+            Command::Quit { force } => self.quit(force),
+            Command::Write { force, quit } => self.write_file(force, quit),
+            Command::Discard => self.discard_changes(),
             Command::Reload => {}
         }
     }
@@ -1354,6 +1441,16 @@ impl Desk {
             _ => (whole.cols, whole.rows),
         };
         Size::new(cols, rows).unwrap_or(fallback)
+    }
+}
+
+/// The bar's name for `mode`.
+fn mode_name(mode: Mode) -> ModeName {
+    match mode {
+        Mode::Insert => ModeName::Insert,
+        Mode::Normal => ModeName::Normal,
+        Mode::Visual(Selection::Characters) => ModeName::Visual,
+        Mode::Visual(Selection::Lines) => ModeName::VisualLine,
     }
 }
 
@@ -1436,6 +1533,7 @@ mod tests {
             .filter_map(|message| match message {
                 ClientMessage::Request(request) => Some(request),
                 ClientMessage::FrameDone { .. }
+                | ClientMessage::Edit { .. }
                 | ClientMessage::Hello { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
@@ -2223,6 +2321,119 @@ mod tests {
             copies.len(),
             2,
             "to the primary selection, then the clipboard"
+        );
+    }
+
+    /// Types `text`, a character at a time.
+    fn type_text(desk: &mut Desk, text: &str) {
+        for ch in text.chars() {
+            press(
+                desk,
+                Key::Character(ch.to_string().into()),
+                None,
+                Modifiers::default(),
+            );
+        }
+    }
+
+    /// The changes to buffers waiting to go to the daemon.
+    fn buffer_changes(desk: &mut Desk) -> Vec<(u64, clackatoo_protocol::Change)> {
+        (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Edit { seq, change, .. } => Some((seq, change)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_file_is_edited_written_and_kept_open_while_it_has_changes() {
+        use clackatoo_protocol::{BufferSnapshot, BufferUpdate, Change, Edit};
+
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+        });
+        let mut desk = Desk::default();
+        desk.set_area(Some(Area {
+            rect: crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 810.0,
+                height: 480.0,
+            },
+            cell: [10.0, 20.0],
+            gap: 10.0,
+            inset: 5.0,
+        }));
+        desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+        let asked = answer_all(&mut desk);
+        assert!(
+            asked.contains(&Request::AttachBuffer { buffer }),
+            "{asked:?}"
+        );
+        desk.buffer_changed(
+            buffer,
+            BufferUpdate::Snapshot(BufferSnapshot {
+                path: "/src/notes.txt".into(),
+                text: "notes\n".into(),
+                version: 0,
+                modified: false,
+            }),
+        );
+        assert_eq!(desk.title(), Some("notes.txt"));
+
+        type_text(&mut desk, "A!");
+        assert_eq!(desk.text_goes_to(), Some(TextTarget::Pane));
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        let sent = buffer_changes(&mut desk);
+        let edit = Edit::replace(6, 5, "", "!");
+        assert_eq!(
+            sent,
+            [(
+                0,
+                Change::Edit {
+                    edit,
+                    base: 0,
+                    step: true
+                }
+            )]
+        );
+        desk.buffer_changed(buffer, BufferUpdate::Acked { version: 1, seq: 0 });
+        desk.buffer_changed(buffer, BufferUpdate::Modified(true));
+        let Status::Tabs { mode, note, .. } = desk.status() else {
+            panic!("the tabs");
+        };
+        assert_eq!(mode, Some(ModeName::Normal));
+        assert_eq!(note.as_deref(), Some("notes.txt [+]  1:6"));
+
+        // :q won't throw the change away; :w writes it.
+        command(&mut desk, "q");
+        assert!(answer_all(&mut desk).is_empty());
+        assert!(
+            desk.message
+                .as_deref()
+                .is_some_and(|message| message.contains(":q!"))
+        );
+        command(&mut desk, "w");
+        let asked = desk.take_outbox();
+        assert!(matches!(
+            asked.as_slice(),
+            [ClientMessage::Request(Request::Save { force: false, .. })]
+        ));
+        desk.answered(Response::Done);
+        assert_eq!(desk.message.as_deref(), Some("notes.txt written"));
+        desk.buffer_changed(buffer, BufferUpdate::Modified(false));
+        command(&mut desk, "q");
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::ClosePane { pane: PaneId(1) }]
         );
     }
 }

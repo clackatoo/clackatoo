@@ -54,12 +54,19 @@ impl Object {
     /// it's empty. Blocks aren't found here (see the module docs).
     pub(crate) fn find(self, lines: &impl Lines, at: Point, inner: bool) -> Option<(Point, Point)> {
         match self {
-            Self::Word => Some(word(lines.row(at.line), at, inner, |class| class)),
-            Self::BigWord => Some(word(lines.row(at.line), at, inner, |class| match class {
-                Class::Blank => Class::Blank,
-                Class::Word | Class::Punctuation => Class::Word,
+            Self::Word => Some(word(lines.row(at.line).as_deref(), at, inner, |class| {
+                class
             })),
-            Self::Quote(quote) => quoted(lines.row(at.line), at, quote, inner),
+            Self::BigWord => Some(word(
+                lines.row(at.line).as_deref(),
+                at,
+                inner,
+                |class| match class {
+                    Class::Blank => Class::Blank,
+                    Class::Word | Class::Punctuation => Class::Word,
+                },
+            )),
+            Self::Quote(quote) => quoted(lines.row(at.line).as_deref(), at, quote, inner),
             Self::Bracket { open, close } => bracketed(lines, at, open, close, inner),
             Self::Block => None,
         }
@@ -155,10 +162,8 @@ fn bracketed(
     inner: bool,
 ) -> Option<(Point, Point)> {
     let ch = |point: Point| {
-        lines
-            .row(point.line)
-            .and_then(|row| row.cells().get(point.col))
-            .map(|cell| cell.ch())
+        let row = lines.row(point.line)?;
+        row.cells().get(point.col).map(|cell| cell.ch())
     };
     // The opening bracket: the cursor's, or the first unmatched one before
     // it.
@@ -212,19 +217,19 @@ fn inside(lines: &impl Lines, open: Point, close: Point) -> Option<(Point, Point
     let mut walk = Walk::new(lines, open);
     walk.forward();
     let mut first = walk.at();
-    if first.line < close.line && first.col >= text_end(lines.row(first.line)) {
+    if first.line < close.line && first.col >= text_end(lines.row(first.line).as_deref()) {
         first = Point {
             line: first.line + 1,
             col: 0,
         };
     }
     let row = lines.row(close.line);
-    let indented = (0..close.col).all(|col| class_at(row, col) == Class::Blank);
+    let indented = (0..close.col).all(|col| class_at(row.as_deref(), col) == Class::Blank);
     let last = if indented && close.line > first.line {
         let line = close.line - 1;
         Point {
             line,
-            col: text_end(lines.row(line)).saturating_sub(1),
+            col: text_end(lines.row(line).as_deref()).saturating_sub(1),
         }
     } else {
         let mut walk = Walk::new(lines, close);

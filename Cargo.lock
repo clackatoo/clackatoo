@@ -520,6 +520,7 @@ dependencies = [
  "bytes",
  "clackatoo-protocol",
  "clackatoo-term",
+ "clackatoo-text",
  "log",
  "mio",
  "postcard",
@@ -545,6 +546,7 @@ dependencies = [
  "clackatoo-daemon",
  "clackatoo-protocol",
  "clackatoo-term",
+ "clackatoo-text",
  "fontique",
  "log",
  "mlua",
@@ -564,6 +566,7 @@ name = "clackatoo-protocol"
 version = "0.1.0"
 dependencies = [
  "clackatoo-term",
+ "clackatoo-text",
  "postcard",
  "proptest",
  "serde",

@@ -255,6 +255,16 @@ impl Desk {
 
     /// The mode bindings are looked up in: the focused pane's.
     pub(super) fn key_mode(&self) -> KeyMode {
+        if let Some((editor, _)) = self.focused_editor() {
+            if editor.prompting() {
+                return KeyMode::Prompt;
+            }
+            return match editor.mode {
+                crate::pane::Mode::Insert => KeyMode::Insert,
+                crate::pane::Mode::Normal => KeyMode::Normal,
+                crate::pane::Mode::Visual(_) => KeyMode::Visual,
+            };
+        }
         let Some(pane) = self
             .focused_terminal()
             .and_then(|terminal| self.panes.get(&terminal))
