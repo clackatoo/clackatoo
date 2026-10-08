@@ -53,6 +53,12 @@ impl Desk {
         self.prefix == Some(Prefix::Pane)
     }
 
+    /// Stops waiting after Ctrl+B, as when the mouse is clicked. Returns
+    /// whether it was waiting.
+    pub(crate) fn cancel_prefix(&mut self) -> bool {
+        self.prefix.take().is_some()
+    }
+
     /// What the bottom bar says while Ctrl+B waits.
     pub(super) fn prefix_note(&self) -> Option<&'static str> {
         Some(match self.prefix? {

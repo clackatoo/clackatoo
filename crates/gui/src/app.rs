@@ -632,6 +632,10 @@ impl App {
         };
         self.last_click = Some((now, hit, point, clicks));
         let double = clicks == 2;
+        // A click cancels Ctrl+B, as any key does.
+        if self.desk.cancel_prefix() {
+            self.request_redraw();
+        }
         // With a menu open, a click picks one of its items or, anywhere
         // else, just closes it.
         if let Some(menu) = self.menu.take() {

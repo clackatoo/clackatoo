@@ -1690,6 +1690,10 @@ mod tests {
         type_keys(&mut desk, "3");
         assert!(!desk.numbering_panes());
         assert_eq!(shown_pane(&desk), PaneId(3));
+        // A click cancels it, as the window says when the mouse goes down.
+        ctrl_b(&mut desk, "p");
+        assert!(desk.cancel_prefix());
+        assert!(!desk.numbering_panes());
         ctrl_b(&mut desk, "h");
         assert_eq!(shown_pane(&desk), PaneId(2));
         // And in normal mode alike, where Ctrl+B used to page.
