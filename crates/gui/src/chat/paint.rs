@@ -18,6 +18,7 @@ use parley::{
 };
 
 use super::markdown::{self, BlockKind};
+use super::picker::{self, ChoiceRow, Row, SliderRow, Spot};
 use super::{Brush, ChatView, Hit, Menu, Tone};
 use crate::fonts::Fonts;
 use crate::render::{Fill, Ink, Paint, PlacedGlyph};
@@ -899,21 +900,24 @@ impl ChatView {
     }
 
     /// Draws one of a menu's choices in `rect`: lit if the keyboard or the
-    /// mouse is on it, ticked if it's the setting's value.
+    /// mouse is on it, ticked if it's chosen, and for a model family, with
+    /// the button that shows its versions.
     fn draw_choice(
         &mut self,
         canvas: &mut Canvas<'_>,
         m: Measures,
+        place: Place,
         rect: [f32; 4],
-        choice: &MenuChoice<'_>,
+        choice: &ChoiceLaid,
+        (lit, column): (bool, f32),
     ) {
-        if choice.lit {
+        if lit {
             canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.5)));
         }
         let mark = m.em(1.6);
-        let left = rect[0] + m.em(0.4);
+        let mut x = rect[0] + m.em(0.4);
         let top = rect[1] + (rect[3] - choice.name.height) / 2.0;
-        if choice.current {
+        if choice.row.current {
             let tick = lay_out(
                 &mut self.layout_cx,
                 canvas.fonts,
@@ -922,17 +926,148 @@ impl ChatView {
                 Look::Plain(Tone::Accent),
                 mark,
             );
-            draw_laid(canvas, m, &tick, [left, top], mark);
+            let indent = if choice.row.nested { m.em(NESTED) } else { 0.0 };
+            draw_laid(canvas, m, &tick, [x + indent, top], mark);
         }
-        draw_laid(canvas, m, choice.name, [left + mark, top], rect[2]);
-        if let Some(description) = choice.description {
-            let at = [left + mark + choice.name.width + m.em(1.2), top];
-            draw_laid(canvas, m, description, at, rect[2]);
+        x += mark + if choice.row.nested { m.em(NESTED) } else { 0.0 };
+        let names = x;
+        draw_laid(canvas, m, &choice.name, [x, top], rect[2]);
+        x += choice.name.width;
+        if let Some(version) = &choice.version {
+            draw_laid(canvas, m, version, [x + m.em(0.35), top], rect[2]);
+        }
+        // Descriptions line up, after the widest name.
+        x = names + column.max(choice.named(m));
+        for (gap, laid) in [
+            (m.em(1.2), choice.description.as_ref()),
+            (m.em(0.8), choice.recommended.as_ref()),
+        ] {
+            if let Some(laid) = laid {
+                x += gap;
+                draw_laid(canvas, m, laid, [x, top], rect[2]);
+                x += laid.width;
+            }
+        }
+        if let Some((family, open)) = &choice.row.family {
+            let size = m.em(1.5);
+            let button = [
+                rect[0] + rect[2] - m.em(0.25) - size,
+                rect[1] + (rect[3] - size) / 2.0,
+                size,
+                size,
+            ];
+            canvas.fill(Fill::rounded(
+                button,
+                if *open { Paint::Picked } else { Paint::Clear },
+                m.em(0.4),
+            ));
+            let chevron = lay_out(
+                &mut self.layout_cx,
+                canvas.fonts,
+                m,
+                if *open { "▾" } else { "▸" },
+                Look::Plain(Tone::Muted),
+                size,
+            );
+            let at = [
+                button[0] + (size - chevron.width) / 2.0,
+                button[1] + (size - chevron.height) / 2.0,
+            ];
+            draw_laid(canvas, m, &chevron, at, size);
+            self.hits
+                .push((Hit::Expand(family.clone()), place.in_pane(button)));
         }
     }
 
-    /// The rows of `menu`, laid out at most `wide`: each setting's
-    /// choices, under its name when there are several.
+    /// Draws a slider in `rect`: its steps along a line, filled up to the
+    /// one chosen, and beside it the button that leaves it to the agent.
+    #[allow(clippy::cast_precision_loss, reason = "a handful of steps")]
+    fn draw_slider(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        place: Place,
+        rect: [f32; 4],
+        slider: &SliderRow,
+        reset: Option<&Laid>,
+    ) {
+        let reset_width = reset.map_or(0.0, |laid| laid.width + m.em(1.4));
+        let left = rect[0] + m.em(1.0);
+        let right = rect[0] + rect[2]
+            - m.em(1.0)
+            - if reset.is_some() {
+                reset_width + m.em(0.9)
+            } else {
+                0.0
+            };
+        let middle = (rect[1] + rect[3] / 2.0).round();
+        let steps = slider.steps.len();
+        let gap = (right - left) / (steps - 1) as f32;
+        let x_of = |step: usize| left + gap * step as f32;
+        let line = m.em(0.2).max(2.0);
+        let track = |to: f32| [left, middle - line / 2.0, to - left, line];
+        canvas.fill(Fill::rounded(track(right), Paint::PaletteEdge, line / 2.0));
+        if let Some(at) = slider.at {
+            canvas.fill(Fill::rounded(track(x_of(at)), Paint::Accent, line / 2.0));
+        }
+        for (step, (value, _)) in slider.steps.iter().enumerate() {
+            let dot = m.em(0.45);
+            let filled = slider.at.is_some_and(|at| step <= at);
+            canvas.fill(Fill::rounded(
+                [x_of(step) - dot / 2.0, middle - dot / 2.0, dot, dot],
+                if filled {
+                    Paint::Accent
+                } else {
+                    Paint::PaletteEdge
+                },
+                dot / 2.0,
+            ));
+            let share = [x_of(step) - gap / 2.0, rect[1], gap, rect[3]];
+            self.hits.push((
+                Hit::Step {
+                    setting: slider.setting.clone(),
+                    value: value.clone(),
+                },
+                place.in_pane(share),
+            ));
+        }
+        if let Some(at) = slider.at {
+            let knob = m.em(1.1);
+            canvas.fill(
+                Fill::rounded(
+                    [x_of(at) - knob / 2.0, middle - knob / 2.0, knob, knob],
+                    Paint::Accent,
+                    knob / 2.0,
+                )
+                .bordered(2.0, Paint::Palette),
+            );
+        }
+        if let (Some((value, _, on)), Some(laid)) = (&slider.reset, reset) {
+            let height = m.em(1.6);
+            let pill = [
+                rect[0] + rect[2] - m.em(0.4) - reset_width,
+                middle - height / 2.0,
+                reset_width,
+                height,
+            ];
+            canvas.fill(if *on {
+                Fill::rounded(pill, Paint::Accent, height / 2.0)
+            } else {
+                Fill::rounded(pill, Paint::Clear, height / 2.0).bordered(1.0, Paint::PaletteEdge)
+            });
+            let at = [pill[0] + m.em(0.7), middle - laid.height / 2.0];
+            draw_laid(canvas, m, laid, at, pill[2]);
+            self.hits.push((
+                Hit::Reset {
+                    setting: slider.setting.clone(),
+                    value: value.clone(),
+                },
+                place.in_pane(pill),
+            ));
+        }
+    }
+
+    /// The rows of `menu`, laid out at most `wide`.
     fn menu_rows(
         &mut self,
         fonts: &mut Fonts,
@@ -940,31 +1075,32 @@ impl ChatView {
         menu: &Menu,
         wide: f32,
     ) -> Vec<MenuRow> {
-        let settings: Vec<Setting> = (menu.settings.iter())
-            .filter_map(|id| self.setting(id).cloned())
-            .collect();
-        let mut rows = Vec::new();
+        let rows = picker::rows(&self.node.settings, menu);
         let mut text = |text: &str, tone| {
             lay_out(&mut self.layout_cx, fonts, m, text, Look::Plain(tone), wide)
         };
-        for setting in &settings {
-            if settings.len() > 1 {
-                rows.push(MenuRow::Heading(text(&setting.name, Tone::Muted)));
-            }
-            for choice in &setting.choices {
-                let description = (choice.description.as_deref())
-                    .filter(|description| !description.is_empty())
-                    .map(|description| text(description, Tone::Muted));
-                rows.push(MenuRow::Choice {
-                    setting: setting.id.clone(),
-                    value: choice.value.clone(),
-                    name: text(&choice.name, Tone::Plain),
-                    description,
-                    current: choice.value == setting.value,
-                });
-            }
-        }
-        rows
+        (rows.into_iter())
+            .map(|row| match row {
+                Row::Heading { name, aside } => MenuRow::Heading {
+                    name: text(&name, Tone::Muted),
+                    aside: aside.map(|aside| text(&aside, Tone::Plain)),
+                },
+                Row::Choice(row) => MenuRow::Choice(Box::new(ChoiceLaid {
+                    name: text(&row.name, Tone::Plain),
+                    version: (row.version.as_deref()).map(|version| text(version, Tone::Muted)),
+                    description: (row.description.as_deref())
+                        .map(|description| text(description, Tone::Muted)),
+                    recommended: row.recommended.then(|| text("recommended", Tone::Accent)),
+                    row,
+                })),
+                Row::Slider(row) => MenuRow::Slider {
+                    reset: (row.reset.as_ref()).map(|(_, name, on)| {
+                        text(name, if *on { Tone::OnAccent } else { Tone::Muted })
+                    }),
+                    row,
+                },
+            })
+            .collect()
     }
 
     /// Draws the settings menu, opening upward from `anchor`: the left of
@@ -981,29 +1117,19 @@ impl ChatView {
             return;
         };
         let rows = self.menu_rows(fonts, m, &menu, place.size[0]);
-        let (row, heading, pad, mark) = (m.em(1.9), m.em(1.6), m.em(0.4), m.em(1.6));
-        let width = (rows.iter())
-            .map(|row| match row {
-                MenuRow::Heading(laid) => laid.width,
-                MenuRow::Choice {
-                    name, description, ..
-                } => {
-                    name.width
-                        + description
-                            .as_ref()
-                            .map_or(0.0, |laid| m.em(1.2) + laid.width)
-                }
+        let pad = m.em(0.4);
+        // The width of the widest name a description follows.
+        let column = (rows.iter())
+            .filter_map(|row| match row {
+                MenuRow::Choice(choice) if !choice.row.nested => Some(choice.named(m)),
+                _ => None,
             })
+            .fold(0.0, f32::max);
+        let width = (rows.iter())
+            .map(|row| row.width(m, column))
             .fold(0.0, f32::max)
-            + mark
             + m.em(1.4);
-        let height: f32 = 2.0 * pad
-            + (rows.iter())
-                .map(|menu_row| match menu_row {
-                    MenuRow::Heading(_) => heading,
-                    MenuRow::Choice { .. } => row,
-                })
-                .sum::<f32>();
+        let height = 2.0 * pad + rows.iter().map(|row| row.height(m)).sum::<f32>();
         let width = width.min(place.size[0] - m.em(1.0));
         let left = anchor[0].clamp(
             place.origin[0] + m.em(0.5),
@@ -1035,38 +1161,49 @@ impl ChatView {
         canvas.clip = bounds;
         let mut y = top + pad;
         for menu_row in rows {
+            let height = menu_row.height(m);
+            let rect = [left + pad, y, width - 2.0 * pad, height];
             match menu_row {
-                MenuRow::Heading(laid) => {
+                MenuRow::Heading { name, aside } => {
+                    let middle = |laid: &Laid| y + (height - laid.height) / 2.0;
                     draw_laid(
                         &mut canvas,
                         m,
-                        &laid,
-                        [left + m.em(0.8), y + (heading - laid.height) / 2.0],
+                        &name,
+                        [left + m.em(0.8), middle(&name)],
                         width,
                     );
-                    y += heading;
+                    if let Some(aside) = aside {
+                        let x = left + width - m.em(0.8) - aside.width;
+                        draw_laid(&mut canvas, m, &aside, [x, middle(&aside)], width);
+                    }
                 }
-                MenuRow::Choice {
-                    setting,
-                    value,
-                    name,
-                    description,
-                    current,
-                } => {
-                    let rect = [left + pad, y, width - 2.0 * pad, row];
-                    let lit = menu.highlighted.as_ref() == Some(&(setting.clone(), value.clone()));
-                    let choice = MenuChoice {
-                        name: &name,
-                        description: description.as_ref(),
-                        current,
-                        lit,
+                MenuRow::Choice(choice) => {
+                    let spot = Spot::Choice {
+                        setting: choice.row.setting.clone(),
+                        value: choice.row.value.clone(),
                     };
-                    self.draw_choice(&mut canvas, m, rect, &choice);
-                    self.hits
-                        .push((Hit::Pick { setting, value }, place.in_pane(rect)));
-                    y += row;
+                    let lit = menu.highlighted.as_ref() == Some(&spot);
+                    self.draw_choice(&mut canvas, m, place, rect, &choice, (lit, column));
+                    // Under the versions button, which goes over it.
+                    let pick = Hit::Pick {
+                        setting: choice.row.setting,
+                        value: choice.row.value,
+                    };
+                    let at = self
+                        .hits
+                        .len()
+                        .saturating_sub(usize::from(choice.row.family.is_some()));
+                    self.hits.insert(at, (pick, place.in_pane(rect)));
+                }
+                MenuRow::Slider { row, reset } => {
+                    if menu.highlighted.as_ref() == Some(&Spot::Slider(row.setting.clone())) {
+                        canvas.fill(Fill::rounded(rect, Paint::Hover, m.em(0.5)));
+                    }
+                    self.draw_slider(&mut canvas, m, place, rect, &row, reset.as_ref());
                 }
             }
+            y += height;
         }
     }
 }
@@ -1094,29 +1231,68 @@ fn tokens(count: u64) -> String {
     }
 }
 
-/// One of a menu's choices, to draw.
-struct MenuChoice<'a> {
-    name: &'a Laid,
-    description: Option<&'a Laid>,
-    /// It's the setting's value now.
-    current: bool,
-    /// The keyboard or the mouse is on it.
-    lit: bool,
+/// One of a menu's choices, laid out.
+struct ChoiceLaid {
+    row: ChoiceRow,
+    name: Laid,
+    version: Option<Laid>,
+    description: Option<Laid>,
+    recommended: Option<Laid>,
 }
 
-/// One row of the settings menu.
+impl ChoiceLaid {
+    /// How wide its name is, with its version.
+    fn named(&self, m: Measures) -> f32 {
+        self.name.width + (self.version.as_ref()).map_or(0.0, |version| m.em(0.35) + version.width)
+    }
+}
+
+/// One row of the settings menu, laid out.
 enum MenuRow {
-    /// A section's heading: its setting's name.
-    Heading(Laid),
-    /// A choice: its setting and value, laid out, with its description,
-    /// and whether it's the setting's value now.
-    Choice {
-        setting: String,
-        value: String,
-        name: Laid,
-        description: Option<Laid>,
-        current: bool,
-    },
+    Heading { name: Laid, aside: Option<Laid> },
+    Choice(Box<ChoiceLaid>),
+    Slider { row: SliderRow, reset: Option<Laid> },
+}
+
+/// How far a model family's versions are indented, in ems.
+const NESTED: f32 = 1.2;
+
+impl MenuRow {
+    fn height(&self, m: Measures) -> f32 {
+        m.em(match self {
+            Self::Heading { .. } => 1.6,
+            Self::Choice(_) => 1.9,
+            Self::Slider { .. } => 2.4,
+        })
+    }
+
+    /// The width it needs, with the menu's padding left out, and its
+    /// description after `column`, if it's not nested.
+    fn width(&self, m: Measures, column: f32) -> f32 {
+        let width = |laid: Option<&Laid>, gap: f32| laid.map_or(0.0, |laid| gap + laid.width);
+        match self {
+            Self::Heading { name, aside } => name.width + width(aside.as_ref(), m.em(2.0)),
+            Self::Choice(choice) => {
+                m.em(1.6)
+                    + if choice.row.nested { m.em(NESTED) } else { 0.0 }
+                    + if choice.row.nested {
+                        choice.named(m)
+                    } else {
+                        column
+                    }
+                    + width(choice.description.as_ref(), m.em(1.2))
+                    + width(choice.recommended.as_ref(), m.em(0.8))
+                    + if choice.row.family.is_some() {
+                        m.em(2.2)
+                    } else {
+                        0.0
+                    }
+            }
+            Self::Slider { reset, .. } => {
+                m.em(14.0) + reset.as_ref().map_or(0.0, |laid| laid.width + m.em(2.3))
+            }
+        }
+    }
 }
 
 /// What the box says while nothing's typed.

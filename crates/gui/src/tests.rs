@@ -686,17 +686,50 @@ fn claude_settings() -> Vec<clackatoo_protocol::Setting> {
             kind: SettingKind::Model,
             value: "sonnet".into(),
             choices: vec![
+                choice("default", "Default (recommended)", Some("Opus 5.5")),
                 choice(
                     "opus",
                     "Opus 5.5",
                     Some("For complex work and everyday tasks"),
                 ),
+                choice("fable", "Fable 5.1", Some("For your toughest challenges")),
                 choice(
                     "sonnet",
                     "Sonnet 5.5",
                     Some("Most efficient for simpler tasks"),
                 ),
                 choice("haiku", "Haiku 5.5", Some("Fastest for quick answers")),
+                choice(
+                    "claude-haiku-4-5-20251001",
+                    "Haiku 4.5",
+                    Some("Fastest for quick answers"),
+                ),
+                choice(
+                    "claude-sonnet-5",
+                    "Sonnet 5",
+                    Some("Efficient for routine tasks"),
+                ),
+                choice(
+                    "claude-opus-5",
+                    "Opus 5",
+                    Some("Best for everyday, complex tasks"),
+                ),
+                choice("claude-fable-5", "Fable 5", Some("Most capable")),
+                choice(
+                    "claude-opus-4-8",
+                    "Opus 4.8",
+                    Some("Best for everyday, complex tasks"),
+                ),
+                choice(
+                    "claude-opus-4-7",
+                    "Opus 4.7",
+                    Some("Best for everyday, complex tasks"),
+                ),
+                choice(
+                    "claude-sonnet-4-6",
+                    "Sonnet 4.6",
+                    Some("Efficient for routine tasks"),
+                ),
             ],
         },
         Setting {
@@ -705,9 +738,12 @@ fn claude_settings() -> Vec<clackatoo_protocol::Setting> {
             kind: SettingKind::Effort,
             value: "high".into(),
             choices: vec![
+                choice("default", "Default", None),
                 choice("low", "Low", None),
                 choice("medium", "Medium", None),
                 choice("high", "High", None),
+                choice("xhigh", "Xhigh", None),
+                choice("max", "Max", None),
             ],
         },
     ]
@@ -795,6 +831,13 @@ fn renders_a_chat_with_its_box_and_question() {
         |_| {},
     );
     render_chat_with("chat-menu", chat_node(false), "", 1.0, |chat| {
+        use clackatoo_protocol::SettingKind;
+        chat.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+    });
+    // A pinned version: its family's versions are shown.
+    let mut pinned = chat_node(false);
+    pinned.settings[1].value = "claude-opus-4-8".into();
+    render_chat_with("chat-menu-versions", pinned, "", 1.0, |chat| {
         use clackatoo_protocol::SettingKind;
         chat.open_menu(&[SettingKind::Model, SettingKind::Effort]);
     });

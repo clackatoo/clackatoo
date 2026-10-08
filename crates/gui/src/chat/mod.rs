@@ -14,6 +14,7 @@
 
 mod markdown;
 mod paint;
+mod picker;
 
 use clackatoo_protocol::{ChatAction, ChatNode, ChoiceKind, Setting, SettingKind, ViewUpdate};
 use parley::{LayoutContext, PlainEditor};
@@ -21,6 +22,7 @@ use winit::keyboard::{Key, NamedKey};
 
 use crate::fonts::Fonts;
 use crate::input::{KeyPress, Modifiers};
+use picker::{Row, Spot};
 
 pub(crate) use paint::ChatPaint;
 
@@ -61,6 +63,8 @@ enum Input {
     },
     /// The mouse moved to a point, with a button held.
     Drag([f32; 2]),
+    /// The button was let go.
+    Release,
     /// The input method is composing this text, with its cursor over this
     /// stretch of it, or has stopped.
     Compose(Option<(String, Option<(usize, usize)>)>),
@@ -93,6 +97,19 @@ enum Hit {
         setting: String,
         value: String,
     },
+    /// The button that shows or hides a model family's versions, by its
+    /// name.
+    Expand(String),
+    /// A step's share of a slider, to click or drag to.
+    Step {
+        setting: String,
+        value: String,
+    },
+    /// The button beside a slider that leaves its setting to the agent.
+    Reset {
+        setting: String,
+        value: String,
+    },
 }
 
 /// What the mouse pointer looks like over a chat.
@@ -111,8 +128,23 @@ pub(crate) enum Pointer {
 struct Menu {
     /// The settings it picks from, by their IDs: a section each.
     settings: Vec<String>,
-    /// The choice the keyboard or the mouse is on: its setting and value.
-    highlighted: Option<(String, String)>,
+    /// Where the keyboard or the mouse is.
+    highlighted: Option<Spot>,
+    /// The model family whose versions are shown, by its name.
+    expanded: Option<String>,
+    /// A slider's setting and the value it was last slid to, until the
+    /// agent says it's set, for it to stay where it was put meanwhile.
+    held: Option<(String, String)>,
+}
+
+impl Menu {
+    /// What `setting` is, or is about to be.
+    fn value<'a>(&'a self, setting: &'a Setting) -> &'a str {
+        match &self.held {
+            Some((id, value)) if *id == setting.id => value,
+            _ => &setting.value,
+        }
+    }
 }
 
 /// The window's side of a chat.
@@ -144,6 +176,8 @@ pub(crate) struct ChatView {
     editor_origin: [f32; 2],
     /// A drag that started in the editor selects as it goes.
     selecting: bool,
+    /// A drag that started on a slider moves it as it goes: its setting.
+    sliding: Option<String>,
     /// The settings menu, while it's open.
     menu: Option<Menu>,
     /// Where the chip that opened the menu was drawn, for the menu to open
@@ -180,6 +214,7 @@ impl ChatView {
             hits: Vec::new(),
             editor_origin: [0.0; 2],
             selecting: false,
+            sliding: None,
             menu: None,
             menu_anchor: None,
         }
@@ -205,6 +240,14 @@ impl ChatView {
                     }
                 }
             }
+        }
+        // The agent has set what a slider was slid to.
+        if let Some(menu) = &mut self.menu
+            && let Some((id, value)) = &menu.held
+            && (self.node.settings.iter())
+                .any(|setting| setting.id == *id && setting.value == *value)
+        {
+            menu.held = None;
         }
     }
 
@@ -237,13 +280,11 @@ impl ChatView {
 
     /// The mouse moved to `at` with a button held.
     pub(crate) fn drag(&mut self, at: [f32; 2]) {
-        if self.selecting {
-            self.queued.push(Input::Drag(at));
-        }
+        self.queued.push(Input::Drag(at));
     }
 
     pub(crate) fn release(&mut self) {
-        self.selecting = false;
+        self.queued.push(Input::Release);
     }
 
     /// The input method is composing `text`, with its cursor over that
@@ -266,7 +307,8 @@ impl ChatView {
     }
 
     /// The mouse moved to `at` with no button held: over a menu, its
-    /// choice there lights up. Returns whether the chat must be redrawn.
+    /// choice or slider there lights up. Returns whether the chat must be
+    /// redrawn.
     pub(crate) fn hover(&mut self, at: [f32; 2]) -> bool {
         let Some(menu) = &mut self.menu else {
             return false;
@@ -274,7 +316,13 @@ impl ChatView {
         let under = (self.hits.iter())
             .find(|(_, rect)| contains(*rect, at))
             .and_then(|(hit, _)| match hit {
-                Hit::Pick { setting, value } => Some((setting.clone(), value.clone())),
+                Hit::Pick { setting, value } => Some(Spot::Choice {
+                    setting: setting.clone(),
+                    value: value.clone(),
+                }),
+                Hit::Step { setting, .. } | Hit::Reset { setting, .. } => {
+                    Some(Spot::Slider(setting.clone()))
+                }
                 _ => None,
             });
         if under.is_some() && under != menu.highlighted {
@@ -298,7 +346,9 @@ impl ChatView {
         }
         self.style_editor(fonts);
         for input in std::mem::take(&mut self.queued) {
-            settled.redraw = true;
+            // A drag that started nothing changes nothing.
+            settled.redraw |=
+                !matches!(input, Input::Drag(_)) || self.selecting || self.sliding.is_some();
             match input {
                 Input::Key {
                     key,
@@ -314,9 +364,16 @@ impl ChatView {
                 Input::Press { at, clicks, shift } => {
                     self.pressed(fonts, at, clicks, shift, &mut settled);
                 }
-                Input::Drag(at) => {
+                // A drag does what the press it follows started, if anything.
+                Input::Drag(at) if self.sliding.is_some() => self.slide(at[0], &mut settled),
+                Input::Drag(at) if self.selecting => {
                     let [x, y] = self.in_editor(at);
                     self.drive(fonts, |driver| driver.extend_selection_to_point(x, y));
+                }
+                Input::Drag(_) => {}
+                Input::Release => {
+                    self.selecting = false;
+                    self.sliding = None;
                 }
                 Input::Compose(Some((text, cursor))) => {
                     self.drive(fonts, |driver| driver.set_compose(&text, cursor));
@@ -485,22 +542,24 @@ impl ChatView {
     }
 
     /// A key while the settings menu is open: Up and Down move through
-    /// its choices, Enter picks one, and Esc closes it, as does any other
+    /// it, Left and Right move a slider or show and hide a model family's
+    /// versions, Enter picks a choice, and Esc closes it, as does any other
     /// key, which then does what it would have. Returns whether it took
     /// the key.
     fn menu_key(&mut self, key: &Key, settled: &mut Settled) -> bool {
         let Some(menu) = self.menu.clone() else {
             return false;
         };
-        let choices = self.menu_choices(&menu);
+        let rows = picker::rows(&self.node.settings, &menu);
+        let spots: Vec<Spot> = rows.iter().filter_map(Row::spot).collect();
         let at = (menu.highlighted.as_ref())
-            .and_then(|highlighted| choices.iter().position(|choice| choice == highlighted));
+            .and_then(|highlighted| spots.iter().position(|spot| spot == highlighted));
         match key {
             Key::Named(direction @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) => {
-                if choices.is_empty() {
+                if spots.is_empty() {
                     return true;
                 }
-                let last = choices.len() - 1;
+                let last = spots.len() - 1;
                 let next = match (at, *direction == NamedKey::ArrowUp) {
                     (None, true) => last,
                     (None, false) => 0,
@@ -514,12 +573,17 @@ impl ChatView {
                     }
                 };
                 if let Some(menu) = &mut self.menu {
-                    menu.highlighted = Some(choices[next].clone());
+                    menu.highlighted = Some(spots[next].clone());
                 }
                 true
             }
+            Key::Named(direction @ (NamedKey::ArrowLeft | NamedKey::ArrowRight)) => {
+                let row = (rows.iter()).find(|row| row.spot() == menu.highlighted);
+                self.sideways(&rows, row, *direction == NamedKey::ArrowRight, settled);
+                true
+            }
             Key::Named(NamedKey::Enter) => {
-                if let Some((setting, value)) = menu.highlighted {
+                if let Some(Spot::Choice { setting, value }) = menu.highlighted {
                     settled.actions.push(ChatAction::Set { setting, value });
                 }
                 self.menu = None;
@@ -536,19 +600,87 @@ impl ChatView {
         }
     }
 
-    /// Every choice in `menu`, in order: each setting's, by its ID and the
-    /// choice's value.
-    fn menu_choices(&self, menu: &Menu) -> Vec<(String, String)> {
-        (menu.settings.iter())
-            .filter_map(|id| self.node.settings.iter().find(|setting| setting.id == *id))
-            .flat_map(|setting| {
-                (setting.choices.iter()).map(|choice| (setting.id.clone(), choice.value.clone()))
-            })
-            .collect()
+    /// Left or Right, on `row` of the menu's `rows`: along a slider, or
+    /// into and out of a model family's versions.
+    fn sideways(&mut self, rows: &[Row], row: Option<&Row>, right: bool, settled: &mut Settled) {
+        match row {
+            Some(Row::Slider(slider)) => {
+                let last = slider.steps.len() - 1;
+                let next = match slider.at {
+                    Some(at) if right => (at + 1).min(last),
+                    Some(at) => at.saturating_sub(1),
+                    None => 0,
+                };
+                let value = slider.steps[next].0.clone();
+                self.slide_to(&slider.setting, &value, settled);
+            }
+            Some(Row::Choice(choice)) => {
+                let Some(menu) = &mut self.menu else {
+                    return;
+                };
+                if let Some((family, _)) = &choice.family {
+                    menu.expanded = right.then(|| family.clone());
+                } else if choice.nested && !right {
+                    // Back out to the family's row.
+                    menu.highlighted = (rows.iter())
+                        .find(|row| {
+                            matches!(row, Row::Choice(head) if head.family.as_ref().is_some_and(|(_, open)| *open))
+                        })
+                        .and_then(Row::spot);
+                    menu.expanded = None;
+                }
+            }
+            _ => {}
+        }
     }
 
-    /// Opens the menu for `settings`, on the choice of the first, or closes
-    /// it if it's open for them.
+    /// Moves the slider for `setting` to `value`, and asks the agent to
+    /// set it, unless it's there.
+    fn slide_to(&mut self, setting: &str, value: &str, settled: &mut Settled) {
+        let Some(menu) = &mut self.menu else {
+            return;
+        };
+        menu.highlighted = Some(Spot::Slider(setting.to_owned()));
+        let Some(current) = (self.node.settings.iter()).find(|each| each.id == setting) else {
+            return;
+        };
+        if menu.value(current) == value {
+            return;
+        }
+        menu.held = Some((setting.to_owned(), value.to_owned()));
+        settled.actions.push(ChatAction::Set {
+            setting: setting.to_owned(),
+            value: value.to_owned(),
+        });
+    }
+
+    /// The mouse, dragging a slider, moved to `x`, from the pane's left:
+    /// the slider goes to the step whose share of it that's in, or the end
+    /// nearest.
+    fn slide(&mut self, x: f32, settled: &mut Settled) {
+        let Some(setting) = self.sliding.clone() else {
+            return;
+        };
+        let steps: Vec<(&String, [f32; 4])> = (self.hits.iter())
+            .filter_map(|(hit, rect)| match hit {
+                Hit::Step { setting: of, value } if *of == setting => Some((value, *rect)),
+                _ => None,
+            })
+            .collect();
+        let within = (steps.iter()).find(|(_, rect)| x >= rect[0] && x < rect[0] + rect[2]);
+        let nearest = match steps.first() {
+            Some((_, first)) if x < first[0] => steps.first(),
+            _ => steps.last(),
+        };
+        let Some(value) = within.or(nearest).map(|(value, _)| (*value).clone()) else {
+            return;
+        };
+        self.slide_to(&setting, &value, settled);
+    }
+
+    /// Opens the menu for `settings`, on the choice made, with the versions
+    /// of a model family shown if one of them is chosen, or closes it if
+    /// it's open for them.
     fn toggle_menu(&mut self, settings: Vec<String>) {
         if self
             .menu
@@ -558,13 +690,19 @@ impl ChatView {
             self.menu = None;
             return;
         }
-        let highlighted = (settings.first())
-            .and_then(|id| self.node.settings.iter().find(|setting| setting.id == *id))
-            .map(|setting| (setting.id.clone(), setting.value.clone()));
-        self.menu = Some(Menu {
+        let expanded = (settings.iter())
+            .filter_map(|id| self.setting(id))
+            .find_map(picker::pinned_family);
+        let mut menu = Menu {
             settings,
-            highlighted,
-        });
+            highlighted: None,
+            expanded,
+            held: None,
+        };
+        menu.highlighted = (picker::rows(&self.node.settings, &menu).iter())
+            .find(|row| matches!(row, Row::Choice(choice) if choice.current))
+            .and_then(Row::spot);
+        self.menu = Some(menu);
     }
 
     /// Moves the agent's mode on to the next it offers, round to the first.
@@ -608,11 +746,30 @@ impl ChatView {
             .find(|(_, rect)| contains(*rect, at))
             .map(|(hit, _)| hit.clone());
         // A click anywhere else closes the menu.
-        if !matches!(hit, Some(Hit::Pick { .. } | Hit::Chip(_))) {
+        if !matches!(
+            hit,
+            Some(
+                Hit::Pick { .. }
+                    | Hit::Chip(_)
+                    | Hit::Expand(_)
+                    | Hit::Step { .. }
+                    | Hit::Reset { .. }
+            )
+        ) {
             self.menu = None;
         }
         match hit {
             Some(Hit::Chip(settings)) => self.toggle_menu(settings),
+            Some(Hit::Expand(family)) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.expanded = (menu.expanded.as_ref() != Some(&family)).then_some(family);
+                }
+            }
+            Some(Hit::Step { setting, value }) => {
+                self.sliding = Some(setting.clone());
+                self.slide_to(&setting, &value, settled);
+            }
+            Some(Hit::Reset { setting, value }) => self.slide_to(&setting, &value, settled),
             Some(Hit::Pick { setting, value }) => {
                 self.menu = None;
                 settled.actions.push(ChatAction::Set { setting, value });
@@ -934,5 +1091,112 @@ mod tests {
         assert_eq!(view.pointer([10.0, 10.0]), Pointer::Text);
         assert_eq!(view.pointer([110.0, 10.0]), Pointer::Hand);
         assert_eq!(view.pointer([10.0, 40.0]), Pointer::Arrow);
+    }
+
+    /// A chat with Claude Code's settings, in short: Opus, with a pinned
+    /// version, and effort from low to max.
+    fn with_claude() -> ChatView {
+        use clackatoo_protocol::SettingChoice;
+        let choice = |value: &str, name: &str| SettingChoice {
+            value: value.into(),
+            name: name.into(),
+            description: None,
+        };
+        let node = ChatNode {
+            settings: vec![
+                Setting {
+                    id: "model".into(),
+                    name: "Model".into(),
+                    kind: SettingKind::Model,
+                    value: "opus".into(),
+                    choices: vec![
+                        choice("opus", "Opus 5.5"),
+                        choice("claude-opus-4-8", "Opus 4.8"),
+                    ],
+                },
+                Setting {
+                    id: "effort".into(),
+                    name: "Effort".into(),
+                    kind: SettingKind::Effort,
+                    value: "high".into(),
+                    choices: vec![
+                        choice("default", "Default"),
+                        choice("low", "Low"),
+                        choice("high", "High"),
+                        choice("max", "Max"),
+                    ],
+                },
+            ],
+            ..ChatNode::default()
+        };
+        ChatView::new(String::new(), node)
+    }
+
+    fn key(view: &mut ChatView, named: NamedKey) {
+        press(view, &Key::Named(named), None, Modifiers::default());
+    }
+
+    #[test]
+    fn right_shows_a_model_familys_versions_to_pick_from() {
+        let mut fonts = fonts();
+        let mut view = with_claude();
+        view.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+        key(&mut view, NamedKey::ArrowRight);
+        key(&mut view, NamedKey::ArrowDown);
+        key(&mut view, NamedKey::Enter);
+        assert_eq!(
+            view.settle(&mut fonts).actions,
+            [set("model", "claude-opus-4-8")]
+        );
+    }
+
+    #[test]
+    fn left_and_right_slide_the_effort_and_leave_the_menu_open() {
+        let mut fonts = fonts();
+        let mut view = with_claude();
+        view.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+        // Up, from the model, round to the slider at the bottom.
+        key(&mut view, NamedKey::ArrowUp);
+        for _ in 0..2 {
+            key(&mut view, NamedKey::ArrowRight);
+        }
+        key(&mut view, NamedKey::ArrowLeft);
+        // Max, then nothing past it, then back to high: the slider stays
+        // where it was put while the agent sets it.
+        assert_eq!(
+            view.settle(&mut fonts).actions,
+            [set("effort", "max"), set("effort", "high")]
+        );
+        assert!(view.menu.is_some());
+    }
+
+    #[test]
+    fn dragging_a_slider_sets_each_step_it_crosses() {
+        let mut fonts = fonts();
+        let mut view = with_claude();
+        view.open_menu(&[SettingKind::Effort]);
+        let step = |value: &str| Hit::Step {
+            setting: "effort".into(),
+            value: value.into(),
+        };
+        view.hits = vec![
+            (step("low"), [0.0, 0.0, 10.0, 10.0]),
+            (step("high"), [10.0, 0.0, 10.0, 10.0]),
+            (step("max"), [20.0, 0.0, 10.0, 10.0]),
+        ];
+        view.press([5.0, 5.0], 1, false);
+        view.drag([12.0, 40.0]);
+        // Past the end: the last step.
+        view.drag([90.0, 5.0]);
+        view.release();
+        view.drag([5.0, 5.0]);
+        assert_eq!(
+            view.settle(&mut fonts).actions,
+            [
+                set("effort", "low"),
+                set("effort", "high"),
+                set("effort", "max")
+            ]
+        );
     }
 }
