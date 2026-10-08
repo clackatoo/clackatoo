@@ -324,7 +324,8 @@ impl ChatView {
         let Some(menu) = &mut self.menu else {
             return false;
         };
-        let under = (self.hits.iter())
+        // What's drawn last is on top, as the menu is over the cards.
+        let under = (self.hits.iter().rev())
             .find(|(_, rect)| contains(*rect, at))
             .and_then(|(hit, _)| match hit {
                 Hit::Pick { setting, value } => Some(Spot::Choice {
@@ -1233,5 +1234,29 @@ mod tests {
         view.press([10.0, 10.0], 1, false);
         view.settle(&mut fonts);
         assert!(view.open_cards.is_empty());
+    }
+
+    #[test]
+    fn a_menu_over_a_card_lights_up_under_the_mouse() {
+        let mut view = with_settings();
+        view.open_menu(&[SettingKind::Model]);
+        view.hits = vec![
+            (Hit::Card("t".into()), [0.0, 0.0, 100.0, 100.0]),
+            (
+                Hit::Pick {
+                    setting: "model".into(),
+                    value: "sonnet".into(),
+                },
+                [10.0, 10.0, 50.0, 20.0],
+            ),
+        ];
+        assert!(view.hover([20.0, 20.0]));
+        assert_eq!(
+            view.menu.unwrap().highlighted,
+            Some(Spot::Choice {
+                setting: "model".into(),
+                value: "sonnet".into()
+            })
+        );
     }
 }
