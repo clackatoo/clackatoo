@@ -15,8 +15,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use clackatoo_protocol::{
-    Axis, ClientMessage, Content, Layout, NewTerminal, PaneId, PaneTerminal, Request, Response,
-    Side, Size, Tab, TabId, TerminalId, ViewUpdate, WorkspaceId, Workspaces,
+    Axis, ClientMessage, Content, Layout, NewAgent, NewTerminal, PaneId, PaneTerminal, Request,
+    Response, Side, Size, Tab, TabId, TerminalId, ViewUpdate, WorkspaceId, Workspaces,
 };
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
@@ -1228,13 +1228,14 @@ impl Desk {
     /// Carries out a command.
     fn run(&mut self, command: Command) {
         let Some(shown) = self.shown else { return };
-        let new = |size| {
-            PaneTerminal::New(NewTerminal {
+        let new = |kind, size| match kind {
+            Kind::Terminal => PaneTerminal::New(NewTerminal {
                 size,
                 command: None,
                 cwd: None,
                 record_to: None,
-            })
+            }),
+            Kind::Agent => PaneTerminal::Agent(NewAgent { size, cwd: None }),
         };
         match command {
             Command::Open {
@@ -1247,10 +1248,10 @@ impl Desk {
             }
             Command::Open {
                 place: Place::Tab,
-                kind: Kind::Terminal,
+                kind,
                 daemon: None,
             } => {
-                let terminal = new(self.new_pane_size(None));
+                let terminal = new(kind, self.new_pane_size(None));
                 self.request(
                     Request::NewTab {
                         workspace: shown.workspace,
@@ -1261,10 +1262,10 @@ impl Desk {
             }
             Command::Open {
                 place: Place::Beside(side),
-                kind: Kind::Terminal,
+                kind,
                 daemon: None,
             } => {
-                let terminal = new(self.new_pane_size(Some(side)));
+                let terminal = new(kind, self.new_pane_size(Some(side)));
                 self.request(
                     Request::Split {
                         pane: shown.pane,
@@ -1284,7 +1285,7 @@ impl Desk {
                 if let Some(workspace) = existing {
                     self.show_workspace(workspace.id);
                 } else {
-                    let terminal = new(self.new_pane_size(None));
+                    let terminal = new(Kind::Terminal, self.new_pane_size(None));
                     self.request(Request::NewWorkspace { name, terminal }, Asked::Pane);
                 }
             }

@@ -1,9 +1,10 @@
 //! The command line, opened with `:` in normal mode: what its commands
 //! mean.
 //!
-//! Capitalised words are kinds of pane, and open one: `Terminal` in a new
-//! tab, and with a mark before it, beside the focused pane (`|` right,
-//! `|<` left, `-` below, `-^` above). `Terminal@host` asks for it on
+//! Capitalised words are kinds of pane, and open one: `Terminal`, or
+//! `Agent`, a chat with an agent such as Claude Code, in a new tab, and
+//! with a mark before it, beside the focused pane (`|` right, `|<` left,
+//! `-` below, `-^` above). `Terminal@host` asks for it on
 //! another machine's daemon. A number moves to that tab. Lowercase words
 //! are the window's own commands.
 
@@ -43,10 +44,12 @@ pub(crate) enum Place {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Terminal,
+    /// A chat with an agent.
+    Agent,
 }
 
 /// Every kind, by name.
-const KINDS: [(&str, Kind); 1] = [("Terminal", Kind::Terminal)];
+const KINDS: [(&str, Kind); 2] = [("Terminal", Kind::Terminal), ("Agent", Kind::Agent)];
 
 /// The window's own commands, for messages.
 const COMMANDS: &str = "a tab's number, workspace, rename and close";
@@ -158,6 +161,14 @@ mod tests {
             parse("-^Terminal").unwrap(),
             open(Place::Beside(Side::Above), None)
         );
+        assert_eq!(
+            parse("|Agent").unwrap(),
+            Command::Open {
+                place: Place::Beside(Side::Right),
+                kind: Kind::Agent,
+                daemon: None,
+            }
+        );
         // A mark alone means a terminal.
         assert_eq!(parse("|").unwrap(), open(Place::Beside(Side::Right), None));
         assert_eq!(parse("-^").unwrap(), open(Place::Beside(Side::Above), None));
@@ -206,7 +217,7 @@ mod tests {
         assert!(
             parse("Editor")
                 .unwrap_err()
-                .contains("the kinds are Terminal")
+                .contains("the kinds are Terminal, Agent")
         );
         assert!(
             parse("split")

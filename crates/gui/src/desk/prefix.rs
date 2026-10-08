@@ -9,6 +9,7 @@
 //! | `p` and `1`–`9` | Pane 1 to 9, numbered on screen meanwhile |
 //! | `h` `j` `k` `l` | The pane left, below, above, right |
 //! | `\|` `-` | Splits the pane, to the right or below |
+//! | `a` | Opens a chat with an agent, to the right |
 //! | `x` | Closes the pane |
 //! | `w` | Picks a workspace, or makes one, in the palette |
 //! | `o` `i` | Back and forward through the tab's panes (see [`super::jumps`]) |
@@ -62,7 +63,7 @@ impl Desk {
     /// What the bottom bar says while Ctrl+B waits.
     pub(super) fn prefix_note(&self) -> Option<&'static str> {
         Some(match self.prefix? {
-            Prefix::Waiting => "tab 1-9 c [ ] ,  pane p hjkl | - x  o i  w workspace",
+            Prefix::Waiting => "tab 1-9 c [ ] ,  pane p hjkl | - x  o i  a agent  w workspace",
             Prefix::Pane => "pane number",
         })
     }
@@ -93,9 +94,9 @@ impl Desk {
         if *press.key == Key::Named(NamedKey::Escape) {
             return true;
         }
-        let beside = |side| Command::Open {
+        let beside = |side, kind| Command::Open {
             place: Place::Beside(side),
-            kind: Kind::Terminal,
+            kind,
             daemon: None,
         };
         match (digit, character) {
@@ -114,8 +115,9 @@ impl Desk {
                 'k' => Direction::Up,
                 _ => Direction::Right,
             }),
-            (_, Some('|')) => self.run(beside(Side::Right)),
-            (_, Some('-')) => self.run(beside(Side::Below)),
+            (_, Some('|')) => self.run(beside(Side::Right, Kind::Terminal)),
+            (_, Some('-')) => self.run(beside(Side::Below, Kind::Terminal)),
+            (_, Some('a')) => self.run(beside(Side::Right, Kind::Agent)),
             (_, Some('x')) => self.run(Command::Close),
             (_, Some('w')) => {
                 self.input = Some(Input {
