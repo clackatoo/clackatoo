@@ -59,14 +59,19 @@ pub(crate) struct ClientConfig {
     pub(crate) renderer: Option<GraphicsApi>,
 }
 
-/// Where the file is: `$XDG_CONFIG_HOME/clackatoo/client.toml`, or
-/// `~/.config/clackatoo/client.toml`.
-pub(crate) fn path() -> Option<PathBuf> {
+/// clackatoo's config directory: `$XDG_CONFIG_HOME/clackatoo`, or
+/// `~/.config/clackatoo`.
+pub(crate) fn dir() -> Option<PathBuf> {
     let non_empty = |name| std::env::var_os(name).filter(|value| !value.is_empty());
     let config = non_empty("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(config.join("clackatoo/client.toml"))
+    Some(config.join("clackatoo"))
+}
+
+/// Where the file is: `client.toml` in the [config directory](dir).
+pub(crate) fn path() -> Option<PathBuf> {
+    Some(dir()?.join("client.toml"))
 }
 
 /// Reads the file, printing what's wrong with it, if anything, to stderr.

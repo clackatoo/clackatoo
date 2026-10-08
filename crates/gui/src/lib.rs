@@ -26,7 +26,9 @@ mod glyphs;
 mod history;
 mod ime;
 mod input;
+mod keymap;
 mod layout;
+mod lua;
 mod motion;
 mod objects;
 mod pane;
@@ -37,6 +39,7 @@ mod session;
 #[cfg(test)]
 mod tests;
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Context;
@@ -56,6 +59,9 @@ pub struct Options {
     pub font: FontOptions,
     /// The graphics API to draw with.
     pub graphics_api: GraphicsApi,
+    /// clackatoo's config directory, whose `client/init.lua` configures
+    /// the window, if there is one.
+    pub config: Option<PathBuf>,
 }
 
 /// The graphics API the window draws with. If the one chosen can't draw,
@@ -111,8 +117,22 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         Some(remote) => session::Location::Remote(remote),
         None => session::Location::Local(options.runtime.clone()),
     };
+    // The config runs alongside everything else starting.
+    let lua_start = options.config.map(|dir| {
+        let proxy = event_loop.create_proxy();
+        desk::LuaStart(Box::new(move || {
+            let proxy = proxy.clone();
+            let wake: lua::Wake = Box::new(move || {
+                let _ = proxy.send_event(session::SessionEvent::Lua);
+            });
+            lua::Lua::start(lua::Source::Dir(dir.clone()), wake)
+        }))
+    });
     let session = session::Session::start(location, &options.runtime, event_loop.create_proxy());
     let mut app = app::App::new(started, fonts, gpu, session);
+    if let Some(start) = lua_start {
+        app.start_lua(start);
+    }
     event_loop.run_app(&mut app)?;
     app.result
 }

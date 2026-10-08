@@ -75,6 +75,9 @@ pub(crate) enum SessionEvent {
     },
     /// The connection failed or closed.
     Lost(String),
+    /// The config's Lua has something for the window. Sent from the Lua
+    /// thread, not the session's.
+    Lua,
 }
 
 /// What the window tells the session thread.

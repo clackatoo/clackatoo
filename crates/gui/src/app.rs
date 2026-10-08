@@ -651,7 +651,7 @@ impl App {
         self.last_click = Some((now, hit, point, clicks));
         let double = clicks == 2;
         // A click cancels Ctrl+B, as any key does.
-        if self.desk.cancel_prefix() {
+        if self.desk.cancel_keys() {
             self.request_redraw();
         }
         // With a menu open, a click picks one of its items or, anywhere
@@ -747,8 +747,15 @@ impl App {
         }
     }
 
-    /// Sends what the desk has for the daemon.
+    /// Starts the config's Lua.
+    pub(crate) fn start_lua(&mut self, start: crate::desk::LuaStart) {
+        self.desk.start_lua(start);
+    }
+
+    /// Sends what the desk has for the daemon, and tells the config's Lua
+    /// what's changed.
     fn send_outbox(&mut self) {
+        self.desk.sync_lua();
         // What was typed or clicked in a chat goes first, as it needs the
         // fonts, which the desk hasn't got.
         if let Some(frame) = &mut self.frame
@@ -1760,6 +1767,12 @@ impl App {
             SessionEvent::Message(
                 ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. },
             ) => {}
+            SessionEvent::Lua => {
+                if self.desk.lua_said() {
+                    self.update_title();
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Lost(reason) => {
                 log::warn!("lost the daemon: {reason}");
                 let was_connected = self.sender.take().is_some();

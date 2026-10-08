@@ -45,6 +45,7 @@ quinn-proto = { version = "0.11", default-features = false, features = ["rustls-
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 # Reads the agent's words in a chat as Markdown.
 pulldown-cmark = { version = "0.13", default-features = false }
+mlua = { version = "0.12.2", features = ["luau"] }
 similar = { version = "2.7", default-features = false, features = ["text"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # TLS for QUIC: the same version and backend as quinn-proto's.

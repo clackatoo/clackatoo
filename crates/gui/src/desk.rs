@@ -24,8 +24,10 @@ use winit::keyboard::{Key, NamedKey};
 use crate::chrome::{ModeName, Status};
 use crate::command::{self, Command, Kind, Place};
 use crate::input::{self, KeyPress, Modifiers};
+use crate::keymap::{Chord, Pressed};
 use crate::layout::{Area, Direction, Divider, Placement};
 use crate::pane::{self, Copy, Mode, Pane, PaneMouse, Selection};
+use bindings::Binding;
 
 /// What a mouse event did, for the window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,10 +77,16 @@ enum Asked {
     /// A split resized, whose shares are shown ahead of the daemon's until
     /// it has answered.
     Resize,
+    /// A pane made for the config's Lua, which waits for it by this
+    /// request's number.
+    Lua(u64),
 }
 
+mod bindings;
 mod jumps;
-mod prefix;
+mod script;
+
+pub(crate) use script::LuaStart;
 
 /// Something being typed in the palette.
 #[derive(Debug)]
@@ -149,24 +157,13 @@ pub(crate) struct Desk {
     resizes_pending: usize,
     /// Every workspace has closed, so the window should too.
     finished: bool,
-    /// What Ctrl+B is waiting for, after it's pressed.
-    prefix: Option<prefix::Prefix>,
+    /// What keys are bound to, and those waiting for the rest of a
+    /// binding, as after Ctrl+B.
+    keymap: bindings::Keys,
+    /// The config's Lua, if there's a config.
+    script: script::Script,
     /// Where the focus has been.
     jumps: jumps::Jumps,
-}
-
-/// Whether `press` is Ctrl+Shift+O, back through where the focus has been
-/// (`Some(true)`), or Ctrl+Shift+I, forward again (`Some(false)`).
-fn global_jump(press: &KeyPress<'_>) -> Option<bool> {
-    let modifiers = press.modifiers;
-    if !(modifiers.ctrl && modifiers.shift && !modifiers.alt) {
-        return None;
-    }
-    match press.key {
-        Key::Character(text) if text.eq_ignore_ascii_case("o") => Some(true),
-        Key::Character(text) if text.eq_ignore_ascii_case("i") => Some(false),
-        _ => None,
-    }
 }
 
 impl Desk {
@@ -376,8 +373,8 @@ impl Desk {
         Status::Tabs {
             mode,
             note: self
-                .prefix_note()
-                .map(str::to_owned)
+                .keymap
+                .hint()
                 .or_else(|| self.message.clone())
                 .or_else(|| pane.and_then(Pane::label)),
             panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
@@ -706,6 +703,7 @@ impl Desk {
         self.settle();
         self.attach_shown();
         self.fit_panes();
+        self.forget_gone_handlers();
     }
 
     /// Applies a view update for `terminal`. Returns whether it's shown,
@@ -751,6 +749,19 @@ impl Desk {
                     self.split_shares = None;
                 }
                 false
+            }
+            Some(Asker::Window(Asked::Lua(request))) => {
+                let result = match response {
+                    Response::PaneCreated(pane) => {
+                        // As a pane split with a key is.
+                        self.show_pane(pane);
+                        Ok(pane)
+                    }
+                    Response::Error(err) => Err(err.to_string()),
+                    other => Err(format!("the daemon answered {other:?}")),
+                };
+                self.answer_lua(request, result);
+                true
             }
             Some(Asker::Window(asked)) => match (asked, response) {
                 (Asked::Quiet, Response::Error(err)) => {
@@ -815,7 +826,7 @@ impl Desk {
 
     // --- Keys -------------------------------------------------------------
 
-    /// Handles a key press: the command line's, the window's own, then the
+    /// Handles a key press: the command line's, a binding's, then the
     /// focused pane's. Returns whether the window must be redrawn.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> bool {
         // The keyboard reports Shift, Ctrl and the like as keys of their
@@ -825,27 +836,6 @@ impl Desk {
         if input::is_modifier(press.key) {
             return false;
         }
-        // Ctrl+Shift+O and Ctrl+Shift+I: the terminal's own keys, as
-        // Ctrl+Shift+C is, so programs lose nothing.
-        if self.input.is_none()
-            && let Some(back) = global_jump(press)
-        {
-            self.prefix = None;
-            self.jump(back, false);
-            return true;
-        }
-        if let Some(prefix) = self.prefix.take() {
-            return self.prefix_key(prefix, press);
-        }
-        let prompting = self
-            .focused_terminal()
-            .and_then(|terminal| self.panes.get(&terminal))
-            .is_some_and(Pane::prompting);
-        if self.input.is_none() && !prompting && prefix::is_ctrl_b(press) {
-            self.prefix = Some(prefix::Prefix::Waiting);
-            self.message = None;
-            return true;
-        }
         if self.input.is_some() {
             // Ctrl+; and its kin close the command line, and go on to the
             // pane, which stays in normal mode.
@@ -854,15 +844,37 @@ impl Desk {
                 return true;
             }
             self.input = None;
+        } else if let Some(chord) = Chord::of(press) {
+            // The config's keypress handlers come first, then the bindings.
+            if self.keypress_handled(chord, press) {
+                return true;
+            }
+            let mode = self.key_mode();
+            match self.keymap.press(mode, chord) {
+                Pressed::Bound(Binding::Window(action)) => {
+                    self.forget_waiting();
+                    self.message = None;
+                    self.act(action);
+                    return true;
+                }
+                Pressed::Bound(Binding::Lua(binding)) => {
+                    self.message = None;
+                    self.run_lua_binding(binding, chord, press);
+                    return true;
+                }
+                Pressed::Waiting => {
+                    self.keep_waiting(chord, press);
+                    self.message = None;
+                    return true;
+                }
+                Pressed::Dropped => {
+                    self.forget_waiting();
+                    return true;
+                }
+                Pressed::Unbound => {}
+            }
         }
         let had_message = self.message.take().is_some();
-        let window_key = match self.focused_pane() {
-            Some(pane) if pane.mode != Mode::Insert && !pane.prompting() => self.window_key(press),
-            _ => false,
-        };
-        if window_key {
-            return true;
-        }
         let redraw = self.focused_pane().is_some_and(|pane| pane.key(press));
         redraw || had_message
     }
@@ -1137,50 +1149,6 @@ impl Desk {
         ))
     }
 
-    /// Takes a key in the focused pane's normal mode if it's the window's:
-    /// `:` opens the command line, and Ctrl with `h`, `j`, `k` or `l` moves
-    /// to the pane to the left, below, above or right. Returns whether it
-    /// took it.
-    fn window_key(&mut self, press: &KeyPress<'_>) -> bool {
-        let character = match press.key {
-            Key::Character(text) => text.chars().next(),
-            _ => None,
-        };
-        let ctrl = press.modifiers.ctrl && !press.modifiers.alt;
-        let direction = match character {
-            Some(':') if !ctrl => {
-                self.input = Some(Input {
-                    purpose: Purpose::Command,
-                    text: String::new(),
-                    selected: 0,
-                });
-                return true;
-            }
-            Some(letter @ ('h' | 'j' | 'k' | 'l')) if press.modifiers.alt && !ctrl => {
-                self.move_edge(match letter {
-                    'h' => Direction::Left,
-                    'j' => Direction::Down,
-                    'k' => Direction::Up,
-                    _ => Direction::Right,
-                });
-                return true;
-            }
-            Some('h') if ctrl => Direction::Left,
-            Some('j') if ctrl => Direction::Down,
-            Some('k') if ctrl => Direction::Up,
-            Some('l') if ctrl => Direction::Right,
-            // Back and forward through the tab's panes, as through Vim's
-            // jump list.
-            Some(key @ ('o' | 'i')) if ctrl => {
-                self.jump(key == 'o', true);
-                return true;
-            }
-            _ => return false,
-        };
-        self.focus_towards(direction);
-        true
-    }
-
     /// Focuses the pane beside the focused one towards `direction`, if
     /// there is one.
     fn focus_towards(&mut self, direction: Direction) {
@@ -1262,6 +1230,10 @@ impl Desk {
 
     /// Carries out a command.
     fn run(&mut self, command: Command) {
+        if command == Command::Reload {
+            self.reload_lua();
+            return;
+        }
         let Some(shown) = self.shown else { return };
         let new = |kind, size| match kind {
             Kind::Terminal => PaneTerminal::New(NewTerminal {
@@ -1349,6 +1321,7 @@ impl Desk {
             Command::Close => {
                 self.request(Request::ClosePane { pane: shown.pane }, Asked::Command);
             }
+            Command::Reload => {}
         }
     }
 
@@ -1735,6 +1708,14 @@ mod tests {
         ctrl_b(&mut desk, "[");
         assert_eq!(desk.shown().unwrap().tab, TabId(3), "round to the last");
         ctrl_b(&mut desk, "1");
+        // While Ctrl+B waits, the bar says what it takes.
+        ctrl(&mut desk, "b");
+        assert!(matches!(
+            desk.status(),
+            Status::Tabs { note: Some(note), .. }
+                if note == "tab 1-9 c [ ] ,  pane p h j k l | - x  jump o i  agent a  workspace w"
+        ));
+        assert!(desk.cancel_keys());
         // Panes by number, shown on screen while one is awaited.
         ctrl_b(&mut desk, "p");
         assert!(desk.numbering_panes());
@@ -1742,7 +1723,7 @@ mod tests {
             desk.status(),
             Status::Tabs {
                 mode: Some(ModeName::Insert),
-                note: Some("pane number".into()),
+                note: Some("pane 1-9".into()),
                 panes: 3
             }
         );
@@ -1751,7 +1732,7 @@ mod tests {
         assert_eq!(shown_pane(&desk), PaneId(3));
         // A click cancels it, as the window says when the mouse goes down.
         ctrl_b(&mut desk, "p");
-        assert!(desk.cancel_prefix());
+        assert!(desk.cancel_keys());
         assert!(!desk.numbering_panes());
         ctrl_b(&mut desk, "h");
         assert_eq!(shown_pane(&desk), PaneId(2));
@@ -1796,8 +1777,55 @@ mod tests {
         }));
         // Anything else does nothing, and goes nowhere.
         ctrl_b(&mut desk, "z");
-        assert_eq!(desk.prefix, None);
+        assert!(desk.keymap.waiting().is_empty());
         assert!(answer_all(&mut desk).is_empty());
+    }
+
+    #[test]
+    fn the_configs_handlers_and_bindings_come_before_the_pane() {
+        let mut desk = three_tabs();
+        snapshot(&mut desk, 1);
+        desk.lua_from(
+            r#"
+            client.keys.map("niv", '<C-b>"', function(ev) ev.pane:split("below") end)
+            client.keys.unmap("niv", "<C-b>x")
+            client.keys.map("i", "jk", function(ev) ev:propagate() end)
+            client.on("keypress", function(ev) if ev.key == "q" then ev:stop() end end)
+            "#,
+        );
+        let sent = |desk: &mut Desk| -> Vec<u8> {
+            (answer_all(desk).into_iter())
+                .filter_map(|request| match request {
+                    Request::SendInput { bytes, .. } => Some(bytes),
+                    _ => None,
+                })
+                .flatten()
+                .collect()
+        };
+        answer_all(&mut desk);
+        ctrl_b(&mut desk, "\"");
+        assert!(matches!(
+            answer_all(&mut desk)[..],
+            [Request::Split {
+                pane: PaneId(1),
+                side: Side::Below,
+                ..
+            }]
+        ));
+        ctrl_b(&mut desk, "x");
+        assert!(answer_all(&mut desk).is_empty(), "unbound");
+        type_keys(&mut desk, "q");
+        assert_eq!(sent(&mut desk), b"", "stopped");
+        type_keys(&mut desk, "jkw");
+        assert_eq!(sent(&mut desk), b"jkw", "let go on, in order");
+
+        // A reload starts again from the window's own keys.
+        normal_mode(&mut desk);
+        command(&mut desk, "reload");
+        assert_eq!(desk.message.as_deref(), Some("reloaded the config"));
+        desk.lua_ready();
+        ctrl_b(&mut desk, "x");
+        assert!(answer_all(&mut desk).is_empty(), "unbound again");
     }
 
     #[test]

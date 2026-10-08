@@ -29,6 +29,8 @@ pub(crate) enum Command {
     Rename(String),
     /// Close the focused pane.
     Close,
+    /// Run the config again, from the start.
+    Reload,
 }
 
 /// Where a new pane goes.
@@ -52,7 +54,7 @@ pub(crate) enum Kind {
 const KINDS: [(&str, Kind); 2] = [("Terminal", Kind::Terminal), ("Agent", Kind::Agent)];
 
 /// The window's own commands, for messages.
-const COMMANDS: &str = "a tab's number, workspace, rename and close";
+const COMMANDS: &str = "a tab's number, workspace, rename, close and reload";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -70,6 +72,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
                 .ok_or_else(|| "rename needs a name: :rename NAME".to_owned());
         }
         "close" | "q" => return Ok(Command::Close),
+        "reload" => return Ok(Command::Reload),
         _ => {}
     }
     if let Some(argument) = argument {

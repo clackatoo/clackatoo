@@ -40,6 +40,38 @@ pub(crate) struct KeyPress<'a> {
     pub(crate) modifiers: Modifiers,
 }
 
+/// A key press kept for later, as one waiting for the rest of a binding.
+#[derive(Clone, Debug)]
+pub(crate) struct KeptPress {
+    key: Key,
+    text: Option<String>,
+    location: KeyLocation,
+    code: Option<KeyCode>,
+    modifiers: Modifiers,
+}
+
+impl KeptPress {
+    pub(crate) fn of(press: &KeyPress<'_>) -> Self {
+        Self {
+            key: press.key.clone(),
+            text: press.text.map(str::to_owned),
+            location: press.location,
+            code: press.code,
+            modifiers: press.modifiers,
+        }
+    }
+
+    pub(crate) fn press(&self) -> KeyPress<'_> {
+        KeyPress {
+            key: &self.key,
+            text: self.text.as_deref(),
+            location: self.location,
+            code: self.code,
+            modifiers: self.modifiers,
+        }
+    }
+}
+
 /// Whether `key` is only a modifier, such as Shift or Ctrl, which programs
 /// are never sent on its own.
 pub(crate) fn is_modifier(key: &Key) -> bool {

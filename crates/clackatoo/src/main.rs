@@ -386,6 +386,7 @@ fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
             .map(Into::into)
             .or(config.renderer)
             .unwrap_or_default(),
+        config: config::dir(),
     })
 }
 
