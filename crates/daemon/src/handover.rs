@@ -10,22 +10,26 @@
 //!
 //! File descriptors travel separately (they can't be written down), and
 //! the state refers to each by its index in [`Fds`].
+//!
+//! Versions:
+//! 1. The first.
+//! 2. Each terminal's shell blocks ([`clackatoo_term::BlocksSnapshot`]).
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::os::fd::OwnedFd;
 
-use clackatoo_term::Snapshot;
+use clackatoo_term::{BlocksSnapshot, Snapshot};
 use serde::{Deserialize, Serialize};
 
 /// The start of every handover, to tell it from anything else.
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 2;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[VERSION];
+pub(crate) const READABLE: &[u32] = &[1, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -64,7 +68,7 @@ impl Fds {
     }
 }
 
-/// The daemon's state, version 1.
+/// The daemon's state, version 2.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The listening socket.
@@ -92,6 +96,7 @@ pub(crate) struct Terminal {
     /// Input the PTY hasn't accepted yet.
     pub(crate) input: Vec<u8>,
     pub(crate) screen: Snapshot,
+    pub(crate) blocks: BlocksSnapshot,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -184,8 +189,65 @@ impl State {
             .split_first_chunk::<4>()
             .ok_or(HandoverError::NotAHandover)?;
         match u32::from_le_bytes(*version) {
+            1 => Ok(postcard::from_bytes::<v1::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
+        }
+    }
+}
+
+/// Version 1, as the builds that wrote it wrote it. The types that version
+/// 2 left as they were are shared: copy one here before changing it.
+mod v1 {
+    use clackatoo_term::Snapshot;
+    use serde::Deserialize;
+
+    use super::{Process, Status, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Terminal {
+        id: u32,
+        process: Option<Process>,
+        pid: u32,
+        pty: Option<u32>,
+        status: Status,
+        input: Vec<u8>,
+        screen: Snapshot,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state
+                    .terminals
+                    .into_iter()
+                    .map(|terminal| super::Terminal {
+                        id: terminal.id,
+                        process: terminal.process,
+                        pid: terminal.pid,
+                        pty: terminal.pty,
+                        status: terminal.status,
+                        input: terminal.input,
+                        screen: terminal.screen,
+                        blocks: clackatoo_term::BlocksSnapshot::default(),
+                    })
+                    .collect(),
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+            }
         }
     }
 }
@@ -247,10 +309,32 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(MAGIC).unwrap();
-        file.write_all(&2u32.to_le_bytes()).unwrap();
+        file.write_all(&3u32.to_le_bytes()).unwrap();
         assert!(matches!(
             State::read(&mut file),
-            Err(HandoverError::Version(2))
+            Err(HandoverError::Version(3))
+        ));
+    }
+
+    /// Written by a build that wrote version 1. It must always be read.
+    #[test]
+    fn version_1_is_read() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v1.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!((state.next_terminal, state.orphans[0].pid), (8, 99));
+        let terminal = &state.terminals[0];
+        assert_eq!((terminal.id, terminal.input.as_slice()), (7, &b"ls\r"[..]));
+        assert_eq!(terminal.blocks, BlocksSnapshot::default());
+        let screen =
+            clackatoo_term::Terminal::restore(&terminal.screen, &clackatoo_term::Config::default())
+                .unwrap()
+                .screen_text();
+        assert_eq!(screen, "two\nthree\nfour");
+        assert!(matches!(
+            state.workspaces.list[0].tabs[0].layout,
+            Layout::Split { ref shares, .. } if *shares == [2, 1]
         ));
     }
 

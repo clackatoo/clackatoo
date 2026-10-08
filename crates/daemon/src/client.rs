@@ -8,9 +8,9 @@ use std::path::Path;
 
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
 use clackatoo_protocol::{
-    ClientMessage, Error, Event, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal,
-    Request, Response, ServerMessage, Side, Size, TerminalId, TerminalInfo, Udp, View, WorkspaceId,
-    Workspaces,
+    Block, ClientMessage, Error, Event, HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId,
+    PaneTerminal, Request, Response, ServerMessage, Side, Size, TerminalId, TerminalInfo, Udp,
+    View, Which, WorkspaceId, Workspaces,
 };
 
 use crate::quic::{self, Carried, Contact, Route};
@@ -308,6 +308,27 @@ impl Client {
             count,
         })? {
             Response::History(lines) => Ok(lines),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Finds the shell's block at line `line`, or the one before or after.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn block(
+        &mut self,
+        terminal: TerminalId,
+        line: u64,
+        which: Which,
+    ) -> Result<Option<Block>, ClientError> {
+        match self.request(&Request::Block {
+            terminal,
+            line,
+            which,
+        })? {
+            Response::Block(block) => Ok(block),
             other => Err(unexpected(other)),
         }
     }

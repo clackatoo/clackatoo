@@ -341,7 +341,7 @@ fn program_of(pid: u32) -> std::path::PathBuf {
 #[test]
 fn upgrading_keeps_terminals_and_their_programs_running() {
     use clackatoo_daemon::Client;
-    use clackatoo_protocol::{NewTerminal, PaneTerminal, Side, TerminalStatus};
+    use clackatoo_protocol::{NewTerminal, PaneTerminal, Side, TerminalStatus, Which};
 
     let runtime = Runtime::new();
     let daemon = daemon(runtime.path());
@@ -354,10 +354,13 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
     };
 
     let mut client = Client::connect(&socket).unwrap();
-    // Enough coloured lines to fill history, then a wait for input.
+    // Enough coloured lines to fill history, marked as a shell would mark
+    // a command, then a wait for input.
     let reader = client
         .new_terminal(terminal(
-            r#"i=0; while [ $i -lt 60 ]; do printf '\033[3%dmline %d\033[0m\n' $((i % 8)) $i; i=$((i + 1)); done
+            r#"printf '\033]133;A\007$ seq\n\033]133;C;cmdline_url=seq\007'
+               i=0; while [ $i -lt 60 ]; do printf '\033[3%dmline %d\033[0m\n' $((i % 8)) $i; i=$((i + 1)); done
+               printf '\033]133;D;0\007\033]133;A\007'
                echo ready; read reply; echo "got $reply"; exit 3"#,
         ))
         .unwrap();
@@ -377,6 +380,8 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
     eventually("the reader is ready", || shows("ready"));
     let screen = client.capture(reader).unwrap();
     let history = client.history(reader, u64::MAX, 100).unwrap();
+    let block = client.block(reader, 30, Which::At).unwrap();
+    assert_eq!(block.as_ref().map(|block| block.first), Some(0));
     let workspaces = client.watch_workspaces().unwrap();
     let terminals = client.list_terminals().unwrap();
     drop(client);
@@ -400,6 +405,7 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
     let mut client = Client::connect(&socket).unwrap();
     assert_eq!(client.capture(reader).unwrap(), screen);
     assert_eq!(client.history(reader, u64::MAX, 100).unwrap(), history);
+    assert_eq!(client.block(reader, 30, Which::At).unwrap(), block);
     assert_eq!(client.watch_workspaces().unwrap(), workspaces);
     assert_eq!(client.list_terminals().unwrap(), terminals);
 
@@ -481,7 +487,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let flagless = script(
         bin.path(),
         "flagless",
-        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1"#,
+        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2"#,
     );
     not_upgrading(ask_to_upgrade(runtime.path(), &flagless), "can't take over");
     // Failed after everything was handed over: it says it can take over,
@@ -490,7 +496,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"case " $* " in *" --handover-versions "*) echo 1; rm -- "$0";; esac"#,
+        r#"case " $* " in *" --handover-versions "*) echo 1 2; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),

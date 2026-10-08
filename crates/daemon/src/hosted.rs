@@ -116,6 +116,7 @@ impl HostedTerminal {
             },
             input: self.input,
             screen: self.emulator.snapshot(),
+            blocks: self.emulator.blocks_snapshot(),
         }
     }
 
@@ -134,9 +135,11 @@ impl HostedTerminal {
             .pty
             .map(|pty| fds.take(pty).map(Pty::from_fd))
             .transpose()?;
+        let mut emulator = Terminal::restore(&terminal.screen, &config.terminal)?;
+        emulator.restore_blocks(&terminal.blocks);
         Ok(Self {
             id: TerminalId(terminal.id),
-            emulator: Terminal::restore(&terminal.screen, &config.terminal)?,
+            emulator,
             pty,
             pid: terminal.pid,
             process,
