@@ -3,6 +3,9 @@
 //! The configured family supplies the regular, bold, italic and bold italic
 //! faces. A character none of them has is looked up in fallback fonts
 //! (CJK, emoji, other scripts), found through fontconfig and cached.
+//!
+//! A cell holding several codepoints, as a joined emoji or a letter with
+//! accents, is shaped: the font's own rules pick and place its glyphs.
 
 use std::collections::HashMap;
 
@@ -11,8 +14,15 @@ use fontique::{
     Attributes, Blob, Collection, CollectionOptions, FallbackKey, FontStyle, FontWeight,
     GenericFamily, QueryFamily, QueryStatus, Script, SourceCache,
 };
+use swash::shape::ShapeContext;
 use swash::text::Codepoint;
 use swash::{CacheKey, FontRef, GlyphId};
+
+/// Joins emoji into one, as 👩 and 💻 into 👩‍💻.
+const ZWJ: char = '\u{200D}';
+/// Asks for the emoji form of a character that also has a text form, as
+/// ❤️ for ❤.
+const EMOJI_PRESENTATION: char = '\u{FE0F}';
 
 /// What to draw text with.
 #[derive(Clone, Debug)]
@@ -134,6 +144,15 @@ pub(crate) struct UiGlyph {
     pub(crate) advance: f32,
 }
 
+/// One of the glyphs a cell's codepoints are shaped into, and where it
+/// goes from the cell's pen, in pixels, down being positive.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ShapedGlyph {
+    pub(crate) face: FaceId,
+    pub(crate) glyph: GlyphId,
+    pub(crate) offset: [f32; 2],
+}
+
 /// The fonts a window draws with, at one pixel size.
 pub(crate) struct Fonts {
     collection: Collection,
@@ -142,6 +161,9 @@ pub(crate) struct Fonts {
     /// The four primary faces, by variant, as indices into `faces`.
     primary: [FaceId; 4],
     glyphs: HashMap<(char, Variant), Option<(FaceId, GlyphId)>>,
+    /// The emoji face that has each character, for emoji sequences.
+    emoji: HashMap<char, Option<FaceId>>,
+    shaper: ShapeContext,
     /// The configured size, in points.
     points: f32,
     /// The size glyphs are drawn at, in pixels per em.
@@ -202,6 +224,8 @@ impl Fonts {
             primary,
             ui,
             glyphs: HashMap::new(),
+            emoji: HashMap::new(),
+            shaper: ShapeContext::new(),
             points: options.size,
             ppem: 0.0,
             cell: CellMetrics {
@@ -332,14 +356,33 @@ impl Fonts {
         let tag = ch.script().to_opentype().to_be_bytes();
         // OpenType script tags are ISO 15924 codes in lower case.
         let script = Script::from_bytes([tag[0].to_ascii_uppercase(), tag[1], tag[2], tag[3]]);
+        self.search(
+            ch,
+            variant,
+            &[
+                QueryFamily::Generic(GenericFamily::Emoji),
+                QueryFamily::Generic(GenericFamily::SansSerif),
+            ],
+            Some(FallbackKey::new(script, None)),
+        )
+    }
+
+    /// The first font of `families`, or else of `fallbacks`, that has
+    /// `ch`.
+    fn search(
+        &mut self,
+        ch: char,
+        variant: Variant,
+        families: &[QueryFamily<'_>],
+        fallbacks: Option<FallbackKey>,
+    ) -> Option<(FaceId, GlyphId)> {
         let mut found = None;
         let mut query = self.collection.query(&mut self.source_cache);
-        query.set_families([
-            QueryFamily::Generic(GenericFamily::Emoji),
-            QueryFamily::Generic(GenericFamily::SansSerif),
-        ]);
+        query.set_families(families.iter().copied());
         query.set_attributes(variant.attributes());
-        query.set_fallbacks(FallbackKey::new(script, None));
+        if let Some(fallbacks) = fallbacks {
+            query.set_fallbacks(fallbacks);
+        }
         query.matches_with(|font| {
             if font
                 .charmap()
@@ -362,6 +405,62 @@ impl Fonts {
                 None => push_face(&mut self.faces, Face::from_query(&font)?),
             };
         Some((id, self.face(id).glyph(ch)?))
+    }
+
+    /// The glyphs `text`, one cell's codepoints, is drawn with, shaped in
+    /// the face its first character is found in: an emoji face for an
+    /// emoji sequence. `None` if that face lacks any of it, as when a mark
+    /// is only in another font.
+    pub(crate) fn shape(&mut self, text: &str, variant: Variant) -> Option<Vec<ShapedGlyph>> {
+        let first = text.chars().next()?;
+        let emoji = text
+            .contains([ZWJ, EMOJI_PRESENTATION])
+            .then(|| self.emoji_face(first))
+            .flatten();
+        let face = match emoji {
+            Some(face) => face,
+            None => self.glyph(first, variant)?.0,
+        };
+        let font = self.faces[usize::from(face.0)].font();
+        let mut shaper = self
+            .shaper
+            .builder(font)
+            .script(first.script())
+            .size(self.ppem)
+            .build();
+        // The selector has done its job in picking the face, and fonts
+        // rarely have a glyph for it.
+        for piece in text.split(EMOJI_PRESENTATION) {
+            shaper.add_str(piece);
+        }
+        let mut glyphs = Vec::new();
+        let mut pen = 0.0;
+        let mut missing = false;
+        shaper.shape_with(|cluster| {
+            for glyph in cluster.glyphs {
+                missing |= glyph.id == 0;
+                glyphs.push(ShapedGlyph {
+                    face,
+                    glyph: glyph.id,
+                    offset: [(pen + glyph.x).round(), -glyph.y.round()],
+                });
+                pen += glyph.advance;
+            }
+        });
+        (!missing).then_some(glyphs)
+    }
+
+    /// The emoji face that has `ch`, if any.
+    fn emoji_face(&mut self, ch: char) -> Option<FaceId> {
+        if let Some(&found) = self.emoji.get(&ch) {
+            return found;
+        }
+        let emoji = [QueryFamily::Generic(GenericFamily::Emoji)];
+        let found = self
+            .search(ch, Variant::Regular, &emoji, None)
+            .map(|(face, _)| face);
+        self.emoji.insert(ch, found);
+        found
     }
 }
 

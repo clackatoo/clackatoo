@@ -286,9 +286,15 @@ pub(crate) struct Renderer {
     /// Each character's glyph in each variant, found once: finding it
     /// means asking the fonts, then the atlas.
     char_glyphs: CharGlyphs,
+    /// The glyphs each cell text of several codepoints is shaped into, by
+    /// variant, with where they go from the pen: `None` if it can't be.
+    shaped: [std::collections::HashMap<Box<str>, Option<Shaped>>; 4],
     /// Holds a cell's text when it has more than one codepoint.
     cell_text: String,
 }
+
+/// A cell text's shaped glyphs, with where each goes from the pen.
+type Shaped = Box<[(AtlasGlyph, [f32; 2])]>;
 
 /// Glyphs by character and variant, with ASCII in a table of its own, as
 /// it's nearly everything a terminal shows.
@@ -413,6 +419,7 @@ impl Renderer {
             glyph_instances: Vec::new(),
             text_glyphs: Vec::new(),
             char_glyphs: CharGlyphs::new(),
+            shaped: Default::default(),
             cell_text: String::new(),
         }
     }
@@ -421,6 +428,7 @@ impl Renderer {
     pub(crate) fn forget_glyphs(&mut self) {
         self.glyphs = GlyphCache::new();
         self.char_glyphs = CharGlyphs::new();
+        self.shaped = Default::default();
     }
 
     /// The glyph for `ch` in `variant`, if any font has it.
@@ -779,9 +787,9 @@ impl Renderer {
         }
     }
 
-    /// Adds the glyphs for one cell's text: its character, then any
-    /// combining marks drawn over it. Emoji sequences show their first
-    /// emoji until text shaping arrives.
+    /// Adds the glyphs for one cell's text: its character, or the glyphs
+    /// its codepoints are shaped into, as a joined emoji or a letter and
+    /// its accents.
     #[allow(clippy::too_many_arguments)]
     fn push_cell_text(
         &mut self,
@@ -815,6 +823,35 @@ impl Renderer {
         let mut text = std::mem::take(&mut self.cell_text);
         text.clear();
         row.push_text(col, &mut text);
+        let shaped = &mut self.shaped[variant as usize];
+        if !shaped.contains_key(text.as_str()) {
+            let glyphs = fonts.shape(&text, variant).map(|glyphs| {
+                glyphs
+                    .iter()
+                    .filter_map(|shaped| {
+                        let atlas = self.glyphs.get(fonts, shaped.face, shaped.glyph)?;
+                        Some((atlas, shaped.offset))
+                    })
+                    .collect()
+            });
+            shaped.insert(text.as_str().into(), glyphs);
+        }
+        if let Some(glyphs) = shaped.get(text.as_str()).and_then(Option::as_deref) {
+            // An emoji fills the cell, so one is drawn: what a sequence
+            // joins into, or its first if the font can't join it.
+            let emoji = glyphs
+                .iter()
+                .find(|(atlas, _)| atlas.color)
+                .map(std::slice::from_ref);
+            for (atlas, offset) in emoji.unwrap_or(glyphs) {
+                let pen = [pen[0] + offset[0], pen[1] + offset[1]];
+                self.glyph_instances
+                    .push(place(atlas, pen, cell_box, color, fonts.cell.baseline));
+            }
+            self.cell_text = text;
+            return;
+        }
+        // Each codepoint from whichever font has it.
         for (index, ch) in text.chars().enumerate() {
             let Some(atlas) = self.char_glyph(fonts, ch, variant) else {
                 continue;

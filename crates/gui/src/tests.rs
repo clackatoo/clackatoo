@@ -7,7 +7,7 @@ use clackatoo_protocol::{Axis, Content, Layout, Pane, PaneId, TabId, TerminalId,
 
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, ModeName, Status};
 use crate::desktop::ButtonLayout;
-use crate::fonts::{FontOptions, Fonts};
+use crate::fonts::{FontOptions, Fonts, Variant};
 use crate::layout::Placement;
 use crate::render::{CursorStyle, Highlight, HighlightKind, Picture, Renderer, Scene, SceneCursor};
 use crate::screen::Screen;
@@ -174,7 +174,7 @@ fn save(name: &str, size: [u32; 2], pixels: &[u8]) {
 fn renders_text_colours_and_the_cursor() {
     let output = "plain \x1b[1mbold\x1b[0m \x1b[3mitalic\x1b[0m \x1b[4munder\x1b[0m \x1b[9mstruck\x1b[0m\r\n\
         \x1b[31mred \x1b[32mgreen \x1b[34mblue \x1b[38;2;255;128;0mrgb\x1b[0m \x1b[7minverse\x1b[0m\r\n\
-        \x1b[41m red bg \x1b[0m 字符 e\u{301} 😀 👩\u{200D}💻 ok\r\n\
+        \x1b[41m red bg \x1b[0m 字符 e\u{301} 😀 👩\u{200D}💻 ❤\u{FE0F} #\u{FE0F}\u{20E3} ok\r\n\
         box: ┌─┐ │ │ └─┘  arrows: → ← ↑ ↓\r\n$ ";
     let Some((size, pixels)) = render(48, 6, output, 2.0, (false, &[])) else {
         eprintln!("no GPU available; skipping");
@@ -549,4 +549,28 @@ fn nothing_is_drawn_past_a_rounded_windows_corners() {
     ] {
         assert_eq!(alpha(x, y), 0, "the corner at {x}, {y} is see-through");
     }
+}
+
+#[test]
+fn joined_emoji_are_shaped_into_one_glyph() {
+    let mut fonts = fonts(1.0);
+    let Some((emoji, woman)) = fonts.glyph('👩', Variant::Regular) else {
+        eprintln!("no emoji font; skipping");
+        return;
+    };
+    let shaped = |fonts: &mut Fonts, text| {
+        let glyphs = fonts.shape(text, Variant::Regular).expect(text);
+        glyphs
+            .iter()
+            .map(|glyph| (glyph.face, glyph.glyph))
+            .collect::<Vec<_>>()
+    };
+    let joined = shaped(&mut fonts, "👩\u{200D}💻");
+    assert_eq!(joined.len(), 1, "{joined:?}");
+    assert_eq!(joined[0].0, emoji);
+    assert_ne!(joined[0].1, woman);
+    // A keycap, through its emoji presentation selector.
+    assert_eq!(shaped(&mut fonts, "#\u{FE0F}\u{20E3}").len(), 1);
+    // ❤ is in text fonts too, but the selector asks for the emoji.
+    assert_eq!(shaped(&mut fonts, "❤\u{FE0F}")[0].0, emoji);
 }
