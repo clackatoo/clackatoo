@@ -513,3 +513,89 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     drop(runtime);
     wait(daemon);
 }
+
+/// The shell's own commands are marked: bash through the script the daemon
+/// gives it, fish by itself. Each shell runs with an empty home, so no
+/// one's own startup files get in the way.
+#[test]
+fn shells_mark_their_commands() {
+    use clackatoo_daemon::Client;
+    use clackatoo_protocol::{NewTerminal, Position, Request, Response, Which};
+
+    for shell in ["/bin/bash", "/usr/bin/fish"] {
+        if !Path::new(shell).exists() {
+            eprintln!("{shell} isn't installed: skipped");
+            continue;
+        }
+        let runtime = Runtime::new();
+        let home = tempfile::tempdir().unwrap();
+        let mut daemon = Command::new(BINARY)
+            .arg("daemon")
+            .env("XDG_RUNTIME_DIR", runtime.path())
+            .env("SHELL", shell)
+            .env("HOME", home.path())
+            .spawn()
+            .unwrap();
+        let socket = runtime.path().join("clackatoo/daemon.sock");
+        eventually("the daemon answers", || {
+            clackatoo(runtime.path(), &["list"]).status.success()
+        });
+        let mut client = Client::connect(&socket).unwrap();
+        let terminal = client
+            .new_terminal(NewTerminal {
+                size: clackatoo_protocol::Size::new(60, 20).unwrap(),
+                command: None,
+                cwd: None,
+                record_to: None,
+            })
+            .unwrap();
+        let mut last_block = || client.block(terminal, u64::MAX, Which::Before).unwrap();
+        eventually(&format!("{shell} shows a prompt"), || {
+            last_block().is_some()
+        });
+
+        client
+            .send_input(terminal, b"echo one; echo two; false\r")
+            .unwrap();
+        let mut ran = None;
+        eventually(&format!("{shell} runs the command"), || {
+            let prompt = client.block(terminal, u64::MAX, Which::Before).unwrap();
+            ran = prompt.and_then(|prompt| {
+                client
+                    .block(terminal, prompt.first, Which::Before)
+                    .unwrap()
+                    .filter(|block| block.exit.is_some())
+            });
+            ran.is_some()
+        });
+        let ran = ran.unwrap();
+        assert_eq!(ran.exit, Some(1), "{shell}: {ran:?}");
+        let output = ran.output.expect("it printed");
+        let text = match client
+            .request(&Request::Text {
+                terminal,
+                from: Position {
+                    line: output,
+                    col: 0,
+                },
+                to: Position {
+                    line: ran.last,
+                    col: 0,
+                },
+                whole_lines: true,
+            })
+            .unwrap()
+        {
+            Response::Text(text) => text,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(text, "one\ntwo", "{shell}");
+        assert_eq!(ran.cwd.as_deref(), home.path().to_str(), "{shell}");
+        if shell.ends_with("fish") {
+            assert_eq!(ran.command.as_deref(), Some("echo one; echo two; false"));
+        }
+        drop(client);
+        clackatoo(runtime.path(), &["stop"]);
+        let _ = daemon.wait();
+    }
+}

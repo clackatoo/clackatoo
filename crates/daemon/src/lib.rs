@@ -22,6 +22,7 @@ mod quic;
 pub mod remote;
 mod runtime;
 mod server;
+mod shell;
 pub mod upgrade;
 mod workspaces;
 
@@ -43,6 +44,10 @@ pub struct DaemonConfig {
     pub shell: OsString,
     /// The working directory a terminal starts in when none is given.
     pub home: PathBuf,
+    /// Where the scripts are that make shells mark their prompts and
+    /// commands, which [`upgrade::serve`] writes. Without them, shells
+    /// start as they are.
+    pub shell_integration: Option<PathBuf>,
     /// The UDP ports clients on other machines may move their QUIC
     /// connections onto: the first free one is taken, when the first
     /// connection over SSH arrives. 0 means any port. `None` keeps every
@@ -65,6 +70,7 @@ impl DaemonConfig {
             terminal: clackatoo_term::Config::default(),
             shell: non_empty("SHELL").unwrap_or_else(|| "/bin/sh".into()),
             home: non_empty("HOME").map_or_else(|| "/".into(), PathBuf::from),
+            shell_integration: None,
             udp_ports: match non_empty("CLACKATOO_UDP_PORTS") {
                 None => Some(DEFAULT_UDP_PORTS),
                 Some(ports) if ports == "off" => None,

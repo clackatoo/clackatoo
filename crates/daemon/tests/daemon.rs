@@ -30,6 +30,7 @@ impl TestDaemon {
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),
+            shell_integration: None,
             udp_ports: Some(0..=0),
         };
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");

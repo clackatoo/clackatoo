@@ -168,6 +168,8 @@ pub fn serve(
         (lock, Daemon::bind(&runtime.socket_path(), config.clone())?)
     };
     daemon.set_upgrade_args(args);
+    // Once the lock is held: the directory is ours.
+    daemon.install_shell_integration(runtime.path().join("shell"));
 
     while let Some(Upgrade {
         executable,
@@ -187,6 +189,7 @@ pub fn serve(
         handover.state.lock = None;
         daemon = Daemon::resume(handover, config.clone()).map_err(io::Error::other)?;
         daemon.set_upgrade_args(args);
+        daemon.install_shell_integration(runtime.path().join("shell"));
     }
     Ok(())
 }

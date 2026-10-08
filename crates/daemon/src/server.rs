@@ -394,6 +394,15 @@ impl Daemon {
         self.upgrade_args = args.to_vec();
     }
 
+    /// Writes the shell integration scripts into `dir`, for the shells
+    /// this daemon starts from now on. If that fails, they start as they
+    /// are.
+    pub(crate) fn install_shell_integration(&mut self, dir: PathBuf) {
+        self.config.shell_integration = crate::shell::install(dir)
+            .map_err(|err| log::warn!("shells won't mark their commands: {err}"))
+            .ok();
+    }
+
     /// Everything the next build needs, taken out of this daemon, which is
     /// left with nothing to hang up when it's dropped. The listening socket
     /// is shared: closing this daemon's copy leaves it open.

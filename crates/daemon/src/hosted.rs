@@ -14,6 +14,7 @@ use clackatoo_term::{Damage, Terminal, recording};
 use crate::DaemonConfig;
 use crate::handover::{self, Fds, HandoverError};
 use crate::pty::{self, Process, Program, Pty};
+use crate::shell;
 
 /// How much input may wait for a program that isn't reading it. Pastes far
 /// larger than any real one fit.
@@ -66,10 +67,15 @@ impl HostedTerminal {
             None => None,
         };
 
+        // The user's own shell gets its integration, if it has one.
+        let integration = match (&request.command, &config.shell_integration) {
+            (None, Some(scripts)) => shell::args(&config.shell, scripts),
+            _ => Vec::new(),
+        };
         let (path, args) = match request.command.as_deref() {
             Some([program, args @ ..]) => (program.as_ref(), args),
             Some([]) => return Err(Error::SpawnFailed("the command is empty".to_owned())),
-            None => (config.shell.as_os_str(), &[][..]),
+            None => (config.shell.as_os_str(), integration.as_slice()),
         };
         let cwd = request
             .cwd
