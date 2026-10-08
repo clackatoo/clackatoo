@@ -257,9 +257,12 @@ fn the_bridge_relays_over_pipes() {
                 return;
             }
             bytes.extend_from_slice(&buffer[..n]);
-            if let Some(at) = bytes.iter().position(|&byte| byte == b'\n') {
+            // Frames follow the bridge's marker line. Under an ssh login,
+            // an address line comes before it.
+            let marker = b"\x1b[clackatoo-bridge]\n";
+            if let Some(at) = bytes.windows(marker.len()).position(|w| w == marker) {
                 let mut decoder = FrameDecoder::new();
-                decoder.push(&bytes[at + 1..]);
+                decoder.push(&bytes[at + marker.len()..]);
                 if let Ok(Some(message)) = decoder.decode::<ServerMessage>() {
                     let _ = sender.send(message);
                     return;
