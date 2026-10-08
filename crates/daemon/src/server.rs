@@ -1,8 +1,8 @@
 //! The daemon's event loop.
 //!
 //! One thread waits on every file descriptor the daemon cares about: the
-//! listening socket, each client connection, each PTY, and each program's
-//! pidfd. The terminals' grids stay on that thread, so nothing is locked or
+//! listening socket, each client connection, each PTY, each program's
+//! pidfd, and the pipes to the agent that chats talk to. The terminals' grids stay on that thread, so nothing is locked or
 //! shared, and output goes from PTY to grid with no handoff in between.
 //!
 //! Clients on other machines talk over QUIC, inside a connection to the
@@ -29,9 +29,9 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    ClientMessage, Error, GridState, HistoryLine, HistoryLines, Line, NodeId, PROTOCOL_VERSION,
-    PaneId, PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size, TerminalId,
-    TerminalStatus, Udp, View, ViewUpdate, WorkspaceId,
+    ClientMessage, Error, GridState, HistoryLine, HistoryLines, Line, NewAgent, NodeId,
+    PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size,
+    TerminalId, TerminalInfo, TerminalStatus, Udp, View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_term::{Damage, Terminal};
 use mio::event::Event;
@@ -42,6 +42,8 @@ use quinn_proto::{ConnectionHandle, StreamId};
 use slab::Slab;
 
 use crate::DaemonConfig;
+use crate::agent::{Agent, Incoming};
+use crate::chat::{Action, HostedChat};
 use crate::handover::{self, Fds, Handover, HandoverError};
 use crate::hosted::{HostedTerminal, Orphan, ReadOutcome};
 use crate::memory;
@@ -75,17 +77,111 @@ enum Source {
     Exit(TerminalId),
     /// The pidfd of a closed terminal's program that hasn't exited yet.
     Orphan(Orphan),
+    /// The agent's stdout, where its messages come.
+    AgentOutput,
+    /// The agent's stderr.
+    AgentErrors,
+    /// The agent's stdin, watched for room to write.
+    AgentInput,
+    /// The agent's pidfd.
+    AgentExit,
     Client(Client),
     Carrier(Carrier),
+}
+
+/// What a terminal is: a program on a PTY, or a chat with an agent, which
+/// the daemon writes itself.
+#[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "both are over a kilobyte, a few per daemon; boxing either puts a pointer \
+              between the event loop and every byte of output"
+)]
+enum Hosted {
+    Pty(HostedTerminal),
+    Chat(HostedChat),
+}
+
+impl Hosted {
+    fn info(&self) -> TerminalInfo {
+        match self {
+            Self::Pty(terminal) => terminal.info(),
+            Self::Chat(chat) => chat.info(),
+        }
+    }
+
+    fn emulator(&self) -> &Terminal {
+        match self {
+            Self::Pty(terminal) => terminal.emulator(),
+            Self::Chat(chat) => chat.emulator(),
+        }
+    }
+
+    fn view(&self) -> View {
+        match self {
+            Self::Pty(terminal) => terminal.view(),
+            Self::Chat(chat) => chat.view(),
+        }
+    }
+
+    fn take_damage(&mut self, into: &mut Damage) {
+        match self {
+            Self::Pty(terminal) => terminal.take_damage(into),
+            Self::Chat(chat) => chat.take_damage(into),
+        }
+    }
+
+    fn resize(&mut self, size: Size) {
+        match self {
+            Self::Pty(terminal) => terminal.resize(size),
+            Self::Chat(chat) => chat.resize(size),
+        }
+    }
+
+    fn scrollback_needs_compaction(&mut self) -> bool {
+        match self {
+            Self::Pty(terminal) => terminal.scrollback_needs_compaction(),
+            Self::Chat(chat) => chat.scrollback_needs_compaction(),
+        }
+    }
+
+    fn compact_scrollback(&mut self) {
+        match self {
+            Self::Pty(terminal) => terminal.compact_scrollback(),
+            Self::Chat(chat) => chat.compact_scrollback(),
+        }
+    }
+
+    /// The directory a new pane beside this one starts in.
+    fn working_directory(&self) -> Option<String> {
+        match self {
+            Self::Pty(terminal) => terminal.working_directory(),
+            Self::Chat(chat) => Some(chat.working_directory().to_owned()),
+        }
+    }
+
+    fn pty(&mut self) -> Option<&mut HostedTerminal> {
+        match self {
+            Self::Pty(terminal) => Some(terminal),
+            Self::Chat(_) => None,
+        }
+    }
+
+    fn chat(&mut self) -> Option<&mut HostedChat> {
+        match self {
+            Self::Chat(chat) => Some(chat),
+            Self::Pty(_) => None,
+        }
+    }
 }
 
 /// A terminal plus its event-loop registrations.
 #[derive(Debug)]
 struct Slot {
-    terminal: HostedTerminal,
-    /// Unset once the PTY closes.
+    terminal: Hosted,
+    /// Unset once the PTY closes, and for a chat, which has none.
     output: Option<Token>,
-    /// Unset once the program has been reaped.
+    /// Unset once the program has been reaped, and for a chat.
     exit: Option<Token>,
     /// Whether the PTY is registered for writability, which it only is while
     /// input is queued.
@@ -247,6 +343,10 @@ pub struct Daemon {
     terminals: BTreeMap<TerminalId, Slot>,
     next_id: u32,
     workspaces: WorkspaceState,
+    /// The agent chats talk to, while any chat needs it.
+    agent: Option<AgentSlot>,
+    /// What the agent sent last, for the chats to act on.
+    incoming: Vec<Incoming>,
     /// The QUIC endpoint, set up when a connection first carries QUIC.
     quic: Option<QuicServer>,
     /// What the QUIC endpoint last asked to be acted on.
@@ -272,6 +372,15 @@ pub struct Daemon {
     /// The arguments an upgrade runs the next build with. Without them,
     /// the daemon can't upgrade.
     upgrade_args: Vec<std::ffi::OsString>,
+}
+
+/// The agent plus its event-loop registrations.
+#[derive(Debug)]
+struct AgentSlot {
+    agent: Agent,
+    tokens: [Token; 4],
+    /// Its read budget ran out with more of its output waiting.
+    unread: bool,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -324,6 +433,8 @@ impl Daemon {
             terminals: BTreeMap::new(),
             next_id: 1,
             workspaces: WorkspaceState::new(),
+            agent: None,
+            incoming: Vec::new(),
             quic: None,
             quic_events: Vec::new(),
             carriers_made: 0,
@@ -371,6 +482,16 @@ impl Daemon {
                 daemon.workspaces.remove_terminal(id);
             }
         }
+        for chat in &state.chats {
+            let id = TerminalId(chat.id);
+            match HostedChat::resume(chat, &daemon.config) {
+                Ok(chat) => daemon.add_chat(chat),
+                Err(err) => {
+                    log::error!("chat {id} couldn't be taken over: {err}");
+                    daemon.workspaces.remove_terminal(id);
+                }
+            }
+        }
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
                 Ok(orphan) => daemon.watch_orphan(orphan),
@@ -409,10 +530,16 @@ impl Daemon {
     fn hand_over(&mut self) -> io::Result<Handover> {
         let mut fds = Fds::default();
         let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
-        let terminals = std::mem::take(&mut self.terminals)
-            .into_values()
-            .map(|slot| slot.terminal.hand_over(&mut fds))
-            .collect();
+        let mut terminals = Vec::new();
+        let mut chats = Vec::new();
+        for slot in std::mem::take(&mut self.terminals).into_values() {
+            match slot.terminal {
+                Hosted::Pty(terminal) => terminals.push(terminal.hand_over(&mut fds)),
+                Hosted::Chat(chat) => chats.push(chat.hand_over()),
+            }
+        }
+        // The agent stops, and the next build reaps it.
+        self.stop_agent();
         let orphan_tokens: Vec<usize> = (self.sources.iter())
             .filter(|(_, source)| matches!(source, Source::Orphan(_)))
             .map(|(key, _)| key)
@@ -429,6 +556,7 @@ impl Daemon {
                 lock: None,
                 next_terminal: self.next_id,
                 terminals,
+                chats,
                 orphans,
                 workspaces: self.workspaces.hand_over(),
             },
@@ -479,7 +607,8 @@ impl Daemon {
             // With output still waiting, poll without blocking so it gets read
             // right after anything else that's ready. Otherwise wait for the
             // next compaction or QUIC timer, if there is one.
-            let timeout = if self.unread.is_empty() {
+            let agent_unread = self.agent.as_ref().is_some_and(|agent| agent.unread);
+            let timeout = if self.unread.is_empty() && !agent_unread {
                 let compaction = self.compactions.values().min().copied();
                 let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
                 let next = compaction.into_iter().chain(quic).min();
@@ -498,6 +627,9 @@ impl Daemon {
             self.drive_quic();
             for id in std::mem::take(&mut self.unread) {
                 self.read_output(id);
+            }
+            if agent_unread {
+                self.read_agent();
             }
             self.compact_scrollbacks();
             self.send_view_updates();
@@ -527,6 +659,18 @@ impl Daemon {
                     self.reap(id);
                 }
                 Some(Source::Orphan(_)) => self.reap_orphan(token),
+                Some(Source::AgentOutput) => self.read_agent(),
+                Some(Source::AgentErrors) => {
+                    if let Some(agent) = &mut self.agent {
+                        agent.agent.read_errors(&mut self.buffer);
+                    }
+                }
+                Some(Source::AgentInput) => self.flush_agent(),
+                Some(Source::AgentExit) => {
+                    // What it said last comes first.
+                    self.read_agent();
+                    self.agent_gone();
+                }
                 Some(Source::Client(_)) => self.serve_client(token),
                 Some(Source::Carrier(_)) => self.serve_carrier(token, event),
                 None => {}
@@ -540,7 +684,10 @@ impl Daemon {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
-        match slot.terminal.read_output(&mut self.buffer, OUTPUT_BUDGET) {
+        let Some(terminal) = slot.terminal.pty() else {
+            return;
+        };
+        match terminal.read_output(&mut self.buffer, OUTPUT_BUDGET) {
             ReadOutcome::Drained => {}
             ReadOutcome::BudgetExhausted => self.unread.push_back(id),
             ReadOutcome::Closed => {
@@ -680,8 +827,8 @@ impl Daemon {
     }
 
     fn flush_input(&mut self, id: TerminalId) {
-        if let Some(slot) = self.terminals.get_mut(&id) {
-            slot.terminal.flush_input();
+        if let Some(terminal) = (self.terminals.get_mut(&id)).and_then(|slot| slot.terminal.pty()) {
+            terminal.flush_input();
             self.update_pty_interest(id);
         }
     }
@@ -691,10 +838,13 @@ impl Daemon {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
-        let (Some(token), Some(fd)) = (slot.output, slot.terminal.pty_fd()) else {
+        let Some(terminal) = slot.terminal.pty() else {
             return;
         };
-        let wants_writable = slot.terminal.has_pending_input();
+        let (Some(token), Some(fd)) = (slot.output, terminal.pty_fd()) else {
+            return;
+        };
+        let wants_writable = terminal.has_pending_input();
         if wants_writable == slot.wants_writable {
             return;
         }
@@ -720,7 +870,10 @@ impl Daemon {
         let Some(token) = slot.exit else {
             return;
         };
-        if slot.terminal.reap() {
+        let Some(terminal) = slot.terminal.pty() else {
+            return;
+        };
+        if terminal.reap() {
             // Reaping closed the pidfd, which removed it from epoll.
             slot.exit = None;
             self.sources.remove(token.0);
@@ -773,7 +926,7 @@ impl Daemon {
                 self.terminals.insert(
                     id,
                     Slot {
-                        terminal,
+                        terminal: Hosted::Pty(terminal),
                         output,
                         exit,
                         wants_writable: false,
@@ -819,7 +972,18 @@ impl Daemon {
         for token in [slot.output, slot.exit].into_iter().flatten() {
             self.sources.remove(token.0);
         }
-        if let Some(orphan) = slot.terminal.close() {
+        let terminal = match slot.terminal {
+            Hosted::Pty(terminal) => terminal,
+            Hosted::Chat(chat) => {
+                self.close_chat(id, &chat);
+                if self.workspaces.remove_terminal(id) {
+                    self.workspaces_changed();
+                }
+                log::info!("chat {id} closed");
+                return Ok(());
+            }
+        };
+        if let Some(orphan) = terminal.close() {
             // The pidfd is still registered under the exit token, which we just
             // freed. Re-register it under a new token for the orphan.
             let fd = orphan.exit_fd();
@@ -876,6 +1040,7 @@ impl Daemon {
                 }
                 self.new_terminal(&request)
             }
+            PaneTerminal::Agent(request) => Ok(self.new_chat(request, beside)),
         }
     }
 
@@ -965,6 +1130,281 @@ impl Daemon {
             .register(&mut SourceFd(&fd), token, Interest::READABLE)?;
         entry.insert(source);
         Ok(Some(token))
+    }
+
+    // --- Chats and the agent -----------------------------------------------
+
+    /// Starts a chat, working in the directory asked for, or the one the
+    /// pane `beside` is in.
+    fn new_chat(&mut self, request: NewAgent, beside: Option<PaneId>) -> TerminalId {
+        let id = TerminalId(self.next_id);
+        self.next_id += 1;
+        let cwd = request
+            .cwd
+            .or_else(|| beside.and_then(|pane| self.working_directory(pane)))
+            .unwrap_or_else(|| self.config.home.to_string_lossy().into_owned());
+        let chat = HostedChat::new(id, request.size, cwd, &self.config);
+        log::info!("chat {id} started");
+        self.add_chat(chat);
+        self.connect(id);
+        id
+    }
+
+    fn add_chat(&mut self, chat: HostedChat) {
+        let id = chat.info().id;
+        self.terminals.insert(
+            id,
+            Slot {
+                terminal: Hosted::Chat(chat),
+                output: None,
+                exit: None,
+                wants_writable: false,
+                viewers: Vec::new(),
+            },
+        );
+    }
+
+    /// The chat in terminal `id`.
+    fn chat(&mut self, id: TerminalId) -> Option<&mut HostedChat> {
+        self.terminals.get_mut(&id)?.terminal.chat()
+    }
+
+    /// The chat whose session is `session`.
+    fn chat_in(&mut self, session: &str) -> Option<(TerminalId, &mut HostedChat)> {
+        self.terminals.iter_mut().find_map(|(&id, slot)| {
+            let chat = slot.terminal.chat()?;
+            (chat.session() == Some(session)).then_some((id, chat))
+        })
+    }
+
+    /// Asks the agent for the chat's session, starting the agent if it
+    /// isn't running.
+    fn connect(&mut self, id: TerminalId) {
+        if let Err(err) = self.start_agent() {
+            log::warn!("the agent couldn't start: {err}");
+            if let Some(chat) = self.chat(id) {
+                chat.failed_to_connect(&err.to_string());
+            }
+            self.collect_damage(id);
+            return;
+        }
+        let Some(chat) = self
+            .terminals
+            .get_mut(&id)
+            .and_then(|slot| slot.terminal.chat())
+        else {
+            return;
+        };
+        let (cwd, session) = (
+            chat.working_directory().to_owned(),
+            chat.session().map(str::to_owned),
+        );
+        if let Some(agent) = &mut self.agent {
+            agent.agent.open_session(id, &cwd, session.as_deref());
+        }
+        self.flush_agent();
+    }
+
+    /// Starts the agent, unless it's running.
+    fn start_agent(&mut self) -> io::Result<()> {
+        if self.agent.is_some() {
+            return Ok(());
+        }
+        let agent = Agent::start(&self.config.agent)?;
+        let mut tokens: Vec<Token> = Vec::new();
+        let sources = [
+            (agent.stdout_fd(), Source::AgentOutput, Interest::READABLE),
+            (agent.stderr_fd(), Source::AgentErrors, Interest::READABLE),
+            (agent.stdin_fd(), Source::AgentInput, Interest::WRITABLE),
+            (agent.exit_fd(), Source::AgentExit, Interest::READABLE),
+        ];
+        for (fd, source, interest) in sources {
+            let entry = self.sources.vacant_entry();
+            let token = Token(entry.key());
+            if let Err(err) = self
+                .poll
+                .registry()
+                .register(&mut SourceFd(&fd), token, interest)
+            {
+                for token in tokens {
+                    self.sources.remove(token.0);
+                }
+                // Its pipes close as it's dropped, which ends it.
+                self.watch_orphan(Orphan::new(agent.stop()));
+                return Err(err);
+            }
+            entry.insert(source);
+            tokens.push(token);
+        }
+        self.agent = Some(AgentSlot {
+            agent,
+            tokens: tokens.try_into().expect("four sources"),
+            unread: false,
+        });
+        Ok(())
+    }
+
+    /// Carries out what a chat asked for.
+    fn act(&mut self, id: TerminalId, actions: Vec<Action>) {
+        for action in actions {
+            let session = self
+                .chat(id)
+                .and_then(|chat| chat.session().map(str::to_owned));
+            match (action, &mut self.agent, session) {
+                (Action::Connect, _, _) => self.connect(id),
+                (Action::Prompt(text), Some(agent), Some(session)) => {
+                    agent.agent.prompt(id, &session, &text);
+                }
+                (Action::Cancel, Some(agent), Some(session)) => agent.agent.cancel(&session),
+                (Action::Answer { request, option }, Some(agent), _) => {
+                    agent.agent.answer_permission(&request, option.as_deref());
+                }
+                // The agent has gone, which the chat has heard or will.
+                _ => {}
+            }
+        }
+        self.flush_agent();
+    }
+
+    /// Writes what's queued for the agent.
+    fn flush_agent(&mut self) {
+        let Some(agent) = &mut self.agent else { return };
+        if agent.agent.has_outgoing() && agent.agent.flush().is_err() {
+            self.agent_gone();
+        }
+    }
+
+    /// Reads what the agent sent, and hands it to the chats.
+    fn read_agent(&mut self) {
+        let Some(agent) = &mut self.agent else { return };
+        let mut incoming = std::mem::take(&mut self.incoming);
+        let read = agent
+            .agent
+            .read(&mut self.buffer, OUTPUT_BUDGET, &mut incoming);
+        if let Ok(more) = read {
+            agent.unread = more;
+        }
+        for message in incoming.drain(..) {
+            self.receive_from_agent(message);
+        }
+        self.incoming = incoming;
+        if read.is_err() {
+            self.agent_gone();
+        } else {
+            self.flush_agent();
+        }
+    }
+
+    fn receive_from_agent(&mut self, message: Incoming) {
+        let id = match message {
+            Incoming::Session { terminal, result } => {
+                let Some(chat) = self.chat(terminal) else {
+                    // The chat closed while its session was being made.
+                    if let (Ok(session), Some(agent)) = (result, &mut self.agent) {
+                        agent.agent.close_session(&session);
+                    }
+                    return;
+                };
+                match result {
+                    Ok(session) => {
+                        if let Some(text) = chat.connected(session)
+                            && let Some(session) = chat.session().map(str::to_owned)
+                            && let Some(agent) = &mut self.agent
+                        {
+                            agent.agent.prompt(terminal, &session, &text);
+                        }
+                    }
+                    Err(err) => chat.failed_to_connect(&err),
+                }
+                terminal
+            }
+            Incoming::Update { session, update } => {
+                let Some((id, chat)) = self.chat_in(&session) else {
+                    return;
+                };
+                chat.update(*update);
+                id
+            }
+            Incoming::Answered { terminal, result } => {
+                let Some(chat) = self.chat(terminal) else {
+                    return;
+                };
+                chat.answered(result);
+                terminal
+            }
+            Incoming::Permission {
+                session,
+                request,
+                tool,
+                options,
+            } => {
+                let Some((id, chat)) = self.chat_in(&session) else {
+                    if let Some(agent) = &mut self.agent {
+                        agent.agent.answer_permission(&request, None);
+                    }
+                    return;
+                };
+                chat.ask(request, &tool, options);
+                id
+            }
+        };
+        self.schedule_compaction(id);
+        self.collect_damage(id);
+    }
+
+    /// The agent has gone: every chat hears, and opens its session again
+    /// when it's next needed.
+    fn agent_gone(&mut self) {
+        if !self.stop_agent() {
+            return;
+        }
+        let chats: Vec<TerminalId> = (self.terminals.iter_mut())
+            .filter_map(|(&id, slot)| {
+                slot.terminal.chat()?.disconnected();
+                Some(id)
+            })
+            .collect();
+        for id in chats {
+            self.collect_damage(id);
+        }
+    }
+
+    /// Ends a closed chat's session, and the agent with the last one.
+    fn close_chat(&mut self, id: TerminalId, chat: &HostedChat) {
+        let Some(agent) = &mut self.agent else { return };
+        if let Some(session) = chat.session() {
+            agent.agent.close_session(session);
+        }
+        let chats_left = self
+            .terminals
+            .values()
+            .any(|slot| matches!(slot.terminal, Hosted::Chat(_)));
+        let waiting = agent.agent.waiting().any(|terminal| terminal != id);
+        if chats_left || waiting {
+            self.flush_agent();
+        } else {
+            self.stop_agent();
+        }
+    }
+
+    /// Stops the agent, if it's running, and watches its process until it
+    /// exits, to reap it. Returns whether it was running.
+    fn stop_agent(&mut self) -> bool {
+        let Some(agent) = self.agent.take() else {
+            return false;
+        };
+        for token in agent.tokens {
+            self.sources.remove(token.0);
+        }
+        // Its pidfd is registered under a token just freed: it's watched
+        // anew, as an orphan's.
+        let process = agent.agent.stop();
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&process);
+        if let Err(err) = self.poll.registry().deregister(&mut SourceFd(&fd)) {
+            log::warn!("agent: unwatching its process failed: {err}");
+        }
+        self.watch_orphan(Orphan::new(process));
+        true
     }
 
     // --- Clients ----------------------------------------------------------
@@ -1343,8 +1783,17 @@ impl Daemon {
             .terminals
             .get_mut(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
-        slot.terminal.send_input(bytes)?;
-        self.update_pty_interest(id);
+        match &mut slot.terminal {
+            Hosted::Pty(terminal) => {
+                terminal.send_input(bytes)?;
+                self.update_pty_interest(id);
+            }
+            Hosted::Chat(chat) => {
+                let actions = chat.input(bytes);
+                self.act(id, actions);
+                self.collect_damage(id);
+            }
+        }
         Ok(())
     }
 

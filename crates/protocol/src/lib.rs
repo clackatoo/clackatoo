@@ -61,7 +61,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -338,6 +338,20 @@ pub struct NewTerminal {
     pub record_to: Option<String>,
 }
 
+/// How to start a chat with an agent, such as Claude Code, in a pane.
+///
+/// The chat is a terminal whose program is the daemon itself: it writes
+/// the conversation into the terminal, and what's typed into it becomes
+/// the next message. So it scrolls, searches and copies like any terminal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewAgent {
+    /// The terminal's size.
+    pub size: Size,
+    /// The directory the agent works in. `None` uses the one the pane
+    /// beside it is in, as for a new terminal.
+    pub cwd: Option<String>,
+}
+
 /// The daemon's answer to a [`Request`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
@@ -469,8 +483,9 @@ impl fmt::Display for TerminalId {
 pub struct TerminalInfo {
     /// The terminal's ID.
     pub id: TerminalId,
-    /// The process ID of the program the terminal started.
-    pub pid: u32,
+    /// The process ID of the program the terminal started. A chat with an
+    /// agent has none: the daemon writes it.
+    pub pid: Option<u32>,
     /// The terminal's size.
     pub size: Size,
     /// The window title the program set, or empty.

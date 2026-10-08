@@ -436,6 +436,79 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
     wait(daemon);
 }
 
+#[test]
+fn upgrading_keeps_chats_and_reaps_their_agent() {
+    use clackatoo_daemon::Client;
+    use clackatoo_protocol::{NewAgent, PaneTerminal};
+
+    let runtime = Runtime::new();
+    // `cat` for the agent, which sends back whatever it's sent: the daemon
+    // refuses its own requests, sent back, and the chat says it couldn't
+    // start. Enough to have an agent to hand over.
+    let daemon = Command::new(BINARY)
+        .arg("daemon")
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("CLACKATOO_AGENT", "cat")
+        .spawn()
+        .unwrap();
+    eventually("the daemon answers", || {
+        clackatoo(runtime.path(), &["list"]).status.success()
+    });
+    let socket = runtime.path().join("clackatoo/daemon.sock");
+    let mut client = Client::connect(&socket).unwrap();
+    client
+        .new_workspace(
+            None,
+            PaneTerminal::Agent(NewAgent {
+                size: clackatoo_protocol::Size::new(60, 10).unwrap(),
+                cwd: None,
+            }),
+        )
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let shows = |client: &mut Client, text: &str| {
+        let view = client.capture(chat).unwrap();
+        let grid = view.grid().unwrap();
+        grid.lines.iter().any(|line| line.text().contains(text))
+    };
+    eventually("the chat says the agent couldn't start", || {
+        shows(&mut client, "couldn't start")
+    });
+    client.send_input(chat, b"half typed").unwrap();
+    eventually("the typing shows", || shows(&mut client, "half typed"));
+    let agent = children(daemon.id());
+    assert_eq!(agent.len(), 1, "the agent is the daemon's one child");
+    let screen = client.capture(chat).unwrap();
+    drop(client);
+
+    let upgraded = clackatoo(runtime.path(), &["upgrade"]);
+    assert!(upgraded.status.success(), "{upgraded:?}");
+    let mut client = Client::connect(&socket).unwrap();
+    assert_eq!(client.capture(chat).unwrap(), screen);
+    // The agent stopped, and the new build reaped it.
+    eventually("the old agent is reaped", || {
+        !Path::new(&format!("/proc/{}", agent[0])).exists()
+    });
+    drop(runtime);
+    wait(daemon);
+}
+
+/// The children of process `pid`.
+fn children(pid: u32) -> Vec<u32> {
+    let mut children = Vec::new();
+    for task in std::fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .flatten()
+    {
+        let list = std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+        children.extend(
+            list.split_whitespace()
+                .map(|child| child.parse::<u32>().unwrap()),
+        );
+    }
+    children
+}
+
 /// Asks the daemon in `runtime` to become `executable`, by hand, as a
 /// client could, and returns its answer, if any, once it hangs up.
 fn ask_to_upgrade(runtime: &Path, executable: &Path) -> Option<clackatoo_protocol::ServerMessage> {
@@ -490,7 +563,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let flagless = script(
         bin.path(),
         "flagless",
-        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2"#,
+        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3"#,
     );
     not_upgrading(ask_to_upgrade(runtime.path(), &flagless), "can't take over");
     // Failed after everything was handed over: it says it can take over,
@@ -499,7 +572,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"case " $* " in *" --handover-versions "*) echo 1 2; rm -- "$0";; esac"#,
+        r#"case " $* " in *" --handover-versions "*) echo 1 2 3; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),

@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    ClientMessage, Error, Event, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch,
-    Request, Response, ServerMessage, Side, Size, TerminalId, TerminalStatus, View, ViewUpdate,
-    Workspaces,
+    ClientMessage, Error, Event, NewAgent, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal,
+    Patch, Request, Response, ServerMessage, Side, Size, TerminalId, TerminalStatus, View,
+    ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -25,12 +25,25 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn start() -> Self {
+        Self::start_with_agent(|dir| {
+            vec![
+                fake_agent().into(),
+                "--log".into(),
+                dir.join("agent.log").into(),
+            ]
+        })
+    }
+
+    /// A daemon whose chats talk to the agent `agent` names, given the
+    /// daemon's directory.
+    fn start_with_agent(agent: impl FnOnce(&Path) -> Vec<std::ffi::OsString>) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let config = DaemonConfig {
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),
             shell_integration: None,
+            agent: agent(dir.path()),
             udp_ports: Some(0..=0),
         };
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
@@ -61,6 +74,32 @@ impl Drop for TestDaemon {
     }
 }
 
+/// The agent for tests, which `cargo test` builds with them: see
+/// `examples/fake_agent.rs`. A test build names it with a hash, so it's
+/// the newest one built.
+fn fake_agent() -> PathBuf {
+    let test = std::env::current_exe().expect("the test's path");
+    let examples = test
+        .parent()
+        .and_then(Path::parent)
+        .expect("tests are in the profile's deps")
+        .join("examples");
+    std::fs::read_dir(&examples)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("fake_agent") && !name.ends_with(".d")
+        })
+        .max_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok())
+        .map_or_else(
+            || panic!("no fake agent in {}: run cargo test", examples.display()),
+            |entry| entry.path(),
+        )
+}
+
 fn spawn(client: &mut Client, command: &[&str]) -> TerminalId {
     client
         .new_terminal(NewTerminal {
@@ -84,7 +123,17 @@ fn wait_for_screen(
     terminal: TerminalId,
     done: impl Fn(&str) -> bool,
 ) -> String {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    wait_for_screen_for(client, terminal, Duration::from_secs(5), done)
+}
+
+/// As [`wait_for_screen`], waiting up to `limit`.
+fn wait_for_screen_for(
+    client: &mut Client,
+    terminal: TerminalId,
+    limit: Duration,
+    done: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + limit;
     loop {
         let text = screen_text(&client.capture(terminal).expect("capture"));
         if done(&text) {
@@ -1080,4 +1129,177 @@ fn a_daemon_that_stops_answering_is_out_of_contact_until_it_answers_again() {
     notified.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(contact.silent_since(), None);
     client.list_terminals().unwrap();
+}
+
+// --- Chats ---------------------------------------------------------------
+
+/// A new chat, working where the pane beside it is.
+fn new_chat() -> PaneTerminal {
+    PaneTerminal::Agent(NewAgent {
+        size: Size::new(40, 10).unwrap(),
+        cwd: None,
+    })
+}
+
+/// Starts a workspace with a chat, and waits for it to be ready.
+fn start_chat(client: &mut Client) -> TerminalId {
+    client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    wait_for_screen(client, chat, |text| !text.contains("starting"));
+    chat
+}
+
+#[test]
+fn a_chat_answers_what_is_typed() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let info = &client.list_terminals().unwrap()[0];
+    assert_eq!((info.id, info.pid), (chat, None));
+    client.send_input(chat, b"hello there\r").unwrap();
+    let text = wait_for_screen(&mut client, chat, |text| text.contains("echo: hello there"));
+    assert!(
+        text.starts_with("› hello there\n\necho: hello there\n"),
+        "{text}"
+    );
+    // The exchange is a block, whose command is the message.
+    let block = client
+        .block(chat, 0, clackatoo_protocol::Which::At)
+        .unwrap()
+        .expect("a block");
+    assert_eq!(block.command.as_deref(), Some("hello there"));
+    assert_eq!(block.exit, Some(0));
+}
+
+#[test]
+fn a_chat_starts_where_the_pane_beside_it_is() {
+    let daemon = TestDaemon::start();
+    std::fs::create_dir(daemon.dir.path().join("project")).unwrap();
+    let mut client = daemon.client();
+    let shell = client.new_workspace(None, new_pane(&["sh"])).unwrap();
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    client
+        .send_input(terminal, b"cd project && echo mo\"\"ved\r")
+        .unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.contains("moved"));
+
+    client.split_pane(shell, Side::Right, new_chat()).unwrap();
+    let chat = next_workspaces(&mut client).list[0].terminals()[1];
+    client.send_input(chat, b"cwd\r").unwrap();
+    wait_for_screen(&mut client, chat, |text| text.contains("/project"));
+}
+
+#[test]
+fn tool_calls_are_shown_and_the_agent_asks_before_using_one() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client.send_input(chat, b"tool\r").unwrap();
+    wait_for_screen(&mut client, chat, |text| {
+        text.contains("✓ Read notes.txt\ndone")
+    });
+    client.send_input(chat, b"ask\r").unwrap();
+    wait_for_screen(&mut client, chat, |text| {
+        text.contains("May the agent Write notes.txt?")
+    });
+    client.send_input(chat, b"1").unwrap();
+    wait_for_screen(&mut client, chat, |text| text.contains("picked allow"));
+}
+
+#[test]
+fn ctrl_c_stops_the_answer() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client.send_input(chat, b"wait\r").unwrap();
+    wait_for_screen(&mut client, chat, |text| text.contains("Ctrl+C stops it"));
+    client.send_input(chat, b"\x03").unwrap();
+    wait_for_screen(&mut client, chat, |text| text.contains("stopped"));
+    // And the next message goes.
+    client.send_input(chat, b"next\r").unwrap();
+    wait_for_screen(&mut client, chat, |text| text.contains("echo: next"));
+}
+
+#[test]
+fn when_the_agent_stops_the_next_message_starts_it_again() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    client.send_input(chat, b"exit\r").unwrap();
+    wait_for_screen(&mut client, chat, |text| text.contains("the agent stopped"));
+    client.send_input(chat, b"back\r").unwrap();
+    wait_for_screen(&mut client, chat, |text| text.contains("echo: back"));
+}
+
+#[test]
+fn closing_a_chat_ends_its_session() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let first = client.new_workspace(None, new_chat()).unwrap();
+    client.split_pane(first, Side::Right, new_chat()).unwrap();
+    let chats = client.watch_workspaces().unwrap().list[0].terminals();
+    for &chat in &chats {
+        wait_for_screen(&mut client, chat, |text| !text.contains("starting"));
+    }
+    client.close_pane(first).unwrap();
+    let log = daemon.dir.path().join("agent.log");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&log).is_ok_and(|log| log.contains("closed s1")) {
+        assert!(Instant::now() < deadline, "the session was never closed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The other chat carries on.
+    client.send_input(chats[1], b"still here\r").unwrap();
+    wait_for_screen(&mut client, chats[1], |text| {
+        text.contains("echo: still here")
+    });
+}
+
+/// Claude Code, through its adapter, on the cheapest model. Run by hand,
+/// with the adapter's command in `CLACKATOO_REAL_AGENT`, such as
+/// `npx --yes @agentclientprotocol/claude-agent-acp@0.88.0`: it uses the
+/// account `claude` is logged in to.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_answers_and_asks_before_running_commands() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with_agent(|_| {
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect()
+    });
+    let mut client = daemon.client();
+    client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_screen_for(&mut client, chat, minute, |text| !text.contains("starting"));
+
+    client
+        .send_input(
+            chat,
+            b"Reply with exactly one word, pong, and use no tools.\r",
+        )
+        .unwrap();
+    wait_for_screen_for(&mut client, chat, minute, |text| {
+        text.to_lowercase().contains("\npong") && !text.contains("answering")
+    });
+
+    // A command that changes something, which Claude Code asks about,
+    // unlike reading ones.
+    client
+        .send_input(chat, b"Use your Bash tool to run: touch made-by-claude\r")
+        .unwrap();
+    wait_for_screen_for(&mut client, chat, minute, |text| {
+        text.contains("May the agent")
+    });
+    // No: Esc turns it down, and the answer ends.
+    client.send_input(chat, b"\x1b").unwrap();
+    wait_for_screen_for(&mut client, chat, minute, |text| {
+        !text.contains("answering") && !text.contains("May the agent")
+    });
+    assert!(!daemon.dir.path().join("made-by-claude").exists());
 }

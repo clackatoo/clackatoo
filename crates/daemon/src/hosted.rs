@@ -162,7 +162,7 @@ impl HostedTerminal {
     pub(crate) fn info(&self) -> TerminalInfo {
         TerminalInfo {
             id: self.id,
-            pid: self.pid,
+            pid: Some(self.pid),
             size: self.emulator.size(),
             title: self.emulator.title().to_owned(),
             status: self.status,
@@ -385,6 +385,10 @@ pub(crate) struct Orphan {
 }
 
 impl Orphan {
+    pub(crate) fn new(process: Process) -> Self {
+        Self { process }
+    }
+
     pub(crate) fn hand_over(self, fds: &mut Fds) -> handover::Process {
         let (pid, pidfd) = self.process.into_parts();
         handover::Process {

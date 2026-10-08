@@ -13,7 +13,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{NewTerminal, TerminalId};
+use crate::{NewAgent, NewTerminal, TerminalId};
 
 /// Identifies a workspace within one daemon. Never reused while it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -163,6 +163,8 @@ pub enum PaneTerminal {
     New(NewTerminal),
     /// One already running and in no pane, such as one started by a script.
     Existing(TerminalId),
+    /// A new chat with an agent.
+    Agent(NewAgent),
 }
 
 impl Workspaces {

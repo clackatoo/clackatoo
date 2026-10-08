@@ -15,6 +15,10 @@ clackatoo-daemon = { path = "crates/daemon" }
 clackatoo-bench = { path = "crates/bench" }
 clackatoo-gui = { path = "crates/gui" }
 
+# The types of ACP, the Agent Client Protocol, which chats with agents
+# speak (CLACKA-7). Only the types: the daemon frames the messages itself,
+# in its own event loop. Without schemars, which only describes them.
+agent-client-protocol-schema = { version = "1.10", default-features = false }
 anyhow = "1.0"
 # Text only: images would pull in an image codec.
 arboard = { version = "3.6", default-features = false }
@@ -40,6 +44,7 @@ postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustix = { version = "1.1", features = ["fs", "net", "process", "pty", "std", "stdio", "termios"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_json = "1.0"
 simdutf8 = "0.1"
 slab = "0.4"
 swash = "0.2"

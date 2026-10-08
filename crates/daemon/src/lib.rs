@@ -12,6 +12,8 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod agent;
+mod chat;
 pub mod client;
 mod handover;
 mod hosted;
@@ -48,6 +50,9 @@ pub struct DaemonConfig {
     /// commands, which [`upgrade::serve`] writes. Without them, shells
     /// start as they are.
     pub shell_integration: Option<PathBuf>,
+    /// The agent chats talk to, and its arguments: a program speaking ACP,
+    /// the Agent Client Protocol, on its stdin and stdout.
+    pub agent: Vec<OsString>,
     /// The UDP ports clients on other machines may move their QUIC
     /// connections onto: the first free one is taken, when the first
     /// connection over SSH arrives. 0 means any port. `None` keeps every
@@ -55,14 +60,25 @@ pub struct DaemonConfig {
     pub udp_ports: Option<RangeInclusive<u16>>,
 }
 
+/// The agent chats talk to unless told otherwise: Claude Code, through
+/// the adapter that speaks ACP for it, at the version tried with
+/// clackatoo. `npx` fetches it the first time.
+pub const DEFAULT_AGENT: &[&str] = &[
+    "npx",
+    "--yes",
+    "--prefer-offline",
+    "@agentclientprotocol/claude-agent-acp@0.88.0",
+];
+
 /// The UDP ports a daemon uses unless told otherwise: mosh's, so a
 /// firewall opened for mosh lets clackatoo through too.
 pub const DEFAULT_UDP_PORTS: RangeInclusive<u16> = 60000..=61000;
 
 impl DaemonConfig {
     /// Defaults taken from the environment: `$SHELL` (or `/bin/sh`),
-    /// `$HOME` (or `/`), and `$CLACKATOO_UDP_PORTS`: a port, a range such
-    /// as `60000-61000` (the default), or `off`.
+    /// `$HOME` (or `/`), `$CLACKATOO_AGENT`: a command, split at spaces
+    /// (or [`DEFAULT_AGENT`]), and `$CLACKATOO_UDP_PORTS`: a port, a range
+    /// such as `60000-61000` (the default), or `off`.
     #[must_use]
     pub fn from_env() -> Self {
         let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
@@ -71,6 +87,14 @@ impl DaemonConfig {
             shell: non_empty("SHELL").unwrap_or_else(|| "/bin/sh".into()),
             home: non_empty("HOME").map_or_else(|| "/".into(), PathBuf::from),
             shell_integration: None,
+            agent: match non_empty("CLACKATOO_AGENT") {
+                Some(command) => command
+                    .to_string_lossy()
+                    .split_whitespace()
+                    .map(OsString::from)
+                    .collect(),
+                None => DEFAULT_AGENT.iter().map(OsString::from).collect(),
+            },
             udp_ports: match non_empty("CLACKATOO_UDP_PORTS") {
                 None => Some(DEFAULT_UDP_PORTS),
                 Some(ports) if ports == "off" => None,

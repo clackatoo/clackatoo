@@ -11,6 +11,7 @@ publish.workspace = true
 bench = false
 
 [dependencies]
+agent-client-protocol-schema.workspace = true
 bytes.workspace = true
 clackatoo-protocol.workspace = true
 clackatoo-term = { workspace = true, features = ["serde"] }
@@ -22,8 +23,10 @@ rcgen.workspace = true
 rustls.workspace = true
 rustix.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 slab.workspace = true
 thiserror.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

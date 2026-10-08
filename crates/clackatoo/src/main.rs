@@ -474,7 +474,9 @@ fn list(connection: &Connection) -> anyhow::Result<()> {
             out,
             "{:>4}  {:>8}  {:>9}  {:<16}  {}",
             terminal.id,
-            terminal.pid,
+            terminal
+                .pid
+                .map_or_else(|| "-".to_owned(), |pid| pid.to_string()),
             terminal.size.to_string(),
             terminal.status.to_string(),
             terminal.title
