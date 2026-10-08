@@ -95,6 +95,17 @@ enum Hit {
     },
 }
 
+/// What the mouse pointer looks like over a chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pointer {
+    /// Over nothing that takes a click.
+    Arrow,
+    /// Over something to click: a button, a chip, a menu's choice.
+    Hand,
+    /// Over text to type in or select.
+    Text,
+}
+
 /// A menu open over the box, to pick the agent's settings.
 #[derive(Clone, Debug, PartialEq)]
 struct Menu {
@@ -239,6 +250,19 @@ impl ChatView {
     /// stretch of it, or has stopped, with `None`.
     pub(crate) fn compose(&mut self, composing: Option<(String, Option<(usize, usize)>)>) {
         self.queued.push(Input::Compose(composing));
+    }
+
+    /// How the mouse pointer looks at `at`, from the pane's top left, by
+    /// what was drawn there last.
+    pub(crate) fn pointer(&self, at: [f32; 2]) -> Pointer {
+        let hit = (self.hits.iter().rev())
+            .find(|(_, rect)| contains(*rect, at))
+            .map(|(hit, _)| hit);
+        match hit {
+            Some(Hit::Editor) => Pointer::Text,
+            Some(_) => Pointer::Hand,
+            None => Pointer::Arrow,
+        }
     }
 
     /// The mouse moved to `at` with no button held: over a menu, its
@@ -898,5 +922,17 @@ mod tests {
         typed(&mut view, "x");
         assert_eq!(view.settle(&mut fonts).actions, []);
         assert_eq!((view.menu.as_ref(), view.editor.raw_text()), (None, "x"));
+    }
+
+    #[test]
+    fn the_pointer_is_a_hand_over_what_takes_a_click() {
+        let mut view = with_settings();
+        view.hits = vec![
+            (Hit::Editor, [0.0, 0.0, 100.0, 20.0]),
+            (Hit::Send, [100.0, 0.0, 20.0, 20.0]),
+        ];
+        assert_eq!(view.pointer([10.0, 10.0]), Pointer::Text);
+        assert_eq!(view.pointer([110.0, 10.0]), Pointer::Hand);
+        assert_eq!(view.pointer([10.0, 40.0]), Pointer::Arrow);
     }
 }

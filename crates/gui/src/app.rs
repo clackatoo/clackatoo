@@ -23,7 +23,7 @@ use winit::keyboard::{Key, KeyLocation, NamedKey};
 use winit::window::{CursorIcon, ImePurpose, ResizeDirection, Window, WindowAttributes, WindowId};
 
 use crate::GraphicsApi;
-use crate::chat::ChatPaint;
+use crate::chat::{ChatPaint, Pointer};
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, Status};
 use crate::desk::{Desk, TextTarget};
 use crate::desktop::{Button, ButtonLayout, Desktop};
@@ -513,6 +513,12 @@ impl App {
             Hit::Panes if self.desk.reports_mouse_at(point, self.modifiers.shift) => {
                 CursorIcon::Default
             }
+            // A chat says what's under the pointer.
+            Hit::Panes if let Some(pointer) = self.desk.chat_pointer(point) => match pointer {
+                Pointer::Arrow => CursorIcon::Default,
+                Pointer::Hand => CursorIcon::Pointer,
+                Pointer::Text => CursorIcon::Text,
+            },
             Hit::Panes => CursorIcon::Text,
             Hit::TopBar | Hit::Nothing => CursorIcon::Default,
         };

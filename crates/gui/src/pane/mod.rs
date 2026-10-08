@@ -230,6 +230,12 @@ impl Pane {
         settled.redraw
     }
 
+    /// How the mouse pointer looks at `at`, from the pane's top left, if it
+    /// shows a chat.
+    pub(crate) fn chat_pointer(&self, at: [f32; 2]) -> Option<crate::chat::Pointer> {
+        Some(self.chat.as_ref()?.pointer(at))
+    }
+
     /// Shows what an input method is composing in the chat's box, if it
     /// shows a chat being typed in. Returns whether it does.
     pub(crate) fn compose_in_chat(

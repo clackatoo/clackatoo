@@ -184,6 +184,13 @@ impl Desk {
         self.panes.get_mut(&terminal)
     }
 
+    /// How the mouse pointer looks at `point`, if it's over a chat, which
+    /// says by what it drew there.
+    pub(crate) fn chat_pointer(&self, point: [f32; 2]) -> Option<crate::chat::Pointer> {
+        let (terminal, _, pixel) = self.cell_at(point, None)?;
+        self.panes.get(&terminal)?.chat_pointer(pixel)
+    }
+
     /// Passes what an input method is composing to the focused pane, if
     /// it's a chat being typed in, which shows it in its box. Returns
     /// whether it was: the window shows it over a terminal itself.
