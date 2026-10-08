@@ -1288,6 +1288,38 @@ fn a_real_agent_answers_and_asks_before_running_commands() {
         text.to_lowercase().contains("\npong") && !text.contains("answering")
     });
 
+    // The agent crashes: the chat says so, and the next message starts it
+    // again, carrying on the same conversation. The daemon runs in this
+    // process, so the agent is this process's one child.
+    let children: Vec<String> = std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .flatten()
+        .flat_map(|task| {
+            let list = std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            list.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(children.len(), 1, "{children:?}");
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", &children[0]])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    wait_for_screen_for(&mut client, chat, minute, |text| {
+        text.contains("the agent stopped")
+    });
+    client
+        .send_input(
+            chat,
+            b"What one word did you reply with before? Reply with it alone.\r",
+        )
+        .unwrap();
+    wait_for_screen_for(&mut client, chat, minute, |text| {
+        text.to_lowercase().matches("pong").count() >= 2 && !text.contains("answering")
+    });
+
     // A command that changes something, which Claude Code asks about,
     // unlike reading ones.
     client

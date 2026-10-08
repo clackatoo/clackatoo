@@ -1383,6 +1383,8 @@ impl Daemon {
         if chats_left || waiting {
             self.flush_agent();
         } else {
+            // Unsent, the close goes with the agent, whose sessions all end
+            // as it does.
             self.stop_agent();
         }
     }

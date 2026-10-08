@@ -407,6 +407,8 @@ impl HostedChat {
         } else if was_opening {
             self.commit_line("the agent stopped before it started", FAILED);
             self.failure = Some("it stopped".to_owned());
+        } else if self.session.is_some() {
+            self.commit_line("the agent stopped; the next message starts it again", DIM);
         }
         self.redraw();
     }
@@ -1200,6 +1202,15 @@ mod tests {
         assert_eq!(screen(&chat).trim_end(), "› some wor\nds typed");
         chat.resize(Size::new(40, 12).unwrap());
         assert_eq!(screen(&chat).trim_end(), "› some words typed");
+    }
+
+    #[test]
+    fn the_agent_stopping_while_idle_is_said() {
+        let mut chat = chat();
+        chat.connected("s".into());
+        chat.disconnected();
+        assert!(screen(&chat).contains("the agent stopped"));
+        assert_eq!(chat.input(b"hi\r"), [Action::Connect]);
     }
 
     #[test]
