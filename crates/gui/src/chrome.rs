@@ -241,6 +241,9 @@ pub(crate) struct Chrome {
     pub(crate) alert: Option<(String, Rect)>,
     /// Whether to draw the bottom bar: notices take its place.
     pub(crate) bottom_shown: bool,
+    /// Whether the window's corners are rounded, which what's drawn in the
+    /// bottom bar's corner must follow.
+    pub(crate) rounded: bool,
 }
 
 /// What goes in the frame, besides where.
@@ -257,6 +260,8 @@ pub(crate) struct Contents<'a> {
     pub(crate) menu: Option<([f32; 2], Vec<String>)>,
     /// Something gone wrong, to show in the top bar.
     pub(crate) alert: Option<String>,
+    /// Whether the window's corners are rounded.
+    pub(crate) rounded: bool,
 }
 
 impl Chrome {
@@ -365,6 +370,7 @@ impl Chrome {
             menu,
             alert,
             bottom_shown: contents.bottom_shown,
+            rounded: contents.rounded,
         }
     }
 
@@ -470,9 +476,7 @@ impl Chrome {
             let bottom = self.geometry.bottom;
             let text_y = (bottom.y + (bottom.height - metrics.cell[1]) / 2.0).round();
             if let Some((mode, rect)) = self.mode {
-                painted
-                    .fills
-                    .push(Fill::solid(rect.to_array(), Paint::Mode(mode)));
+                self.push_bottom_fill(rect, Paint::Mode(mode), &mut painted.fills);
                 painted.texts.push(Text {
                     origin: [rect.x + 3.0 * metrics.padding, text_y],
                     content: mode.text(),
@@ -488,7 +492,7 @@ impl Chrome {
                     (false, false) => None,
                 };
                 if let Some(paint) = background {
-                    painted.fills.push(Fill::solid(item.rect.to_array(), paint));
+                    self.push_bottom_fill(item.rect, paint, &mut painted.fills);
                 }
                 painted.texts.push(Text {
                     origin: [item.rect.x + 3.0 * metrics.padding, text_y],
@@ -542,6 +546,37 @@ impl Chrome {
             }
         }
         painted
+    }
+
+    /// Fills `rect`, in the bottom bar, with `paint`: square, but for a
+    /// corner that's the window's own rounded corner, which it follows.
+    fn push_bottom_fill(&self, rect: Rect, paint: Paint, fills: &mut Vec<Fill>) {
+        if !(self.rounded && rect.x <= 0.0) {
+            fills.push(Fill::solid(rect.to_array(), paint));
+            return;
+        }
+        let radius = self
+            .geometry
+            .window_radius
+            .min(rect.height / 2.0)
+            .min(rect.width / 2.0);
+        let Rect {
+            x,
+            y,
+            width,
+            height,
+        } = rect;
+        // Square above the corner and right of it, and round in it.
+        fills.push(Fill::solid([x, y, width, height - radius], paint));
+        fills.push(Fill::solid(
+            [x + radius, y + height - radius, width - radius, radius],
+            paint,
+        ));
+        fills.push(Fill::rounded(
+            [x, y + height - 2.0 * radius, 2.0 * radius, 2.0 * radius],
+            paint,
+            radius,
+        ));
     }
 
     /// The palette, over the tiles, while something's being typed.
@@ -656,14 +691,15 @@ fn lay_out_bottom(
         (mode, rect)
     });
     let panes = match panes {
-        1 => "1 pane".to_owned(),
-        panes => format!("{panes} panes"),
+        0 => None,
+        1 => Some("1 pane".to_owned()),
+        panes => Some(format!("{panes} panes")),
     };
     let hint = mode.map(|(mode, _)| mode.hint().to_owned());
     let tabs_start = mode.map_or(0.0, |(_, rect)| rect.x + rect.width);
     let tab_width = |text: &str| (mono(text) + 6.0 * padding).round();
     let needed = tabs.iter().map(|(_, text, _)| tab_width(text)).sum::<f32>() + bottom.height;
-    let mut wanted = [note, Some(panes), hint];
+    let mut wanted = [note, panes, hint];
     let (notes, notes_start) = loop {
         let mut x = bottom.width - 3.0 * padding;
         let mut notes = Vec::new();
@@ -1090,6 +1126,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: None,
+                rounded: false,
             },
             &mut measure,
         )
@@ -1111,6 +1148,7 @@ mod tests {
                 bottom_shown: true,
                 menu: None,
                 alert: Some("no contact with box for 4 s".into()),
+                rounded: false,
             },
             &mut measure,
         );

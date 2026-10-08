@@ -266,6 +266,7 @@ fn two_pane_window(
             bottom_shown: true,
             menu,
             alert,
+            rounded: false,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -288,8 +289,20 @@ fn two_pane_window(
 fn draw_window(
     gpu: &(wgpu::Device, wgpu::Queue),
     fonts: &mut Fonts,
+    window: &([u32; 2], Chrome, Placement),
+    screens: [&Screen; 2],
+) -> Vec<u8> {
+    draw_window_shaped(gpu, fonts, window, screens, false)
+}
+
+/// Draws as [`draw_window`] does, in a window with rounded corners and
+/// see-through beyond them if `rounded`.
+fn draw_window_shaped(
+    gpu: &(wgpu::Device, wgpu::Queue),
+    fonts: &mut Fonts,
     (size, chrome, placement): &([u32; 2], Chrome, Placement),
     screens: [&Screen; 2],
+    rounded: bool,
 ) -> Vec<u8> {
     let geometry = chrome.geometry;
     let rows: Vec<Vec<_>> = screens
@@ -311,7 +324,7 @@ fn draw_window(
         })
         .collect();
     let painted = chrome.paint(Hit::Workspace(WorkspaceId(2)));
-    let mut fills = vec![chrome::window_fill(&geometry, false)];
+    let mut fills = vec![chrome::window_fill(&geometry, rounded)];
     fills.extend(painted.fills);
     let focused = placement.panes.get(1).map(|&(id, _)| id);
     fills.extend(chrome::paint_panes(&geometry, placement, focused));
@@ -322,7 +335,7 @@ fn draw_window(
         fills: &fills,
         over: &painted.over,
         texts: &texts,
-        transparent: false,
+        transparent: rounded,
     };
     draw(gpu, *size, &picture, fonts)
 }
@@ -488,4 +501,40 @@ fn an_alert_is_drawn_in_the_top_bar() {
         rise(0) > rise(1) + 10 && rise(0) > rise(2) + 10,
         "not tinted red: {inside:?} against {outside:?}"
     );
+}
+
+#[test]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn nothing_is_drawn_past_a_rounded_windows_corners() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut fonts = fonts(2.0);
+    let window = two_pane_window(
+        &mut fonts,
+        Status::Tabs {
+            mode: Some(ModeName::Insert),
+            note: None,
+            panes: 2,
+        },
+        None,
+        None,
+    );
+    let mut window = window;
+    window.1.rounded = true;
+    let left = screen(20, 4, "left\r\n$ ");
+    let right = screen(20, 4, "right\r\n$ ");
+    let pixels = draw_window_shaped(&gpu, &mut fonts, &window, [&left, &right], true);
+    save("rounded", window.0, &pixels);
+    let [width, height] = window.0;
+    let alpha = |x: u32, y: u32| pixels[((y * width + x) * 4 + 3) as usize];
+    for (x, y) in [
+        (0, 0),
+        (width - 1, 0),
+        (0, height - 1),
+        (width - 1, height - 1),
+    ] {
+        assert_eq!(alpha(x, y), 0, "the corner at {x}, {y} is see-through");
+    }
 }

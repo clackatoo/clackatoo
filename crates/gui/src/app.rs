@@ -430,6 +430,7 @@ impl App {
     /// Where everything in the window's frame goes, now.
     fn chrome(&mut self) -> Option<Chrome> {
         let geometry = self.geometry()?;
+        let rounded = self.rounded();
         let contents = if self.notice.is_some() {
             Contents {
                 workspaces: Vec::new(),
@@ -443,6 +444,7 @@ impl App {
                 bottom_shown: false,
                 menu: None,
                 alert: None,
+                rounded,
             }
         } else {
             Contents {
@@ -455,6 +457,7 @@ impl App {
                     .menu
                     .map(|menu| (menu.at, MENU_ITEMS.map(str::to_owned).to_vec())),
                 alert: self.out_of_contact(),
+                rounded,
             }
         };
         let fonts = &mut self.frame.as_mut()?.fonts;
@@ -893,12 +896,18 @@ impl App {
         self.desk.drawn(&drawn);
     }
 
-    /// The window's background: rounded at the corners where the window
-    /// can be see-through, unless it's maximised.
+    /// Whether the window has rounded corners: where it can be
+    /// see-through, unless it's maximised.
+    fn rounded(&self) -> bool {
+        self.frame
+            .as_ref()
+            .is_some_and(|frame| frame.transparent && !frame.window.is_maximized())
+    }
+
+    /// The window's background, rounded if the window is.
     fn window_fill(&self, geometry: &Geometry) -> Option<Fill> {
-        let frame = self.frame.as_ref()?;
-        let rounded = frame.transparent && !frame.window.is_maximized();
-        Some(chrome::window_fill(geometry, rounded))
+        self.frame.as_ref()?;
+        Some(chrome::window_fill(geometry, self.rounded()))
     }
 
     /// Draws the notice in one pane filling the space between the bars.
