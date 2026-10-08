@@ -294,14 +294,8 @@ impl Pane {
     /// Handles a key press. Returns whether the pane must be redrawn.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> bool {
         let modifiers = press.modifiers;
-        let ctrl_backslash = modifiers.ctrl
-            && !modifiers.alt
-            && matches!(press.key, Key::Character(text) if text == "\\");
-        let shift_escape = modifiers.shift && *press.key == Key::Named(NamedKey::Escape);
-        // By its place on the keyboard, so it's the same keys on layouts
-        // where `;` takes Shift.
-        let ctrl_semicolon =
-            modifiers.ctrl && !modifiers.alt && press.code == Some(KeyCode::Semicolon);
+        let ctrl_backslash = is_ctrl_backslash(press);
+        let to_normal = enters_normal_mode(press);
         let prefix = self.prefix.take();
         // Text selected with the mouse is copied by Ctrl+Shift+C, or `y` in
         // normal mode, and any other key forgets it.
@@ -319,7 +313,7 @@ impl Pane {
             return forgot_selection;
         }
         let redraw = match self.mode {
-            Mode::Insert if ctrl_backslash || shift_escape || ctrl_semicolon => {
+            Mode::Insert if to_normal => {
                 self.enter_normal();
                 self.prefix = ctrl_backslash.then_some(Prefix::CtrlBackslash);
                 true
@@ -332,6 +326,14 @@ impl Pane {
             _ if ctrl_backslash && prefix == Some(Prefix::CtrlBackslash) => {
                 self.send_input(vec![0x1c]);
                 self.insert()
+            }
+            // From anywhere else, too: a selection or a search being typed
+            // is left, and the cursor stays where it is.
+            _ if to_normal => {
+                self.mode = Mode::Normal;
+                self.anchor = None;
+                self.prompt = None;
+                true
             }
             _ => self.normal_key(press, prefix),
         };
@@ -664,6 +666,24 @@ impl Pane {
     pub(crate) fn take_outbox(&mut self) -> Vec<ClientMessage> {
         std::mem::take(&mut self.outbox)
     }
+}
+
+/// Whether `press` is Ctrl+\\.
+fn is_ctrl_backslash(press: &KeyPress<'_>) -> bool {
+    press.modifiers.ctrl
+        && !press.modifiers.alt
+        && matches!(press.key, Key::Character(text) if text == "\\")
+}
+
+/// Whether `press` is one of the keys that switch to normal mode from
+/// anywhere: Ctrl+;, Shift+Esc or Ctrl+\\.
+pub(crate) fn enters_normal_mode(press: &KeyPress<'_>) -> bool {
+    let modifiers = press.modifiers;
+    let shift_escape = modifiers.shift && *press.key == Key::Named(NamedKey::Escape);
+    // By its place on the keyboard, so it's the same keys on layouts
+    // where `;` takes Shift.
+    let ctrl_semicolon = modifiers.ctrl && !modifiers.alt && press.code == Some(KeyCode::Semicolon);
+    shift_escape || ctrl_semicolon || is_ctrl_backslash(press)
 }
 
 /// History and screen as one document, for the normal-mode cursor: history

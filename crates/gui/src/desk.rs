@@ -25,7 +25,7 @@ use crate::chrome::{ModeName, Status};
 use crate::command::{self, Command, Kind, Place};
 use crate::input::{self, KeyPress, Modifiers};
 use crate::layout::{Area, Direction, Divider, Placement};
-use crate::pane::{Copy, Mode, Pane, PaneMouse, Selection};
+use crate::pane::{self, Copy, Mode, Pane, PaneMouse, Selection};
 
 /// What a mouse event did, for the window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -695,8 +695,13 @@ impl Desk {
             return false;
         }
         if self.input.is_some() {
-            self.input_key(press);
-            return true;
+            // Ctrl+; and its kin close the command line, and go on to the
+            // pane, which stays in normal mode.
+            if !pane::enters_normal_mode(press) {
+                self.input_key(press);
+                return true;
+            }
+            self.input = None;
         }
         let had_message = self.message.take().is_some();
         let window_key = match self.focused_pane() {
@@ -1367,6 +1372,47 @@ mod tests {
         assert_eq!(shown_pane(&desk), PaneId(2), "nothing further right");
         ctrl(&mut desk, "h");
         assert_eq!(shown_pane(&desk), PaneId(1));
+    }
+
+    #[test]
+    fn ctrl_semicolon_goes_to_normal_mode_from_anywhere() {
+        let mut desk = desk(workspaces(vec![workspace(
+            1,
+            "work",
+            vec![tab(1, pane(1))],
+        )]));
+        snapshot(&mut desk, 1);
+        let typing = |desk: &Desk| matches!(desk.status(), Status::Typing { .. });
+        let key = |desk: &mut Desk, text: &str| {
+            press(
+                desk,
+                Key::Character(text.into()),
+                None,
+                Modifiers::default(),
+            );
+        };
+        normal_mode(&mut desk);
+        assert_eq!(mode(&desk, 1), Mode::Normal);
+        // From a visual selection.
+        key(&mut desk, "v");
+        assert_eq!(mode(&desk, 1), Mode::Visual(Selection::Characters));
+        normal_mode(&mut desk);
+        assert_eq!(mode(&desk, 1), Mode::Normal);
+        // From a search being typed, and from the command line.
+        for opens in ["/", ":"] {
+            key(&mut desk, opens);
+            key(&mut desk, "x");
+            assert!(typing(&desk), "{opens} opens a prompt");
+            normal_mode(&mut desk);
+            assert!(!typing(&desk), "{opens}'s prompt closed");
+            assert_eq!(mode(&desk, 1), Mode::Normal);
+        }
+        // Ctrl+\ twice from insert mode still reaches the program.
+        key(&mut desk, "i");
+        ctrl(&mut desk, "\\");
+        assert_eq!(mode(&desk, 1), Mode::Normal);
+        ctrl(&mut desk, "\\");
+        assert_eq!(mode(&desk, 1), Mode::Insert);
     }
 
     #[test]
