@@ -17,18 +17,16 @@ pub(crate) struct Theme {
     pub(crate) background: Rgba,
     pub(crate) cursor: Rgba,
     /// clackatoo's own colour, the cockatoo's crest, for the window's own
-    /// marks such as the focused card's edge in normal mode.
+    /// marks such as highlights and the focused pane's edge.
     pub(crate) accent: Rgba,
-    /// The window's background fades from this, at the bottom left...
-    pub(crate) backdrop: Rgba,
-    /// ...to this, bluer, at the top right.
-    pub(crate) backdrop_end: Rgba,
-    /// A card's edge.
-    pub(crate) edge: Rgba,
-    /// The focused card's edge, while typing goes to its program.
-    pub(crate) focus: Rgba,
-    /// Behind what's picked, such as the workspace shown.
+    /// The bars' background, and the window's.
+    pub(crate) bar: Rgba,
+    /// The lines between the panes, and between them and the bars.
+    pub(crate) divider: Rgba,
+    /// Behind what's picked, such as the workspace shown...
     pub(crate) picked: Rgba,
+    /// ...and its edge, in the top bar.
+    pub(crate) picked_edge: Rgba,
     /// Under the mouse.
     pub(crate) hover: Rgba,
     /// Text that matters less, such as the names in the bars not shown.
@@ -39,6 +37,11 @@ pub(crate) struct Theme {
     pub(crate) palette_edge: Rgba,
     /// For what's gone wrong, such as the daemon being out of contact.
     pub(crate) warning: Rgba,
+    /// The workspaces' colours, the dots by their names, in turn.
+    pub(crate) workspaces: [Rgba; 6],
+    /// The mode's colour, behind its name in the bottom bar: insert,
+    /// normal and visual.
+    pub(crate) modes: [Rgba; 3],
     /// The 256 indexed colours: 16 named ones, a 6×6×6 cube, and 24 greys.
     palette: [Rgba; 256],
 }
@@ -75,20 +78,32 @@ impl Default for Theme {
             palette[232 + n as usize] = hex_rgba(grey << 16 | grey << 8 | grey);
         }
         Self {
-            foreground: hex_rgba(0xc8_d0_da),
-            background: hex_rgba(0x11_15_1b),
-            cursor: hex_rgba(0xc8_d0_da),
+            foreground: hex_rgba(0xdd_e1_e6),
+            background: hex_rgba(0x0c_0e_10),
+            cursor: hex_rgba(0xdd_e1_e6),
             accent: hex_rgba(0xd9_b2_4a),
-            backdrop: hex_rgba(0x0a_0d_12),
-            backdrop_end: hex_rgba(0x0e_1a_2c),
-            edge: hex_rgba(0x1d_23_2c),
-            focus: hex_rgba(0x2f_86_a8),
-            picked: hex_rgba(0x1b_21_2a),
-            hover: hex_rgba(0x18_1e_27),
-            muted: hex_rgba(0x7c_86_96),
-            palette_background: hex_rgba(0x14_19_20),
-            palette_edge: hex_rgba(0x2a_32_3f),
+            bar: hex_rgba(0x0012_1416),
+            divider: hex_rgba(0x25_26_2c),
+            picked: hex_rgba(0x1f_20_27),
+            picked_edge: hex_rgba(0x2e_2f_36),
+            hover: hex_rgba(0x19_1b_20),
+            muted: hex_rgba(0x8a_90_99),
+            palette_background: hex_rgba(0x16_18_1c),
+            palette_edge: hex_rgba(0x2e_2f_36),
             warning: hex_rgba(0xe0_6c_75),
+            workspaces: [
+                hex_rgba(0xf8_cd_5a),
+                hex_rgba(0x7c_b7_f5),
+                hex_rgba(0xd5_9c_f1),
+                hex_rgba(0x8f_d1_8a),
+                hex_rgba(0xf0_93_7a),
+                hex_rgba(0x6f_d3_c9),
+            ],
+            modes: [
+                hex_rgba(0xc8_9c_ec),
+                hex_rgba(0xe8_c2_5a),
+                hex_rgba(0x7c_b7_f5),
+            ],
             palette,
         }
     }
@@ -101,17 +116,16 @@ impl Theme {
         let faint = |[r, g, b, _]: Rgba, alpha: f32| [r, g, b, alpha];
         match paint {
             Paint::Clear => [0.0; 4],
-            Paint::Backdrop => self.backdrop,
-            Paint::BackdropEnd => self.backdrop_end,
+            Paint::Bar => self.bar,
             Paint::WindowEdge => white(0.08),
             Paint::Shadow => [0.0, 0.0, 0.0, 0.25],
-            Paint::Card => self.background,
-            Paint::Edge => self.edge,
-            Paint::Focus => self.focus,
-            Paint::FocusGlow => faint(self.focus, 0.16),
-            Paint::Accent => self.accent,
-            Paint::AccentGlow => faint(self.accent, 0.14),
+            Paint::Tile => self.background,
+            Paint::Divider => self.divider,
+            Paint::FocusEdge => faint(self.accent, 0.35),
             Paint::Picked => self.picked,
+            Paint::PickedEdge => self.picked_edge,
+            Paint::Workspace(index) => self.workspaces[usize::from(index) % self.workspaces.len()],
+            Paint::Mode(mode) => self.modes[mode.colour()],
             Paint::Hover => self.hover,
             Paint::Icon => self.muted,
             Paint::Ink => self.foreground,

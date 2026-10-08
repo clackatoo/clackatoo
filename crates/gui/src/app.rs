@@ -23,16 +23,14 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowAttributes, WindowId};
 
 use crate::GraphicsApi;
-use crate::chrome::{Chrome, Contents, Geometry, Hit, Metrics, Status};
+use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, Status};
 use crate::desk::Desk;
 use crate::desktop::{Button, ButtonLayout, Desktop};
 use crate::fonts::Fonts;
 use crate::input;
-use crate::layout::{Card, Placement};
+use crate::layout::{Placement, Tile};
 use crate::pane::{Copy, Mode};
-use crate::render::{
-    CursorStyle, Fill, Highlight, PADDING, Paint, Picture, Renderer, Scene, SceneCursor,
-};
+use crate::render::{CursorStyle, Fill, Highlight, PADDING, Picture, Renderer, Scene, SceneCursor};
 use crate::screen::Screen;
 use crate::session::{Session, SessionEvent};
 
@@ -436,7 +434,11 @@ impl App {
             Contents {
                 workspaces: Vec::new(),
                 tabs: Vec::new(),
-                status: Status::Tabs { note: None },
+                status: Status::Tabs {
+                    mode: None,
+                    note: None,
+                    panes: 0,
+                },
                 buttons: &self.buttons,
                 bottom_shown: false,
                 menu: None,
@@ -487,16 +489,16 @@ impl App {
             | Hit::NewWorkspace
             | Hit::NewTab
             | Hit::Menu(_) => CursorIcon::Pointer,
-            Hit::Cards if let Some(axis) = self.desk.divider_at(point) => match axis {
+            Hit::Panes if let Some(axis) = self.desk.divider_at(point) => match axis {
                 Axis::LeftToRight => CursorIcon::ColResize,
                 Axis::TopToBottom => CursorIcon::RowResize,
             },
             // A program that takes the mouse gets the arrow, as clicks are
             // its, not for selecting text.
-            Hit::Cards if self.desk.reports_mouse_at(point, self.modifiers.shift) => {
+            Hit::Panes if self.desk.reports_mouse_at(point, self.modifiers.shift) => {
                 CursorIcon::Default
             }
-            Hit::Cards => CursorIcon::Text,
+            Hit::Panes => CursorIcon::Text,
             Hit::TopBar | Hit::Nothing => CursorIcon::Default,
         };
         if let Some(frame) = &self.frame
@@ -637,7 +639,7 @@ impl App {
             return;
         }
         // Clicks in a pane are the pane's: selecting, or for its program.
-        if hit == Hit::Cards {
+        if hit == Hit::Panes {
             self.clicked_in_pane(point, button, clicks);
             return;
         }
@@ -697,7 +699,7 @@ impl App {
                 self.desk.new_tab();
                 Ok(())
             }
-            Hit::Cards | Hit::Menu(_) | Hit::Nothing => Ok(()),
+            Hit::Panes | Hit::Menu(_) | Hit::Nothing => Ok(()),
         };
         if let Err(err) = result {
             log::warn!("the desktop wouldn't move or resize the window: {err}");
@@ -891,41 +893,30 @@ impl App {
         self.desk.drawn(&drawn);
     }
 
-    /// The window's background, fading corner to corner: rounded at the
-    /// corners where the window can be see-through, unless it's maximised.
+    /// The window's background: rounded at the corners where the window
+    /// can be see-through, unless it's maximised.
     fn window_fill(&self, geometry: &Geometry) -> Option<Fill> {
         let frame = self.frame.as_ref()?;
-        let [width, height] = geometry.size;
         let rounded = frame.transparent && !frame.window.is_maximized();
-        let backdrop = Fill::rounded(
-            [0.0, 0.0, width, height],
-            Paint::Backdrop,
-            if rounded { geometry.window_radius } else { 0.0 },
-        )
-        .fading(Paint::BackdropEnd, [1.0, -1.0]);
-        // A faint line round the window, where it has corners of its own.
-        Some(if rounded {
-            backdrop.bordered(geometry.edge, Paint::WindowEdge)
-        } else {
-            backdrop
-        })
+        Some(chrome::window_fill(geometry, rounded))
     }
 
-    /// Draws the notice on a card filling the space between the bars.
+    /// Draws the notice in one pane filling the space between the bars.
     fn draw_notice(&mut self, chrome: &Chrome) {
         let Some(notice) = &self.notice else { return };
         let geometry = &chrome.geometry;
         let area = geometry.area;
-        let card = Placement::new(&single_pane(), &area).panes[0].1;
-        let Ok(size) = Size::new(card.cols, card.rows) else {
+        let placement = Placement::new(&single_pane(), &area);
+        let tile = placement.panes[0].1;
+        let Ok(size) = Size::new(tile.cols, tile.rows) else {
             return;
         };
-        let lines = notice.lines(self.session.location().host(), usize::from(card.cols));
+        let lines = notice.lines(self.session.location().host(), usize::from(tile.cols));
         let screen = Screen::message(&lines, size);
         let rows: Vec<_> = screen.rows.iter().collect();
         let scenes = [Scene {
-            origin: card.origin,
-            size: card.cells_size(area.cell),
+            origin: tile.origin,
+            size: tile.cells_size(area.cell),
             rows: &rows,
             cursor: None,
             normal_mode: false,
@@ -934,7 +925,7 @@ impl App {
         let painted = chrome.paint(self.hover);
         let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
         fills.extend(painted.fills);
-        push_card(&mut fills, geometry, &card, Paint::Edge, None);
+        fills.extend(chrome::paint_panes(geometry, &placement, None));
         let mut texts = painted.texts;
         texts.extend(painted.over_texts);
         if let Some(frame) = &mut self.frame {
@@ -952,8 +943,8 @@ impl App {
         }
     }
 
-    /// Draws the frame and the shown tab's panes, each on its card. Returns
-    /// the terminals drawn, or `None` if the frame wasn't shown.
+    /// Draws the frame and the shown tab's panes. Returns the terminals
+    /// drawn, or `None` if the frame wasn't shown.
     fn draw_panes(&mut self, chrome: &Chrome) -> Option<Vec<TerminalId>> {
         let geometry = &chrome.geometry;
         let desk = &self.desk;
@@ -964,8 +955,9 @@ impl App {
         let painted = chrome.paint(self.hover);
         let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
         fills.extend(painted.fills);
+        fills.extend(chrome::paint_panes(geometry, &placement, Some(shown.pane)));
         let mut drawings = Vec::new();
-        for &(id, card) in &placement.panes {
+        for &(id, tile) in &placement.panes {
             let Some(pane) = layout_panes.iter().find(|pane| pane.id == id) else {
                 continue;
             };
@@ -973,18 +965,10 @@ impl App {
             let state = desk.pane(terminal);
             let focused = id == shown.pane;
             let normal = state.is_some_and(|state| state.mode != Mode::Insert);
-            // The focused card's edge, and its glow, show where typing
-            // goes, and in what mode.
-            let (edge, glow) = match (focused, normal) {
-                (false, _) => (Paint::Edge, None),
-                (true, false) => (Paint::Focus, Some(Paint::FocusGlow)),
-                (true, true) => (Paint::Accent, Some(Paint::AccentGlow)),
-            };
-            push_card(&mut fills, geometry, &card, edge, glow);
             let Some(state) = state.filter(|state| state.screen().is_some()) else {
                 continue;
             };
-            let height = usize::from(card.rows);
+            let height = usize::from(tile.rows);
             let (rows, mut cursor) = state.scene(height);
             if let Some(cursor) = &mut cursor
                 && !(focused && self.focused)
@@ -993,7 +977,7 @@ impl App {
             }
             drawings.push(Drawing {
                 terminal,
-                card,
+                tile,
                 rows,
                 cursor,
                 highlights: state.highlights(height),
@@ -1003,8 +987,8 @@ impl App {
         let scenes: Vec<Scene<'_>> = drawings
             .iter()
             .map(|drawing| Scene {
-                origin: drawing.card.origin,
-                size: drawing.card.cells_size(geometry.area.cell),
+                origin: drawing.tile.origin,
+                size: drawing.tile.cells_size(geometry.area.cell),
                 rows: &drawing.rows,
                 cursor: drawing.cursor,
                 normal_mode: drawing.normal_mode,
@@ -1040,43 +1024,12 @@ fn metrics(fonts: &Fonts, padding: f32) -> Metrics {
     }
 }
 
-/// A layout of one pane, for a card filling the whole space.
+/// A layout of one pane, for a tile filling the whole space.
 fn single_pane() -> Layout {
     Layout::Pane(LayoutPane {
         id: PaneId(0),
         content: Content::Terminal(TerminalId(0)),
     })
-}
-
-/// Adds a card's rounded rectangle, with its edge in `edge`, and around
-/// it, if given, a soft `glow`, fading over a few pixels.
-fn push_card(
-    fills: &mut Vec<Fill>,
-    geometry: &Geometry,
-    card: &Card,
-    edge: Paint,
-    glow: Option<Paint>,
-) {
-    if let Some(glow) = glow {
-        for spread in [3.0, 1.5] {
-            let outset = (spread * geometry.edge).round();
-            let rect = card.rect;
-            fills.push(Fill::rounded(
-                [
-                    rect.x - outset,
-                    rect.y - outset,
-                    rect.width + 2.0 * outset,
-                    rect.height + 2.0 * outset,
-                ],
-                glow,
-                geometry.radius + outset,
-            ));
-        }
-    }
-    fills.push(
-        Fill::rounded(card.rect.to_array(), Paint::Card, geometry.radius)
-            .bordered(geometry.edge, edge),
-    );
 }
 
 /// The cursor for resizing the window towards `direction`.
@@ -1096,7 +1049,7 @@ fn resize_icon(direction: ResizeDirection) -> CursorIcon {
 /// One pane, ready to draw.
 struct Drawing<'a> {
     terminal: TerminalId,
-    card: Card,
+    tile: Tile,
     rows: Vec<&'a Row>,
     cursor: Option<SceneCursor>,
     highlights: Vec<Highlight>,

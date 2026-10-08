@@ -21,11 +21,11 @@ use clackatoo_protocol::{
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
 
-use crate::chrome::Status;
+use crate::chrome::{ModeName, Status};
 use crate::command::{self, Command, Kind, Place};
 use crate::input::{self, KeyPress, Modifiers};
 use crate::layout::{Area, Direction, Divider, Placement};
-use crate::pane::{Copy, Mode, Pane, PaneMouse};
+use crate::pane::{Copy, Mode, Pane, PaneMouse, Selection};
 
 /// What a mouse event did, for the window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -105,7 +105,7 @@ pub(crate) struct Desk {
     asked: VecDeque<Asker>,
     /// Messages for the daemon, oldest first, besides the panes' own.
     outbox: Vec<ClientMessage>,
-    /// The space the panes' cards share, once the window is open.
+    /// The space the panes' tiles share, once the window is open.
     area: Option<Area>,
     /// What's being typed in the palette, such as a command after `:`.
     input: Option<Input>,
@@ -208,7 +208,7 @@ impl Desk {
     }
 
     /// Every workspace, by name, and whether it's the one shown.
-    pub(crate) fn workspace_names(&self) -> Vec<(WorkspaceId, String, bool)> {
+    pub(crate) fn workspace_names(&self) -> Vec<(WorkspaceId, String, usize, bool)> {
         let shown = self.shown.map(|shown| shown.workspace);
         self.workspaces
             .list
@@ -217,6 +217,7 @@ impl Desk {
                 (
                     workspace.id,
                     workspace.name.clone(),
+                    workspace.tabs.len(),
                     Some(workspace.id) == shown,
                 )
             })
@@ -267,8 +268,16 @@ impl Desk {
                 text: prompt,
             };
         }
+        let mode = pane.map(|pane| match pane.mode {
+            Mode::Insert => ModeName::Insert,
+            Mode::Normal => ModeName::Normal,
+            Mode::Visual(Selection::Characters) => ModeName::Visual,
+            Mode::Visual(Selection::Lines) => ModeName::VisualLine,
+        });
         Status::Tabs {
+            mode,
             note: self.message.clone().or_else(|| pane.and_then(Pane::label)),
+            panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
         }
     }
 
@@ -375,7 +384,7 @@ impl Desk {
         }
     }
 
-    /// Focuses the pane whose card is at `point`, as when it's clicked.
+    /// Focuses the pane whose tile is at `point`, as when it's clicked.
     /// Returns whether one is.
     pub(crate) fn focus_at(&mut self, point: [f32; 2]) -> bool {
         let pane = self
@@ -506,14 +515,14 @@ impl Desk {
         };
         let Some(tab) = self.shown_tab() else { return };
         let panes = tab.layout.panes();
-        for (id, card) in placement.panes {
+        for (id, tile) in placement.panes {
             let Some(pane) = panes.iter().find(|pane| pane.id == id) else {
                 continue;
             };
             let Content::Terminal(terminal) = pane.content;
             if let (Some(pane), Ok(size)) = (
                 self.panes.get_mut(&terminal),
-                Size::new(card.cols, card.rows),
+                Size::new(tile.cols, tile.rows),
             ) {
                 pane.resize(size);
             }
@@ -864,10 +873,10 @@ impl Desk {
         else {
             return;
         };
-        let Some(card) = placement.card(shown.pane) else {
+        let Some(tile) = placement.tile(shown.pane) else {
             return;
         };
-        let rect = card.rect;
+        let rect = tile.rect;
         let middle = [rect.x + rect.width / 2.0, rect.y + rect.height / 2.0];
         let half_gap = area.gap / 2.0;
         let (near, far, step) = match direction {
@@ -948,22 +957,22 @@ impl Desk {
             let Content::Terminal(terminal) = pane.content;
             Some(terminal)
         };
-        let (terminal, card) = if let Some(within) = within {
-            placement.panes.iter().find_map(|&(id, card)| {
-                (terminal_of(id) == Some(within)).then_some((within, card))
+        let (terminal, tile) = if let Some(within) = within {
+            placement.panes.iter().find_map(|&(id, tile)| {
+                (terminal_of(id) == Some(within)).then_some((within, tile))
             })?
         } else {
             let id = placement.pane_at(point)?;
-            let card = placement.panes.iter().find(|(pane, _)| *pane == id)?.1;
-            (terminal_of(id)?, card)
+            let tile = placement.panes.iter().find(|(pane, _)| *pane == id)?.1;
+            (terminal_of(id)?, tile)
         };
         #[allow(clippy::cast_possible_truncation)]
         let cell = |offset: f32, size: f32| (offset / size).floor() as i64;
         Some((
             terminal,
             [
-                cell(point[1] - card.origin[1], area.cell[1]),
-                cell(point[0] - card.origin[0], area.cell[0]),
+                cell(point[1] - tile.origin[1], area.cell[1]),
+                cell(point[0] - tile.origin[0], area.cell[0]),
             ],
         ))
     }
@@ -1168,11 +1177,11 @@ impl Desk {
         let focused = self
             .shown
             .zip(self.placement())
-            .and_then(|(shown, placement)| placement.card(shown.pane));
+            .and_then(|(shown, placement)| placement.tile(shown.pane));
         let (cols, rows) = match (side, focused) {
-            (Some(side), Some(card)) => match side.axis() {
-                Axis::LeftToRight => ((card.cols / 2).max(1), card.rows),
-                Axis::TopToBottom => (card.cols, (card.rows / 2).max(1)),
+            (Some(side), Some(tile)) => match side.axis() {
+                Axis::LeftToRight => ((tile.cols / 2).max(1), tile.rows),
+                Axis::TopToBottom => (tile.cols, (tile.rows / 2).max(1)),
             },
             _ => (whole.cols, whole.rows),
         };
@@ -1573,7 +1582,7 @@ mod tests {
             desk.mouse(point, action, 1, Modifiers::default());
         };
         let left = MouseButton::Left;
-        // The left card's cells start 5 pixels in, and are 10 × 20.
+        // The left tile's cells start 5 pixels in, and are 10 × 20.
         mouse(&mut desk, [50.0, 25.0], MouseAction::Press(left));
         mouse(&mut desk, [60.0, 25.0], MouseAction::Motion(None));
         // Still in the same cell: nothing more.
@@ -1601,11 +1610,11 @@ mod tests {
         assert_eq!(sent, expected.map(|bytes| (1, bytes.to_owned())).to_vec());
     }
 
-    /// The width of `pane`'s card.
+    /// The width of `pane`'s tile.
     fn width(desk: &Desk, pane: u32) -> f32 {
         desk.placement()
             .unwrap()
-            .card(PaneId(pane))
+            .tile(PaneId(pane))
             .unwrap()
             .rect
             .width

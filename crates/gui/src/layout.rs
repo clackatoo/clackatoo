@@ -1,10 +1,10 @@
 //! Where a tab's panes go in the window, and which pane is next to which.
 //!
-//! Each pane is a card: a rectangle with a gap around it, holding its
-//! terminal's cells a little in from its edges. A split shares its space
-//! between its parts by their shares, in whole pixels, with any pixels
-//! left over going to the first parts. The gaps between a split's parts
-//! are its dividers, which dragging moves.
+//! Each pane is a tile: a rectangle beside the others, a line apart,
+//! holding its terminal's cells a little in from its edges. A split shares
+//! its space between its parts by their shares, in whole pixels, with any
+//! pixels left over going to the first parts. The lines between a split's
+//! parts are its dividers, which dragging moves.
 
 use clackatoo_protocol::{Axis, Layout, PaneId};
 
@@ -35,21 +35,21 @@ impl Rect {
     }
 }
 
-/// The space a tab's cards share, and how they're spaced.
+/// The space a tab's tiles share, and how they're spaced.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Area {
     pub(crate) rect: Rect,
     /// A cell's width and height.
     pub(crate) cell: [f32; 2],
-    /// The space between cards.
+    /// The space between tiles.
     pub(crate) gap: f32,
-    /// How far in from a card's edges its cells start.
+    /// How far in from a tile's edges its cells start.
     pub(crate) inset: f32,
 }
 
-/// One pane's card, and the cells it holds.
+/// One pane's tile, and the cells it holds.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Card {
+pub(crate) struct Tile {
     pub(crate) rect: Rect,
     /// Where its cells start.
     pub(crate) origin: [f32; 2],
@@ -57,7 +57,7 @@ pub(crate) struct Card {
     pub(crate) rows: u16,
 }
 
-impl Card {
+impl Tile {
     /// The pixels its cells cover.
     pub(crate) fn cells_size(&self, cell: [f32; 2]) -> [f32; 2] {
         [
@@ -123,7 +123,7 @@ impl Divider {
 /// Where everything in a tab goes.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Placement {
-    pub(crate) panes: Vec<(PaneId, Card)>,
+    pub(crate) panes: Vec<(PaneId, Tile)>,
     pub(crate) dividers: Vec<Divider>,
 }
 
@@ -138,7 +138,7 @@ impl Placement {
     fn place(&mut self, layout: &Layout, rect: Rect, area: &Area, path: &mut Vec<u16>) {
         let (axis, parts, shares) = match layout {
             Layout::Pane(pane) => {
-                self.panes.push((pane.id, card(rect, area)));
+                self.panes.push((pane.id, tile(rect, area)));
                 return;
             }
             Layout::Split {
@@ -207,18 +207,18 @@ impl Placement {
             .max_by_key(|divider| divider.split.len())
     }
 
-    pub(crate) fn card(&self, pane: PaneId) -> Option<Card> {
+    pub(crate) fn tile(&self, pane: PaneId) -> Option<Tile> {
         self.panes
             .iter()
             .find(|(id, _)| *id == pane)
-            .map(|&(_, card)| card)
+            .map(|&(_, tile)| tile)
     }
 
-    /// The pane whose card is at `point`, if any.
+    /// The pane whose tile is at `point`, if any.
     pub(crate) fn pane_at(&self, point: [f32; 2]) -> Option<PaneId> {
         self.panes
             .iter()
-            .find(|(_, card)| card.rect.contains(point))
+            .find(|(_, tile)| tile.rect.contains(point))
             .map(|&(id, _)| id)
     }
 
@@ -226,13 +226,13 @@ impl Placement {
     /// side, the one level with its top or left, or failing that the
     /// nearest.
     pub(crate) fn neighbour(&self, from: PaneId, direction: Direction) -> Option<PaneId> {
-        let from_rect = self.card(from)?.rect;
+        let from_rect = self.tile(from)?.rect;
         let mut best: Option<((f32, f32), PaneId)> = None;
-        for &(id, card) in &self.panes {
+        for &(id, tile) in &self.panes {
             if id == from {
                 continue;
             }
-            let rect = card.rect;
+            let rect = tile.rect;
             // How far it is, and how far its side is from being level
             // with ours, along the side they share.
             let found = match direction {
@@ -288,14 +288,14 @@ fn share_out(length: f32, gap: f32, shares: &[u32]) -> Vec<f32> {
     lengths
 }
 
-/// A card filling `rect`, with as many whole cells as fit inside its inset.
+/// A tile filling `rect`, with as many whole cells as fit inside its inset.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn card(rect: Rect, area: &Area) -> Card {
+fn tile(rect: Rect, area: &Area) -> Tile {
     let cells = |pixels: f32, cell: f32| {
         u16::try_from(((pixels - 2.0 * area.inset) / cell).floor().max(1.0) as u32)
             .unwrap_or(u16::MAX)
     };
-    Card {
+    Tile {
         rect,
         origin: [rect.x + area.inset, rect.y + area.inset],
         cols: cells(rect.width, area.cell[0]),
@@ -374,7 +374,7 @@ mod tests {
             vec![pane(1), split(Axis::TopToBottom, vec![pane(2), pane(3)])],
         );
         let placement = Placement::new(&layout, &area());
-        let rects: Vec<Rect> = placement.panes.iter().map(|(_, card)| card.rect).collect();
+        let rects: Vec<Rect> = placement.panes.iter().map(|(_, tile)| tile.rect).collect();
         assert_eq!(
             rects,
             [
@@ -383,9 +383,9 @@ mod tests {
                 rect(210.0, 110.0, 200.0, 100.0),
             ]
         );
-        // Inside a 200 × 100 card's inset of 5: 19 columns and 4 rows.
-        let card = placement.card(PaneId(2)).unwrap();
-        assert_eq!((card.cols, card.rows, card.origin), (19, 4, [215.0, 5.0]));
+        // Inside a 200 × 100 tile's inset of 5: 19 columns and 4 rows.
+        let tile = placement.tile(PaneId(2)).unwrap();
+        assert_eq!((tile.cols, tile.rows, tile.origin), (19, 4, [215.0, 5.0]));
     }
 
     #[test]
@@ -395,7 +395,7 @@ mod tests {
             Placement::new(&layout, area)
                 .panes
                 .iter()
-                .map(|(_, card)| card.rect.width)
+                .map(|(_, tile)| tile.rect.width)
                 .collect()
         };
         // 410 less two gaps is 390: 130 each.
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn neighbours_are_found_by_direction_and_cards_by_point() {
+    fn neighbours_are_found_by_direction_and_tiles_by_point() {
         // 1 | 2
         //   | -
         //   | 3
@@ -440,7 +440,7 @@ mod tests {
         let widths: Vec<f32> = Placement::new(&layout, &area())
             .panes
             .iter()
-            .map(|(_, card)| card.rect.width)
+            .map(|(_, tile)| tile.rect.width)
             .collect();
         // 400 pixels besides the gap: 300 and 100.
         assert_eq!(widths, [300.0, 100.0]);

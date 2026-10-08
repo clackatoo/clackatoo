@@ -23,7 +23,7 @@ use crate::glyphs::{ATLAS_SIZE, AtlasGlyph, GlyphCache};
 pub(crate) struct Picture<'a> {
     /// The panes.
     pub(crate) scenes: &'a [Scene<'a>],
-    /// Rectangles of the window's own, such as the cards and the names in
+    /// Rectangles of the window's own, such as the tiles and the names in
     /// the bars, under the panes.
     pub(crate) fills: &'a [Fill],
     /// Rectangles of the window's own over the panes, such as the palette.
@@ -47,9 +47,6 @@ pub(crate) struct Fill {
     pub(crate) radius: f32,
     /// A border inside its edge: how thick, and its colour.
     pub(crate) border: Option<(f32, Paint)>,
-    /// A fade to another colour: the colour, and which way, as a vector
-    /// across the rectangle, where one is its whole width or height.
-    pub(crate) fade: Option<(Paint, [f32; 2])>,
 }
 
 impl Fill {
@@ -60,7 +57,6 @@ impl Fill {
             paint,
             radius: 0.0,
             border: None,
-            fade: None,
         }
     }
 
@@ -71,7 +67,6 @@ impl Fill {
             paint,
             radius,
             border: None,
-            fade: None,
         }
     }
 
@@ -82,15 +77,6 @@ impl Fill {
             ..self
         }
     }
-
-    /// Fading to `paint` towards `direction`: `[0.0, 1.0]` top to bottom,
-    /// `[1.0, 1.0]` corner to corner.
-    pub(crate) fn fading(self, paint: Paint, direction: [f32; 2]) -> Self {
-        Self {
-            fade: Some((paint, direction)),
-            ..self
-        }
-    }
 }
 
 /// The colours the window's own things are drawn in.
@@ -98,28 +84,26 @@ impl Fill {
 pub(crate) enum Paint {
     /// Nothing: for a border alone.
     Clear,
-    /// The window's background, at the bottom left of its fade...
-    Backdrop,
-    /// ...and at the top right, bluer.
-    BackdropEnd,
+    /// The bars, and the window behind everything.
+    Bar,
     /// The faint line round the window.
     WindowEdge,
     /// A soft shadow, under something raised.
     Shadow,
-    /// A pane's card, the colour its terminal's background is.
-    Card,
-    /// A card's edge.
-    Edge,
-    /// The focused card's edge, while typing goes to its program...
-    Focus,
-    /// ...and the glow around it.
-    FocusGlow,
-    /// clackatoo's own colour: the focused card's edge in normal mode...
-    Accent,
-    /// ...and the glow around it.
-    AccentGlow,
-    /// Behind what's picked, such as the workspace shown.
+    /// Behind a pane, the colour its terminal's background is.
+    Tile,
+    /// The lines between panes, and between them and the bars.
+    Divider,
+    /// The focused pane's edge, when there are others.
+    FocusEdge,
+    /// Behind what's picked, such as the workspace shown...
     Picked,
+    /// ...and its edge, in the top bar.
+    PickedEdge,
+    /// The dot by a workspace's name, by its place in the list.
+    Workspace(u8),
+    /// Behind the mode's name.
+    Mode(crate::chrome::ModeName),
     /// Under the mouse.
     Hover,
     /// Drawn icons.
@@ -153,8 +137,8 @@ pub(crate) enum Ink {
     Plain,
     /// In a quieter colour, for what matters less.
     Muted,
-    /// Bold, in the text colour, for what's picked.
-    Strong,
+    /// Bold, in the bars' colour, on something coloured.
+    OnColor,
     /// In the warning colour, for what's gone wrong.
     Warning,
 }
@@ -243,12 +227,6 @@ struct Rect {
     /// How thick its border is, in pixels, inside its edge.
     border: f32,
     border_color: Rgba,
-    /// The colour it fades to, along `direction`.
-    color_to: Rgba,
-    /// Which way it fades from `color` to `color_to`, as a vector across
-    /// the rectangle, where one is its whole width or height. Zero for no
-    /// fade.
-    direction: [f32; 2],
 }
 
 impl Rect {
@@ -261,8 +239,6 @@ impl Rect {
             radius: 0.0,
             border: 0.0,
             border_color: [0.0; 4],
-            color_to: color,
-            direction: [0.0; 2],
         }
     }
 }
@@ -407,7 +383,7 @@ impl Renderer {
             ("rect_vs", "rect_fs"),
             &wgpu::vertex_attr_array![
                 0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32,
-                4 => Float32, 5 => Float32x4, 6 => Float32x4, 7 => Float32x2,
+                4 => Float32, 5 => Float32x4,
             ],
             std::mem::size_of::<Rect>() as u64,
         );
@@ -525,7 +501,7 @@ impl Renderer {
             let clear = if picture.transparent {
                 [0.0; 4]
             } else {
-                self.theme.backdrop
+                self.theme.bar
             };
             let [r, g, b, a] = clear.map(f64::from);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -585,27 +561,20 @@ impl Renderer {
             let (border, border_color) = fill.border.map_or((0.0, [0.0; 4]), |(width, paint)| {
                 (width, self.theme.paint(paint))
             });
-            let color = self.theme.paint(fill.paint);
-            let (color_to, direction) =
-                fill.fade.map_or((color, [0.0; 2]), |(paint, direction)| {
-                    (self.theme.paint(paint), direction)
-                });
             Rect {
                 origin: [left, top],
                 size: [width, height],
-                color,
+                color: self.theme.paint(fill.paint),
                 radius: fill.radius,
                 border,
                 border_color,
-                color_to,
-                direction,
             }
         };
         let (under, over): (Vec<Rect>, Vec<Rect>) = (
             picture.fills.iter().map(rect).collect(),
             picture.over.iter().map(rect).collect(),
         );
-        // The cards go under the panes' cells, and the palette over them.
+        // The tiles go under the panes' cells, and the palette over them.
         self.rects.splice(0..0, under);
         self.overlays.extend(over);
         for text in picture.texts {
@@ -751,9 +720,10 @@ impl Renderer {
     fn push_text(&mut self, text: &Text<'_>, fonts: &mut Fonts) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
-        let bold = text.ink == Ink::Strong;
+        let bold = text.ink == Ink::OnColor;
         let color = match text.ink {
-            Ink::Plain | Ink::Strong => self.theme.foreground,
+            Ink::Plain => self.theme.foreground,
+            Ink::OnColor => self.theme.bar,
             Ink::Muted => self.theme.muted,
             Ink::Warning => self.theme.warning,
         };

@@ -526,20 +526,14 @@ impl Pane {
         }
     }
 
-    /// The corner label: a search being typed, a message, or the mode,
+    /// The note for the bottom bar: a search being typed, or a message,
     /// with how far up the view is scrolled.
     pub(crate) fn label(&self) -> Option<String> {
         if let Some(prompt) = &self.prompt {
             let slash = if prompt.backward { '?' } else { '/' };
             return Some(format!("{slash}{}▏", prompt.query));
         }
-        let mode = match self.mode {
-            Mode::Insert => None,
-            Mode::Normal => Some("NORMAL"),
-            Mode::Visual(Selection::Characters) => Some("VISUAL"),
-            Mode::Visual(Selection::Lines) => Some("VISUAL LINE"),
-        };
-        let mut label = self.status.clone().or(mode.map(str::to_owned));
+        let mut label = self.status.clone();
         if self.scroll > 0 {
             let up = format!("↑{}", self.scroll);
             label = Some(match label {
@@ -878,7 +872,7 @@ mod tests {
         let terminal = terminal("one\r\ntwo\r\nthree");
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
-        assert_eq!(pane.label().as_deref(), Some("NORMAL"));
+        assert_eq!(pane.mode, Mode::Normal);
         assert_eq!(cursor(&pane), ("three".into(), 2, 5));
         keys(&mut pane, "k");
         assert_eq!(cursor(&pane), ("two".into(), 1, 2));
@@ -897,13 +891,13 @@ mod tests {
         keys(&mut pane, "kkkkkk");
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("line 7".into(), 0, 0));
-        assert_eq!(pane.label().as_deref(), Some("NORMAL  ↑2"));
+        assert_eq!(pane.label().as_deref(), Some("↑2"));
         keys(&mut pane, "gg");
         serve(&mut pane, &terminal);
         assert_eq!(cursor(&pane), ("line 1".into(), 0, 0));
         keys(&mut pane, "G");
         assert_eq!(cursor(&pane).1, 4);
-        assert_eq!(pane.label().as_deref(), Some("NORMAL"));
+        assert_eq!(pane.label(), None, "back at the live screen");
     }
 
     #[test]
@@ -1007,7 +1001,7 @@ mod tests {
         let mut pane = pane(&terminal);
         normal_mode(&mut pane);
         keys(&mut pane, "k0ve");
-        assert_eq!(pane.label().as_deref(), Some("VISUAL"));
+        assert_eq!(pane.mode, Mode::Visual(Selection::Characters));
         let highlights = pane.highlights(5);
         assert_eq!(highlights.len(), 1);
         assert_eq!((highlights[0].line, highlights[0].cols.clone()), (0, 0..5));
