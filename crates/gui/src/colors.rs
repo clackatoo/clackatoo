@@ -122,6 +122,7 @@ impl Theme {
             Paint::Tile => self.background,
             Paint::Divider => self.divider,
             Paint::FocusEdge => faint(self.accent, 0.35),
+            Paint::Accent => self.accent,
             Paint::Picked => self.picked,
             Paint::PickedEdge => self.picked_edge,
             Paint::Workspace(index) => self.workspaces[usize::from(index) % self.workspaces.len()],

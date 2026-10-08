@@ -1006,11 +1006,18 @@ impl App {
             .collect();
         let mut texts = painted.texts;
         texts.extend(painted.over_texts);
+        let mut over = painted.over;
+        // Ctrl+B p: each pane's number, over it, to pick it by.
+        if desk.numbering_panes() {
+            let (fills, numbers) = chrome::paint_pane_numbers(geometry, &placement);
+            over.extend(fills);
+            texts.extend(numbers);
+        }
         let transparent = self.frame.as_ref()?.transparent;
         let picture = Picture {
             scenes: &scenes,
             fills: &fills,
-            over: &painted.over,
+            over: &over,
             texts: &texts,
             transparent,
         };

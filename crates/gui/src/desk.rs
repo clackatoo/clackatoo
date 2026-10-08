@@ -68,11 +68,16 @@ enum Asked {
     Resize,
 }
 
+mod jumps;
+mod prefix;
+
 /// Something being typed in the palette.
 #[derive(Debug)]
 struct Input {
     purpose: Purpose,
     text: String,
+    /// Which of the choices listed under it is picked, if it lists any.
+    selected: usize,
 }
 
 /// What's typed in the palette is for.
@@ -84,6 +89,8 @@ enum Purpose {
     RenameWorkspace(WorkspaceId),
     /// A tab's new name: empty for none.
     RenameTab(TabId),
+    /// A workspace to switch to, or the name of one to make.
+    Workspace,
 }
 
 /// The window's view of the daemon's workspaces.
@@ -133,6 +140,24 @@ pub(crate) struct Desk {
     resizes_pending: usize,
     /// Every workspace has closed, so the window should too.
     finished: bool,
+    /// What Ctrl+B is waiting for, after it's pressed.
+    prefix: Option<prefix::Prefix>,
+    /// Where the focus has been.
+    jumps: jumps::Jumps,
+}
+
+/// Whether `press` is Ctrl+Shift+O, back through where the focus has been
+/// (`Some(true)`), or Ctrl+Shift+I, forward again (`Some(false)`).
+fn global_jump(press: &KeyPress<'_>) -> Option<bool> {
+    let modifiers = press.modifiers;
+    if !(modifiers.ctrl && modifiers.shift && !modifiers.alt) {
+        return None;
+    }
+    match press.key {
+        Key::Character(text) if text.eq_ignore_ascii_case("o") => Some(true),
+        Key::Character(text) if text.eq_ignore_ascii_case("i") => Some(false),
+        _ => None,
+    }
 }
 
 impl Desk {
@@ -250,10 +275,28 @@ impl Desk {
                 Purpose::Command => (None, ":"),
                 Purpose::RenameWorkspace(_) => (Some("Rename workspace"), ""),
                 Purpose::RenameTab(_) => (Some("Rename tab"), ""),
+                Purpose::Workspace => (Some("Workspace"), ""),
+            };
+            let choices = match input.purpose {
+                Purpose::Workspace => {
+                    let mut choices: Vec<(String, bool)> = self
+                        .workspace_choices(&input.text)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (_, name))| (name, index == input.selected))
+                        .collect();
+                    let name = input.text.trim();
+                    if choices.is_empty() && !name.is_empty() {
+                        choices.push((format!("New workspace “{name}”"), true));
+                    }
+                    choices
+                }
+                _ => Vec::new(),
             };
             return Status::Typing {
                 label: label.map(str::to_owned),
                 text: format!("{prefix}{}▏", input.text),
+                choices,
             };
         }
         let pane = self
@@ -266,6 +309,7 @@ impl Desk {
             return Status::Typing {
                 label: None,
                 text: prompt,
+                choices: Vec::new(),
             };
         }
         let mode = pane.map(|pane| match pane.mode {
@@ -276,7 +320,11 @@ impl Desk {
         });
         Status::Tabs {
             mode,
-            note: self.message.clone().or_else(|| pane.and_then(Pane::label)),
+            note: self
+                .prefix_note()
+                .map(str::to_owned)
+                .or_else(|| self.message.clone())
+                .or_else(|| pane.and_then(Pane::label)),
             panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
         }
     }
@@ -316,6 +364,7 @@ impl Desk {
             self.input = Some(Input {
                 purpose: Purpose::RenameWorkspace(workspace),
                 text: found.name.clone(),
+                selected: 0,
             });
         }
     }
@@ -332,6 +381,7 @@ impl Desk {
             self.input = Some(Input {
                 purpose: Purpose::RenameTab(tab),
                 text,
+                selected: 0,
             });
         }
     }
@@ -436,6 +486,29 @@ impl Desk {
     /// Switches to `pane`, wherever it is. From a pane in normal mode, it
     /// arrives in normal mode too. The pane left stays as it was.
     fn show_pane(&mut self, pane: PaneId) {
+        self.move_focus(pane, true);
+    }
+
+    /// Goes back through the places the focus has been, or forward again:
+    /// within the tab shown, or anywhere.
+    fn jump(&mut self, back: bool, within_tab: bool) {
+        let Some(shown) = self.shown else { return };
+        let workspaces = &self.workspaces;
+        let wanted = |place: &Shown| {
+            *place != shown
+                && workspaces
+                    .find_pane(place.pane)
+                    .is_some_and(|(_, tab, _)| !within_tab || tab.id == shown.tab)
+        };
+        if let Some((index, place)) = self.jumps.step(back, wanted) {
+            self.jumps.go(index);
+            self.move_focus(place.pane, false);
+        }
+    }
+
+    /// Switches to `pane`, as [`show_pane`](Self::show_pane) does, adding
+    /// the move to where the focus has been if `record`.
+    fn move_focus(&mut self, pane: PaneId, record: bool) {
         let Some((workspace, tab, _)) = self.workspaces.find_pane(pane) else {
             return;
         };
@@ -446,6 +519,9 @@ impl Desk {
         };
         if self.shown == Some(shown) {
             return;
+        }
+        if record {
+            self.jumps.moved(self.shown, shown);
         }
         let unfocused = self.unfocused;
         let normal = self.focused_pane().is_some_and(|left| {
@@ -693,6 +769,27 @@ impl Desk {
         // or the first key of a two-key command, before the chord arrives.
         if input::is_modifier(press.key) {
             return false;
+        }
+        // Ctrl+Shift+O and Ctrl+Shift+I: the terminal's own keys, as
+        // Ctrl+Shift+C is, so programs lose nothing.
+        if self.input.is_none()
+            && let Some(back) = global_jump(press)
+        {
+            self.prefix = None;
+            self.jump(back, false);
+            return true;
+        }
+        if let Some(prefix) = self.prefix.take() {
+            return self.prefix_key(prefix, press);
+        }
+        let prompting = self
+            .focused_terminal()
+            .and_then(|terminal| self.panes.get(&terminal))
+            .is_some_and(Pane::prompting);
+        if self.input.is_none() && !prompting && prefix::is_ctrl_b(press) {
+            self.prefix = Some(prefix::Prefix::Waiting);
+            self.message = None;
+            return true;
         }
         if self.input.is_some() {
             // Ctrl+; and its kin close the command line, and go on to the
@@ -997,6 +1094,7 @@ impl Desk {
                 self.input = Some(Input {
                     purpose: Purpose::Command,
                     text: String::new(),
+                    selected: 0,
                 });
                 return true;
             }
@@ -1013,8 +1111,21 @@ impl Desk {
             Some('j') if ctrl => Direction::Down,
             Some('k') if ctrl => Direction::Up,
             Some('l') if ctrl => Direction::Right,
+            // Back and forward through the tab's panes, as through Vim's
+            // jump list.
+            Some(key @ ('o' | 'i')) if ctrl => {
+                self.jump(key == 'o', true);
+                return true;
+            }
             _ => return false,
         };
+        self.focus_towards(direction);
+        true
+    }
+
+    /// Focuses the pane beside the focused one towards `direction`, if
+    /// there is one.
+    fn focus_towards(&mut self, direction: Direction) {
         if let Some(shown) = self.shown
             && let Some(next) = self
                 .placement()
@@ -1022,7 +1133,6 @@ impl Desk {
         {
             self.show_pane(next);
         }
-        true
     }
 
     /// Handles a key while the palette is open.
@@ -1032,8 +1142,27 @@ impl Desk {
         };
         match press.key {
             Key::Named(NamedKey::Escape) => self.input = None,
+            Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp | NamedKey::Tab)
+                if input.purpose == Purpose::Workspace =>
+            {
+                let up = *press.key == Key::Named(NamedKey::ArrowUp)
+                    || (*press.key == Key::Named(NamedKey::Tab) && press.modifiers.shift);
+                let text = input.text.clone();
+                let count = self.workspace_choices(&text).len();
+                let Some(input) = &mut self.input else { return };
+                input.selected = if up {
+                    input.selected.saturating_sub(1)
+                } else {
+                    (input.selected + 1).min(count.saturating_sub(1))
+                };
+            }
             Key::Named(NamedKey::Enter) => {
-                let Some(Input { purpose, text }) = self.input.take() else {
+                let Some(Input {
+                    purpose,
+                    text,
+                    selected,
+                }) = self.input.take()
+                else {
                     return;
                 };
                 match purpose {
@@ -1051,6 +1180,7 @@ impl Desk {
                     Purpose::RenameTab(tab) => {
                         self.request(Request::RenameTab { tab, name: text }, Asked::Command);
                     }
+                    Purpose::Workspace => self.pick_workspace(&text, selected),
                 }
             }
             Key::Named(NamedKey::Backspace) => {
@@ -1066,6 +1196,7 @@ impl Desk {
                     input
                         .text
                         .extend(text.chars().filter(|ch| !ch.is_control()));
+                    input.selected = 0;
                 }
             }
         }
@@ -1500,6 +1631,217 @@ mod tests {
         assert_eq!(mode(&desk, 2), Mode::Normal);
     }
 
+    /// Ctrl+B, then `keys`, each as typed.
+    fn ctrl_b(desk: &mut Desk, keys: &str) {
+        ctrl(desk, "b");
+        type_keys(desk, keys);
+    }
+
+    fn type_keys(desk: &mut Desk, keys: &str) {
+        for ch in keys.chars() {
+            press(
+                desk,
+                Key::Character(ch.to_string().into()),
+                None,
+                Modifiers::default(),
+            );
+        }
+    }
+
+    fn three_tabs() -> Desk {
+        desk(workspaces(vec![workspace(
+            1,
+            "work",
+            vec![
+                tab(1, side_by_side(vec![pane(1), pane(2), pane(3)])),
+                tab(2, pane(4)),
+                tab(3, pane(5)),
+            ],
+        )]))
+    }
+
+    #[test]
+    fn ctrl_b_moves_between_tabs_and_panes_in_either_mode() {
+        let mut desk = three_tabs();
+        // In insert mode, the keys don't reach the program.
+        ctrl_b(&mut desk, "3");
+        assert_eq!(desk.shown().unwrap().tab, TabId(3));
+        assert!(
+            !answer_all(&mut desk)
+                .iter()
+                .any(|request| matches!(request, Request::SendInput { .. }))
+        );
+        ctrl_b(&mut desk, "]");
+        assert_eq!(desk.shown().unwrap().tab, TabId(1), "round to the first");
+        ctrl_b(&mut desk, "[");
+        assert_eq!(desk.shown().unwrap().tab, TabId(3), "round to the last");
+        ctrl_b(&mut desk, "1");
+        // Panes by number, shown on screen while one is awaited.
+        ctrl_b(&mut desk, "p");
+        assert!(desk.numbering_panes());
+        assert_eq!(
+            desk.status(),
+            Status::Tabs {
+                mode: Some(ModeName::Insert),
+                note: Some("pane number".into()),
+                panes: 3
+            }
+        );
+        type_keys(&mut desk, "3");
+        assert!(!desk.numbering_panes());
+        assert_eq!(shown_pane(&desk), PaneId(3));
+        ctrl_b(&mut desk, "h");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        // And in normal mode alike, where Ctrl+B used to page.
+        normal_mode(&mut desk);
+        ctrl_b(&mut desk, "p1");
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        assert_eq!(mode(&desk, 1), Mode::Normal);
+    }
+
+    #[test]
+    fn ctrl_b_makes_and_closes_panes_and_passes_itself_on() {
+        let mut desk = three_tabs();
+        answer_all(&mut desk);
+        ctrl_b(&mut desk, "c");
+        ctrl_b(&mut desk, "|");
+        ctrl_b(&mut desk, "-");
+        ctrl_b(&mut desk, "x");
+        let requests = answer_all(&mut desk);
+        assert!(matches!(requests[0], Request::NewTab { .. }));
+        assert!(matches!(
+            requests[1],
+            Request::Split {
+                side: Side::Right,
+                ..
+            }
+        ));
+        assert!(matches!(
+            requests[2],
+            Request::Split {
+                side: Side::Below,
+                ..
+            }
+        ));
+        assert!(matches!(requests[3], Request::ClosePane { .. }));
+        // Twice sends one to the program.
+        ctrl_b(&mut desk, "");
+        ctrl(&mut desk, "b");
+        assert!(answer_all(&mut desk).contains(&Request::SendInput {
+            terminal: TerminalId(1),
+            bytes: vec![0x02],
+        }));
+        // Anything else does nothing, and goes nowhere.
+        ctrl_b(&mut desk, "z");
+        assert_eq!(desk.prefix, None);
+        assert!(answer_all(&mut desk).is_empty());
+    }
+
+    #[test]
+    fn ctrl_b_w_picks_a_workspace_or_makes_one() {
+        let mut desk = desk(workspaces(vec![
+            workspace(1, "clackatoo", vec![tab(1, pane(1))]),
+            workspace(2, "peios", vec![tab(2, pane(2))]),
+            workspace(3, "homelab", vec![tab(3, pane(3))]),
+        ]));
+        ctrl_b(&mut desk, "w");
+        let choices = |desk: &Desk| match desk.status() {
+            Status::Typing { choices, .. } => choices,
+            Status::Tabs { .. } => panic!("the picker closed"),
+        };
+        assert_eq!(choices(&desk).len(), 3);
+        // Typing narrows them; Down picks the next.
+        type_keys(&mut desk, "o");
+        let names: Vec<String> = choices(&desk).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["clackatoo", "peios", "homelab"]);
+        type_keys(&mut desk, "s");
+        assert_eq!(choices(&desk), [("peios".to_owned(), true)]);
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(desk.shown().unwrap().workspace, WorkspaceId(2));
+        // A name nothing has makes a workspace by it.
+        ctrl_b(&mut desk, "wnas");
+        assert_eq!(choices(&desk), [("New workspace “nas”".to_owned(), true)]);
+        answer_all(&mut desk);
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert!(matches!(
+            &answer_all(&mut desk)[..],
+            [Request::NewWorkspace { name: Some(name), .. }] if name == "nas"
+        ));
+        // Down and Up move through the choices.
+        ctrl_b(&mut desk, "w");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::ArrowDown),
+            None,
+            Modifiers::default(),
+        );
+        press(
+            &mut desk,
+            Key::Named(NamedKey::ArrowDown),
+            None,
+            Modifiers::default(),
+        );
+        press(
+            &mut desk,
+            Key::Named(NamedKey::ArrowUp),
+            None,
+            Modifiers::default(),
+        );
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(desk.shown().unwrap().workspace, WorkspaceId(2));
+    }
+
+    #[test]
+    fn ctrl_o_and_ctrl_i_go_back_and_forth_within_the_tab_or_anywhere() {
+        let mut desk = three_tabs();
+        normal_mode(&mut desk);
+        // Pane 2, tab 2's pane 4, back to tab 1 (at pane 1), then pane 3.
+        ctrl_b(&mut desk, "p2");
+        ctrl_b(&mut desk, "2");
+        ctrl_b(&mut desk, "1");
+        ctrl_b(&mut desk, "p3");
+        // Within the tab: back to pane 1, then past tab 2's pane to pane 2,
+        // and forward again past it to pane 1.
+        ctrl(&mut desk, "o");
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        ctrl(&mut desk, "o");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        ctrl(&mut desk, "i");
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        // Anywhere, in insert mode too: back to tab 2's pane, and forward.
+        type_keys(&mut desk, "i");
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            alt: false,
+        };
+        press(&mut desk, Key::Character("O".into()), None, ctrl_shift);
+        assert_eq!(shown_pane(&desk), PaneId(4));
+        press(&mut desk, Key::Character("I".into()), None, ctrl_shift);
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        assert!(
+            !answer_all(&mut desk)
+                .iter()
+                .any(|request| matches!(request, Request::SendInput { .. })),
+            "the program heard nothing"
+        );
+    }
+
     #[test]
     fn numbers_move_between_tabs() {
         let mut desk = desk(workspaces(vec![workspace(
@@ -1531,6 +1873,7 @@ mod tests {
             Status::Typing {
                 label: Some("Rename workspace".into()),
                 text: "work▏".into(),
+                choices: Vec::new(),
             }
         );
         for _ in 0..4 {

@@ -190,8 +190,13 @@ pub(crate) struct Item<T> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
     /// Something being typed, such as a command or a search, in the
-    /// palette, perhaps after a label saying what it's for.
-    Typing { label: Option<String>, text: String },
+    /// palette, perhaps after a label saying what it's for, and with
+    /// choices listed under it, one of them picked.
+    Typing {
+        label: Option<String>,
+        text: String,
+        choices: Vec<(String, bool)>,
+    },
     /// The focused pane's mode, the tabs, and on the right a note (how far
     /// the view is scrolled, or a message), how many panes the tab has,
     /// and a hint.
@@ -228,6 +233,8 @@ pub(crate) struct Chrome {
     pub(crate) notes: Vec<(String, f32)>,
     /// The palette, while something's being typed.
     pub(crate) palette: Option<Rect>,
+    /// Where each of the palette's choices goes.
+    pub(crate) choices: Vec<Rect>,
     /// Where the palette's text starts, after its label.
     pub(crate) palette_text_x: f32,
     /// The `+` after the workspaces, which makes one.
@@ -347,15 +354,15 @@ impl Chrome {
             ),
             Status::Typing { .. } => Bottom::default(),
         };
-        let (palette, palette_text_x) = match &status {
-            Status::Typing { label, .. } => {
-                let rect = place_palette(&geometry);
+        let (palette, palette_text_x, choices) = match &status {
+            Status::Typing { label, choices, .. } => {
+                let (rect, rows) = place_palette(&geometry, choices.len());
                 let label = label
                     .as_deref()
                     .map_or(0.0, |label| measure(label, false) + 2.0 * padding);
-                (Some(rect), (rect.x + 2.0 * padding + label).round())
+                (Some(rect), (rect.x + 2.0 * padding + label).round(), rows)
             }
-            Status::Tabs { .. } => (None, 0.0),
+            Status::Tabs { .. } => (None, 0.0, Vec::new()),
         };
         let menu = contents
             .menu
@@ -370,6 +377,7 @@ impl Chrome {
             notes: bottom.notes,
             palette,
             palette_text_x,
+            choices,
             new_workspace,
             new_tab: bottom.new_tab,
             menu,
@@ -587,7 +595,15 @@ impl Chrome {
     /// The palette, over the tiles, while something's being typed.
     fn paint_palette<'a>(&'a self, painted: &mut Painted<'a>) {
         let metrics = self.geometry.metrics;
-        if let (Some(rect), Status::Typing { label, text }) = (self.palette, &self.status) {
+        if let (
+            Some(rect),
+            Status::Typing {
+                label,
+                text,
+                choices,
+            },
+        ) = (self.palette, &self.status)
+        {
             push_shadow(
                 &mut painted.over,
                 rect,
@@ -598,11 +614,12 @@ impl Chrome {
                 Fill::rounded(rect.to_array(), Paint::Palette, self.geometry.radius)
                     .bordered(self.geometry.edge, Paint::PaletteEdge),
             );
+            let line_height = (metrics.cell[1] + 4.0 * metrics.padding).round();
             if let Some(label) = label {
                 painted.over_texts.push(Text {
                     origin: [
                         rect.x + 2.0 * metrics.padding,
-                        (rect.y + (rect.height - metrics.ui_line) / 2.0).round(),
+                        (rect.y + (line_height - metrics.ui_line) / 2.0).round(),
                     ],
                     content: label,
                     ink: Ink::Muted,
@@ -612,12 +629,30 @@ impl Chrome {
             painted.over_texts.push(Text {
                 origin: [
                     self.palette_text_x,
-                    rect.y + (rect.height - metrics.cell[1]) / 2.0,
+                    rect.y + (line_height - metrics.cell[1]) / 2.0,
                 ],
                 content: text,
                 ink: Ink::Plain,
                 font: TextFont::Mono,
             });
+            for ((choice, picked), row) in choices.iter().zip(&self.choices) {
+                if *picked {
+                    painted.over.push(Fill::rounded(
+                        row.to_array(),
+                        Paint::Picked,
+                        (1.5 * metrics.padding).round(),
+                    ));
+                }
+                painted.over_texts.push(Text {
+                    origin: [
+                        row.x + 2.0 * metrics.padding,
+                        (row.y + (row.height - metrics.ui_line) / 2.0).round(),
+                    ],
+                    content: choice,
+                    ink: if *picked { Ink::Plain } else { Ink::Muted },
+                    font: TextFont::Ui,
+                });
+            }
         }
     }
 
@@ -786,20 +821,49 @@ fn place_buttons(geometry: &Geometry, layout: &ButtonLayout) -> (Vec<(Button, Re
 }
 
 /// The palette: in the middle of the window, wide enough for most
-/// commands.
-fn place_palette(geometry: &Geometry) -> Rect {
+/// commands, a line of text tall, and `choices` rows taller. Returns it,
+/// and where each choice goes.
+fn place_palette(geometry: &Geometry, choices: usize) -> (Rect, Vec<Rect>) {
     let metrics = geometry.metrics;
+    let padding = metrics.padding;
     let [width, height] = geometry.size;
     let palette_width = (width * 0.6)
         .min(90.0 * metrics.cell[0])
-        .min(width - 4.0 * metrics.padding);
-    let palette_height = (metrics.cell[1] + 4.0 * metrics.padding).round();
-    Rect {
+        .min(width - 4.0 * padding);
+    let line_height = (metrics.cell[1] + 4.0 * padding).round();
+    let row_height = metrics.pill_height();
+    // As many choices as fit in the window.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let fit = ((height - line_height - 5.0 * padding) / row_height).max(0.0) as usize;
+    let choices = choices.min(fit);
+    #[allow(clippy::cast_precision_loss)]
+    let list_height = if choices == 0 {
+        0.0
+    } else {
+        choices as f32 * row_height + padding
+    };
+    // Its text in the middle, unless the choices would run off the bottom.
+    let total = line_height + list_height;
+    let y = ((height - line_height) / 2.0)
+        .min(height - total - 2.0 * padding)
+        .max(2.0 * padding)
+        .round();
+    let palette = Rect {
         x: ((width - palette_width) / 2.0).round(),
-        y: ((height - palette_height) / 2.0).round(),
+        y,
         width: palette_width.round(),
-        height: palette_height,
-    }
+        height: total,
+    };
+    let rows = (0_u16..)
+        .take(choices)
+        .map(|index| Rect {
+            x: palette.x + padding,
+            y: palette.y + line_height + f32::from(index) * row_height,
+            width: palette.width - 2.0 * padding,
+            height: row_height,
+        })
+        .collect();
+    (palette, rows)
 }
 
 /// A menu of `labels` asked for at `at`: below and right of it, unless
@@ -995,6 +1059,40 @@ pub(crate) fn window_fill(geometry: &Geometry, rounded: bool) -> Fill {
     } else {
         fill
     }
+}
+
+/// Each of the first nine panes' numbers, big in the middle of it, while
+/// Ctrl+B p waits for one: the fills, and the numbers.
+pub(crate) fn paint_pane_numbers(
+    geometry: &Geometry,
+    placement: &Placement,
+) -> (Vec<Fill>, Vec<Text<'static>>) {
+    const NUMBERS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    let metrics = geometry.metrics;
+    let [cell_width, cell_height] = metrics.cell;
+    let side = (2.0 * cell_height).round();
+    let mut fills = Vec::new();
+    let mut texts = Vec::new();
+    for ((_, tile), number) in placement.panes.iter().zip(NUMBERS) {
+        let rect = tile.rect;
+        let x = (rect.x + (rect.width - side) / 2.0).round();
+        let y = (rect.y + (rect.height - side) / 2.0).round();
+        fills.push(Fill::rounded(
+            [x, y, side, side],
+            Paint::Accent,
+            (1.5 * metrics.padding).round(),
+        ));
+        texts.push(Text {
+            origin: [
+                (x + (side - cell_width) / 2.0).round(),
+                (y + (side - cell_height) / 2.0).round(),
+            ],
+            content: number,
+            ink: Ink::OnColor,
+            font: TextFont::Mono,
+        });
+    }
+    (fills, texts)
 }
 
 /// The panes of `placement`: each one's background, side by side, with
@@ -1320,6 +1418,7 @@ mod tests {
             Status::Typing {
                 label: None,
                 text: ":|Terminal".into(),
+                choices: Vec::new(),
             },
             &ButtonLayout::default(),
         );

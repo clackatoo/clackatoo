@@ -643,6 +643,11 @@ impl Pane {
         }
     }
 
+    /// Sends `bytes` to the program as though typed.
+    pub(crate) fn send_bytes(&mut self, bytes: Vec<u8>) {
+        self.send_input(bytes);
+    }
+
     fn send_input(&mut self, bytes: Vec<u8>) {
         self.request(
             Request::SendInput {

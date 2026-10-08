@@ -65,7 +65,7 @@ impl Pane {
             (_, Some('d')) if ctrl => return self.page(half),
             (_, Some('u')) if ctrl => return self.page(-half),
             (_, Some('f')) if ctrl => return self.page(page),
-            (_, Some('b')) if ctrl => return self.page(-page),
+            // Ctrl+B is the window's (see `desk::prefix`): Page Up pages up.
             (Key::Named(NamedKey::PageDown), _) => return self.page(page),
             (Key::Named(NamedKey::PageUp), _) => return self.page(-page),
             // A line of view, keeping the cursor in it.

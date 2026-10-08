@@ -102,6 +102,8 @@ pub(crate) enum Paint {
     PickedEdge,
     /// The dot by a workspace's name, by its place in the list.
     Workspace(u8),
+    /// clackatoo's own colour, for what it shows over the panes.
+    Accent,
     /// Behind the mode's name.
     Mode(crate::chrome::ModeName),
     /// Under the mouse.

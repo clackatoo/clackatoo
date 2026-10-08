@@ -292,17 +292,18 @@ fn draw_window(
     window: &([u32; 2], Chrome, Placement),
     screens: [&Screen; 2],
 ) -> Vec<u8> {
-    draw_window_shaped(gpu, fonts, window, screens, false)
+    draw_window_shaped(gpu, fonts, window, screens, (false, false))
 }
 
 /// Draws as [`draw_window`] does, in a window with rounded corners and
-/// see-through beyond them if `rounded`.
+/// see-through beyond them if `rounded`, and with the panes' numbers over
+/// them if `numbered`, as while Ctrl+B p waits.
 fn draw_window_shaped(
     gpu: &(wgpu::Device, wgpu::Queue),
     fonts: &mut Fonts,
     (size, chrome, placement): &([u32; 2], Chrome, Placement),
     screens: [&Screen; 2],
-    rounded: bool,
+    (rounded, numbered): (bool, bool),
 ) -> Vec<u8> {
     let geometry = chrome.geometry;
     let rows: Vec<Vec<_>> = screens
@@ -330,10 +331,16 @@ fn draw_window_shaped(
     fills.extend(chrome::paint_panes(&geometry, placement, focused));
     let mut texts = painted.texts;
     texts.extend(painted.over_texts);
+    let mut over = painted.over;
+    if numbered {
+        let (fills, numbers) = chrome::paint_pane_numbers(&geometry, placement);
+        over.extend(fills);
+        texts.extend(numbers);
+    }
     let picture = Picture {
         scenes: &scenes,
         fills: &fills,
-        over: &painted.over,
+        over: &over,
         texts: &texts,
         transparent: rounded,
     };
@@ -425,8 +432,13 @@ fn the_palette_is_drawn_over_the_panes() {
     let window = two_pane_window(
         &mut fonts,
         Status::Typing {
-            label: Some("Rename workspace".into()),
-            text: "clackatoo▏".into(),
+            label: Some("Workspace".into()),
+            text: "o▏".into(),
+            choices: vec![
+                ("clackatoo".into(), false),
+                ("dotfiles".into(), true),
+                ("homelab".into(), false),
+            ],
         },
         None,
         None,
@@ -525,7 +537,7 @@ fn nothing_is_drawn_past_a_rounded_windows_corners() {
     window.1.rounded = true;
     let left = screen(20, 4, "left\r\n$ ");
     let right = screen(20, 4, "right\r\n$ ");
-    let pixels = draw_window_shaped(&gpu, &mut fonts, &window, [&left, &right], true);
+    let pixels = draw_window_shaped(&gpu, &mut fonts, &window, [&left, &right], (true, true));
     save("rounded", window.0, &pixels);
     let [width, height] = window.0;
     let alpha = |x: u32, y: u32| pixels[((y * width + x) * 4 + 3) as usize];
