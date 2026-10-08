@@ -242,8 +242,17 @@ impl Pane {
         Some((start, end, selection.kind))
     }
 
-    /// Asks the daemon for the text from `start` to `end`, for `to`.
+    /// Asks the daemon for the text from `start` to `end`, for `to`. Text
+    /// for the clipboard is highlighted for a moment, to show what went.
     pub(super) fn copy(&mut self, start: Point, end: Point, kind: Selection, to: Copy) {
+        if to == Copy::Clipboard {
+            self.flash = Some(super::Flash {
+                start,
+                end,
+                kind,
+                until: std::time::Instant::now() + super::FLASH,
+            });
+        }
         self.request(
             clackatoo_protocol::Request::Text {
                 terminal: self.terminal,

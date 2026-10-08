@@ -201,6 +201,8 @@ pub(crate) enum HighlightKind {
     Selection,
     /// A search found it.
     Match,
+    /// It was just copied.
+    Copied,
 }
 
 /// Where the cursor is drawn, and how.
@@ -697,7 +699,7 @@ impl Renderer {
             // Translucent, so the text's own colours show through.
             let alpha = match highlight.kind {
                 HighlightKind::Selection => 0.35,
-                HighlightKind::Match => 0.6,
+                HighlightKind::Match | HighlightKind::Copied => 0.6,
             };
             let start = highlight.cols.start.min(cols);
             let end = highlight.cols.end.min(cols);

@@ -1424,12 +1424,15 @@ impl ApplicationHandler<SessionEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // While the daemon is out of contact, the top bar counts the
-        // seconds; otherwise, nothing wakes the window but events.
-        let flow = match self.contact.as_ref().and_then(Contact::silent_since) {
-            Some(since) => {
-                let seconds = since.elapsed().as_secs() + 1;
-                ControlFlow::WaitUntil(since + Duration::from_secs(seconds))
-            }
+        // seconds, and a highlight on text just copied goes after a moment;
+        // otherwise, nothing wakes the window but events.
+        let counting = self
+            .contact
+            .as_ref()
+            .and_then(Contact::silent_since)
+            .map(|since| since + Duration::from_secs(since.elapsed().as_secs() + 1));
+        let flow = match counting.into_iter().chain(self.desk.flash_ends()).min() {
+            Some(wake) => ControlFlow::WaitUntil(wake),
             None => ControlFlow::Wait,
         };
         event_loop.set_control_flow(flow);

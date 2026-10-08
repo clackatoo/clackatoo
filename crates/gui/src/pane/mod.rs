@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
     ClientMessage, CursorShape, Match, Request, Response, Size, TerminalId, ViewUpdate,
@@ -57,6 +58,19 @@ enum Prefix {
     /// Ctrl+\ left insert mode, and pressing it again sends it to the
     /// program.
     CtrlBackslash,
+}
+
+/// How long text copied to the clipboard stays highlighted, so you see what
+/// went: as long as Neovim's highlight on yank.
+const FLASH: Duration = Duration::from_millis(150);
+
+/// Text just copied, highlighted until `until`.
+#[derive(Clone, Copy, Debug)]
+struct Flash {
+    start: Point,
+    end: Point,
+    kind: Selection,
+    until: Instant,
 }
 
 /// What a visual selection covers.
@@ -117,6 +131,8 @@ pub(crate) struct Pane {
     yanked: Option<(String, Copy)>,
     /// Text selected with the mouse.
     mouse_selection: Option<mouse::MouseSelection>,
+    /// Text just copied to the clipboard.
+    flash: Option<Flash>,
     pending: VecDeque<Pending>,
     /// A view update was applied but not yet drawn and acknowledged.
     unacknowledged: bool,
@@ -144,6 +160,7 @@ impl Pane {
             status: None,
             yanked: None,
             mouse_selection: None,
+            flash: None,
             pending: VecDeque::new(),
             unacknowledged: false,
             prefix: None,
@@ -430,50 +447,83 @@ impl Pane {
         (rows, cursor)
     }
 
+    /// When the highlight on text just copied goes, if it's showing: the
+    /// window must be drawn again then.
+    pub(crate) fn flash_ends(&self) -> Option<Instant> {
+        self.flash
+            .map(|flash| flash.until)
+            .filter(|&until| until > Instant::now())
+    }
+
     /// What to highlight in a view `height` lines tall: the visual
-    /// selection, and the last match found.
+    /// selection, text just copied, and the last match found.
     pub(crate) fn highlights(&self, height: usize) -> Vec<Highlight> {
-        let top = self.view_top();
-        let bottom = top + height as u64;
-        let document = Document(self);
-        let in_view = |line: u64| usize::try_from(line - top).expect("within the height");
         let mut highlights = Vec::new();
         if let Some((start, end, kind)) = self.selection().or_else(|| self.mouse_selected()) {
-            for line in start.line.max(top)..end.line.saturating_add(1).min(bottom) {
-                let row = document.line(line);
-                let width = row.map_or(0, Row::width);
-                let cols = match kind {
-                    Selection::Lines => 0..width,
-                    Selection::Characters => {
-                        let from = if line == start.line { start.col } else { 0 };
-                        let to = if line == end.line {
-                            let wide = row
-                                .and_then(|row| row.cells().get(end.col))
-                                .is_some_and(|cell| cell.is_wide());
-                            (end.col + if wide { 2 } else { 1 }).min(width.max(end.col + 1))
-                        } else {
-                            width
-                        };
-                        from..to
-                    }
-                };
-                highlights.push(Highlight {
-                    line: in_view(line),
-                    cols,
-                    kind: HighlightKind::Selection,
-                });
-            }
+            self.highlight(
+                &mut highlights,
+                height,
+                (start, end, kind),
+                HighlightKind::Selection,
+            );
         }
+        if let Some(flash) = self.flash
+            && flash.until > Instant::now()
+        {
+            let range = (flash.start, flash.end, flash.kind);
+            self.highlight(&mut highlights, height, range, HighlightKind::Copied);
+        }
+        let top = self.view_top();
+        let bottom = top + height as u64;
         if let Some(found) = self.found
             && (top..bottom).contains(&found.start.line)
         {
             highlights.push(Highlight {
-                line: in_view(found.start.line),
+                line: usize::try_from(found.start.line - top).expect("within the height"),
                 cols: found.start.col..found.start.col + found.cells,
                 kind: HighlightKind::Match,
             });
         }
         highlights
+    }
+
+    /// Highlights the text from `start` to `end`, characters or whole
+    /// lines, where it's in a view `height` lines tall.
+    fn highlight(
+        &self,
+        highlights: &mut Vec<Highlight>,
+        height: usize,
+        (start, end, kind): (Point, Point, Selection),
+        highlight: HighlightKind,
+    ) {
+        let top = self.view_top();
+        let bottom = top + height as u64;
+        let document = Document(self);
+        let in_view = |line: u64| usize::try_from(line - top).expect("within the height");
+        for line in start.line.max(top)..end.line.saturating_add(1).min(bottom) {
+            let row = document.line(line);
+            let width = row.map_or(0, Row::width);
+            let cols = match kind {
+                Selection::Lines => 0..width,
+                Selection::Characters => {
+                    let from = if line == start.line { start.col } else { 0 };
+                    let to = if line == end.line {
+                        let wide = row
+                            .and_then(|row| row.cells().get(end.col))
+                            .is_some_and(|cell| cell.is_wide());
+                        (end.col + if wide { 2 } else { 1 }).min(width.max(end.col + 1))
+                    } else {
+                        width
+                    };
+                    from..to
+                }
+            };
+            highlights.push(Highlight {
+                line: in_view(line),
+                cols,
+                kind: highlight,
+            });
+        }
     }
 
     /// The corner label: a search being typed, a message, or the mode,
@@ -1062,6 +1112,35 @@ mod tests {
         assert_eq!(pane.mode, Mode::Normal);
     }
 
+    /// The highlights on text just copied, as lines and columns.
+    fn flashed(pane: &Pane) -> Vec<(usize, Range<usize>)> {
+        pane.highlights(5)
+            .into_iter()
+            .filter(|highlight| highlight.kind == HighlightKind::Copied)
+            .map(|highlight| (highlight.line, highlight.cols))
+            .collect()
+    }
+
+    #[test]
+    fn copying_highlights_what_was_copied_for_a_moment() {
+        let terminal = terminal("one two\r\nthree");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        yanked(&mut pane, &terminal, "gg0yiw");
+        assert_eq!(flashed(&pane), [(0, 0..3)]);
+        let ends = pane.flash_ends().expect("the window wakes to clear it");
+        assert!(ends <= Instant::now() + FLASH);
+
+        // Whole lines are highlighted whole.
+        yanked(&mut pane, &terminal, "yj");
+        assert_eq!(flashed(&pane), [(0, 0..12), (1, 0..12)]);
+
+        // Then it's gone.
+        pane.flash.as_mut().unwrap().until = Instant::now();
+        assert!(flashed(&pane).is_empty());
+        assert_eq!(pane.flash_ends(), None);
+    }
+
     /// A 20 × 10 terminal where fish ran `ls` and `false`, and is showing
     /// its prompt.
     fn shell() -> Terminal {
@@ -1101,7 +1180,12 @@ mod tests {
         yanked(&mut pane, &terminal, "[[");
         yanked(&mut pane, &terminal, "[[");
         assert_eq!(yanked(&mut pane, &terminal, "vab"), None);
-        assert_eq!(pane.highlights(5).len(), 3, "the block is selected");
+        let selected = pane
+            .highlights(5)
+            .iter()
+            .filter(|highlight| highlight.kind == HighlightKind::Selection)
+            .count();
+        assert_eq!(selected, 3, "the block is selected");
         assert_eq!(
             yanked(&mut pane, &terminal, "y").as_deref(),
             Some("$ ls\na\nb")
@@ -1248,9 +1332,17 @@ mod mouse_tests {
             copied(&mut pane, &terminal),
             Some(("world\nsec".to_owned(), Copy::Clipboard))
         );
-        // Nothing went to the program, and the selection is gone.
+        // Nothing went to the program, and the selection is gone, but for
+        // a moment the clipboard's copy is highlighted. The primary
+        // selection's wasn't: the selection showed it already.
         assert_eq!(input(&mut pane), "");
-        assert!(pane.highlights(5).is_empty());
+        let highlights = pane.highlights(5);
+        assert_eq!(highlights.len(), 2);
+        assert!(
+            highlights
+                .iter()
+                .all(|highlight| highlight.kind == HighlightKind::Copied)
+        );
     }
 
     #[test]

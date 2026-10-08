@@ -303,17 +303,8 @@ impl Pane {
         let Some(cursor) = self.cursor else {
             return false;
         };
-        let line = position(cursor.at);
-        self.request(
-            Request::Text {
-                terminal: self.terminal,
-                from: line,
-                to: line,
-                whole_lines: true,
-            },
-            Pending::Text(Copy::Clipboard),
-        );
-        false
+        self.copy(cursor.at, cursor.at, Selection::Lines, Copy::Clipboard);
+        true
     }
 
     /// Ctrl+E and Ctrl+Y: moves the view `lines` up, keeping the cursor in

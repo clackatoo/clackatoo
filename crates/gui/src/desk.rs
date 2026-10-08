@@ -150,6 +150,12 @@ impl Desk {
         self.finished
     }
 
+    /// When a pane's highlight on text just copied goes, the soonest of
+    /// them: the window must be drawn again then.
+    pub(crate) fn flash_ends(&self) -> Option<std::time::Instant> {
+        self.panes.values().filter_map(Pane::flash_ends).min()
+    }
+
     /// Takes text copied, for the window to put on the clipboard or the
     /// primary selection.
     pub(crate) fn take_yanked(&mut self) -> Option<(String, Copy)> {
