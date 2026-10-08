@@ -16,13 +16,20 @@ use crate::screen::Screen;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// A GPU device, or `None` on machines without one.
+/// The GPU device every test shares, or `None` on machines without one.
+/// It's made once: tests making and dropping devices of their own at the
+/// same time sometimes hung NVIDIA's Vulkan driver.
 fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+    static GPU: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue)>> =
+        std::sync::OnceLock::new();
+    GPU.get_or_init(|| {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+    })
+    .clone()
 }
 
 /// Renders `output` played into a terminal of `cols` × `rows`, and returns
