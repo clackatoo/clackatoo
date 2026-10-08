@@ -169,6 +169,22 @@ impl HostedTerminal {
         }
     }
 
+    /// The directory the program in front is in: a nested shell's or an
+    /// editor's, say, else the terminal's own program's. For a shell, it's
+    /// where it last changed to.
+    pub(crate) fn working_directory(&self) -> Option<String> {
+        let cwd = |pid: i32| std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+        // The front process may have exited, or be another user's, as
+        // under sudo.
+        let cwd = self
+            .pty
+            .as_ref()
+            .and_then(Pty::foreground)
+            .and_then(|pid| cwd(pid.as_raw_nonzero().get()))
+            .or_else(|| cwd(self.pid.cast_signed()))?;
+        cwd.into_os_string().into_string().ok()
+    }
+
     pub(crate) fn view(&self) -> View {
         View::capture(&self.emulator)
     }

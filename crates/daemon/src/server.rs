@@ -879,13 +879,10 @@ impl Daemon {
         }
     }
 
-    /// The directory the program in `pane`'s terminal is in: for a shell,
-    /// where it last changed to.
+    /// The directory the program in front in `pane`'s terminal is in.
     fn working_directory(&self, pane: PaneId) -> Option<String> {
         let terminal = self.workspaces.check_pane(pane).ok()?;
-        let pid = self.terminals.get(&terminal)?.terminal.info().pid;
-        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
-        cwd.into_os_string().into_string().ok()
+        self.terminals.get(&terminal)?.terminal.working_directory()
     }
 
     fn new_workspace(

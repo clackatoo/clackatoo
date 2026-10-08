@@ -193,6 +193,13 @@ impl Pty {
         Ok(rustix::io::write(&self.master, bytes)?)
     }
 
+    /// The process group in the foreground: the program the shell is
+    /// running, or the shell itself at its prompt. Its ID is its first
+    /// process's.
+    pub(crate) fn foreground(&self) -> Option<Pid> {
+        rustix::termios::tcgetpgrp(&self.master).ok()
+    }
+
     /// Sets the window size the program sees. The kernel sends it SIGWINCH.
     pub(crate) fn resize(&self, size: Size) -> io::Result<()> {
         Ok(rustix::termios::tcsetwinsize(&self.master, winsize(size))?)

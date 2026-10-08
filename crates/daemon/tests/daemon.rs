@@ -701,6 +701,31 @@ fn a_split_starts_where_the_split_pane_is() {
 }
 
 #[test]
+fn a_split_starts_where_the_program_in_front_is() {
+    let daemon = TestDaemon::start();
+    std::fs::create_dir(daemon.dir.path().join("project")).unwrap();
+    let mut client = daemon.client();
+    let shell = client.new_workspace(None, new_pane(&["sh"])).unwrap();
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    // A program the shell runs, as a nested shell or an editor, moves on
+    // while the shell stays where it was.
+    client
+        .send_input(
+            terminal,
+            b"sh -c 'cd project && echo mo\"\"ved && exec cat'\r",
+        )
+        .unwrap();
+    wait_for_screen(&mut client, terminal, |text| text.contains("moved"));
+
+    client
+        .split_pane(shell, Side::Below, new_pane(&["sh", "-c", "pwd; cat"]))
+        .unwrap();
+    let workspaces = next_workspaces(&mut client);
+    let split = workspaces.list[0].terminals()[1];
+    wait_for_screen(&mut client, split, |text| text.contains("/project"));
+}
+
+#[test]
 fn a_running_terminal_can_be_put_in_one_pane() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();
