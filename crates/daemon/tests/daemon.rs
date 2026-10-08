@@ -10,9 +10,9 @@ use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode, ChatState, ClientMessage,
-    Diff, Edit, Error, Event, Item, Location, NewAgent, NewTerminal, OpenFile, Outcome,
+    Diff, Edit, Error, Event, Item, Kind, Location, NewAgent, NewTerminal, OpenFile, Outcome,
     PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size,
-    TerminalId, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, View, ViewUpdate,
+    Span, TerminalId, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, View, ViewUpdate,
     Workspaces,
 };
 use clackatoo_term::Terminal;
@@ -39,15 +39,22 @@ impl TestDaemon {
     /// A daemon whose chats talk to the agent `agent` names, given the
     /// daemon's directory.
     fn start_with_agent(agent: impl FnOnce(&Path) -> Vec<std::ffi::OsString>) -> Self {
+        Self::start_with(|dir, config| config.agent = agent(dir))
+    }
+
+    /// A daemon with its config changed by `change`, given its directory.
+    fn start_with(change: impl FnOnce(&Path, &mut DaemonConfig)) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
-        let config = DaemonConfig {
+        let mut config = DaemonConfig {
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),
             shell_integration: None,
-            agent: agent(dir.path()),
+            agent: Vec::new(),
             udp_ports: Some(0..=0),
+            languages: None,
         };
+        change(dir.path(), &mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
         let shutdown = daemon.shutdown_handle();
         let thread = std::thread::spawn(move || drop(daemon.run().expect("daemon failed")));
@@ -1574,6 +1581,69 @@ fn insert(len: usize, at: usize, text: &str, base: u64) -> Change {
         base,
         step: true,
     }
+}
+
+/// The next highlights for a buffer, skipping other updates.
+fn next_highlights(client: &mut Client) -> (u64, usize, usize, Vec<Span>) {
+    loop {
+        if let BufferUpdate::Highlights {
+            version,
+            start,
+            end,
+            spans,
+        } = next_buffer_update(client)
+        {
+            return (version, start, end, spans);
+        }
+    }
+}
+
+#[test]
+fn a_buffer_in_a_language_with_a_pack_is_highlighted_as_it_changes() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.languages =
+            Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"));
+    });
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("a.json"), "[1, \"x\"]").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "a.json"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    let span = |start, end, kind| Span { start, end, kind };
+    // The whole text, once it's parsed: after the snapshot, or if it was
+    // parsed before the window attached, with it.
+    assert_eq!(
+        next_highlights(&mut client),
+        (
+            0,
+            0,
+            8,
+            vec![span(1, 2, Kind::Number), span(4, 7, Kind::String)]
+        )
+    );
+
+    // An edit, then what the parse after it changed.
+    send_change(&mut client, buffer, 0, insert(8, 1, "true, ", 0));
+    let (version, start, end, spans) = next_highlights(&mut client);
+    assert_eq!(version, 1);
+    assert!(start <= 1 && end >= 5, "{start}..{end}");
+    assert_eq!(spans.first(), Some(&span(1, 5, Kind::Constant)));
+
+    // A window attaching later gets them all with the text.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    let (version, start, end, spans) = next_highlights(&mut other);
+    assert_eq!((version, start, end), (1, 0, 14));
+    assert_eq!(
+        spans,
+        [
+            span(1, 5, Kind::Constant),
+            span(7, 8, Kind::Number),
+            span(10, 13, Kind::String),
+        ]
+    );
 }
 
 #[test]

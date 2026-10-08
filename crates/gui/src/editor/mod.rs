@@ -1274,7 +1274,9 @@ impl Editor {
                 let typing_after = line == lines && self.cursor.at.line == lines;
                 if line < lines || typing_after {
                     let laid = Laid::new(text.line_text(line));
-                    laid.shown(self.left, self.width)
+                    let (start, end) = (text.line_start(line), text.line_end(line));
+                    let spans = copy.highlights().within(start, end);
+                    laid.shown(self.left, self.width, spans, start)
                 } else {
                     let mut builder = clackatoo_term::RowBuilder::new(self.width);
                     if copy.loaded() {

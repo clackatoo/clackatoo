@@ -935,7 +935,7 @@ fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
 
 #[test]
 fn renders_an_editor_pane() {
-    use clackatoo_protocol::{BufferId, BufferSnapshot, BufferUpdate};
+    use clackatoo_protocol::{BufferId, BufferSnapshot, BufferUpdate, Kind, Span};
 
     use crate::editor::{BufferCopy, Editor};
 
@@ -950,6 +950,19 @@ fn renders_an_editor_pane() {
         version: 0,
         modified: false,
     }));
+    // As tree-sitter-rust's queries colour it.
+    let span = |start, end, kind| Span { start, end, kind };
+    copy.update(BufferUpdate::Highlights {
+        version: 0,
+        start: 0,
+        end: 42,
+        spans: vec![
+            span(0, 2, Kind::Keyword),
+            span(3, 7, Kind::Function),
+            span(13, 21, Kind::Macro),
+            span(22, 37, Kind::String),
+        ],
+    });
     let (cols, rows) = (32u16, 5u16);
     let mut editor = Editor::new(BufferId(1));
     editor.resize(Size::new(cols, rows).unwrap());
@@ -985,6 +998,9 @@ fn renders_an_editor_pane() {
     let pixels = draw(&gpu, size, &picture, &mut fonts);
     save("editor", size, &pixels);
     assert_eq!(lines[1].text().trim_start(), "println!(\"hello, 世界\");");
+    let fg = |row: &clackatoo_term::Row, col: usize| row.style(row.cells()[col]).fg;
+    assert_eq!(fg(lines[0], 0), crate::colors::syntax(Kind::Keyword).fg);
+    assert_eq!(fg(lines[1], 4), crate::colors::syntax(Kind::Macro).fg);
     assert_eq!(lines[3].text(), "~", "past the end");
     let background = &pixels[..4];
     assert!(pixels.chunks(4).any(|pixel| pixel != background));

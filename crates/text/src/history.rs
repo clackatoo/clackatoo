@@ -171,8 +171,13 @@ impl<A: Clone + Eq> History<A> {
         }
     }
 
-    /// The edits made since `version`, oldest first.
-    fn since(&self, version: u64) -> Result<impl Iterator<Item = &(Edit, A)>, HistoryError> {
+    /// The edits made since `version`, oldest first, with their authors.
+    ///
+    /// # Errors
+    ///
+    /// If `version` hasn't been made yet, or the history no longer reaches
+    /// back to it.
+    pub fn since(&self, version: u64) -> Result<impl Iterator<Item = &(Edit, A)>, HistoryError> {
         if version > self.version() {
             return Err(HistoryError::Future(version));
         }

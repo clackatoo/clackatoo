@@ -16,6 +16,7 @@ anyhow.workspace = true
 clackatoo-daemon.workspace = true
 clackatoo-gui.workspace = true
 clackatoo-protocol.workspace = true
+clackatoo-syntax.workspace = true
 clackatoo-term.workspace = true
 clap.workspace = true
 env_logger.workspace = true

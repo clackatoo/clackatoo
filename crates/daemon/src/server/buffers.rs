@@ -1,13 +1,16 @@
 //! Buffers in the event loop: opening files into panes, sending each
 //! window that attached to a buffer its edits, and making the edits windows
-//! send.
+//! send. And having buffers parsed, and sending their highlights.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use clackatoo_protocol::{
-    Author, BufferId, BufferUpdate, Change, Error, Event, OpenFile, PaneId, Response,
+    Author, BufferId, BufferUpdate, Change, Edit, Error, Event, OpenFile, PaneId, Response,
     ServerMessage, frame,
 };
+use clackatoo_syntax::{Highlighted, Syntax};
+use clackatoo_text::Highlights;
 use mio::Token;
 
 use super::{Daemon, Source};
@@ -18,6 +21,22 @@ use crate::buffer::{Buffer, Made};
 pub(super) struct BufferSlot {
     pub(super) buffer: Buffer,
     pub(super) viewers: Vec<Token>,
+    /// Its highlights, as of the last parse, moved along with each edit
+    /// since.
+    highlights: Highlights,
+    /// Whether it's being parsed: its language has a pack.
+    parsed: bool,
+}
+
+impl BufferSlot {
+    pub(super) fn new(buffer: Buffer) -> Self {
+        Self {
+            buffer,
+            viewers: Vec::new(),
+            highlights: Highlights::new(),
+            parsed: false,
+        }
+    }
 }
 
 impl Daemon {
@@ -45,13 +64,8 @@ impl Daemon {
         let id = BufferId(self.next_buffer);
         self.next_buffer += 1;
         log::info!("buffer {id}: {}", buffer.path().display());
-        self.buffers.insert(
-            id,
-            BufferSlot {
-                buffer,
-                viewers: Vec::new(),
-            },
-        );
+        self.buffers.insert(id, BufferSlot::new(buffer));
+        self.parse_buffer(id);
         Ok(id)
     }
 
@@ -61,9 +75,31 @@ impl Daemon {
         if !slot.viewers.contains(&token) {
             slot.viewers.push(token);
         }
-        let snapshot = BufferUpdate::Snapshot(slot.buffer.snapshot());
-        self.tell(token, id, snapshot);
+        if !slot.parsed {
+            // Its language may have been installed since it was opened.
+            self.parse_buffer(id);
+        }
+        self.send_snapshot(token, id);
         Ok(())
+    }
+
+    /// Sends the client at `token` all of buffer `id`: its text, then its
+    /// highlights.
+    fn send_snapshot(&mut self, token: Token, id: BufferId) {
+        let Some(slot) = self.buffers.get(&id) else {
+            return;
+        };
+        let snapshot = BufferUpdate::Snapshot(slot.buffer.snapshot());
+        let highlights = (!slot.highlights.spans().is_empty()).then(|| BufferUpdate::Highlights {
+            version: slot.buffer.version(),
+            start: 0,
+            end: slot.buffer.text().len_bytes(),
+            spans: slot.highlights.spans().to_vec(),
+        });
+        self.tell(token, id, snapshot);
+        if let Some(highlights) = highlights {
+            self.tell(token, id, highlights);
+        }
     }
 
     /// Stops sending `id` to the client at `token`.
@@ -95,6 +131,7 @@ impl Daemon {
         };
         match made {
             Ok((Some(Made { version, edit }), acked)) => {
+                self.edited(id, version, &edit);
                 let answer = if acked {
                     BufferUpdate::Acked { version, seq }
                 } else {
@@ -119,8 +156,7 @@ impl Daemon {
             Err(err) => {
                 // The client's copy is wrong somehow: start it again.
                 log::warn!("buffer {id}: an edit couldn't be made: {err}");
-                let snapshot = BufferUpdate::Snapshot(slot.buffer.snapshot());
-                self.tell(token, id, snapshot);
+                self.send_snapshot(token, id);
             }
         }
     }
@@ -151,6 +187,7 @@ impl Daemon {
                     reason: err.to_string(),
                 }
             })?;
+        self.edited(id, made.version, &made.edit);
         let update = BufferUpdate::Edited {
             version: made.version,
             edit: made.edit,
@@ -173,6 +210,91 @@ impl Daemon {
             && (self.buffers.get(&buffer)).is_some_and(|slot| !slot.buffer.modified());
         if unwanted && let Some(slot) = self.buffers.remove(&buffer) {
             log::info!("buffer {buffer} closed: {}", slot.buffer.path().display());
+            if let Some(syntax) = &self.syntax
+                && slot.parsed
+            {
+                syntax.close(key(buffer));
+            }
+        }
+    }
+
+    /// Has buffer `id` parsed, if its language has a pack, starting the
+    /// thread that parses if it's the first.
+    pub(super) fn parse_buffer(&mut self, id: BufferId) {
+        let (Some(languages), Some(slot)) = (&mut self.languages, self.buffers.get_mut(&id)) else {
+            return;
+        };
+        let Some(pack) = languages.find(slot.buffer.path()) else {
+            return;
+        };
+        if self.syntax.is_none() {
+            let waker = Arc::clone(&self.waker);
+            let wake = move || {
+                if let Err(err) = waker.wake() {
+                    log::warn!("waking the event loop for highlights failed: {err}");
+                }
+            };
+            match Syntax::start(wake) {
+                Ok(syntax) => self.syntax = Some(syntax),
+                Err(err) => {
+                    log::error!("buffers won't be parsed: {err}");
+                    self.languages = None;
+                    return;
+                }
+            }
+        }
+        let Some(syntax) = &self.syntax else {
+            return;
+        };
+        log::info!("buffer {id}: parsed as {}", pack.name);
+        let (text, version) = (slot.buffer.text().clone(), slot.buffer.version());
+        syntax.open(key(id), pack, text, version);
+        slot.parsed = true;
+    }
+
+    /// Moves buffer `id`'s highlights along with `edit`, which made
+    /// `version`, and has the buffer parsed again.
+    fn edited(&mut self, id: BufferId, version: u64, edit: &Edit) {
+        let Some(slot) = self.buffers.get_mut(&id) else {
+            return;
+        };
+        if !slot.parsed {
+            return;
+        }
+        slot.highlights.map(edit);
+        if let Some(syntax) = &self.syntax {
+            syntax.edit(key(id), version, edit.clone(), slot.buffer.text().clone());
+        }
+    }
+
+    /// Sends the highlights parses have found since last asked to every
+    /// client following their buffers.
+    pub(super) fn take_highlights(&mut self) {
+        let Some(syntax) = &self.syntax else {
+            return;
+        };
+        let found: Vec<Highlighted> = syntax.take().collect();
+        for found in found {
+            let Some(id) = u32::try_from(found.buffer).ok().map(BufferId) else {
+                continue;
+            };
+            let Some(slot) = self.buffers.get_mut(&id) else {
+                continue;
+            };
+            // Edits made while it was parsing move it along, as they moved
+            // what was there.
+            let Some(edits) = slot.buffer.edits_since(found.version) else {
+                log::warn!("buffer {id}: highlights for a version long gone");
+                continue;
+            };
+            let range = (slot.highlights).replace_since(found.range, found.spans, edits);
+            let update = BufferUpdate::Highlights {
+                version: slot.buffer.version(),
+                start: range.start,
+                end: range.end,
+                spans: slot.highlights.within(range.start, range.end).to_vec(),
+            };
+            self.tell_viewers(id, None, &update);
         }
     }
 
@@ -216,6 +338,11 @@ impl Daemon {
         }
         self.flush_client(token);
     }
+}
+
+/// Buffer `id`, as the thread parsing buffers knows it.
+fn key(id: BufferId) -> clackatoo_syntax::Key {
+    u64::from(id.0)
 }
 
 /// `path` made absolute, from `dir` if it's relative, or from `home` if it

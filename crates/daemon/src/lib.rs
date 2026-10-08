@@ -59,6 +59,10 @@ pub struct DaemonConfig {
     /// connection over SSH arrives. 0 means any port. `None` keeps every
     /// connection inside SSH.
     pub udp_ports: Option<RangeInclusive<u16>>,
+    /// Where the language packs are that buffers are parsed with, one
+    /// directory each (see [`clackatoo_syntax::pack`]). `None` parses
+    /// nothing.
+    pub languages: Option<PathBuf>,
 }
 
 /// The agent chats talk to unless told otherwise: Claude Code, through
@@ -78,8 +82,9 @@ pub const DEFAULT_UDP_PORTS: RangeInclusive<u16> = 60000..=61000;
 impl DaemonConfig {
     /// Defaults taken from the environment: `$SHELL` (or `/bin/sh`),
     /// `$HOME` (or `/`), `$CLACKATOO_AGENT`: a command, split at spaces
-    /// (or [`DEFAULT_AGENT`]), and `$CLACKATOO_UDP_PORTS`: a port, a range
-    /// such as `60000-61000` (the default), or `off`.
+    /// (or [`DEFAULT_AGENT`]), `$CLACKATOO_UDP_PORTS`: a port, a range
+    /// such as `60000-61000` (the default), or `off`, and the language
+    /// packs in [`languages_dir`].
     #[must_use]
     pub fn from_env() -> Self {
         let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
@@ -107,8 +112,20 @@ impl DaemonConfig {
                     Some(DEFAULT_UDP_PORTS)
                 }),
             },
+            languages: languages_dir(),
         }
     }
+}
+
+/// Where language packs are installed: `clackatoo/languages` in
+/// `$XDG_DATA_HOME`, or else in `~/.local/share`.
+#[must_use]
+pub fn languages_dir() -> Option<PathBuf> {
+    let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let data = non_empty("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
+    Some(data.join("clackatoo/languages"))
 }
 
 /// A port, or a range of them.

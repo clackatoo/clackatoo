@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod language;
 mod ping;
 mod render;
 
@@ -130,6 +131,9 @@ enum Command {
     /// Show or change the window's settings in client/startup.toml. With no
     /// arguments, shows them all.
     Config(ConfigArgs),
+    /// The languages files are parsed and coloured in.
+    #[command(subcommand)]
+    Language(language::LanguageCommand),
     /// Relay between standard input and output and the daemon, starting it
     /// if it isn't running. `--remote` runs this on the remote machine,
     /// through ssh.
@@ -311,6 +315,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::List(connection) => list(&connection),
         Command::New(new) => new_terminal(new),
         Command::Edit(edit) => edit_file(edit),
+        Command::Language(command) => language::run(command),
         Command::Run(run) => {
             let mut line = run.words.join(" ").into_bytes();
             line.push(b'\r');

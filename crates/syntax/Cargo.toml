@@ -1,0 +1,27 @@
+[package]
+name = "clackatoo-syntax"
+description = "Reading buffers' text with tree-sitter grammars loaded as WebAssembly: language packs, parsing off the event loop, and highlights."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# See crates/term/Cargo.toml: keeps `cargo bench -- OPTIONS` working.
+bench = false
+
+[dependencies]
+clackatoo-text.workspace = true
+log.workspace = true
+ring.workspace = true
+thiserror.workspace = true
+toml_edit.workspace = true
+ropey.workspace = true
+tree-sitter.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

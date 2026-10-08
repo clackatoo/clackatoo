@@ -34,6 +34,7 @@ use clackatoo_protocol::{
     ServerMessage, Side, Size, TerminalId, TerminalInfo, TerminalStatus, Udp, View, ViewUpdate,
     WorkspaceId,
 };
+use clackatoo_syntax::{Languages, Syntax};
 use clackatoo_term::{Damage, Terminal};
 use mio::event::Event;
 use mio::net::{UdpSocket, UnixListener, UnixStream};
@@ -366,6 +367,11 @@ pub struct Daemon {
     /// Files being edited.
     buffers: BTreeMap<BufferId, BufferSlot>,
     next_buffer: u32,
+    /// The language packs buffers are parsed with, if they're looked for.
+    languages: Option<Languages>,
+    /// The thread parsing buffers, once one is in a language there's a
+    /// pack for.
+    syntax: Option<Syntax>,
     /// The agent chats talk to, while any chat needs it.
     agent: Option<AgentSlot>,
     /// What the agent sent last, for the chats to act on.
@@ -458,6 +464,8 @@ impl Daemon {
             workspaces: WorkspaceState::new(),
             buffers: BTreeMap::new(),
             next_buffer: 1,
+            languages: config.languages.clone().map(Languages::new),
+            syntax: None,
             agent: None,
             incoming: Vec::new(),
             quic: None,
@@ -515,11 +523,9 @@ impl Daemon {
         daemon.next_buffer = state.next_buffer;
         for buffer in buffers {
             let id = BufferId(buffer.id);
-            let slot = BufferSlot {
-                buffer: Buffer::resume(buffer),
-                viewers: Vec::new(),
-            };
+            let slot = BufferSlot::new(Buffer::resume(buffer));
             daemon.buffers.insert(id, slot);
+            daemon.parse_buffer(id);
         }
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
@@ -664,6 +670,7 @@ impl Daemon {
             if agent_unread {
                 self.read_agent();
             }
+            self.take_highlights();
             self.compact_scrollbacks();
             self.send_view_updates();
             self.transmit_quic();

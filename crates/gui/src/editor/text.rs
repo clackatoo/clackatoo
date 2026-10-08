@@ -12,8 +12,9 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use clackatoo_term::{Row, RowBuilder, Style};
-use clackatoo_text::Rope;
+use clackatoo_text::{Rope, Span};
 
+use crate::colors;
 use crate::motion::{Lines, Point};
 
 /// Columns a tab stops at a multiple of.
@@ -96,9 +97,12 @@ impl Laid {
             .map_or(self.text.len(), |&(_, end)| end)
     }
 
-    /// The line as drawn in `width` cells from cell `left`.
-    pub(crate) fn shown(&self, left: usize, width: usize) -> Row {
+    /// The line as drawn in `width` cells from cell `left`, coloured as
+    /// `spans` say. The line starts at byte `start` of the text they're
+    /// for.
+    pub(crate) fn shown(&self, left: usize, width: usize, spans: &[Span], start: usize) -> Row {
         let mut builder = RowBuilder::new(width);
+        let mut spans = spans.iter().peekable();
         for (index, &(cell, byte)) in self.starts.iter().enumerate() {
             let (next_cell, next_byte) =
                 (self.starts.get(index + 1).copied()).unwrap_or((self.cells, self.text.len()));
@@ -114,10 +118,15 @@ impl Laid {
                 break;
             }
             let piece = &self.text[byte..next_byte];
+            while spans.next_if(|span| span.end <= start + byte).is_some() {}
+            let style = match spans.peek() {
+                Some(span) if span.start <= start + byte => colors::syntax(span.kind),
+                _ => Style::DEFAULT,
+            };
             match piece.chars().next() {
                 Some('\t') => builder.push(&" ".repeat(next_cell - cell), &Style::DEFAULT, true),
                 Some(ch) if ch.is_control() => push(&mut builder, ch, cell),
-                _ => builder.push(piece, &Style::DEFAULT, false),
+                _ => builder.push(piece, &style, false),
             }
         }
         builder.finish(false)
@@ -330,10 +339,41 @@ mod tests {
     #[test]
     fn a_line_is_drawn_from_any_column() {
         let laid = Laid::new("ab字cd".to_owned());
-        assert_eq!(laid.shown(0, 4).text(), "ab字");
-        assert_eq!(laid.shown(1, 3).text(), "b字");
+        assert_eq!(laid.shown(0, 4, &[], 0).text(), "ab字");
+        assert_eq!(laid.shown(1, 3, &[], 0).text(), "b字");
         // Half of 字 off the left edge.
-        assert_eq!(laid.shown(3, 3).text(), " cd");
+        assert_eq!(laid.shown(3, 3, &[], 0).text(), " cd");
+    }
+
+    #[test]
+    fn a_line_is_coloured_as_its_spans_say() {
+        use clackatoo_text::Kind;
+        // The line "fn x()" starts at byte 10 of its text.
+        let laid = Laid::new("fn x()".to_owned());
+        let spans = [
+            Span {
+                start: 2,
+                end: 9,
+                kind: Kind::Comment,
+            },
+            Span {
+                start: 10,
+                end: 12,
+                kind: Kind::Keyword,
+            },
+            Span {
+                start: 13,
+                end: 14,
+                kind: Kind::Function,
+            },
+        ];
+        let row = laid.shown(0, 6, &spans, 10);
+        let fg = |col: usize| row.style(row.cells()[col]).fg;
+        assert_eq!(fg(0), colors::syntax(Kind::Keyword).fg);
+        assert_eq!(fg(1), colors::syntax(Kind::Keyword).fg);
+        assert_eq!(fg(2), Style::DEFAULT.fg);
+        assert_eq!(fg(3), colors::syntax(Kind::Function).fg);
+        assert_eq!(fg(4), Style::DEFAULT.fg);
     }
 
     #[test]

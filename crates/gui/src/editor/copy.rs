@@ -8,11 +8,14 @@
 //! brought past the changes still waiting before it's made to the copy,
 //! and they're brought past it, as the daemon brought them past it (see
 //! [`clackatoo_text`]).
+//!
+//! It keeps the buffer's highlights too, moving them along with each edit
+//! until the parse that follows it sends new ones.
 
 use std::collections::VecDeque;
 
 use clackatoo_protocol::{BufferId, BufferUpdate, Change, ClientMessage, Edit};
-use clackatoo_text::{Rope, compose, transform};
+use clackatoo_text::{Highlights, Rope, Span, compose, transform};
 
 /// A change waiting for the daemon's answer, or to be sent.
 #[derive(Debug)]
@@ -58,6 +61,8 @@ pub(crate) struct BufferCopy {
     /// The edits made here since last taken, for other panes showing the
     /// buffer to follow.
     made: Vec<Edit>,
+    /// What each piece of the text is, as its grammar reads it.
+    highlights: Highlights,
 }
 
 impl BufferCopy {
@@ -74,11 +79,16 @@ impl BufferCopy {
             next_seq: 0,
             outbox: Vec::new(),
             made: Vec::new(),
+            highlights: Highlights::new(),
         }
     }
 
     pub(crate) fn text(&self) -> &Rope {
         &self.text
+    }
+
+    pub(crate) fn highlights(&self) -> &Highlights {
+        &self.highlights
     }
 
     /// The file's name, for titles.
@@ -105,6 +115,7 @@ impl BufferCopy {
             log::error!("buffer {}: an edit didn't fit: {err}", self.id);
             return false;
         }
+        self.highlights.map(&edit);
         self.made.push(edit.clone());
         // An edit joining the last step joins the last edit, if that's
         // still to be sent.
@@ -141,6 +152,7 @@ impl BufferCopy {
                 self.loaded = true;
                 self.waiting.clear();
                 self.sent = None;
+                self.highlights.clear();
                 Heard::Replaced
             }
             BufferUpdate::Acked { version, seq } => {
@@ -170,6 +182,7 @@ impl BufferCopy {
                     log::error!("buffer {}: the daemon's edit didn't fit: {err}", self.id);
                     return Heard::Nothing;
                 }
+                self.highlights.map(&edit);
                 self.version = version;
                 self.send_next();
                 if reversal {
@@ -191,7 +204,32 @@ impl BufferCopy {
                 self.modified = modified;
                 Heard::Nothing
             }
+            BufferUpdate::Highlights {
+                version,
+                start,
+                end,
+                spans,
+            } => {
+                self.recolour(version, start, end, spans);
+                Heard::Nothing
+            }
         }
+    }
+
+    /// Takes highlights for bytes `start` to `end` of the daemon's text at
+    /// `version`, moving them past the window's edits waiting.
+    fn recolour(&mut self, version: u64, start: usize, end: usize, spans: Vec<Span>) {
+        if version != self.version {
+            // Not for the text the copy is made from, which the daemon
+            // never sends.
+            log::debug!("buffer {}: highlights for version {version}", self.id);
+            return;
+        }
+        let waiting = (self.waiting.iter()).filter_map(|waiting| match waiting {
+            Waiting::Edit { edit, .. } => Some(edit),
+            Waiting::Undo | Waiting::Redo => None,
+        });
+        (self.highlights).replace_since(start..end, spans, waiting);
     }
 
     /// The connection was lost. A new one sends a snapshot, and changes
@@ -385,6 +423,51 @@ pub(super) mod tests {
         }
         assert_eq!(daemon.text.to_string(), "pub fn main() {xy}\n");
         assert_eq!(copy.text.to_string(), daemon.text.to_string());
+    }
+
+    #[test]
+    fn highlights_move_with_edits_and_land_past_those_not_answered() {
+        use clackatoo_text::{Kind, Span};
+        let span = |start, end, kind| Span { start, end, kind };
+        let mut daemon = Daemon::new("fn a\n");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        copy.update(BufferUpdate::Highlights {
+            version: 0,
+            start: 0,
+            end: 5,
+            spans: vec![span(0, 2, Kind::Keyword), span(3, 4, Kind::Function)],
+        });
+        // Typed at the start, before the daemon has it: the spans move.
+        typed(&mut copy, 0, "pub ", true);
+        assert_eq!(
+            copy.highlights().spans(),
+            [span(4, 6, Kind::Keyword), span(7, 8, Kind::Function)]
+        );
+        // Answered; then more is typed, and the daemon's parse of the text
+        // it has comes while that's still on its way.
+        let (ack, _) = daemon.take(copy.take_outbox().remove(0));
+        copy.update(ack);
+        typed(&mut copy, 0, "x", true);
+        copy.update(BufferUpdate::Highlights {
+            version: 1,
+            start: 0,
+            end: 9,
+            spans: vec![span(0, 3, Kind::Keyword), span(4, 6, Kind::Keyword)],
+        });
+        assert_eq!(
+            copy.highlights().spans(),
+            [span(1, 4, Kind::Keyword), span(5, 7, Kind::Keyword)],
+            "what the parse found replaces what was there, past the \"x\""
+        );
+        // Highlights for a version the copy isn't made from are dropped.
+        copy.update(BufferUpdate::Highlights {
+            version: 0,
+            start: 0,
+            end: 9,
+            spans: Vec::new(),
+        });
+        assert_eq!(copy.highlights().spans().len(), 2);
     }
 
     #[test]

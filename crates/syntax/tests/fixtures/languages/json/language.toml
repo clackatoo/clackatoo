@@ -1,0 +1,2 @@
+grammar = "json"
+extensions = ["json"]

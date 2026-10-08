@@ -1,6 +1,6 @@
 //! Turning a cell's style into the colours it's drawn in.
 
-use clackatoo_protocol::{Attributes, Color, Style};
+use clackatoo_protocol::{Attributes, Color, Kind, Style};
 
 /// A colour as red, green, blue and alpha, each from 0 to 1, in sRGB.
 pub(crate) type Rgba = [f32; 4];
@@ -113,6 +113,46 @@ impl Default for Theme {
             ],
             palette,
         }
+    }
+}
+
+/// How text of `kind` is drawn in an editor. The colours are the palette's
+/// named ones where there's one to suit, so they follow a terminal's theme,
+/// with orange and grey for numbers and comments, as in Tomorrow Night,
+/// which the default palette is.
+#[must_use]
+pub(crate) const fn syntax(kind: Kind) -> Style {
+    const RED: Color = Color::Indexed(1);
+    const GREEN: Color = Color::Indexed(2);
+    const YELLOW: Color = Color::Indexed(3);
+    const BLUE: Color = Color::Indexed(4);
+    const MAGENTA: Color = Color::Indexed(5);
+    const CYAN: Color = Color::Indexed(6);
+    const ORANGE: Color = Color::Rgb(0xde, 0x93, 0x5f);
+    const GREY: Color = Color::Rgb(0x96, 0x98, 0x96);
+    let fg = match kind {
+        Kind::Comment => GREY,
+        Kind::Keyword => MAGENTA,
+        Kind::String => GREEN,
+        Kind::StringSpecial
+        | Kind::Escape
+        | Kind::Macro
+        | Kind::Attribute
+        | Kind::PunctuationSpecial => CYAN,
+        Kind::Number | Kind::Constant => ORANGE,
+        Kind::Function => BLUE,
+        Kind::Type | Kind::Constructor => YELLOW,
+        Kind::VariableBuiltin | Kind::Label | Kind::Tag => RED,
+        Kind::Module
+        | Kind::Variable
+        | Kind::Parameter
+        | Kind::Property
+        | Kind::Operator
+        | Kind::Punctuation => Color::Default,
+    };
+    Style {
+        fg,
+        ..Style::DEFAULT
     }
 }
 

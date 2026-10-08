@@ -20,10 +20,15 @@ tempfile.workspace = true
 
 [dev-dependencies]
 alacritty_terminal.workspace = true
+clackatoo-text.workspace = true
 criterion.workspace = true
 
 [[bench]]
 name = "throughput"
+harness = false
+
+[[bench]]
+name = "highlights"
 harness = false
 
 [lints]

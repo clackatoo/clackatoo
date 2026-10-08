@@ -13,6 +13,9 @@
 //! [`History`] keeps the edits made, by whom, so each author can undo their
 //! own without undoing anyone else's.
 //!
+//! [`Highlights`] are what each piece of the text is, as its language's
+//! grammar reads it, for colouring it; they move along with edits.
+//!
 //! Places in a text are byte offsets into its UTF-8, as tree-sitter's are.
 //!
 //! The crate does no I/O, so a browser client compiled to WebAssembly can
@@ -22,8 +25,10 @@
 #![warn(missing_docs)]
 
 mod edit;
+mod highlights;
 mod history;
 
 pub use edit::{Bias, Edit, EditError, Op, compose, transform};
+pub use highlights::{Highlights, Kind, Span};
 pub use history::{History, HistoryError, HistorySnapshot, Steps};
 pub use ropey::Rope;

@@ -117,6 +117,17 @@ impl Buffer {
         self.modified
     }
 
+    pub(crate) fn text(&self) -> &Rope {
+        &self.text
+    }
+
+    /// The edits made since `version`, oldest first, or `None` if that's
+    /// further back than the history reaches.
+    pub(crate) fn edits_since(&self, version: u64) -> Option<impl Iterator<Item = &Edit>> {
+        let since = self.history.since(version).ok()?;
+        Some(since.map(|(edit, _)| edit))
+    }
+
     pub(crate) fn snapshot(&self) -> BufferSnapshot {
         BufferSnapshot {
             path: self.path.display().to_string(),

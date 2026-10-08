@@ -14,10 +14,15 @@
 //! A window has one change on its way at a time: it sends the next once
 //! the daemon has answered the last, with [`BufferUpdate::Acked`] for an
 //! edit, or with the edit an undo or redo made.
+//!
+//! A buffer whose language the daemon has a grammar for is parsed after
+//! each edit, off the event loop, and its [`BufferUpdate::Highlights`] sent
+//! as each parse ends: all of them first, then what each parse changed.
+//! The window moves the highlights it has along with each edit until then.
 
 use std::fmt;
 
-use clackatoo_text::Edit;
+use clackatoo_text::{Edit, Span};
 use serde::{Deserialize, Serialize};
 
 use crate::TerminalId;
@@ -118,4 +123,18 @@ pub enum BufferUpdate {
     NoChange(u64),
     /// Whether the buffer has changes that aren't saved is now this.
     Modified(bool),
+    /// What a parse found: bytes `start` to `end` of the text at `version`
+    /// are highlighted as `spans` say, and the rest as before. Sent after
+    /// the edit that made `version`, and after a snapshot, for the whole
+    /// text.
+    Highlights {
+        /// The version of the text they're for.
+        version: u64,
+        /// The first byte they're for.
+        start: usize,
+        /// The byte after the last.
+        end: usize,
+        /// The spans there, in order.
+        spans: Vec<Span>,
+    },
 }
