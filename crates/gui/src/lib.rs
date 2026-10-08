@@ -26,6 +26,7 @@ mod history;
 mod input;
 mod layout;
 mod motion;
+mod objects;
 mod pane;
 mod render;
 mod screen;

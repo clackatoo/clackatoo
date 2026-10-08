@@ -3,7 +3,8 @@
 //!
 //! The cursor moves with Vim's motions over the whole document, history
 //! then screen, and the view follows it. `v` and `V` select from where the
-//! cursor was to where it goes, by character or by line, and `y` copies.
+//! cursor was to where it goes, by character or by line, and `y` copies;
+//! `y` also takes a motion or a text object (see [`super::operator`]).
 //! `/` and `?` search forward and back, and `n` and `N` search again. The
 //! daemon does the copying and searching, since it holds all of history
 //! and the window only the lines it has shown.
@@ -14,6 +15,7 @@ use winit::keyboard::{Key, NamedKey};
 use super::{Copy, Document, Lines, Mode, Pane, Pending, Prefix, Selection};
 use crate::input::KeyPress;
 use crate::motion::{Cursor, Motion, Point};
+use crate::objects::Object;
 
 /// A search being typed.
 #[derive(Debug)]
@@ -30,7 +32,6 @@ impl Pane {
         self.status = None;
         let modifiers = press.modifiers;
         let after_g = prefix == Some(Prefix::G);
-        let after_y = prefix == Some(Prefix::Y);
         let height = self.height();
         let half = i64::try_from((height / 2).max(1)).unwrap_or(1);
         let page = i64::try_from(height.max(1)).unwrap_or(1);
@@ -39,6 +40,9 @@ impl Pane {
             _ => None,
         };
         let ctrl = modifiers.ctrl;
+        if !ctrl && let Some(redraw) = self.second_key(press, character, prefix) {
+            return redraw;
+        }
         let visual = matches!(self.mode, Mode::Visual(_));
         let motion = match (press.key, character) {
             // Ctrl+Shift+C copies, as in other terminals.
@@ -68,6 +72,10 @@ impl Pane {
             (_, Some('e')) if ctrl => return self.scroll_view(-1),
             (_, Some('y')) if ctrl => return self.scroll_view(1),
             (_, _) if ctrl => return false,
+            (_, Some(key @ ('i' | 'a'))) if visual => {
+                self.prefix = Some(Prefix::Object { inner: key == 'i' });
+                return false;
+            }
             (_, Some('i')) => return self.insert(),
             (_, Some('v')) => return self.toggle_visual(Selection::Characters),
             (_, Some('V')) => return self.toggle_visual(Selection::Lines),
@@ -80,7 +88,6 @@ impl Pane {
                 return true;
             }
             (_, Some('y')) if visual => return self.yank_selection(),
-            (_, Some('y')) if after_y => return self.yank_line(),
             (_, Some('y')) => {
                 self.prefix = Some(Prefix::Y);
                 return false;
@@ -95,16 +102,12 @@ impl Pane {
             }
             (_, Some('n')) => return self.search_again(false),
             (_, Some('N')) => return self.search_again(true),
-            (Key::Named(NamedKey::ArrowLeft), _) | (_, Some('h')) => Motion::Left,
-            (Key::Named(NamedKey::ArrowRight), _) | (_, Some('l')) => Motion::Right,
-            (Key::Named(NamedKey::ArrowDown), _) | (_, Some('j')) => Motion::Down(1),
-            (Key::Named(NamedKey::ArrowUp), _) | (_, Some('k')) => Motion::Up(1),
-            (Key::Named(NamedKey::Home), _) | (_, Some('0')) => Motion::LineStart,
-            (Key::Named(NamedKey::End), _) | (_, Some('$')) => Motion::LineEnd,
-            (_, Some('w')) => Motion::WordStart,
-            (_, Some('b')) => Motion::WordBack,
-            (_, Some('e')) => Motion::WordEnd,
-            (_, Some('G')) => Motion::Last,
+            (_, Some(bracket @ ('[' | ']'))) => {
+                self.prefix = Some(Prefix::Bracket {
+                    forward: bracket == ']',
+                });
+                return false;
+            }
             (_, Some('g')) if after_g => Motion::First,
             (_, Some('g')) => {
                 self.prefix = Some(Prefix::G);
@@ -120,10 +123,53 @@ impl Pane {
                 };
                 return self.move_to_line(line);
             }
-            _ => return false,
+            _ => match motion(press.key, character) {
+                Some(motion) => motion,
+                None => return false,
+            },
         };
         self.move_cursor(motion);
         true
+    }
+
+    /// The second key of `y`, `i`, `[` and their kin, after `prefix`: none
+    /// if there's no such prefix. A key they don't take cancels them.
+    fn second_key(
+        &mut self,
+        press: &KeyPress<'_>,
+        character: Option<char>,
+        prefix: Option<Prefix>,
+    ) -> Option<bool> {
+        Some(match prefix? {
+            Prefix::Y => self.after_y(press, character, false),
+            Prefix::YG => self.after_y(press, character, true),
+            Prefix::Object { inner } => character
+                .and_then(Object::of_key)
+                .is_some_and(|object| self.use_object(object, inner)),
+            Prefix::Bracket { forward } => {
+                let again = if forward { ']' } else { '[' };
+                character == Some(again) && self.jump_to_block(forward)
+            }
+            Prefix::G | Prefix::CtrlBackslash => return None,
+        })
+    }
+
+    /// The key after `y`, or after `yg` if `after_yg`.
+    fn after_y(&mut self, press: &KeyPress<'_>, character: Option<char>, after_yg: bool) -> bool {
+        match character {
+            Some('g') if after_yg => self.yank_motion(Motion::First),
+            _ if after_yg => false,
+            Some('y') => self.yank_line(),
+            Some('g') => {
+                self.prefix = Some(Prefix::YG);
+                false
+            }
+            Some(key @ ('i' | 'a')) => {
+                self.prefix = Some(Prefix::Object { inner: key == 'i' });
+                false
+            }
+            _ => motion(press.key, character).is_some_and(|motion| self.yank_motion(motion)),
+        }
     }
 
     /// Takes in what the daemon answered a copy or a search with.
@@ -383,6 +429,23 @@ impl Pane {
             self.move_to_line(line);
         }
     }
+}
+
+/// The motion a key makes, of those that take one key and no count.
+fn motion(key: &Key, character: Option<char>) -> Option<Motion> {
+    Some(match (key, character) {
+        (Key::Named(NamedKey::ArrowLeft), _) | (_, Some('h')) => Motion::Left,
+        (Key::Named(NamedKey::ArrowRight), _) | (_, Some('l')) => Motion::Right,
+        (Key::Named(NamedKey::ArrowDown), _) | (_, Some('j')) => Motion::Down(1),
+        (Key::Named(NamedKey::ArrowUp), _) | (_, Some('k')) => Motion::Up(1),
+        (Key::Named(NamedKey::Home), _) | (_, Some('0')) => Motion::LineStart,
+        (Key::Named(NamedKey::End), _) | (_, Some('$')) => Motion::LineEnd,
+        (_, Some('w')) => Motion::WordStart,
+        (_, Some('b')) => Motion::WordBack,
+        (_, Some('e')) => Motion::WordEnd,
+        (_, Some('G')) => Motion::Last,
+        _ => return None,
+    })
 }
 
 pub(super) fn position(point: Point) -> Position {

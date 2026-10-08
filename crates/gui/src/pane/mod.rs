@@ -28,6 +28,7 @@ use crate::screen::Screen;
 
 mod mouse;
 mod normal;
+mod operator;
 
 pub(crate) use mouse::{Copy, PaneMouse};
 
@@ -45,8 +46,14 @@ pub(crate) enum Mode {
 enum Prefix {
     /// `g`, and `gg` jumps to the top.
     G,
-    /// `y`, and `yy` copies the line.
+    /// `y`, waiting for a motion or an object; `yy` copies the line.
     Y,
+    /// `yg`, and `ygg` copies up to the first line.
+    YG,
+    /// `i` or `a`, after `y` or in visual mode: an object comes next.
+    Object { inner: bool },
+    /// `[` or `]`, and the same again jumps to the block before or after.
+    Bracket { forward: bool },
     /// Ctrl+\ left insert mode, and pressing it again sends it to the
     /// program.
     CtrlBackslash,
@@ -71,6 +78,8 @@ enum Pending {
     Text(Copy),
     /// A search.
     Search,
+    /// A block, and what for.
+    Block(operator::BlockUse),
     /// Anything answered with just "done" or an error.
     Other,
 }
@@ -240,6 +249,10 @@ impl Pane {
             }
             (Some(Pending::Search), Response::Found(found)) => {
                 self.searched(found);
+                true
+            }
+            (Some(Pending::Block(use_)), Response::Block(block)) => {
+                self.found_block(block, use_);
                 true
             }
             _ => false,
@@ -675,9 +688,18 @@ mod tests {
         pane
     }
 
-    /// Answers the pane's requests as the daemon would.
+    /// Answers the pane's requests as the daemon would, and those it makes
+    /// on hearing the answers.
     fn serve(pane: &mut Pane, terminal: &Terminal) {
-        for message in pane.take_outbox() {
+        let mut outbox = pane.take_outbox();
+        while !outbox.is_empty() {
+            serve_once(pane, terminal, outbox);
+            outbox = pane.take_outbox();
+        }
+    }
+
+    fn serve_once(pane: &mut Pane, terminal: &Terminal, outbox: Vec<ClientMessage>) {
+        for message in outbox {
             let response = match message {
                 ClientMessage::Request(Request::History { end, count, .. }) => {
                     let start = end.saturating_sub(u64::from(count));
@@ -710,6 +732,9 @@ mod tests {
                     backward,
                     ..
                 }) => Response::Found(terminal.search(&query, from, backward)),
+                ClientMessage::Request(Request::Block { line, which, .. }) => {
+                    Response::Block(terminal.block(line, which))
+                }
                 ClientMessage::Request(_) => Response::Done,
                 _ => continue,
             };
@@ -985,6 +1010,104 @@ mod tests {
         named(&mut pane, NamedKey::Enter);
         serve(&mut pane, &terminal);
         assert_eq!(pane.label().as_deref(), Some("not found: zebra"));
+    }
+
+    /// What `keys` copy, the daemon answering as `terminal`.
+    fn yanked(pane: &mut Pane, terminal: &Terminal, keys_: &str) -> Option<String> {
+        keys(pane, keys_);
+        serve(pane, terminal);
+        pane.take_yanked().map(|(text, _)| text)
+    }
+
+    #[test]
+    fn y_takes_a_motion() {
+        let terminal = terminal("one two six\r\nfour five");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
+        assert_eq!(yank("gg0yw").as_deref(), Some("one "));
+        assert_eq!(yank("ye").as_deref(), Some("one"));
+        assert_eq!(yank("wy$").as_deref(), Some("two six"));
+        // Back over a word moves the cursor to its start.
+        assert_eq!(yank("yb").as_deref(), Some("one "));
+        assert_eq!(yank("yw").as_deref(), Some("one "));
+        // From the last word, `w` would go to the next line, so stops at
+        // this one's end.
+        assert_eq!(yank("$byw").as_deref(), Some("six"));
+        assert_eq!(yank("yj").as_deref(), Some("one two six\nfour five"));
+        assert_eq!(yank("jygg").as_deref(), Some("one two six\nfour five"));
+        // Anything else after `y` cancels it.
+        assert_eq!(yank("yxw"), None);
+    }
+
+    #[test]
+    fn y_takes_a_text_object_and_visual_mode_selects_one() {
+        let terminal = terminal("f(\"a b\")\r\nx");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        assert_eq!(
+            yanked(&mut pane, &terminal, "gg0lllyiw").as_deref(),
+            Some("a")
+        );
+        assert_eq!(yanked(&mut pane, &terminal, "yi\"").as_deref(), Some("a b"));
+        assert_eq!(
+            yanked(&mut pane, &terminal, "ya(").as_deref(),
+            Some("(\"a b\")")
+        );
+        assert_eq!(yanked(&mut pane, &terminal, "ll").as_deref(), None);
+        assert_eq!(
+            yanked(&mut pane, &terminal, "vi(y").as_deref(),
+            Some("\"a b\"")
+        );
+        assert_eq!(pane.mode, Mode::Normal);
+    }
+
+    /// A 20 × 10 terminal where fish ran `ls` and `false`, and is showing
+    /// its prompt.
+    fn shell() -> Terminal {
+        let mut terminal = Terminal::new(Size::new(20, 10).unwrap(), &Config::default());
+        let prompt = "\x1b]133;A\x07$ ";
+        terminal.advance(
+            format!(
+                "{prompt}ls\r\n\x1b]133;C;cmdline_url=ls\x07a\r\nb\r\n\x1b]133;D;0\x07\
+             {prompt}false\r\n\x1b]133;C;cmdline_url=false\x07\x1b]133;D;1\x07{prompt}"
+            )
+            .as_bytes(),
+        );
+        terminal
+    }
+
+    #[test]
+    fn blocks_are_copied_selected_and_jumped_to() {
+        let terminal = shell();
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        assert_eq!(
+            yanked(&mut pane, &terminal, "ggjyib").as_deref(),
+            Some("a\nb")
+        );
+        assert_eq!(
+            yanked(&mut pane, &terminal, "yab").as_deref(),
+            Some("$ ls\na\nb")
+        );
+        assert_eq!(pane.label().as_deref(), Some("copied 3 lines"));
+        // `false` printed nothing.
+        assert_eq!(yanked(&mut pane, &terminal, "]]"), None);
+        assert_eq!(yanked(&mut pane, &terminal, "yib"), None);
+        assert_eq!(pane.label().as_deref(), Some("no output"));
+        assert_eq!(cursor(&pane).0, "$ false");
+        assert_eq!(yanked(&mut pane, &terminal, "]]").as_deref(), None);
+        assert_eq!(cursor(&pane).0, "$");
+        yanked(&mut pane, &terminal, "[[");
+        yanked(&mut pane, &terminal, "[[");
+        assert_eq!(yanked(&mut pane, &terminal, "vab"), None);
+        assert_eq!(pane.highlights(5).len(), 3, "the block is selected");
+        assert_eq!(
+            yanked(&mut pane, &terminal, "y").as_deref(),
+            Some("$ ls\na\nb")
+        );
+        assert_eq!(yanked(&mut pane, &terminal, "[[").as_deref(), None);
+        assert_eq!(pane.label().as_deref(), Some("no block here"));
     }
 }
 

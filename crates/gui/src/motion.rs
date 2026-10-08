@@ -47,6 +47,29 @@ pub(crate) enum Motion {
     Last,
 }
 
+/// What an operator such as `y` takes when given a motion, as in Vim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reach {
+    /// The characters up to where the motion goes, but not that one.
+    Exclusive,
+    /// The characters up to where the motion goes, and that one.
+    Inclusive,
+    /// Every line from the cursor's to the motion's, whole.
+    Lines,
+}
+
+impl Motion {
+    pub(crate) fn reach(self) -> Reach {
+        match self {
+            Self::Left | Self::Right | Self::LineStart | Self::WordStart | Self::WordBack => {
+                Reach::Exclusive
+            }
+            Self::LineEnd | Self::WordEnd => Reach::Inclusive,
+            Self::Up(_) | Self::Down(_) | Self::First | Self::Last => Reach::Lines,
+        }
+    }
+}
+
 /// The normal-mode cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Cursor {
@@ -58,7 +81,7 @@ pub(crate) struct Cursor {
 
 /// What kind of character a cell holds, for word motions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Class {
+pub(crate) enum Class {
     Blank,
     /// Letters, digits and `_`.
     Word,
@@ -184,14 +207,18 @@ impl Cursor {
 
 /// A position moving cell by cell through the document, with each line's
 /// end as a blank between it and the next.
-struct Walk<'a, L> {
+pub(crate) struct Walk<'a, L> {
     lines: &'a L,
     at: Point,
 }
 
 impl<'a, L: Lines> Walk<'a, L> {
-    fn new(lines: &'a L, at: Point) -> Self {
+    pub(crate) fn new(lines: &'a L, at: Point) -> Self {
         Self { lines, at }
+    }
+
+    pub(crate) fn at(&self) -> Point {
+        self.at
     }
 
     fn class(&self) -> Class {
@@ -200,7 +227,7 @@ impl<'a, L: Lines> Walk<'a, L> {
 
     /// Steps to the next cell, or the next line's start. Returns false at
     /// the document's end.
-    fn forward(&mut self) -> bool {
+    pub(crate) fn forward(&mut self) -> bool {
         match self.next() {
             Some(next) => {
                 self.at = next;
@@ -210,7 +237,7 @@ impl<'a, L: Lines> Walk<'a, L> {
         }
     }
 
-    fn back(&mut self) -> bool {
+    pub(crate) fn back(&mut self) -> bool {
         match self.previous() {
             Some(previous) => {
                 self.at = previous;
@@ -266,7 +293,7 @@ impl<'a, L: Lines> Walk<'a, L> {
 }
 
 /// The class of the cell at `col`, with past a line's text blank.
-fn class_at(row: Option<&Row>, col: usize) -> Class {
+pub(crate) fn class_at(row: Option<&Row>, col: usize) -> Class {
     let Some(cell) = row.and_then(|row| row.cells().get(col)) else {
         return Class::Blank;
     };
@@ -281,7 +308,7 @@ fn class_at(row: Option<&Row>, col: usize) -> Class {
 }
 
 /// Where the line's text ends: one past its last non-blank cell.
-fn text_end(row: Option<&Row>) -> usize {
+pub(crate) fn text_end(row: Option<&Row>) -> usize {
     row.map_or(0, |row| {
         row.cells()
             .iter()
@@ -297,7 +324,7 @@ fn last_char(row: Option<&Row>) -> usize {
 
 /// The cell after the one at `col`, stepping over a wide character's
 /// right half.
-fn next_cell(row: Option<&Row>, col: usize) -> Option<usize> {
+pub(crate) fn next_cell(row: Option<&Row>, col: usize) -> Option<usize> {
     let cells = row?.cells();
     let mut next = col + 1;
     while cells.get(next).is_some_and(|cell| cell.is_wide_spacer()) {
@@ -308,7 +335,7 @@ fn next_cell(row: Option<&Row>, col: usize) -> Option<usize> {
 
 /// The cell before the one at `col`, landing on a wide character's left
 /// half.
-fn previous_cell(row: Option<&Row>, col: usize) -> Option<usize> {
+pub(crate) fn previous_cell(row: Option<&Row>, col: usize) -> Option<usize> {
     let previous = col.checked_sub(1)?;
     Some(start_of_cell(row, previous))
 }
@@ -323,15 +350,16 @@ fn start_of_cell(row: Option<&Row>, col: usize) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use clackatoo_term::{RowBuilder, Style};
 
     use super::*;
 
-    struct Text(Vec<Row>);
+    /// Lines of text, 20 columns wide, numbered from 0.
+    pub(crate) struct Text(Vec<Row>);
 
     impl Text {
-        fn new(lines: &[&str]) -> Self {
+        pub(crate) fn new(lines: &[&str]) -> Self {
             Self(
                 lines
                     .iter()
@@ -355,7 +383,7 @@ mod tests {
         }
     }
 
-    fn at(line: u64, col: usize) -> Point {
+    pub(crate) fn at(line: u64, col: usize) -> Point {
         Point { line, col }
     }
 
