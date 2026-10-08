@@ -713,6 +713,10 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
         b"\x1b(0".to_vec(),
         b"\x1b(B".to_vec(),
         b"\x1b]2;title\x07".to_vec(),
+        b"\x1b]133;A\x07".to_vec(),
+        b"\x1b]133;C;cmdline_url=ls%20-l\x07".to_vec(),
+        b"\x1b]133;D;1\x07".to_vec(),
+        b"\x1b]7;file://host/tmp\x07".to_vec(),
     ]);
     prop_oneof![4 => printable, 2 => control, 3 => csi, 1 => modes, 1 => esc, 1 => any::<u8>().prop_map(|b| vec![b])]
 }
@@ -821,6 +825,8 @@ proptest! {
         prop_assert!(!off.scrollback_needs_compaction() && !eager.scrollback_needs_compaction());
         prop_assert_eq!(cells(off), cells(lazy));
         prop_assert_eq!(cells(off), cells(eager));
+        prop_assert_eq!(off.blocks_snapshot(), lazy.blocks_snapshot());
+        prop_assert_eq!(off.blocks_snapshot(), eager.blocks_snapshot());
     }
 
     #[test]
@@ -937,9 +943,12 @@ mod snapshots {
             original.take_replies();
 
             let snapshot = original.snapshot();
+            let blocks = original.blocks_snapshot();
             let mut restored = Terminal::restore(&snapshot, &config()).unwrap();
+            restored.restore_blocks(&blocks);
             restored.assert_invariants();
             prop_assert_eq!(&restored.snapshot(), &snapshot);
+            prop_assert_eq!(&restored.blocks_snapshot(), &blocks);
             prop_assert_eq!(cells(&restored), cells(&original));
 
             // What the screen doesn't show (modes, character sets, tab
@@ -952,6 +961,7 @@ mod snapshots {
             prop_assert_eq!(restored.cursor(), original.cursor());
             prop_assert_eq!(restored.input_modes(), original.input_modes());
             prop_assert_eq!(restored.emulator_state(), original.emulator_state());
+            prop_assert_eq!(restored.blocks_snapshot(), original.blocks_snapshot());
         }
     }
 

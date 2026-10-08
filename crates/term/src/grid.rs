@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
+use crate::blocks::Mark;
 use crate::damage::Damage;
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
@@ -125,9 +126,6 @@ impl Grid {
         self.scrollback.rows()
     }
 
-    /// Screen row `line`, for changing. Every change to the screen goes
-    /// through this or another method of the grid, so each can record what
-    /// it damaged.
     /// The number the next line scrolled into history will get. Lines are
     /// numbered from 0 as they arrive, so numbers stay put while new lines
     /// push old ones out.
@@ -145,6 +143,39 @@ impl Grid {
         self.scrollback.numbered_rows(numbers)
     }
 
+    /// Every line a shell marked (see [`crate::blocks`]), in history then
+    /// on screen, numbered as in [`crate::document`].
+    pub(crate) fn marks(&self) -> impl Iterator<Item = (u64, Mark)> + '_ {
+        let end = self.scrollback.end();
+        let screen = (end..)
+            .zip(&self.rows)
+            .filter_map(|(line, row)| Some((line, row.mark()?)));
+        self.scrollback.marks().chain(screen)
+    }
+
+    /// Marks the lines in `marks`, numbered as [`marks`](Self::marks)
+    /// numbers them. Lines that aren't held are left out.
+    pub(crate) fn set_marks(&mut self, marks: &[(u64, Mark)]) {
+        let end = self.scrollback.end();
+        self.scrollback
+            .set_marks(marks.iter().copied().filter(|&(line, _)| line < end));
+        for row in &mut self.rows {
+            row.set_mark(None);
+        }
+        for &(line, mark) in marks {
+            if let Some(row) = line
+                .checked_sub(end)
+                .and_then(|line| usize::try_from(line).ok())
+                .and_then(|line| self.rows.get_mut(line))
+            {
+                row.set_mark(Some(mark));
+            }
+        }
+    }
+
+    /// Screen row `line`, for changing. Every change to the screen goes
+    /// through this or another method of the grid, so each can record what
+    /// it damaged.
     pub(crate) fn row_mut(&mut self, line: usize) -> &mut Row {
         self.damage.mark(line);
         &mut self.rows[line]
@@ -232,6 +263,8 @@ impl Grid {
                 rows.push(std::mem::replace(&mut out, Row::new(width)));
                 out_col = 0;
             }
+            // A mark goes to the row its row's first character lands on.
+            let mut mark = row.mark();
             let mut end = if row.is_wrapped() {
                 row.width() - usize::from(is_padded(row, old.get(line + 1)))
             } else {
@@ -255,11 +288,17 @@ impl Grid {
                     rows.push(std::mem::replace(&mut out, Row::new(width)));
                     out_col = 0;
                 }
+                if let Some(mark) = mark.take() {
+                    out.set_mark(Some(mark));
+                }
                 if line == cursor.0 && (col == cursor.1 || col + 1 == cursor.1 && cells == 2) {
                     moved = (rows.len(), (out_col + cursor.1 - col).min(width - 1));
                 }
                 copy_cell(&mut out, out_col, row, col);
                 out_col += cells;
+            }
+            if let Some(mark) = mark {
+                out.set_mark(Some(mark));
             }
         }
         rows.push(out);

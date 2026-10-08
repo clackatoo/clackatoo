@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod blocks;
 mod cell;
 mod charset;
 mod damage;
@@ -33,6 +34,7 @@ mod width;
 #[cfg(test)]
 mod tests;
 
+pub use blocks::{Block, Which};
 pub use cell::{Cell, CellFlags};
 pub use damage::Damage;
 pub use document::{Match, Position};
@@ -40,6 +42,6 @@ pub use grid::Grid;
 pub use row::{Row, RowBuilder};
 pub use scrollback::Compaction;
 pub use size::{InvalidSize, Size};
-pub use snapshot::{RestoreError, Snapshot};
+pub use snapshot::{BlocksSnapshot, RestoreError, Snapshot};
 pub use style::{Attributes, Color, Style, Underline};
 pub use terminal::{Config, Cursor, CursorShape, InputModes, Terminal};

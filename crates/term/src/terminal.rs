@@ -4,6 +4,7 @@ use std::ops::Range;
 
 use bitflags::bitflags;
 
+use crate::blocks::{self, Blocks, Mark};
 use crate::charset::Charsets;
 use crate::damage::Damage;
 use crate::grid::Grid;
@@ -12,7 +13,7 @@ use crate::parser::Parser;
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
 use crate::size::Size;
-use crate::snapshot::{Line, RestoreError, Snapshot, position};
+use crate::snapshot::{BlocksSnapshot, Line, RestoreError, Snapshot, position};
 use crate::style::Style;
 use crate::tabs::TabStops;
 use crate::width;
@@ -194,6 +195,17 @@ impl Terminal {
         &self.emulator.title
     }
 
+    /// The working directory the shell last reported (OSC 7), as a path.
+    #[must_use]
+    pub fn cwd(&self) -> Option<&str> {
+        self.emulator.cwd.as_deref()
+    }
+
+    /// What the shell said about block `block`, if it is still kept.
+    pub(crate) fn block_entry(&self, block: u32) -> Option<&blocks::Entry> {
+        self.emulator.blocks.get(block)
+    }
+
     /// The terminal's whole state, to carry into another process. See
     /// [`Snapshot`] for what isn't kept.
     #[must_use]
@@ -296,6 +308,29 @@ impl Terminal {
         })
     }
 
+    /// What the shell marked, to carry into another process with a
+    /// [`snapshot`](Self::snapshot).
+    #[must_use]
+    pub fn blocks_snapshot(&self) -> BlocksSnapshot {
+        let emulator = &self.emulator;
+        BlocksSnapshot::capture(
+            emulator.cwd.as_deref(),
+            emulator.primary.marks(),
+            &emulator.blocks,
+        )
+    }
+
+    /// Puts back what the shell marked, from a
+    /// [`blocks_snapshot`](Self::blocks_snapshot) taken with the
+    /// [`snapshot`](Self::snapshot) this terminal was restored from.
+    pub fn restore_blocks(&mut self, snapshot: &BlocksSnapshot) {
+        let (marks, blocks) = snapshot.restore();
+        let emulator = &mut self.emulator;
+        emulator.primary.set_marks(&marks);
+        emulator.blocks = blocks;
+        emulator.cwd.clone_from(&snapshot.cwd);
+    }
+
     /// The printing state the screen doesn't show: the cursor's position and
     /// pending wrap, and the character REP would repeat.
     #[cfg(test)]
@@ -347,6 +382,13 @@ impl Terminal {
         assert!(
             emulator.screen == Screen::Primary || emulator.alternate.is_some(),
             "the alternate screen is shown but doesn't exist"
+        );
+        assert!(
+            emulator
+                .alternate
+                .as_ref()
+                .is_none_or(|grid| grid.marks().next().is_none()),
+            "the alternate screen has marks"
         );
         assert!(
             emulator.cursor.line < emulator.height(),
@@ -569,6 +611,10 @@ pub(crate) struct Emulator {
     scroll_region: Range<usize>,
     tabs: TabStops,
     pub(crate) title: String,
+    /// The working directory the shell last reported.
+    cwd: Option<String>,
+    /// The commands the shell marked (see [`crate::blocks`]).
+    blocks: Blocks,
     /// The cursor shape the program asked for.
     cursor_shape: CursorShape,
     pub(crate) replies: Vec<u8>,
@@ -606,6 +652,8 @@ impl Emulator {
             scroll_region: 0..height,
             tabs: TabStops::new(width),
             title: String::new(),
+            cwd: None,
+            blocks: Blocks::default(),
             cursor_shape: CursorShape::Default,
             replies: Vec::new(),
             last_printed: None,
@@ -1119,7 +1167,13 @@ impl Emulator {
                 row.set_wrapped(false);
             }
             1 => row.fill(0..col + 1, &blank),
-            2 => row.reset(&blank),
+            // Shells clear the line to draw their prompt again, which keeps
+            // its mark.
+            2 => {
+                let mark = row.mark();
+                row.reset(&blank);
+                row.set_mark(mark);
+            }
             _ => log::trace!("unhandled EL mode {mode}"),
         }
     }
@@ -1357,6 +1411,53 @@ impl Emulator {
         ] {
             cursor.line = cursor.line.min(height - 1);
             cursor.col = cursor.col.min(width - 1);
+        }
+    }
+
+    // --- Shell integration (see crate::blocks) ------------------------
+
+    /// OSC 133: the shell marks where a prompt (`A`) or a command's output
+    /// (`C`) starts, or that the command finished (`D`), with `options`.
+    pub(crate) fn shell_mark(&mut self, kind: &[u8], options: &[&[u8]]) {
+        if self.screen == Screen::Alternate {
+            return;
+        }
+        match kind {
+            b"A" => {
+                let block = self.blocks.prompt();
+                self.mark_cursor_row(block, false);
+                // Forget the blocks no row is marked with any more.
+                let oldest = self.primary.marks().map(|(_, mark)| mark.block).min();
+                self.blocks.forget_before(oldest.unwrap_or(block));
+            }
+            b"C" => {
+                let command = options
+                    .iter()
+                    .find_map(|option| option.strip_prefix(b"cmdline_url="))
+                    .map(blocks::percent_decode);
+                let block = self.blocks.command(command, self.cwd.clone());
+                self.mark_cursor_row(block, true);
+            }
+            b"D" => {
+                let exit = options
+                    .first()
+                    .and_then(|status| std::str::from_utf8(status).ok()?.parse().ok());
+                self.blocks.finished(exit);
+            }
+            _ => {}
+        }
+    }
+
+    fn mark_cursor_row(&mut self, block: u32, output: bool) {
+        let line = self.cursor.line;
+        let row = self.primary.row_mut(line);
+        row.set_mark(Some(Mark::add(row.mark(), block, output)));
+    }
+
+    /// OSC 7: the shell's working directory, as a `file://` URL.
+    pub(crate) fn set_cwd(&mut self, url: &[u8]) {
+        if let Some(path) = blocks::file_url_path(url) {
+            self.cwd = Some(path);
         }
     }
 

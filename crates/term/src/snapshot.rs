@@ -16,7 +16,14 @@
 //! Not kept: an escape sequence or character cut off part way (the next
 //! build starts with a fresh parser), unanswered replies, and damage (a
 //! restored terminal is all damaged).
+//!
+//! What the shell marked (see [`crate::blocks`]) came later, so it is a
+//! snapshot of its own, [`BlocksSnapshot`], and a terminal snapshotted
+//! without one restores with no blocks.
 
+use std::collections::VecDeque;
+
+use crate::blocks::{Blocks, Entry, Mark, Phase as LivePhase};
 use crate::charset::{Charset as LiveCharset, Charsets as LiveCharsets, Slot};
 use crate::mouse::{MouseEncoding, MouseTracking};
 use crate::row::{Row, RowBuilder};
@@ -56,6 +63,114 @@ pub struct Snapshot {
     pub(crate) cursor_shape: Shape,
     /// The character REP repeats.
     pub(crate) last_printed: Option<char>,
+}
+
+/// What a terminal's shell marked, from
+/// [`Terminal::blocks_snapshot`](crate::Terminal::blocks_snapshot), for
+/// [`Terminal::restore_blocks`](crate::Terminal::restore_blocks).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct BlocksSnapshot {
+    /// The working directory the shell last reported.
+    pub(crate) cwd: Option<String>,
+    /// The primary screen's marked lines, numbered through its history and
+    /// on through the screen, oldest first.
+    pub(crate) marks: Vec<MarkedLine>,
+    /// The number of the first block.
+    pub(crate) first: u32,
+    pub(crate) blocks: Vec<BlockEntry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub(crate) struct MarkedLine {
+    pub(crate) line: u64,
+    pub(crate) block: u32,
+    pub(crate) prompt: bool,
+    pub(crate) output: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub(crate) struct BlockEntry {
+    pub(crate) command: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) phase: Phase,
+    pub(crate) exit: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub(crate) enum Phase {
+    Prompt,
+    Running,
+    Finished,
+}
+
+impl BlocksSnapshot {
+    pub(crate) fn capture(
+        cwd: Option<&str>,
+        marks: impl Iterator<Item = (u64, Mark)>,
+        blocks: &Blocks,
+    ) -> Self {
+        let (first, entries) = blocks.parts();
+        Self {
+            cwd: cwd.map(str::to_owned),
+            marks: marks
+                .map(|(line, mark)| MarkedLine {
+                    line,
+                    block: mark.block,
+                    prompt: mark.prompt,
+                    output: mark.output,
+                })
+                .collect(),
+            first,
+            blocks: entries
+                .iter()
+                .map(|entry| BlockEntry {
+                    command: entry.command.clone(),
+                    cwd: entry.cwd.clone(),
+                    phase: match entry.phase {
+                        LivePhase::Prompt => Phase::Prompt,
+                        LivePhase::Running => Phase::Running,
+                        LivePhase::Finished => Phase::Finished,
+                    },
+                    exit: entry.exit,
+                })
+                .collect(),
+        }
+    }
+
+    /// The marks, by line, and the blocks.
+    pub(crate) fn restore(&self) -> (Vec<(u64, Mark)>, Blocks) {
+        let marks = self
+            .marks
+            .iter()
+            .map(|marked| {
+                let mark = Mark {
+                    block: marked.block,
+                    prompt: marked.prompt,
+                    output: marked.output,
+                };
+                (marked.line, mark)
+            })
+            .collect();
+        let entries: VecDeque<Entry> = self
+            .blocks
+            .iter()
+            .map(|entry| Entry {
+                command: entry.command.clone(),
+                cwd: entry.cwd.clone(),
+                phase: match entry.phase {
+                    Phase::Prompt => LivePhase::Prompt,
+                    Phase::Running => LivePhase::Running,
+                    Phase::Finished => LivePhase::Finished,
+                },
+                exit: entry.exit,
+            })
+            .collect();
+        (marks, Blocks::from_parts(self.first, entries))
+    }
 }
 
 /// One row: its text, styled in runs.

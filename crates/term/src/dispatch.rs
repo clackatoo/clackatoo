@@ -152,6 +152,8 @@ impl Perform for Emulator {
             [b"0" | b"2", title @ ..] => {
                 self.title = String::from_utf8_lossy(&title.join(&b';')).into_owned();
             }
+            [b"7", url @ ..] => self.set_cwd(&url.join(&b';')),
+            [b"133", kind, options @ ..] => self.shell_mark(kind, options),
             _ => log::trace!(
                 "unhandled OSC {:?}",
                 params.first().map(|p| String::from_utf8_lossy(p))

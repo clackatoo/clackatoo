@@ -19,10 +19,15 @@
 //! Records keep their wrap markers, so consecutive records that continue
 //! one another form a logical line: what the program printed, before it was
 //! wrapped to fit. Those can be wrapped again to any width.
+//!
+//! The few lines a shell marked as where a block starts (see
+//! [`crate::blocks`]) are listed by number on the side, so the others pay
+//! nothing for marks.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
 
+use crate::blocks::Mark;
 use crate::cell::{Cell, StyleIndex};
 use crate::row::{Row, RowBuilder};
 use crate::snapshot::{self, Line};
@@ -83,6 +88,8 @@ pub(crate) struct Scrollback {
     compaction: Compaction,
     /// Where each style is in the last page's palette, to avoid searching it.
     style_indices: StyleIndices,
+    /// The held lines a shell marked, by number, oldest first.
+    marks: VecDeque<(u64, Mark)>,
 }
 
 /// A row kept as it was on screen.
@@ -148,6 +155,7 @@ impl Scrollback {
             limit,
             compaction,
             style_indices: StyleIndices::default(),
+            marks: VecDeque::new(),
         }
     }
 
@@ -164,9 +172,12 @@ impl Scrollback {
     /// Returns a row the caller can reuse rather than allocate one: `row`
     /// itself if it was compacted or not kept, or an evicted row. Its
     /// contents and width are arbitrary.
-    pub(crate) fn push(&mut self, row: Row, padded: bool) -> Option<Row> {
+    pub(crate) fn push(&mut self, mut row: Row, padded: bool) -> Option<Row> {
         if self.limit == 0 {
             return Some(row);
+        }
+        if let Some(mark) = row.take_mark() {
+            self.marks.push_back((self.stored, mark));
         }
         self.stored += 1;
         let mut spare = None;
@@ -183,8 +194,32 @@ impl Scrollback {
         }
         if self.len() > self.limit {
             spare = spare.or(self.evict());
+            let first = self.first();
+            while self.marks.front().is_some_and(|&(line, _)| line < first) {
+                self.marks.pop_front();
+            }
         }
         spare
+    }
+
+    /// The number of the oldest line held.
+    fn first(&self) -> u64 {
+        self.stored - self.len() as u64
+    }
+
+    /// The marked lines, by number, oldest first.
+    pub(crate) fn marks(&self) -> impl Iterator<Item = (u64, Mark)> + '_ {
+        self.marks.iter().copied()
+    }
+
+    /// Marks the held lines in `marks`, by number, oldest first. Others are
+    /// left out.
+    pub(crate) fn set_marks(&mut self, marks: impl IntoIterator<Item = (u64, Mark)>) {
+        let held = self.first()..self.stored;
+        self.marks = marks
+            .into_iter()
+            .filter(|(line, _)| held.contains(line))
+            .collect();
     }
 
     /// Whether some rows are waiting for [`compact`](Self::compact).
@@ -207,6 +242,7 @@ impl Scrollback {
         self.records = 0;
         self.raw = VecDeque::new();
         self.raw_cells = 0;
+        self.marks = VecDeque::new();
     }
 
     /// Every line as a row, oldest first, at the width it had.
@@ -270,7 +306,7 @@ impl Scrollback {
         &self,
         numbers: std::ops::Range<u64>,
     ) -> impl Iterator<Item = (u64, Row)> + '_ {
-        let first = self.stored - self.len() as u64;
+        let first = self.first();
         let start = numbers.start.clamp(first, self.stored);
         let end = numbers.end.clamp(start, self.stored);
         // Offsets from the oldest held line, which fit: they're below len().
@@ -332,6 +368,14 @@ impl Scrollback {
         assert!(
             self.compaction != Compaction::Eager || self.raw.is_empty(),
             "eager history holds raw rows"
+        );
+        assert!(
+            self.marks.iter().is_sorted_by_key(|&(line, _)| line)
+                && self
+                    .marks
+                    .iter()
+                    .all(|(line, _)| (self.first()..self.stored).contains(line)),
+            "marks out of order or not held"
         );
     }
 

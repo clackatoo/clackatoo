@@ -6,6 +6,7 @@ mod lookup;
 
 use std::ops::Range;
 
+use crate::blocks::Mark;
 use crate::cell::{Cell, CellFlags, StyleIndex};
 use crate::style::Style;
 pub use builder::RowBuilder;
@@ -55,6 +56,8 @@ struct Extras {
     /// An index into the palette, built while it is too big to search one by
     /// one, and dropped when the row scrolls into scrollback.
     lookup: StyleLookup,
+    /// Where a shell's block starts (see [`crate::blocks`]).
+    mark: Option<Mark>,
 }
 
 impl Row {
@@ -227,6 +230,7 @@ impl Row {
             // Keep the allocations: a recycled row is about to be written.
             extras.graphemes.clear();
             extras.lookup.invalidate();
+            extras.mark = None;
         }
         self.wrapped = false;
         let blank = Cell::blank(self.intern(style));
@@ -435,6 +439,21 @@ impl Row {
         {
             extras.graphemes.remove_range(cols);
         }
+    }
+
+    /// The shell's mark on this row, if any.
+    pub(crate) fn mark(&self) -> Option<Mark> {
+        self.extras.as_ref()?.mark
+    }
+
+    pub(crate) fn set_mark(&mut self, mark: Option<Mark>) {
+        if mark.is_some() || self.extras.is_some() {
+            self.extras_mut().mark = mark;
+        }
+    }
+
+    pub(crate) fn take_mark(&mut self) -> Option<Mark> {
+        self.extras.as_mut()?.mark.take()
     }
 
     fn extras_mut(&mut self) -> &mut Extras {
