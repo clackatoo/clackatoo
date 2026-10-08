@@ -1,0 +1,26 @@
+[package]
+name = "clackatoo-text"
+description = "Text buffers' edits, how concurrent edits are reconciled, and undo. Performs no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# See crates/term/Cargo.toml: keeps `cargo bench -- OPTIONS` working.
+bench = false
+
+[dependencies]
+ropey.workspace = true
+serde = { workspace = true, optional = true }
+thiserror.workspace = true
+
+[features]
+## Serialize and deserialize edits, for the wire protocol.
+serde = ["dep:serde"]
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

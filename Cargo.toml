@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 clackatoo-term = { path = "crates/term" }
+clackatoo-text = { path = "crates/text" }
 clackatoo-protocol = { path = "crates/protocol" }
 clackatoo-daemon = { path = "crates/daemon" }
 clackatoo-bench = { path = "crates/bench" }
@@ -57,6 +58,9 @@ simdutf8 = "0.1"
 slab = "0.4"
 swash = "0.2"
 thiserror = "2.0"
+# The text of files being edited: a tree of chunks, so an edit in the middle
+# of a big file is cheap. Lines end at \n only, as Vim's do.
+ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
 # Edits keep a config file's comments and layout.
 toml_edit = "0.25"
 unicode-width = "0.2"
