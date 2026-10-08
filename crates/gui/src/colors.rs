@@ -37,6 +37,10 @@ pub(crate) struct Theme {
     pub(crate) palette_edge: Rgba,
     /// For what's gone wrong, such as the daemon being out of contact.
     pub(crate) warning: Rgba,
+    /// For lines added to a file...
+    pub(crate) added: Rgba,
+    /// ...and removed.
+    pub(crate) removed: Rgba,
     /// The workspaces' colours, the dots by their names, in turn.
     pub(crate) workspaces: [Rgba; 6],
     /// The mode's colour, behind its name in the bottom bar: insert,
@@ -91,6 +95,9 @@ impl Default for Theme {
             palette_background: hex_rgba(0x16_18_1c),
             palette_edge: hex_rgba(0x2e_2f_36),
             warning: hex_rgba(0xe0_6c_75),
+            // The bright green and red.
+            added: hex_rgba(NAMED[10]),
+            removed: hex_rgba(NAMED[9]),
             workspaces: [
                 hex_rgba(0xf8_cd_5a),
                 hex_rgba(0x7c_b7_f5),
@@ -137,6 +144,8 @@ impl Theme {
             Paint::Raised => white(0.07),
             Paint::RaisedEdge => white(0.09),
             Paint::Code => white(0.05),
+            Paint::Added => faint(self.added, 0.13),
+            Paint::Removed => faint(self.removed, 0.13),
         }
     }
 

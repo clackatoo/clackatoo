@@ -6,6 +6,8 @@
 //! width, and again only when their text changes, as the turn being
 //! answered does.
 
+mod cards;
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -17,6 +19,7 @@ use parley::{
     Layout, LineHeight, PositionedLayoutItem, StyleProperty,
 };
 
+use super::card::Card;
 use super::markdown::{self, BlockKind};
 use super::picker::{self, ChoiceRow, Row, SliderRow, Spot};
 use super::{Brush, ChatView, Hit, Menu, Tone};
@@ -102,6 +105,8 @@ pub(super) struct Cache {
     pieces: HashMap<(usize, usize), Laid>,
     /// Text of the chat's own, such as "Working…", by what it says.
     notes: HashMap<(String, Tone), Laid>,
+    /// Tools shown as cards, by turn and piece.
+    cards: HashMap<(usize, usize), cards::CardLaid>,
 }
 
 /// Something laid out: the text it was laid out from, and its blocks.
@@ -150,6 +155,8 @@ enum Look {
     Thought,
     /// Plain text, as a message sent is, in `Tone`.
     Plain(Tone),
+    /// Plain text in the terminal's font, as a command's output is.
+    Mono(Tone),
 }
 
 /// The fills and glyphs being drawn, and what they're cut off outside.
@@ -207,6 +214,8 @@ impl Canvas<'_> {
                     Tone::Muted => Ink::Muted,
                     Tone::Accent => Ink::Accent,
                     Tone::Warning => Ink::Warning,
+                    Tone::Added => Ink::Added,
+                    Tone::Removed => Ink::Removed,
                     Tone::OnAccent => Ink::OnColor,
                 };
                 for glyph in run.positioned_glyphs() {
@@ -321,13 +330,21 @@ impl ChatView {
             em,
             over: false,
         };
+        let mut hits = Vec::new();
         for span in &spans {
             // Out of view: nothing to draw.
             if top + span.bottom < origin[1] || top + span.top > origin[1] + view_height {
                 continue;
             }
-            self.draw_span(&mut canvas, m, span, [origin[0] + left, top], column);
+            self.draw_span(
+                &mut canvas,
+                m,
+                span,
+                ([origin[0] + left, top], column),
+                (origin, &mut hits),
+            );
         }
+        self.hits.extend(hits);
         if self.node.turns.is_empty() && matches!(self.node.state, ChatState::Ready) {
             let laid = self.note(canvas.fonts, m, EMPTY, Tone::Muted, column);
             let x = origin[0] + left + (column - laid.width) / 2.0;
@@ -378,7 +395,6 @@ impl ChatView {
         let mut spans = Vec::new();
         let mut y = m.em(1.5);
         let last = turns.len().checked_sub(1);
-        let state = self.node.state.clone();
         for (index, turn) in turns.iter().enumerate() {
             if index > 0 {
                 y += m.em(2.0);
@@ -402,6 +418,25 @@ impl ChatView {
             }
             for (item_index, item) in turn.items.iter().enumerate() {
                 let key = (index, item_index + 1);
+                let follows = spans.last().is_some_and(|span: &Span| {
+                    matches!(span.piece, Piece::Item(..) | Piece::Card(..))
+                        && span.turn() == Some(index)
+                });
+                if let Item::Tool(tool) = item
+                    && Card::shows(tool)
+                {
+                    if follows {
+                        y += m.em(0.6);
+                    }
+                    let height = self.card(fonts, m, key, tool, column);
+                    spans.push(Span {
+                        piece: Piece::Card(index, item_index + 1),
+                        top: y,
+                        bottom: y + height,
+                    });
+                    y += height;
+                    continue;
+                }
                 let (text, look) = match item {
                     Item::Words(words) => (words.clone(), Look::Words),
                     Item::Thought(words) => (words.clone(), Look::Thought),
@@ -414,13 +449,15 @@ impl ChatView {
                     continue;
                 }
                 let laid = self.piece(fonts, m, key, &text, look, column);
+                let after_card = spans
+                    .last()
+                    .is_some_and(|span| matches!(span.piece, Piece::Card(..)));
                 let gap = match item {
+                    _ if after_card => m.em(0.6),
                     Item::Tool(_) => m.em(0.35),
                     _ => m.em(0.75),
                 };
-                if spans.last().is_some_and(|span: &Span| {
-                    matches!(span.piece, Piece::Item(..)) && span.turn() == Some(index)
-                }) {
+                if follows {
                     y += gap;
                 }
                 spans.push(Span {
@@ -430,24 +467,7 @@ impl ChatView {
                 });
                 y += laid.height;
             }
-            // How it ended, or that it's still going.
-            let note = match (&turn.end, Some(index) == last, &state) {
-                (Some(end), _, _) => match &end.outcome {
-                    Outcome::Done => None,
-                    Outcome::Stopped => Some(("Stopped.".to_owned(), Tone::Muted)),
-                    Outcome::Failed(why) => {
-                        Some((format!("⚠ {}", capitalised(why)), Tone::Warning))
-                    }
-                },
-                (None, true, ChatState::Starting) => {
-                    Some(("Starting the agent…".to_owned(), Tone::Muted))
-                }
-                (None, true, _) if self.node.question.is_none() => {
-                    Some(("Working…".to_owned(), Tone::Muted))
-                }
-                _ => None,
-            };
-            if let Some((text, tone)) = note {
+            if let Some((text, tone)) = self.turn_note(turn, Some(index) == last) {
                 y += m.em(0.75);
                 let laid = self.note(fonts, m, &text, tone, column);
                 spans.push(Span {
@@ -460,6 +480,25 @@ impl ChatView {
             }
         }
         spans
+    }
+
+    /// What's said under a turn: how it ended, or that it's still going,
+    /// if it's the `last`.
+    fn turn_note(&self, turn: &Turn, last: bool) -> Option<(String, Tone)> {
+        match (&turn.end, last, &self.node.state) {
+            (Some(end), _, _) => match &end.outcome {
+                Outcome::Done => None,
+                Outcome::Stopped => Some(("Stopped.".to_owned(), Tone::Muted)),
+                Outcome::Failed(why) => Some((format!("⚠ {}", capitalised(why)), Tone::Warning)),
+            },
+            (None, true, ChatState::Starting) => {
+                Some(("Starting the agent…".to_owned(), Tone::Muted))
+            }
+            (None, true, _) if self.node.question.is_none() => {
+                Some(("Working…".to_owned(), Tone::Muted))
+            }
+            _ => None,
+        }
     }
 
     /// A turn's piece, laid out, from the cache if its text is the same.
@@ -500,17 +539,23 @@ impl ChatView {
     }
 
     /// Draws one piece of the conversation, the column's left at
-    /// `origin[0]`, the conversation's top at `origin[1]`.
+    /// `origin[0]`, the conversation's top at `origin[1]`. What can be
+    /// clicked goes in `hits`, from `pane`, the pane's top left.
     fn draw_span(
         &self,
         canvas: &mut Canvas<'_>,
         m: Measures,
         span: &Span,
-        origin: [f32; 2],
-        column: f32,
+        (origin, column): ([f32; 2], f32),
+        hits: ([f32; 2], &mut Vec<(Hit, [f32; 4])>),
     ) {
         let top = origin[1] + span.top;
         match &span.piece {
+            Piece::Card(turn, piece) => {
+                if let Some(card) = self.cache.cards.get(&(*turn, *piece)) {
+                    cards::draw_card(canvas, m, card, [origin[0], top], column, hits);
+                }
+            }
             Piece::Prompt(turn) => {
                 let Some(laid) = self.cache.pieces.get(&(*turn, 0)) else {
                     return;
@@ -1382,7 +1427,7 @@ struct Span {
 impl Span {
     fn turn(&self) -> Option<usize> {
         match self.piece {
-            Piece::Prompt(turn) | Piece::Item(turn, _) => Some(turn),
+            Piece::Prompt(turn) | Piece::Item(turn, _) | Piece::Card(turn, _) => Some(turn),
             Piece::Note(..) => None,
         }
     }
@@ -1393,6 +1438,8 @@ enum Piece {
     Prompt(usize),
     /// What the agent did, by turn and piece.
     Item(usize, usize),
+    /// A tool it used, as a card, by turn and piece.
+    Card(usize, usize),
     /// Text of the chat's own.
     Note(String, Tone),
 }
@@ -1444,7 +1491,7 @@ fn lay_out(
 ) -> Laid {
     let blocks = match look {
         Look::Words | Look::Thought => markdown::blocks(text),
-        Look::Plain(_) => vec![markdown::Block {
+        Look::Plain(_) | Look::Mono(_) => vec![markdown::Block {
             kind: BlockKind::Paragraph,
             text: text.to_owned(),
             spans: Vec::new(),
@@ -1472,6 +1519,7 @@ fn lay_out(
                 _ => 0.0,
             };
         let size = match block.kind {
+            _ if matches!(look, Look::Mono(_)) => m.em * 0.93,
             BlockKind::Heading(1) => m.em * 1.35,
             BlockKind::Heading(2) => m.em * 1.2,
             BlockKind::Heading(_) => m.em * 1.08,
@@ -1524,7 +1572,7 @@ fn lay_out_block(
     let tone = match look {
         Look::Words => Tone::Plain,
         Look::Thought => Tone::Muted,
-        Look::Plain(tone) => tone,
+        Look::Plain(tone) | Look::Mono(tone) => tone,
     };
     let (body, mono) = (body_style(fonts, size), mono_family(fonts));
     let mut builder = layout_cx.ranged_builder(&mut fonts.font_cx, &block.text, 1.0, true);
@@ -1534,6 +1582,12 @@ fn lay_out_block(
     builder.push_default(StyleProperty::Brush(Brush { tone, code: false }));
     if matches!(look, Look::Thought) {
         builder.push_default(StyleProperty::FontStyle(FontStyle::Italic));
+    }
+    if matches!(look, Look::Mono(_)) {
+        builder.push_default(StyleProperty::FontFamily(mono.clone()));
+        builder.push_default(StyleProperty::LineHeight(LineHeight::FontSizeRelative(
+            1.35,
+        )));
     }
     match block.kind {
         BlockKind::Heading(_) => builder.push_default(StyleProperty::FontWeight(FontWeight::BOLD)),

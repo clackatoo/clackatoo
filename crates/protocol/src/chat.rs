@@ -142,6 +142,55 @@ pub struct Tool {
     pub title: String,
     /// How it's going.
     pub status: ToolStatus,
+    /// What sort of tool it is.
+    pub kind: ToolKind,
+    /// What it shows: what it's for, its output, or the changes it makes
+    /// to files.
+    pub content: Vec<ToolContent>,
+}
+
+/// What sort of tool an agent used, as it says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolKind {
+    /// Reads files.
+    Read,
+    /// Changes files.
+    Edit,
+    /// Deletes files.
+    Delete,
+    /// Moves or renames files.
+    Move,
+    /// Searches files.
+    Search,
+    /// Runs a command: its title is the command.
+    Execute,
+    /// Thinks.
+    Think,
+    /// Fetches from the web.
+    Fetch,
+    /// Something else.
+    #[default]
+    Other,
+}
+
+/// Something a tool shows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolContent {
+    /// Text, in Markdown: a command's output comes fenced, as code.
+    Text(String),
+    /// A change to a file.
+    Diff(Diff),
+}
+
+/// A change to a file: the part of it changed, before and after.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Diff {
+    /// The file's path.
+    pub path: String,
+    /// What was there, or `None` for a new file.
+    pub old: Option<String>,
+    /// What's there now.
+    pub new: String,
 }
 
 /// How a tool call is going.
@@ -213,6 +262,16 @@ pub enum ChatPatch {
         /// What it is now.
         turn: Turn,
     },
+    /// Item `item` of turn `turn` is now `value`, as a tool is as it
+    /// goes. An index one past the last adds an item.
+    Item {
+        /// The turn's index.
+        turn: u32,
+        /// The item's index in the turn.
+        item: u32,
+        /// What it is now.
+        value: Item,
+    },
     /// More of the agent's words, or its thinking: `text` goes on the end
     /// of item `item` of turn `turn`.
     Append {
@@ -265,6 +324,16 @@ impl ChatNode {
                     std::cmp::Ordering::Less => self.turns[index] = turn,
                     std::cmp::Ordering::Equal => self.turns.push(turn),
                     std::cmp::Ordering::Greater => {}
+                }
+            }
+            ChatPatch::Item { turn, item, value } => {
+                if let Some(turn) = self.turns.get_mut(turn as usize) {
+                    let item = item as usize;
+                    match item.cmp(&turn.items.len()) {
+                        std::cmp::Ordering::Less => turn.items[item] = value,
+                        std::cmp::Ordering::Equal => turn.items.push(value),
+                        std::cmp::Ordering::Greater => {}
+                    }
                 }
             }
             ChatPatch::Append { turn, item, text } => {

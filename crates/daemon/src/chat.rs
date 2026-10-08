@@ -15,12 +15,13 @@ use agent_client_protocol_schema::MaybeUndefined;
 use agent_client_protocol_schema::v1::{
     ContentBlock, PermissionOption, PermissionOptionKind, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOptions, SessionUpdate, StopReason,
-    ToolCallStatus, ToolCallUpdate,
+    ToolCallContent, ToolCallStatus, ToolCallUpdate,
 };
 use clackatoo_protocol::{
-    ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Item, Node, Outcome, Patch,
-    Question, Setting, SettingChoice, SettingKind, Size, TerminalId, TerminalInfo, TerminalStatus,
-    Tool, ToolStatus, Turn, TurnEnd, Usage, View, ViewUpdate,
+    ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Node, Outcome,
+    Patch, Question, Setting, SettingChoice, SettingKind, Size, TerminalId, TerminalInfo,
+    TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, Usage, View,
+    ViewUpdate,
 };
 use serde_json::Value;
 
@@ -34,6 +35,14 @@ const STARTING_MODE: &str = "auto";
 /// How many changes a chat keeps for viewers that are behind. One further
 /// behind gets the whole chat again.
 const JOURNAL: usize = 4096;
+
+/// The most of a tool's text a chat keeps, in bytes: the end of it, as
+/// the end of a command's output is where what went wrong is.
+const TOOL_TEXT: usize = 32 * 1024;
+
+/// The most of each side of a change to a file a chat keeps, in bytes:
+/// the start of it.
+const DIFF_TEXT: usize = 256 * 1024;
 
 /// What a chat asks the server to do.
 #[derive(Debug, PartialEq)]
@@ -498,6 +507,8 @@ impl HostedChat {
                 id: call.tool_call_id.0.to_string(),
                 title: clean(&call.title),
                 status: tool_status(call.status),
+                kind: tool_kind(call.kind),
+                content: tool_content(&call.content),
             }),
             SessionUpdate::ToolCallUpdate(update) => {
                 let id = update.tool_call_id.0.to_string();
@@ -505,12 +516,22 @@ impl HostedChat {
                     id,
                     title: "a tool".to_owned(),
                     status: ToolStatus::Running,
+                    kind: ToolKind::Other,
+                    content: Vec::new(),
                 });
                 if let Some(title) = &update.fields.title {
                     tool.title = clean(title);
                 }
                 if let Some(status) = update.fields.status {
                     tool.status = tool_status(status);
+                }
+                if let Some(kind) = update.fields.kind {
+                    tool.kind = tool_kind(kind);
+                }
+                // What it shows is replaced, not added to: a command's
+                // description gives way to its output.
+                if let Some(content) = &update.fields.content {
+                    tool.content = tool_content(content);
                 }
                 self.set_tool(tool);
             }
@@ -560,12 +581,14 @@ impl HostedChat {
         };
         if !continues {
             // A new item goes whole, empty, with the text appended after.
-            items.push(if thinking {
+            let item = if thinking {
                 Item::Thought(String::new())
             } else {
                 Item::Words(String::new())
-            });
-            self.patch_turn(index);
+            };
+            items.push(item.clone());
+            let at = items.len() - 1;
+            self.patch_item(index, at, item);
         }
         let items = &mut self.node.turns[index].items;
         if let Some(Item::Words(words) | Item::Thought(words)) = items.last_mut() {
@@ -585,14 +608,18 @@ impl HostedChat {
             return;
         };
         let items = &mut self.node.turns[index].items;
-        let existing = items
-            .iter_mut()
-            .find(|item| matches!(item, Item::Tool(old) if old.id == tool.id));
-        match existing {
-            Some(item) => *item = Item::Tool(tool),
-            None => items.push(Item::Tool(tool)),
-        }
-        self.patch_turn(index);
+        let at =
+            (items.iter()).position(|item| matches!(item, Item::Tool(old) if old.id == tool.id));
+        let at = if let Some(at) = at {
+            items[at] = Item::Tool(tool.clone());
+            at
+        } else {
+            items.push(Item::Tool(tool.clone()));
+            items.len() - 1
+        };
+        // Only the tool goes, not its turn: a turn of many tools, each
+        // with its output, would be sent again with every change.
+        self.patch_item(index, at, Item::Tool(tool));
     }
 
     /// The tool with `id`, in the turn answering.
@@ -640,6 +667,15 @@ impl HostedChat {
     fn push_turn(&mut self, turn: Turn) {
         self.node.turns.push(turn);
         self.patch_turn(self.node.turns.len() - 1);
+    }
+
+    /// Records that item `item` of turn `turn` is now `value`.
+    fn patch_item(&mut self, turn: usize, item: usize, value: Item) {
+        self.journal.push(ChatPatch::Item {
+            turn: index_u32(turn),
+            item: index_u32(item),
+            value,
+        });
     }
 
     /// Records that turn `index` changed, sending it whole.
@@ -747,6 +783,83 @@ fn tool_status(status: ToolCallStatus) -> ToolStatus {
     }
 }
 
+fn tool_kind(kind: agent_client_protocol_schema::v1::ToolKind) -> ToolKind {
+    use agent_client_protocol_schema::v1::ToolKind as Acp;
+    match kind {
+        Acp::Read => ToolKind::Read,
+        Acp::Edit => ToolKind::Edit,
+        Acp::Delete => ToolKind::Delete,
+        Acp::Move => ToolKind::Move,
+        Acp::Search => ToolKind::Search,
+        Acp::Execute => ToolKind::Execute,
+        Acp::Think => ToolKind::Think,
+        Acp::Fetch => ToolKind::Fetch,
+        // Switching mode, or a kind newer than this build knows.
+        _ => ToolKind::Other,
+    }
+}
+
+/// What a tool shows, as the agent gives it: its text and its changes to
+/// files, cut down to what a chat keeps. Terminals, which the daemon says
+/// it doesn't run, and anything but text, are left out.
+fn tool_content(content: &[ToolCallContent]) -> Vec<ToolContent> {
+    (content.iter())
+        .filter_map(|content| match content {
+            ToolCallContent::Content(content) => match &content.content {
+                ContentBlock::Text(text) => {
+                    Some(ToolContent::Text(tail(&clean_text(&text.text), TOOL_TEXT)))
+                }
+                _ => None,
+            },
+            ToolCallContent::Diff(diff) => Some(ToolContent::Diff(Diff {
+                path: diff.path.to_string_lossy().into_owned(),
+                old: (diff.old_text.as_deref()).map(|old| head(&clean_text(old), DIFF_TEXT)),
+                new: head(&clean_text(&diff.new_text), DIFF_TEXT),
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The last whole lines of `text` that fit in `max` bytes, after "…", if
+/// it's longer. A fence it opens with stays, for it to still read as code.
+fn tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let fence = if text.starts_with("```") {
+        text.split_inclusive('\n').next().unwrap_or_default()
+    } else {
+        ""
+    };
+    let mut start = text.len() - max.saturating_sub(fence.len());
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let rest = &text[start..];
+    // Cut in a line: from the next.
+    let rest = if text.as_bytes()[start - 1] == b'\n' {
+        rest
+    } else {
+        rest.split_once('\n').map_or(rest, |(_, after)| after)
+    };
+    format!("{fence}…\n{rest}")
+}
+
+/// The first whole lines of `text` that fit in `max` bytes, if it's
+/// longer.
+fn head(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = &text[..end];
+    cut.rfind('\n').map_or(cut, |line| &cut[..=line]).to_owned()
+}
+
 /// A title or name on one line, without control characters.
 fn clean(text: &str) -> String {
     text.chars()
@@ -821,6 +934,27 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
                         ToolStatus::Done => handover::ToolStatus::Done,
                         ToolStatus::Failed => handover::ToolStatus::Failed,
                     },
+                    kind: match tool.kind {
+                        ToolKind::Read => handover::ToolKind::Read,
+                        ToolKind::Edit => handover::ToolKind::Edit,
+                        ToolKind::Delete => handover::ToolKind::Delete,
+                        ToolKind::Move => handover::ToolKind::Move,
+                        ToolKind::Search => handover::ToolKind::Search,
+                        ToolKind::Execute => handover::ToolKind::Execute,
+                        ToolKind::Think => handover::ToolKind::Think,
+                        ToolKind::Fetch => handover::ToolKind::Fetch,
+                        ToolKind::Other => handover::ToolKind::Other,
+                    },
+                    content: (tool.content.into_iter())
+                        .map(|content| match content {
+                            ToolContent::Text(text) => handover::ToolContent::Text(text),
+                            ToolContent::Diff(diff) => handover::ToolContent::Diff {
+                                path: diff.path,
+                                old: diff.old,
+                                new: diff.new,
+                            },
+                        })
+                        .collect(),
                 },
             })
             .collect(),
@@ -843,7 +977,13 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
             .map(|item| match item {
                 handover::ChatItem::Words(words) => Item::Words(words),
                 handover::ChatItem::Thought(words) => Item::Thought(words),
-                handover::ChatItem::Tool { id, title, status } => Item::Tool(Tool {
+                handover::ChatItem::Tool {
+                    id,
+                    title,
+                    status,
+                    kind,
+                    content,
+                } => Item::Tool(Tool {
                     id,
                     title,
                     status: match status {
@@ -851,6 +991,25 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
                         handover::ToolStatus::Done => ToolStatus::Done,
                         handover::ToolStatus::Failed => ToolStatus::Failed,
                     },
+                    kind: match kind {
+                        handover::ToolKind::Read => ToolKind::Read,
+                        handover::ToolKind::Edit => ToolKind::Edit,
+                        handover::ToolKind::Delete => ToolKind::Delete,
+                        handover::ToolKind::Move => ToolKind::Move,
+                        handover::ToolKind::Search => ToolKind::Search,
+                        handover::ToolKind::Execute => ToolKind::Execute,
+                        handover::ToolKind::Think => ToolKind::Think,
+                        handover::ToolKind::Fetch => ToolKind::Fetch,
+                        handover::ToolKind::Other => ToolKind::Other,
+                    },
+                    content: (content.into_iter())
+                        .map(|content| match content {
+                            handover::ToolContent::Text(text) => ToolContent::Text(text),
+                            handover::ToolContent::Diff { path, old, new } => {
+                                ToolContent::Diff(Diff { path, old, new })
+                            }
+                        })
+                        .collect(),
                 }),
             })
             .collect(),
@@ -990,11 +1149,79 @@ mod tests {
                     id: "t1".into(),
                     title: "Read a.rs".into(),
                     status: ToolStatus::Done,
+                    kind: ToolKind::Other,
+                    content: Vec::new(),
                 }),
                 Item::Words("Done.".into()),
             ]
         );
         assert_eq!(outcome(turn), Some(&Outcome::Done));
+    }
+
+    #[test]
+    fn a_tool_keeps_what_it_shows_which_each_update_replaces() {
+        let mut chat = chat();
+        chat.act(ChatAction::Send("run it".into()));
+        let mut viewer = Viewer::new();
+        viewer.catch_up(&chat);
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"b","title":"ls","kind":"execute","status":"pending",
+                "content":[{"type":"content","content":{"type":"text","text":"List files"}}]}"#,
+        );
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"b","status":"completed",
+                "content":[{"type":"content","content":{"type":"text","text":"```console\na\n```"}}]}"#,
+        );
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"w","title":"Write a","kind":"edit","status":"pending",
+                "content":[{"type":"diff","path":"/src/a","oldText":null,"newText":"x\n"}]}"#,
+        );
+        let tools: Vec<(ToolKind, &[ToolContent])> = (chat.node.turns[0].items.iter())
+            .filter_map(|item| match item {
+                Item::Tool(tool) => Some((tool.kind, tool.content.as_slice())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tools,
+            [
+                (
+                    ToolKind::Execute,
+                    &[ToolContent::Text("```console\na\n```".into())][..]
+                ),
+                (
+                    ToolKind::Edit,
+                    &[ToolContent::Diff(Diff {
+                        path: "/src/a".into(),
+                        old: None,
+                        new: "x\n".into(),
+                    })][..]
+                ),
+            ]
+        );
+        // Each change goes as the tool alone, not its turn.
+        let Some(ViewUpdate::Patch(patches)) = viewer.catch_up(&chat) else {
+            panic!("no patches");
+        };
+        assert!(
+            (patches.iter()).all(|patch| matches!(patch, Patch::Chat(ChatPatch::Item { .. }))),
+            "{patches:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_output_keeps_its_end_and_a_long_diff_its_start() {
+        let output = format!("```console\n{}```", "line\n".repeat(10));
+        let kept = tail(&output, 24);
+        assert_eq!(kept, "```console\n…\nline\nline\n```");
+        assert_eq!(tail("short", 24), "short");
+        assert_eq!(head(&"line\n".repeat(10), 12), "line\nline\n");
+        // Never in the middle of a character.
+        assert_eq!(tail("ééééé\nab", 3), "…\nab");
+        assert_eq!(head("ééé", 3), "é");
     }
 
     #[test]

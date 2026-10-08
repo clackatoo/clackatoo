@@ -12,6 +12,7 @@
 //! the window [settles](ChatView::settle) it, which it does before sending
 //! anything to the daemon and before drawing.
 
+mod card;
 mod markdown;
 mod paint;
 mod picker;
@@ -44,6 +45,10 @@ pub(crate) enum Tone {
     Warning,
     /// On something in the accent colour.
     OnAccent,
+    /// Added to a file.
+    Added,
+    /// Removed from a file.
+    Removed,
 }
 
 /// Something done to the chat that waits for the fonts.
@@ -110,6 +115,8 @@ enum Hit {
         setting: String,
         value: String,
     },
+    /// A tool's card, which opens and folds, by the tool's ID.
+    Card(String),
 }
 
 /// What the mouse pointer looks like over a chat.
@@ -183,6 +190,9 @@ pub(crate) struct ChatView {
     /// Where the chip that opened the menu was drawn, for the menu to open
     /// from, while drawing.
     menu_anchor: Option<[f32; 4]>,
+    /// The tools whose cards are open, showing all they have, by their
+    /// IDs.
+    open_cards: std::collections::HashSet<String>,
 }
 
 impl std::fmt::Debug for ChatView {
@@ -217,6 +227,7 @@ impl ChatView {
             sliding: None,
             menu: None,
             menu_anchor: None,
+            open_cards: std::collections::HashSet::new(),
         }
     }
 
@@ -774,6 +785,11 @@ impl ChatView {
                 self.menu = None;
                 settled.actions.push(ChatAction::Set { setting, value });
             }
+            Some(Hit::Card(tool)) => {
+                if !self.open_cards.remove(&tool) {
+                    self.open_cards.insert(tool);
+                }
+            }
             Some(Hit::Send) => self.send(settled),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
             Some(Hit::Choice(id)) => settled.actions.push(ChatAction::Answer(Some(id))),
@@ -852,6 +868,11 @@ impl ChatView {
 
 #[cfg(test)]
 impl ChatView {
+    /// Opens the card of the tool with `id`, as clicking it does.
+    pub(crate) fn open_card(&mut self, id: &str) {
+        self.open_cards.insert(id.to_owned());
+    }
+
     /// Opens the menu for the setting of `kind`, as clicking its chip does.
     pub(crate) fn open_menu(&mut self, kinds: &[SettingKind]) {
         let ids = (kinds.iter())
@@ -1198,5 +1219,19 @@ mod tests {
                 set("effort", "max")
             ]
         );
+    }
+
+    #[test]
+    fn clicking_a_card_opens_it_and_clicking_again_folds_it() {
+        let mut fonts = fonts();
+        let mut view = with_settings();
+        view.hits = vec![(Hit::Card("t".into()), [0.0, 0.0, 100.0, 50.0])];
+        assert_eq!(view.pointer([10.0, 10.0]), Pointer::Hand);
+        view.press([10.0, 10.0], 1, false);
+        view.settle(&mut fonts);
+        assert!(view.open_cards.contains("t"));
+        view.press([10.0, 10.0], 1, false);
+        view.settle(&mut fonts);
+        assert!(view.open_cards.is_empty());
     }
 }

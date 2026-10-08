@@ -17,6 +17,8 @@
 //! 3. Chats with agents, as the screens they were written into.
 //! 4. Chats as their turns.
 //! 5. Chats' settings, and the values the user chose for them.
+//! 6. What sort of tool each of a chat's tools is, and what it shows: a
+//!    command's output, a change to a file.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -29,10 +31,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 5;
+pub(crate) const VERSION: u32 = 6;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -169,6 +171,8 @@ pub(crate) enum ChatItem {
         id: String,
         title: String,
         status: ToolStatus,
+        kind: ToolKind,
+        content: Vec<ToolContent>,
     },
 }
 
@@ -177,6 +181,31 @@ pub(crate) enum ToolStatus {
     Running,
     Done,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) enum ToolKind {
+    Read,
+    Edit,
+    Delete,
+    Move,
+    Search,
+    Execute,
+    Think,
+    Fetch,
+    Other,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum ToolContent {
+    /// Markdown.
+    Text(String),
+    /// A change to the file at `path`: `old` is `None` for a new file.
+    Diff {
+        path: String,
+        old: Option<String>,
+        new: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -287,6 +316,7 @@ impl State {
             2 => Ok(postcard::from_bytes::<v2::State>(body)?.into()),
             3 => postcard::from_bytes::<v3::State>(body)?.try_into(),
             4 => Ok(postcard::from_bytes::<v4::State>(body)?.into()),
+            5 => Ok(postcard::from_bytes::<v5::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -489,7 +519,8 @@ mod v3 {
 mod v4 {
     use serde::Deserialize;
 
-    use super::{ChatTurn, Process, Terminal, Workspaces};
+    use super::v5::ChatTurn;
+    use super::{Process, Terminal, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -516,6 +547,110 @@ mod v4 {
 
     impl From<State> for super::State {
         fn from(state: State) -> Self {
+            super::v5::State {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: (state.chats.into_iter())
+                    .map(|chat| super::v5::Chat {
+                        id: chat.id,
+                        cols: chat.cols,
+                        rows: chat.rows,
+                        title: chat.title,
+                        cwd: chat.cwd,
+                        session: chat.session,
+                        failure: chat.failure,
+                        turns: chat.turns,
+                        settings: Vec::new(),
+                        chosen: Vec::new(),
+                    })
+                    .collect(),
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+            }
+            .into()
+        }
+    }
+}
+
+/// Version 5, as the builds that wrote it wrote it: tools without their
+/// kinds or what they show, which come through as tools of no kind,
+/// showing nothing.
+mod v5 {
+    use serde::Deserialize;
+
+    use super::{ChatEnd, ChatSetting, Process, Terminal, ToolStatus, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        pub(super) listener: u32,
+        pub(super) lock: Option<u32>,
+        pub(super) next_terminal: u32,
+        pub(super) terminals: Vec<Terminal>,
+        pub(super) chats: Vec<Chat>,
+        pub(super) orphans: Vec<Process>,
+        pub(super) workspaces: Workspaces,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct Chat {
+        pub(super) id: u32,
+        pub(super) cols: u16,
+        pub(super) rows: u16,
+        pub(super) title: String,
+        pub(super) cwd: String,
+        pub(super) session: Option<String>,
+        pub(super) failure: Option<String>,
+        pub(super) turns: Vec<ChatTurn>,
+        pub(super) settings: Vec<ChatSetting>,
+        pub(super) chosen: Vec<(String, String)>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct ChatTurn {
+        prompt: String,
+        sent: u64,
+        items: Vec<ChatItem>,
+        end: Option<ChatEnd>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    enum ChatItem {
+        Words(String),
+        Thought(String),
+        Tool {
+            id: String,
+            title: String,
+            status: ToolStatus,
+        },
+    }
+
+    impl From<ChatTurn> for super::ChatTurn {
+        fn from(turn: ChatTurn) -> Self {
+            Self {
+                prompt: turn.prompt,
+                sent: turn.sent,
+                items: (turn.items.into_iter())
+                    .map(|item| match item {
+                        ChatItem::Words(words) => super::ChatItem::Words(words),
+                        ChatItem::Thought(words) => super::ChatItem::Thought(words),
+                        ChatItem::Tool { id, title, status } => super::ChatItem::Tool {
+                            id,
+                            title,
+                            status,
+                            kind: super::ToolKind::Other,
+                            content: Vec::new(),
+                        },
+                    })
+                    .collect(),
+                end: turn.end,
+            }
+        }
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
             Self {
                 listener: state.listener,
                 lock: state.lock,
@@ -530,9 +665,9 @@ mod v4 {
                         cwd: chat.cwd,
                         session: chat.session,
                         failure: chat.failure,
-                        turns: chat.turns,
-                        settings: Vec::new(),
-                        chosen: Vec::new(),
+                        turns: chat.turns.into_iter().map(Into::into).collect(),
+                        settings: chat.settings,
+                        chosen: chat.chosen,
                     })
                     .collect(),
                 orphans: state.orphans,
@@ -569,6 +704,15 @@ mod tests {
                             id: "t".to_owned(),
                             title: "Read".to_owned(),
                             status: ToolStatus::Done,
+                            kind: ToolKind::Edit,
+                            content: vec![
+                                ToolContent::Text("for".to_owned()),
+                                ToolContent::Diff {
+                                    path: "/src/a".to_owned(),
+                                    old: None,
+                                    new: "b".to_owned(),
+                                },
+                            ],
                         },
                     ],
                     end: Some(ChatEnd {
@@ -636,10 +780,10 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(MAGIC).unwrap();
-        file.write_all(&6u32.to_le_bytes()).unwrap();
+        file.write_all(&7u32.to_le_bytes()).unwrap();
         assert!(matches!(
             State::read(&mut file),
-            Err(HandoverError::Version(6))
+            Err(HandoverError::Version(7))
         ));
     }
 
@@ -720,6 +864,33 @@ mod tests {
         assert_eq!((chat.id, chat.session.as_deref()), (4, Some("s4")));
         assert_eq!(chat.turns[0].prompt, "why?");
         assert!(chat.settings.is_empty() && chat.chosen.is_empty());
+    }
+
+    /// Written by a build that wrote version 5. It must always be read.
+    #[test]
+    fn version_5_is_read_with_tools_of_no_kind() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v5.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!((state.next_terminal, state.orphans[0].pid), (6, 95));
+        let chat = &state.chats[0];
+        assert_eq!((chat.id, chat.session.as_deref()), (5, Some("s5")));
+        assert_eq!(chat.chosen, [("model".to_owned(), "haiku".to_owned())]);
+        let [
+            _,
+            ChatItem::Tool {
+                title,
+                kind,
+                content,
+                ..
+            },
+        ] = chat.turns[0].items.as_slice()
+        else {
+            panic!("{:?}", chat.turns[0].items);
+        };
+        assert_eq!(title, "Read");
+        assert!(matches!(kind, ToolKind::Other) && content.is_empty());
     }
 
     #[test]

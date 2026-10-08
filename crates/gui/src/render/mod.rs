@@ -160,6 +160,10 @@ pub(crate) enum Paint {
     RaisedEdge,
     /// Behind code, in a chat.
     Code,
+    /// Behind a line added to a file, faintly green...
+    Added,
+    /// ...and one removed, faintly red.
+    Removed,
 }
 
 /// A line of text of the window's own.
@@ -185,6 +189,10 @@ pub(crate) enum Ink {
     Warning,
     /// In clackatoo's own colour, as links are.
     Accent,
+    /// Green, for what's added to a file...
+    Added,
+    /// ...and red, for what's removed.
+    Removed,
 }
 
 /// Which font text of the window's own is drawn in.
@@ -680,6 +688,8 @@ impl Renderer {
             Ink::Muted => self.theme.muted,
             Ink::Warning => self.theme.warning,
             Ink::Accent => self.theme.accent,
+            Ink::Added => self.theme.added,
+            Ink::Removed => self.theme.removed,
         }
     }
 

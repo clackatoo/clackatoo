@@ -13,6 +13,7 @@ bench = false
 [dependencies]
 parley.workspace = true
 pulldown-cmark.workspace = true
+similar.workspace = true
 anyhow.workspace = true
 arboard.workspace = true
 bytemuck.workspace = true

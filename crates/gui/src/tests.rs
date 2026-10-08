@@ -583,16 +583,43 @@ fn joined_emoji_are_shaped_into_one_glyph() {
 /// box a message is typed in, or the agent's question.
 fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
     use clackatoo_protocol::{
-        ChatNode, ChatState, Choice, ChoiceKind, Item, Outcome, Question, Tool, ToolStatus, Turn,
-        TurnEnd,
+        ChatNode, ChatState, Choice, ChoiceKind, Diff, Item, Outcome, Question, Tool, ToolContent,
+        ToolKind, ToolStatus, Turn, TurnEnd,
     };
     let tool = |title: &str, status| {
         Item::Tool(Tool {
             id: title.into(),
             title: title.into(),
             status,
+            kind: ToolKind::Read,
+            content: Vec::new(),
         })
     };
+    let build = Item::Tool(Tool {
+        id: "build".into(),
+        title: "cargo build".into(),
+        status: ToolStatus::Failed,
+        kind: ToolKind::Execute,
+        content: vec![ToolContent::Text(format!(
+            "```console\n   Compiling openssl-sys v0.9.103\n{}error: could not find system \
+             library 'openssl' required by the 'openssl-sys' crate\nerror: could not compile \
+             `openssl-sys` (build script) due to 1 previous error\n```",
+            "warning: openssl-sys@0.9.103: Could not find directory of OpenSSL installation\n"
+                .repeat(10)
+        ))],
+    });
+    let edit = Item::Tool(Tool {
+        id: "edit".into(),
+        title: "Edit Cargo.toml".into(),
+        status: ToolStatus::Running,
+        kind: ToolKind::Edit,
+        content: vec![ToolContent::Diff(Diff {
+            path: "/src/app/Cargo.toml".into(),
+            old: Some("[dependencies]\nopenssl = \"0.10\"\n".into()),
+            new: "[dependencies]\nopenssl = { version = \"0.10\", features = [\"vendored\"] }\n"
+                .into(),
+        })],
+    });
     ChatNode {
         turns: vec![
             Turn {
@@ -600,7 +627,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                 sent: 0,
                 items: vec![
                     tool("Read Cargo.toml", ToolStatus::Done),
-                    tool("cargo build", ToolStatus::Failed),
+                    build,
                     Item::Words(
                         "The linker can't find **libssl**. Your `Cargo.toml` asks for \
                          `openssl` 0.10 without the `vendored` feature, so it looks for the \
@@ -617,7 +644,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
             Turn {
                 prompt: "Turn on vendored and try again".into(),
                 sent: 2,
-                items: vec![tool("Edit Cargo.toml", ToolStatus::Running)],
+                items: vec![edit],
                 end: None,
             },
         ],
@@ -833,6 +860,14 @@ fn renders_a_chat_with_its_box_and_question() {
     render_chat_with("chat-menu", chat_node(false), "", 1.0, |chat| {
         use clackatoo_protocol::SettingKind;
         chat.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+    });
+    // A command's card, folded to its output's last lines, and open.
+    let mut first = chat_node(false);
+    first.turns.truncate(1);
+    first.turns[0].items.truncate(2);
+    render_chat("chat-cards", first.clone(), "", 1.0);
+    render_chat_with("chat-cards-open", first, "", 1.0, |chat| {
+        chat.open_card("build");
     });
     // A pinned version: its family's versions are shown.
     let mut pinned = chat_node(false);

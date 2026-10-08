@@ -194,6 +194,30 @@ impl Fake {
                     &json!({ "sessionUpdate": "tool_call_update",
                                           "toolCallId": "t1", "status": "completed" }),
                 );
+                // A command, as Claude Code's adapter runs one: what it's
+                // for while it runs, then its output.
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "t3", "title": "ls",
+                             "kind": "execute", "status": "pending",
+                             "content": [{ "type": "content",
+                                           "content": { "type": "text", "text": "List files" } }] }),
+                );
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t3",
+                             "status": "completed",
+                             "content": [{ "type": "content", "content": { "type": "text",
+                                           "text": "```console\nnotes.txt\n```" } }] }),
+                );
+                // A change to a file.
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "t4",
+                             "title": "Edit notes.txt", "kind": "edit", "status": "completed",
+                             "content": [{ "type": "diff", "path": "/notes.txt",
+                                           "oldText": "hi\n", "newText": "hello\n" }] }),
+                );
                 say(&session, "done\n");
                 done(&id, "end_turn");
             }
