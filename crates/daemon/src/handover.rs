@@ -19,6 +19,7 @@
 //! 5. Chats' settings, and the values the user chose for them.
 //! 6. What sort of tool each of a chat's tools is, and what it shows: a
 //!    command's output, a change to a file.
+//! 7. Where in files each tool works: their paths, and lines.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -31,10 +32,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 6;
+pub(crate) const VERSION: u32 = 7;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -173,7 +174,15 @@ pub(crate) enum ChatItem {
         status: ToolStatus,
         kind: ToolKind,
         content: Vec<ToolContent>,
+        locations: Vec<ToolLocation>,
     },
+}
+
+/// A file a tool works in, and the line, if it says.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ToolLocation {
+    pub(crate) path: String,
+    pub(crate) line: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -317,6 +326,7 @@ impl State {
             3 => postcard::from_bytes::<v3::State>(body)?.try_into(),
             4 => Ok(postcard::from_bytes::<v4::State>(body)?.into()),
             5 => Ok(postcard::from_bytes::<v5::State>(body)?.into()),
+            6 => Ok(postcard::from_bytes::<v6::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -626,6 +636,113 @@ mod v5 {
         },
     }
 
+    impl From<ChatTurn> for super::v6::ChatTurn {
+        fn from(turn: ChatTurn) -> Self {
+            Self {
+                prompt: turn.prompt,
+                sent: turn.sent,
+                items: (turn.items.into_iter())
+                    .map(|item| match item {
+                        ChatItem::Words(words) => super::v6::ChatItem::Words(words),
+                        ChatItem::Thought(words) => super::v6::ChatItem::Thought(words),
+                        ChatItem::Tool { id, title, status } => super::v6::ChatItem::Tool {
+                            id,
+                            title,
+                            status,
+                            kind: super::ToolKind::Other,
+                            content: Vec::new(),
+                        },
+                    })
+                    .collect(),
+                end: turn.end,
+            }
+        }
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            super::v6::State {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: (state.chats.into_iter())
+                    .map(|chat| super::v6::Chat {
+                        id: chat.id,
+                        cols: chat.cols,
+                        rows: chat.rows,
+                        title: chat.title,
+                        cwd: chat.cwd,
+                        session: chat.session,
+                        failure: chat.failure,
+                        turns: chat.turns.into_iter().map(Into::into).collect(),
+                        settings: chat.settings,
+                        chosen: chat.chosen,
+                    })
+                    .collect(),
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+            }
+            .into()
+        }
+    }
+}
+
+/// Version 6, as the builds that wrote it wrote it: tools without where
+/// they work, which come through as working nowhere in particular.
+mod v6 {
+    use serde::Deserialize;
+
+    use super::{
+        ChatEnd, ChatSetting, Process, Terminal, ToolContent, ToolKind, ToolStatus, Workspaces,
+    };
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        pub(super) listener: u32,
+        pub(super) lock: Option<u32>,
+        pub(super) next_terminal: u32,
+        pub(super) terminals: Vec<Terminal>,
+        pub(super) chats: Vec<Chat>,
+        pub(super) orphans: Vec<Process>,
+        pub(super) workspaces: Workspaces,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct Chat {
+        pub(super) id: u32,
+        pub(super) cols: u16,
+        pub(super) rows: u16,
+        pub(super) title: String,
+        pub(super) cwd: String,
+        pub(super) session: Option<String>,
+        pub(super) failure: Option<String>,
+        pub(super) turns: Vec<ChatTurn>,
+        pub(super) settings: Vec<ChatSetting>,
+        pub(super) chosen: Vec<(String, String)>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct ChatTurn {
+        pub(super) prompt: String,
+        pub(super) sent: u64,
+        pub(super) items: Vec<ChatItem>,
+        pub(super) end: Option<ChatEnd>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(super) enum ChatItem {
+        Words(String),
+        Thought(String),
+        Tool {
+            id: String,
+            title: String,
+            status: ToolStatus,
+            kind: ToolKind,
+            content: Vec<ToolContent>,
+        },
+    }
+
     impl From<ChatTurn> for super::ChatTurn {
         fn from(turn: ChatTurn) -> Self {
             Self {
@@ -635,12 +752,19 @@ mod v5 {
                     .map(|item| match item {
                         ChatItem::Words(words) => super::ChatItem::Words(words),
                         ChatItem::Thought(words) => super::ChatItem::Thought(words),
-                        ChatItem::Tool { id, title, status } => super::ChatItem::Tool {
+                        ChatItem::Tool {
                             id,
                             title,
                             status,
-                            kind: super::ToolKind::Other,
-                            content: Vec::new(),
+                            kind,
+                            content,
+                        } => super::ChatItem::Tool {
+                            id,
+                            title,
+                            status,
+                            kind,
+                            content,
+                            locations: Vec::new(),
                         },
                     })
                     .collect(),
@@ -713,6 +837,10 @@ mod tests {
                                     new: "b".to_owned(),
                                 },
                             ],
+                            locations: vec![ToolLocation {
+                                path: "/src/a".to_owned(),
+                                line: Some(4),
+                            }],
                         },
                     ],
                     end: Some(ChatEnd {
@@ -780,10 +908,10 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(MAGIC).unwrap();
-        file.write_all(&7u32.to_le_bytes()).unwrap();
+        file.write_all(&8u32.to_le_bytes()).unwrap();
         assert!(matches!(
             State::read(&mut file),
-            Err(HandoverError::Version(7))
+            Err(HandoverError::Version(8))
         ));
     }
 
@@ -891,6 +1019,32 @@ mod tests {
         };
         assert_eq!(title, "Read");
         assert!(matches!(kind, ToolKind::Other) && content.is_empty());
+    }
+
+    /// Written by a build that wrote version 6. It must always be read.
+    #[test]
+    fn version_6_is_read_with_tools_working_nowhere() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v6.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!((state.next_terminal, state.orphans[0].pid), (7, 94));
+        let chat = &state.chats[0];
+        assert_eq!((chat.id, chat.session.as_deref()), (6, Some("s6")));
+        let [
+            _,
+            ChatItem::Tool {
+                kind,
+                content,
+                locations,
+                ..
+            },
+        ] = chat.turns[0].items.as_slice()
+        else {
+            panic!("{:?}", chat.turns[0].items);
+        };
+        assert!(matches!(kind, ToolKind::Edit) && content.len() == 2);
+        assert!(locations.is_empty());
     }
 
     #[test]

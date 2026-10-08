@@ -29,8 +29,8 @@ pub(super) struct CardLaid {
     head: Laid,
     /// How many lines a change adds and removes.
     counts: Option<(Laid, Laid)>,
-    /// The marks a change's lines get: added and removed.
-    signs: Option<(Laid, Laid)>,
+    /// What goes before a change's lines.
+    gutter: Option<Gutter>,
     body: Vec<Section>,
     /// What clicking it does, if it has more to show, or less.
     footer: Option<Laid>,
@@ -44,17 +44,38 @@ enum Section {
     Text(Laid),
     /// A file's path, over its lines, when a change is to several.
     Path(Laid),
-    /// A line of a change.
-    Line(Sign, Laid),
+    /// A line of a change: its sign, its number and its text.
+    Line(Sign, Option<Laid>, Laid),
     /// How many lines are left out.
     More(Laid),
+}
+
+/// What goes before a change's lines: their numbers, if they're known,
+/// and the signs of those added and removed.
+struct Gutter {
+    added: Laid,
+    removed: Laid,
+    /// How wide the widest number is, or 0 with none.
+    numbers: f32,
+}
+
+impl Gutter {
+    /// How far the lines are from the left.
+    fn width(&self, m: Measures) -> f32 {
+        let numbers = if self.numbers > 0.0 {
+            self.numbers + m.em(0.8)
+        } else {
+            0.0
+        };
+        numbers + self.added.width + m.em(0.6)
+    }
 }
 
 impl Section {
     fn height(&self, m: Measures) -> f32 {
         match self {
             Self::Path(laid) => laid.height + m.em(0.3),
-            Self::Text(laid) | Self::Line(_, laid) | Self::More(laid) => laid.height,
+            Self::Text(laid) | Self::Line(_, _, laid) | Self::More(laid) => laid.height,
         }
     }
 }
@@ -126,7 +147,7 @@ impl ChatView {
             }
             _ => w.text(&tool.title, Look::Plain(Tone::Plain), head_wide),
         };
-        let (body, signs, total) = match &card {
+        let (body, gutter, total) = match &card {
             Some(Card::Command {
                 purpose, output, ..
             }) => {
@@ -159,7 +180,7 @@ impl ChatView {
             mark,
             head,
             counts,
-            signs,
+            gutter,
             body,
             footer,
             head_height,
@@ -225,19 +246,27 @@ impl Writer<'_> {
         (body, total)
     }
 
-    /// What a change's card shows, the signs its lines get, and how many
-    /// lines it has: from the start, each file's lines, under its path if
-    /// there are several.
-    fn change(&mut self, files: &[FileChange]) -> (Vec<Section>, Option<(Laid, Laid)>, usize) {
-        let (added, removed) = (
-            self.text("+", Look::Mono(Tone::Added), self.inner),
-            self.text("−", Look::Mono(Tone::Removed), self.inner),
-        );
-        // Lines wrap after their signs.
-        let lines_wide = self.body_wide() - gutter(self.m, &added);
+    /// What a change's card shows, what goes before its lines, and how
+    /// many lines it has: from the start, each file's lines, under its
+    /// path if there are several.
+    fn change(&mut self, files: &[FileChange]) -> (Vec<Section>, Option<Gutter>, usize) {
         let total = files.iter().map(|file| file.lines.len()).sum();
+        let most = if self.open { MOST } else { FOLDED };
+        let shown = || files.iter().flat_map(|file| &file.lines).take(most);
+        let widest = shown().filter_map(|line| line.number).max();
+        let numbers = widest.map_or(0.0, |widest| {
+            self.text(&widest.to_string(), Look::Mono(Tone::Muted), f32::INFINITY)
+                .width
+        });
+        let gutter = Gutter {
+            added: self.text("+", Look::Mono(Tone::Added), self.inner),
+            removed: self.text("−", Look::Mono(Tone::Removed), self.inner),
+            numbers,
+        };
+        // Lines wrap after the gutter.
+        let lines_wide = self.body_wide() - gutter.width(self.m);
         let mut body = Vec::new();
-        let mut left = if self.open { MOST } else { FOLDED };
+        let mut left = most;
         for file in files {
             if left == 0 {
                 break;
@@ -249,18 +278,23 @@ impl Writer<'_> {
                     self.inner,
                 )));
             }
-            for (sign, line) in file.lines.iter().take(left) {
-                let tone = if *sign == Sign::Kept {
+            for line in file.lines.iter().take(left) {
+                let tone = if line.sign == Sign::Kept {
                     Tone::Muted
                 } else {
                     Tone::Plain
                 };
+                let number = (line.number).map(|number| {
+                    self.text(&number.to_string(), Look::Mono(Tone::Muted), f32::INFINITY)
+                });
                 // An empty line still takes a line.
-                let line = if line.is_empty() { " " } else { line };
-                body.push(Section::Line(
-                    *sign,
-                    self.text(line, Look::Mono(tone), lines_wide),
-                ));
+                let text = if line.text.is_empty() {
+                    " "
+                } else {
+                    &line.text
+                };
+                let text = self.text(text, Look::Mono(tone), lines_wide);
+                body.push(Section::Line(line.sign, number, text));
             }
             left = left.saturating_sub(file.lines.len());
         }
@@ -272,7 +306,7 @@ impl Writer<'_> {
                 self.inner,
             )));
         }
-        (body, Some((added, removed)), total)
+        (body, Some(gutter), total)
     }
 }
 
@@ -325,7 +359,16 @@ pub(super) fn draw_card(
                     draw_laid(canvas, m, laid, [x, y], inner);
                 }
                 Section::Path(laid) => draw_laid(canvas, m, laid, [x, y + m.em(0.15)], inner),
-                Section::Line(sign, laid) => draw_line(canvas, m, card, *sign, laid, [x, y], width),
+                Section::Line(sign, number, laid) => {
+                    draw_line(
+                        canvas,
+                        m,
+                        card,
+                        (*sign, number.as_ref(), laid),
+                        [x, y],
+                        width,
+                    );
+                }
             }
             y += section.height(m);
         }
@@ -364,37 +407,40 @@ fn intersection(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 }
 
 /// Draws a line of a change at `at`: on green or red if it's added or
-/// removed, after its sign.
+/// removed, after its number and sign.
 fn draw_line(
     canvas: &mut Canvas<'_>,
     m: Measures,
     card: &CardLaid,
-    sign: Sign,
-    laid: &Laid,
+    (sign, number, laid): (Sign, Option<&Laid>, &Laid),
     at: [f32; 2],
     width: f32,
 ) {
+    let Some(gutter) = &card.gutter else {
+        return;
+    };
     let left = at[0] - m.em(PAD) + 1.0;
     let row = [left, at[1], width - 2.0, laid.height];
-    let mark = match (sign, &card.signs) {
-        (Sign::Added, Some((added, _))) => {
+    let mark = match sign {
+        Sign::Added => {
             canvas.fill(Fill::solid(row, Paint::Added));
-            Some(added)
+            Some(&gutter.added)
         }
-        (Sign::Removed, Some((_, removed))) => {
+        Sign::Removed => {
             canvas.fill(Fill::solid(row, Paint::Removed));
-            Some(removed)
+            Some(&gutter.removed)
         }
-        _ => None,
+        Sign::Kept => None,
     };
-    let gutter = (card.signs.as_ref()).map_or(0.0, |(added, _)| gutter(m, added));
-    if let Some(mark) = mark {
-        draw_laid(canvas, m, mark, at, gutter);
+    // Numbers line up on the right.
+    if let Some(number) = number {
+        let x = at[0] + gutter.numbers - number.width;
+        draw_laid(canvas, m, number, [x, at[1]], gutter.numbers);
     }
-    draw_laid(canvas, m, laid, [at[0] + gutter, at[1]], width);
-}
-
-/// How far a change's lines are from its left, after `sign`.
-fn gutter(m: Measures, sign: &Laid) -> f32 {
-    sign.width + m.em(0.6)
+    let text_x = at[0] + gutter.width(m);
+    if let Some(mark) = mark {
+        let x = text_x - m.em(0.6) - mark.width;
+        draw_laid(canvas, m, mark, [x, at[1]], mark.width);
+    }
+    draw_laid(canvas, m, laid, [text_x, at[1]], width);
 }

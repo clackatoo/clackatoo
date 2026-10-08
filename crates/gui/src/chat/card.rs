@@ -4,11 +4,13 @@
 //! Claude Code's adapter gives a command's output as one fenced block of
 //! Markdown, and while the command runs, a line saying what it's for. A
 //! change to a file comes as the part of it changed, before and after,
-//! which is compared here a line at a time.
+//! which is compared here a line at a time. Where it is in the file comes
+//! from the tool's locations: once the change is made, Claude Code's
+//! adapter gives the line the part shown starts at.
 
 use std::time::Duration;
 
-use clackatoo_protocol::{Diff, Tool, ToolContent, ToolKind};
+use clackatoo_protocol::{Diff, Location, Tool, ToolContent, ToolKind};
 use similar::{ChangeTag, TextDiff};
 
 /// How long comparing a file before and after may take, before what's
@@ -32,7 +34,17 @@ pub(super) enum Card {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct FileChange {
     pub(super) path: String,
-    pub(super) lines: Vec<(Sign, String)>,
+    pub(super) lines: Vec<Line>,
+}
+
+/// A line of a change.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Line {
+    pub(super) sign: Sign,
+    /// Its number in the file: where it is now, or for a line removed,
+    /// where it was. `None` while where the change is isn't known.
+    pub(super) number: Option<u32>,
+    pub(super) text: String,
 }
 
 /// Whether a line of a change is kept, added or removed.
@@ -60,7 +72,7 @@ impl Card {
             })
             .collect();
         if !diffs.is_empty() {
-            return Some(Self::Change(diffs.into_iter().map(file_change).collect()));
+            return Some(Self::Change(changes(&diffs, &tool.locations)));
         }
         if tool.kind != ToolKind::Execute {
             return None;
@@ -89,7 +101,7 @@ impl Card {
             return None;
         };
         let lines = files.iter().flat_map(|file| &file.lines);
-        let count = |sign| lines.clone().filter(|(of, _)| *of == sign).count();
+        let count = |sign| lines.clone().filter(|line| line.sign == sign).count();
         Some((count(Sign::Added), count(Sign::Removed)))
     }
 }
@@ -103,9 +115,70 @@ fn fenced(text: &str) -> Option<&str> {
     Some(body.strip_suffix('\n').unwrap_or(body))
 }
 
+/// `diffs`, a line at a time, numbered from where `locations` say they
+/// are.
+///
+/// Each diff takes the next location for its file that has a line, which
+/// is where it starts now. Where it started before is earlier or later by
+/// how many lines the diffs to the same file before it added or removed.
+fn changes(diffs: &[&Diff], locations: &[Location]) -> Vec<FileChange> {
+    let mut lines =
+        (locations.iter()).filter_map(|location| Some((&location.path, location.line?)));
+    let mut files: Vec<FileChange> = Vec::new();
+    for diff in diffs {
+        let signs = signs(diff);
+        // A new file starts at its start.
+        let start = if diff.old.is_none() {
+            Some(1)
+        } else {
+            (lines.by_ref())
+                .find(|(path, _)| **path == diff.path)
+                .map(|(_, line)| line)
+        };
+        let shift: i64 = (files.iter())
+            .filter(|file| file.path == diff.path)
+            .flat_map(|file| &file.lines)
+            .map(|line| match line.sign {
+                Sign::Added => 1,
+                Sign::Removed => -1,
+                Sign::Kept => 0,
+            })
+            .sum();
+        let (mut new, mut old) = match start {
+            Some(start) => (Some(i64::from(start)), Some(i64::from(start) - shift)),
+            None => (None, None),
+        };
+        let next = |counter: &mut Option<i64>| {
+            let number = counter
+                .and_then(|number| u32::try_from(number).ok())
+                .filter(|&number| number > 0);
+            *counter = counter.map(|number| number + 1);
+            number
+        };
+        let lines = (signs.into_iter())
+            .map(|(sign, text)| {
+                let number = match sign {
+                    Sign::Kept => {
+                        next(&mut old);
+                        next(&mut new)
+                    }
+                    Sign::Added => next(&mut new),
+                    Sign::Removed => next(&mut old),
+                };
+                Line { sign, number, text }
+            })
+            .collect();
+        files.push(FileChange {
+            path: diff.path.clone(),
+            lines,
+        });
+    }
+    files
+}
+
 /// `diff`, a line at a time: all added, for a new file.
-fn file_change(diff: &Diff) -> FileChange {
-    let lines = match &diff.old {
+fn signs(diff: &Diff) -> Vec<(Sign, String)> {
+    match &diff.old {
         None => (diff.new.lines())
             .map(|line| (Sign::Added, line.to_owned()))
             .collect(),
@@ -122,10 +195,6 @@ fn file_change(diff: &Diff) -> FileChange {
                 (sign, line.to_owned())
             })
             .collect(),
-    };
-    FileChange {
-        path: diff.path.clone(),
-        lines,
     }
 }
 
@@ -142,6 +211,7 @@ mod tests {
             status: ToolStatus::Done,
             kind,
             content,
+            locations: Vec::new(),
         }
     }
 
@@ -192,8 +262,11 @@ mod tests {
             panic!("{card:?}")
         };
         let line = |sign, text: &str| (sign, text.to_owned());
+        let lines: Vec<(Sign, String)> = (files[0].lines.iter())
+            .map(|line| (line.sign, line.text.clone()))
+            .collect();
         assert_eq!(
-            files[0].lines,
+            lines,
             [
                 line(Sign::Kept, "one"),
                 line(Sign::Removed, "two"),
@@ -216,5 +289,77 @@ mod tests {
             })],
         );
         assert_eq!(Card::of(&write).unwrap().counts(), Some((2, 0)));
+    }
+
+    fn numbers(card: &Card) -> Vec<Vec<(Sign, Option<u32>)>> {
+        let Card::Change(files) = card else {
+            panic!("{card:?}")
+        };
+        (files.iter())
+            .map(|file| {
+                (file.lines.iter())
+                    .map(|line| (line.sign, line.number))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lines_are_numbered_from_where_the_change_is() {
+        use Sign::{Added, Kept, Removed};
+
+        let diff = |old: &str, new: &str| {
+            ToolContent::Diff(Diff {
+                path: "/a".into(),
+                old: Some(old.into()),
+                new: new.into(),
+            })
+        };
+        let mut edit = tool(
+            ToolKind::Edit,
+            vec![
+                diff("k\nold\nk\n", "k\nnew\nmore\nk\n"),
+                diff("x\ny\n", "y\n"),
+            ],
+        );
+        // Not yet made: nowhere in particular.
+        assert_eq!(numbers(&Card::of(&edit).unwrap())[0][0], (Sign::Kept, None));
+        edit.locations = vec![
+            Location {
+                path: "/a".into(),
+                line: Some(12),
+            },
+            Location {
+                path: "/a".into(),
+                line: Some(40),
+            },
+        ];
+        assert_eq!(
+            numbers(&Card::of(&edit).unwrap()),
+            [
+                vec![
+                    (Kept, Some(12)),
+                    (Removed, Some(13)),
+                    (Added, Some(13)),
+                    (Added, Some(14)),
+                    (Kept, Some(15)),
+                ],
+                // The first added a line: this was a line earlier before.
+                vec![(Removed, Some(39)), (Kept, Some(40))],
+            ]
+        );
+        // A new file, from its first line.
+        let write = tool(
+            ToolKind::Edit,
+            vec![ToolContent::Diff(Diff {
+                path: "/b".into(),
+                old: None,
+                new: "a\nb".into(),
+            })],
+        );
+        assert_eq!(
+            numbers(&Card::of(&write).unwrap()),
+            [vec![(Added, Some(1)), (Added, Some(2))]]
+        );
     }
 }

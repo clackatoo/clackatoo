@@ -15,11 +15,11 @@ use agent_client_protocol_schema::MaybeUndefined;
 use agent_client_protocol_schema::v1::{
     ContentBlock, PermissionOption, PermissionOptionKind, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOptions, SessionUpdate, StopReason,
-    ToolCallContent, ToolCallStatus, ToolCallUpdate,
+    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
 };
 use clackatoo_protocol::{
-    ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Node, Outcome,
-    Patch, Question, Setting, SettingChoice, SettingKind, Size, TerminalId, TerminalInfo,
+    ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Location, Node,
+    Outcome, Patch, Question, Setting, SettingChoice, SettingKind, Size, TerminalId, TerminalInfo,
     TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, Usage, View,
     ViewUpdate,
 };
@@ -509,6 +509,7 @@ impl HostedChat {
                 status: tool_status(call.status),
                 kind: tool_kind(call.kind),
                 content: tool_content(&call.content),
+                locations: tool_locations(&call.locations),
             }),
             SessionUpdate::ToolCallUpdate(update) => {
                 let id = update.tool_call_id.0.to_string();
@@ -518,6 +519,7 @@ impl HostedChat {
                     status: ToolStatus::Running,
                     kind: ToolKind::Other,
                     content: Vec::new(),
+                    locations: Vec::new(),
                 });
                 if let Some(title) = &update.fields.title {
                     tool.title = clean(title);
@@ -532,6 +534,9 @@ impl HostedChat {
                 // description gives way to its output.
                 if let Some(content) = &update.fields.content {
                     tool.content = tool_content(content);
+                }
+                if let Some(locations) = &update.fields.locations {
+                    tool.locations = tool_locations(locations);
                 }
                 self.set_tool(tool);
             }
@@ -821,6 +826,15 @@ fn tool_content(content: &[ToolCallContent]) -> Vec<ToolContent> {
         .collect()
 }
 
+fn tool_locations(locations: &[ToolCallLocation]) -> Vec<Location> {
+    (locations.iter())
+        .map(|location| Location {
+            path: location.path.to_string_lossy().into_owned(),
+            line: location.line,
+        })
+        .collect()
+}
+
 /// The last whole lines of `text` that fit in `max` bytes, after "…", if
 /// it's longer. A fence it opens with stays, for it to still read as code.
 fn tail(text: &str, max: usize) -> String {
@@ -955,6 +969,12 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
                             },
                         })
                         .collect(),
+                    locations: (tool.locations.into_iter())
+                        .map(|location| handover::ToolLocation {
+                            path: location.path,
+                            line: location.line,
+                        })
+                        .collect(),
                 },
             })
             .collect(),
@@ -983,6 +1003,7 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
                     status,
                     kind,
                     content,
+                    locations,
                 } => Item::Tool(Tool {
                     id,
                     title,
@@ -1008,6 +1029,12 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
                             handover::ToolContent::Diff { path, old, new } => {
                                 ToolContent::Diff(Diff { path, old, new })
                             }
+                        })
+                        .collect(),
+                    locations: (locations.into_iter())
+                        .map(|location| Location {
+                            path: location.path,
+                            line: location.line,
                         })
                         .collect(),
                 }),
@@ -1151,6 +1178,7 @@ mod tests {
                     status: ToolStatus::Done,
                     kind: ToolKind::Other,
                     content: Vec::new(),
+                    locations: Vec::new(),
                 }),
                 Item::Words("Done.".into()),
             ]

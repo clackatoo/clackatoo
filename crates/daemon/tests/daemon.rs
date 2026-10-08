@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    ChatAction, ChatNode, ChatState, ClientMessage, Diff, Error, Event, Item, NewAgent,
+    ChatAction, ChatNode, ChatState, ClientMessage, Diff, Error, Event, Item, Location, NewAgent,
     NewTerminal, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Request, Response,
     ServerMessage, Side, Size, TerminalId, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus,
     View, ViewUpdate, Workspaces,
@@ -1277,6 +1277,7 @@ fn tool_calls_are_kept_and_the_agent_asks_before_using_one() {
                 status: ToolStatus::Done,
                 kind: ToolKind::Other,
                 content: Vec::new(),
+                locations: Vec::new(),
             }),
             // Its output in place of what it was for.
             Item::Tool(Tool {
@@ -1285,6 +1286,7 @@ fn tool_calls_are_kept_and_the_agent_asks_before_using_one() {
                 status: ToolStatus::Done,
                 kind: ToolKind::Execute,
                 content: vec![ToolContent::Text("```console\nnotes.txt\n```".into())],
+                locations: Vec::new(),
             }),
             Item::Tool(Tool {
                 id: "t4".into(),
@@ -1296,6 +1298,10 @@ fn tool_calls_are_kept_and_the_agent_asks_before_using_one() {
                     old: Some("hi\n".into()),
                     new: "hello\n".into(),
                 })],
+                locations: vec![Location {
+                    path: "/notes.txt".into(),
+                    line: Some(3),
+                }],
             }),
             Item::Words("done\n".into()),
         ]

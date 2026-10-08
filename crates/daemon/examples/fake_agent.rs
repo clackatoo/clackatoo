@@ -216,7 +216,8 @@ impl Fake {
                     &json!({ "sessionUpdate": "tool_call", "toolCallId": "t4",
                              "title": "Edit notes.txt", "kind": "edit", "status": "completed",
                              "content": [{ "type": "diff", "path": "/notes.txt",
-                                           "oldText": "hi\n", "newText": "hello\n" }] }),
+                                           "oldText": "hi\n", "newText": "hello\n" }],
+                             "locations": [{ "path": "/notes.txt", "line": 3 }] }),
                 );
                 say(&session, "done\n");
                 done(&id, "end_turn");

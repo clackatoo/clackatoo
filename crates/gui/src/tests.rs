@@ -583,8 +583,8 @@ fn joined_emoji_are_shaped_into_one_glyph() {
 /// box a message is typed in, or the agent's question.
 fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
     use clackatoo_protocol::{
-        ChatNode, ChatState, Choice, ChoiceKind, Diff, Item, Outcome, Question, Tool, ToolContent,
-        ToolKind, ToolStatus, Turn, TurnEnd,
+        ChatNode, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome, Question, Tool,
+        ToolContent, ToolKind, ToolStatus, Turn, TurnEnd,
     };
     let tool = |title: &str, status| {
         Item::Tool(Tool {
@@ -593,6 +593,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
             status,
             kind: ToolKind::Read,
             content: Vec::new(),
+            locations: Vec::new(),
         })
     };
     let build = Item::Tool(Tool {
@@ -607,6 +608,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
             "warning: openssl-sys@0.9.103: Could not find directory of OpenSSL installation\n"
                 .repeat(10)
         ))],
+        locations: Vec::new(),
     });
     let edit = Item::Tool(Tool {
         id: "edit".into(),
@@ -615,10 +617,14 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
         kind: ToolKind::Edit,
         content: vec![ToolContent::Diff(Diff {
             path: "/src/app/Cargo.toml".into(),
-            old: Some("[dependencies]\nopenssl = \"0.10\"\n".into()),
-            new: "[dependencies]\nopenssl = { version = \"0.10\", features = [\"vendored\"] }\n"
+            old: Some("[package]\nedition = \"2024\"\n\n[dependencies]\nopenssl = \"0.10\"\n".into()),
+            new: "[package]\nedition = \"2024\"\n\n[dependencies]\nopenssl = { version = \"0.10\", features = [\"vendored\"] }\n"
                 .into(),
         })],
+        locations: vec![Location {
+            path: "/src/app/Cargo.toml".into(),
+            line: Some(98),
+        }],
     });
     ChatNode {
         turns: vec![

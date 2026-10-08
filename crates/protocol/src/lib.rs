@@ -52,9 +52,9 @@ pub use clackatoo_term::{
 use serde::{Deserialize, Serialize};
 
 pub use chat::{
-    ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Outcome, Question,
-    Setting, SettingChoice, SettingKind, Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd,
-    Usage,
+    ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome,
+    Question, Setting, SettingChoice, SettingKind, Tool, ToolContent, ToolKind, ToolStatus, Turn,
+    TurnEnd, Usage,
 };
 pub use view::{
     CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, Node, NodeId, Patch, Run,
@@ -67,7 +67,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

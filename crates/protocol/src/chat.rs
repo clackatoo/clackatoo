@@ -147,6 +147,18 @@ pub struct Tool {
     /// What it shows: what it's for, its output, or the changes it makes
     /// to files.
     pub content: Vec<ToolContent>,
+    /// Where in files it works, as the agent says: a change to a file is
+    /// at the line its location gives.
+    pub locations: Vec<Location>,
+}
+
+/// A file a tool works in, and where in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Location {
+    /// The file's path.
+    pub path: String,
+    /// The line, from 1, if the agent says.
+    pub line: Option<u32>,
 }
 
 /// What sort of tool an agent used, as it says.
