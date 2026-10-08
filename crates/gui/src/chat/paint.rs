@@ -295,18 +295,15 @@ impl ChatView {
             self.draw_span(&mut canvas, m, span, [origin[0] + left, top], column);
         }
         if self.node.turns.is_empty() && matches!(self.node.state, ChatState::Ready) {
-            let laid = self.note(
-                canvas.fonts,
-                m,
-                "Send a message to start.",
-                Tone::Muted,
-                column,
-            );
+            let laid = self.note(canvas.fonts, m, EMPTY, Tone::Muted, column);
             let x = origin[0] + left + (column - laid.width) / 2.0;
             let y = origin[1] + (view_height - laid.height) / 2.0;
             for block in &laid.blocks {
                 canvas.text(&block.layout, [x, y + block.top]);
             }
+            self.cache
+                .notes
+                .insert((EMPTY.to_owned(), Tone::Muted), laid);
         }
         paint
     }
@@ -768,6 +765,9 @@ impl ChatView {
 
 /// What the box says while nothing's typed.
 const PLACEHOLDER: &str = "Message the agent";
+
+/// What a chat with no turns says.
+const EMPTY: &str = "Send a message to start.";
 
 /// Where a chat is drawn: its pane, and the column of turns in it.
 #[derive(Clone, Copy)]
