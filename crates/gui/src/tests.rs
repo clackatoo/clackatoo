@@ -731,8 +731,22 @@ fn render_chat_with(
     scale: f64,
     then: impl FnOnce(&mut crate::chat::ChatView),
 ) -> Option<Vec<u8>> {
+    render_chat_in(name, node, typed, (scale, None), then)
+}
+
+/// As [`render_chat_with`], with the interface font `ui`, if given.
+fn render_chat_in(
+    name: &str,
+    node: clackatoo_protocol::ChatNode,
+    typed: &str,
+    (scale, ui): (f64, Option<&str>),
+    then: impl FnOnce(&mut crate::chat::ChatView),
+) -> Option<Vec<u8>> {
     let gpu = gpu()?;
     let mut fonts = fonts(scale);
+    if let Some(ui) = ui {
+        fonts.load_ui(Some(ui), 11.0, scale);
+    }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let size = [(720.0 * scale) as u32, (640.0 * scale) as u32];
     let mut chat = crate::chat::ChatView::new("chat".into(), node);
@@ -772,6 +786,14 @@ fn renders_a_chat_with_its_box_and_question() {
     assert!(pixels.chunks(4).any(|pixel| pixel != &pixels[..4]));
     render_chat("chat-question", chat_node(true), "", 1.0);
     render_chat("chat-hidpi", chat_node(false), "", 2.0);
+    // Noto Sans has no ▾: it comes from the fonts behind it.
+    render_chat_in(
+        "chat-noto",
+        chat_node(false),
+        "",
+        (1.0, Some("Noto Sans")),
+        |_| {},
+    );
     render_chat_with("chat-menu", chat_node(false), "", 1.0, |chat| {
         use clackatoo_protocol::SettingKind;
         chat.open_menu(&[SettingKind::Model, SettingKind::Effort]);

@@ -48,20 +48,35 @@ pub(super) fn text_size(fonts: &Fonts) -> f32 {
     fonts.ppem
 }
 
-/// The interface's font family.
+/// The interface's font family, with others behind it for what it hasn't
+/// got: the terminal's, then emoji. Noto Sans, a common interface font,
+/// has no `▾`, which the terminal's fonts nearly all have.
 fn ui_family(fonts: &Fonts) -> FontFamily<'static> {
-    FontFamily::Single(match &fonts.ui_family {
-        Some(name) => FontFamilyName::Named(Cow::Owned(name.clone())),
-        None => FontFamilyName::Generic(GenericFamily::SansSerif),
-    })
+    FontFamily::List(Cow::Owned(vec![
+        named_or(fonts.ui_family.as_ref(), GenericFamily::SansSerif),
+        named_or(fonts.mono_family.as_ref(), GenericFamily::Monospace),
+        FontFamilyName::Generic(GenericFamily::Monospace),
+        FontFamilyName::Generic(GenericFamily::Emoji),
+    ]))
 }
 
-/// The terminal's font family, for code.
+/// The terminal's font family, for code, with the interface's and emoji
+/// behind it.
 fn mono_family(fonts: &Fonts) -> FontFamily<'static> {
-    FontFamily::Single(match &fonts.mono_family {
+    FontFamily::List(Cow::Owned(vec![
+        named_or(fonts.mono_family.as_ref(), GenericFamily::Monospace),
+        FontFamilyName::Generic(GenericFamily::Monospace),
+        named_or(fonts.ui_family.as_ref(), GenericFamily::SansSerif),
+        FontFamilyName::Generic(GenericFamily::Emoji),
+    ]))
+}
+
+/// The family called `name`, or `generic` without one.
+fn named_or(name: Option<&String>, generic: GenericFamily) -> FontFamilyName<'static> {
+    match name {
         Some(name) => FontFamilyName::Named(Cow::Owned(name.clone())),
-        None => FontFamilyName::Generic(GenericFamily::Monospace),
-    })
+        None => FontFamilyName::Generic(generic),
+    }
 }
 
 /// How the chat's ordinary text is styled, at `size` pixels.
@@ -1446,4 +1461,38 @@ fn escape(text: &str) -> String {
         escaped.push(ch);
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fonts::FontOptions;
+
+    #[test]
+    fn characters_the_interface_font_lacks_come_from_the_fonts_behind_it() {
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        // Noto Sans has no ▾. Without it here, there's nothing to check.
+        fonts.load_ui(Some("Noto Sans"), 11.0, 1.0);
+        if fonts.ui_family.as_deref() != Some("Noto Sans") {
+            return;
+        }
+        let mut layout_cx = parley::LayoutContext::new();
+        let laid = lay_out(
+            &mut layout_cx,
+            &mut fonts,
+            Measures::of(16.0),
+            "Auto ▾ ✓ ✗ ○",
+            Look::Plain(Tone::Plain),
+            400.0,
+        );
+        let layout = &laid.blocks[0].layout;
+        for line in layout.lines() {
+            for item in line.items() {
+                if let PositionedLayoutItem::GlyphRun(run) = item {
+                    // Glyph 0 is a font's box for what it hasn't got.
+                    assert!(run.glyphs().all(|glyph| glyph.id != 0));
+                }
+            }
+        }
+    }
 }
