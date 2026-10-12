@@ -48,10 +48,13 @@ pub struct Row {
     written: u16,
     width: u16,
     wrapped: bool,
+    /// The row wrapped early, because a wide character didn't fit in its
+    /// last column: that column is padding, not text.
+    padded: bool,
 }
 
 // Scrollback is mostly rows, so their size matters. The last-style hint, the
-// width and the wrapped flag fit in what would otherwise be padding.
+// width and the two flags fit in what would otherwise be padding.
 const _: () = assert!(size_of::<Row>() <= 64);
 
 /// What a row reads as before it is first written. One copy serves every
@@ -87,6 +90,7 @@ impl Row {
             written: 0,
             width: u16::try_from(width).expect("columns fit in u16"),
             wrapped: false,
+            padded: false,
         }
     }
 
@@ -176,6 +180,20 @@ impl Row {
 
     pub(crate) fn set_wrapped(&mut self, wrapped: bool) {
         self.wrapped = wrapped;
+        self.padded = false;
+    }
+
+    /// Marks the row as wrapped early: a wide character didn't fit in its
+    /// last column, which is left as padding.
+    pub(crate) fn set_wrapped_early(&mut self) {
+        self.wrapped = true;
+        self.padded = true;
+    }
+
+    /// Whether the row wrapped early, leaving padding in its last column.
+    /// Writing there since makes the column text again.
+    pub(crate) fn is_padded(&self) -> bool {
+        self.padded && self.cells().last() == Some(&Cell::BLANK)
     }
 
     /// Writes `ch` at `col`, taking two cells if it is `wide`.
@@ -281,6 +299,7 @@ impl Row {
             extras.mark = None;
         }
         self.wrapped = false;
+        self.padded = false;
         let blank = Cell::blank(self.intern(style));
         if blank == Cell::BLANK {
             // Cells past the written mark are blank already, and so is a row

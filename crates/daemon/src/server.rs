@@ -290,6 +290,9 @@ struct Subscription {
     /// The size last sent. `None` until the first snapshot is sent, and
     /// after a re-attach, which asks for a fresh one.
     size: Option<Size>,
+    /// The terminal's history generation when the last snapshot was sent.
+    /// A new one renumbers history, which only a snapshot tells a client.
+    history_generation: u64,
     title: String,
     state: GridState,
     /// For a chat: what was last sent of it.
@@ -303,6 +306,7 @@ impl Subscription {
         Self {
             damage: Damage::new(),
             size: None,
+            history_generation: 0,
             title: String::new(),
             state: GridState::default(),
             chat: ChatSent::default(),
@@ -324,8 +328,10 @@ impl Subscription {
     fn update(&mut self, terminal: &Terminal) -> Option<ViewUpdate> {
         let size = terminal.size();
         let state = GridState::of(terminal);
-        if self.size != Some(size) {
+        let history_generation = terminal.primary().history_generation();
+        if self.size != Some(size) || self.history_generation != history_generation {
             self.size = Some(size);
+            self.history_generation = history_generation;
             terminal.title().clone_into(&mut self.title);
             self.state = state;
             self.damage.clear();
@@ -2345,5 +2351,52 @@ fn history(terminal: &Terminal, end: u64, count: u16) -> HistoryLines {
     HistoryLines {
         first: first.unwrap_or(end),
         lines,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clackatoo_term::Config;
+
+    use super::*;
+
+    #[test]
+    fn renumbering_history_sends_a_snapshot() {
+        let size = |cols| Size::new(cols, 2).expect("test sizes are valid");
+        let mut terminal = Terminal::new(size(10), &Config::default());
+        terminal.advance(b"abcdefghijklmnopqrstuvwxy");
+        let mut sent = Subscription::new();
+        assert!(matches!(
+            sent.update(&terminal),
+            Some(ViewUpdate::Snapshot(_))
+        ));
+        terminal.advance(b"z");
+        assert!(matches!(sent.update(&terminal), Some(ViewUpdate::Patch(_))));
+
+        // Back at the same size before the client heard of the first
+        // resize, but the line in history was taken back and rewrapped.
+        terminal.resize(size(7));
+        terminal.resize(size(10));
+        assert!(matches!(
+            sent.update(&terminal),
+            Some(ViewUpdate::Snapshot(_))
+        ));
+    }
+
+    #[test]
+    fn a_reset_sends_a_snapshot() {
+        let size = Size::new(10, 2).expect("test sizes are valid");
+        let mut terminal = Terminal::new(size, &Config::default());
+        terminal.advance(b"one\r\ntwo\r\nthree\r\n");
+        let mut sent = Subscription::new();
+        sent.update(&terminal);
+        // A reset numbers history from 0 again, and more output can take
+        // it past where it was before the client hears of either.
+        terminal.advance(b"\x1bc");
+        terminal.advance(&b"line\r\n".repeat(10));
+        assert!(matches!(
+            sent.update(&terminal),
+            Some(ViewUpdate::Snapshot(_))
+        ));
     }
 }

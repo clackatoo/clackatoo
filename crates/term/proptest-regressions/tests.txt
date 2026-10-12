@@ -6,3 +6,6 @@
 # everyone who runs the test benefits from these saved cases.
 cc ced1e5110b8c6d49418ea3404d5ddadc6fe4f5226b52e6004b2b4a27dd4a5ed1 # shrinks to bytes = [204, 129, 204, 129, 27, 91, 63, 50, 53, 108, 229, 173, 151, 97, 27, 91, 48, 64, 229, 173, 151, 27, 91, 63, 49, 48, 64, 32, 97, 32, 32, 97, 97, 32, 97, 97, 32, 27, 55, 27, 91, 63, 49, 48, 52, 55, 108, 27, 91, 64, 97, 13, 229, 173, 151, 27, 91, 52, 108, 204, 129, 27, 55, 27, 91, 64, 229, 173, 151, 13, 27, 91, 52, 108, 32, 204, 129, 101, 204, 129, 229, 173, 151, 229, 173, 151, 204, 129, 0, 13], split = Index(15406071973647537614)
 cc 042229eef91bc4100dfdf05d093aa12e451cfd7ad1aace731adc4bace84265c7 # shrinks to text = " a a a a ", cols = 1
+cc 38f9656634eaf1e658b78298fac5296e43e638bb4daa8ee84fa21cd401ce9022 # shrinks to text = "aa", cols = 3, new_cols = 2, rows = 1
+cc 14e5856a0e11fdb2c8ccefa358caa7eabb69875890a5831299e51bff5d27adf3 # shrinks to text = " aa字 字a字 a字字字aaaa 字aa字  aa字aa aa字字aaa字字字a  aa ", cols = 3, new_cols = 5, rows = 1
+cc 76048ed5402efcce583baff1699e9e952f406c6951ae57408bacc7abda499853 # shrinks to text = "字字字 aaa 字a字字 ", cols = 3, new_cols = 4, rows = 1

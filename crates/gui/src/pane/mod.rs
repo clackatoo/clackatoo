@@ -89,8 +89,9 @@ pub(crate) enum Selection {
 /// the order requests were sent.
 #[derive(Debug)]
 enum Pending {
-    /// History lines, the range asked for.
-    History(Range<u64>),
+    /// History lines, the range asked for and the history's generation
+    /// then.
+    History(Range<u64>, u64),
     /// Text to copy, and where to.
     Text(Copy),
     /// A search.
@@ -368,23 +369,33 @@ impl Pane {
             return true;
         }
         let old_end = self.screen.as_ref().map(|screen| screen.state.history_end);
+        let snapshot = matches!(update, ViewUpdate::Snapshot(_));
         match (&mut self.screen, update) {
             (Some(screen), _) => screen.apply(update),
             (None, ViewUpdate::Snapshot(view)) => self.screen = Screen::new(view),
             (None, ViewUpdate::Patch(_)) => return false,
         }
         let end = self.history_end();
+        // Stay on the lines being read, and in normal mode, on the lines
+        // around the cursor.
+        let follow = self.scroll > 0 || self.mode != Mode::Insert;
         match old_end {
+            // History may have been renumbered, by clearing it or by a
+            // resize rewrapping the line the screen's top row continues.
+            // It can have fewer lines than before.
+            Some(old_end) if snapshot => {
+                self.history.clear();
+                if follow {
+                    self.scroll = (self.scroll + end).saturating_sub(old_end);
+                }
+            }
             // The terminal was reset, and numbering started again.
-            Some(old) if end < old => {
+            Some(old_end) if end < old_end => {
                 self.history.clear();
                 self.scroll = 0;
             }
-            // New lines scrolled into history: stay on the lines being read,
-            // and in normal mode, on the lines around the cursor.
-            Some(old) if self.scroll > 0 || self.mode != Mode::Insert => {
-                self.scroll += end - old;
-            }
+            // New lines scrolled into history.
+            Some(old_end) if follow => self.scroll += end - old_end,
             _ => {}
         }
         self.scroll = self.scroll.min(self.max_scroll());
@@ -406,9 +417,9 @@ impl Pane {
                 log::warn!("the daemon refused a request: {err}");
                 false
             }
-            (Some(Pending::History(asked)), Response::History(lines)) => {
+            (Some(Pending::History(asked, generation)), Response::History(lines)) => {
                 let shown = self.shown_history();
-                self.history.receive(&lines, &asked, &shown);
+                self.history.receive(&lines, &asked, generation, &shown);
                 self.scroll = self.scroll.min(self.max_scroll());
                 self.fetch_history();
                 true
@@ -772,7 +783,8 @@ impl Pane {
     /// The furthest the view can scroll: to the oldest line held, once
     /// known, or as far as numbering goes until then.
     fn max_scroll(&self) -> u64 {
-        self.history_end() - self.history.start.unwrap_or(0)
+        self.history_end()
+            .saturating_sub(self.history.start.unwrap_or(0))
     }
 
     fn history_end(&self) -> u64 {
@@ -806,7 +818,7 @@ impl Pane {
                     end: wanted.end,
                     count,
                 },
-                Pending::History(wanted),
+                Pending::History(wanted, self.history.generation()),
             );
         }
     }
@@ -1097,6 +1109,54 @@ mod tests {
         keys(&mut pane, "G");
         assert_eq!(cursor(&pane).1, 4);
         assert_eq!(pane.label(), None, "back at the live screen");
+    }
+
+    #[test]
+    fn resizing_keeps_the_view_on_history_it_rewraps() {
+        // The long line starts in history and continues onto the screen.
+        let mut terminal = terminal(&(numbered_lines("line ") + &"x".repeat(60) + "\r\n$"));
+        let mut pane = pane(&terminal);
+        pane.scroll_by(3);
+        serve(&mut pane, &terminal);
+        let shown =
+            |pane: &Pane| -> Vec<String> { pane.scene(5).0.iter().map(|row| row.text()).collect() };
+        assert_eq!(shown(&pane)[..3], ["line 11", "line 12", &"x".repeat(12)]);
+
+        // Narrower, the line takes more rows, some of them in history.
+        terminal.resize(Size::new(10, 5).unwrap());
+        pane.view_changed(&ViewUpdate::Snapshot(View::capture(&terminal)));
+        serve(&mut pane, &terminal);
+        assert_eq!(
+            shown(&pane)[..4],
+            ["line 11", "line 12", &"x".repeat(10), &"x".repeat(10)]
+        );
+
+        // Wider, it all fits on screen, and history has fewer lines than
+        // before. That isn't a reset: the view stays where it was.
+        terminal.resize(Size::new(15, 5).unwrap());
+        pane.view_changed(&ViewUpdate::Snapshot(View::capture(&terminal)));
+        serve(&mut pane, &terminal);
+        assert_eq!(shown(&pane)[..3], ["line 11", "line 12", &"x".repeat(15)]);
+    }
+
+    #[test]
+    fn a_snapshot_forgets_the_history_fetched_before_it() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        pane.scroll_by(3);
+        serve(&mut pane, &terminal);
+        assert!(pane.take_outbox().is_empty(), "the lines shown are here");
+
+        // History may have been renumbered at the same size, as by
+        // resizing and back between frames.
+        pane.view_changed(&ViewUpdate::Snapshot(View::capture(&terminal)));
+        let asked = pane.take_outbox();
+        assert!(
+            asked
+                .iter()
+                .any(|message| matches!(message, ClientMessage::Request(Request::History { .. }))),
+            "the lines shown are fetched again"
+        );
     }
 
     #[test]

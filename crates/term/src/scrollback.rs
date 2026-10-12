@@ -77,12 +77,17 @@ pub(crate) struct Scrollback {
     /// Records held, across all pages.
     records: usize,
     /// Rows not compacted yet, all newer than every record.
-    raw: VecDeque<RawRow>,
+    raw: VecDeque<Row>,
     /// Cells across `raw`.
     raw_cells: usize,
-    /// Lines ever stored. Lines are numbered from 0 as they arrive, so the
-    /// newest held is `stored - 1` and the oldest `stored - len()`.
+    /// Lines stored, less those taken back. Lines are numbered from 0 as
+    /// they arrive, so the newest held is `stored - 1` and the oldest
+    /// `stored - len()`. Taking lines back (see
+    /// [`take_continued`](Self::take_continued)) gives their numbers to the
+    /// lines stored next.
     stored: u64,
+    /// See [`generation`](Self::generation).
+    generation: u64,
     /// The most lines held; older ones are evicted.
     limit: usize,
     compaction: Compaction,
@@ -90,14 +95,6 @@ pub(crate) struct Scrollback {
     style_indices: StyleIndices,
     /// The held lines a shell marked, by number, oldest first.
     marks: VecDeque<(u64, Mark)>,
-}
-
-/// A row kept as it was on screen.
-#[derive(Clone, Debug)]
-struct RawRow {
-    row: Row,
-    /// The row wrapped early, leaving its last column as padding.
-    padded: bool,
 }
 
 /// Page palette indices by style, hashed cheaply: the keys come from the
@@ -152,6 +149,7 @@ impl Scrollback {
             raw: VecDeque::new(),
             raw_cells: 0,
             stored: 0,
+            generation: 0,
             limit,
             compaction,
             style_indices: StyleIndices::default(),
@@ -165,14 +163,12 @@ impl Scrollback {
     }
 
     /// Stores `row`, which has just scrolled off the screen, evicting the
-    /// oldest line if history is full. If `padded`, the row wrapped early
-    /// because a wide character didn't fit in its last column, which is
-    /// left out.
+    /// oldest line if history is full.
     ///
     /// Returns a row the caller can reuse rather than allocate one: `row`
     /// itself if it was compacted or not kept, or an evicted row. Its
     /// contents and width are arbitrary.
-    pub(crate) fn push(&mut self, mut row: Row, padded: bool) -> Option<Row> {
+    pub(crate) fn push(&mut self, mut row: Row) -> Option<Row> {
         if self.limit == 0 {
             return Some(row);
         }
@@ -182,11 +178,11 @@ impl Scrollback {
         self.stored += 1;
         let mut spare = None;
         if self.compaction == Compaction::Eager {
-            self.compact_row(&row, padded);
+            self.compact_row(&row);
             spare = Some(row);
         } else {
             self.raw_cells += row.width();
-            self.raw.push_back(RawRow { row, padded });
+            self.raw.push_back(row);
             // After a resize, older rows may be narrower than this one.
             while self.compaction == Compaction::Lazy && self.raw_cells > RAW_CELLS_MAX {
                 spare = Some(self.compact_oldest());
@@ -222,6 +218,85 @@ impl Scrollback {
             .collect();
     }
 
+    /// Takes back the newest lines that continue onto the screen: the part
+    /// of the logical line the screen's top row continues that's held here,
+    /// oldest first, each with its mark, until they hold `cells` cells.
+    /// Resizing rewraps that line whole.
+    pub(crate) fn take_continued(&mut self, cells: usize) -> Vec<Row> {
+        let mut rows = Vec::new();
+        let mut taken = 0;
+        while taken < cells && self.newest_continues() {
+            if rows.is_empty() {
+                self.generation += 1;
+            }
+            let mut row = self.pop_newest();
+            taken += row.width();
+            self.stored -= 1;
+            if self
+                .marks
+                .back()
+                .is_some_and(|&(line, _)| line == self.stored)
+            {
+                row.set_mark(self.marks.pop_back().map(|(_, mark)| mark));
+            }
+            rows.push(row);
+        }
+        rows.reverse();
+        rows
+    }
+
+    /// Ends the newest line where it is: the screen's top row no longer
+    /// continues it.
+    pub(crate) fn end_newest_line(&mut self) {
+        if let Some(raw) = self.raw.back_mut() {
+            raw.set_wrapped(false);
+        } else if let Some(record) = self
+            .pages
+            .back_mut()
+            .and_then(|page| page.records[page.first..].last_mut())
+        {
+            record.continues = false;
+        }
+    }
+
+    /// Whether the newest line continues on the next row.
+    fn newest_continues(&self) -> bool {
+        match self.raw.back() {
+            Some(raw) => raw.is_wrapped(),
+            None => self
+                .pages
+                .back()
+                .and_then(|page| page.records[page.first..].last())
+                .is_some_and(|record| record.continues),
+        }
+    }
+
+    /// Removes the newest line and returns it as a row, leaving its number
+    /// to the caller.
+    fn pop_newest(&mut self) -> Row {
+        if let Some(raw) = self.raw.pop_back() {
+            self.raw_cells -= raw.width();
+            return raw;
+        }
+        let page = self.pages.back_mut().expect("there is a newest line");
+        let row = page.decode(page.records.len() - 1);
+        page.records.pop();
+        self.records -= 1;
+        let (text_end, runs_end) = page
+            .records
+            .last()
+            .map_or((0, 0), |record| (record.text_end, record.runs_end));
+        page.text.truncate(index(text_end));
+        page.runs.truncate(index(runs_end));
+        // The page's styles stay, so the indices into them stay right.
+        if page.first == page.records.len() {
+            self.pages.pop_back();
+            // Any page before is full, so the next record starts a new one.
+            self.style_indices.clear();
+        }
+        row
+    }
+
     /// Whether some rows are waiting for [`compact`](Self::compact).
     pub(crate) fn needs_compaction(&self) -> bool {
         self.compaction == Compaction::Lazy && !self.raw.is_empty()
@@ -235,8 +310,23 @@ impl Scrollback {
         self.raw = VecDeque::new();
     }
 
+    /// Bumped whenever lines are taken back or cleared, so the numbers of
+    /// lines read before may now name other lines, or none.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Carries on from history whose generation was `before`, as when the
+    /// terminal is reset and numbering starts again.
+    pub(crate) fn follow(&mut self, before: u64) {
+        self.generation = before + 1;
+    }
+
     /// Forgets all history.
     pub(crate) fn clear(&mut self) {
+        if self.len() > 0 {
+            self.generation += 1;
+        }
         self.pages.clear();
         self.style_indices.clear();
         self.records = 0;
@@ -252,7 +342,7 @@ impl Scrollback {
             .iter()
             .flat_map(|page| (page.first..page.records.len()).map(move |index| page.decode(index)));
         ExactLen {
-            inner: records.chain(self.raw.iter().map(|raw| raw.row.clone())),
+            inner: records.chain(self.raw.iter().cloned()),
             remaining: self.len(),
         }
     }
@@ -263,20 +353,15 @@ impl Scrollback {
             .pages
             .iter()
             .flat_map(|page| (page.first..page.records.len()).map(move |index| page.line(index)));
-        let raw = self
-            .raw
-            .iter()
-            .map(|raw| Line::of_row(&raw.row, raw.padded));
-        records.chain(raw).collect()
+        records.chain(self.raw.iter().map(Line::of_row)).collect()
     }
 
-    /// History holding `rows`, oldest first, each with whether it ends in
-    /// padding, the newest numbered `end - 1`. Fails with the first row
-    /// that does.
+    /// History holding `rows`, oldest first, the newest numbered `end - 1`.
+    /// Fails with the first row that does.
     pub(crate) fn restored<E>(
         limit: usize,
         compaction: Compaction,
-        rows: impl IntoIterator<Item = Result<(Row, bool), E>>,
+        rows: impl IntoIterator<Item = Result<Row, E>>,
         end: u64,
     ) -> Result<Self, E> {
         // Nothing is printing, so lazy history needn't wait to compact:
@@ -287,8 +372,7 @@ impl Scrollback {
         };
         let mut history = Self::new(limit, restoring);
         for row in rows {
-            let (row, padded) = row?;
-            history.push(row, padded);
+            history.push(row?);
         }
         history.compaction = compaction;
         history.stored = end.max(history.stored);
@@ -323,7 +407,7 @@ impl Scrollback {
             wanted.map(move |offset| page.decode(page.first + offset - page_start))
         });
         let raw = start.saturating_sub(self.records)..end.saturating_sub(self.records);
-        let raw = self.raw.range(raw).map(|raw| raw.row.clone());
+        let raw = self.raw.range(raw).cloned();
         let first_number = first + start as u64;
         (first_number..).zip(compacted.chain(raw))
     }
@@ -331,12 +415,12 @@ impl Scrollback {
     /// Compacts the oldest raw row, returning it for reuse.
     fn compact_oldest(&mut self) -> Row {
         let raw = self.raw.pop_front().expect("there is a raw row");
-        self.raw_cells -= raw.row.width();
-        self.compact_row(&raw.row, raw.padded);
-        raw.row
+        self.raw_cells -= raw.width();
+        self.compact_row(&raw);
+        raw
     }
 
-    fn compact_row(&mut self, row: &Row, padded: bool) {
+    fn compact_row(&mut self, row: &Row) {
         if self.pages.back().is_none_or(|page| {
             page.text.len() >= PAGE_TEXT_LEN || page.styles.len() >= usize::from(u16::MAX) - 1
         }) {
@@ -344,7 +428,7 @@ impl Scrollback {
             self.style_indices.clear();
         }
         let page = self.pages.back_mut().expect("a page was just made");
-        page.encode(row, padded, &mut self.style_indices);
+        page.encode(row, &mut self.style_indices);
         self.records += 1;
     }
 
@@ -358,7 +442,7 @@ impl Scrollback {
             .sum();
         assert_eq!(records, self.records);
         assert_eq!(
-            self.raw.iter().map(|raw| raw.row.width()).sum::<usize>(),
+            self.raw.iter().map(Row::width).sum::<usize>(),
             self.raw_cells
         );
         assert!(
@@ -383,8 +467,8 @@ impl Scrollback {
     fn evict(&mut self) -> Option<Row> {
         if self.records == 0 {
             let raw = self.raw.pop_front().expect("history is full");
-            self.raw_cells -= raw.row.width();
-            return Some(raw.row);
+            self.raw_cells -= raw.width();
+            return Some(raw);
         }
         let page = self.pages.front_mut().expect("records live in pages");
         page.first += 1;
@@ -400,10 +484,10 @@ impl Scrollback {
 }
 
 impl Page {
-    fn encode(&mut self, row: &Row, padded: bool, style_indices: &mut StyleIndices) {
+    fn encode(&mut self, row: &Row, style_indices: &mut StyleIndices) {
         let cells = row.cells();
         let end = if row.is_wrapped() {
-            cells.len() - usize::from(padded)
+            cells.len() - usize::from(row.is_padded())
         } else {
             cells[..row.written()]
                 .iter()
@@ -605,8 +689,11 @@ fn offset(value: usize) -> u32 {
 }
 
 fn span(start: u32, end: u32) -> std::ops::Range<usize> {
-    let index = |value: u32| usize::try_from(value).expect("u32 fits in usize");
     index(start)..index(end)
+}
+
+fn index(value: u32) -> usize {
+    usize::try_from(value).expect("u32 fits in usize")
 }
 
 /// An iterator whose length is known up front.
@@ -648,9 +735,9 @@ mod tests {
     #[test]
     fn rows_evicted_before_compaction_are_handed_back() {
         let mut history = Scrollback::new(2, Compaction::Lazy);
-        assert!(history.push(row("a", 4), false).is_none());
-        assert!(history.push(row("b", 4), false).is_none());
-        let spare = history.push(row("c", 4), false).expect("a was evicted");
+        assert!(history.push(row("a", 4)).is_none());
+        assert!(history.push(row("b", 4)).is_none());
+        let spare = history.push(row("c", 4)).expect("a was evicted");
         assert_eq!(spare.text(), "a");
         assert_eq!(texts(&history), ["b", "c"]);
         assert!(history.needs_compaction());
@@ -659,7 +746,7 @@ mod tests {
         assert!(!history.needs_compaction());
         assert_eq!(texts(&history), ["b", "c"]);
         // Evicting a record frees nothing to hand back.
-        assert!(history.push(row("d", 4), false).is_none());
+        assert!(history.push(row("d", 4)).is_none());
         assert_eq!(texts(&history), ["c", "d"]);
         history.assert_invariants();
     }
@@ -668,7 +755,7 @@ mod tests {
     fn eager_and_off_never_wait_for_compaction() {
         for compaction in [Compaction::Eager, Compaction::Off] {
             let mut history = Scrollback::new(4, compaction);
-            history.push(row("a", 4), false);
+            history.push(row("a", 4));
             assert!(!history.needs_compaction());
             assert_eq!(texts(&history), ["a"]);
             history.assert_invariants();
@@ -681,7 +768,7 @@ mod tests {
         let rows = RAW_CELLS_MAX / WIDTH + 10;
         let mut history = Scrollback::new(rows, Compaction::Lazy);
         for n in 0..rows {
-            history.push(row(&n.to_string(), WIDTH), false);
+            history.push(row(&n.to_string(), WIDTH));
         }
         assert!(history.raw_cells <= RAW_CELLS_MAX);
         assert_eq!(history.records, 10);
@@ -696,9 +783,9 @@ mod tests {
         let narrow_rows = RAW_CELLS_MAX / NARROW;
         let mut history = Scrollback::new(narrow_rows + 1, Compaction::Lazy);
         for _ in 0..narrow_rows {
-            history.push(row("a", NARROW), false);
+            history.push(row("a", NARROW));
         }
-        history.push(row("wide", usize::from(u16::MAX)), false);
+        history.push(row("wide", usize::from(u16::MAX)));
         assert!(history.raw_cells <= RAW_CELLS_MAX);
         assert!(history.records > 1);
         history.assert_invariants();
@@ -725,7 +812,7 @@ mod tests {
                     }
                     _ => {
                         let text = format!("line {next}");
-                        history.push(row(&text, 12), false);
+                        history.push(row(&text, 12));
                         if limit > 0 {
                             model.push_back((next, text));
                             next += 1;
@@ -753,12 +840,84 @@ mod tests {
         }
     }
 
+    fn wrapped_row(text: &str, width: usize, style: &Style) -> Row {
+        let mut row = Row::new(width);
+        let style = row.intern(style);
+        row.write_ascii(0, text.as_bytes(), style);
+        row.set_wrapped(true);
+        row
+    }
+
+    #[test]
+    fn continued_lines_are_taken_back_from_records_and_raw_rows() {
+        let red = Style {
+            fg: crate::style::Color::Indexed(1),
+            ..Style::DEFAULT
+        };
+        let mut history = Scrollback::new(100, Compaction::Lazy);
+        history.push(row("ends", 4));
+        history.push(wrapped_row("abcd", 4, &red));
+        history.compact();
+        history.push(wrapped_row("efgh", 4, &Style::DEFAULT));
+        history.marks.push_back((1, Mark::add(None, 7, false)));
+
+        let taken = history.take_continued(usize::MAX);
+        let taken_texts: Vec<String> = taken.iter().map(Row::text).collect();
+        assert_eq!(taken_texts, ["abcd", "efgh"]);
+        assert_eq!(*taken[0].style(taken[0].cells()[0]), red);
+        assert!(taken[0].mark().is_some() && taken[1].mark().is_none());
+        assert_eq!(texts(&history), ["ends"]);
+        assert_eq!(history.end(), 1);
+        assert!(history.marks.is_empty());
+        history.assert_invariants();
+
+        // What goes back is stored as anything else would be.
+        for row in taken {
+            history.push(row);
+        }
+        history.compact();
+        assert_eq!(texts(&history), ["ends", "abcd", "efgh"]);
+        assert_eq!(
+            history.marks().map(|(line, _)| line).collect::<Vec<_>>(),
+            [1]
+        );
+        history.assert_invariants();
+    }
+
+    #[test]
+    fn taking_back_a_whole_page_starts_the_next_record_on_a_new_one() {
+        let mut history = Scrollback::new(1000, Compaction::Eager);
+        let long = "x".repeat(1000);
+        while history
+            .pages
+            .back()
+            .is_none_or(|page| page.text.len() < PAGE_TEXT_LEN)
+        {
+            history.push(row(&long, 1000));
+        }
+        let blue = Style {
+            fg: crate::style::Color::Indexed(4),
+            ..Style::DEFAULT
+        };
+        // The first page is full, so this starts the second.
+        history.push(wrapped_row("cont", 4, &blue));
+        assert_eq!(history.pages.len(), 2);
+
+        assert_eq!(history.take_continued(usize::MAX).len(), 1);
+        assert_eq!(history.pages.len(), 1);
+        history.push(wrapped_row("more", 4, &blue));
+        let newest = history.rows().last().expect("a row was pushed");
+        assert_eq!(newest.text(), "more");
+        assert_eq!(*newest.style(newest.cells()[0]), blue);
+        history.assert_invariants();
+    }
+
     #[test]
     fn clearing_forgets_raw_rows_too() {
         let mut history = Scrollback::new(4, Compaction::Lazy);
-        history.push(row("a", 4), false);
+        history.push(row("a", 4));
         history.compact();
-        history.push(row("b", 4), false);
+        history.push(row("b", 4));
         history.clear();
         assert_eq!(history.len(), 0);
         assert!(!history.needs_compaction());

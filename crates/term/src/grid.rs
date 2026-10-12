@@ -45,10 +45,7 @@ impl Grid {
     /// The screen's rows and its history's, oldest first, for a snapshot.
     pub(crate) fn lines(&self) -> (Vec<Line>, Vec<Line>) {
         let screen = (0..self.height)
-            .map(|line| {
-                let row = &self.rows[line];
-                Line::of_row(row, is_padded(row, self.rows.get(line + 1)))
-            })
+            .map(|line| Line::of_row(&self.rows[line]))
             .collect();
         (screen, self.scrollback.lines())
     }
@@ -63,7 +60,7 @@ impl Grid {
             .iter()
             .map(|line| {
                 if usize::from(line.width) == width {
-                    Ok(line.to_row()?.0)
+                    line.to_row()
                 } else {
                     Err(RestoreError("a screen line isn't as wide as the screen"))
                 }
@@ -128,10 +125,26 @@ impl Grid {
 
     /// The number the next line scrolled into history will get. Lines are
     /// numbered from 0 as they arrive, so numbers stay put while new lines
-    /// push old ones out.
+    /// push old ones out. A resize can take lines back, though, which makes
+    /// this smaller (see [`history_generation`](Self::history_generation)).
     #[must_use]
     pub fn scrollback_end(&self) -> u64 {
         self.scrollback.end()
+    }
+
+    /// A number that changes whenever history's lines are renumbered:
+    /// when it is cleared, or a resize takes back the start of the line the
+    /// screen's top row continues and puts it back rewrapped. Line numbers
+    /// read before then may name other lines now, or none.
+    #[must_use]
+    pub fn history_generation(&self) -> u64 {
+        self.scrollback.generation()
+    }
+
+    /// Carries on from a grid whose history generation was `before`: this
+    /// one's history is numbered afresh.
+    pub(crate) fn follow_history(&mut self, before: u64) {
+        self.scrollback.follow(before);
     }
 
     /// The history lines numbered within `numbers` that are still held,
@@ -181,6 +194,16 @@ impl Grid {
         &mut self.rows[line]
     }
 
+    /// Screen row `line`, for erasing or editing rather than printing.
+    /// Doing that to the top row ends the line in history it continued:
+    /// what's there is no longer known to be more of that line.
+    pub(crate) fn edit_row(&mut self, line: usize) -> &mut Row {
+        if line == 0 {
+            self.end_history_line();
+        }
+        self.row_mut(line)
+    }
+
     /// Adds the lines changed since the last call to `into`.
     pub(crate) fn take_damage(&mut self, into: &mut Damage) {
         into.merge(&self.damage);
@@ -200,8 +223,7 @@ impl Grid {
         }
         for _ in 0..count.min(self.height) {
             let row = self.rows.pop_front().expect("a grid always has rows");
-            let padded = is_padded(&row, self.rows.front());
-            let mut row = match self.scrollback.push(row, padded) {
+            let mut row = match self.scrollback.push(row) {
                 Some(spare) if spare.width() == self.width => spare,
                 _ => Row::new(self.width),
             };
@@ -218,6 +240,7 @@ impl Grid {
         let rows = self.absolute(region);
         if count > 0 {
             self.damage.mark_range(rows.clone());
+            self.top_replaced(&rows);
         }
         self.rotate_left(rows.clone(), count);
         for index in rows.end - count..rows.end {
@@ -233,6 +256,7 @@ impl Grid {
         let rows = self.absolute(region);
         if count > 0 {
             self.damage.mark_range(rows.clone());
+            self.top_replaced(&rows);
         }
         self.rotate_left(rows.clone(), rows.len() - count);
         for index in rows.start..rows.start + count {
@@ -240,21 +264,53 @@ impl Grid {
         }
     }
 
+    /// Ends the line in history the top row continued, if scrolling `rows`
+    /// within the screen replaces the top row.
+    fn top_replaced(&mut self, rows: &Range<usize>) {
+        if rows.start == 0 {
+            self.end_history_line();
+        }
+    }
+
     /// Resizes the screen, rewrapping its lines to the new width, and returns
-    /// where the cell at `cursor` ended up. Rows that no longer fit above
-    /// the cursor go into scrollback; blank rows below it go first.
+    /// where the cell at `cursor` ended up. If the cursor is `after` that
+    /// cell, waiting to wrap, it stays after it: the returned flag says it
+    /// is waiting to wrap again, at the end of a row. With `autowrap`, a
+    /// cursor just past the last line's text where a row now ends waits
+    /// there too. Rows that no longer fit above the cursor go into
+    /// scrollback; blank rows below it go first.
     ///
-    /// A line that started in scrollback keeps that part there; its rest is
-    /// rewrapped from the top of the screen.
+    /// A line that started in scrollback is rewrapped whole, as if it had
+    /// been printed at the new width: its part in scrollback is taken back
+    /// and rewrapped with the rest. The rows before the one the screen's
+    /// top row now starts on go back into scrollback, so the screen shows
+    /// the same lines as before. History older than that line is left as
+    /// it is, since it can be wrapped to any width when it is read. So is
+    /// the start of a line longer than [`TAKE_BACK_SCREENS`] screens: only
+    /// its end is rewrapped, so resizing stays quick, and the line still
+    /// reads whole.
     pub(crate) fn reflow(
         &mut self,
         width: usize,
         height: usize,
         cursor: (usize, usize),
-    ) -> (usize, usize) {
-        let old: Vec<Row> = self.rows.drain(..).collect();
+        after: bool,
+        autowrap: bool,
+    ) -> (usize, usize, bool) {
+        let cells = (TAKE_BACK_SCREENS * self.width * self.height).max(TAKE_BACK_CELLS_MIN);
+        let mut old = self.scrollback.take_continued(cells);
+        let screen_start = old.len();
+        old.extend(self.rows.drain(..));
+        let cursor = (cursor.0 + screen_start, cursor.1);
+        // The last row with text: a cursor past it has no line after it.
+        let last_text = old
+            .iter()
+            .rposition(|row| row.is_wrapped() || content_end(row) > 0)
+            .unwrap_or(0);
         let mut rows = Vec::with_capacity(old.len());
         let mut moved = (0, 0);
+        // The row the screen's old top row starts on.
+        let mut screen_top = 0;
         let mut out = Row::new(width);
         let mut out_col = 0;
         for (line, row) in old.iter().enumerate() {
@@ -263,17 +319,21 @@ impl Grid {
                 rows.push(std::mem::replace(&mut out, Row::new(width)));
                 out_col = 0;
             }
-            // A mark goes to the row its row's first character lands on.
+            // A mark goes to the row its row's first character lands on, and
+            // so does the top of the screen.
             let mut mark = row.mark();
-            let mut end = if row.is_wrapped() {
-                row.width() - usize::from(is_padded(row, old.get(line + 1)))
+            let mut top = line == screen_start;
+            let text_end = if row.is_wrapped() {
+                row.width() - usize::from(row.is_padded())
             } else {
                 content_end(row)
             };
             // Keep the cursor's cell, even in the blank tail of its line.
-            if line == cursor.0 {
-                end = end.max(cursor.1 + 1).min(row.width());
-            }
+            let end = if line == cursor.0 {
+                text_end.max(cursor.1 + 1).min(row.width())
+            } else {
+                text_end
+            };
             for col in 0..end {
                 let cell = row.cells()[col];
                 if cell.is_wide_spacer() {
@@ -283,16 +343,44 @@ impl Grid {
                 if cells > width {
                     continue;
                 }
+                // A cursor past the last line's text that would start a row
+                // waits at the end of the row before to wrap, as it does
+                // after printing up to the end of a row. With a line after
+                // it, wrapping would join the two, and without autowrap
+                // it couldn't wait.
+                if line == cursor.0
+                    && col == cursor.1
+                    && col >= text_end
+                    && out_col == width
+                    && !row.is_wrapped()
+                    && !after
+                    && autowrap
+                    && line >= last_text
+                {
+                    moved = (rows.len(), width);
+                    break;
+                }
                 if out_col + cells > width {
-                    out.set_wrapped(true);
+                    if out_col < width {
+                        out.set_wrapped_early();
+                    } else {
+                        out.set_wrapped(true);
+                    }
                     rows.push(std::mem::replace(&mut out, Row::new(width)));
                     out_col = 0;
                 }
                 if let Some(mark) = mark.take() {
                     out.set_mark(Some(mark));
                 }
+                if std::mem::take(&mut top) {
+                    screen_top = rows.len();
+                }
                 if line == cursor.0 && (col == cursor.1 || col + 1 == cursor.1 && cells == 2) {
-                    moved = (rows.len(), (out_col + cursor.1 - col).min(width - 1));
+                    moved = if after {
+                        (rows.len(), out_col + cells)
+                    } else {
+                        (rows.len(), (out_col + cursor.1 - col).min(width - 1))
+                    };
                 }
                 copy_cell(&mut out, out_col, row, col);
                 out_col += cells;
@@ -300,25 +388,43 @@ impl Grid {
             if let Some(mark) = mark {
                 out.set_mark(Some(mark));
             }
+            if top {
+                screen_top = rows.len();
+            }
         }
         rows.push(out);
+        let overflow = self.fit(rows, width, height, screen_top, moved.0);
+        (moved.0 - overflow, moved.1.min(width - 1), moved.1 == width)
+    }
 
-        // Fit the rows to the new height. Blank rows below the cursor are
-        // just space, so they go before anything scrolls away. Rows above
-        // the cursor go into scrollback; if the cursor is too high for that,
-        // rows below it are lost instead.
-        while rows.len() > height
-            && rows.len() > moved.0 + 1
+    /// Makes rewrapped `rows`, `width` wide, the screen, `height` tall,
+    /// and returns how many went into scrollback. The rows before
+    /// `screen_top`, where the old screen's top row starts, go back into
+    /// scrollback. Blank rows below the cursor's, `cursor`, are just
+    /// space, so they go before anything else scrolls away. Rows above the
+    /// cursor go into scrollback; if the cursor is too high for that, rows
+    /// below it are lost instead.
+    fn fit(
+        &mut self,
+        mut rows: Vec<Row>,
+        width: usize,
+        height: usize,
+        screen_top: usize,
+        cursor: usize,
+    ) -> usize {
+        while rows.len() > screen_top + height
+            && rows.len() > cursor + 1
             && content_end(&rows[rows.len() - 1]) == 0
         {
             rows.pop();
         }
-        let overflow = rows.len().saturating_sub(height).min(moved.0);
-        let padded: Vec<bool> = (0..overflow)
-            .map(|index| is_padded(&rows[index], rows.get(index + 1)))
-            .collect();
-        for (row, padded) in rows.drain(..overflow).zip(padded) {
-            self.scrollback.push(row, padded);
+        let overflow = rows
+            .len()
+            .saturating_sub(height)
+            .max(screen_top)
+            .min(cursor);
+        for row in rows.drain(..overflow) {
+            self.scrollback.push(row);
         }
         rows.truncate(height);
         rows.resize_with(height, || Row::new(width));
@@ -326,7 +432,7 @@ impl Grid {
         self.width = width;
         self.height = height;
         self.damage.mark_all();
-        (moved.0 - overflow, moved.1)
+        overflow
     }
 
     /// Resizes the screen without rewrapping: rows are cut off or extended
@@ -365,6 +471,15 @@ impl Grid {
         for row in &mut self.rows {
             row.reset(blank);
         }
+        self.end_history_line();
+    }
+
+    /// Ends the newest line in scrollback, which the screen's top row no
+    /// longer continues: everything above the cursor was erased. Erasing
+    /// rows ends their lines on screen the same way, so a resize won't
+    /// join the screen's first line to the history before it.
+    pub(crate) fn end_history_line(&mut self) {
+        self.scrollback.end_newest_line();
     }
 
     pub(crate) fn clear_scrollback(&mut self) {
@@ -427,16 +542,13 @@ impl Grid {
     }
 }
 
-/// Whether `row` wrapped early because a wide character didn't fit in its
-/// last column, leaving padding there rather than text.
-fn is_padded(row: &Row, next: Option<&Row>) -> bool {
-    row.is_wrapped()
-        && row
-            .cells()
-            .last()
-            .is_some_and(|&cell| cell == crate::Cell::BLANK)
-        && next.is_some_and(|next| next.cells().first().is_some_and(|cell| cell.is_wide()))
-}
+/// A resize takes back at most this many screens' worth of cells of the
+/// line the screen's top row continues from history.
+const TAKE_BACK_SCREENS: usize = 4;
+
+/// Small screens take back this many cells, so ordinary long lines are
+/// still rewrapped whole.
+const TAKE_BACK_CELLS_MIN: usize = 16 * 1024;
 
 /// Where a row's content ends: everything after is blank.
 fn content_end(row: &Row) -> usize {

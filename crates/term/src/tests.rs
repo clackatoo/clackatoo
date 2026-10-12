@@ -479,6 +479,36 @@ mod resizing {
     }
 
     #[test]
+    fn a_cursor_waiting_to_wrap_stays_after_its_character() {
+        let mut t = resized(after(5, 3, "abcde"), 7, 3);
+        assert_eq!(cursor(&t), (0, 5));
+        t.advance(b"f");
+        assert_eq!(t.screen_text(), "abcdef");
+
+        // Still waiting, at the end of a narrower row.
+        let mut t = resized(after(6, 3, "abcdef"), 3, 3);
+        assert_eq!(cursor(&t), (1, 2));
+        t.advance(b"g");
+        assert_eq!(t.screen_text(), "abc\ndef\ng");
+
+        // Without autowrap, nothing can wait to wrap, so a cursor past the
+        // text keeps a cell of its own rather than sit on the last
+        // character.
+        let mut t = resized(after(3, 2, "\x1b[?7lab"), 2, 2);
+        assert_eq!(cursor(&t), (1, 0));
+        t.advance(b"c");
+        assert_eq!(t.screen_text(), "ab\nc");
+
+        // Nor does it wait when a line follows, which wrapping would join.
+        let mut t = after(3, 3, "ab\r\nxyz\x1b[1;3H");
+        t.resize(size(2, 3));
+        t.assert_invariants();
+        t.advance(b"c");
+        assert_eq!(scrollback_text(&t), ["ab"]);
+        assert_eq!(t.screen_text(), "c\nxy\nz");
+    }
+
+    #[test]
     fn the_cursor_keeps_its_place_in_blank_space() {
         let t = after(10, 3, "ab\x1b[1;7H");
         let t = resized(t, 20, 3);
@@ -520,6 +550,243 @@ mod resizing {
         assert_eq!(style_at(&t, 1, 1), red_fg());
     }
 
+    /// A terminal of `cols` × `rows` with history compacted as `compaction`
+    /// says, after `input`.
+    fn after_with(compaction: Compaction, cols: u16, rows: u16, input: &str) -> Terminal {
+        let config = Config {
+            scrollback_lines: 100,
+            scrollback_compaction: compaction,
+        };
+        let mut t = Terminal::new(size(cols, rows), &config);
+        t.advance(input.as_bytes());
+        t.compact_scrollback();
+        t.assert_invariants();
+        t
+    }
+
+    fn wrapped(t: &Terminal) -> (Vec<bool>, Vec<bool>) {
+        let grid = t.grid();
+        (
+            grid.scrollback().map(|row| row.is_wrapped()).collect(),
+            grid.rows().map(crate::Row::is_wrapped).collect(),
+        )
+    }
+
+    const ALPHABET: &str = "abcdefghijklmnopqrstuvwxy";
+
+    #[test]
+    fn narrowing_rewraps_a_line_that_started_in_scrollback_whole() {
+        for compaction in [Compaction::Off, Compaction::Lazy, Compaction::Eager] {
+            let t = after_with(compaction, 10, 2, ALPHABET);
+            assert_eq!(scrollback_text(&t), ["abcdefghij"]);
+            let t = resized(t, 7, 2);
+            assert_eq!(
+                scrollback_text(&t),
+                ["abcdefg", "hijklmn"],
+                "{compaction:?}"
+            );
+            assert_eq!(t.screen_text(), "opqrstu\nvwxy");
+            assert_eq!(wrapped(&t), (vec![true, true], vec![true, false]));
+            assert_eq!(cursor(&t), (1, 4));
+            assert_eq!(t.grid().scrollback_end(), 2);
+        }
+    }
+
+    #[test]
+    fn widening_takes_back_what_now_fits_beside_the_screen() {
+        for compaction in [Compaction::Off, Compaction::Lazy, Compaction::Eager] {
+            // Three rows in history and two on screen.
+            let digits = "0123456789".repeat(4) + "abcde";
+            let t = after_with(compaction, 10, 2, &digits);
+            assert_eq!(scrollback_text(&t).len(), 3);
+            // At 20 columns, the screen's old top row starts on the second
+            // row of the line, and the first goes back into history.
+            let t = resized(t, 20, 2);
+            assert_eq!(scrollback_text(&t), [&digits[..20]], "{compaction:?}");
+            assert_eq!(t.screen_text(), format!("{}\nabcde", &digits[20..40]));
+            assert_eq!(wrapped(&t), (vec![true], vec![true, false]));
+            assert_eq!(cursor(&t), (1, 5));
+            assert_eq!(t.grid().scrollback_end(), 1);
+
+            // Once it all fits on the line the screen starts on, none of it
+            // stays in history.
+            let t = resized(t, 50, 2);
+            assert!(scrollback_text(&t).is_empty());
+            assert_eq!(t.screen_text(), digits);
+            assert_eq!(cursor(&t), (0, 45));
+        }
+    }
+
+    #[test]
+    fn a_rewrapped_line_reads_the_same_at_its_old_width() {
+        let t = after(10, 2, ALPHABET);
+        let t = resized(t, 7, 2);
+        let t = resized(t, 10, 2);
+        assert_eq!(scrollback_text(&t), ["abcdefghij"]);
+        assert_eq!(t.screen_text(), "klmnopqrst\nuvwxy");
+        assert_eq!(cursor(&t), (1, 5));
+    }
+
+    #[test]
+    fn older_history_keeps_its_lines_and_their_numbers() {
+        let t = after(10, 2, &format!("one\r\ntwo\r\n{ALPHABET}"));
+        let numbered = |t: &Terminal| -> Vec<(u64, String)> {
+            t.grid()
+                .scrollback_lines(0..100)
+                .map(|(number, row)| (number, row.text()))
+                .collect()
+        };
+        assert_eq!(numbered(&t)[..2], [(0, "one".into()), (1, "two".into())]);
+        let t = resized(t, 7, 2);
+        assert_eq!(
+            numbered(&t),
+            [
+                (0, "one".into()),
+                (1, "two".into()),
+                (2, "abcdefg".into()),
+                (3, "hijklmn".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn wide_characters_at_the_edge_of_history_wrap_whole() {
+        // The wide character didn't fit in the last column of the row now
+        // in history, which is left as padding.
+        let t = after(5, 2, "abcd字e\r\nxyz");
+        assert_eq!(scrollback_text(&t), ["abcd"]);
+        assert_eq!(t.screen_text(), "字e\nxyz");
+
+        let t = resized(t, 6, 2);
+        assert_eq!(scrollback_text(&t), ["abcd字"]);
+        assert_eq!(t.screen_text(), "e\nxyz");
+
+        let t = resized(t, 7, 2);
+        assert!(scrollback_text(&t).is_empty());
+        assert_eq!(t.screen_text(), "abcd字e\nxyz");
+
+        let t = resized(t, 4, 2);
+        assert_eq!(scrollback_text(&t), ["abcd"]);
+        assert_eq!(t.screen_text(), "字e\nxyz");
+        assert_eq!(wrapped(&t), (vec![true], vec![false, false]));
+        assert_eq!(cursor(&t), (1, 3));
+    }
+
+    #[test]
+    fn marks_move_with_the_line_through_history() {
+        let marks =
+            |t: &Terminal| -> Vec<u64> { t.primary().marks().map(|(line, _)| line).collect() };
+        // A prompt, then a long line of output marked as the command's.
+        let t = after(
+            10,
+            3,
+            &format!("\x1b]133;A\x07$ x\r\n\x1b]133;C\x07{ALPHABET}"),
+        );
+        assert_eq!(scrollback_text(&t), ["$ x"]);
+        assert_eq!(marks(&t), [0, 1]);
+
+        let t = resized(t, 7, 3);
+        assert_eq!(scrollback_text(&t), ["$ x", "abcdefg"]);
+        assert_eq!(marks(&t), [0, 1]);
+
+        let t = resized(t, 30, 3);
+        assert_eq!(scrollback_text(&t), ["$ x"]);
+        assert_eq!(t.screen_text(), ALPHABET);
+        assert_eq!(marks(&t), [0, 1]);
+    }
+
+    #[test]
+    fn clearing_the_screen_ends_the_line_in_history() {
+        for clear in ["\x1b[2J", "\x1b[1J"] {
+            let t = after(10, 2, &format!("{ALPHABET}{clear}\x1b[H$ "));
+            let t = resized(t, 20, 2);
+            assert_eq!(scrollback_text(&t), ["abcdefghij"], "{clear:?}");
+            assert_eq!(t.screen_text(), "$");
+            assert_eq!(wrapped(&t).0, [false]);
+        }
+    }
+
+    #[test]
+    fn replacing_the_top_row_ends_the_line_in_history() {
+        let replacements = [
+            "\x1b[H\x1b[J",
+            "\x1b[H\x1b[1K",
+            "\x1b[H\x1b[2K",
+            "\x1b[H\x1b[X",
+            "\x1b[H\x1b[@",
+            "\x1b[H\x1b[P",
+            "\x1b[H\x1bM",
+            "\x1b[H\x1b[L",
+            "\x1b[H\x1b[M",
+            // A region at the top of the screen scrolling, as apt's
+            // progress bar makes.
+            "\x1b[1;2r\x1b[2H\n\x1b[r",
+            "\x1b#8",
+        ];
+        for replace in replacements {
+            let t = after(10, 3, &format!("{ALPHABET}\r\n{replace}\x1b[H$ "));
+            let t = resized(t, 20, 3);
+            assert_eq!(scrollback_text(&t), ["abcdefghij"], "{replace:?}");
+            assert_eq!(wrapped(&t).0, [false], "{replace:?}");
+            assert!(t.screen_text().starts_with('$'), "{replace:?}");
+        }
+        // Printing over it doesn't: that's how a line editor redraws.
+        let t = after(10, 3, &format!("{ALPHABET}\r\n\x1b[Hklm"));
+        assert_eq!(wrapped(&t).0, [true]);
+    }
+
+    #[test]
+    fn only_the_end_of_a_line_longer_than_a_few_screens_is_rewrapped() {
+        // 20,000 cells, far more than four 10x2 screens or 16 Ki cells.
+        let long = "0123456789".repeat(2000);
+        let mut t = Terminal::new(size(10, 2), &Config::default());
+        t.advance(long.as_bytes());
+        let history = t.grid().scrollback_len();
+        let t = resized(t, 7, 2);
+        let rows: Vec<crate::Row> = t.grid().scrollback().collect();
+        // The start stays as it was, at its width, and the end is
+        // rewrapped onto it, so the line still reads whole.
+        let rewrapped = rows
+            .iter()
+            .position(|row| row.width() == 7)
+            .expect("some were rewrapped");
+        assert!(rewrapped > 0 && rewrapped < history);
+        assert!(rows.iter().all(crate::Row::is_wrapped));
+        let text: String = rows
+            .iter()
+            .map(crate::Row::text)
+            .chain(t.grid().rows().map(crate::Row::text))
+            .collect();
+        assert_eq!(text, long);
+    }
+
+    #[test]
+    fn renumbering_history_changes_its_generation() {
+        let mut t = after(10, 2, ALPHABET);
+        let generation = |t: &Terminal| t.grid().history_generation();
+        let first = generation(&t);
+        // Nothing in history continues onto the screen after this.
+        t.advance(b"\r\n\r\n");
+        t.resize(size(7, 2));
+        assert_eq!(generation(&t), first, "nothing was taken back");
+
+        let mut t = after(10, 2, ALPHABET);
+        t.resize(size(7, 2));
+        assert_ne!(generation(&t), first, "the line was taken back");
+        let rewrapped = generation(&t);
+        t.advance(b"\x1b[3J");
+        let cleared = generation(&t);
+        assert_ne!(cleared, rewrapped, "history was cleared");
+        t.advance(b"\x1b[3J");
+        assert_eq!(generation(&t), cleared, "there was nothing to clear");
+
+        // A reset numbers history from 0 again, however much follows.
+        let mut t = after(10, 2, "a\r\nb\r\nc");
+        let before = generation(&t);
+        t.advance(b"\x1bc");
+        assert_ne!(generation(&t), before);
+    }
+
     #[test]
     fn the_alternate_screen_is_cropped_not_rewrapped() {
         let t = after(6, 3, "prompt\x1b[?1049h\x1b[Habcdef");
@@ -548,6 +815,83 @@ mod resizing {
             t.assert_invariants();
             t.advance(&second);
             t.assert_invariants();
+        }
+
+        // Lines this short are always taken back from history whole; see
+        // only_the_end_of_a_line_longer_than_a_few_screens_is_rewrapped for
+        // longer ones.
+        #[test]
+        fn a_resized_line_reads_as_if_printed_at_the_new_width(
+            text in "[a-z 字]{0,60}",
+            cols in 2u16..12,
+            new_cols in 2u16..12,
+            rows in 1u16..6,
+        ) {
+            // History, then the screen without its blank rows at the bottom,
+            // and the cursor's place in that.
+            let document = |t: &Terminal| {
+                let grid = t.grid();
+                let mut lines: Vec<RowContents> = grid
+                    .scrollback()
+                    .map(|row| row_contents(&row))
+                    .chain(grid.rows().map(row_contents))
+                    .collect();
+                let blank = row_contents(&crate::Row::new(grid.width()));
+                while lines.len() > grid.scrollback_len() + cursor(t).0 + 1
+                    && lines.last() == Some(&blank)
+                {
+                    lines.pop();
+                }
+                let (line, col, pending, _) = t.emulator_state();
+                (lines, grid.scrollback_len() + line, col, pending)
+            };
+            let mut t = terminal(cols, rows);
+            t.advance(text.as_bytes());
+            t.resize(size(new_cols, rows));
+            t.assert_invariants();
+            let mut printed = terminal(new_cols, rows);
+            printed.advance(text.as_bytes());
+            prop_assert_eq!(document(&t), document(&printed));
+        }
+
+        #[test]
+        fn resizing_keeps_every_line_of_text(
+            text in "([a-z 字]{0,20}\r\n){0,6}[a-z 字]{0,20}",
+            cols in 2u16..12,
+            new_cols in 2u16..12,
+            rows in 1u16..6,
+            new_rows in 1u16..6,
+        ) {
+            // The lines as printed, before they were wrapped to fit.
+            let lines = |t: &Terminal| {
+                let grid = t.grid();
+                let mut lines = vec![String::new()];
+                for row in grid.scrollback().chain(grid.rows().cloned()) {
+                    let line = lines.last_mut().expect("there is a line");
+                    if row.is_wrapped() {
+                        let end = row.width() - usize::from(row.is_padded());
+                        for col in 0..end {
+                            row.push_text(col, line);
+                        }
+                    } else {
+                        line.push_str(&row.text());
+                        lines.push(String::new());
+                    }
+                }
+                for line in &mut lines {
+                    line.truncate(line.trim_end().len());
+                }
+                while lines.last().is_some_and(String::is_empty) {
+                    lines.pop();
+                }
+                lines
+            };
+            let mut t = terminal(cols, rows);
+            t.advance(text.as_bytes());
+            let before = lines(&t);
+            t.resize(size(new_cols, new_rows));
+            t.assert_invariants();
+            prop_assert_eq!(lines(&t), before);
         }
 
         #[test]
@@ -771,7 +1115,7 @@ proptest! {
         t.advance(&bytes);
         for row in t.grid().rows() {
             let mut history = crate::scrollback::Scrollback::new(1, Compaction::Eager);
-            history.push(row.clone(), false);
+            history.push(row.clone());
             let stored = history.rows().next().expect("one row was stored");
             prop_assert_eq!(row_contents(&stored), row_contents(row));
         }

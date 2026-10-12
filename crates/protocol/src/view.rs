@@ -68,7 +68,10 @@ pub struct GridState {
 pub struct HistoryLines {
     /// The number of the first line. Lines are numbered from 0 as they
     /// scroll into history, so a line keeps its number while newer lines
-    /// push older ones out.
+    /// push older ones out. Until history is renumbered: clearing it, or a
+    /// resize that rewraps the line the screen's top row continues, can
+    /// give numbers to other lines. The daemon then sends a
+    /// [`ViewUpdate::Snapshot`], and lines fetched before it are stale.
     pub first: u64,
     /// The lines, oldest first, each at the width it had.
     pub lines: Vec<HistoryLine>,
@@ -126,7 +129,9 @@ pub struct Run {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ViewUpdate {
     /// The whole view: the first one a client gets, and whenever a patch
-    /// can't describe the change, such as a resize.
+    /// can't describe the change, such as a resize. A terminal's history
+    /// may have been renumbered since the last one (see
+    /// [`HistoryLines::first`]).
     Snapshot(View),
     /// Changes to the view last sent.
     Patch(Vec<Patch>),

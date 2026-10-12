@@ -288,13 +288,13 @@ pub struct RestoreError(pub(crate) &'static str);
 // --- Lines -------------------------------------------------------------------
 
 impl Line {
-    /// `row`, which ends in padding if `padded`.
-    pub(crate) fn of_row(row: &Row, padded: bool) -> Self {
+    /// `row` as a line.
+    pub(crate) fn of_row(row: &Row) -> Self {
         let cells = row.cells();
         // As history stores rows: a row that continues keeps every column
         // but padding; one that doesn't loses its trailing blanks.
         let end = if row.is_wrapped() {
-            cells.len() - usize::from(padded)
+            cells.len() - usize::from(row.is_padded())
         } else {
             cells[..row.written()]
                 .iter()
@@ -333,8 +333,8 @@ impl Line {
         }
     }
 
-    /// The row, and whether it ends in padding.
-    pub(crate) fn to_row(&self) -> Result<(Row, bool), RestoreError> {
+    /// The line as a row.
+    pub(crate) fn to_row(&self) -> Result<Row, RestoreError> {
         if self.width == 0 {
             return Err(RestoreError("a line has no columns"));
         }
@@ -351,8 +351,7 @@ impl Line {
             let end = self.runs.get(index + 1).map_or(text_end, |next| next.start);
             builder.push(text(run.start, end)?, &run.style.into(), run.separate);
         }
-        let padded = self.continues && builder.filled() < usize::from(self.width);
-        Ok((builder.finish(self.continues), padded))
+        Ok(builder.finish(self.continues))
     }
 }
 

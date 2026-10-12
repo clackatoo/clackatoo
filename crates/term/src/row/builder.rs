@@ -67,9 +67,15 @@ impl RowBuilder {
     }
 
     /// The finished row, marked as continuing on the next one if `wrapped`.
+    /// A row that continues before its last column wrapped early, so what
+    /// is left of it is padding.
     #[must_use]
     pub fn finish(mut self, wrapped: bool) -> Row {
-        self.row.set_wrapped(wrapped);
+        if wrapped && self.col < self.row.width() {
+            self.row.set_wrapped_early();
+        } else {
+            self.row.set_wrapped(wrapped);
+        }
         self.row
     }
 

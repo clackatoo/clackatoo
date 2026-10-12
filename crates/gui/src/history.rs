@@ -3,7 +3,9 @@
 //! History lives in the daemon. The window fetches the lines it shows, a
 //! page at a time, and keeps them by number: lines are numbered as they
 //! scroll into history, so a number names the same line however much
-//! arrives later.
+//! arrives later. Clearing history or rewrapping its newest line on a
+//! resize renumbers it, which the daemon follows with a snapshot of the
+//! view; everything fetched before then is forgotten.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -26,6 +28,9 @@ pub(crate) struct History {
     pub(crate) start: Option<u64>,
     /// Lines asked for and not yet received.
     pending: Option<Range<u64>>,
+    /// How many times everything was forgotten. Fetches answered after
+    /// that describe lines by old numbers, so are dropped.
+    generation: u64,
 }
 
 impl History {
@@ -33,10 +38,18 @@ impl History {
         self.rows.get(&number)
     }
 
-    /// Forgets everything, as when the terminal is reset and numbering
-    /// starts again.
+    /// Forgets everything, as when history is renumbered.
     pub(crate) fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            generation: self.generation + 1,
+            ..Self::default()
+        };
+    }
+
+    /// Tells fetches asked for before and after a [`clear`](Self::clear)
+    /// apart.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Forgets the fetch on its way, which will never arrive.
@@ -64,9 +77,18 @@ impl History {
         Some(wanted)
     }
 
-    /// Takes in fetched lines. `asked` is the range the fetch asked for:
-    /// lines missing from its start have been evicted.
-    pub(crate) fn receive(&mut self, lines: &HistoryLines, asked: &Range<u64>, view: &Range<u64>) {
+    /// Takes in fetched lines. `asked` is the range the fetch asked for,
+    /// in `generation`: lines missing from its start have been evicted.
+    pub(crate) fn receive(
+        &mut self,
+        lines: &HistoryLines,
+        asked: &Range<u64>,
+        generation: u64,
+        view: &Range<u64>,
+    ) {
+        if generation != self.generation {
+            return;
+        }
         if self.pending.as_ref() == Some(asked) {
             self.pending = None;
         }
@@ -87,5 +109,26 @@ impl History {
                 view.start.saturating_sub(MAX_LINES as u64 / 2)..view.end + MAX_LINES as u64 / 2;
             self.rows.retain(|number, _| keep.contains(number));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answers_to_fetches_from_before_a_clear_are_dropped() {
+        let mut history = History::default();
+        let asked = history.fetch(90..100, 100).expect("nothing is fetched yet");
+        let generation = history.generation();
+        history.clear();
+        // Under the new numbering, history ends below what was asked for.
+        let answer = HistoryLines {
+            first: asked.end,
+            lines: Vec::new(),
+        };
+        history.receive(&answer, &asked, generation, &(90..100));
+        assert_eq!(history.start, None);
+        assert_eq!(history.fetch(40..50, 50), Some(0..50));
     }
 }

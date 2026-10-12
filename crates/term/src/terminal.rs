@@ -906,7 +906,15 @@ impl Emulator {
     /// Continues on the next line after text reached the right edge.
     fn wrap(&mut self) {
         let line = self.cursor.line;
-        self.grid_mut().row_mut(line).set_wrapped(true);
+        // Without a pending wrap, this is a wide character that doesn't fit
+        // in the last column.
+        let early = !self.cursor.pending_wrap;
+        let row = self.grid_mut().row_mut(line);
+        if early {
+            row.set_wrapped_early();
+        } else {
+            row.set_wrapped(true);
+        }
         self.index();
         self.cursor.col = 0;
     }
@@ -1130,7 +1138,7 @@ impl Emulator {
         let grid = self.grid_mut();
         match mode {
             0 => {
-                let row = grid.row_mut(line);
+                let row = grid.edit_row(line);
                 row.fill(col..width, &blank);
                 row.set_wrapped(false);
                 for below in line + 1..height {
@@ -1141,7 +1149,8 @@ impl Emulator {
                 for above in 0..line {
                     grid.row_mut(above).reset(&blank);
                 }
-                grid.row_mut(line).fill(0..col + 1, &blank);
+                grid.edit_row(line).fill(0..col + 1, &blank);
+                grid.end_history_line();
             }
             2 => grid.clear(&blank),
             3 => {
@@ -1160,7 +1169,7 @@ impl Emulator {
         let blank = self.blank();
         let CursorState { line, col, .. } = self.cursor;
         let width = self.width();
-        let row = self.grid_mut().row_mut(line);
+        let row = self.grid_mut().edit_row(line);
         match mode {
             0 => {
                 row.fill(col..width, &blank);
@@ -1185,7 +1194,7 @@ impl Emulator {
         let blank = self.blank();
         let CursorState { line, col, .. } = self.cursor;
         let end = col.saturating_add(count);
-        self.grid_mut().row_mut(line).fill(col..end, &blank);
+        self.grid_mut().edit_row(line).fill(col..end, &blank);
     }
 
     /// ICH: inserts blanks at the cursor.
@@ -1194,7 +1203,7 @@ impl Emulator {
         let blank = self.blank();
         let CursorState { line, col, .. } = self.cursor;
         self.grid_mut()
-            .row_mut(line)
+            .edit_row(line)
             .insert_blanks(col, count, &blank);
     }
 
@@ -1204,7 +1213,7 @@ impl Emulator {
         let blank = self.blank();
         let CursorState { line, col, .. } = self.cursor;
         self.grid_mut()
-            .row_mut(line)
+            .edit_row(line)
             .delete_cells(col, count, &blank);
     }
 
@@ -1214,7 +1223,7 @@ impl Emulator {
         let (width, height) = (self.width(), self.height());
         let grid = self.grid_mut();
         for line in 0..height {
-            let row = grid.row_mut(line);
+            let row = grid.edit_row(line);
             row.reset(&Style::DEFAULT);
             for col in 0..width {
                 row.write(col, 'E', false, &Style::DEFAULT);
@@ -1374,8 +1383,11 @@ impl Emulator {
     /// RIS: full reset to the power-on state, including scrollback.
     pub(crate) fn full_reset(&mut self) {
         let replies = std::mem::take(&mut self.replies);
+        let generation = self.primary.history_generation();
         *self = Self::new(self.size, &self.config);
         self.replies = replies;
+        // History is numbered from 0 again.
+        self.primary.follow_history(generation);
     }
 
     fn resize(&mut self, size: Size) {
@@ -1384,6 +1396,7 @@ impl Emulator {
         }
         let (width, height) = (usize::from(size.cols()), usize::from(size.rows()));
         let on_primary = self.screen == Screen::Primary;
+        let autowrap = self.modes.contains(Modes::AUTOWRAP);
         // The primary screen's cursor is the live one, or the one saved when
         // a program switched to the alternate screen.
         let primary_cursor = if on_primary {
@@ -1391,11 +1404,19 @@ impl Emulator {
         } else {
             &mut self.saved_primary.cursor
         };
-        let (line, col) =
-            self.primary
-                .reflow(width, height, (primary_cursor.line, primary_cursor.col));
-        primary_cursor.line = line;
-        primary_cursor.col = col;
+        (
+            primary_cursor.line,
+            primary_cursor.col,
+            primary_cursor.pending_wrap,
+        ) = self.primary.reflow(
+            width,
+            height,
+            (primary_cursor.line, primary_cursor.col),
+            primary_cursor.pending_wrap,
+            autowrap,
+        );
+        // Without autowrap, nothing waits to wrap.
+        primary_cursor.pending_wrap &= autowrap;
         if let Some(alternate) = &mut self.alternate {
             alternate.crop(width, height);
         }
@@ -1403,7 +1424,9 @@ impl Emulator {
         self.size = size;
         self.scroll_region = 0..height;
         self.tabs.resize(width);
-        self.cursor.pending_wrap = false;
+        if !on_primary {
+            self.cursor.pending_wrap = false;
+        }
         for cursor in [
             &mut self.cursor,
             &mut self.saved_primary.cursor,
