@@ -177,6 +177,11 @@ local client = {
 	on = function(event, handler)
 		return subscription(call(core.on, "client", 0, event, handler))
 	end,
+	-- Runs a command, as if typed after `:`, as Neovim's `vim.cmd`:
+	-- `client.cmd("Files")`.
+	cmd = function(line)
+		call(core.command, line)
+	end,
 	-- The options, by name or short name, as Vim's `vim.opt`:
 	-- `client.opt.number = false`.
 	opt = setmetatable({}, {

@@ -16,6 +16,7 @@ use clackatoo_protocol::PaneId;
 
 use crate::desktop::{Button, ButtonLayout};
 use crate::editor::PanelView;
+use crate::finder::{self, view::FinderView};
 use crate::layout::{Area, Placement, Rect};
 use crate::render::{Fill, Ink, Paint, Text, TextFont};
 
@@ -252,6 +253,8 @@ pub(crate) struct Chrome {
     /// Whether the window's corners are rounded, which what's drawn in the
     /// bottom bar's corner must follow.
     pub(crate) rounded: bool,
+    /// The finder, if it's open: where its parts go, and what it shows.
+    pub(crate) finder: Option<(finder::view::Layout, FinderView)>,
 }
 
 /// What goes in the frame, besides where.
@@ -270,6 +273,9 @@ pub(crate) struct Contents<'a> {
     pub(crate) alert: Option<String>,
     /// Whether the window's corners are rounded.
     pub(crate) rounded: bool,
+    /// What the finder shows, if it's open, laid out as
+    /// [`finder::view::Layout`] says for the window's size.
+    pub(crate) finder: Option<FinderView>,
 }
 
 impl Chrome {
@@ -385,6 +391,7 @@ impl Chrome {
             alert,
             bottom_shown: contents.bottom_shown,
             rounded: contents.rounded,
+            finder: (contents.finder).map(|view| place_finder(&geometry, view, measure)),
         }
     }
 
@@ -398,6 +405,11 @@ impl Chrome {
                 .iter()
                 .position(|(_, item)| item.contains(point))
                 .map_or(Hit::Nothing, Hit::Menu);
+        }
+        if let Some((layout, view)) = &self.finder
+            && layout.panel.contains(point)
+        {
+            return Hit::Finder(layout.row_at(point, view.rows.len()));
         }
         if !maximised && let Some(direction) = self.edge(point) {
             return Hit::Resize(direction);
@@ -529,6 +541,9 @@ impl Chrome {
             }
         }
         self.paint_palette(&mut painted);
+        if let Some((layout, view)) = &self.finder {
+            layout.paint(view, &self.geometry, &mut painted);
+        }
         if let Some((rect, items)) = &self.menu {
             push_shadow(
                 &mut painted.over,
@@ -880,6 +895,17 @@ fn place_palette(geometry: &Geometry, choices: usize) -> (Rect, Vec<Rect>) {
     (palette, rows)
 }
 
+/// The finder, showing `view`, its title measured by `measure`.
+fn place_finder(
+    geometry: &Geometry,
+    view: FinderView,
+    measure: &mut dyn FnMut(&str, bool) -> f32,
+) -> (finder::view::Layout, FinderView) {
+    let mut layout = finder::view::Layout::new(geometry);
+    layout.title_width = measure(view.title, false);
+    (layout, view)
+}
+
 /// A menu of `labels` asked for at `at`: below and right of it, unless
 /// that runs off the window. Returns its box, and its items.
 fn place_menu(
@@ -929,7 +955,7 @@ fn place_menu(
 
 /// Adds a soft shadow under `rect`, whose corners are `radius` round:
 /// layers wider and fainter outwards, a little below it.
-fn push_shadow(fills: &mut Vec<Fill>, rect: Rect, radius: f32, padding: f32) {
+pub(crate) fn push_shadow(fills: &mut Vec<Fill>, rect: Rect, radius: f32, padding: f32) {
     for spread in [3.0, 2.0, 1.0] {
         let grow = spread * padding;
         fills.push(Fill::rounded(
@@ -1290,6 +1316,9 @@ pub(crate) enum Hit {
     NewTab,
     /// An item of the open menu, by its place in it.
     Menu(usize),
+    /// The finder, and the row of its list, if it's over one. The panes
+    /// under it get nothing.
+    Finder(Option<usize>),
     Nothing,
 }
 
@@ -1333,6 +1362,7 @@ mod tests {
                 menu: None,
                 alert: None,
                 rounded: false,
+                finder: None,
             },
             &mut measure,
         )
@@ -1355,6 +1385,7 @@ mod tests {
                 menu: None,
                 alert: Some("no contact with box for 4 s".into()),
                 rounded: false,
+                finder: None,
             },
             &mut measure,
         );
@@ -1464,6 +1495,7 @@ mod tests {
                 menu: None,
                 alert: None,
                 rounded: false,
+                finder: None,
             },
             &mut measure,
         );

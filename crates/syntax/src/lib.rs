@@ -28,5 +28,5 @@ mod worker;
 pub use install::{InstallError, Known, install, known, known_for};
 pub use known::KNOWN;
 pub use pack::{Languages, Pack};
-pub use server::Server;
+pub use server::{Server, git_root};
 pub use worker::{Highlighted, Key, Syntax};

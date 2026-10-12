@@ -276,9 +276,11 @@ pub(crate) struct Editor {
     /// What the language server says is at the cursor, with what's wrong
     /// there, shown by it.
     panel: Option<Panel>,
-    /// A place in another file an answer goes to, and how many places it
-    /// gave, for the desk to open.
-    opening: Option<(FileLocation, usize)>,
+    /// A place in another file an answer goes to, for the desk to open.
+    opening: Option<FileLocation>,
+    /// The places an answer gave, when it gave several, for the desk to
+    /// open the finder on.
+    places: Option<Vec<FileLocation>>,
     /// The byte the cursor left, on a jump such as `G` or a search, for
     /// the desk's jump list.
     jumped_from: Option<usize>,
@@ -326,6 +328,7 @@ impl Editor {
             panel: None,
             opening: None,
             jumped_from: None,
+            places: None,
             flash: None,
             held: None,
             rows: Vec::new(),
@@ -339,6 +342,12 @@ impl Editor {
     /// Whether a search or a new name is being typed, in the bar.
     pub(crate) fn prompting(&self) -> bool {
         self.prompt.is_some()
+    }
+
+    /// Whether a command is half typed, such as `d` waiting for its
+    /// motion, which the next key is for.
+    pub(crate) fn pending(&self) -> bool {
+        !self.typed.is_empty()
     }
 
     pub(crate) fn resize(&mut self, size: Size) {
@@ -1778,10 +1787,11 @@ impl Editor {
     }
 
     /// Goes where the language server's answer to `gd` and the like says:
-    /// the first place, if it gives several, here or, in another file,
-    /// for the desk to open.
+    /// its place, here or, in another file, for the desk to open; or if it
+    /// gives several, they're for the desk to open the finder on.
     fn jump(&mut self, answer: &Answer, copy: &BufferCopy) {
         match answer {
+            Answer::Locations(found) if found.len() > 1 => self.places = Some(found.clone()),
             Answer::Locations(found) => {
                 let Some(first) = found.first() else {
                     return;
@@ -1789,9 +1799,8 @@ impl Editor {
                 self.left_from(self.cursor.at, copy);
                 if first.path == copy.path() {
                     self.go_to(first.line, first.col, copy);
-                    self.say_how_many(found.len());
                 } else {
-                    self.opening = Some((first.clone(), found.len()));
+                    self.opening = Some(first.clone());
                 }
             }
             Answer::Nothing => {
@@ -1826,17 +1835,16 @@ impl Editor {
         self.follow(copy);
     }
 
-    /// Says, if an answer gave more places than the one gone to, how many.
-    pub(crate) fn say_how_many(&mut self, places: usize) {
-        if places > 1 {
-            self.status = Some(format!("1 of {places} places"));
-        }
+    /// The place in another file the last answer goes to, for the desk to
+    /// open, if there's one.
+    pub(crate) fn take_opening(&mut self) -> Option<FileLocation> {
+        self.opening.take()
     }
 
-    /// The place in another file the last answer goes to, and how many
-    /// places it gave, for the desk to open, if there's one.
-    pub(crate) fn take_opening(&mut self) -> Option<(FileLocation, usize)> {
-        self.opening.take()
+    /// The places the last answer gave, if it gave several, for the desk
+    /// to open the finder on.
+    pub(crate) fn take_places(&mut self) -> Option<Vec<FileLocation>> {
+        self.places.take()
     }
 
     /// Notes that the cursor jumped from `from`, for the desk's jump list.

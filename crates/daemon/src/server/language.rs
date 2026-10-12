@@ -431,6 +431,15 @@ impl Daemon {
         }
     }
 
+    /// The root of the project buffer `id`'s language server was started
+    /// for, if it's open in one: for a library's file gone to from a
+    /// project, the project's.
+    pub(super) fn buffer_root(&self, id: BufferId) -> Option<PathBuf> {
+        let opened = self.buffers.get(&id)?.server.as_ref()?;
+        let slot = self.servers.slots.get(&opened.server)?;
+        Some(slot.root.clone())
+    }
+
     /// Forgets the queries the client at `token` asked about `buffer`, or
     /// about any buffer, as when it goes.
     pub(super) fn forget_queries(&mut self, token: Token, buffer: Option<BufferId>) {
@@ -799,11 +808,12 @@ impl Daemon {
             let line = text.byte_to_line(byte);
             (byte, line as u64, byte - text.line_to_byte(line))
         };
-        let location = |line, col, offset| FileLocation {
+        let location = |text: &Rope, line, col, offset| FileLocation {
             path: path.display().to_string(),
             line,
             col,
             offset,
+            text: line_text(text, line),
         };
         let asked_slot = self.buffers.get(&asked.buffer)?;
         if asked_slot.buffer.path() == path {
@@ -813,7 +823,7 @@ impl Daemon {
             let text = asked_slot.buffer.text();
             let line = text.byte_to_line(byte.min(text.len_bytes()));
             let col = byte - text.line_to_byte(line);
-            return Some(location(line as u64, col, Some(byte)));
+            return Some(location(text, line as u64, col, Some(byte)));
         }
         let open = (self.buffers.values())
             .find(|slot| slot.buffer.path() == path)
@@ -829,7 +839,7 @@ impl Daemon {
                 .clone()?,
         };
         let (_, line, col) = at(&text);
-        Some(location(line, col, None))
+        Some(location(&text, line, col, None))
     }
 
     fn diagnosed(
@@ -972,6 +982,23 @@ impl Daemon {
             }
         }
     }
+}
+
+/// The most characters of a place's line sent with it.
+const MAX_LINE_TEXT: usize = 200;
+
+/// Line `line` of `text`, without its end, cut short if it's long.
+fn line_text(text: &Rope, line: u64) -> String {
+    let Some(line) = usize::try_from(line)
+        .ok()
+        .and_then(|line| text.get_line(line))
+    else {
+        return String::new();
+    };
+    (line.chars())
+        .take_while(|&ch| ch != '\n' && ch != '\r')
+        .take(MAX_LINE_TEXT)
+        .collect()
 }
 
 /// A diagnostic as reported, counted in `text`, as one at byte offsets.

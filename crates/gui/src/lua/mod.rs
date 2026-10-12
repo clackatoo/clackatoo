@@ -169,6 +169,8 @@ pub(crate) enum FromLua {
     Focus {
         pane: PaneId,
     },
+    /// Run a command, as if typed after `:`.
+    Command(String),
     /// Set an option, to a value it can hold.
     Set {
         option: &'static Info,

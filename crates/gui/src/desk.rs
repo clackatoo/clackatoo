@@ -15,14 +15,16 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use clackatoo_protocol::{
-    Axis, BufferId, ClientMessage, Content, Layout, NewAgent, NewTerminal, PaneId, PaneTerminal,
-    Request, Response, Side, Size, Tab, TabId, TerminalId, ViewUpdate, WorkspaceId, Workspaces,
+    Axis, BufferId, ClientMessage, Content, FileLocation, Layout, NewAgent, NewTerminal, PaneId,
+    PaneTerminal, Request, Response, Side, Size, Tab, TabId, TerminalId, ViewUpdate, WorkspaceId,
+    Workspaces,
 };
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::chrome::{ModeName, Status};
 use crate::command::{self, Command, Kind, Place};
+use crate::finder::Finder;
 use crate::input::{self, KeyPress, Modifiers};
 use crate::keymap::{Chord, Pressed};
 use crate::layout::{Area, Direction, Divider, Placement};
@@ -58,7 +60,7 @@ pub(crate) enum TextTarget {
 }
 
 /// Who sent a request, and so gets its answer.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Asker {
     /// A pane, which keeps track of its own requests.
     Pane(TerminalId),
@@ -67,7 +69,7 @@ enum Asker {
 }
 
 /// What the window asked for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Asked {
     /// A new pane, to switch to once made.
     Pane,
@@ -89,10 +91,14 @@ enum Asked {
     /// A file opened in place of the one this pane showed, whose failure
     /// is shown, and forgets where its cursor was to go in that file.
     OpenedHere(PaneId),
+    /// A new pane showing a file, to switch to once made, with its cursor
+    /// put at this place once the file's text has come.
+    PaneAt(Option<FileLocation>),
 }
 
 mod bindings;
 mod editors;
+mod finding;
 mod jumps;
 mod offers;
 mod script;
@@ -183,6 +189,14 @@ pub(crate) struct Desk {
     jumps: jumps::Jumps,
     /// The options, as config and `:set` have set them.
     options: Options,
+    /// The finder, while it's open.
+    finder: Option<Finder>,
+    /// How many searches the window has asked the daemon for, which
+    /// numbers them.
+    searches: u64,
+    /// When the finder's grep is to search for what's been typed, a moment
+    /// after the last key.
+    grep_at: Option<std::time::Instant>,
 }
 
 impl Desk {
@@ -231,7 +245,7 @@ impl Desk {
     /// Where typed text goes now, if keys type text rather than being
     /// commands, as they are in normal mode.
     pub(crate) fn text_goes_to(&self) -> Option<TextTarget> {
-        if self.input.is_some() {
+        if self.input.is_some() || self.finding() {
             return Some(TextTarget::Bar);
         }
         if let Some((editor, _)) = self.focused_editor() {
@@ -730,6 +744,8 @@ impl Desk {
     pub(crate) fn lost(&mut self) {
         self.connected = false;
         self.forget_asked();
+        // Its searches went with the connection.
+        self.finder = None;
     }
 
     /// Forgets everything sent on the last connection, which will never be
@@ -820,6 +836,19 @@ impl Desk {
             }
             Some(Asker::Window(Asked::Saved { buffer, then_close })) => {
                 self.saved(buffer, then_close, &response);
+                true
+            }
+            Some(Asker::Window(Asked::PaneAt(landing))) => {
+                match response {
+                    Response::PaneCreated(pane) => {
+                        self.show_pane(pane);
+                        if let Some(landing) = landing {
+                            self.land_at(pane, landing);
+                        }
+                    }
+                    Response::Error(err) => self.message = Some(err.to_string()),
+                    _ => {}
+                }
                 true
             }
             Some(Asker::Window(Asked::OpenedHere(pane))) => {
@@ -919,13 +948,27 @@ impl Desk {
                 return true;
             }
             self.input = None;
+        } else if self.finding() {
+            // And so the finder.
+            if !pane::enters_normal_mode(press) {
+                self.finder_key(press);
+                return true;
+            }
+            self.close_finder();
         } else if let Some(chord) = Chord::of(press) {
             // The config's keypress handlers come first, then the bindings.
             if self.keypress_handled(chord, press) {
                 return true;
             }
             let mode = self.key_mode();
-            match self.keymap.press(mode, chord) {
+            // A key a half-typed command in the pane waits for is the
+            // pane's, as `d<Space>`'s Space is, not a binding's first.
+            let pressed = if self.keymap.waiting().is_empty() && self.pane_pending() {
+                Pressed::Unbound
+            } else {
+                self.keymap.press(mode, chord)
+            };
+            match pressed {
                 Pressed::Bound(Binding::Window(action)) => {
                     self.forget_waiting();
                     self.message = None;
@@ -964,6 +1007,8 @@ impl Desk {
             input
                 .text
                 .extend(text.chars().filter(|ch| !ch.is_control()));
+        } else if self.finding() {
+            self.paste_into_finder(text);
         } else if !self.paste_into_editor(text)
             && let Some(pane) = self.focused_pane()
         {
@@ -1432,6 +1477,7 @@ impl Desk {
             Command::Quit { force } => self.quit(force),
             Command::Write { force, quit } => self.write_file(force, quit),
             Command::Discard => self.discard_changes(),
+            Command::Find { kind, query } => self.open_finder(kind, query),
             Command::Reload | Command::Set(_) => {}
         }
     }
@@ -1560,6 +1606,8 @@ mod tests {
                 | ClientMessage::Edit { .. }
                 | ClientMessage::Query { .. }
                 | ClientMessage::Rename { .. }
+                | ClientMessage::Find { .. }
+                | ClientMessage::StopFinding { .. }
                 | ClientMessage::Hello { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
@@ -2520,6 +2568,22 @@ mod tests {
         assert!(!asked(&desk));
         assert_eq!(answer_all(&mut desk), []);
 
+        // Nor while the finder is open: y and Enter are its.
+        command(&mut desk, "Buffers");
+        desk.buffer_changed(buffer, offer());
+        assert!(!asked(&desk));
+        type_keys(&mut desk, "y");
+        assert_eq!(desk.finder_view((10, 60), None).unwrap().query, "y▏");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        assert!(asked(&desk), "asked once it's closed");
+        assert!(!answer_all(&mut desk).contains(&install));
+        type_keys(&mut desk, "j");
+
         // Or it's installed without asking, or never.
         command(&mut desk, "set languageinstall=always");
         answer_all(&mut desk);
@@ -2701,6 +2765,7 @@ mod tests {
             line: 2,
             col: 1,
             offset: None,
+            text: String::new(),
         }
     }
 
@@ -2860,6 +2925,7 @@ mod tests {
             line: 2,
             col: 1,
             offset: None,
+            text: String::new(),
         };
         answer_query(&mut desk, 7, vec![there]);
         // Each file opens in the pane in turn, as the daemon would, with a
@@ -3022,5 +3088,483 @@ mod tests {
         escape(&mut desk);
         ctrl(&mut desk, "o");
         assert_eq!(note(&desk), "a.txt  4:1", "line 3, moved down by one");
+    }
+
+    /// The finder's messages for the daemon, answering every request with
+    /// "done" on the way.
+    fn finds(desk: &mut Desk) -> Vec<ClientMessage> {
+        let messages = desk.take_outbox();
+        for message in &messages {
+            if let ClientMessage::Request(_) = message {
+                desk.answered(Response::Done);
+            }
+        }
+        (messages.into_iter())
+            .filter(|message| {
+                matches!(
+                    message,
+                    ClientMessage::Find { .. } | ClientMessage::StopFinding { .. }
+                )
+            })
+            .collect()
+    }
+
+    /// The number and what's asked of the one search in `messages`, besides
+    /// previews.
+    fn search_in(messages: &[ClientMessage]) -> (u64, clackatoo_protocol::Search) {
+        use clackatoo_protocol::Search;
+        let found: Vec<(u64, Search)> = (messages.iter())
+            .filter_map(|message| match message {
+                ClientMessage::Find { id, search, .. }
+                    if !matches!(search, Search::Preview { .. }) =>
+                {
+                    Some((*id, search.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "{messages:?}");
+        found[0].clone()
+    }
+
+    /// A desk with one pane, editing `path`, whose text is `text`.
+    fn editing(path: &str, text: &str) -> Desk {
+        use clackatoo_protocol::{BufferSnapshot, BufferUpdate};
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+        });
+        let mut desk = desk(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+        desk.buffer_changed(
+            buffer,
+            BufferUpdate::Snapshot(BufferSnapshot {
+                path: path.into(),
+                text: text.into(),
+                version: 0,
+                modified: false,
+            }),
+        );
+        answer_all(&mut desk);
+        desk
+    }
+
+    /// Gives the search numbered `id` the root `/p` and `files`.
+    fn found_files(desk: &mut Desk, id: u64, files: &[&str]) {
+        use clackatoo_protocol::Found;
+        desk.found(
+            id,
+            Found::Root {
+                path: "/p".into(),
+                name: "~/p".into(),
+            },
+        );
+        desk.found(
+            id,
+            Found::Files(files.iter().map(|&file| file.to_owned()).collect()),
+        );
+    }
+
+    /// The text of each row the finder shows.
+    fn finder_rows(desk: &mut Desk) -> Vec<String> {
+        let view = desk
+            .finder_view((10, 60), Some((10, 60)))
+            .expect("the finder");
+        view.rows.into_iter().map(|row| row.text).collect()
+    }
+
+    #[test]
+    fn space_p_f_finds_the_projects_files_and_opens_the_one_picked() {
+        use clackatoo_protocol::{OpenFile, Search};
+        let mut desk = editing("/p/src/main.rs", "fn main() {}\n");
+        type_keys(&mut desk, " pf");
+        let asked = finds(&mut desk);
+        assert!(matches!(
+            asked[..],
+            [ClientMessage::Find {
+                pane: Some(PaneId(1)),
+                search: Search::Files,
+                ..
+            }]
+        ));
+        let (id, _) = search_in(&asked);
+        assert_eq!(desk.text_goes_to(), Some(TextTarget::Bar));
+        found_files(&mut desk, id, &["src/main.rs", "src/other.rs", "README"]);
+        assert_eq!(
+            finder_rows(&mut desk),
+            ["README", "src/main.rs", "src/other.rs"]
+        );
+        // The one picked is previewed as it's drawn, and the next once
+        // it's picked.
+        let preview = |messages: &[ClientMessage]| {
+            (messages.iter())
+                .find_map(|message| match message {
+                    ClientMessage::Find {
+                        id,
+                        search: Search::Preview { path, line, .. },
+                        ..
+                    } => Some((*id, path.clone(), *line)),
+                    _ => None,
+                })
+                .expect("a preview asked for")
+        };
+        let (first, path, line) = preview(&finds(&mut desk));
+        assert_eq!((path.as_str(), line), ("/p/README", 0));
+        finder_rows(&mut desk);
+        assert!(finds(&mut desk).is_empty(), "asked for once");
+        type_keys(&mut desk, "oth");
+        assert_eq!(finder_rows(&mut desk), ["src/other.rs"]);
+        let asked = finds(&mut desk);
+        assert!(asked.contains(&ClientMessage::StopFinding { id: first }));
+        assert_eq!(preview(&asked).1, "/p/src/other.rs");
+
+        // Enter opens it in place of the file shown, as :e does.
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert!(desk.finder_view((10, 60), None).is_none(), "closed");
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::OpenHere {
+                pane: PaneId(1),
+                file: OpenFile {
+                    path: "/p/src/other.rs".into(),
+                    cwd: None
+                },
+            }]
+        );
+
+        // Ctrl+V beside it, and Esc closes, stopping the search.
+        type_keys(&mut desk, " pf");
+        let (id, _) = search_in(&finds(&mut desk));
+        found_files(&mut desk, id, &["README"]);
+        ctrl(&mut desk, "v");
+        assert!(matches!(
+            &answer_all(&mut desk)[..],
+            [Request::Split {
+                pane: PaneId(1),
+                side: Side::Right,
+                terminal: PaneTerminal::File(OpenFile { path, .. }),
+            }] if path == "/p/README"
+        ));
+        type_keys(&mut desk, " pf");
+        let (id, _) = search_in(&finds(&mut desk));
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(finds(&mut desk), [ClientMessage::StopFinding { id }]);
+        assert!(!desk.found(id, clackatoo_protocol::Found::Files(vec!["a".into()])));
+    }
+
+    #[test]
+    fn a_grep_searches_again_as_typed_and_goes_to_the_line_picked() {
+        use clackatoo_protocol::{Found, FoundLine, Search};
+        let mut desk = editing("/p/src/main.rs", "use a;\nfn main() {}\n");
+        command(&mut desk, "Grep fn");
+        let (first, search) = search_in(&finds(&mut desk));
+        assert_eq!(
+            search,
+            Search::Grep {
+                pattern: "fn".into(),
+                exact: false
+            }
+        );
+        // A capital matches case, as `smartcase` says. Typing searches once
+        // it pauses.
+        type_keys(&mut desk, "M");
+        assert!(finds(&mut desk).is_empty(), "not yet");
+        assert!(desk.grep_at().is_some(), "the window wakes for it");
+        desk.grep_if_due(std::time::Instant::now() + finding::GREP_WAIT);
+        let asked = finds(&mut desk);
+        assert!(asked.contains(&ClientMessage::StopFinding { id: first }));
+        let (id, search) = search_in(&asked);
+        assert_eq!(
+            search,
+            Search::Grep {
+                pattern: "fnM".into(),
+                exact: true
+            }
+        );
+        let line = FoundLine {
+            path: "src/main.rs".into(),
+            line: 1,
+            col: 3,
+            text: "fn main() {}".into(),
+            matches: vec![(0, 2)],
+        };
+        assert!(
+            !desk.found(first, Found::Lines(vec![line.clone()])),
+            "too late"
+        );
+        desk.found(
+            id,
+            Found::Root {
+                path: "/p".into(),
+                name: "~/p".into(),
+            },
+        );
+        desk.found(id, Found::Lines(vec![line]));
+        assert_eq!(finder_rows(&mut desk), ["src/main.rs:2: fn main() {}"]);
+        // In the file shown, the cursor goes there with nothing opened.
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert!(answer_all(&mut desk).is_empty());
+        let Status::Tabs { note, .. } = desk.status() else {
+            panic!("the tabs");
+        };
+        assert_eq!(note.as_deref(), Some("main.rs  2:4"));
+    }
+
+    #[test]
+    fn several_places_an_answer_gives_are_picked_from_in_the_finder() {
+        use clackatoo_protocol::{Answer, BufferUpdate, FileLocation, OpenFile};
+        let mut desk = editing("/p/a.rs", "one\ntwo\nthree\n");
+        type_keys(&mut desk, "gd");
+        let id = (desk.take_outbox().into_iter())
+            .find_map(|message| match message {
+                ClientMessage::Query { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("a query");
+        let place = |path: &str, line, text: &str| FileLocation {
+            path: path.into(),
+            line,
+            col: 1,
+            offset: None,
+            text: text.into(),
+        };
+        let found = vec![place("/p/a.rs", 2, "three"), place("/p/lib/b.rs", 0, "b")];
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Answer {
+                id,
+                version: 0,
+                answer: Answer::Locations(found),
+            },
+        );
+        assert_eq!(finder_rows(&mut desk), ["a.rs:3: three", "lib/b.rs:1: b"]);
+        assert_eq!(desk.finder_view((10, 60), None).unwrap().title, "Places");
+        // One here goes there.
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        let Status::Tabs { note, .. } = desk.status() else {
+            panic!("the tabs");
+        };
+        assert_eq!(note.as_deref(), Some("a.rs  3:2"));
+
+        // One elsewhere opens there.
+        type_keys(&mut desk, "gd");
+        let id = (desk.take_outbox().into_iter())
+            .find_map(|message| match message {
+                ClientMessage::Query { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("a query");
+        let found = vec![place("/p/a.rs", 2, "three"), place("/p/lib/b.rs", 0, "b")];
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Answer {
+                id,
+                version: 0,
+                answer: Answer::Locations(found),
+            },
+        );
+        ctrl(&mut desk, "n");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::OpenHere {
+                pane: PaneId(1),
+                file: OpenFile {
+                    path: "/p/lib/b.rs".into(),
+                    cwd: None
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn the_config_binds_keys_to_commands_such_as_the_finders() {
+        use clackatoo_protocol::Search;
+        let mut desk = three_tabs();
+        snapshot(&mut desk, 1);
+        desk.lua_from(
+            r#"
+            client.keys.unmap("nv", "<Space>pf")
+            client.keys.map("n", "<Space>ff", function() client.cmd("Files") end)
+            client.keys.map("n", "<Space>x", function() client.cmd("Nonsense") end)
+            "#,
+        );
+        answer_all(&mut desk);
+        normal_mode(&mut desk);
+        type_keys(&mut desk, " pf");
+        assert!(finds(&mut desk).is_empty(), "unbound");
+        type_keys(&mut desk, " ff");
+        let asked = finds(&mut desk);
+        assert_eq!(search_in(&asked).1, Search::Files);
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        type_keys(&mut desk, " x");
+        assert!(
+            (desk.message.as_deref()).is_some_and(|message| message.contains("Nonsense")),
+            "{:?}",
+            desk.message
+        );
+        // The other finders' keys, as jack's Telescope keys are.
+        type_keys(&mut desk, " pgf");
+        assert!(
+            desk.finder_view((10, 60), None)
+                .is_some_and(|view| view.title == "Grep")
+        );
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        type_keys(&mut desk, " ?");
+        assert_eq!(search_in(&finds(&mut desk)).1, Search::Buffers);
+    }
+
+    #[test]
+    fn ctrl_o_comes_back_from_a_file_or_line_the_finder_opened() {
+        use clackatoo_protocol::{Found, FoundLine};
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/p/a.rs", "fn a() {}\nfn b() {}\n");
+        type_text(&mut desk, "jw");
+        type_keys(&mut desk, " pf");
+        let (id, _) = search_in(&finds(&mut desk));
+        found_files(&mut desk, id, &["b.rs"]);
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        open_asked(&mut desk, 8, "/p/b.rs", "x\ny\n");
+        assert_eq!(note(&desk), "b.rs  1:1");
+        ctrl(&mut desk, "o");
+        open_asked(&mut desk, 9, "/p/a.rs", "fn a() {}\nfn b() {}\n");
+        assert_eq!(note(&desk), "a.rs  2:4", "back where the finder left");
+
+        // A line in the file shown is a jump too.
+        command(&mut desk, "Grep fn");
+        let (id, _) = search_in(&finds(&mut desk));
+        desk.found(
+            id,
+            Found::Root {
+                path: "/p".into(),
+                name: "~/p".into(),
+            },
+        );
+        let line = FoundLine {
+            path: "a.rs".into(),
+            line: 0,
+            col: 3,
+            text: "fn a() {}".into(),
+            matches: vec![(0, 2)],
+        };
+        desk.found(id, Found::Lines(vec![line]));
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(note(&desk), "a.rs  1:4");
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "a.rs  2:4");
+    }
+
+    #[test]
+    fn a_key_a_half_typed_command_waits_for_is_never_a_bindings() {
+        use clackatoo_protocol::{Change, Edit};
+        let mut desk = editing("/p/a.txt", "abc\ndef\nghi\n");
+        // `d<Space>` deletes a character, as in Vim, though Space starts
+        // the finder's keys, and `j` and `k` only move after it.
+        type_keys(&mut desk, "d jk");
+        assert!(desk.finder_view((10, 60), None).is_none());
+        let edit = Edit::replace(12, 0, "a", "");
+        assert_eq!(
+            buffer_changes(&mut desk),
+            [(
+                0,
+                Change::Edit {
+                    edit,
+                    base: 0,
+                    step: true
+                }
+            )]
+        );
+        // And so `f:` finds a colon rather than opening the command line.
+        let mut desk = editing("/p/b.txt", "a:b\n");
+        type_keys(&mut desk, "f:");
+        assert!(matches!(desk.status(), Status::Tabs { .. }), "no palette");
+        assert_eq!(note_of(&desk), "b.txt  1:2");
+    }
+
+    fn note_of(desk: &Desk) -> String {
+        let Status::Tabs { note, .. } = desk.status() else {
+            panic!("the tabs");
+        };
+        note.unwrap_or_default()
+    }
+
+    #[test]
+    fn the_hover_panel_closes_as_the_finder_opens() {
+        use clackatoo_protocol::{Answer, BufferUpdate};
+        let mut desk = editing("/p/a.rs", "fn a() {}\n");
+        type_keys(&mut desk, "K");
+        let id = (desk.take_outbox().into_iter())
+            .find_map(|message| match message {
+                ClientMessage::Query { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("a query");
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Answer {
+                id,
+                version: 0,
+                answer: Answer::Hover {
+                    text: "fn a()".into(),
+                    markdown: false,
+                },
+            },
+        );
+        let panel = |desk: &Desk| {
+            (desk.editor(PaneId(1)))
+                .and_then(crate::editor::Editor::panel)
+                .is_some()
+        };
+        desk.settle_editors();
+        assert!(panel(&desk));
+        type_keys(&mut desk, " pf");
+        desk.settle_editors();
+        assert!(desk.finder_view((10, 60), None).is_some());
+        assert!(!panel(&desk));
     }
 }

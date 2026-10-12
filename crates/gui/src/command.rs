@@ -7,9 +7,12 @@
 //! left, `-` below, `-^` above). `Terminal@host` asks for it on another
 //! machine's daemon. A number moves to that tab. Lowercase words are the
 //! window's own commands, and Vim's for files, `w`, `q`, `wq` and `e`, and
-//! for options, `set`.
+//! for options, `set`. The finder's are capitalised too, as fzf.vim's are:
+//! `Files`, `Grep` and `Buffers`, each with what to start with typed.
 
 use clackatoo_protocol::Side;
+
+use crate::finder;
 
 /// What a command line asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +49,8 @@ pub(crate) enum Command {
     Reload,
     /// `:set`: change options, or say what they are, as these words say.
     Set(String),
+    /// `:Files`, `:Grep` or `:Buffers`: the finder, with this typed.
+    Find { kind: finder::Kind, query: String },
 }
 
 /// Where a new pane goes.
@@ -74,8 +79,16 @@ const KINDS: [(&str, Kind); 2] = [("Terminal", Kind::Terminal), ("Agent", Kind::
 /// The kind of pane that edits a file, which needs the file's path.
 const EDITOR: &str = "Editor";
 
+/// What the finder lists, by name.
+const FINDERS: [(&str, finder::Kind); 3] = [
+    ("Files", finder::Kind::Files),
+    ("Grep", finder::Kind::Grep),
+    ("Buffers", finder::Kind::Buffers),
+];
+
 /// The window's own commands, for messages.
-const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, w, q and e";
+const COMMANDS: &str =
+    "a tab's number, workspace, rename, close, reload, set, w, q, e, Files, Grep and Buffers";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -99,6 +112,10 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     }
     if let Some(command) = file_command(word, argument) {
         return command;
+    }
+    if let Some(&(_, kind)) = FINDERS.iter().find(|(name, _)| *name == word) {
+        let query = argument.unwrap_or_default().to_owned();
+        return Ok(Command::Find { kind, query });
     }
     let (place, rest) = place(word);
     if rest == EDITOR {
@@ -326,6 +343,23 @@ mod tests {
             parse("Terminal htop")
                 .unwrap_err()
                 .contains("takes nothing")
+        );
+    }
+
+    #[test]
+    fn the_finder_opens_with_what_follows_typed() {
+        let find = |kind, query: &str| Command::Find {
+            kind,
+            query: query.to_owned(),
+        };
+        assert_eq!(parse("Files").unwrap(), find(finder::Kind::Files, ""));
+        assert_eq!(
+            parse("Grep fn  main").unwrap(),
+            find(finder::Kind::Grep, "fn  main")
+        );
+        assert_eq!(
+            parse("Buffers rs").unwrap(),
+            find(finder::Kind::Buffers, "rs")
         );
     }
 }

@@ -818,28 +818,38 @@ fn gd_asks_the_language_server_and_goes_where_it_says() {
         line,
         col,
         offset: None,
+        text: String::new(),
     };
-    setup.answer(asked, Answer::Locations(vec![here(1, 3), here(0, 0)]));
-    assert_eq!(setup.cursor(), (1, 3), "the first place");
-    assert_eq!(setup.editor.status.as_deref(), Some("1 of 2 places"));
+    setup.answer(asked, Answer::Locations(vec![here(1, 3)]));
+    assert_eq!(setup.cursor(), (1, 3));
+    assert_eq!(setup.editor.take_places(), None);
+
+    // Several are for the desk to pick from, in the finder.
+    setup.keys("gd");
+    let (asked, ..) = setup.queries[1];
+    let several = vec![here(0, 0), here(1, 0)];
+    setup.answer(asked, Answer::Locations(several.clone()));
+    assert_eq!(setup.editor.take_places(), Some(several));
+    assert_eq!(setup.cursor(), (1, 3), "staying put");
 
     // Another file's is for the desk to open.
     setup.keys("gD");
-    let (asked, ..) = setup.queries[1];
+    let (asked, ..) = setup.queries[2];
     let elsewhere = FileLocation {
         path: "/b.rs".into(),
         line: 9,
         col: 2,
         offset: None,
+        text: String::new(),
     };
     setup.answer(asked, Answer::Locations(vec![elsewhere.clone()]));
-    assert_eq!(setup.editor.take_opening(), Some((elsewhere, 1)));
+    assert_eq!(setup.editor.take_opening(), Some(elsewhere));
     assert_eq!(setup.cursor(), (1, 3), "staying put here");
 
     // An answer to an older query, or another pane's, goes nowhere; and
     // what goes wrong is said.
     setup.keys("gri");
-    let (asked, at, query) = setup.queries[2];
+    let (asked, at, query) = setup.queries[3];
     assert_eq!((at, query), (14, Query::Implementation));
     setup.answer(asked - 1, Answer::Locations(vec![here(0, 0)]));
     assert_eq!(setup.cursor(), (1, 3));
@@ -853,7 +863,7 @@ fn gd_asks_the_language_server_and_goes_where_it_says() {
     );
     // An empty list, which the daemon never sends, does nothing.
     setup.keys("gd");
-    let (asked, ..) = setup.queries[3];
+    let (asked, ..) = setup.queries[4];
     setup.answer(asked, Answer::Locations(Vec::new()));
     assert_eq!(setup.cursor(), (1, 3));
 }

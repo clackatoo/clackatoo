@@ -24,6 +24,7 @@ clackatoo-term.workspace = true
 clackatoo-text.workspace = true
 fontique.workspace = true
 log.workspace = true
+nucleo-matcher.workspace = true
 pollster.workspace = true
 swash.workspace = true
 unicode-width.workspace = true

@@ -615,6 +615,7 @@ pub(super) mod tests {
             line: 0,
             col: offset,
             offset: Some(offset),
+            text: String::new(),
         };
         let heard = copy.update(BufferUpdate::Answer {
             id,

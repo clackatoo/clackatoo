@@ -19,6 +19,10 @@
 //! Esc, or any other key, cancels. While Ctrl+B waits, the bottom bar says
 //! what it takes.
 //!
+//! In normal and visual mode, Space starts the finder's keys, as a leader
+//! key does in Neovim: `<Space>pf` the project's files, `<Space>pgf` a grep
+//! of them, and `<Space>?` the files open (see [`crate::finder`]).
+//!
 //! In normal and visual mode, `:` opens the command line, Ctrl with `h`,
 //! `j`, `k` or `l` moves to the pane that way, Alt with them moves the
 //! pane's edge, and Ctrl+O and Ctrl+I go back and forward through the
@@ -30,6 +34,7 @@ use clackatoo_protocol::{Side, WorkspaceId};
 
 use super::{Desk, Input, Purpose};
 use crate::command::{Command, Kind, Place};
+use crate::finder;
 use crate::keymap::{KeyMode, Keymap, parse_keys, parse_modes};
 use crate::layout::Direction;
 
@@ -72,6 +77,8 @@ pub(crate) enum Action {
     PickWorkspace,
     /// The command line.
     CommandLine,
+    /// The finder, for this.
+    Find(finder::Kind),
     /// Sends Ctrl+B to the focused pane's program.
     SendCtrlB,
 }
@@ -162,6 +169,11 @@ fn defaults() -> Keymap<Binding> {
     bind("niv", "<C-b><C-b>", Action::SendCtrlB, None);
 
     bind("nv", ":", Action::CommandLine, None);
+    // As jack's Telescope keys are.
+    let find = Some("find");
+    bind("nv", "<Space>pf", Action::Find(finder::Kind::Files), find);
+    bind("nv", "<Space>pgf", Action::Find(finder::Kind::Grep), find);
+    bind("nv", "<Space>?", Action::Find(finder::Kind::Buffers), find);
     for (letter, direction) in DIRECTIONS {
         bind(
             "nv",
@@ -237,6 +249,7 @@ impl Desk {
             Action::Jump { back, within_tab } => self.jump(back, within_tab),
             Action::PickWorkspace => self.open_palette(Purpose::Workspace),
             Action::CommandLine => self.open_palette(Purpose::Command),
+            Action::Find(kind) => self.open_finder(kind, String::new()),
             Action::SendCtrlB => {
                 if let Some(pane) = self.focused_pane() {
                     pane.send_bytes(vec![0x02]);
@@ -251,6 +264,17 @@ impl Desk {
             text: String::new(),
             selected: 0,
         });
+    }
+
+    /// Whether the focused pane has a command half typed, which the next
+    /// key finishes.
+    pub(super) fn pane_pending(&self) -> bool {
+        if let Some((editor, _)) = self.focused_editor() {
+            return editor.pending();
+        }
+        (self.focused_terminal())
+            .and_then(|terminal| self.panes.get(&terminal))
+            .is_some_and(crate::pane::Pane::pending)
     }
 
     /// The mode bindings are looked up in: the focused pane's.

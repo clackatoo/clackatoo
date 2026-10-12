@@ -283,6 +283,14 @@ impl Desk {
                 self.request(Request::ClosePane { pane }, Asked::Command);
             }
             FromLua::Focus { pane } => self.show_pane(pane),
+            FromLua::Command(line) => match crate::command::parse(&line) {
+                // Not from the config being run.
+                Ok(crate::command::Command::Reload) => {
+                    self.message = Some("the config can't reload itself".into());
+                }
+                Ok(command) => self.run(command),
+                Err(message) => self.message = Some(message),
+            },
             FromLua::Set { option, value } => self.set_option(option, value),
             FromLua::Error(text) => {
                 log::warn!("config: {text}");

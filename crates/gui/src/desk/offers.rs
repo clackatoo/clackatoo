@@ -2,8 +2,8 @@
 //! server, when they're missing: asked in the bar, as `languageinstall`
 //! says, or taken or turned down without asking.
 //!
-//! The question is asked while an editor has the focus, and the command
-//! line isn't open, and waits for y or Enter, which installs, or n, which
+//! The question is asked while an editor has the focus, and neither the
+//! command line nor the finder is open, and waits for y or Enter, which installs, or n, which
 //! declines for good. Any other key drops it unanswered, and goes on as it
 //! would have: each window is offered each language once, so the next
 //! window opened asks again.
@@ -103,9 +103,13 @@ impl Desk {
     }
 
     /// Whether an offer is being asked about: there's one, an editor has
-    /// the focus, and the command line isn't open. Until then it waits.
+    /// the focus, and neither the command line nor the finder is open,
+    /// whose keys they are. Until then it waits.
     pub(super) fn offer_asked(&self) -> bool {
-        self.offer.is_some() && self.input.is_none() && self.focused_editor().is_some()
+        self.offer.is_some()
+            && self.input.is_none()
+            && !self.finding()
+            && self.focused_editor().is_some()
     }
 
     /// The question asked, for the bar.

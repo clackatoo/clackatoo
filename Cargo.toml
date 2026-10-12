@@ -33,7 +33,15 @@ env_logger = { version = "0.11", default-features = false }
 # Loads fontconfig only when the window first needs a font, so CLI commands
 # and the daemon don't pay for linking it and its dependencies.
 fontique = { version = "0.11", features = ["fontconfig-dlopen"] }
+# Walks a project for the finder as ripgrep does (it's ripgrep's walker),
+# leaving out ignored and hidden files, on several threads.
+ignore = "0.4.33"
 log = "0.4"
+# Finds line ends in files grepped.
+memchr = "2.8"
+# The finder's fuzzy matching and ranking in the window: Helix's, scoring
+# as fzf does, and fast enough to rank a big project's files as you type.
+nucleo-matcher = "0.3.1"
 # Lays out a chat's text: line breaking, mixed styles, and the box a
 # message is typed in. Built on fontique, as our own fonts are, so there's
 # one collection of them.
@@ -45,6 +53,8 @@ pollster = "1.0"
 quinn-proto = { version = "0.11", default-features = false, features = ["rustls-ring", "log"] }
 # A self-signed certificate for each daemon's QUIC endpoint.
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+# The finder's grep, over a whole file at a time, as ripgrep's engine.
+regex = { version = "1.13", default-features = false, features = ["std", "perf", "unicode"] }
 # Reads the agent's words in a chat as Markdown.
 pulldown-cmark = { version = "0.13", default-features = false }
 mlua = { version = "0.12.2", features = ["luau"] }

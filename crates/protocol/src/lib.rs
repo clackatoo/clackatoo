@@ -40,6 +40,7 @@
 
 mod buffer;
 mod chat;
+mod find;
 pub mod frame;
 mod view;
 mod workspace;
@@ -61,6 +62,7 @@ pub use chat::{
     TurnEnd, Usage,
 };
 pub use clackatoo_text::{Diagnostic, Edit, Kind, Op, Severity, Span};
+pub use find::{Done, Found, FoundBuffer, FoundLine, Search};
 pub use view::{
     CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, Node, NodeId, Patch, Run,
     View, ViewUpdate,
@@ -72,7 +74,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -159,6 +161,26 @@ pub enum ClientMessage {
         /// The name to give it.
         name: String,
     },
+    /// Asks the daemon to find something, such as the files in the project
+    /// a pane is in. Not answered as a request is, since it may take a
+    /// while: what's found comes in [`Event::Found`]s numbered `id`, until
+    /// one says it's done.
+    Find {
+        /// The client's number for the search.
+        id: u64,
+        /// The pane whose project to look in: the one its file or its
+        /// program's working directory is in. `None` looks in the home
+        /// directory.
+        pane: Option<PaneId>,
+        /// What to find.
+        search: Search,
+    },
+    /// Stops the search numbered `id`. Nothing more comes of it. Not
+    /// answered.
+    StopFinding {
+        /// The search's number.
+        id: u64,
+    },
 }
 
 /// Everything the daemon sends.
@@ -209,6 +231,14 @@ pub enum Event {
         language: String,
         /// What was installed, or why it couldn't be.
         outcome: Result<String, String>,
+    },
+    /// Some of what the client's [`ClientMessage::Find`] numbered `id`
+    /// found.
+    Found {
+        /// The search's number.
+        id: u64,
+        /// What it found.
+        found: Found,
     },
 }
 

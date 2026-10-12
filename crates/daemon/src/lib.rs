@@ -16,6 +16,7 @@ mod agent;
 mod buffer;
 mod chat;
 pub mod client;
+mod find;
 mod handover;
 mod hosted;
 pub mod launch;

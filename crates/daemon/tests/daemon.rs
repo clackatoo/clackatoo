@@ -10,10 +10,11 @@ use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode,
-    ChatState, ClientMessage, Diff, Edit, Error, Event, FileLocation, Item, Kind, Location,
-    NewAgent, NewTerminal, OpenFile, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Query,
-    Request, Response, ServerMessage, Side, Size, Span, TerminalId, TerminalStatus, Tool,
-    ToolContent, ToolKind, ToolStatus, View, ViewUpdate, Workspaces,
+    ChatState, ClientMessage, Diff, Done, Edit, Error, Event, FileLocation, Found, FoundBuffer,
+    FoundLine, Item, Kind, Location, NewAgent, NewTerminal, OpenFile, Outcome, PROTOCOL_VERSION,
+    PaneId, PaneTerminal, Patch, Query, Request, Response, Search, ServerMessage, Side, Size, Span,
+    TerminalId, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, View, ViewUpdate,
+    Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -1573,7 +1574,7 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
         match client.next_event().expect("a buffer update") {
             Event::Buffer { update, .. } => return update,
             Event::Workspaces(_) => {}
-            other @ (Event::View { .. } | Event::Installed { .. }) => {
+            other @ (Event::View { .. } | Event::Installed { .. } | Event::Found { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }
@@ -1694,17 +1695,18 @@ fn a_language_server_says_where_things_are_defined() {
         let path = |name: &str| dir.join("app").join(name).display().to_string();
 
         client.query(buffer, 1, (0, 0), Query::Definition).unwrap();
-        let place = |path, line, col, offset| FileLocation {
+        let place = |path, line, col, offset, text: &str| FileLocation {
             path,
             line,
             col,
             offset,
+            text: text.to_owned(),
         };
         assert_eq!(
             next_answer(&mut client),
             (
                 1,
-                Answer::Locations(vec![place(path("a.fk"), 0, 3, Some(3))])
+                Answer::Locations(vec![place(path("a.fk"), 0, 3, Some(3), "é bad")])
             ),
             "{flag}"
         );
@@ -1714,7 +1716,13 @@ fn a_language_server_says_where_things_are_defined() {
             next_answer(&mut client),
             (
                 2,
-                Answer::Locations(vec![place(path("defs.fk"), 1, "fn é_".len(), None)])
+                Answer::Locations(vec![place(
+                    path("defs.fk"),
+                    1,
+                    "fn é_".len(),
+                    None,
+                    "fn é_bad() {}"
+                )])
             ),
             "{flag}"
         );
@@ -1758,7 +1766,7 @@ fn a_library_gone_to_is_the_projects_servers_and_a_server_waits_a_while() {
     // Going to a library's file opens it in the project's server, which
     // keeps going though the project's file closes.
     client.query(buffer, 1, (0, 5), Query::Definition).unwrap();
-    let (_, Answer::Locations(found)) = next_answer(&mut client) else {
+    let (_, Answer::Locations(places)) = next_answer(&mut client) else {
         panic!("a place");
     };
     let open_here = |client: &mut Client, path: &str| {
@@ -1768,10 +1776,15 @@ fn a_library_gone_to_is_the_projects_servers_and_a_server_waits_a_while() {
         };
         client.request(&Request::OpenHere { pane, file }).unwrap()
     };
-    assert_eq!(open_here(&mut client, &found[0].path), Response::Done);
+    assert_eq!(open_here(&mut client, &places[0].path), Response::Done);
     let library = buffer_in(&mut client, pane);
     attach_buffer(&mut client, library);
     next_diagnostics(&mut client);
+    // The finder, from the library's file, looks in the project, as its
+    // server does.
+    client.find(1, Some(pane), Search::Files).unwrap();
+    let (found_files, _) = found(&mut client, 1);
+    assert_eq!(files_found(&found_files).0.as_deref(), Some("~/app"));
     // And back again, with no file of its open meanwhile.
     open_here(&mut client, "app/a.fk");
     let buffer = buffer_in(&mut client, pane);
@@ -2867,4 +2880,392 @@ fn a_server_installed_after_it_wasnt_found_is_started() {
     attach_buffer(&mut client, buffer);
     let (_, places) = next_diagnostics(&mut client);
     assert_eq!(places, [(0, 3)]);
+}
+
+#[test]
+fn a_language_server_can_give_several_places_each_with_its_line() {
+    let daemon = with_fake_language_server(|_| Vec::new());
+    let dir = daemon.dir.path();
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    std::fs::write(dir.join("app/a.fk"), "bad\nok bad\n\tbad bad\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    next_diagnostics(&mut client);
+    client
+        .query(buffer, 1, (0, 0), Query::Implementation)
+        .unwrap();
+    let (1, Answer::Locations(found)) = next_answer(&mut client) else {
+        panic!("several places");
+    };
+    let places: Vec<(u64, usize, &str)> = (found.iter())
+        .map(|place| (place.line, place.col, place.text.as_str()))
+        .collect();
+    assert_eq!(
+        places,
+        [
+            (0, 0, "bad"),
+            (1, 3, "ok bad"),
+            (2, 1, "\tbad bad"),
+            (2, 5, "\tbad bad")
+        ]
+    );
+}
+
+// --- The finder ------------------------------------------------------------
+
+/// What the search numbered `id` finds, until it says it's done, skipping
+/// everything else: what it found, and how it finished.
+fn found(client: &mut Client, id: u64) -> (Vec<Found>, Done) {
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut all = Vec::new();
+    loop {
+        match client.next_event().expect("something found") {
+            Event::Found { id: of, found } if of == id => match found {
+                Found::Done(done) => return (all, done),
+                found => all.push(found),
+            },
+            _ => {}
+        }
+    }
+}
+
+/// The files a search found, in order, and where it looked.
+fn files_found(found: &[Found]) -> (Option<String>, Vec<String>) {
+    let mut root = None;
+    let mut files = Vec::new();
+    for found in found {
+        match found {
+            Found::Root { name, .. } => root = Some(name.clone()),
+            Found::Files(batch) => files.extend(batch.iter().cloned()),
+            other => panic!("not a file: {other:?}"),
+        }
+    }
+    files.sort();
+    (root, files)
+}
+
+/// A project in `dir/project`, a repository that ignores some of its files.
+fn ignoring_project(dir: &Path) -> PathBuf {
+    let project = dir.join("project");
+    for path in [".git", "src/deep", "target/debug"] {
+        std::fs::create_dir_all(project.join(path)).unwrap();
+    }
+    let files = [
+        (".gitignore", "target/\n*.log\n"),
+        (".hidden", "fn hidden() {}\n"),
+        ("README", "a project\n"),
+        ("debug.log", "fn logged() {}\n"),
+        ("src/a.rs", "fn main() {\n    run();\n}\n"),
+        ("src/deep/b.rs", "pub fn run() {}\nfn Run() {}\n"),
+        ("target/debug/built.rs", "fn built() {}\n"),
+    ];
+    for (path, text) in files {
+        std::fs::write(project.join(path), text).unwrap();
+    }
+    std::fs::write(project.join("src/blob.bin"), b"fn \0binary").unwrap();
+    project
+}
+
+#[test]
+fn the_finder_lists_a_projects_files_leaving_out_ignored_and_hidden_ones() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let project = ignoring_project(dir);
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let expected: Vec<String> = ["README", "src/a.rs", "src/blob.bin", "src/deep/b.rs"]
+        .map(str::to_owned)
+        .to_vec();
+
+    // From a file's pane: its repository's root.
+    let pane = (client.new_workspace(None, open_file(dir, "project/src/deep/b.rs"))).unwrap();
+    client.find(1, Some(pane), Search::Files).unwrap();
+    let (found_files, done) = found(&mut client, 1);
+    assert_eq!(done, Done::All);
+    assert_eq!(
+        files_found(&found_files),
+        (Some("~/project".to_owned()), expected.clone())
+    );
+    let Found::Root { path, .. } = &found_files[0] else {
+        panic!("the root comes first");
+    };
+    assert_eq!(Path::new(path), project);
+
+    // From a terminal's: its program's working directory's repository.
+    let terminal = client
+        .split_pane(
+            pane,
+            Side::Right,
+            PaneTerminal::New(NewTerminal {
+                size: Size::new(40, 10).unwrap(),
+                command: Some(vec!["cat".into()]),
+                cwd: Some(project.join("src/deep").display().to_string()),
+                record_to: None,
+            }),
+        )
+        .unwrap();
+    client.find(2, Some(terminal), Search::Files).unwrap();
+    let (found_files, _) = found(&mut client, 2);
+    assert_eq!(files_found(&found_files).1, expected);
+
+    // From nowhere: the home directory.
+    client.find(3, None, Search::Files).unwrap();
+    let (found_files, _) = found(&mut client, 3);
+    let (root, files) = files_found(&found_files);
+    assert_eq!(root.as_deref(), Some("~"));
+    assert!(files.contains(&"project/src/a.rs".to_owned()), "{files:?}");
+}
+
+#[test]
+fn the_finder_greps_a_project_previews_its_files_and_lists_buffers() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let project = ignoring_project(dir);
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "project/src/a.rs"))).unwrap();
+    let a = buffer_in(&mut client, pane);
+    let grep = |client: &mut Client, id, pattern: &str, exact| {
+        client
+            .find(
+                id,
+                Some(pane),
+                Search::Grep {
+                    pattern: pattern.to_owned(),
+                    exact,
+                },
+            )
+            .unwrap();
+        let (found, done) = found(client, id);
+        assert_eq!(done, Done::All);
+        let mut lines: Vec<FoundLine> = (found.into_iter())
+            .flat_map(|found| match found {
+                Found::Lines(lines) => lines,
+                _ => Vec::new(),
+            })
+            .collect();
+        lines.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
+        lines
+    };
+
+    // Ignored, hidden and binary files aren't grepped.
+    let lines = grep(&mut client, 1, r"fn \w+", true);
+    let places: Vec<(&str, u64, usize, &str)> = (lines.iter())
+        .map(|line| (line.path.as_str(), line.line, line.col, line.text.as_str()))
+        .collect();
+    assert_eq!(
+        places,
+        [
+            ("src/a.rs", 0, 0, "fn main() {"),
+            ("src/deep/b.rs", 0, 4, "pub fn run() {}"),
+            ("src/deep/b.rs", 1, 0, "fn Run() {}"),
+        ]
+    );
+    assert_eq!(lines[1].matches, [(4, 10)]);
+    // Case is ignored unless asked to match.
+    assert_eq!(grep(&mut client, 2, "RUN", false).len(), 3);
+    assert!(grep(&mut client, 3, "RUN", true).is_empty());
+    // Nothing to look for finds nothing.
+    assert!(grep(&mut client, 4, "", false).is_empty());
+
+    // A preview reads the lines round a line from disk, or from the file's
+    // buffer, changes not written and all.
+    let preview = |client: &mut Client, id, path: &Path| {
+        let search = Search::Preview {
+            path: path.display().to_string(),
+            line: 1,
+            lines: 3,
+        };
+        client.find(id, None, search).unwrap();
+        found(client, id)
+    };
+    let (shown, done) = preview(&mut client, 5, &project.join("src/deep/b.rs"));
+    assert_eq!(done, Done::All);
+    let lines = vec!["pub fn run() {}".to_owned(), "fn Run() {}".to_owned()];
+    assert_eq!(shown, [Found::Preview { first: 0, lines }]);
+    attach_buffer(&mut client, a);
+    send_change(&mut client, a, 0, insert(25, 0, "// new\n", 0));
+    next_buffer_update(&mut client);
+    let (shown, _) = preview(&mut client, 6, &project.join("src/a.rs"));
+    let lines = ["// new", "fn main() {", "    run();"]
+        .map(str::to_owned)
+        .to_vec();
+    assert_eq!(shown, [Found::Preview { first: 0, lines }]);
+    let (shown, done) = preview(&mut client, 7, &project.join("src/blob.bin"));
+    assert!(shown.is_empty());
+    assert_eq!(done, Done::Failed("it isn't text".to_owned()));
+
+    // The files open, newest first, from the root, saying which have
+    // changes.
+    let elsewhere = dir.join("notes.txt");
+    std::fs::write(&elsewhere, "").unwrap();
+    client
+        .split_pane(pane, Side::Right, open_file(dir, "notes.txt"))
+        .unwrap();
+    next_workspaces(&mut client);
+    client.find(8, Some(pane), Search::Buffers).unwrap();
+    let (shown, _) = found(&mut client, 8);
+    let buffers = vec![
+        FoundBuffer {
+            path: elsewhere.display().to_string(),
+            modified: false,
+        },
+        FoundBuffer {
+            path: "src/a.rs".to_owned(),
+            modified: true,
+        },
+    ];
+    assert_eq!(shown[1..], [Found::Buffers(buffers)]);
+}
+
+/// A project of `count` files, in directories of a hundred.
+fn big_project(dir: &Path, count: usize) -> PathBuf {
+    let project = dir.join("big");
+    for file in 0..count {
+        let sub = project.join(format!("d{}", file / 100));
+        if file % 100 == 0 {
+            std::fs::create_dir_all(&sub).unwrap();
+        }
+        std::fs::write(sub.join(format!("f{file}")), "needle\n").unwrap();
+    }
+    project
+}
+
+#[test]
+fn a_search_stopped_or_asked_again_says_nothing_more_and_others_go_on() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    big_project(dir, 2000);
+    let mut client = daemon.client();
+    let grep = |pattern: &str| Search::Grep {
+        pattern: pattern.to_owned(),
+        exact: true,
+    };
+    // Stopped at once, a big search never finishes, and one after it does.
+    client.find(1, None, grep("needle")).unwrap();
+    client.stop_finding(1).unwrap();
+    client.find(2, None, Search::Buffers).unwrap();
+    let (_, done) = found(&mut client, 2);
+    assert_eq!(done, Done::All);
+    // Asked again by the same number, a search starts over.
+    client.find(3, None, grep("nothing like it")).unwrap();
+    client.find(3, None, grep("needle")).unwrap();
+    let mut lines = 0;
+    let mut stopped_said = false;
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let done = loop {
+        match client.next_event().expect("something found") {
+            Event::Found {
+                id: 1,
+                found: Found::Done(_),
+            } => stopped_said = true,
+            Event::Found {
+                id: 3,
+                found: Found::Lines(batch),
+            } => lines += batch.len(),
+            Event::Found {
+                id: 3,
+                found: Found::Done(done),
+            } => break done,
+            _ => {}
+        }
+    };
+    assert_eq!((done, lines), (Done::All, 2000));
+    assert!(!stopped_said, "the stopped search never finished");
+
+    // A pattern matching every line stops at the most a grep finds.
+    std::fs::write(dir.join("big/many"), "x\n".repeat(20_000)).unwrap();
+    client.find(4, None, grep("x")).unwrap();
+    let (found_lines, done) = found(&mut client, 4);
+    let count: usize = (found_lines.iter())
+        .map(|found| match found {
+            Found::Lines(lines) => lines.len(),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!((done, count), (Done::CutShort, 10_000));
+}
+
+#[test]
+fn a_client_gone_mid_search_leaves_the_daemon_serving_others() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    big_project(dir, 2000);
+    {
+        let mut leaving = daemon.client();
+        leaving.find(1, None, Search::Files).unwrap();
+        leaving
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        // Gone once the first batch is in.
+        while !matches!(
+            leaving.next_event().unwrap(),
+            Event::Found {
+                found: Found::Files(_),
+                ..
+            }
+        ) {}
+    }
+    let mut staying = daemon.client();
+    staying.find(1, None, Search::Files).unwrap();
+    let (found_files, done) = found(&mut staying, 1);
+    assert_eq!(done, Done::All);
+    assert_eq!(files_found(&found_files).1.len(), 2000);
+}
+
+#[test]
+fn what_a_search_finds_waits_for_a_slow_client_and_goes_when_its_stopped() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let line = format!("x{}\n", "y".repeat(200));
+    std::fs::write(dir.join("long"), line.repeat(20_000)).unwrap();
+    let mut client = daemon.client();
+    client
+        .find(
+            1,
+            None,
+            Search::Grep {
+                pattern: "x".into(),
+                exact: true,
+            },
+        )
+        .unwrap();
+    // Not read meanwhile: the daemon finds the most it may, ten thousand
+    // long lines, far more than a connection holds.
+    std::thread::sleep(Duration::from_millis(300));
+    client.stop_finding(1).unwrap();
+    client.find(2, None, Search::Buffers).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut lines = 0;
+    loop {
+        match client.next_event().expect("something found") {
+            Event::Found {
+                id: 1,
+                found: Found::Lines(batch),
+            } => lines += batch.len(),
+            Event::Found {
+                id: 1,
+                found: Found::Done(_),
+            } => panic!("the stopped search finished"),
+            Event::Found {
+                id: 2,
+                found: Found::Done(_),
+            } => break,
+            _ => {}
+        }
+    }
+    assert!(
+        lines < 5_000,
+        "{lines} lines were sent to a client not reading"
+    );
 }

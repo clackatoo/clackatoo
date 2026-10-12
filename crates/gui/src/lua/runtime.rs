@@ -526,6 +526,14 @@ fn acting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    let s = state.clone();
+    core.set(
+        "command",
+        lua.create_function(move |_, line: String| {
+            s.tell(FromLua::Command(line));
+            Ok(())
+        })?,
+    )?;
     Ok(())
 }
 

@@ -158,14 +158,21 @@ impl Server {
         } else {
             marked.next()
         };
-        root.or_else(|| {
-            dir.ancestors()
-                .take_while(below_home)
-                .find(|dir| dir.join(".git").exists())
-        })
-        .or(Some(dir))
-        .map(Path::to_owned)
+        root.map(Path::to_owned)
+            .or_else(|| git_root(dir, home))
+            .or_else(|| Some(dir.to_owned()))
     }
+}
+
+/// The nearest directory from `dir` up with a `.git` in it, short of the
+/// home directory: the root of the repository `dir` is in, unless that's
+/// all of home.
+#[must_use]
+pub fn git_root(dir: &Path, home: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .take_while(|dir| !home.starts_with(dir))
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_owned)
 }
 
 #[cfg(test)]

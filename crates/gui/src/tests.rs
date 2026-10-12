@@ -269,6 +269,7 @@ fn two_pane_window(
             menu,
             alert,
             rounded: false,
+            finder: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -1252,4 +1253,133 @@ fn an_editors_panel_is_drawn_over_its_text() {
     let palette = [0x16, 0x18, 0x1c];
     assert_eq!(at(3, 4), palette, "the panel, over the text");
     assert_ne!(at(3, 30), palette, "the file, beside it");
+}
+
+#[test]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn the_finder_is_drawn_over_the_panes_with_a_preview() {
+    use crate::finder::view::Layout as FinderLayout;
+
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut fonts = fonts(1.0);
+    let metrics = Metrics {
+        cell: [fonts.cell.width as f32, fonts.cell.height as f32],
+        ui_line: fonts.ui.height,
+        padding: 4.0,
+    };
+    let [width, height] = Geometry::window_size(150, 36, metrics);
+    let size = [width as u32, height as u32];
+    let geometry = Geometry::new(size, metrics);
+    let view = grep_finder_view(&FinderLayout::new(&geometry));
+    assert!(view.preview.is_some());
+    let buttons = ButtonLayout::default();
+    let chrome = Chrome::new(
+        geometry,
+        Contents {
+            workspaces: vec![(WorkspaceId(1), "clackatoo".into(), 2, true)],
+            tabs: vec![(TabId(1), "1 zsh".into(), true)],
+            status: Status::tabs(),
+            buttons: &buttons,
+            bottom_shown: true,
+            menu: None,
+            alert: None,
+            rounded: false,
+            finder: Some(view),
+        },
+        &mut |text, bold| fonts.ui_width(text, bold),
+    );
+    // Clicks on the panel are its own, a row's or none's: never the pane's.
+    let (finder, _) = chrome.finder.as_ref().expect("the finder");
+    let panel = finder.panel;
+    assert_eq!(
+        chrome.hit([panel.x + 2.0, panel.y + 2.0], false),
+        Hit::Finder(None)
+    );
+    let first_row = (0..200)
+        .map(|y| [panel.x + 30.0, panel.y + y as f32])
+        .find(|&point| finder.row_at(point, 3) == Some(0))
+        .expect("a row");
+    assert_eq!(chrome.hit(first_row, false), Hit::Finder(Some(0)));
+    let layout = Layout::Pane(Pane {
+        id: PaneId(1),
+        content: Content::Terminal(TerminalId(1)),
+    });
+    let placement = Placement::new(&layout, &geometry.area);
+    let screen = screen(150, 36, "$ ls\r\nCargo.toml  crates\r\n$ ");
+    let rows: Vec<_> = screen.rows.iter().collect();
+    let scenes = [Scene {
+        origin: placement.panes[0].1.origin,
+        size: placement.panes[0].1.cells_size(geometry.area.cell),
+        rows: &rows,
+        cursor: None,
+        normal_mode: true,
+        highlights: &[],
+    }];
+    let painted = chrome.paint(Hit::Nothing);
+    let mut fills = vec![chrome::window_fill(&geometry, false)];
+    fills.extend(painted.fills);
+    fills.extend(chrome::paint_panes(&geometry, &placement, None));
+    let mut texts = painted.texts;
+    texts.extend(painted.over_texts);
+    let picture = Picture {
+        scenes: &scenes,
+        fills: &fills,
+        over: &painted.over,
+        texts: &texts,
+        glyphs: &[],
+        over_glyphs: &[],
+        transparent: false,
+    };
+    let pixels = draw(&gpu, size, &picture, &mut fonts);
+    save("finder", size, &pixels);
+}
+
+/// What a grep's finder shows, laid out as `layout` says, with three lines
+/// found and a preview of the first.
+fn grep_finder_view(layout: &crate::finder::view::Layout) -> crate::finder::view::FinderView {
+    use clackatoo_protocol::{Found, FoundLine};
+
+    use crate::finder::{Finder, Kind};
+    use crate::options::Case;
+
+    let mut finder = Finder::new(Kind::Grep, "fn ma".into(), Case::default());
+    finder.searching(1);
+    finder.found(Found::Root {
+        path: "/home/jack/projects/clackatoo".into(),
+        name: "~/projects/clackatoo".into(),
+    });
+    let line = |path: &str, line, text: &str| FoundLine {
+        path: path.into(),
+        line,
+        col: 0,
+        text: text.into(),
+        matches: vec![(0, 5)],
+    };
+    finder.found(Found::Lines(vec![
+        line("crates/clackatoo/src/main.rs", 40, "fn main() {"),
+        line("crates/daemon/examples/fake_agent.rs", 12, "fn main() {"),
+        line(
+            "crates/gui/src/desk/finding.rs",
+            220,
+            "fn make_it(&mut self) {}",
+        ),
+    ]));
+    let main = "/home/jack/projects/clackatoo/crates/clackatoo/src/main.rs";
+    finder.previewing(2, main.into(), 40);
+    let lines: Vec<String> = (0..60)
+        .map(|n| match n {
+            40 => "fn main() {".to_owned(),
+            41 => "\tlet args = Args::parse();".to_owned(),
+            _ => format!("// line {n}"),
+        })
+        .collect();
+    finder.preview_found(Found::Preview { first: 0, lines });
+    finder.view((layout.rows, layout.cols), layout.preview_size)
 }

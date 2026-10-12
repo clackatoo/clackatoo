@@ -6,7 +6,8 @@
 //! Asked where something is defined, it says the first `bad` in the file,
 //! when asked about its first line, or else the first `bad` on the second
 //! line of `defs.fk` beside it, or of the file `--defs` names, as a link,
-//! read from disk.
+//! read from disk. Asked what implements something, it says every `bad` in
+//! the file, so an answer can give several places.
 //!
 //! Asked what's at a place, it describes a `bad` there in markdown, and
 //! knows nothing of anything else. Asked to rename a word, it renames it
@@ -200,6 +201,17 @@ impl Fake {
                     }
                 }
                 let result = self.rename(params);
+                send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
+            }
+            "textDocument/implementation" => {
+                let uri = params["textDocument"]["uri"].as_str().unwrap();
+                let text = &self.files[uri];
+                let result: Vec<Value> = (text.match_indices("bad"))
+                    .map(|(at, _)| {
+                        let start = place(text, at, self.utf16);
+                        json!({ "uri": uri, "range": { "start": start, "end": start } })
+                    })
+                    .collect();
                 send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
             }
             "exit" => return false,

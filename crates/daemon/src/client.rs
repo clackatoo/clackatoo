@@ -9,8 +9,8 @@ use std::path::Path;
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
 use clackatoo_protocol::{
     Block, BufferId, Change, ChatAction, ClientMessage, Error, Event, HistoryLines, NewTerminal,
-    PROTOCOL_VERSION, PaneId, PaneTerminal, Query, Request, Response, ServerMessage, Side, Size,
-    TerminalId, TerminalInfo, Udp, View, Which, WorkspaceId, Workspaces,
+    PROTOCOL_VERSION, PaneId, PaneTerminal, Query, Request, Response, Search, ServerMessage, Side,
+    Size, TerminalId, TerminalInfo, Udp, View, Which, WorkspaceId, Workspaces,
 };
 
 use crate::quic::{self, Carried, Contact, Route};
@@ -336,6 +336,30 @@ impl Client {
             at,
             name: name.to_owned(),
         })
+    }
+
+    /// Asks the daemon to find `search` in the project `pane` is in,
+    /// numbered `id`. What's found comes in [`Event::Found`]s.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn find(
+        &mut self,
+        id: u64,
+        pane: Option<PaneId>,
+        search: Search,
+    ) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Find { id, pane, search })
+    }
+
+    /// Stops the search numbered `id`.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn stop_finding(&mut self, id: u64) -> Result<(), ClientError> {
+        self.send(&ClientMessage::StopFinding { id })
     }
 
     /// Limits how long [`next_event`](Self::next_event) and requests wait.

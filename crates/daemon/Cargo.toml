@@ -17,11 +17,14 @@ clackatoo-protocol.workspace = true
 clackatoo-syntax.workspace = true
 clackatoo-term = { workspace = true, features = ["serde"] }
 clackatoo-text.workspace = true
+ignore.workspace = true
 log.workspace = true
+memchr.workspace = true
 mio.workspace = true
 postcard.workspace = true
 quinn-proto.workspace = true
 rcgen.workspace = true
+regex.workspace = true
 rustls.workspace = true
 rustix.workspace = true
 serde.workspace = true

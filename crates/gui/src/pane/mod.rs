@@ -318,6 +318,14 @@ impl Pane {
         self.prompt.is_some()
     }
 
+    /// Whether a two-key command is half typed, such as `y` waiting for
+    /// its motion, which the next key is for. Ctrl+\ waiting to be pressed
+    /// again isn't: any other key does what it would.
+    pub(crate) fn pending(&self) -> bool {
+        self.prefix
+            .is_some_and(|prefix| prefix != Prefix::CtrlBackslash)
+    }
+
     /// Switches to normal mode, if in insert mode, as when the focus
     /// arrives from a pane in normal mode.
     pub(crate) fn enter_normal_mode(&mut self) {

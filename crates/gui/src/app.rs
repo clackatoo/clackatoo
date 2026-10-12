@@ -462,6 +462,7 @@ impl App {
                 menu: None,
                 alert: None,
                 rounded,
+                finder: None,
             }
         } else {
             let mut status = self.desk.status();
@@ -474,6 +475,16 @@ impl App {
             {
                 text.insert_str(caret, &preedit.text);
             }
+            let finder = crate::finder::view::Layout::new(&geometry);
+            let layout = (finder.rows, finder.cols);
+            let mut finder = self.desk.finder_view(layout, finder.preview_size);
+            // And so in the finder's query.
+            if let Some(view) = &mut finder
+                && let Some(preedit) = self.ime.preedit()
+                && let Some(caret) = view.query.rfind(CARET)
+            {
+                view.query.insert_str(caret, &preedit.text);
+            }
             Contents {
                 workspaces: self.desk.workspace_names(),
                 tabs: self.desk.tab_names(),
@@ -485,6 +496,7 @@ impl App {
                     .map(|menu| (menu.at, MENU_ITEMS.map(str::to_owned).to_vec())),
                 alert: self.out_of_contact(),
                 rounded,
+                finder,
             }
         };
         let fonts = &mut self.frame.as_mut()?.fonts;
@@ -518,7 +530,8 @@ impl App {
             | Hit::Tab(_)
             | Hit::NewWorkspace
             | Hit::NewTab
-            | Hit::Menu(_) => CursorIcon::Pointer,
+            | Hit::Menu(_)
+            | Hit::Finder(Some(_)) => CursorIcon::Pointer,
             Hit::Panes if let Some(axis) = self.desk.divider_at(point) => match axis {
                 Axis::LeftToRight => CursorIcon::ColResize,
                 Axis::TopToBottom => CursorIcon::RowResize,
@@ -535,7 +548,7 @@ impl App {
                 Pointer::Text => CursorIcon::Text,
             },
             Hit::Panes => CursorIcon::Text,
-            Hit::TopBar | Hit::Nothing => CursorIcon::Default,
+            Hit::TopBar | Hit::Finder(None) | Hit::Nothing => CursorIcon::Default,
         };
         if let Some(frame) = &self.frame
             && icon != self.cursor_icon
@@ -563,8 +576,8 @@ impl App {
             self.request_redraw();
             return;
         }
-        // Over a pane, or dragging out of one.
-        if self.notice.is_none() {
+        // Over a pane, or dragging out of one: not over the finder.
+        if self.notice.is_none() && !matches!(hit, Hit::Finder(_)) {
             let outcome = self
                 .desk
                 .mouse(point, MouseAction::Motion(None), 1, self.modifiers);
@@ -608,7 +621,7 @@ impl App {
         let (Some(point), Some(button)) = (self.pointer, mouse_button(button)) else {
             return;
         };
-        if self.notice.is_some() {
+        if self.notice.is_some() || matches!(self.hit(point), Hit::Finder(_)) {
             return;
         }
         let outcome = self
@@ -678,28 +691,16 @@ impl App {
             self.request_redraw();
             return;
         }
+        if let Hit::Finder(row) = hit {
+            return self.clicked_in_finder(row, button, double);
+        }
         // Clicks in a pane are the pane's: selecting, or for its program.
         if hit == Hit::Panes {
             self.clicked_in_pane(point, button, clicks);
             return;
         }
         if button == MouseButton::Right {
-            let target = match hit {
-                Hit::Workspace(workspace) => Some(MenuTarget::Workspace(workspace)),
-                Hit::Tab(tab) => Some(MenuTarget::Tab(tab)),
-                _ => None,
-            };
-            match target {
-                Some(target) => {
-                    self.menu = Some(Menu { at: point, target });
-                    self.request_redraw();
-                }
-                None if hit == Hit::TopBar => {
-                    window.show_window_menu(PhysicalPosition::new(point[0], point[1]));
-                }
-                None => {}
-            }
-            return;
+            return self.right_clicked(hit, point, &window);
         }
         if button != MouseButton::Left {
             return;
@@ -739,13 +740,44 @@ impl App {
                 self.desk.new_tab();
                 Ok(())
             }
-            Hit::Panes | Hit::Menu(_) | Hit::Nothing => Ok(()),
+            Hit::Panes | Hit::Menu(_) | Hit::Finder(_) | Hit::Nothing => Ok(()),
         };
         if let Err(err) = result {
             log::warn!("the desktop wouldn't move or resize the window: {err}");
         }
         self.update_title();
         self.request_redraw();
+    }
+
+    /// A click on the finder, which is its own: a row picks it, and a
+    /// double click opens it.
+    fn clicked_in_finder(&mut self, row: Option<usize>, button: MouseButton, double: bool) {
+        if let Some(row) = row.filter(|_| button == MouseButton::Left) {
+            self.desk.finder_click(row, double);
+            self.send_outbox();
+        }
+        self.update_title();
+        self.request_redraw();
+    }
+
+    /// A right click on `hit`, at `point`: a workspace's or tab's menu, or
+    /// on the top bar, the desktop's menu for the window.
+    fn right_clicked(&mut self, hit: Hit, point: [f32; 2], window: &Window) {
+        let target = match hit {
+            Hit::Workspace(workspace) => Some(MenuTarget::Workspace(workspace)),
+            Hit::Tab(tab) => Some(MenuTarget::Tab(tab)),
+            _ => None,
+        };
+        match target {
+            Some(target) => {
+                self.menu = Some(Menu { at: point, target });
+                self.request_redraw();
+            }
+            None if hit == Hit::TopBar => {
+                window.show_window_menu(PhysicalPosition::new(point[0], point[1]));
+            }
+            None => {}
+        }
     }
 
     /// Titles the window after the focused pane, and the daemon's machine.
@@ -982,7 +1014,11 @@ impl App {
             return;
         };
         #[allow(clippy::cast_possible_truncation)]
-        if whole != 0.0 && self.desk.wheel(point, whole as i64, self.modifiers) {
+        let whole = whole as i64;
+        if whole != 0 && matches!(self.hit(point), Hit::Finder(_)) {
+            self.desk.finder_wheel(whole);
+            self.request_redraw();
+        } else if whole != 0 && self.desk.wheel(point, whole, self.modifiers) {
             self.request_redraw();
         }
         self.send_outbox();
@@ -1141,9 +1177,10 @@ impl App {
         texts.extend(painted.over_texts);
         let mut over: Vec<Fill> = Vec::new();
         // The focused editor's panel by its cursor, under the palette and
-        // menus. Hidden while the palette is open, as their text would
-        // mix.
+        // menus. Hidden while the palette or the finder is open, as their
+        // text would mix.
         if chrome.palette.is_none()
+            && chrome.finder.is_none()
             && let Some(view) = desk.editor(shown.pane).and_then(Editor::panel)
             && let Some(&(_, tile)) = (placement.panes.iter()).find(|(id, _)| *id == shown.pane)
         {
@@ -1729,7 +1766,11 @@ impl ApplicationHandler<SessionEvent> for App {
             .as_ref()
             .and_then(Contact::silent_since)
             .map(|since| since + Duration::from_secs(since.elapsed().as_secs() + 1));
-        let flow = match counting.into_iter().chain(self.desk.flash_ends()).min() {
+        let soonest = (counting.into_iter())
+            .chain(self.desk.flash_ends())
+            .chain(self.desk.grep_at())
+            .min();
+        let flow = match soonest {
             Some(wake) => ControlFlow::WaitUntil(wake),
             None => ControlFlow::Wait,
         };
@@ -1869,6 +1910,11 @@ impl App {
                 self.desk.installed(outcome);
                 self.request_redraw();
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Found { id, found })) => {
+                if self.desk.found(id, found) {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Message(ServerMessage::Event(Event::Workspaces(workspaces))) => {
                 self.desk.workspaces_changed(workspaces);
                 self.update_title();
@@ -1990,6 +2036,7 @@ mod tests {
                     menu: None,
                     alert: None,
                     rounded: false,
+                    finder: None,
                 },
                 &mut |_, _| 0.0,
             )
@@ -2027,6 +2074,7 @@ mod tests {
                 menu: None,
                 alert: None,
                 rounded: false,
+                finder: None,
             },
             &mut |_, _| 0.0,
         );

@@ -55,11 +55,13 @@ use crate::upgrade::Upgrade;
 use crate::workspaces::WorkspaceState;
 
 mod buffers;
+mod finder;
 mod language;
 mod offers;
 mod rename;
 
 use buffers::BufferSlot;
+use finder::Finds;
 use language::{Pipe, ServerId, Servers};
 use offers::Installs;
 
@@ -391,6 +393,8 @@ pub struct Daemon {
     installs: Installs,
     /// Renames whose files are being written.
     renames: rename::Renames,
+    /// The finder's searches going on.
+    finds: Finds,
     /// The agent chats talk to, while any chat needs it.
     agent: Option<AgentSlot>,
     /// What the agent sent last, for the chats to act on.
@@ -472,6 +476,14 @@ impl Daemon {
         poll.registry()
             .register(&mut listener, LISTENER, Interest::READABLE)?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKER)?);
+        let finds = {
+            let waker = Arc::clone(&waker);
+            Finds::new(&config.home, move || {
+                if let Err(err) = waker.wake() {
+                    log::warn!("waking the event loop for what was found failed: {err}");
+                }
+            })
+        };
         Ok(Self {
             poll,
             listener,
@@ -488,6 +500,7 @@ impl Daemon {
             servers: Servers::default(),
             installs: Installs::new(config.declined.as_deref()),
             renames: rename::Renames::default(),
+            finds,
             agent: None,
             incoming: Vec::new(),
             quic: None,
@@ -707,6 +720,7 @@ impl Daemon {
             self.take_installs();
             self.take_renames();
             self.ask_again();
+            self.take_found();
             self.stop_idle_servers();
             self.compact_scrollbacks();
             self.send_view_updates();
@@ -1613,16 +1627,12 @@ impl Daemon {
                 ClientMessage::Request(request) => {
                     ServerMessage::Response(self.respond(request, token))
                 }
-                ClientMessage::Edit {
-                    buffer,
-                    seq,
-                    change,
-                } => {
-                    self.serve_edit(token, buffer, seq, change);
-                    continue;
-                }
-                message @ (ClientMessage::Query { .. } | ClientMessage::Rename { .. }) => {
-                    self.serve_query(token, message);
+                message @ (ClientMessage::Edit { .. }
+                | ClientMessage::Query { .. }
+                | ClientMessage::Rename { .. }
+                | ClientMessage::Find { .. }
+                | ClientMessage::StopFinding { .. }) => {
+                    self.serve_unanswered(token, message);
                     continue;
                 }
             };
@@ -1645,6 +1655,25 @@ impl Daemon {
             self.become_carrier(token);
         } else {
             self.flush_client(token);
+        }
+    }
+
+    /// Acts on a message from the client at `token` that isn't answered as
+    /// a request is: a change to a buffer, a question or a rename for its
+    /// language server, or a search, all answered in events of their own.
+    fn serve_unanswered(&mut self, token: Token, message: ClientMessage) {
+        match message {
+            ClientMessage::Edit {
+                buffer,
+                seq,
+                change,
+            } => self.serve_edit(token, buffer, seq, change),
+            message @ (ClientMessage::Query { .. } | ClientMessage::Rename { .. }) => {
+                self.serve_query(token, message);
+            }
+            ClientMessage::Find { id, pane, search } => self.serve_find(token, id, pane, search),
+            ClientMessage::StopFinding { id } => self.stop_finding(token, id),
+            other => log::error!("{other:?} is answered"),
         }
     }
 
@@ -2007,6 +2036,7 @@ impl Daemon {
             self.forget_viewer(token, &client);
             self.forget_queries(token, None);
             self.installs.forget(token);
+            self.forget_finds(token);
             if let Link::Quic(handle) = client.link
                 && let Some(quic) = self.quic.as_mut()
             {

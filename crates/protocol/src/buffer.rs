@@ -233,4 +233,7 @@ pub struct FileLocation {
     /// answer's version, which a client moves past its own changes that
     /// haven't been made yet, as it moves diagnostics.
     pub offset: Option<usize>,
+    /// The line's text, without its end, cut short if it's long, for a
+    /// list of places to pick from.
+    pub text: String,
 }

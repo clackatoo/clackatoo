@@ -31,7 +31,7 @@ pub(super) struct Editors {
     attached: HashSet<BufferId>,
     /// Places in files being opened in panes, which their cursors go to
     /// once the files' text has come.
-    landings: HashMap<PaneId, (FileLocation, usize)>,
+    landings: HashMap<PaneId, FileLocation>,
     /// The files asked to open in panes, in place of theirs, that the
     /// daemon hasn't answered about yet, oldest first. Until it has, what
     /// a pane shows is about to change, so no cursor lands in it.
@@ -138,7 +138,7 @@ impl Desk {
     /// the pane has opened, or failed to.
     fn land(&mut self) {
         let editors = &mut self.editors;
-        editors.landings.retain(|pane, (place, places)| {
+        editors.landings.retain(|pane, place| {
             if editors.opening.contains_key(pane) {
                 return true;
             }
@@ -148,7 +148,6 @@ impl Desk {
             match editors.buffers.get(&editor.buffer()) {
                 Some(copy) if copy.loaded() && copy.path() == place.path => {
                     editor.go_to(place.line, place.col, copy);
-                    editor.say_how_many(*places);
                     false
                 }
                 _ => true,
@@ -156,10 +155,17 @@ impl Desk {
         });
     }
 
+    /// Puts `pane`'s cursor on `place`, in the file it's opening, once the
+    /// file's text has come.
+    pub(super) fn land_at(&mut self, pane: PaneId, place: FileLocation) {
+        self.editors.landings.insert(pane, place);
+        self.land();
+    }
+
     /// `pane` shows `path` in place of its file, as `:e` does, saying so if
     /// the file it showed has changes that aren't written, which are kept,
     /// unseen. Where its cursor was to go before, it won't.
-    fn open_here(&mut self, pane: PaneId, path: String) {
+    pub(super) fn open_here(&mut self, pane: PaneId, path: String) {
         self.editors.landings.remove(&pane);
         if self.connected {
             let opening = self.editors.opening.entry(pane).or_default();
@@ -192,7 +198,7 @@ impl Desk {
         }
         if failed
             && let Some(path) = path
-            && (editors.landings.get(&pane)).is_some_and(|(place, _)| place.path == path)
+            && (editors.landings.get(&pane)).is_some_and(|place| place.path == path)
         {
             editors.landings.remove(&pane);
         }
@@ -218,7 +224,7 @@ impl Desk {
         self.workspaces.find_pane(pane)?;
         let editors = &self.editors;
         if byte.is_none()
-            && let Some((place, _)) = editors.landings.get(&pane)
+            && let Some(place) = editors.landings.get(&pane)
         {
             let text = (editors.buffers.values())
                 .find(|copy| copy.loaded() && copy.path() == place.path)
@@ -254,9 +260,9 @@ impl Desk {
             line: place.line,
             col: place.col,
             offset: None,
+            text: String::new(),
         };
-        self.editors.landings.insert(pane, (location, 1));
-        self.land();
+        self.land_at(pane, location);
     }
 
     /// Takes in a change to `buffer`. Returns whether a pane showing it is
@@ -292,20 +298,27 @@ impl Desk {
         }
         let mut opening = Vec::new();
         let mut left = Vec::new();
+        let mut places = None;
         for pane in &showing {
             let editor = editors.panes.get_mut(pane).expect("just found");
             editor.heard(&heard, Some(*pane) == focused, copy);
             left.extend(editor.take_left().map(|byte| (*pane, byte)));
             opening.extend(editor.take_opening().map(|place| (*pane, place)));
+            places = places.or_else(|| editor.take_places());
         }
+        let here = copy.path().to_owned();
         for (pane, byte) in left {
             self.record_jump(pane, Some(byte));
         }
         // An answer that goes to another file opens it in the pane, and
-        // the cursor goes to the place once its text has come.
-        for (pane, (place, places)) in opening {
+        // the cursor goes to the place once its text has come; one that
+        // gives several places opens the finder on them.
+        for (pane, place) in opening {
             self.open_here(pane, place.path.clone());
-            self.editors.landings.insert(pane, (place, places));
+            self.editors.landings.insert(pane, place);
+        }
+        if let Some(places) = places {
+            self.pick_place(&places, &here);
         }
         self.land();
         self.shown_tab().is_some_and(|tab| {
