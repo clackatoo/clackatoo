@@ -61,7 +61,7 @@ pub use chat::{
     Question, Setting, SettingChoice, SettingKind, Tool, ToolContent, ToolKind, ToolStatus, Turn,
     TurnEnd, Usage,
 };
-pub use clackatoo_text::{Diagnostic, Edit, Kind, Op, Severity, Span};
+pub use clackatoo_text::{Diagnostic, Edit, Hunk, Kind, Op, Severity, Span};
 pub use find::{Done, Found, FoundBuffer, FoundLine, Search};
 pub use view::{
     CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, Node, NodeId, Patch, Run,
@@ -74,7 +74,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -180,6 +180,21 @@ pub enum ClientMessage {
     StopFinding {
         /// The search's number.
         id: u64,
+    },
+    /// Asks the daemon to stage the hunk at a place in a buffer the client
+    /// attached to: to put just that hunk's lines in git's index, as `git
+    /// add -p` would, as [`Query`](Self::Query) asks about a place. The
+    /// answer comes as [`Answer::Staged`](crate::Answer::Staged) in a
+    /// [`BufferUpdate::Answer`], after the buffer's new hunks.
+    Stage {
+        /// The buffer.
+        buffer: BufferId,
+        /// The client's number for it, which the answer gives back.
+        id: u64,
+        /// The version of the text `at` is in, as for a query.
+        version: u64,
+        /// A place on the hunk's lines, in bytes.
+        at: usize,
     },
 }
 

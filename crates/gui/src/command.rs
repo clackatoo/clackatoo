@@ -8,10 +8,14 @@
 //! machine's daemon. A number moves to that tab. Lowercase words are the
 //! window's own commands, and Vim's for files, `w`, `q`, `wq` and `e`, and
 //! for options, `set`. The finder's are capitalised too, as fzf.vim's are:
-//! `Files`, `Grep` and `Buffers`, each with what to start with typed.
+//! `Files`, `Grep` and `Buffers`, each with what to start with typed. So is
+//! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
+//! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
+//! `prev_hunk`.
 
 use clackatoo_protocol::Side;
 
+use crate::editor::HunkAction;
 use crate::finder;
 
 /// What a command line asks for.
@@ -54,6 +58,8 @@ pub(crate) enum Command {
     Set(String),
     /// `:Files`, `:Grep` or `:Buffers`: the finder, with this typed.
     Find { kind: finder::Kind, query: String },
+    /// `:Gitsigns`: this, to the hunk at the focused editor's cursor.
+    Hunk(HunkAction),
 }
 
 /// Where a new pane goes.
@@ -90,8 +96,19 @@ const FINDERS: [(&str, finder::Kind); 4] = [
     ("Diagnostics", finder::Kind::Diagnostics),
 ];
 
+/// What `:Gitsigns` does to the hunk at the cursor, by gitsigns.nvim's
+/// names for it.
+const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
+    ("preview_hunk", HunkAction::Preview),
+    ("reset_hunk", HunkAction::Reset),
+    ("stage_hunk", HunkAction::Stage),
+    ("next_hunk", HunkAction::Next { forward: true }),
+    ("prev_hunk", HunkAction::Next { forward: false }),
+];
+
 /// The window's own commands, for messages.
-const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, w, q, e, Format, Files, Grep, Buffers and Diagnostics";
+const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, w, q, e, Format, \
+                        Files, Grep, Buffers, Diagnostics and Gitsigns";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -115,6 +132,16 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     }
     if let Some(command) = file_command(word, argument) {
         return command;
+    }
+    if word == "Gitsigns" {
+        let names = || HUNK_ACTIONS.map(|(name, _)| name).join(", ");
+        let Some(argument) = argument else {
+            return Err(format!("Gitsigns needs what to do: {}", names()));
+        };
+        return (HUNK_ACTIONS.iter())
+            .find(|(name, _)| *name == argument)
+            .map(|&(_, action)| Command::Hunk(action))
+            .ok_or_else(|| format!("Gitsigns can't {argument:?}; it can {}", names()));
     }
     if let Some(&(_, kind)) = FINDERS.iter().find(|(name, _)| *name == word) {
         let query = argument.unwrap_or_default().to_owned();
@@ -348,6 +375,20 @@ mod tests {
                 .unwrap_err()
                 .contains("takes nothing")
         );
+    }
+
+    #[test]
+    fn hunk_commands_are_named_as_gitsigns_names_them() {
+        assert_eq!(
+            parse("Gitsigns stage_hunk").unwrap(),
+            Command::Hunk(HunkAction::Stage)
+        );
+        assert_eq!(
+            parse("Gitsigns prev_hunk").unwrap(),
+            Command::Hunk(HunkAction::Next { forward: false })
+        );
+        assert!(parse("Gitsigns").unwrap_err().contains("preview_hunk"));
+        assert!(parse("Gitsigns blame").unwrap_err().contains("reset_hunk"));
     }
 
     #[test]

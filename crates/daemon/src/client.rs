@@ -338,6 +338,27 @@ impl Client {
         })
     }
 
+    /// Asks the daemon to stage the hunk at byte `at` of the text at
+    /// `version` of a buffer the client follows, numbered `id`. The answer
+    /// comes in an [`Event::Buffer`], after the buffer's new hunks.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn stage(
+        &mut self,
+        buffer: BufferId,
+        id: u64,
+        (version, at): (u64, usize),
+    ) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Stage {
+            buffer,
+            id,
+            version,
+            at,
+        })
+    }
+
     /// Asks the daemon to find `search` in the project `pane` is in,
     /// numbered `id`. What's found comes in [`Event::Found`]s.
     ///

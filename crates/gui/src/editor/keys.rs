@@ -181,6 +181,11 @@ pub(crate) enum Action {
     Diagnostic {
         backward: bool,
     },
+    /// `]c`, or `[c` if `backward`: to the next hunk, a change since the
+    /// file's text in the index.
+    Hunk {
+        backward: bool,
+    },
     /// `gd` and the like: ask the language server, and go where it says.
     Ask(Query),
     /// `K`: ask the language server what's under the cursor, and show
@@ -221,9 +226,9 @@ impl Action {
     }
 
     /// Whether it's a jump, which the jump list records, as Vim's are:
-    /// `gg`, `G`, `n` and `N`, and `]d` and `[d`. A search typed after `/`
-    /// is too, once Enter finds it, as is going where a language server
-    /// says, once it answers.
+    /// `gg`, `G`, `n` and `N`, `]d` and `[d`, and `]c` and `[c`. A search
+    /// typed after `/` is too, once Enter finds it, as is going where a
+    /// language server says, once it answers.
     pub(crate) fn jumps(self) -> bool {
         matches!(
             self,
@@ -232,6 +237,7 @@ impl Action {
                 | Self::SearchAgain { .. }
                 | Self::SearchWord { .. }
                 | Self::Diagnostic { .. }
+                | Self::Hunk { .. }
         )
     }
 }
@@ -400,6 +406,9 @@ impl Reader<'_> {
                 None => return Err(Parsed::Incomplete),
                 Some(next) => match next.plain() {
                     Some('d') => Action::Diagnostic {
+                        backward: bracket == '[',
+                    },
+                    Some('c') => Action::Hunk {
                         backward: bracket == '[',
                     },
                     _ => return Err(Parsed::Nothing),

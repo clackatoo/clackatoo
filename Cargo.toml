@@ -36,6 +36,10 @@ fontique = { version = "0.11", features = ["fontconfig-dlopen"] }
 # Walks a project for the finder as ripgrep does (it's ripgrep's walker),
 # leaving out ignored and hidden files, on several threads.
 ignore = "0.4.33"
+# Compares a buffer with its file's text in git, line by line, for the
+# signs beside its lines: the histogram algorithm, as Helix uses it, and
+# fast enough to run after every pause in typing on a big file.
+imara-diff = { version = "0.2.0", default-features = false }
 log = "0.4"
 # Finds line ends in files grepped.
 memchr = "2.8"

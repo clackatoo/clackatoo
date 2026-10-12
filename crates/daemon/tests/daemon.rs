@@ -3355,3 +3355,304 @@ fn what_a_search_finds_waits_for_a_slow_client_and_goes_when_its_stopped() {
         "{lines} lines were sent to a client not reading"
     );
 }
+
+// --- Signs -----------------------------------------------------------------
+
+/// Runs `git` with `args` in `dir`, as nobody's config would have it, and
+/// returns what it printed.
+fn run_git(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A repository at `dir/repo`, with `a.txt` in its index as `staged`, and
+/// on disk as `text`.
+fn repo_with(dir: &Path, staged: &str, text: &str) -> PathBuf {
+    let repo = dir.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    run_git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("a.txt"), staged).unwrap();
+    run_git(&repo, &["add", "a.txt"]);
+    std::fs::write(repo.join("a.txt"), text).unwrap();
+    repo
+}
+
+/// Opens `path`, from `dir`, in a new workspace, attached.
+fn open_attached(client: &mut Client, dir: &Path, path: &str) -> BufferId {
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, path))).unwrap();
+    let buffer = buffer_in(client, pane);
+    attach_buffer(client, buffer);
+    buffer
+}
+
+type Hunks = Vec<(usize, usize, String)>;
+
+/// The next hunks for a buffer, skipping other updates: their version,
+/// and each one's place and base.
+fn next_hunks(client: &mut Client) -> (u64, Hunks) {
+    loop {
+        if let BufferUpdate::Hunks { version, hunks } = next_buffer_update(client) {
+            let hunks = (hunks.into_iter())
+                .map(|hunk| (hunk.start, hunk.end, hunk.base))
+                .collect();
+            return (version, hunks);
+        }
+    }
+}
+
+/// Asserts no hunks come for a while: longer than edits wait for.
+fn assert_no_hunks(client: &mut Client) {
+    client
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    loop {
+        match client.next_event() {
+            Ok(Event::Buffer {
+                update: update @ BufferUpdate::Hunks { .. },
+                ..
+            }) => panic!("hunks came: {update:?}"),
+            Ok(_) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+fn hunks(list: &[(usize, usize, &str)]) -> Hunks {
+    (list.iter())
+        .map(|&(start, end, base)| (start, end, base.to_owned()))
+        .collect()
+}
+
+#[test]
+fn signs_show_lines_added_changed_and_deleted_and_move_with_edits() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    // b changed, a line added after c, and e deleted.
+    repo_with(dir, "a\nb\nc\nd\ne\n", "a\nB\nc\nnew\nd\n");
+    let mut client = daemon.client();
+    let buffer = open_attached(&mut client, dir, "repo/a.txt");
+    assert_eq!(
+        next_hunks(&mut client),
+        (0, hunks(&[(2, 4, "b\n"), (6, 10, ""), (12, 12, "e\n")]))
+    );
+
+    // A line put in at the top adds one, and moves the rest down.
+    send_change(&mut client, buffer, 0, insert(12, 0, "top\n", 0));
+    assert_eq!(
+        next_hunks(&mut client),
+        (
+            1,
+            hunks(&[(0, 4, ""), (6, 8, "b\n"), (10, 14, ""), (16, 16, "e\n")])
+        )
+    );
+
+    // Typing within a changed line leaves the hunks as they were moved,
+    // which every window moved them to already.
+    send_change(&mut client, buffer, 1, insert(16, 7, "x", 1));
+    assert_no_hunks(&mut client);
+
+    // Taking the change back takes its hunk away.
+    let mut edit = Edit::new();
+    edit.retain(6).delete("Bx").insert("b").retain(9);
+    let change = Change::Edit {
+        edit,
+        base: 2,
+        step: true,
+    };
+    send_change(&mut client, buffer, 2, change);
+    assert_eq!(
+        next_hunks(&mut client),
+        (3, hunks(&[(0, 4, ""), (10, 14, ""), (16, 16, "e\n")]))
+    );
+}
+
+#[test]
+fn staging_puts_one_hunk_in_the_index() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let repo = repo_with(dir, "a\nb\nc\nd\ne\n", "a\nB\nc\nnew\nd\n");
+    let mut client = daemon.client();
+    let buffer = open_attached(&mut client, dir, "repo/a.txt");
+    next_hunks(&mut client);
+
+    // The changed line, from any byte on it: its hunk goes, then the
+    // answer comes.
+    client.stage(buffer, 1, (0, 3)).unwrap();
+    assert_eq!(
+        next_hunks(&mut client),
+        (0, hunks(&[(6, 10, ""), (12, 12, "e\n")]))
+    );
+    assert_eq!(next_answer(&mut client), (1, Answer::Staged));
+    assert_eq!(run_git(&repo, &["show", ":a.txt"]), "a\nB\nc\nd\ne\n");
+
+    // The lines deleted, from the line above where they were.
+    client.stage(buffer, 2, (0, 10)).unwrap();
+    assert_eq!(next_hunks(&mut client), (0, hunks(&[(6, 10, "")])));
+    assert_eq!(next_answer(&mut client), (2, Answer::Staged));
+    assert_eq!(run_git(&repo, &["show", ":a.txt"]), "a\nB\nc\nd\n");
+
+    // Nothing to stage on a line that hasn't changed.
+    client.stage(buffer, 3, (0, 0)).unwrap();
+    assert_eq!(next_answer(&mut client), (3, Answer::Nothing));
+
+    // The line added, once an edit before it has moved it, as the daemon
+    // moves the place asked about.
+    send_change(&mut client, buffer, 0, insert(12, 0, "a", 0));
+    client.stage(buffer, 4, (0, 6)).unwrap();
+    assert_eq!(next_hunks(&mut client), (1, hunks(&[(0, 3, "a\n")])));
+    assert_eq!(next_answer(&mut client), (4, Answer::Staged));
+    assert_eq!(run_git(&repo, &["show", ":a.txt"]), "a\nB\nc\nnew\nd\n");
+}
+
+#[test]
+fn files_outside_git_or_not_in_its_index_have_no_signs() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("loose.txt"), "a\n").unwrap();
+    let repo = repo_with(dir, "a\n", "a\n");
+    std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+    let mut client = daemon.client();
+    for (path, len) in [("loose.txt", 2), ("repo/new.txt", 4)] {
+        let buffer = open_attached(&mut client, dir, path);
+        send_change(&mut client, buffer, 0, insert(len, 0, "x\n", 0));
+        assert_no_hunks(&mut client);
+        // Nor anything to stage.
+        client.stage(buffer, 1, (1, 0)).unwrap();
+        assert!(
+            matches!(next_answer(&mut client), (1, Answer::Failed(_))),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn signs_follow_the_index_changing_outside_in_a_linked_worktree() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let repo = repo_with(dir, "a\nb\n", "a\nb\n");
+    run_git(&repo, &["commit", "-q", "-m", "first", "--no-verify"]);
+    // A linked worktree's index is in its own git directory, not by its
+    // files, where `.git` is a file.
+    run_git(&repo, &["worktree", "add", "-q", "../linked"]);
+    let linked = dir.join("linked");
+    std::fs::write(linked.join("a.txt"), "a\nB\n").unwrap();
+    let mut client = daemon.client();
+    open_attached(&mut client, dir, "linked/a.txt");
+    assert_eq!(next_hunks(&mut client), (0, hunks(&[(2, 4, "b\n")])));
+
+    run_git(&linked, &["add", "a.txt"]);
+    assert_eq!(next_hunks(&mut client), (0, Vec::new()));
+    run_git(&linked, &["reset", "-q", "a.txt"]);
+    assert_eq!(next_hunks(&mut client), (0, hunks(&[(2, 4, "b\n")])));
+}
+
+#[test]
+fn files_git_converts_are_compared_as_checked_out_and_not_staged_by_hunks() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let repo = dir.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    run_git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join(".gitattributes"), "*.txt text eol=crlf\n").unwrap();
+    // In the index with LF, checked out with CRLF.
+    std::fs::write(repo.join("a.txt"), "a\nb\n").unwrap();
+    run_git(&repo, &["add", ".gitattributes", "a.txt"]);
+    std::fs::write(repo.join("a.txt"), "a\r\nB\r\n").unwrap();
+    let mut client = daemon.client();
+    let buffer = open_attached(&mut client, dir, "repo/a.txt");
+    // Only the line changed, not every line's end.
+    assert_eq!(next_hunks(&mut client), (0, hunks(&[(3, 6, "b\r\n")])));
+    client.stage(buffer, 1, (0, 4)).unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (
+            1,
+            Answer::Failed("git converts this file: stage it in a terminal".into())
+        )
+    );
+    assert_eq!(run_git(&repo, &["show", ":a.txt"]), "a\nb\n");
+}
+
+#[test]
+fn files_whose_names_git_quotes_are_staged() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let repo = dir.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    run_git(&repo, &["init", "-q"]);
+    let name = "tab\there \"quoted\".txt";
+    std::fs::write(repo.join(name), "a\nb\n").unwrap();
+    run_git(&repo, &["add", "--", name]);
+    std::fs::write(repo.join(name), "a\nB\n").unwrap();
+    let mut client = daemon.client();
+    let buffer = open_attached(&mut client, dir, &format!("repo/{name}"));
+    assert_eq!(next_hunks(&mut client), (0, hunks(&[(2, 4, "b\n")])));
+    client.stage(buffer, 1, (0, 2)).unwrap();
+    assert_eq!(next_hunks(&mut client), (0, Vec::new()));
+    assert_eq!(next_answer(&mut client), (1, Answer::Staged));
+    let shown = format!(":{name}");
+    assert_eq!(run_git(&repo, &["show", &shown]), "a\nB\n");
+}
+
+/// Types a line at the end of `buffer`, whose text is `len` bytes at
+/// `version`, `times` times, `every` so often, waiting for each to be
+/// made. Returns the version typing made, and the version of the first
+/// hunks that came meanwhile, if any did.
+fn type_steadily(
+    client: &mut Client,
+    buffer: BufferId,
+    (len, version): (usize, u64),
+    times: u64,
+    every: Duration,
+) -> (u64, Option<u64>) {
+    let mut first = None;
+    for n in 0..times {
+        let base = version + n;
+        let len = len + 2 * usize::try_from(n).unwrap();
+        send_change(client, buffer, base, insert(len, len, "x\n", base));
+        loop {
+            match next_buffer_update(client) {
+                BufferUpdate::Acked { version, .. } if version == base + 1 => break,
+                BufferUpdate::Hunks { version, .. } => {
+                    first.get_or_insert(version);
+                }
+                _ => {}
+            }
+        }
+        std::thread::sleep(every);
+    }
+    (version + times, first)
+}
+
+#[test]
+fn comparisons_wait_for_typing_to_pause_but_not_forever() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    repo_with(dir, "a\n", "a\n");
+    let mut client = daemon.client();
+    let buffer = open_attached(&mut client, dir, "repo/a.txt");
+    // Typing faster than the pause: nothing until it stops, then the
+    // hunks for all of it.
+    let every = Duration::from_millis(20);
+    let (version, during) = type_steadily(&mut client, buffer, (2, 0), 8, every);
+    assert_eq!(during, None, "compared while typing went on");
+    assert_eq!(next_hunks(&mut client), (version, hunks(&[(2, 18, "")])));
+    // Typing on for longer than the longest wait is compared meanwhile:
+    // each line typed at the end is after the lines added, not in them,
+    // until a comparison says so.
+    let (_, during) = type_steadily(&mut client, buffer, (18, version), 80, every);
+    assert!(during.is_some(), "never compared while typing went on");
+}

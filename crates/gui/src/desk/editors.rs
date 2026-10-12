@@ -15,7 +15,7 @@ use clackatoo_protocol::{
 use super::jumps::{FilePlace, Jump};
 use super::{Asked, Desk};
 use crate::command::Place;
-use crate::editor::{BufferCopy, Editor, Heard, Register};
+use crate::editor::{BufferCopy, Done, Editor, Heard, HunkAction, Register};
 use crate::input::KeyPress;
 use crate::options::Options;
 use crate::pane::{Copy, Mode};
@@ -349,16 +349,33 @@ impl Desk {
     /// the other editors of its buffer with any edits it makes. Returns
     /// whether the window must be redrawn.
     pub(super) fn editor_key(&mut self, press: &KeyPress<'_>) -> bool {
-        let Some(focused) = self.shown.map(|shown| shown.pane) else {
-            return false;
-        };
+        self.in_focused_editor(|editor, copy, register| editor.key(press, copy, register))
+            .unwrap_or(false)
+    }
+
+    /// Does `action` to the hunk at the focused editor's cursor, as
+    /// `<Space>hs` and `:Gitsigns` ask, or says the pane has no file.
+    pub(super) fn editor_hunk(&mut self, action: HunkAction) {
+        if self
+            .in_focused_editor(|editor, copy, _| editor.hunk(action, copy))
+            .is_none()
+        {
+            self.message = Some("this pane has no file".into());
+        }
+    }
+
+    /// Has `act` done to the focused pane's editor and its buffer, moving
+    /// the cursors of the other editors of its buffer with any edits it
+    /// makes. Returns whether the window must be redrawn, or `None` if the
+    /// focused pane isn't an editor.
+    fn in_focused_editor(
+        &mut self,
+        act: impl FnOnce(&mut Editor, &mut BufferCopy, &mut Register) -> Done,
+    ) -> Option<bool> {
+        let focused = self.shown.map(|shown| shown.pane)?;
         let editors = &mut self.editors;
-        let Some(buffer) = editors.panes.get(&focused).map(Editor::buffer) else {
-            return false;
-        };
-        let Some(copy) = editors.buffers.get_mut(&buffer) else {
-            return false;
-        };
+        let buffer = editors.panes.get(&focused).map(Editor::buffer)?;
+        let copy = editors.buffers.get_mut(&buffer)?;
         let others: Vec<PaneId> = (editors.panes.iter())
             .filter(|&(&pane, editor)| pane != focused && editor.buffer() == buffer)
             .map(|(&pane, _)| pane)
@@ -367,7 +384,7 @@ impl Desk {
             editors.panes.get_mut(pane).expect("just found").hold(copy);
         }
         let editor = editors.panes.get_mut(&focused).expect("just found");
-        let done = editor.key(press, copy, &mut editors.register);
+        let done = act(editor, copy, &mut editors.register);
         let left = editor.take_left();
         let made = copy.take_made();
         for pane in &others {
@@ -383,7 +400,7 @@ impl Desk {
         if let Some(text) = done.yanked {
             self.yanked = Some((text, Copy::Clipboard));
         }
-        done.redraw
+        Some(done.redraw)
     }
 
     /// Pastes `text` into the focused editor. Returns whether there is one.

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{Answer, BufferId, Edit, FileLocation, Query, Size};
 use clackatoo_term::{Row, RowBuilder, Style};
-use clackatoo_text::{Bias, Diagnostic, Severity};
+use clackatoo_text::{Bias, Diagnostic, Hunk, Severity};
 use winit::keyboard::{Key, NamedKey};
 
 pub(crate) use copy::{BufferCopy, Heard};
@@ -52,6 +52,26 @@ const NEARBY: u64 = 100;
 /// The deepest `>` indents a line, in columns: far deeper than any code,
 /// but short of a count such as `100000000>` asking for gigabytes.
 const MAX_INDENT: usize = 1000;
+
+/// What the bar says when there are no hunks to go to...
+const NO_CHANGES: &str = "nothing's changed since git's index";
+
+/// ...and when there's none at the cursor's line.
+const NO_CHANGE_HERE: &str = "nothing's changed here since git's index";
+
+/// What's done to the hunk at an editor's cursor, by the window's keys and
+/// commands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HunkAction {
+    /// To the next hunk, or the one before, as `]c` and `[c` go.
+    Next { forward: bool },
+    /// Show its lines as they were, and as they are, by the cursor.
+    Preview,
+    /// Put its lines back as they are in git's index.
+    Reset,
+    /// Put its lines in git's index.
+    Stage,
+}
 
 /// Text kept to put back with `p`: what was last copied or deleted, by
 /// characters, or whole lines.
@@ -216,6 +236,8 @@ enum Asking {
 
 /// A pane editing a buffer.
 #[derive(Debug)]
+// Separate settings from the options, not states of one machine.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Editor {
     buffer: BufferId,
     pub(crate) mode: Mode,
@@ -229,7 +251,8 @@ pub(crate) struct Editor {
     width: usize,
     /// How lines are numbered.
     numbers: Numbers,
-    /// The cells the line numbers take, at the pane's left, out of `width`.
+    /// The cells the signs and line numbers take, at the pane's left, out
+    /// of `width`.
     gutter: usize,
     /// How lines are indented, and tabs drawn.
     indent: Indent,
@@ -240,6 +263,8 @@ pub(crate) struct Editor {
     cursorline: bool,
     /// What's wrong with a line is written after it (`virtualtext`).
     virtual_text: bool,
+    /// A column of signs says which lines have changed (`gitsigns`).
+    signs: bool,
     /// The columns marked down the pane, counting from 0 (`colorcolumn`).
     columns: Vec<usize>,
     /// How searches treat case.
@@ -273,6 +298,8 @@ pub(crate) struct Editor {
     /// The number of the rename asked last, until it's answered: a rename
     /// takes a while, and `K` or `gd` meanwhile mustn't lose its answer.
     renaming: Option<u64>,
+    /// The numbers of the stages asked for, until each is answered.
+    staging: Vec<u64>,
     /// What the language server says is at the cursor, with what's wrong
     /// there, shown by it.
     panel: Option<Panel>,
@@ -310,6 +337,7 @@ impl Editor {
             scrolloff: options.scrolloff as usize,
             cursorline: options.cursorline,
             virtual_text: options.virtualtext,
+            signs: options.gitsigns,
             columns: columns(options),
             case: Case::of(options),
             filled: 0,
@@ -325,6 +353,7 @@ impl Editor {
             status: None,
             asked: None,
             renaming: None,
+            staging: Vec::new(),
             panel: None,
             opening: None,
             jumped_from: None,
@@ -381,6 +410,7 @@ impl Editor {
         self.scrolloff = options.scrolloff as usize;
         self.cursorline = options.cursorline;
         self.virtual_text = options.virtualtext;
+        self.signs = options.gitsigns;
         self.columns = columns(options);
         self.case = Case::of(options);
         self.follow(copy);
@@ -657,6 +687,7 @@ impl Editor {
             }
             Action::View(at) => self.view_at(at),
             Action::Diagnostic { backward } => self.next_diagnostic(backward, times, copy),
+            Action::Hunk { backward } => self.next_hunk(backward, times, copy),
             Action::Ask(_) | Action::Hover | Action::ShowDiagnostics | Action::Rename => {
                 self.language_server(command.action, copy);
             }
@@ -1642,6 +1673,134 @@ impl Editor {
         self.cursor = Cursor::new(text.point_of(landings[index]));
     }
 
+    /// `]c`, or `[c` if `backward`: to the line of the `times`th hunk after
+    /// the cursor's, or before it, going round the file's ends, as
+    /// gitsigns' do.
+    fn next_hunk(&mut self, backward: bool, times: usize, copy: &BufferCopy) {
+        let rope = copy.text();
+        let mut lines: Vec<usize> = (copy.hunks().all().iter())
+            .map(|hunk| hunk.line(rope))
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        if lines.is_empty() {
+            self.status = Some(NO_CHANGES.into());
+            return;
+        }
+        let at = usize::try_from(self.cursor.at.line).unwrap_or(usize::MAX);
+        let count = lines.len();
+        // Round and round as often as the count says.
+        let steps = (times.max(1) - 1) % count;
+        let index = if backward {
+            let before = lines.partition_point(|&line| line < at);
+            (before + count - 1 - steps) % count
+        } else {
+            let after = lines.partition_point(|&line| line <= at);
+            (after + steps) % count
+        };
+        let text = self.text(copy);
+        self.cursor = Cursor::new(Point {
+            line: lines[index] as u64,
+            col: 0,
+        });
+        self.cursor.apply(Motion::FirstNonBlank, &text);
+    }
+
+    /// Does `action` to the hunk at the cursor's line, as the window's
+    /// keys and commands ask.
+    pub(crate) fn hunk(&mut self, action: HunkAction, copy: &mut BufferCopy) -> Done {
+        self.status = None;
+        self.panel = None;
+        let from = self.cursor.at;
+        match action {
+            HunkAction::Next { forward } => {
+                self.next_hunk(!forward, 1, copy);
+                if self.cursor.at != from {
+                    self.left_from(from, copy);
+                }
+            }
+            HunkAction::Preview => self.preview_hunk(copy),
+            HunkAction::Reset => self.reset_hunk(copy),
+            HunkAction::Stage => self.stage_hunk(copy),
+        }
+        if self.mode != Mode::Insert {
+            self.normal_cursor(copy);
+        }
+        self.follow(copy);
+        Done {
+            redraw: true,
+            yanked: None,
+        }
+    }
+
+    /// The hunk at the cursor's line, and its place among the copy's.
+    fn hunk_here<'c>(&self, copy: &'c BufferCopy) -> Option<(usize, &'c Hunk)> {
+        let line = usize::try_from(self.cursor.at.line).ok()?;
+        let (index, _) = copy.hunks().find(copy.text(), line)?;
+        Some((index, &copy.hunks().all()[index]))
+    }
+
+    /// Shows the hunk at the cursor's line in the panel by the cursor: its
+    /// lines as they were, and as they are.
+    fn preview_hunk(&mut self, copy: &BufferCopy) {
+        let Some((_, hunk)) = self.hunk_here(copy) else {
+            self.status = Some(NO_CHANGE_HERE.into());
+            return;
+        };
+        let lines = hunk.whole_lines(copy.text());
+        let now = self.text(copy).slice(lines.start, lines.end);
+        let tabstop = self.indent.tabstop;
+        self.panel = Panel::hunk(&hunk.base, &now, self.cursor.at, tabstop);
+    }
+
+    /// Puts the lines of the hunk at the cursor's line back as they are in
+    /// git's index: an edit of the user's, which `u` undoes.
+    fn reset_hunk(&mut self, copy: &mut BufferCopy) {
+        let Some((index, hunk)) = self.hunk_here(copy) else {
+            self.status = Some(NO_CHANGE_HERE.into());
+            return;
+        };
+        let hunk = hunk.clone();
+        // As an operator in visual mode does, it ends the selection, which
+        // could reach past the text it leaves.
+        self.leave_visual();
+        // Its lines whole, though an edit since it was found, such as one
+        // joining lines, has moved its ends into a line.
+        let lines = hunk.whole_lines(copy.text());
+        let text = self.text(copy);
+        let now = text.slice(lines.start, lines.end);
+        let edit = Edit::replace(text.rope().len_bytes(), lines.start, &now, &hunk.base);
+        drop(text);
+        // It goes before the edit, which would leave it as lines deleted
+        // until the daemon compares again.
+        copy.forget_hunk(index);
+        self.new_step = true;
+        self.make(edit, copy);
+        self.new_step = true;
+        let text = self.text(copy);
+        self.cursor = Cursor::new(text.point_of(lines.start));
+        self.cursor.apply(Motion::FirstNonBlank, &text);
+    }
+
+    /// Asks the daemon to stage the hunk at the cursor's line.
+    fn stage_hunk(&mut self, copy: &mut BufferCopy) {
+        if self.hunk_here(copy).is_none() {
+            self.status = Some(NO_CHANGE_HERE.into());
+            return;
+        }
+        let at = self.text(copy).byte_at(self.cursor.at);
+        self.staging.push(copy.stage(at));
+    }
+
+    /// Says in the bar how the stage asked last went.
+    fn staged(&mut self, answer: &Answer) {
+        self.status = Some(match answer {
+            Answer::Staged => "hunk staged".into(),
+            Answer::Failed(why) => why.clone(),
+            _ => NO_CHANGE_HERE.into(),
+        });
+    }
+
     /// Ctrl+D and the like: `lines` lines down, or up if `direction` is
     /// negative, moving the view and the cursor together.
     fn page(&mut self, direction: i64, lines: usize, copy: &BufferCopy) {
@@ -1748,6 +1907,9 @@ impl Editor {
                 } else if self.renaming == Some(*id) {
                     self.renaming = None;
                     self.renamed(answer);
+                } else if let Some(index) = self.staging.iter().position(|staging| staging == id) {
+                    self.staging.remove(index);
+                    self.staged(answer);
                 }
             }
             Heard::Nothing => {}
@@ -1839,7 +2001,10 @@ impl Editor {
                 self.status = Some("the language server knows of nothing there".into());
             }
             Answer::Failed(why) => self.status = Some(why.clone()),
-            Answer::Hover { .. } | Answer::Renamed { .. } | Answer::Formatted { .. } => {}
+            Answer::Hover { .. }
+            | Answer::Renamed { .. }
+            | Answer::Formatted { .. }
+            | Answer::Staged => {}
         }
     }
 
@@ -2011,10 +2176,27 @@ impl Editor {
 
     // --- Drawing ------------------------------------------------------------
 
-    /// The cells line numbers take for a text of `lines` lines: the widest
-    /// number and a space, at least `numberwidth`, or none if they're off
-    /// or would leave the text too little room.
+    /// The cells the signs and line numbers take for a text of `lines`
+    /// lines, or none if they're off or would leave the text too little
+    /// room.
     fn gutter_for(&self, lines: u64) -> usize {
+        let gutter = self.sign_cells() + self.numbers_width(lines);
+        if gutter > 0 && self.width >= gutter + LEAST_TEXT {
+            gutter
+        } else {
+            0
+        }
+    }
+
+    /// The cells the signs take, left of the line numbers: one, while
+    /// they're on.
+    fn sign_cells(&self) -> usize {
+        usize::from(self.signs)
+    }
+
+    /// The cells line numbers take for a text of `lines` lines: the widest
+    /// number and a space, at least `numberwidth`, or none if they're off.
+    fn numbers_width(&self, lines: u64) -> usize {
         let Numbers {
             absolute,
             relative,
@@ -2031,12 +2213,7 @@ impl Editor {
             // Distances from the cursor, which stays in view.
             self.height.max(1) as u64
         };
-        let gutter = (widest.ilog10() as usize + 2).max(least);
-        if self.width >= gutter + LEAST_TEXT {
-            gutter
-        } else {
-            0
-        }
+        (widest.ilog10() as usize + 2).max(least)
     }
 
     /// The cells the text is shown in, right of the line numbers.
@@ -2068,9 +2245,20 @@ impl Editor {
                     let worst = (diagnostics.iter())
                         .filter(|diagnostic| diagnostic.start >= start)
                         .min_by_key(|diagnostic| diagnostic.severity);
-                    if self.gutter > 0 {
+                    if self.gutter > 0 && self.signs {
+                        let at = usize::try_from(line).unwrap_or(usize::MAX);
+                        match copy.hunks().sign(text.rope(), at) {
+                            Some(sign) => {
+                                let (sign, style) = colors::sign(sign);
+                                builder.push(sign, &style, true);
+                            }
+                            None => builder.push(" ", &Style::DEFAULT, true),
+                        }
+                    }
+                    let numbers = self.gutter.saturating_sub(self.sign_cells());
+                    if numbers > 0 {
                         let number = self.numbers.label(line, cursor);
-                        let number = format!("{number:>0$} ", self.gutter - 1);
+                        let number = format!("{number:>0$} ", numbers - 1);
                         let style = match worst {
                             Some(diagnostic) if line != cursor => Style {
                                 fg: colors::diagnostic(diagnostic.severity),

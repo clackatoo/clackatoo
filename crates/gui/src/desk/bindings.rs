@@ -22,7 +22,10 @@
 //! In normal and visual mode, Space starts the finder's keys, as a leader
 //! key does in Neovim: `<Space>pf` the project's files, `<Space>pgf` a grep
 //! of them, `<Space>?` the files open, and `<Space>ds` what's wrong in the
-//! file (see [`crate::finder`]).
+//! file (see [`crate::finder`]). And in an editor, the keys for the hunk
+//! at the cursor, as gitsigns.nvim suggests them: `<Space>hp` shows it,
+//! `<Space>hr` puts its lines back as they are in git's index, and
+//! `<Space>hs` stages it.
 //!
 //! In normal and visual mode, `:` opens the command line, Ctrl with `h`,
 //! `j`, `k` or `l` moves to the pane that way, Alt with them moves the
@@ -35,6 +38,7 @@ use clackatoo_protocol::{Side, WorkspaceId};
 
 use super::{Desk, Input, Purpose};
 use crate::command::{Command, Kind, Place};
+use crate::editor::HunkAction;
 use crate::finder;
 use crate::keymap::{KeyMode, Keymap, parse_keys, parse_modes};
 use crate::layout::Direction;
@@ -80,6 +84,8 @@ pub(crate) enum Action {
     CommandLine,
     /// The finder, for this.
     Find(finder::Kind),
+    /// This, to the hunk at the focused editor's cursor.
+    Hunk(HunkAction),
     /// Sends Ctrl+B to the focused pane's program.
     SendCtrlB,
 }
@@ -181,6 +187,11 @@ fn defaults() -> Keymap<Binding> {
         Action::Find(finder::Kind::Diagnostics),
         find,
     );
+    // As gitsigns.nvim suggests them.
+    let hunk = Some("hunk");
+    bind("nv", "<Space>hp", Action::Hunk(HunkAction::Preview), hunk);
+    bind("nv", "<Space>hr", Action::Hunk(HunkAction::Reset), hunk);
+    bind("nv", "<Space>hs", Action::Hunk(HunkAction::Stage), hunk);
     for (letter, direction) in DIRECTIONS {
         bind(
             "nv",
@@ -257,6 +268,7 @@ impl Desk {
             Action::PickWorkspace => self.open_palette(Purpose::Workspace),
             Action::CommandLine => self.open_palette(Purpose::Command),
             Action::Find(kind) => self.open_finder(kind, String::new()),
+            Action::Hunk(action) => self.editor_hunk(action),
             Action::SendCtrlB => {
                 if let Some(pane) = self.focused_pane() {
                     pane.send_bytes(vec![0x02]);

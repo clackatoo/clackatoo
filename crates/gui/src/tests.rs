@@ -935,8 +935,11 @@ fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
 }
 
 #[test]
+// It shows everything an editor draws.
+#[allow(clippy::too_many_lines)]
 fn renders_an_editor_pane() {
     use clackatoo_protocol::{BufferId, BufferSnapshot, BufferUpdate, Kind, Span};
+    use clackatoo_text::Sign;
 
     use crate::editor::{BufferCopy, Editor};
 
@@ -976,7 +979,19 @@ fn renders_an_editor_pane() {
             code: None,
         }],
     });
-    let (cols, rows) = (32u16, 5u16);
+    // The second line changed since git's index, and one deleted after
+    // the third.
+    let hunk = |start, end, base: &str| clackatoo_protocol::Hunk {
+        start,
+        end,
+        base: base.into(),
+    };
+    let hunks = vec![
+        hunk(12, 40, "\tprint!(\"hi\");\n"),
+        hunk(42, 42, "// gone\n"),
+    ];
+    copy.update(BufferUpdate::Hunks { version: 0, hunks });
+    let (cols, rows) = (33u16, 5u16);
     let options = crate::options::Options {
         colorcolumn: vec![20],
         ..crate::options::Options::default()
@@ -1014,11 +1029,14 @@ fn renders_an_editor_pane() {
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
     save("editor", size, &pixels);
-    // Right of the line numbers, four cells wide.
-    assert_eq!(lines[1].text(), "  1     println!(\"hello, 世界\");");
+    // Right of the signs, a cell wide, and the line numbers, four.
+    assert_eq!(lines[1].text(), "▎  1     println!(\"hello, 世界\");");
     let fg = |row: &clackatoo_term::Row, col: usize| row.style(row.cells()[col]).fg;
-    assert_eq!(fg(lines[0], 4), crate::colors::syntax(Kind::Keyword).fg);
-    assert_eq!(fg(lines[1], 8), crate::colors::syntax(Kind::Macro).fg);
+    assert_eq!(fg(lines[0], 5), crate::colors::syntax(Kind::Keyword).fg);
+    assert_eq!(fg(lines[1], 9), crate::colors::syntax(Kind::Macro).fg);
+    assert_eq!(fg(lines[1], 0), crate::colors::sign(Sign::Changed).1.fg);
+    let deleted = lines[2].text().chars().next();
+    assert_eq!(deleted, Some('▁'), "lines deleted after");
     assert_eq!(lines[3].text(), "~", "past the end");
     let background = &pixels[..4];
     assert!(pixels.chunks(4).any(|pixel| pixel != background));
@@ -1029,10 +1047,16 @@ fn renders_an_editor_pane() {
         let start = ((y * size[0] + x) * 4) as usize;
         &pixels[start..start + 4]
     };
+    // The changed line's sign is a thin bar down its cell's left edge.
+    let x = padding + fonts.cell.width / 8;
+    let y = padding + fonts.cell.height * 3 / 2;
+    let start = ((y * size[0] + x) * 4) as usize;
+    assert_ne!(&pixels[start..start + 4], background, "the sign");
+    assert_eq!(at(0, 0), background, "no sign");
     // The cursor's line is lit across the pane, and column 20 down the
     // file's lines, behind the text, but not past the end. Column 20 is
-    // the 20th cell right of the line numbers.
-    let column = 4 + 19;
+    // the 20th cell right of the signs and line numbers.
+    let column = 5 + 19;
     assert_ne!(at(0, 25), background, "the cursor's line");
     assert_ne!(at(2, column), background, "the column");
     assert_eq!(at(2, column + 2), background);
@@ -1202,7 +1226,8 @@ fn an_editors_panel_is_drawn_over_its_text() {
     editor.heard(&heard, true, &copy);
     editor.settle(&copy);
     let view = editor.panel().expect("a panel");
-    assert_eq!((view.placed.top, view.placed.left), (1, 4));
+    // By the cursor, right of the signs and line numbers.
+    assert_eq!((view.placed.top, view.placed.left), (1, 5));
 
     let mut fonts = fonts(2.0);
     let metrics = Metrics {
@@ -1251,7 +1276,7 @@ fn an_editors_panel_is_drawn_over_its_text() {
     // In the room left of its text, over an "x" of the file's, only the
     // panel's background; and the file's text beside it, not.
     let palette = [0x16, 0x18, 0x1c];
-    assert_eq!(at(3, 4), palette, "the panel, over the text");
+    assert_eq!(at(3, 5), palette, "the panel, over the text");
     assert_ne!(at(3, 30), palette, "the file, beside it");
 }
 

@@ -15,7 +15,9 @@
 //!
 //! [`Highlights`] are what each piece of the text is, as its language's
 //! grammar reads it, for colouring it; they move along with edits, as
-//! [`Diagnostics`] do: what a language server says is wrong with it.
+//! [`Diagnostics`] do: what a language server says is wrong with it, and
+//! [`Hunks`]: what's changed in it since a base, such as the file's text
+//! in git.
 //!
 //! Places in a text are byte offsets into its UTF-8, as tree-sitter's are.
 //!
@@ -29,9 +31,11 @@ mod diagnostics;
 mod edit;
 mod highlights;
 mod history;
+mod hunks;
 
 pub use diagnostics::{Diagnostic, Diagnostics, Severity};
 pub use edit::{Bias, Edit, EditError, Op, compose, transform};
 pub use highlights::{Highlights, Kind, Span};
 pub use history::{History, HistoryError, HistorySnapshot, Steps};
+pub use hunks::{Difference, Hunk, HunkKind, Hunks, Sign, diff, line_starts};
 pub use ropey::Rope;

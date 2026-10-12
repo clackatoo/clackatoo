@@ -17,6 +17,7 @@ mod buffer;
 mod chat;
 pub mod client;
 mod find;
+mod git;
 mod handover;
 mod hosted;
 pub mod launch;

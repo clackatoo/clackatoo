@@ -10,7 +10,7 @@ use clackatoo_protocol::{
     Response, ServerMessage, frame,
 };
 use clackatoo_syntax::{Highlighted, Syntax};
-use clackatoo_text::Highlights;
+use clackatoo_text::{Highlights, Hunks};
 use mio::Token;
 
 use super::language::Opened;
@@ -29,6 +29,15 @@ pub(super) struct BufferSlot {
     pub(super) parsed: bool,
     /// How its language server knows it, while it's open in one.
     pub(super) server: Option<Opened>,
+    /// Whether it's being compared with its file's text in the index.
+    pub(super) compared: bool,
+    /// The git directory of the repository its file is in, once the
+    /// thread comparing it says.
+    pub(super) git_dir: Option<PathBuf>,
+    /// What it has added, changed and deleted since the file's text in
+    /// the index, as of the last comparison, moved along with each edit
+    /// since.
+    pub(super) hunks: Hunks,
 }
 
 impl BufferSlot {
@@ -39,6 +48,9 @@ impl BufferSlot {
             highlights: Highlights::new(),
             parsed: false,
             server: None,
+            compared: false,
+            git_dir: None,
+            hunks: Hunks::new(),
         }
     }
 }
@@ -71,6 +83,7 @@ impl Daemon {
         self.buffers.insert(id, BufferSlot::new(buffer));
         self.parse_buffer(id);
         self.open_in_server(id);
+        self.compare_buffer(id);
         Ok(id)
     }
 
@@ -87,13 +100,15 @@ impl Daemon {
         // Its server may have stopped, or it came through an upgrade,
         // which servers don't.
         self.open_in_server(id);
+        // It came through an upgrade, which the thread comparing doesn't.
+        self.compare_buffer(id);
         self.send_snapshot(token, id);
         self.offer_install(token, id);
         Ok(())
     }
 
     /// Sends the client at `token` all of buffer `id`: its text, then its
-    /// highlights and diagnostics.
+    /// highlights, diagnostics and hunks.
     fn send_snapshot(&mut self, token: Token, id: BufferId) {
         let Some(slot) = self.buffers.get(&id) else {
             return;
@@ -113,7 +128,8 @@ impl Daemon {
                 diagnostics: opened.diagnostics.all().to_vec(),
             });
         self.tell(token, id, snapshot);
-        for update in highlights.into_iter().chain(diagnostics) {
+        let hunks = self.hunks_update(id);
+        for update in highlights.into_iter().chain(diagnostics).chain(hunks) {
             self.tell(token, id, update);
         }
     }
@@ -124,6 +140,7 @@ impl Daemon {
             slot.viewers.retain(|&viewer| viewer != token);
         }
         self.forget_queries(token, Some(id));
+        self.forget_stages(token, Some(id));
     }
 
     /// Makes a change the client at `token` sent to buffer `id`, and tells
@@ -265,6 +282,7 @@ impl Daemon {
                 syntax.close(key(buffer));
             }
             self.closed_in_server(slot.buffer.path(), slot.server);
+            self.closed_in_git(buffer, slot.git_dir);
         }
     }
 
@@ -303,9 +321,11 @@ impl Daemon {
     }
 
     /// Tells buffer `id`'s server about `edit`, which made `version`, and
-    /// moves its highlights along with it, having it parsed again.
+    /// moves its highlights and hunks along with it, having it parsed and
+    /// compared again.
     fn edited(&mut self, id: BufferId, version: u64, edit: &Edit) {
         self.edited_in_server(id, version, edit);
+        self.edited_in_git(id, edit);
         let Some(slot) = self.buffers.get_mut(&id) else {
             return;
         };

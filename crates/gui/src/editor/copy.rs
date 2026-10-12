@@ -10,13 +10,16 @@
 //! [`clackatoo_text`]).
 //!
 //! It keeps the buffer's highlights too, moving them along with each edit
-//! until the parse that follows it sends new ones.
+//! until the parse that follows it sends new ones, and so its diagnostics
+//! and hunks.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{Answer, BufferId, BufferUpdate, Change, ClientMessage, Edit, Query};
-use clackatoo_text::{Bias, Diagnostic, Diagnostics, Highlights, Rope, Span, compose, transform};
+use clackatoo_text::{
+    Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span, compose, transform,
+};
 
 /// A change waiting for the daemon's answer, or to be sent.
 #[derive(Debug)]
@@ -39,6 +42,11 @@ enum Waiting {
         id: u64,
         at: usize,
         name: String,
+    },
+    /// A stage of the hunk at byte `at`, sent as a query is.
+    Stage {
+        id: u64,
+        at: usize,
     },
 }
 
@@ -84,6 +92,8 @@ pub(crate) struct BufferCopy {
     highlights: Highlights,
     /// What its language server says is wrong with it.
     diagnostics: Diagnostics,
+    /// What it's added, changed and deleted since its file's text in git.
+    hunks: Hunks,
 }
 
 impl BufferCopy {
@@ -102,6 +112,7 @@ impl BufferCopy {
             made: Vec::new(),
             highlights: Highlights::new(),
             diagnostics: Diagnostics::new(),
+            hunks: Hunks::new(),
         }
     }
 
@@ -115,6 +126,18 @@ impl BufferCopy {
 
     pub(crate) fn diagnostics(&self) -> &Diagnostics {
         &self.diagnostics
+    }
+
+    pub(crate) fn hunks(&self) -> &Hunks {
+        &self.hunks
+    }
+
+    /// Forgets the hunk at `index` in [`hunks`](Self::hunks), whose lines
+    /// are about to be put back as they were.
+    pub(crate) fn forget_hunk(&mut self, index: usize) {
+        if index < self.hunks.all().len() {
+            self.hunks.remove(index);
+        }
     }
 
     /// The file's path on the daemon's machine.
@@ -148,6 +171,7 @@ impl BufferCopy {
         }
         self.highlights.map(&edit);
         self.diagnostics.map(&edit);
+        self.hunks.map(&edit);
         self.made.push(edit.clone());
         // An edit joining the last step joins the last edit, if that's
         // still to be sent.
@@ -193,6 +217,16 @@ impl BufferCopy {
         id
     }
 
+    /// Asks the daemon to stage the hunk at byte `at` of the copy's text,
+    /// once the changes before it have been made. Returns its number, as
+    /// [`ask`](Self::ask) does.
+    pub(crate) fn stage(&mut self, at: usize) -> u64 {
+        let id = next_query();
+        self.waiting.push_back(Waiting::Stage { id, at });
+        self.send_next();
+        id
+    }
+
     /// How many edits have been made here since they were last taken.
     pub(crate) fn edits_made(&self) -> usize {
         self.made.len()
@@ -211,6 +245,7 @@ impl BufferCopy {
                 self.sent = None;
                 self.highlights.clear();
                 self.diagnostics = Diagnostics::new();
+                self.hunks = Hunks::new();
                 Heard::Replaced
             }
             BufferUpdate::Acked { version, seq } => {
@@ -242,6 +277,7 @@ impl BufferCopy {
                 }
                 self.highlights.map(&edit);
                 self.diagnostics.map(&edit);
+                self.hunks.map(&edit);
                 self.version = version;
                 self.send_next();
                 if reversal {
@@ -289,6 +325,10 @@ impl BufferCopy {
                 id,
                 answer: self.past_waiting(version, answer),
             },
+            BufferUpdate::Hunks { version, hunks } => {
+                self.take_hunks(version, hunks);
+                Heard::Nothing
+            }
         }
     }
 
@@ -336,6 +376,21 @@ impl BufferCopy {
         }
     }
 
+    /// Takes the hunks for the daemon's text at `version`, moving them past
+    /// the window's edits waiting.
+    fn take_hunks(&mut self, version: u64, hunks: Vec<Hunk>) {
+        if version != self.version && !hunks.is_empty() {
+            log::debug!("buffer {}: hunks for version {version}", self.id);
+            return;
+        }
+        self.hunks = Hunks::of(hunks);
+        for waiting in &self.waiting {
+            if let Waiting::Edit { edit, .. } = waiting {
+                self.hunks.map(edit);
+            }
+        }
+    }
+
     /// Takes highlights for bytes `start` to `end` of the daemon's text at
     /// `version`, moving them past the window's edits waiting.
     fn recolour(&mut self, version: u64, start: usize, end: usize, spans: Vec<Span>) {
@@ -347,7 +402,11 @@ impl BufferCopy {
         }
         let waiting = (self.waiting.iter()).filter_map(|waiting| match waiting {
             Waiting::Edit { edit, .. } => Some(edit),
-            Waiting::Undo | Waiting::Redo | Waiting::Query { .. } | Waiting::Rename { .. } => None,
+            Waiting::Undo
+            | Waiting::Redo
+            | Waiting::Query { .. }
+            | Waiting::Rename { .. }
+            | Waiting::Stage { .. } => None,
         });
         (self.highlights).replace_since(start..end, spans, waiting);
     }
@@ -375,7 +434,9 @@ impl BufferCopy {
             let mine = match waiting {
                 Waiting::Edit { edit: mine, .. } => mine,
                 // A place asked about moves with the text around it.
-                Waiting::Query { at, .. } | Waiting::Rename { at, .. } => {
+                Waiting::Query { at, .. }
+                | Waiting::Rename { at, .. }
+                | Waiting::Stage { at, .. } => {
                     *at = edit.map(*at, Bias::Before);
                     continue;
                 }
@@ -401,7 +462,9 @@ impl BufferCopy {
         if self.sent.is_some() || !self.loaded {
             return;
         }
-        while let Some(Waiting::Query { .. } | Waiting::Rename { .. }) = self.waiting.front() {
+        while let Some(Waiting::Query { .. } | Waiting::Rename { .. } | Waiting::Stage { .. }) =
+            self.waiting.front()
+        {
             let (buffer, version) = (self.id, self.version);
             self.outbox.push(match self.waiting.pop_front() {
                 Some(Waiting::Query { id, at, query }) => ClientMessage::Query {
@@ -418,7 +481,13 @@ impl BufferCopy {
                     at,
                     name,
                 },
-                _ => unreachable!("a query or a rename"),
+                Some(Waiting::Stage { id, at }) => ClientMessage::Stage {
+                    buffer,
+                    id,
+                    version,
+                    at,
+                },
+                _ => unreachable!("a query, a rename or a stage"),
             });
         }
         let Some(first) = self.waiting.front() else {
@@ -432,7 +501,9 @@ impl BufferCopy {
             },
             Waiting::Undo => Change::Undo,
             Waiting::Redo => Change::Redo,
-            Waiting::Query { .. } | Waiting::Rename { .. } => unreachable!("sent above"),
+            Waiting::Query { .. } | Waiting::Rename { .. } | Waiting::Stage { .. } => {
+                unreachable!("sent above")
+            }
         };
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -471,6 +542,10 @@ pub(super) mod tests {
                 text: Rope::from_str(text),
                 history: History::new(0),
             }
+        }
+
+        pub(in crate::editor) fn version(&self) -> u64 {
+            self.history.version()
         }
 
         pub(in crate::editor) fn snapshot(&self) -> BufferUpdate {
@@ -548,6 +623,52 @@ pub(super) mod tests {
                 answers: None,
             }
         }
+    }
+
+    #[test]
+    fn hunks_move_past_the_edits_waiting_and_go_with_a_snapshot() {
+        let mut daemon = Daemon::new("a\nB\n");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        // Typed at the top, and not yet answered, when the daemon's hunks
+        // for the text before it come.
+        typed(&mut copy, 0, "top\n", true);
+        let hunks = vec![Hunk {
+            start: 2,
+            end: 4,
+            base: "b\n".into(),
+        }];
+        copy.update(BufferUpdate::Hunks {
+            version: 0,
+            hunks: hunks.clone(),
+        });
+        let places: Vec<(usize, usize)> = (copy.hunks().all().iter())
+            .map(|hunk| (hunk.start, hunk.end))
+            .collect();
+        assert_eq!(places, [(6, 8)]);
+        // Hunks for a version the copy isn't made from are dropped; none
+        // are none whatever the version.
+        copy.update(BufferUpdate::Hunks { version: 5, hunks });
+        assert_eq!(copy.hunks().all().len(), 1);
+        copy.update(BufferUpdate::Hunks {
+            version: 5,
+            hunks: Vec::new(),
+        });
+        assert!(copy.hunks().is_empty());
+        let message = copy.take_outbox().pop().unwrap();
+        let (answer, _) = daemon.take(message);
+        copy.update(answer);
+        copy.update(BufferUpdate::Hunks {
+            version: 1,
+            hunks: vec![Hunk {
+                start: 0,
+                end: 4,
+                base: String::new(),
+            }],
+        });
+        assert_eq!(copy.hunks().all().len(), 1);
+        copy.update(daemon.snapshot());
+        assert!(copy.hunks().is_empty(), "a snapshot has none yet");
     }
 
     fn typed(copy: &mut BufferCopy, at: usize, text: &str, step: bool) {

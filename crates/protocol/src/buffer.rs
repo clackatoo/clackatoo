@@ -23,10 +23,16 @@
 //! A buffer whose language has a language server is kept open in it, and
 //! its [`BufferUpdate::Diagnostics`] sent whenever the server says what's
 //! wrong; the window moves them along with each edit too.
+//!
+//! A buffer whose file is in a git work tree is compared with the file's
+//! text in git's index after each pause in edits, and whenever the index
+//! changes, off the event loop, and its [`BufferUpdate::Hunks`] sent: the
+//! lines added, changed and deleted, for the signs beside them. The window
+//! moves them along with each edit too.
 
 use std::fmt;
 
-use clackatoo_text::{Diagnostic, Edit, Span};
+use clackatoo_text::{Diagnostic, Edit, Hunk, Span};
 use serde::{Deserialize, Serialize};
 
 use crate::TerminalId;
@@ -171,6 +177,16 @@ pub enum BufferUpdate {
         /// What the language server said.
         answer: Answer,
     },
+    /// How the text at `version` differs from the file's text in git's
+    /// index: every hunk, in place of those before. Sent after the edit
+    /// that made `version`, and after a snapshot. There are none for a
+    /// file that isn't in git, or is too big to compare.
+    Hunks {
+        /// The version of the text they're for.
+        version: u64,
+        /// The hunks, in order.
+        hunks: Vec<Hunk>,
+    },
 }
 
 /// What a client asks a buffer's language server about a place in it.
@@ -223,7 +239,8 @@ pub enum Answer {
         files: usize,
     },
     /// Nothing: there's nothing there to ask about, or the server doesn't
-    /// know.
+    /// know. For a [`ClientMessage::Stage`](crate::ClientMessage::Stage),
+    /// there's no hunk there.
     Nothing,
     /// The file is formatted: its edits, if `changed`, have been made.
     Formatted {
@@ -233,8 +250,12 @@ pub enum Answer {
     /// The buffer has no language server, or it failed, or what it said
     /// couldn't be done, as this says. A rename that fails changes
     /// nothing, unless a file it wrote couldn't then be put back as it
-    /// was, which this says.
+    /// was, which this says. So does a stage git refused.
     Failed(String),
+    /// A [`ClientMessage::Stage`](crate::ClientMessage::Stage) was made:
+    /// the hunk's lines are in git's index, and the buffer's hunks, sent
+    /// before this, no longer have it.
+    Staged,
 }
 
 /// A place in a file, on the daemon's machine.

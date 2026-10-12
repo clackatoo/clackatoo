@@ -1,6 +1,7 @@
 //! Turning a cell's style into the colours it's drawn in.
 
 use clackatoo_protocol::{Attributes, Color, Kind, Severity, Style};
+use clackatoo_text::Sign;
 
 /// A colour as red, green, blue and alpha, each from 0 to 1, in sRGB.
 pub(crate) type Rgba = [f32; 4];
@@ -182,6 +183,25 @@ pub(crate) const fn virtual_text(severity: Severity) -> Style {
         attributes: Attributes::DIM,
         ..Style::DEFAULT
     }
+}
+
+/// The sign beside a line git says is added, changed or deleted after,
+/// and how it's drawn: a thin bar down the line's sign column, in the
+/// palette's green or blue, or a thin red line along its foot, or for
+/// lines deleted at the top, its head, as gitsigns.nvim draws them.
+#[must_use]
+pub(crate) const fn sign(sign: Sign) -> (&'static str, Style) {
+    let (text, colour) = match sign {
+        Sign::Added => ("▎", 2),
+        Sign::Changed => ("▎", 4),
+        Sign::Deleted => ("▁", 1),
+        Sign::DeletedAbove => ("▔", 1),
+    };
+    let style = Style {
+        fg: Color::Indexed(colour),
+        ..Style::DEFAULT
+    };
+    (text, style)
 }
 
 /// How an editor's line numbers are drawn: faint, but the cursor's line in

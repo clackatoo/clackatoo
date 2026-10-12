@@ -4,13 +4,14 @@
 use clackatoo_protocol::{
     Answer, BufferId, BufferUpdate, ClientMessage, FileLocation, Query, Size,
 };
+use clackatoo_text::Sign;
 
 use super::copy::tests::Daemon;
 use super::keys::Stroke;
-use super::{BufferCopy, Editor, Mode, Register};
+use super::{BufferCopy, Editor, HunkAction, Mode, Register};
 use crate::options::Options;
 use crate::pane::Selection;
-use crate::render::HighlightKind;
+use crate::render::{HighlightKind, Ink};
 
 struct Setup {
     editor: Editor,
@@ -22,6 +23,8 @@ struct Setup {
     queries: Vec<(u64, usize, Query)>,
     /// The renames sent, for the language server.
     renames: Vec<(u64, usize, String)>,
+    /// The stages sent.
+    stages: Vec<(u64, usize)>,
 }
 
 impl Setup {
@@ -29,7 +32,12 @@ impl Setup {
         let daemon = Daemon::new(text);
         let mut copy = BufferCopy::new(BufferId(1));
         copy.update(daemon.snapshot());
-        let options = Options::default();
+        // Without signs, which tests of them turn on, so the columns of
+        // the rest are counted from the line numbers.
+        let options = Options {
+            gitsigns: false,
+            ..Options::default()
+        };
         let mut editor = Editor::new(BufferId(1), &options);
         editor.resize(Size::new(40, 10).unwrap());
         Self {
@@ -40,6 +48,7 @@ impl Setup {
             options,
             queries: Vec::new(),
             renames: Vec::new(),
+            stages: Vec::new(),
         }
     }
 
@@ -91,12 +100,35 @@ impl Setup {
                     self.renames.push((id, at, name));
                     continue;
                 }
+                if let ClientMessage::Stage { id, at, .. } = message {
+                    self.stages.push((id, at));
+                    continue;
+                }
                 let (answer, _) = self.daemon.take(message);
                 self.editor.hold(&self.copy);
                 let heard = self.copy.update(answer);
                 self.editor.heard(&heard, true, &self.copy);
             }
         }
+    }
+
+    /// Turns the signs on, and gives the copy the hunks the daemon would
+    /// find between `base` and the text now.
+    fn hunks_against(&mut self, base: &str) {
+        self.set(|options| options.gitsigns = true);
+        let text = self.copy.text().to_string();
+        let hunks = clackatoo_text::Hunks::between(base, &text);
+        self.copy.update(BufferUpdate::Hunks {
+            version: self.daemon.version(),
+            hunks: hunks.all().to_vec(),
+        });
+    }
+
+    /// Does `action` to the hunk at the cursor, as `<Space>h` and its
+    /// kin ask.
+    fn hunk(&mut self, action: HunkAction) {
+        self.editor.hunk(action, &mut self.copy);
+        self.serve();
     }
 
     /// Gives the editor the language server's answer to query `id`.
@@ -399,6 +431,7 @@ fn the_options_choose_the_numbers() {
     };
     let mut options = Options {
         relativenumber: false,
+        gitsigns: false,
         ..Options::default()
     };
     assert_eq!(shown(&options), ["  1 a", "  2 b", "  3 c"]);
@@ -1134,4 +1167,185 @@ fn star_ignores_case_as_ignorecase_says_whatever_smartcase_says() {
     let mut setup = Setup::new("Foo bar foo\n");
     setup.keys("*");
     assert_eq!(setup.cursor(), (0, 8));
+}
+
+#[test]
+fn signs_are_drawn_left_of_the_numbers_and_can_be_turned_off() {
+    let mut setup = Setup::new("a\nB\nc\nnew\nd\n");
+    // B changed, a line added, and e deleted after d.
+    setup.hunks_against("a\nb\nc\nd\ne\n");
+    setup.editor.settle(&setup.copy);
+    let (rows, cursor) = setup.editor.scene();
+    let signs: Vec<char> = rows[..5]
+        .iter()
+        .map(|row| row.text().chars().next().unwrap())
+        .collect();
+    assert_eq!(signs, [' ', '▎', ' ', '▎', '▁']);
+    assert_eq!(rows[1].text(), "▎  1 B");
+    let fg = |row: &clackatoo_term::Row| row.style(row.cells()[0]).fg;
+    assert_eq!(fg(rows[1]), crate::colors::sign(Sign::Changed).1.fg);
+    assert_eq!(fg(rows[3]), crate::colors::sign(Sign::Added).1.fg);
+    assert_eq!(fg(rows[4]), crate::colors::sign(Sign::Deleted).1.fg);
+    assert_eq!(cursor.unwrap().col, 5, "right of the signs and numbers");
+    // A click lands on the text beside them.
+    setup.editor.click(1, 5, &setup.copy);
+    assert_eq!(setup.cursor(), (1, 0));
+
+    // They move with typing until the daemon compares again.
+    setup.keys("ggOtop<Esc>");
+    setup.editor.settle(&setup.copy);
+    let (rows, _) = setup.editor.scene();
+    assert!(rows[2].text().starts_with('▎'), "{:?}", rows[2].text());
+
+    setup.set(|options| options.gitsigns = false);
+    setup.editor.settle(&setup.copy);
+    let (rows, cursor) = setup.editor.scene();
+    assert_eq!(rows[2].text(), "  2 B");
+    assert_eq!(cursor.unwrap().col, 4 + 2, "on the p of top");
+}
+
+#[test]
+fn brackets_and_c_go_round_the_hunks_as_jumps() {
+    let base = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n";
+    let mut setup = Setup::new("0\n1\nTWO\n3\n4\nFIVE\n6\n7\n9\n");
+    // Changed at 2 and 5, and 8 deleted after 7.
+    setup.hunks_against(base);
+    setup.keys("]c");
+    assert_eq!(setup.cursor(), (2, 0));
+    assert_eq!(setup.editor.take_left(), Some(0), "a jump");
+    setup.keys("]c");
+    assert_eq!(setup.cursor(), (5, 0));
+    setup.keys("]c");
+    assert_eq!(setup.cursor(), (7, 0), "on the line above lines deleted");
+    setup.keys("]c");
+    assert_eq!(setup.cursor(), (2, 0), "round from the last");
+    setup.keys("[c");
+    assert_eq!(setup.cursor(), (7, 0), "round from the first");
+    setup.keys("2[c");
+    assert_eq!(setup.cursor(), (2, 0));
+    // From the window's keys and commands too.
+    setup.hunk(HunkAction::Next { forward: true });
+    assert_eq!(setup.cursor(), (5, 0));
+
+    let mut setup = Setup::new("same\n");
+    setup.hunks_against("same\n");
+    setup.keys("]c");
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("nothing's changed since git's index")
+    );
+}
+
+#[test]
+fn a_hunk_is_previewed_by_the_cursor() {
+    let mut setup = Setup::new("a\nB\nb2\nc\n");
+    setup.hunks_against("a\nb\nc\n");
+    setup.keys("j");
+    setup.hunk(HunkAction::Preview);
+    setup.editor.settle(&setup.copy);
+    let view = setup.editor.panel().expect("a panel");
+    let lines: Vec<String> = view.lines.iter().map(super::panel::Line::text).collect();
+    assert_eq!(lines, ["-b", "+B", "+b2"]);
+    let inks: Vec<_> = view.lines.iter().map(|line| line.runs[0].ink).collect();
+    assert_eq!(inks, [Ink::Removed, Ink::Added, Ink::Added]);
+    // Moving away closes it; a line not changed has nothing to show.
+    setup.keys("k");
+    assert!(setup.editor.panel.is_none());
+    setup.hunk(HunkAction::Preview);
+    assert!(setup.editor.panel.is_none());
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("nothing's changed here since git's index")
+    );
+}
+
+#[test]
+fn a_hunk_is_reset_as_an_edit_u_undoes() {
+    let mut setup = Setup::new("a\nB\nc\nnew\n");
+    setup.hunks_against("a\nb\nc\n");
+    setup.keys("j");
+    setup.hunk(HunkAction::Reset);
+    assert_eq!(setup.text(), "a\nb\nc\nnew\n");
+    assert_eq!(setup.cursor(), (1, 0));
+    // Only the added line is left, where it was: the hunk put back went
+    // with it rather than staying as lines deleted.
+    let left: Vec<(usize, usize)> = (setup.copy.hunks().all().iter())
+        .map(|hunk| (hunk.start, hunk.end))
+        .collect();
+    assert_eq!(left, [(6, 10)]);
+    setup.keys("u");
+    assert_eq!(setup.text(), "a\nB\nc\nnew\n");
+    setup.keys("<C-r>");
+
+    // Lines added go; lines deleted come back, from the line above them.
+    setup.keys("G");
+    setup.hunk(HunkAction::Reset);
+    assert_eq!(setup.text(), "a\nb\nc\n");
+    let mut setup = Setup::new("a\nc\n");
+    setup.hunks_against("a\nb\nc\n");
+    setup.hunk(HunkAction::Reset);
+    assert_eq!(setup.text(), "a\nb\nc\n");
+    assert!(setup.copy.hunks().is_empty());
+    setup.keys("u");
+    assert_eq!(setup.text(), "a\nc\n");
+    // From visual mode, which it ends, as an operator does.
+    setup.hunks_against("a\nb\nc\n");
+    setup.keys("jVgg");
+    setup.hunk(HunkAction::Reset);
+    assert_eq!(setup.text(), "a\nb\nc\n");
+    assert_eq!(setup.editor.mode, Mode::Normal);
+}
+
+#[test]
+fn a_hunk_moved_into_a_line_is_reset_and_shown_whole() {
+    let mut setup = Setup::new("a\nB\nc\n");
+    setup.hunks_against("a\nb\nc\n");
+    // Joined to the line above before the daemon compares again: the
+    // hunk now starts in the middle of a line.
+    setup.keys("J");
+    assert_eq!(setup.text(), "a B\nc\n");
+    assert_eq!(setup.copy.hunks().all()[0].start, 2);
+    setup.hunk(HunkAction::Preview);
+    setup.editor.settle(&setup.copy);
+    let view = setup.editor.panel().expect("a panel");
+    let lines: Vec<String> = view.lines.iter().map(super::panel::Line::text).collect();
+    assert_eq!(lines, ["-b", "+a B"]);
+    setup.hunk(HunkAction::Reset);
+    assert_eq!(setup.text(), "b\nc\n", "whole lines, not from mid-line");
+}
+
+#[test]
+fn a_hunk_is_staged_by_the_daemon_and_the_bar_says_so() {
+    let mut setup = Setup::new("a\nB\n");
+    setup.hunks_against("a\nb\n");
+    // Nothing to stage on a line that hasn't changed.
+    setup.hunk(HunkAction::Stage);
+    assert!(setup.stages.is_empty());
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("nothing's changed here since git's index")
+    );
+    setup.keys("j");
+    setup.hunk(HunkAction::Stage);
+    let [(id, at)] = setup.stages[..] else {
+        panic!("one stage: {:?}", setup.stages);
+    };
+    assert_eq!(at, 2, "the cursor's place, on the hunk's line");
+    setup.answer(id, Answer::Staged);
+    assert_eq!(setup.editor.status.as_deref(), Some("hunk staged"));
+    setup.hunk(HunkAction::Stage);
+    let (id, _) = setup.stages[1];
+    setup.answer(id, Answer::Failed("git couldn't stage it: no".into()));
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("git couldn't stage it: no")
+    );
+    // Two asked before either is answered: each answer is heard.
+    setup.hunk(HunkAction::Stage);
+    setup.hunk(HunkAction::Stage);
+    let (first, second) = (setup.stages[2].0, setup.stages[3].0);
+    setup.answer(first, Answer::Failed("first".into()));
+    assert_eq!(setup.editor.status.as_deref(), Some("first"));
+    setup.answer(second, Answer::Staged);
+    assert_eq!(setup.editor.status.as_deref(), Some("hunk staged"));
 }

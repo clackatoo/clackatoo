@@ -59,11 +59,13 @@ mod finder;
 mod language;
 mod offers;
 mod rename;
+mod signs;
 
 use buffers::BufferSlot;
 use finder::Finds;
 use language::{Pipe, ServerId, Servers};
 use offers::Installs;
+use signs::Signs;
 
 const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);
@@ -101,6 +103,8 @@ enum Source {
     AgentExit,
     /// One of a language server's pipes.
     Server(ServerId, Pipe),
+    /// The inotify instance watching repositories' indexes.
+    Index,
     Client(Client),
     Carrier(Carrier),
 }
@@ -395,6 +399,9 @@ pub struct Daemon {
     renames: rename::Renames,
     /// The finder's searches going on.
     finds: Finds,
+    /// Buffers being compared with the files' text in their repositories,
+    /// and the indexes watched.
+    signs: Signs,
     /// The agent chats talk to, while any chat needs it.
     agent: Option<AgentSlot>,
     /// What the agent sent last, for the chats to act on.
@@ -501,6 +508,7 @@ impl Daemon {
             installs: Installs::new(config.declined.as_deref()),
             renames: rename::Renames::default(),
             finds,
+            signs: Signs::default(),
             agent: None,
             incoming: Vec::new(),
             quic: None,
@@ -717,6 +725,7 @@ impl Daemon {
                 self.read_servers_unread();
             }
             self.take_highlights();
+            self.take_signs();
             self.take_installs();
             self.take_renames();
             self.ask_again();
@@ -772,6 +781,7 @@ impl Daemon {
                         self.server_gone(id);
                     }
                 },
+                Some(Source::Index) => self.read_index_changes(),
                 Some(Source::Client(_)) => self.serve_client(token),
                 Some(Source::Carrier(_)) => self.serve_carrier(token, event),
                 None => {}
@@ -1631,7 +1641,8 @@ impl Daemon {
                 | ClientMessage::Query { .. }
                 | ClientMessage::Rename { .. }
                 | ClientMessage::Find { .. }
-                | ClientMessage::StopFinding { .. }) => {
+                | ClientMessage::StopFinding { .. }
+                | ClientMessage::Stage { .. }) => {
                     self.serve_unanswered(token, message);
                     continue;
                 }
@@ -1673,6 +1684,12 @@ impl Daemon {
             }
             ClientMessage::Find { id, pane, search } => self.serve_find(token, id, pane, search),
             ClientMessage::StopFinding { id } => self.stop_finding(token, id),
+            ClientMessage::Stage {
+                buffer,
+                id,
+                version,
+                at,
+            } => self.serve_stage(token, buffer, (id, version, at)),
             other => log::error!("{other:?} is answered"),
         }
     }
@@ -2037,6 +2054,7 @@ impl Daemon {
             self.forget_queries(token, None);
             self.installs.forget(token);
             self.forget_finds(token);
+            self.forget_stages(token, None);
             if let Link::Quic(handle) = client.link
                 && let Some(quic) = self.quic.as_mut()
             {

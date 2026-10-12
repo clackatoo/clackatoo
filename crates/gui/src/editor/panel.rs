@@ -1,5 +1,5 @@
 //! The panel an editor shows by its cursor: what the language server says
-//! is there, as `K` asks, and what's wrong there in full.
+//! is there, as `K` asks, what's wrong there in full, and a hunk's change.
 //!
 //! What's shown is made once, from markdown or plain text, into
 //! paragraphs of runs of text, each in one ink. They're wrapped to the
@@ -51,8 +51,8 @@ impl Line {
 enum Block {
     /// Prose, wrapped between words. A `\n` in a run breaks the line.
     Prose(Vec<Run>),
-    /// A line of code, wrapped wherever it reaches the edge.
-    Code(String),
+    /// A line of code, in an ink, wrapped wherever it reaches the edge.
+    Code(String, Ink),
     /// A line across, between what the server says and what's wrong.
     Rule,
     /// An empty line, between paragraphs.
@@ -145,6 +145,34 @@ impl Panel {
         })
     }
 
+    /// A panel showing a hunk as a diff: its lines as they were, `base`,
+    /// in red after a `-`, then as they are, `now`, in green after a `+`,
+    /// as gitsigns.nvim previews one. Tabs go to the next multiple of
+    /// `tabstop` columns. `None` if both are empty.
+    pub(crate) fn hunk(
+        base: &str,
+        now: &str,
+        anchor: crate::motion::Point,
+        tabstop: usize,
+    ) -> Option<Self> {
+        let lines = |text: &str, mark: char, ink: Ink| -> Vec<Block> {
+            (text.lines())
+                .map(|line| Block::Code(format!("{mark}{}", expand_tabs(line, tabstop)), ink))
+                .collect()
+        };
+        let mut blocks = lines(base, '-', Ink::Removed);
+        blocks.extend(lines(now, '+', Ink::Added));
+        (!blocks.is_empty()).then(|| Self {
+            widest: (blocks.iter()).map(Block::natural_width).max().unwrap_or(0),
+            blocks,
+            lines: Vec::new(),
+            wrapped_to: 0,
+            scroll: 0,
+            placed: None,
+            anchor,
+        })
+    }
+
     /// Wraps it for a pane `cols` wide, if that's not what it's wrapped
     /// for. Returns the width of its text.
     fn wrap(&mut self, cols: usize) -> usize {
@@ -214,7 +242,7 @@ impl Block {
                 let text: String = runs.iter().map(|run| run.text.as_str()).collect();
                 text.split('\n').map(mono_width).max().unwrap_or(0)
             }
-            Self::Code(line) => mono_width(line),
+            Self::Code(line, _) => mono_width(line),
             Self::Rule | Self::Gap => 0,
         }
     }
@@ -223,7 +251,7 @@ impl Block {
     fn wrap(&self, width: usize) -> Vec<Line> {
         match self {
             Self::Prose(runs) => wrap_prose(runs, width),
-            Self::Code(line) => {
+            Self::Code(line, ink) => {
                 let chars: Vec<(char, usize)> = line.chars().map(|ch| (ch, 0)).collect();
                 if chars.is_empty() {
                     return vec![Line {
@@ -231,7 +259,11 @@ impl Block {
                         block: true,
                     }];
                 }
-                let run = [plain("")];
+                let run = [Run {
+                    text: String::new(),
+                    ink: *ink,
+                    code: false,
+                }];
                 let mut lines = Vec::new();
                 let mut rest = &chars[..];
                 while !rest.is_empty() {
@@ -454,7 +486,7 @@ impl Markdown {
                 let lines = text.trim_end_matches('\n').split('\n');
                 let tabstop = self.tabstop;
                 self.blocks
-                    .extend(lines.map(|line| Block::Code(expand_tabs(line, tabstop))));
+                    .extend(lines.map(|line| Block::Code(expand_tabs(line, tabstop), Ink::Plain)));
                 self.blocks.push(Block::Gap);
             }
             Event::Text(text) => match &mut self.code {
@@ -624,9 +656,12 @@ mod tests {
         );
         // A hard break breaks.
         assert_eq!(texts(&wrap_prose(&[plain("a\nb")], 9)), ["a", "b"]);
-        let code = Block::Code("fn main() {}".into()).wrap(5);
+        let code = Block::Code("fn main() {}".into(), Ink::Plain).wrap(5);
         assert_eq!(texts(&code), ["fn ma", "in() ", "{}"]);
-        assert_eq!(texts(&Block::Code("日本語".into()).wrap(5)), ["日本", "語"]);
+        assert_eq!(
+            texts(&Block::Code("日本語".into(), Ink::Plain).wrap(5)),
+            ["日本", "語"]
+        );
         assert!(code.iter().all(|line| line.block));
     }
 

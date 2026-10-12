@@ -1456,21 +1456,7 @@ impl Desk {
                     self.request(Request::NewWorkspace { name, terminal }, Asked::Pane);
                 }
             }
-            Command::Tab(number) => {
-                let tabs = self
-                    .workspaces
-                    .get(shown.workspace)
-                    .map_or(&[][..], |workspace| &workspace.tabs[..]);
-                match number.checked_sub(1).and_then(|index| tabs.get(index)) {
-                    Some(tab) => self.show_pane(tab.focused),
-                    None => {
-                        self.message = Some(match tabs.len() {
-                            1 => format!("there's no tab {number}; this workspace has one"),
-                            count => format!("there's no tab {number}; this workspace has {count}"),
-                        });
-                    }
-                }
-            }
+            Command::Tab(number) => self.show_tab_numbered(shown.workspace, number),
             Command::Rename(name) => self.request(
                 Request::RenameWorkspace {
                     workspace: shown.workspace,
@@ -1487,7 +1473,24 @@ impl Desk {
             Command::Discard => self.discard_changes(),
             Command::Format => self.format_file(),
             Command::Find { kind, query } => self.open_finder(kind, query),
+            Command::Hunk(action) => self.editor_hunk(action),
             Command::Reload | Command::Set(_) => {}
+        }
+    }
+
+    /// Shows tab `number` of `workspace`, counting from 1, or says there's
+    /// no such tab.
+    fn show_tab_numbered(&mut self, workspace: WorkspaceId, number: usize) {
+        let tabs =
+            (self.workspaces.get(workspace)).map_or(&[][..], |workspace| &workspace.tabs[..]);
+        match number.checked_sub(1).and_then(|index| tabs.get(index)) {
+            Some(tab) => self.show_pane(tab.focused),
+            None => {
+                self.message = Some(match tabs.len() {
+                    1 => format!("there's no tab {number}; this workspace has one"),
+                    count => format!("there's no tab {number}; this workspace has {count}"),
+                });
+            }
         }
     }
 
@@ -1617,6 +1620,7 @@ mod tests {
                 | ClientMessage::Rename { .. }
                 | ClientMessage::Find { .. }
                 | ClientMessage::StopFinding { .. }
+                | ClientMessage::Stage { .. }
                 | ClientMessage::Hello { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
@@ -3632,6 +3636,47 @@ mod tests {
         assert_eq!(note(&desk), "a.rs  1:4");
         ctrl(&mut desk, "o");
         assert_eq!(note(&desk), "a.rs  2:4");
+    }
+
+    #[test]
+    fn space_h_keys_act_on_the_hunk_at_the_cursor() {
+        use clackatoo_protocol::{BufferUpdate, Change, Edit, Hunk};
+        let mut desk = editing("/p/a.txt", "a\nB\n");
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Hunks {
+                version: 0,
+                hunks: vec![Hunk {
+                    start: 2,
+                    end: 4,
+                    base: "b\n".into(),
+                }],
+            },
+        );
+        type_keys(&mut desk, "j hs");
+        let stages: Vec<usize> = (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Stage { at, .. } => Some(at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stages, [2]);
+        type_keys(&mut desk, " hr");
+        let edit = Edit::replace(4, 2, "B\n", "b\n");
+        assert_eq!(
+            buffer_changes(&mut desk),
+            [(
+                0,
+                Change::Edit {
+                    edit,
+                    base: 0,
+                    step: true
+                }
+            )]
+        );
+        // And from the command line, as gitsigns.nvim's command.
+        command(&mut desk, "Gitsigns preview_hunk");
+        assert_eq!(note_of(&desk), "nothing's changed here since git's index");
     }
 
     #[test]

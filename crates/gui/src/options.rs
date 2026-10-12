@@ -289,6 +289,11 @@ options! {
     /// What's wrong with a line, as its language server says, written
     /// after the line's end: the worst, if there are several.
     virtualtext("vt"): bool = true;
+    /// A column of signs left of the line numbers, saying which lines are
+    /// added, changed or deleted since the file's text in git's index, as
+    /// gitsigns.nvim shows them. Kept for every file while it's on, so the
+    /// text doesn't move when the first change comes.
+    gitsigns("gs"): bool = true;
     /// The fewest lines kept in view above and below the cursor, so what's
     /// around it shows as it moves. Half the pane or more keeps the
     /// cursor's line in the middle.
