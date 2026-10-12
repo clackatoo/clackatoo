@@ -98,6 +98,13 @@ module_name_repetitions = "allow"
 lto = "fat"
 codegen-units = 1
 
+# swash's shaper takes away 1 with wrapping arithmetic when a font replaces
+# a glyph with none, as Noto Color Emoji does for two regional indicators
+# that aren't a flag (🇽🇬). That's what it means, and release builds do
+# it; with overflow checks, debug builds and tests panic instead.
+[profile.dev.package.swash]
+overflow-checks = false
+
 # An optimised build without whole-program optimisation, for trying things
 # out: much faster to build than release, a little slower to run.
 # `cargo build --profile quick`

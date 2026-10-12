@@ -778,12 +778,20 @@ impl Renderer {
         let lines = (scene.size[1] / cell_height).round() as usize;
         let cursor = scene.cursor;
         self.push_highlights(scene, true, [cols, lines], [cell_width, cell_height]);
+        // Whether the row before wrapped halfway through a flag.
+        let mut mid_flag = false;
         for (line, row) in scene.rows.iter().take(lines).enumerate() {
             let top = origin_y + line as f32 * cell_height;
             let baseline = top + cell.baseline;
-            // Cells before this column were drawn as one glyph with a cell
-            // to their left, so draw no text of their own.
-            let mut joined_until = 0;
+            // Cells before `run_until` belong to a run that starts to their
+            // left: drawn with it as one glyph if `run_drawn`, or else each
+            // on its own.
+            let (mut run_until, mut run_drawn) = (0, false);
+            // The second half of a flag the wrap cut in two stands alone,
+            // rather than pairing with the letter after it.
+            if mid_flag && is_regional_indicator(row.cells()[0].ch()) {
+                run_until = 1;
+            }
             for (col, &cell_value) in row.cells().iter().enumerate().take(cols) {
                 if cell_value.is_wide_spacer() {
                     continue;
@@ -817,21 +825,27 @@ impl Renderer {
                     style.attributes.contains(Attributes::BOLD),
                     style.attributes.contains(Attributes::ITALIC),
                 );
-                if col < joined_until {
-                    // Drawn already, with the cell it joins.
+                let alone = if col < run_until {
+                    !run_drawn
                 } else if cell_value.ch() >= FIRST_JOINING
                     && let Some(end) = joined_run(row, col, cols)
-                    && self.push_joined_text(
+                {
+                    // A run the font can't join is still a run, so its
+                    // cells don't pair with others: 🇽🇬🇧 is 🇽, 🇬, then 🇧.
+                    run_until = end;
+                    run_drawn = self.push_joined_text(
                         fonts,
                         row,
                         col..end,
                         variant,
                         [left, baseline],
                         colors.foreground,
-                    )
-                {
-                    joined_until = end;
+                    );
+                    !run_drawn
                 } else {
+                    true
+                };
+                if alone {
                     self.push_cell_text(
                         fonts,
                         row,
@@ -860,6 +874,7 @@ impl Renderer {
                     ));
                 }
             }
+            mid_flag = ends_mid_flag(row, mid_flag);
         }
         self.push_highlights(scene, false, [cols, lines], [cell_width, cell_height]);
     }
@@ -1080,11 +1095,9 @@ impl Renderer {
         shaped.insert(text.into(), glyphs);
     }
 
-    /// Draws the cells `cols` of `row` as the one emoji they make together,
-    /// from `pen`, two cells wide, as an emoji is, in `color` if it hasn't
-    /// colours of its own, if the font joins them
-    /// into one glyph. Returns whether it did: if not, each cell is drawn
-    /// as its own.
+    /// Draws the cells `cols` of `row` as one emoji two cells wide at `pen`,
+    /// in `color` unless it has colours of its own, and returns whether the
+    /// font joined them into one glyph to draw.
     fn push_joined_text(
         &mut self,
         fonts: &mut Fonts,
@@ -1151,6 +1164,26 @@ fn joined_run(row: &clackatoo_term::Row, col: usize, cols: usize) -> Option<usiz
         is_skin_tone(next_cell.ch()) && !is_skin_tone(cell.ch())
     };
     (joins && next + next_width <= cols).then_some(next + next_width)
+}
+
+/// Whether `row`, if it wraps onto the next, ends halfway through a flag:
+/// with an odd number of regional indicators running to its end, counted
+/// from where the run starts. That's on a row before if the run fills
+/// `row`, and `continued` says whether that row ended halfway through one.
+fn ends_mid_flag(row: &clackatoo_term::Row, continued: bool) -> bool {
+    if !row.is_wrapped() {
+        return false;
+    }
+    let cells = row.cells();
+    let run = (cells.iter().rev())
+        .take_while(|cell| is_regional_indicator(cell.ch()) && !cell.has_grapheme())
+        .count();
+    let before = if run == cells.len() {
+        usize::from(continued)
+    } else {
+        0
+    };
+    (before + run) % 2 == 1
 }
 
 /// The uniforms, the atlas and its sampler.
@@ -1435,5 +1468,103 @@ mod tests {
         let cached = renderer.shaped[Variant::Regular as usize].len();
         assert_eq!(drawn(&mut renderer, &mut fonts), first);
         assert_eq!(renderer.shaped[Variant::Regular as usize].len(), cached);
+    }
+
+    /// A row `width` cells wide holding `text`, continuing on the next if
+    /// `wrapped`.
+    fn row_of(width: usize, text: &str, wrapped: bool) -> clackatoo_term::Row {
+        let mut builder = clackatoo_term::RowBuilder::new(width);
+        builder.push(text, &clackatoo_term::Style::DEFAULT, false);
+        builder.finish(wrapped)
+    }
+
+    #[test]
+    fn a_wrapped_row_can_end_halfway_through_a_flag() {
+        assert!(ends_mid_flag(&row_of(3, "ab🇬", true), false));
+        assert!(!ends_mid_flag(&row_of(3, "a🇬🇧", true), false));
+        assert!(!ends_mid_flag(&row_of(3, "ab🇬", false), false), "no wrap");
+        // A run filling the row counts on from the row before.
+        assert!(ends_mid_flag(&row_of(3, "🇬🇧🇯", true), false));
+        assert!(!ends_mid_flag(&row_of(3, "🇬🇧🇯", true), true));
+        assert!(ends_mid_flag(&row_of(2, "🇬🇧", true), true));
+    }
+
+    #[test]
+    fn flags_pair_from_the_left_whether_or_not_they_join() {
+        let Some((device, _)) = crate::tests::gpu() else {
+            eprintln!("no GPU available; skipping");
+            return;
+        };
+        let mut fonts = crate::tests::fonts(1.0);
+        if fonts.glyph('🇬', Variant::Regular).is_none() {
+            eprintln!("no emoji font; skipping");
+            return;
+        }
+        let mut renderer = Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        // As if the font couldn't join 🇽🇬 or 🇦🇦: Noto Color Emoji draws
+        // each as one glyph anyway.
+        for pair in ["🇽🇬", "🇦🇦"] {
+            renderer.shaped[Variant::Regular as usize].insert(pair.into(), None);
+        }
+        // Each glyph drawn, by its line and column, and whether it's two
+        // cells wide, as a flag is, or one, as a letter alone is.
+        let mut drawn = |rows: &[&clackatoo_term::Row]| {
+            #[allow(clippy::cast_precision_loss)]
+            let cell = [fonts.cell.width as f32, fonts.cell.height as f32];
+            let picture = Picture {
+                scenes: &[Scene {
+                    origin: [0.0; 2],
+                    #[allow(clippy::cast_precision_loss)]
+                    size: [
+                        rows[0].width() as f32 * cell[0],
+                        rows.len() as f32 * cell[1],
+                    ],
+                    rows,
+                    cursor: None,
+                    normal_mode: false,
+                    highlights: &[],
+                }],
+                fills: &[],
+                over: &[],
+                texts: &[],
+                glyphs: &[],
+                over_glyphs: &[],
+                transparent: false,
+            };
+            renderer.build(&picture, &mut fonts);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            (renderer.glyph_instances.iter())
+                .map(|glyph| {
+                    let line = (glyph.origin[1] / cell[1]).floor().max(0.0) as usize;
+                    let col = (glyph.origin[0] / cell[0]).floor() as usize;
+                    (line, col, glyph.size[0] > 1.5 * cell[0])
+                })
+                .collect::<Vec<_>>()
+        };
+        // 🇽🇬 and 🇦🇦 aren't flags, so their letters stand alone, and the
+        // second doesn't pair with the next: 🇬🇧 is drawn, not 🇦🇬.
+        let row = row_of(9, "🇽🇬🇧 🇦🇦🇬🇧", false);
+        assert_eq!(
+            drawn(&[&row]),
+            [
+                (0, 0, false),
+                (0, 1, false),
+                (0, 2, false),
+                (0, 4, false),
+                (0, 5, false),
+                (0, 6, true),
+            ]
+        );
+        // A flag the wrap cut in two: its second half stands alone, and
+        // the pair after it is 🇯🇵, not 🇧🇯.
+        let first = row_of(3, "ab🇬", true);
+        let second = row_of(3, "🇧🇯🇵", false);
+        let glyphs = drawn(&[&first, &second]);
+        // After a and b.
+        assert_eq!(
+            glyphs[2..],
+            [(0, 2, false), (1, 0, false), (1, 1, true)],
+            "{glyphs:?}"
+        );
     }
 }
