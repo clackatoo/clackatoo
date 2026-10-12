@@ -1344,7 +1344,7 @@ impl Desk {
                 ));
             }
             Command::Open {
-                place: Place::Tab,
+                place: Place::Tab | Place::Here,
                 kind,
                 daemon: None,
             } => {
@@ -2409,6 +2409,28 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn e_opens_a_file_in_place_of_the_one_shown() {
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(BufferId(7)),
+        });
+        let mut desk = Desk::default();
+        desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+        answer_all(&mut desk);
+        command(&mut desk, "e src/other.rs");
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::OpenHere {
+                pane: PaneId(1),
+                file: clackatoo_protocol::OpenFile {
+                    path: "src/other.rs".into(),
+                    cwd: None,
+                },
+            }]
+        );
     }
 
     #[test]

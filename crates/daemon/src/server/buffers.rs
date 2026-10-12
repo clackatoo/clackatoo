@@ -6,8 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use clackatoo_protocol::{
-    Author, BufferId, BufferUpdate, Change, Edit, Error, Event, OpenFile, PaneId, Response,
-    ServerMessage, frame,
+    Author, BufferId, BufferUpdate, Change, Content, Edit, Error, Event, OpenFile, PaneId,
+    Response, ServerMessage, frame,
 };
 use clackatoo_syntax::{Highlighted, Syntax};
 use clackatoo_text::Highlights;
@@ -222,6 +222,29 @@ impl Daemon {
         if self.workspaces.remove_pane(pane) {
             self.workspaces_changed();
         }
+        self.close_if_unwanted(buffer);
+    }
+
+    /// Answers [`Request::OpenHere`](clackatoo_protocol::Request::OpenHere):
+    /// `pane`, which shows a file, shows `file` instead, and the file it
+    /// showed closes if nothing else shows it and it has no changes to
+    /// save.
+    pub(super) fn open_here(&mut self, pane: PaneId, file: OpenFile) -> Result<Response, Error> {
+        let Content::Buffer(old) = self.workspaces.check_pane(pane)? else {
+            return Err(Error::NotAFile(pane));
+        };
+        let new = self.open_buffer(file, Some(pane))?;
+        if new != old {
+            self.workspaces.set_content(pane, Content::Buffer(new))?;
+            self.workspaces_changed();
+            self.close_if_unwanted(old);
+        }
+        Ok(Response::Done)
+    }
+
+    /// Closes `buffer` if no pane shows it and it has no changes to save.
+    /// One with changes waits, unseen, to be opened again.
+    fn close_if_unwanted(&mut self, buffer: BufferId) {
         let unwanted = !self.workspaces.shows(buffer)
             && (self.buffers.get(&buffer)).is_some_and(|slot| !slot.buffer.modified());
         if unwanted && let Some(slot) = self.buffers.remove(&buffer) {

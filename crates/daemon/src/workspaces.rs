@@ -274,6 +274,15 @@ impl WorkspaceState {
             .collect())
     }
 
+    /// Shows `content` in `pane`, returning what it showed.
+    pub(crate) fn set_content(&mut self, pane: PaneId, content: Content) -> Result<Content, Error> {
+        let found = (self.workspaces.list.iter_mut())
+            .flat_map(|workspace| &mut workspace.tabs)
+            .find_map(|tab| pane_mut(&mut tab.layout, pane))
+            .ok_or(Error::NoSuchPane(pane))?;
+        Ok(std::mem::replace(&mut found.content, content))
+    }
+
     /// Whether any pane shows `buffer`.
     pub(crate) fn shows(&self, buffer: BufferId) -> bool {
         (self.workspaces.list.iter())
@@ -522,6 +531,14 @@ fn split(layout: &mut Layout, target: PaneId, side: Side, new: Pane) {
 
 /// Takes `pane` out of `tab`, and focuses the pane before it if it had the
 /// focus. Returns `false`, changing nothing, if it's the tab's only pane.
+/// `pane`, if it's in `layout`.
+fn pane_mut(layout: &mut Layout, pane: PaneId) -> Option<&mut Pane> {
+    match layout {
+        Layout::Pane(found) => (found.id == pane).then_some(found),
+        Layout::Split { parts, .. } => parts.iter_mut().find_map(|part| pane_mut(part, pane)),
+    }
+}
+
 fn remove(tab: &mut Tab, pane: PaneId) -> bool {
     let Layout::Split { .. } = tab.layout else {
         return false;

@@ -288,9 +288,15 @@ impl Desk {
     /// focused pane's directory, in a new tab or beside the focused pane.
     pub(super) fn open_file(&mut self, place: Place, path: String) {
         let Some(shown) = self.shown else { return };
-        let terminal = PaneTerminal::File(OpenFile { path, cwd: None });
+        let file = OpenFile { path, cwd: None };
+        if place == Place::Here && self.focused_editor().is_some() {
+            let pane = shown.pane;
+            self.request(Request::OpenHere { pane, file }, Asked::Command);
+            return;
+        }
+        let terminal = PaneTerminal::File(file);
         let request = match place {
-            Place::Tab => Request::NewTab {
+            Place::Tab | Place::Here => Request::NewTab {
                 workspace: shown.workspace,
                 terminal,
             },

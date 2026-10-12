@@ -1992,3 +1992,62 @@ fn a_buffer_wont_write_over_changes_made_on_disk_and_outlives_its_panes_while_mo
     let gone = client.request(&Request::AttachBuffer { buffer }).unwrap();
     assert_eq!(gone, Response::Error(Error::NoSuchBuffer(buffer)));
 }
+
+#[test]
+fn a_pane_shows_another_file_in_place_as_e_does() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::create_dir(dir.join("src")).unwrap();
+    for name in ["a.rs", "b.rs", "c.rs"] {
+        std::fs::write(dir.join("src").join(name), format!("// {name}\n")).unwrap();
+    }
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "src/a.rs"))).unwrap();
+    let a = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, a);
+    let open_here = |client: &mut Client, path: &str| {
+        client.request(&Request::OpenHere {
+            pane,
+            file: OpenFile {
+                path: path.to_owned(),
+                cwd: None,
+            },
+        })
+    };
+
+    // A relative path is from where the file shown was opened from; the
+    // one left goes, having no changes.
+    assert_eq!(open_here(&mut client, "src/b.rs").unwrap(), Response::Done);
+    let b = buffer_in(&mut client, pane);
+    assert_ne!(a, b);
+    assert_eq!(attach_buffer(&mut client, b).text, "// b.rs\n");
+    let gone = client
+        .request(&Request::AttachBuffer { buffer: a })
+        .unwrap();
+    assert_eq!(gone, Response::Error(Error::NoSuchBuffer(a)));
+
+    // One with changes waits, unseen, to be opened again.
+    send_change(&mut client, b, 0, insert(8, 0, "x", 0));
+    open_here(&mut client, "src/c.rs").unwrap();
+    assert_ne!(buffer_in(&mut client, pane), b);
+    let kept = client
+        .request(&Request::AttachBuffer { buffer: b })
+        .unwrap();
+    assert_eq!(kept, Response::Done);
+    open_here(&mut client, "src/b.rs").unwrap();
+    assert_eq!(buffer_in(&mut client, pane), b);
+
+    // A terminal's pane shows no file to put another in place of.
+    let terminal = client
+        .split_pane(pane, Side::Below, new_pane(&["cat"]))
+        .unwrap();
+    let refused = client.request(&Request::OpenHere {
+        pane: terminal,
+        file: OpenFile {
+            path: "a.rs".into(),
+            cwd: None,
+        },
+    });
+    assert_eq!(refused.unwrap(), Response::Error(Error::NotAFile(terminal)));
+}

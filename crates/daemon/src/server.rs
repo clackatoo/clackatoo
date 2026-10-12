@@ -1773,7 +1773,8 @@ impl Daemon {
             | Request::RenameTab { .. }
             | Request::CloseTab { .. }
             | Request::CloseWorkspace { .. }
-            | Request::ResizeSplit { .. }) => self.respond_about_workspaces(request, token),
+            | Request::ResizeSplit { .. }
+            | Request::OpenHere { .. }) => self.respond_about_workspaces(request, token),
             Request::CarryQuic => self.carry_quic(token),
             Request::AttachBuffer { buffer } => {
                 self.attach_buffer(token, buffer).map(|()| Response::Done)
@@ -1843,6 +1844,7 @@ impl Daemon {
                     self.workspaces_changed();
                     Response::Done
                 }),
+            Request::OpenHere { pane, file } => self.open_here(pane, file),
             Request::CloseTab { tab } => {
                 let panes = self.workspaces.tab_panes(tab)?;
                 self.close_panes(&panes)

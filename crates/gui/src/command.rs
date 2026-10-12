@@ -53,6 +53,9 @@ pub(crate) enum Command {
 pub(crate) enum Place {
     /// In a tab of its own.
     Tab,
+    /// In place of the file the focused pane shows, as Vim's `:e` opens
+    /// one, or in a tab of its own if it shows none.
+    Here,
     /// Beside the focused pane.
     Beside(Side),
 }
@@ -168,7 +171,7 @@ fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
         "e" | "edit" => Some(
             argument
                 .map(|path| Command::Edit {
-                    place: Place::Tab,
+                    place: Place::Here,
                     path: path.to_owned(),
                 })
                 .ok_or_else(|| "e needs a file: :e PATH".to_owned()),
@@ -255,7 +258,7 @@ mod tests {
             place,
             path: "src/main.rs".to_owned(),
         };
-        assert_eq!(parse("e src/main.rs"), Ok(edit(Place::Tab)));
+        assert_eq!(parse("e src/main.rs"), Ok(edit(Place::Here)));
         assert_eq!(parse("Editor src/main.rs"), Ok(edit(Place::Tab)));
         assert_eq!(
             parse("|Editor src/main.rs"),

@@ -70,7 +70,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -385,6 +385,17 @@ pub enum Request {
         /// The buffer.
         buffer: BufferId,
     },
+    /// Shows `file` in `pane`, which shows a file, in place of that file,
+    /// as Vim's `:e` does. The file it showed closes if nothing else shows
+    /// it and it has no changes to save.
+    OpenHere {
+        /// The pane.
+        pane: PaneId,
+        /// The file to show: a relative path is from the directory the
+        /// file the pane shows was opened from, as Vim's are from its
+        /// working directory.
+        file: OpenFile,
+    },
 }
 
 /// How to start a terminal.
@@ -557,6 +568,9 @@ pub enum Error {
     /// The file has changed since the buffer read it or last wrote it.
     #[error("{0} has changed since it was read")]
     ChangedOnDisk(String),
+    /// The pane doesn't show a file.
+    #[error("pane {0} shows no file")]
+    NotAFile(PaneId),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while
