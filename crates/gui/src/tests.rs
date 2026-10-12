@@ -1037,3 +1037,105 @@ fn renders_an_editor_pane() {
     assert_eq!(at(2, column + 2), background);
     assert_eq!(at(3, column), background, "no column past the end");
 }
+
+/// How long building and sending a frame takes, on the CPU, for a screen
+/// of plain text and one of emoji, joined and not. A measurement, not a
+/// check: run it by hand with `cargo test -p clackatoo-gui --release
+/// frame_times -- --ignored --nocapture`.
+#[test]
+#[ignore = "a timing, run by hand"]
+fn frame_times() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let ascii: String = (0..50)
+        .map(|line| {
+            let text: String = (0..160)
+                .map(|col| char::from(b'!' + u8::try_from((line * 7 + col) % 94).unwrap()))
+                .collect();
+            format!("{text}\r\n")
+        })
+        .collect();
+    let emoji = [
+        "😀",
+        "👩\u{200D}💻",
+        "🇬🇧",
+        "👍🏽",
+        "1\u{FE0F}\u{20E3}",
+        "e\u{301}",
+        "❤\u{FE0F}",
+        "🇯🇵",
+        "👩🏽\u{200D}💻",
+        "a",
+    ];
+    let emoji: String = (0..50)
+        .map(|line| {
+            let text: String = (0..32)
+                .map(|col| emoji[(line + col) % emoji.len()])
+                .collect();
+            format!("{text}\r\n")
+        })
+        .collect();
+    for (name, output) in [("ascii", ascii), ("emoji", emoji)] {
+        let screen = screen(160, 50, &output);
+        let mut fonts = fonts(2.0);
+        let size = [160 * fonts.cell.width, 50 * fonts.cell.height];
+        let rows: Vec<_> = screen.rows.iter().collect();
+        #[allow(clippy::cast_precision_loss)]
+        let scene = Scene {
+            origin: [0.0; 2],
+            size: [size[0] as f32, size[1] as f32],
+            rows: &rows,
+            cursor: None,
+            normal_mode: false,
+            highlights: &[],
+        };
+        let picture = Picture {
+            scenes: &[scene],
+            fills: &[],
+            over: &[],
+            texts: &[],
+            glyphs: &[],
+            over_glyphs: &[],
+            transparent: false,
+        };
+        let (device, queue) = &gpu;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("target"),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut renderer = Renderer::new(device, FORMAT);
+        let mut times = Vec::new();
+        for frame in 0..600 {
+            let started = std::time::Instant::now();
+            renderer.render((device, queue), &view, size, &picture, &mut fonts);
+            // The first frames rasterise glyphs, which later ones reuse.
+            if frame >= 100 {
+                times.push(started.elapsed().as_secs_f64() * 1e6);
+            }
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("poll");
+        }
+        times.sort_by(f64::total_cmp);
+        #[allow(clippy::cast_precision_loss)]
+        let mean = times.iter().sum::<f64>() / times.len() as f64;
+        eprintln!(
+            "{name}: median {:.0} µs, mean {mean:.0} µs, min {:.0} µs",
+            times[times.len() / 2],
+            times[0],
+        );
+    }
+}
