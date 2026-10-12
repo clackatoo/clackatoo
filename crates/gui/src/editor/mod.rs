@@ -205,6 +205,8 @@ pub(crate) struct Editor {
     scrolloff: usize,
     /// The cursor's line is lit (`cursorline`).
     cursorline: bool,
+    /// What's wrong with a line is written after it (`virtualtext`).
+    virtual_text: bool,
     /// The columns marked down the pane, counting from 0 (`colorcolumn`).
     columns: Vec<usize>,
     /// How searches treat case.
@@ -257,6 +259,7 @@ impl Editor {
             indent: Indent::of(options),
             scrolloff: options.scrolloff as usize,
             cursorline: options.cursorline,
+            virtual_text: options.virtualtext,
             columns: columns(options),
             case: Case::of(options),
             filled: 0,
@@ -315,6 +318,7 @@ impl Editor {
         self.numbers = Numbers::of(options);
         self.scrolloff = options.scrolloff as usize;
         self.cursorline = options.cursorline;
+        self.virtual_text = options.virtualtext;
         self.columns = columns(options);
         self.case = Case::of(options);
         self.follow(copy);
@@ -542,6 +546,7 @@ impl Editor {
                 self.page(i64::from(direction), self.height.saturating_sub(2), copy);
             }
             Action::View(at) => self.view_at(at),
+            Action::Diagnostic { backward } => self.next_diagnostic(backward, times, copy),
             Action::OtherEnd => {
                 if let Some(anchor) = self.anchor {
                     self.anchor = Some(self.cursor.at);
@@ -1362,6 +1367,44 @@ impl Editor {
         }
     }
 
+    /// `]d`, or `[d` if `backward`: to the start of the `times`th
+    /// diagnostic after the cursor, or before it, going round the file's
+    /// ends.
+    fn next_diagnostic(&mut self, backward: bool, times: usize, copy: &BufferCopy) {
+        let all = copy.diagnostics().all();
+        if all.is_empty() {
+            self.status = Some("nothing's wrong, as far as the language server knows".into());
+            return;
+        }
+        let text = self.text(copy);
+        // Where the cursor lands on each, which isn't always where it
+        // starts: one past a line's end, as a missing semicolon is, lands
+        // on the line's last character. Going by where it starts would
+        // land there again and again.
+        let mut landings: Vec<usize> = (all.iter())
+            .map(|diagnostic| {
+                let point = text.point_of(diagnostic.start);
+                let cells = text.laid(point.line).map_or(0, |laid| laid.cells());
+                let col = point.col.min(cells.saturating_sub(1));
+                text.byte_at(Point { col, ..point })
+            })
+            .collect();
+        landings.sort_unstable();
+        landings.dedup();
+        let at = text.byte_at(self.cursor.at);
+        let count = landings.len();
+        // Round and round as often as the count says.
+        let steps = (times.max(1) - 1) % count;
+        let index = if backward {
+            let before = landings.partition_point(|&landing| landing < at);
+            (before + count - 1 - steps) % count
+        } else {
+            let after = landings.partition_point(|&landing| landing <= at);
+            (after + steps) % count
+        };
+        self.cursor = Cursor::new(text.point_of(landings[index]));
+    }
+
     /// Ctrl+D and the like: `lines` lines down, or up if `direction` is
     /// negative, moving the view and the cursor together.
     fn page(&mut self, direction: i64, lines: usize, copy: &BufferCopy) {
@@ -1631,16 +1674,28 @@ impl Editor {
                 // The line after the last line break, while typed on.
                 let typing_after = line == lines && cursor == lines;
                 if line < lines || typing_after {
+                    let (start, end) = (text.line_start(line), text.line_end(line));
+                    let diagnostics: Vec<&Diagnostic> =
+                        copy.diagnostics().within(start, end).collect();
+                    // The worst said of this line, where it starts, which
+                    // its number and the text after it tell of.
+                    let worst = (diagnostics.iter())
+                        .filter(|diagnostic| diagnostic.start >= start)
+                        .min_by_key(|diagnostic| diagnostic.severity);
                     if self.gutter > 0 {
                         let number = self.numbers.label(line, cursor);
                         let number = format!("{number:>0$} ", self.gutter - 1);
-                        builder.push(&number, &colors::line_number(line == cursor), true);
+                        let style = match worst {
+                            Some(diagnostic) if line != cursor => Style {
+                                fg: colors::diagnostic(diagnostic.severity),
+                                ..Style::DEFAULT
+                            },
+                            _ => colors::line_number(line == cursor),
+                        };
+                        builder.push(&number, &style, true);
                     }
                     let laid = Laid::new(text.line_text(line), self.indent.tabstop);
-                    let (start, end) = (text.line_start(line), text.line_end(line));
                     let spans = copy.highlights().within(start, end);
-                    let diagnostics: Vec<&Diagnostic> =
-                        copy.diagnostics().within(start, end).collect();
                     laid.show(
                         &mut builder,
                         self.left,
@@ -1649,6 +1704,20 @@ impl Editor {
                         &diagnostics,
                         start,
                     );
+                    if let Some(diagnostic) = worst.filter(|_| self.virtual_text) {
+                        // Two cells after the line's end, as much as fits:
+                        // nothing, past the pane's edge.
+                        let room = self.width.saturating_sub(builder.filled());
+                        let gap = (self.gutter + laid.cells().saturating_sub(self.left) + 2)
+                            .saturating_sub(builder.filled());
+                        if gap < room {
+                            builder.push(&" ".repeat(gap), &Style::DEFAULT, true);
+                            let style = colors::virtual_text(diagnostic.severity);
+                            let message = diagnostic.message.lines().next().unwrap_or_default();
+                            builder.push("■ ", &style, true);
+                            builder.push(message, &style, true);
+                        }
+                    }
                 } else if copy.loaded() {
                     builder.push("~", &Style::DEFAULT, true);
                 }

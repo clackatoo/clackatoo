@@ -231,6 +231,9 @@ options! {
     /// Columns marked down an editor, such as 80, to keep lines short by.
     /// They count from 1, as the bar's column does.
     colorcolumn("cc"): List (1..=9999) = List::new();
+    /// What's wrong with a line, as its language server says, written
+    /// after the line's end: the worst, if there are several.
+    virtualtext("vt"): bool = true;
     /// The fewest lines kept in view above and below the cursor, so what's
     /// around it shows as it moves. Half the pane or more keeps the
     /// cursor's line in the middle.
@@ -240,9 +243,8 @@ options! {
     /// The columns `>>`, `<<` and Tab indent by. 0 means `tabstop`'s, so
     /// the two can't drift apart.
     shiftwidth("sw"): u32 (0..=32) = 0;
-    /// Indent a line that isn't indented yet with spaces, not tabs. A line
-    /// that's indented already keeps its kind of indent: tabs if it has
-    /// one, spaces if not, so a file stays as it's indented.
+    /// Indent with spaces, not tabs, where no line nearby is indented yet.
+    /// A file keeps the kind of indent it has.
     expandtab("et"): bool = true;
     /// Searches ignore case...
     ignorecase("ic"): bool = true;

@@ -172,6 +172,18 @@ pub(crate) const fn diagnostic(severity: Severity) -> Color {
     })
 }
 
+/// How what's wrong with a line is written after its end: in the colour
+/// of how much it matters, dimmed, so it's read when looked for rather
+/// than shouting over the code.
+#[must_use]
+pub(crate) const fn virtual_text(severity: Severity) -> Style {
+    Style {
+        fg: diagnostic(severity),
+        attributes: Attributes::DIM,
+        ..Style::DEFAULT
+    }
+}
+
 /// How an editor's line numbers are drawn: faint, but the cursor's line in
 /// clackatoo's accent, so the eye finds it.
 #[must_use]

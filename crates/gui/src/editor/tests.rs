@@ -697,3 +697,79 @@ fn diagnostics_are_underlined_told_of_in_the_bar_and_move_with_typing() {
     assert_eq!(cell(rows[0], 8).underline, Underline::Curly, "x, moved");
     assert_eq!(cell(rows[0], 4).underline, Underline::None);
 }
+
+#[test]
+fn diagnostics_are_written_after_lines_numbered_and_gone_to() {
+    use clackatoo_protocol::{BufferUpdate, Diagnostic, Severity};
+
+    // A pane wide enough for what's written after the lines.
+    let mut setup = Setup::new("a\nlet x = y;\nb\nz;\n");
+    setup.editor.resize(Size::new(60, 10).unwrap());
+    let diagnostic = |start, severity, message: &str| Diagnostic {
+        start,
+        end: start + 1,
+        severity,
+        message: message.to_owned(),
+        source: None,
+        code: None,
+    };
+    setup.copy.update(BufferUpdate::Diagnostics {
+        version: 0,
+        diagnostics: vec![
+            diagnostic(6, Severity::Warning, "unused"),
+            diagnostic(10, Severity::Error, "cannot find `y`\nhelp: more"),
+            diagnostic(15, Severity::Hint, "a hint"),
+        ],
+    });
+    setup.editor.settle(&setup.copy);
+    let (rows, _) = setup.editor.scene();
+    // The worst of the line's, two cells after it, its first line only.
+    assert_eq!(rows[1].text(), "  1 let x = y;  ■ cannot find `y`");
+    assert_eq!(rows[3].text(), "  3 z;  ■ a hint");
+    let fg = |row: &clackatoo_term::Row, col: usize| row.style(row.cells()[col]).fg;
+    assert_eq!(fg(rows[1], 16), crate::colors::diagnostic(Severity::Error));
+    // Its number in the same colour, but the cursor's line's.
+    assert_eq!(fg(rows[1], 2), crate::colors::diagnostic(Severity::Error));
+    assert_eq!(fg(rows[0], 2), crate::colors::line_number(true).fg);
+    assert_eq!(fg(rows[2], 2), crate::colors::line_number(false).fg);
+
+    // ]d and [d go from one to the next, round the file's ends.
+    setup.keys("]d");
+    assert_eq!(setup.cursor(), (1, 4));
+    setup.keys("]d");
+    assert_eq!(setup.cursor(), (1, 8));
+    setup.keys("2]d");
+    assert_eq!(setup.cursor(), (1, 4), "round past the end");
+    setup.keys("[d");
+    assert_eq!(setup.cursor(), (3, 0));
+
+    // One past a line's end, as a missing semicolon is, is gone to and
+    // past: the cursor lands on the line's last character. And a count
+    // counts places, not diagnostics there together.
+    setup.copy.update(BufferUpdate::Diagnostics {
+        version: 0,
+        diagnostics: vec![
+            diagnostic(1, Severity::Error, "end of the first line"),
+            diagnostic(6, Severity::Error, "x"),
+            diagnostic(6, Severity::Warning, "also x"),
+            diagnostic(15, Severity::Error, "z"),
+        ],
+    });
+    setup.keys("gg]d");
+    assert_eq!(setup.cursor(), (1, 4));
+    setup.keys("]d]d");
+    assert_eq!(setup.cursor(), (0, 0), "round to the first line's end");
+    setup.keys("]d");
+    assert_eq!(setup.cursor(), (1, 4), "and on past it");
+    setup.keys("gg3]d");
+    assert_eq!(
+        setup.cursor(),
+        (0, 0),
+        "three places round, not three diagnostics"
+    );
+
+    // Off, nothing's written after the lines.
+    setup.set(|options| options.virtualtext = false);
+    setup.editor.settle(&setup.copy);
+    assert_eq!(setup.editor.scene().0[1].text(), "  1 let x = y;");
+}

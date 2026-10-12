@@ -170,6 +170,10 @@ pub(crate) enum Action {
     /// Ctrl+F and Page Down, Page Up: a page.
     Page(i8),
     View(ViewAt),
+    /// `]d`, or `[d` if `backward`: to the next diagnostic.
+    Diagnostic {
+        backward: bool,
+    },
     /// `o` in visual mode: to the other end of the selection.
     OtherEnd,
     /// `i` or `a` and an object, in visual mode: select it.
@@ -324,6 +328,15 @@ impl Reader<'_> {
                     Some('t') => Action::View(ViewAt::Top),
                     Some('z') => Action::View(ViewAt::Middle),
                     Some('b') => Action::View(ViewAt::Bottom),
+                    _ => return Err(Parsed::Nothing),
+                },
+            },
+            bracket @ (']' | '[') => match self.next() {
+                None => return Err(Parsed::Incomplete),
+                Some(next) => match next.plain() {
+                    Some('d') => Action::Diagnostic {
+                        backward: bracket == '[',
+                    },
                     _ => return Err(Parsed::Nothing),
                 },
             },
