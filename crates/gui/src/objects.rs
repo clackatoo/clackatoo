@@ -8,8 +8,14 @@
 //! more useful thing in a terminal: `ib` is a command's output, `ab` its
 //! prompt, command and output. Only the daemon knows where blocks are, so
 //! the pane asks it for those.
+//!
+//! In an editor, `f`, `c` and `a` are pieces of code its grammar finds:
+//! `af` is a function and `if` its body, `ac` a class and `ic` its body,
+//! and `aa` an argument with its comma and `ia` the argument. Only the
+//! daemon has the syntax tree, so the editor asks it for those too.
 
 use clackatoo_term::Row;
+use clackatoo_text::Construct;
 
 use crate::motion::{Class, Lines, Point, Walk, class_at, next_cell, previous_cell, text_end};
 
@@ -30,6 +36,8 @@ pub(crate) enum Object {
     Bracket { open: char, close: char },
     /// `b`: the shell's block.
     Block,
+    /// `f`, `c` or `a`: a piece of code.
+    Code(Construct),
 }
 
 impl Object {
@@ -45,13 +53,17 @@ impl Object {
             '{' | '}' => bracket('{', '}'),
             '<' | '>' => bracket('<', '>'),
             'b' => Some(Self::Block),
+            'f' => Some(Self::Code(Construct::Function)),
+            'c' => Some(Self::Code(Construct::Class)),
+            'a' => Some(Self::Code(Construct::Argument)),
             _ => None,
         }
     }
 
     /// Where the object around `at` starts and ends, both included: just
     /// its insides if `inner`. None if there's no such object there, or
-    /// it's empty. Blocks aren't found here (see the module docs).
+    /// it's empty. Blocks and pieces of code aren't found here (see the
+    /// module docs).
     pub(crate) fn find(self, lines: &impl Lines, at: Point, inner: bool) -> Option<(Point, Point)> {
         match self {
             Self::Word => Some(word(lines.row(at.line).as_deref(), at, inner, |class| {
@@ -68,7 +80,7 @@ impl Object {
             )),
             Self::Quote(quote) => quoted(lines.row(at.line).as_deref(), at, quote, inner),
             Self::Bracket { open, close } => bracketed(lines, at, open, close, inner),
-            Self::Block => None,
+            Self::Block | Self::Code(_) => None,
         }
     }
 }

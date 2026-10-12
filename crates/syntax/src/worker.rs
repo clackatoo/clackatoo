@@ -1,19 +1,22 @@
 //! The thread that parses: the event loop hands it each buffer's edits, and
-//! it hands back highlights, so a parse never holds up a keystroke.
+//! it hands back highlights, so a parse never holds up a keystroke. It
+//! answers questions about the pieces of code in each buffer's tree too.
 
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::{fs, thread};
 
-use clackatoo_text::{Edit, Rope, Span};
+use clackatoo_text::{Edit, Piece, Rope, Span};
 use tree_sitter::{Parser, QueryCursor, WasmStore, wasmtime};
 
 use crate::document::Document;
 use crate::highlight::Grammar;
 use crate::pack::Pack;
+use crate::pieces::{Ask, Finder, Objects};
 
 /// A buffer, as the event loop numbers it.
 pub type Key = u64;
@@ -31,6 +34,28 @@ pub struct Highlighted {
     pub spans: Vec<Span>,
 }
 
+/// The answer to a question asked with [`Syntax::ask`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct Answered {
+    /// The question's number.
+    pub ticket: u64,
+    /// The version of the buffer's text the pieces are in: the one the
+    /// question was asked of.
+    pub version: u64,
+    /// The pieces, as the question asked, or `None` if the buffer isn't
+    /// parsed, as when its grammar couldn't be loaded.
+    pub pieces: Option<Vec<Piece>>,
+}
+
+/// What the thread has found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Found {
+    /// New highlights.
+    Highlighted(Highlighted),
+    /// An answer.
+    Answered(Answered),
+}
+
 enum Job {
     Open {
         buffer: Key,
@@ -45,18 +70,27 @@ enum Job {
         text: Rope,
     },
     Close(Key),
+    Ask {
+        buffer: Key,
+        ticket: u64,
+        at: usize,
+        ask: Ask,
+    },
 }
 
 /// The parsing thread, and what it's found.
 #[derive(Debug)]
 pub struct Syntax {
     jobs: Sender<Job>,
-    found: Receiver<Highlighted>,
+    found: Receiver<Found>,
+    /// Whether the thread is still running.
+    running: Arc<AtomicBool>,
 }
 
 impl Syntax {
-    /// Starts the thread. It calls `wake` when it has highlights to take
-    /// with [`take`](Self::take), and stops when this is dropped.
+    /// Starts the thread. It calls `wake` when it has highlights or
+    /// answers to take with [`take`](Self::take), and stops when this is
+    /// dropped.
     ///
     /// # Errors
     ///
@@ -64,10 +98,24 @@ impl Syntax {
     pub fn start(wake: impl Fn() + Send + 'static) -> std::io::Result<Self> {
         let (jobs, taken) = mpsc::channel();
         let (send, found) = mpsc::channel();
+        let worker = Worker::new(send, Box::new(wake));
+        let running = Arc::clone(&worker.running);
         thread::Builder::new()
             .name("syntax".to_owned())
-            .spawn(move || Worker::new(send, Box::new(wake)).run(&taken))?;
-        Ok(Self { jobs, found })
+            .spawn(move || worker.run(&taken))?;
+        Ok(Self {
+            jobs,
+            found,
+            running,
+        })
+    }
+
+    /// Whether the thread has stopped, as one whose grammar panicked
+    /// has, so questions asked of it will never be answered. It wakes the
+    /// event loop as it stops.
+    #[must_use]
+    pub fn stopped(&self) -> bool {
+        !self.running.load(Ordering::Acquire)
     }
 
     /// Starts parsing `buffer`, whose text is `text` at `version`, as
@@ -96,8 +144,21 @@ impl Syntax {
         self.send(Job::Close(buffer));
     }
 
-    /// The highlights found since last asked.
-    pub fn take(&self) -> impl Iterator<Item = Highlighted> + '_ {
+    /// Asks `ask` about byte `at` of `buffer`'s text as it is after the
+    /// edits told of before, answered with an [`Answered`] numbered
+    /// `ticket`. Questions are answered in order with edits: the answer is
+    /// about that text, whatever edits come after.
+    pub fn ask(&self, buffer: Key, ticket: u64, at: usize, ask: Ask) {
+        self.send(Job::Ask {
+            buffer,
+            ticket,
+            at,
+            ask,
+        });
+    }
+
+    /// The highlights and answers found since last asked.
+    pub fn take(&self) -> impl Iterator<Item = Found> + '_ {
         self.found.try_iter()
     }
 
@@ -118,16 +179,29 @@ struct Open {
 struct Worker {
     parser: Parser,
     cursor: QueryCursor,
+    /// The cursor pieces are found with, apart from highlights', as it's
+    /// left limited to a range.
+    pieces_cursor: QueryCursor,
     /// Each pack's grammar, by its directory, once loaded, or `None` if it
     /// couldn't be.
     grammars: HashMap<PathBuf, Option<Arc<Grammar>>>,
     open: HashMap<Key, Open>,
-    found: Sender<Highlighted>,
+    found: Sender<Found>,
     wake: Box<dyn Fn() + Send>,
+    /// Whether it's running, until it's dropped: on the thread, as it
+    /// stops, or panics.
+    running: Arc<AtomicBool>,
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+        (self.wake)();
+    }
 }
 
 impl Worker {
-    fn new(found: Sender<Highlighted>, wake: Box<dyn Fn() + Send>) -> Self {
+    fn new(found: Sender<Found>, wake: Box<dyn Fn() + Send>) -> Self {
         let mut parser = Parser::new();
         match WasmStore::new(&engine()) {
             Ok(store) => {
@@ -140,10 +214,12 @@ impl Worker {
         Self {
             parser,
             cursor: QueryCursor::new(),
+            pieces_cursor: QueryCursor::new(),
             grammars: HashMap::new(),
             open: HashMap::new(),
             found,
             wake,
+            running: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -152,25 +228,68 @@ impl Worker {
             // Everything waiting is taken at once, so a burst of edits is
             // parsed once.
             let mut changed = Vec::new();
+            let mut found = Vec::new();
             for job in std::iter::once(job).chain(jobs.try_iter()) {
-                if let Some(buffer) = self.take(job)
+                if let Job::Ask {
+                    buffer,
+                    ticket,
+                    at,
+                    ask,
+                } = job
+                {
+                    // Answered of the text as it is now, edits after it
+                    // not yet taken, so parsed now if it's changed.
+                    if let Some(index) = changed.iter().position(|&b| b == buffer) {
+                        changed.remove(index);
+                        found.extend(self.parse(buffer).map(Found::Highlighted));
+                    }
+                    found.push(Found::Answered(self.answer(buffer, ticket, at, ask)));
+                } else if let Some(buffer) = self.take(job)
                     && !changed.contains(&buffer)
                 {
                     changed.push(buffer);
                 }
             }
-            let mut any = false;
             for buffer in changed {
-                if let Some(found) = self.parse(buffer) {
-                    any = true;
-                    if self.found.send(found).is_err() {
-                        return;
-                    }
+                found.extend(self.parse(buffer).map(Found::Highlighted));
+            }
+            let any = !found.is_empty();
+            for found in found {
+                if self.found.send(found).is_err() {
+                    return;
                 }
             }
             if any {
                 (self.wake)();
             }
+        }
+    }
+
+    /// The answer to `ask` about byte `at` of `buffer`, numbered
+    /// `ticket`, from its tree as of the last parse.
+    fn answer(&mut self, buffer: Key, ticket: u64, at: usize, ask: Ask) -> Answered {
+        let Some(open) = self.open.get(&buffer) else {
+            return Answered {
+                ticket,
+                version: 0,
+                pieces: None,
+            };
+        };
+        let pieces = match open.document.tree() {
+            Some(tree) => Finder {
+                tree,
+                text: open.document.text(),
+                objects: open.grammar.objects.as_ref(),
+                findable: open.grammar.findable,
+                cursor: &mut self.pieces_cursor,
+            }
+            .answer(ask, at),
+            None => Vec::new(),
+        };
+        Answered {
+            ticket,
+            version: open.version,
+            pieces: Some(pieces),
         }
     }
 
@@ -209,6 +328,7 @@ impl Worker {
                 self.open.remove(&buffer);
                 None
             }
+            Job::Ask { .. } => None,
         }
     }
 
@@ -265,8 +385,29 @@ impl Worker {
             .set_wasm_store(store)
             .map_err(|err| err.to_string())?;
         let language = language.map_err(|err| format!("grammar.wasm: {err}"))?;
-        Grammar::new(language, &highlights).map_err(|err| format!("highlights.scm: {err}"))
+        let mut grammar =
+            Grammar::new(language, &highlights).map_err(|err| format!("highlights.scm: {err}"))?;
+        grammar.objects = objects(pack, &grammar.language);
+        Ok(grammar)
     }
+}
+
+/// `pack`'s query for pieces of code, if it has one, compiled for
+/// `language`. One that can't be read or compiled is passed over, and the
+/// pieces found by their nodes' kinds instead.
+fn objects(pack: &Pack, language: &tree_sitter::Language) -> Option<Objects> {
+    let source = match fs::read_to_string(pack.dir.join("textobjects.scm")) {
+        Ok(source) => source,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            log::warn!("syntax: language {}: textobjects.scm: {err}", pack.name);
+            return None;
+        }
+    };
+    Objects::new(language, &source).unwrap_or_else(|err| {
+        log::warn!("syntax: language {}: textobjects.scm: {err}", pack.name);
+        None
+    })
 }
 
 /// The WebAssembly engine grammars run in. Each grammar's memory is
@@ -286,7 +427,7 @@ fn engine() -> wasmtime::Engine {
 mod tests {
     use std::path::Path;
 
-    use clackatoo_text::{Highlights, Kind};
+    use clackatoo_text::{Construct, Highlights, Kind};
     use proptest::prelude::*;
 
     use super::*;
@@ -368,6 +509,22 @@ mod tests {
         };
         assert_eq!(worker.take(open), None);
         assert!(worker.parse(1).is_none());
+        // Asked about, it says it isn't parsed.
+        let ask = Ask::Around(Construct::Function);
+        assert_eq!(worker.answer(1, 5, 0, ask).pieces, None);
+    }
+
+    #[test]
+    fn a_worker_stopping_says_so_and_wakes_the_loop() {
+        let (found, _) = mpsc::channel();
+        let woken = Arc::new(AtomicBool::new(false));
+        let wake = Arc::clone(&woken);
+        let worker = Worker::new(found, Box::new(move || wake.store(true, Ordering::Release)));
+        let running = Arc::clone(&worker.running);
+        assert!(running.load(Ordering::Acquire));
+        drop(worker);
+        assert!(!running.load(Ordering::Acquire));
+        assert!(woken.load(Ordering::Acquire));
     }
 
     fn json_text() -> impl Strategy<Value = String> {
@@ -470,5 +627,322 @@ mod tests {
             text
         );
         Ok(())
+    }
+
+    // --- Pieces -------------------------------------------------------------
+
+    /// What `ask` about byte `at` finds in `text`, read as `pack` says.
+    fn ask_by(worker: &mut Worker, pack: Arc<Pack>, text: &str, at: usize, ask: Ask) -> Vec<Piece> {
+        worker.take(Job::Open {
+            buffer: 3,
+            pack,
+            text: Rope::from_str(text),
+            version: 0,
+        });
+        worker.parse(3);
+        worker.answer(3, 0, at, ask).pieces.unwrap()
+    }
+
+    /// The text of each piece found, and of its insides.
+    fn texts(text: &str, pieces: &[Piece]) -> Vec<(String, Option<String>)> {
+        (pieces.iter())
+            .map(|piece| {
+                let inner = piece.inner.map(|(start, end)| text[start..end].to_owned());
+                (text[piece.start..piece.end].to_owned(), inner)
+            })
+            .collect()
+    }
+
+    fn piece(whole: &str, inner: Option<&str>) -> (String, Option<String>) {
+        (whole.to_owned(), inner.map(str::to_owned))
+    }
+
+    const JSON: &str = "{\"a\": [1, 22, 333], \"b\": {\"c\": 4}}";
+
+    fn json_ask(at: usize, ask: Ask) -> Vec<(String, Option<String>)> {
+        let pieces = WORKER.with_borrow_mut(|worker| ask_by(worker, json(), JSON, at, ask));
+        texts(JSON, &pieces)
+    }
+
+    #[test]
+    fn the_pieces_around_a_place_are_found_innermost_first_with_their_insides() {
+        let at = |text: &str| JSON.find(text).unwrap();
+        assert_eq!(
+            json_ask(at("4"), Ask::Around(Construct::Function)),
+            [
+                piece("\"c\": 4", Some("4")),
+                piece("\"b\": {\"c\": 4}", Some("{\"c\": 4}")),
+            ]
+        );
+        assert_eq!(
+            json_ask(at("4"), Ask::Around(Construct::Class)),
+            [
+                piece("{\"c\": 4}", Some("\"c\": 4")),
+                piece(JSON, Some(&JSON[1..JSON.len() - 1])),
+            ]
+        );
+        // An argument takes the comma before it, or the first, after it.
+        assert_eq!(
+            json_ask(at("22"), Ask::Around(Construct::Argument)),
+            [piece(", 22", Some("22"))]
+        );
+        assert_eq!(
+            json_ask(at("1"), Ask::Around(Construct::Argument)),
+            [piece("1,", Some("1"))]
+        );
+        // On the comma, the argument after it.
+        assert_eq!(
+            json_ask(at(", 333"), Ask::Around(Construct::Argument)),
+            [piece(", 333", Some("333"))]
+        );
+    }
+
+    #[test]
+    fn with_none_around_a_place_the_next_is_found() {
+        assert_eq!(
+            json_ask(0, Ask::Around(Construct::Function)),
+            [piece("\"a\": [1, 22, 333]", Some("[1, 22, 333]"))]
+        );
+        let end = JSON.len() - 1;
+        assert_eq!(json_ask(end, Ask::Around(Construct::Argument)), []);
+    }
+
+    #[test]
+    fn starts_are_found_after_and_before_a_place_nearest_first() {
+        let starts = |at, backward, count| {
+            let ask = Ask::Starts {
+                construct: Construct::Function,
+                backward,
+                count,
+            };
+            let pieces = WORKER.with_borrow_mut(|worker| ask_by(worker, json(), JSON, at, ask));
+            pieces.iter().map(|piece| piece.start).collect::<Vec<_>>()
+        };
+        let (a, b, c) = (1, JSON.find("\"b\"").unwrap(), JSON.find("\"c\"").unwrap());
+        assert_eq!(starts(0, false, 2), [a, b]);
+        assert_eq!(starts(a, false, 9), [b, c]);
+        assert_eq!(starts(JSON.len(), true, 9), [c, b, a]);
+        assert_eq!(starts(b, true, 1), [a]);
+        assert!(starts(a, true, 1).is_empty());
+    }
+
+    #[test]
+    fn a_pack_without_textobjects_finds_pieces_by_kinds() {
+        // JSON's kinds aren't code's: none.
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = json();
+        for file in ["language.toml", "grammar.wasm", "highlights.scm"] {
+            fs::copy(fixture.dir.join(file), dir.path().join(file)).unwrap();
+        }
+        let pack = Arc::new(Pack::read(dir.path()).unwrap());
+        let mut worker = worker();
+        let ask = Ask::Around(Construct::Function);
+        assert_eq!(ask_by(&mut worker, pack.clone(), JSON, 9, ask), []);
+        assert!(worker.grammar(&pack).unwrap().objects.is_none());
+        assert!(worker.grammar(&json()).unwrap().objects.is_some());
+    }
+
+    const RUST: &str = "struct Point { x: i32, y: i32 }
+
+impl Point {
+    fn add(&self, other: Point, scale: i32) -> Point {
+        let f = |a: i32| a * scale;
+        Point { x: f(self.x + other.x), y: self.y }
+    }
+}
+";
+
+    /// Checks the pieces `rust` finds in [`RUST`], by its query if
+    /// `query`, or else by kinds, where they differ.
+    fn rust_pieces(worker: &mut Worker, rust: &Arc<Pack>, query: bool) {
+        let mut ask = |at: &str, ask| {
+            let at = RUST.find(at).unwrap();
+            texts(RUST, &ask_by(worker, rust.clone(), RUST, at, ask))
+        };
+        let body =
+            "let f = |a: i32| a * scale;\n        Point { x: f(self.x + other.x), y: self.y }";
+        let function =
+            format!("fn add(&self, other: Point, scale: i32) -> Point {{\n        {body}\n    }}");
+        assert_eq!(
+            ask("other.x", Ask::Around(Construct::Function)),
+            [piece(&function, Some(body))]
+        );
+        assert_eq!(
+            ask("other.x", Ask::Around(Construct::Class)),
+            [piece(
+                &format!("impl Point {{\n    {function}\n}}"),
+                Some(&function)
+            )]
+        );
+        assert_eq!(
+            ask("x: i32", Ask::Around(Construct::Class)),
+            [piece(
+                "struct Point { x: i32, y: i32 }",
+                Some("x: i32, y: i32")
+            )]
+        );
+        let argument = Ask::Around(Construct::Argument);
+        assert_eq!(
+            ask("other: Point", argument),
+            [piece(", other: Point", Some("other: Point"))]
+        );
+        assert_eq!(ask("&self", argument), [piece("&self,", Some("&self"))]);
+        // On the comma after the first, both it and the next have it.
+        assert_eq!(
+            ask(", other", argument),
+            [
+                piece("&self,", Some("&self")),
+                piece(", other: Point", Some("other: Point"))
+            ]
+        );
+        // The query takes a struct's field too, the next out.
+        assert_eq!(
+            ask("self.x +", argument)[0],
+            piece("self.x + other.x", Some("self.x + other.x"))
+        );
+        // The closure is a function only by kinds.
+        let starts = (ask(
+            "struct",
+            Ask::Starts {
+                construct: Construct::Function,
+                backward: false,
+                count: 2,
+            },
+        ))
+        .len();
+        assert_eq!(starts, if query { 1 } else { 2 });
+    }
+
+    #[test]
+    #[ignore = "downloads every known language from GitHub: run with --ignored"]
+    fn known_languages_install_and_find_their_pieces() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = worker();
+        for known in crate::KNOWN {
+            crate::install(known, dir.path()).unwrap();
+            let pack = Pack::read(&dir.path().join(known.name)).unwrap();
+            let grammar = (worker.grammar(&pack)).unwrap_or_else(|| panic!("{}", known.name));
+            let has = !known.textobjects.is_empty();
+            assert_eq!(grammar.objects.is_some(), has, "{}", known.name);
+        }
+
+        let rust = Arc::new(Pack::read(&dir.path().join("rust")).unwrap());
+        rust_pieces(&mut worker, &rust, true);
+        // A pack installed before textobjects were: by kinds.
+        let old = dir.path().join("old-rust");
+        fs::create_dir(&old).unwrap();
+        for file in ["language.toml", "grammar.wasm", "highlights.scm"] {
+            fs::copy(rust.dir.join(file), old.join(file)).unwrap();
+        }
+        let old = Arc::new(Pack::read(&old).unwrap());
+        rust_pieces(&mut worker, &old, false);
+
+        // How long questions take about a big file: this crate's
+        // biggest neighbour.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gui/src/editor/mod.rs");
+        let text = fs::read_to_string(path).unwrap();
+        for pack in [&rust, &old] {
+            worker.take(Job::Open {
+                buffer: 9,
+                pack: pack.clone(),
+                text: Rope::from_str(&text),
+                version: 0,
+            });
+            worker.parse(9);
+            let middle = text.len() / 2;
+            let starts = |backward| Ask::Starts {
+                construct: Construct::Function,
+                backward,
+                count: 1,
+            };
+            for (what, at, ask) in [
+                ("af", middle, Ask::Around(Construct::Function)),
+                ("ac", middle, Ask::Around(Construct::Class)),
+                ("aa", middle, Ask::Around(Construct::Argument)),
+                (
+                    "af at the end",
+                    text.len(),
+                    Ask::Around(Construct::Function),
+                ),
+                ("]f", middle, starts(false)),
+                ("[f", middle, starts(true)),
+                ("[f at the end", text.len(), starts(true)),
+            ] {
+                // The quickest of a few, as a busy machine can stop the
+                // thread for a while in any one.
+                let (found, took) = (0..5)
+                    .map(|_| {
+                        let took = std::time::Instant::now();
+                        let found = worker.answer(9, 0, at, ask).pieces.unwrap().len();
+                        (found, took.elapsed())
+                    })
+                    .min_by_key(|&(_, took)| took)
+                    .unwrap();
+                eprintln!("{} {what}: {found} in {took:?}", pack.name);
+                assert!(
+                    took < std::time::Duration::from_millis(100),
+                    "{what}: {took:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_question_is_answered_of_the_text_it_was_asked_of() {
+        let (send, found) = mpsc::channel();
+        let worker = Worker::new(send, Box::new(|| {}));
+        let (jobs, taken) = mpsc::channel();
+        let mut rope = Rope::from_str("[1]");
+        // An edit putting `text` in at `at`, as version `version`.
+        let mut insert = |at: usize, text: &str, version| {
+            let mut edit = Edit::new();
+            edit.retain(at).insert(text).retain(rope.len_bytes() - at);
+            edit.apply(&mut rope).unwrap();
+            Job::Edit {
+                buffer: 1,
+                version,
+                edit,
+                text: rope.clone(),
+            }
+        };
+        let open = Job::Open {
+            buffer: 1,
+            pack: json(),
+            text: Rope::from_str("[1]"),
+            version: 0,
+        };
+        // All taken at once: an edit, the question, and an edit after it
+        // that moves what it asks about.
+        let first = insert(2, ", 2", 1);
+        let ask = Job::Ask {
+            buffer: 1,
+            ticket: 7,
+            at: 4,
+            ask: Ask::Around(Construct::Argument),
+        };
+        let after = insert(1, "0, ", 2);
+        for job in [open, first, ask, after] {
+            jobs.send(job).unwrap();
+        }
+        drop(jobs);
+        worker.run(&taken);
+        let answer = found.try_iter().find_map(|found| match found {
+            Found::Answered(answer) => Some(answer),
+            Found::Highlighted(_) => None,
+        });
+        // "[1, 2]": the 2, with its comma, as the text was at version 1.
+        let piece = Piece {
+            start: 2,
+            end: 5,
+            inner: Some((4, 5)),
+        };
+        assert_eq!(
+            answer,
+            Some(Answered {
+                ticket: 7,
+                version: 1,
+                pieces: Some(vec![piece]),
+            })
+        );
     }
 }

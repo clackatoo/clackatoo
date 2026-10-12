@@ -25,6 +25,10 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/tree-sitter/tree-sitter-bash/v0.25.1/queries/highlights.scm",
             sha256: "b74220d954f485b7626d2b2b61f37b522e12eb1830803e388e57dd797dc99f11",
         }],
+        textobjects: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/bash/textobjects.scm",
+            sha256: "ae2635891b859a478a0a1826b5b4c1a5958ff62426914bf5cbd03996c7e35cae",
+        }],
     },
     Known {
         name: "c",
@@ -39,6 +43,10 @@ pub const KNOWN: &[Known] = &[
         highlights: &[Download {
             url: "https://raw.githubusercontent.com/tree-sitter/tree-sitter-c/v0.24.2/queries/highlights.scm",
             sha256: "3378d854dda695b2b282b9468247524ed4271ef74af691033d2e36883379409c",
+        }],
+        textobjects: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/c/textobjects.scm",
+            sha256: "ee37e1e3b9114bf59787757cb79e792692ecd93aaeb7f6bfdf9de7b2e102c730",
         }],
     },
     Known {
@@ -55,6 +63,7 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/tree-sitter/tree-sitter-css/v0.25.0/queries/highlights.scm",
             sha256: "23f7948a3817a0d06d7120158c3bee4ec5b58daa77e524985a4738b364db17b2",
         }],
+        textobjects: &[],
     },
     Known {
         name: "go",
@@ -70,6 +79,10 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/tree-sitter/tree-sitter-go/v0.25.0/queries/highlights.scm",
             sha256: "81182c986547eba7fa6316e82dfd621fb13b8fc89efac85432aee51a48ed0896",
         }],
+        textobjects: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/go/textobjects.scm",
+            sha256: "96e54438985a715948c39e955a95a614c85b7df75392c693ff47fd50bb3024ec",
+        }],
     },
     Known {
         name: "html",
@@ -84,6 +97,10 @@ pub const KNOWN: &[Known] = &[
         highlights: &[Download {
             url: "https://raw.githubusercontent.com/tree-sitter/tree-sitter-html/v0.23.2/queries/highlights.scm",
             sha256: "1ebb3811a8cdc054385b847a3aac6fbf7079faefd5b3dfab5bbad256cd5afdcf",
+        }],
+        textobjects: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/html/textobjects.scm",
+            sha256: "c3b5b16815c35390e2cad8467c48727aea8134d00af54f9496e4a56b6d4f4030",
         }],
     },
     Known {
@@ -110,6 +127,16 @@ pub const KNOWN: &[Known] = &[
                 sha256: "bbe7a58cacfb1c954cb0eab44779fd80421ed59b762b975723447207635de50d",
             },
         ],
+        textobjects: &[
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/ecma/textobjects.scm",
+                sha256: "6bb23613113478a4e65b78192cbda89422edbdcd0aa41c906e2e6928906d15b7",
+            },
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/jsx/textobjects.scm",
+                sha256: "91fa18f70ee836b32b3542845fc1ae6ee0ba57597c54c6c58df0a7579c168f8c",
+            },
+        ],
     },
     Known {
         name: "json",
@@ -125,6 +152,7 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/tree-sitter/tree-sitter-json/v0.24.8/queries/highlights.scm",
             sha256: "0511524465b56aed122580792254e68b6abbbfde7119f1d02b135acbe278233f",
         }],
+        textobjects: &[],
     },
     Known {
         name: "lua",
@@ -139,6 +167,10 @@ pub const KNOWN: &[Known] = &[
         highlights: &[Download {
             url: "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-lua/v0.5.0/queries/highlights.scm",
             sha256: "d2625fb712357f86386878602d18845f9f3e90fee81f02a5ecd87be6512918d1",
+        }],
+        textobjects: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/lua/textobjects.scm",
+            sha256: "add881541a6d270229773fa4b416a4b53463bab73077ff89d8baf1785dca0354",
         }],
     },
     Known {
@@ -155,6 +187,10 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/tree-sitter/tree-sitter-python/v0.25.0/queries/highlights.scm",
             sha256: "a6708f209381618e2b398972c8f1ccd892f0c064eab35a2a3f911c3e22e79a7e",
         }],
+        textobjects: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/python/textobjects.scm",
+            sha256: "b0502ab4cc4310db49bd1bb9f601f5a6c2b214fec97f165d980ae6fe0c7032e0",
+        }],
     },
     Known {
         name: "rust",
@@ -170,6 +206,10 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/tree-sitter/tree-sitter-rust/v0.24.2/queries/highlights.scm",
             sha256: "0f0343107f14a7690157f51090a979eb8f8bfe4eada7c61763ddb4c54b1311d1",
         }],
+        textobjects: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/rust/textobjects.scm",
+            sha256: "24da7788840c8b724122d046c109890823c9f2def20b4fdc4400c9617b33ff26",
+        }],
     },
     Known {
         name: "toml",
@@ -184,6 +224,10 @@ pub const KNOWN: &[Known] = &[
         highlights: &[Download {
             url: "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-toml/v0.7.0/queries/highlights.scm",
             sha256: "2fb5c61d33a70389312254c9c392e2c5dd6313d958d6e5f8f74cadd5e0811707",
+        }],
+        textobjects: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/toml/textobjects.scm",
+            sha256: "672182757920d6773e95ecd614da114d00f8c1b6a64265ecd246d19221285cf3",
         }],
     },
     Known {
@@ -204,6 +248,16 @@ pub const KNOWN: &[Known] = &[
             Download {
                 url: "https://raw.githubusercontent.com/tree-sitter/tree-sitter-javascript/v0.23.1/queries/highlights.scm",
                 sha256: "d3630ae6dc9b2b27b230b5f8bb92b05cd491fb12bff353dae62a0a6d780461ee",
+            },
+        ],
+        textobjects: &[
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/ecma/textobjects.scm",
+                sha256: "6bb23613113478a4e65b78192cbda89422edbdcd0aa41c906e2e6928906d15b7",
+            },
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/typescript/textobjects.scm",
+                sha256: "d41e0324a5edc583dfa55b3c62688f6c3686bfcd0b21c061502861f294ca8546",
             },
         ],
     },
@@ -231,6 +285,20 @@ pub const KNOWN: &[Known] = &[
                 sha256: "d3630ae6dc9b2b27b230b5f8bb92b05cd491fb12bff353dae62a0a6d780461ee",
             },
         ],
+        textobjects: &[
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/ecma/textobjects.scm",
+                sha256: "6bb23613113478a4e65b78192cbda89422edbdcd0aa41c906e2e6928906d15b7",
+            },
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/typescript/textobjects.scm",
+                sha256: "d41e0324a5edc583dfa55b3c62688f6c3686bfcd0b21c061502861f294ca8546",
+            },
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/jsx/textobjects.scm",
+                sha256: "91fa18f70ee836b32b3542845fc1ae6ee0ba57597c54c6c58df0a7579c168f8c",
+            },
+        ],
     },
     Known {
         name: "yaml",
@@ -246,5 +314,6 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/tree-sitter-grammars/tree-sitter-yaml/v0.7.2/queries/highlights.scm",
             sha256: "2fbfbbd5ca0928d0a7e09e59f8f2964b14a328a7ee0ce799270d9013dcce49a0",
         }],
+        textobjects: &[],
     },
 ];

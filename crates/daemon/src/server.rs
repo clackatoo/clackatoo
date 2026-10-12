@@ -58,6 +58,7 @@ mod buffers;
 mod finder;
 mod language;
 mod offers;
+mod pieces;
 mod rename;
 mod signs;
 
@@ -402,6 +403,9 @@ pub struct Daemon {
     /// Buffers being compared with the files' text in their repositories,
     /// and the indexes watched.
     signs: Signs,
+    /// Questions about buffers' pieces of code, on their way to the
+    /// thread parsing buffers.
+    piece_questions: pieces::PieceQuestions,
     /// The agent chats talk to, while any chat needs it.
     agent: Option<AgentSlot>,
     /// What the agent sent last, for the chats to act on.
@@ -509,6 +513,7 @@ impl Daemon {
             renames: rename::Renames::default(),
             finds,
             signs: Signs::default(),
+            piece_questions: pieces::PieceQuestions::default(),
             agent: None,
             incoming: Vec::new(),
             quic: None,
@@ -1679,6 +1684,13 @@ impl Daemon {
                 seq,
                 change,
             } => self.serve_edit(token, buffer, seq, change),
+            ClientMessage::Query {
+                buffer,
+                id,
+                version,
+                at,
+                query,
+            } if query.for_grammar() => self.serve_pieces(token, buffer, (id, version, at), query),
             message @ (ClientMessage::Query { .. } | ClientMessage::Rename { .. }) => {
                 self.serve_query(token, message);
             }
@@ -2055,6 +2067,7 @@ impl Daemon {
             self.installs.forget(token);
             self.forget_finds(token);
             self.forget_stages(token, None);
+            self.forget_piece_questions(token, None);
             if let Link::Quic(handle) = client.link
                 && let Some(quic) = self.quic.as_mut()
             {

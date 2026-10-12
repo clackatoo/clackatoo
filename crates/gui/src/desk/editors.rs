@@ -15,8 +15,8 @@ use clackatoo_protocol::{
 use super::jumps::{FilePlace, Jump};
 use super::{Asked, Desk};
 use crate::command::Place;
-use crate::editor::{BufferCopy, Done, Editor, Heard, HunkAction, Register};
-use crate::input::KeyPress;
+use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Register};
+use crate::input::{KeptPress, KeyPress};
 use crate::options::Options;
 use crate::pane::{Copy, Mode};
 
@@ -36,6 +36,22 @@ pub(super) struct Editors {
     /// daemon hasn't answered about yet, oldest first. Until it has, what
     /// a pane shows is about to change, so no cursor lands in it.
     opening: HashMap<PaneId, VecDeque<String>>,
+    /// The keys and pastes that came while an editor's command waited for
+    /// the grammar, oldest first, to be had once it's done.
+    held: VecDeque<Held>,
+}
+
+/// A key or a paste held while an editor's command waits for the grammar.
+#[derive(Debug)]
+pub(super) enum Held {
+    /// A key: for the config's keypress handlers too if `handlers`, and
+    /// typed by a binding if `typing`, as it came.
+    Key {
+        press: KeptPress,
+        handlers: bool,
+        typing: bool,
+    },
+    Paste(String),
 }
 
 impl Editors {
@@ -88,7 +104,7 @@ impl Desk {
             .and_then(|shown| self.workspaces.get(shown.workspace))
             .map(panes)
             .unwrap_or_default();
-        let (editors, options) = (&mut self.editors, &self.options);
+        let editors = &mut self.editors;
         editors
             .panes
             .retain(|pane, editor| anywhere.get(pane) == Some(&editor.buffer()));
@@ -96,6 +112,8 @@ impl Desk {
         editors
             .landings
             .retain(|pane, _| anywhere.contains_key(pane));
+        self.drop_held_for_none();
+        let (editors, options) = (&mut self.editors, &self.options);
         for &(pane, buffer) in &shown {
             editors
                 .panes
@@ -306,14 +324,31 @@ impl Desk {
         let mut opening = Vec::new();
         let mut left = Vec::new();
         let mut places = None;
+        let mut resuming = Vec::new();
         for pane in &showing {
             let editor = editors.panes.get_mut(pane).expect("just found");
             editor.heard(&mut heard, Some(*pane) == focused, copy);
+            if editor.take_gave_up() {
+                editors.held.clear();
+            }
             left.extend(editor.take_left().map(|byte| (*pane, byte)));
             opening.extend(editor.take_opening().map(|place| (*pane, place)));
             places = places.or_else(|| editor.take_places());
+            if editor.resumable() {
+                resuming.push(*pane);
+            }
         }
         let here = copy.path().to_owned();
+        // A command that waited for the answer is done now, as a key
+        // would do it.
+        self.give_up_off_focus();
+        for pane in resuming {
+            self.in_editor(pane, Editor::resume);
+            if (self.editors.panes.get_mut(&pane)).is_some_and(Editor::take_gave_up) {
+                self.editors.held.clear();
+            }
+        }
+        self.read_held();
         for (pane, byte) in left {
             self.record_jump(pane, Some(byte));
         }
@@ -333,6 +368,122 @@ impl Desk {
             || self.shown_tab().is_some_and(|tab| {
                 (tab.layout.panes().iter()).any(|pane| pane.content == Content::Buffer(buffer))
             })
+    }
+
+    /// Holds `held`, if an editor's command is waiting for the grammar, to
+    /// be had once it's done. Returns `None` if nothing is waiting, or
+    /// else whether the window must be redrawn.
+    ///
+    /// Unless the command is to be given up on, with what's held: if the
+    /// focus has moved to another pane, or it's waited too long, `held`
+    /// isn't held, but had as if nothing were waiting, so it returns
+    /// `None`; or if `cancel`, as Esc does, `held` goes too.
+    pub(super) fn hold_for_grammar(
+        &mut self,
+        cancel: bool,
+        held: impl FnOnce() -> Held,
+    ) -> Option<bool> {
+        if self.give_up_off_focus() {
+            return None;
+        }
+        let editor =
+            (self.editors.panes.values_mut()).find(|editor| editor.waiting_for_grammar())?;
+        if editor.waited_too_long(std::time::Instant::now()) {
+            editor.give_up(GiveUp::TooLong);
+            // Said until the key after this one.
+            editor.keep_status();
+            editor.take_gave_up();
+            self.editors.held.clear();
+            return None;
+        }
+        if cancel {
+            editor.give_up(GiveUp::Cancelled);
+            editor.take_gave_up();
+            self.editors.held.clear();
+            return Some(true);
+        }
+        self.editors.held.push_back(held());
+        Some(false)
+    }
+
+    /// Gives up on a command waiting for the grammar in an editor that no
+    /// longer has the focus, as a click moves it, and drops what's held
+    /// for it, which was typed for that pane. Returns whether it did.
+    fn give_up_off_focus(&mut self) -> bool {
+        let focused = self.shown.map(|shown| shown.pane);
+        let mut gave_up = false;
+        for (&pane, editor) in &mut self.editors.panes {
+            if Some(pane) != focused && editor.waiting_for_grammar() {
+                editor.give_up(GiveUp::FocusMoved);
+                editor.take_gave_up();
+                gave_up = true;
+            }
+        }
+        if gave_up {
+            self.editors.held.clear();
+        }
+        gave_up
+    }
+
+    /// Drops what's held for a command waiting for the grammar if no
+    /// editor's waiting any more, as when the one that was has gone,
+    /// saying so.
+    fn drop_held_for_none(&mut self) {
+        let waiting = (self.editors.panes.values()).any(Editor::waiting_for_grammar);
+        if !waiting && !self.editors.held.is_empty() {
+            self.editors.held.clear();
+            self.message =
+                Some("the editor waiting for the grammar closed: nothing was done".into());
+        }
+    }
+
+    /// What the bar of the editor `pane` says, and how many keys and
+    /// pastes are held, for tests.
+    #[cfg(test)]
+    pub(super) fn editor_label_and_held(&self, pane: PaneId) -> (Option<String>, usize) {
+        let label = (self.editors.panes.get(&pane)).and_then(|editor| {
+            let copy = self.editors.buffers.get(&editor.buffer())?;
+            Some(editor.label(copy))
+        });
+        (label, self.editors.held.len())
+    }
+
+    /// Makes every editor's command waiting as if asked `by` earlier, for
+    /// tests of its patience.
+    #[cfg(test)]
+    pub(super) fn age_grammar_questions(&mut self, by: std::time::Duration) {
+        for editor in self.editors.panes.values_mut() {
+            editor.age_awaiting(by);
+        }
+    }
+
+    /// Has the keys and pastes held while an editor's command waited for
+    /// the grammar, in order, until another starts waiting, which holds
+    /// the rest.
+    ///
+    /// The rest are taken out while each is had, and put back after, so
+    /// what that one holds, such as the keys a binding it set off types,
+    /// comes before them.
+    fn read_held(&mut self) {
+        while !(self.editors.panes.values()).any(Editor::waiting_for_grammar) {
+            let Some(held) = self.editors.held.pop_front() else {
+                return;
+            };
+            let rest = std::mem::take(&mut self.editors.held);
+            match held {
+                Held::Key {
+                    press,
+                    handlers,
+                    typing,
+                } => {
+                    let typing = std::mem::replace(&mut self.script.typing, typing);
+                    self.key_with(&press.press(), handlers);
+                    self.script.typing = typing;
+                }
+                Held::Paste(text) => self.paste(&text),
+            }
+            self.editors.held.extend(rest);
+        }
     }
 
     /// Asks the language server of the focused editor's file `query`,
@@ -376,6 +527,17 @@ impl Desk {
         act: impl FnOnce(&mut Editor, &mut BufferCopy, &mut Register) -> Done,
     ) -> Option<bool> {
         let focused = self.shown.map(|shown| shown.pane)?;
+        self.in_editor(focused, act)
+    }
+
+    /// Has `act` done to the editor `focused` and its buffer, as
+    /// [`in_focused_editor`](Self::in_focused_editor) does to the focused
+    /// one.
+    fn in_editor(
+        &mut self,
+        focused: PaneId,
+        act: impl FnOnce(&mut Editor, &mut BufferCopy, &mut Register) -> Done,
+    ) -> Option<bool> {
         let editors = &mut self.editors;
         let buffer = editors.panes.get(&focused).map(Editor::buffer)?;
         let copy = editors.buffers.get_mut(&buffer)?;
@@ -496,19 +658,26 @@ impl Desk {
     }
 
     /// Asks what editors have due to ask their language servers, now
-    /// typing has paused, as of `now`. Returns whether any asked anything.
+    /// typing has paused, as of `now`, and gives up on commands waiting
+    /// too long for the grammar, or in an editor the focus has left.
+    /// Returns whether any asked anything, or gave up.
     pub(crate) fn tick_editors(&mut self, now: std::time::Instant) -> bool {
+        let mut asked = self.give_up_off_focus();
         let editors = &mut self.editors;
-        let mut asked = false;
         for editor in editors.panes.values_mut() {
             if let Some(copy) = editors.buffers.get_mut(&editor.buffer()) {
                 asked |= editor.tick(now, copy);
+            }
+            // Given up on, as it waited too long, with no key to see to it.
+            if editor.take_gave_up() {
+                editors.held.clear();
             }
         }
         asked
     }
 
-    /// When an editor next has something due to ask its language server.
+    /// When an editor next has something due to ask its language server,
+    /// or a command waiting for the grammar to give up on.
     pub(crate) fn editor_wakes(&self) -> Option<std::time::Instant> {
         self.editors.panes.values().filter_map(Editor::wakes).min()
     }

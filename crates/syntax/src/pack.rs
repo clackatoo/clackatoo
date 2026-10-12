@@ -6,7 +6,14 @@
 //!   language.toml    its name, and the files it's for
 //!   grammar.wasm     its tree-sitter grammar, compiled to WebAssembly
 //!   highlights.scm   the query naming what each piece of text is
+//!   textobjects.scm  where its functions, classes and arguments are
 //! ```
+//!
+//! `textobjects.scm` is optional. It's written as nvim-treesitter-textobjects
+//! writes them, with `@function.outer` and `@function.inner`,
+//! `@class.outer` and `@class.inner`, and `@parameter.outer` and
+//! `@parameter.inner`. Without it, they're found by the kinds of the
+//! grammar's nodes.
 //!
 //! `language.toml`:
 //!

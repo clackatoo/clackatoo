@@ -30,6 +30,7 @@ mod complete;
 mod copy;
 mod keys;
 mod panel;
+mod pieces;
 mod text;
 
 use std::time::{Duration, Instant};
@@ -46,11 +47,13 @@ pub(crate) use copy::{BufferCopy, Heard};
 use keys::{Action, Command, Entry, Operator, Parsed, Stroke, Target, ViewAt};
 use panel::Panel;
 pub(crate) use panel::PanelView;
+pub(crate) use pieces::GiveUp;
 use text::{Laid, Text, tab_end};
 
 use crate::colors;
 use crate::input::KeyPress;
 use crate::motion::{Class, Cursor, Lines, Motion, Point, Reach, before, class_at};
+use crate::objects::Object;
 use crate::options::{Case, CompleteAccept, Options};
 use crate::pane::{Mode, Selection, enters_normal_mode};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
@@ -424,6 +427,16 @@ pub(crate) struct Editor {
     /// When to ask for the picked item's documentation, once picking
     /// pauses.
     resolve_due: Option<Instant>,
+    /// A command waiting for the daemon to say where the pieces of code
+    /// it needs are, and the keys typed meanwhile.
+    awaiting: Option<pieces::Awaiting>,
+    /// The daemon's answer, while the command that waited for it is done.
+    answered: Option<Answer>,
+    /// Whether a command waiting was given up on, for the desk to drop
+    /// the keys it held for it.
+    gave_up: bool,
+    /// Whether what the bar says stays through the next key.
+    keep_status: bool,
 }
 
 impl Editor {
@@ -477,6 +490,10 @@ impl Editor {
             signing: None,
             signature_due: None,
             resolve_due: None,
+            awaiting: None,
+            answered: None,
+            gave_up: false,
+            keep_status: false,
         }
     }
 
@@ -632,7 +649,12 @@ impl Editor {
     }
 
     fn stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, register: &mut Register) -> Done {
-        self.status = None;
+        if self.hold_stroke(stroke) {
+            return Done::default();
+        }
+        if !std::mem::take(&mut self.keep_status) {
+            self.status = None;
+        }
         if self.actions.is_some()
             && self.typed.is_empty()
             && self.prompt.is_none()
@@ -848,6 +870,9 @@ impl Editor {
         register: &mut Register,
         again: bool,
     ) -> Done {
+        if self.waits_for_grammar(command, copy) {
+            return Done::default();
+        }
         let mut done = Done {
             redraw: true,
             yanked: None,
@@ -926,14 +951,11 @@ impl Editor {
                     self.cursor = Cursor::new(anchor);
                 }
             }
-            Action::Select { object, inner } => {
-                let text = self.text(copy);
-                if let Some((start, last)) = object.find(&text, self.cursor.at, inner) {
-                    self.mode = Mode::Visual(Selection::Characters);
-                    self.anchor = Some(start);
-                    self.cursor = Cursor::new(last);
-                }
-            }
+            Action::Piece {
+                construct,
+                backward,
+            } => self.go_to_piece(construct, backward, copy),
+            Action::Select { object, inner } => self.select(object, inner, times, copy),
         }
         if command.action.jumps() && self.cursor.at != from {
             self.left_from(from, copy);
@@ -951,6 +973,20 @@ impl Editor {
         done
     }
 
+    /// `i` or `a` and `object`, in visual mode: selects it, the `times`th
+    /// out if it's a piece of code.
+    fn select(&mut self, object: Object, inner: bool, times: usize, copy: &BufferCopy) {
+        if let Object::Code(construct) = object {
+            return self.select_piece(construct, inner, times, copy);
+        }
+        let text = self.text(copy);
+        if let Some((start, last)) = object.find(&text, self.cursor.at, inner) {
+            self.mode = Mode::Visual(Selection::Characters);
+            self.anchor = Some(start);
+            self.cursor = Cursor::new(last);
+        }
+    }
+
     /// `.`: makes the last change again, `count` times if given.
     fn repeat(
         &mut self,
@@ -965,6 +1001,16 @@ impl Editor {
             change.command.count = count;
         }
         let done = self.execute(change.command, copy, register, true);
+        // A command waiting for the daemon finishes once it answers.
+        if let Some(change) = self.awaiting_again(change) {
+            self.finish_repeat(change, copy);
+        }
+        done
+    }
+
+    /// Finishes `.` making `change` again, once its command is done: types
+    /// what was typed after it.
+    fn finish_repeat(&mut self, change: Change, copy: &mut BufferCopy) {
         if self.mode == Mode::Insert {
             let times = std::mem::replace(&mut self.insert_times, 1);
             for _ in 0..times {
@@ -975,7 +1021,6 @@ impl Editor {
             self.leave_insert(copy);
         }
         self.last_change = Some(change);
-        done
     }
 
     /// Notes `motion` if it's a find, for `;` and `,`.
@@ -1238,10 +1283,22 @@ impl Editor {
                     _ => Some(chars(start, last)),
                 }
             }
+            Target::Object {
+                object: Object::Code(construct),
+                inner,
+            } => {
+                drop(text);
+                let (start, end) = self.piece_span(construct, inner, times, copy)?;
+                Some(Span {
+                    start,
+                    end,
+                    lines: None,
+                })
+            }
             Target::Object { object, inner } => {
                 let Some((start, last)) = object.find(&text, at, inner) else {
                     self.status = Some(match object {
-                        crate::objects::Object::Block => "a file has no shell blocks".into(),
+                        Object::Block => "a file has no shell blocks".into(),
                         _ => "nothing there".into(),
                     });
                     return None;
@@ -2071,11 +2128,13 @@ impl Editor {
     /// Asks what's due to be asked of the language server, now typing has
     /// paused, as of `now`. Returns whether it asked anything.
     pub(crate) fn tick(&mut self, now: Instant, copy: &mut BufferCopy) -> bool {
-        let mut asked = false;
+        // A command waiting too long for the grammar is given up on, with
+        // no key to wait for.
+        let mut asked = self.tick_grammar(now);
         if self.mode != Mode::Insert {
             self.completion_due = None;
             self.signature_due = None;
-            return false;
+            return asked;
         }
         if let Some((due, trigger)) = self.completion_due
             && due <= now
@@ -2106,13 +2165,14 @@ impl Editor {
         asked
     }
 
-    /// When something's next due to be asked of the language server, if
-    /// anything is.
+    /// When something's next due to be asked of the language server, or
+    /// a command waiting for the grammar given up on, if anything is.
     pub(crate) fn wakes(&self) -> Option<Instant> {
         let completion = self.completion_due.map(|(due, _)| due);
         (completion.into_iter())
             .chain(self.signature_due)
             .chain(self.resolve_due)
+            .chain(self.grammar_deadline())
             .min()
     }
 
@@ -2570,6 +2630,7 @@ impl Editor {
     /// since [`hold`](Self::hold).
     pub(crate) fn follow_edit(&mut self, edit: &Edit, copy: &BufferCopy) {
         self.edited(edit);
+        self.awaiting_follows(edit);
         if let Some((cursor, anchor)) = &mut self.held {
             *cursor = edit.map(*cursor, Bias::Before);
             if let Some(anchor) = anchor {
@@ -2585,6 +2646,7 @@ impl Editor {
     pub(crate) fn heard(&mut self, heard: &mut Heard, jump: bool, copy: &mut BufferCopy) {
         match heard {
             Heard::Replaced => {
+                self.text_replaced();
                 self.held = None;
                 self.normal_cursor(copy);
             }
@@ -2614,7 +2676,9 @@ impl Editor {
                 let resolving = (self.completion.as_ref())
                     .and_then(|completion| completion.resolving)
                     .filter(|(resolving, _)| resolving == id);
-                if let Some((asked, asking)) = self.asked
+                if self.heard_pieces(*id, answer) {
+                    // Done by `resume`, which the desk calls.
+                } else if let Some((asked, asking)) = self.asked
                     && asked == *id
                 {
                     self.asked = None;
@@ -2814,6 +2878,7 @@ impl Editor {
             | Answer::Renamed { .. }
             | Answer::Formatted { .. }
             | Answer::Staged
+            | Answer::Pieces(_)
             | Answer::Completions { .. }
             | Answer::Resolved { .. }
             | Answer::Signature { .. }

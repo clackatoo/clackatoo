@@ -385,6 +385,18 @@ impl BufferCopy {
             }
             return Answer::Completions { items, incomplete };
         }
+        if let Answer::Pieces(mut pieces) = answer {
+            if version != self.version {
+                log::debug!("buffer {}: pieces for version {version}", self.id);
+                return Answer::Failed("the text changed meanwhile".into());
+            }
+            for edit in waiting {
+                for piece in &mut pieces {
+                    piece.map(edit);
+                }
+            }
+            return Answer::Pieces(pieces);
+        }
         let Answer::Locations(mut found) = answer else {
             return answer;
         };
@@ -581,7 +593,7 @@ fn next_query() -> u64 {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use clackatoo_protocol::{Author, BufferSnapshot, FileLocation};
+    use clackatoo_protocol::{Author, BufferSnapshot, FileLocation, Piece};
     use clackatoo_text::History;
 
     use super::*;
@@ -807,6 +819,38 @@ pub(super) mod tests {
                 answer: Answer::Locations(vec![place(at + 1)])
             }
         );
+
+        // So do pieces of code, as another pane's edit is waiting.
+        let piece = Piece {
+            start: 0,
+            end: 3,
+            inner: Some((1, 2)),
+        };
+        let heard = copy.update(BufferUpdate::Answer {
+            id,
+            version: 2,
+            answer: Answer::Pieces(vec![piece]),
+        });
+        let moved = Piece {
+            start: 1,
+            end: 4,
+            inner: Some((2, 3)),
+        };
+        let answer = Answer::Pieces(vec![moved]);
+        assert_eq!(heard, Heard::Answer { id, answer });
+        // But not for a version the copy isn't at.
+        let heard = copy.update(BufferUpdate::Answer {
+            id,
+            version: 1,
+            answer: Answer::Pieces(vec![piece]),
+        });
+        assert!(matches!(
+            heard,
+            Heard::Answer {
+                answer: Answer::Failed(_),
+                ..
+            }
+        ));
     }
 
     #[test]

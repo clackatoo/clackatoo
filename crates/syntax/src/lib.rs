@@ -10,7 +10,9 @@
 //!
 //! [`Syntax`] parses on a thread of its own, edit by edit, and hands back
 //! the [`Highlights`](clackatoo_text::Highlights) of what each parse
-//! changed.
+//! changed. It finds the [`Piece`](clackatoo_text::Piece)s of code that
+//! text objects and motions use too: as a pack's `textobjects.scm` says,
+//! or else by the kinds of the tree's nodes.
 //!
 //! [tree-sitter]: https://tree-sitter.github.io
 
@@ -21,6 +23,7 @@ mod highlight;
 pub mod install;
 mod known;
 pub mod pack;
+mod pieces;
 mod server;
 pub mod servers;
 mod worker;
@@ -28,5 +31,6 @@ mod worker;
 pub use install::{InstallError, Known, install, known, known_for};
 pub use known::KNOWN;
 pub use pack::{Languages, Pack};
+pub use pieces::Ask;
 pub use server::{Server, git_root};
-pub use worker::{Highlighted, Key, Syntax};
+pub use worker::{Answered, Found, Highlighted, Key, Syntax};

@@ -10,11 +10,11 @@ use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode,
-    ChatState, ClientMessage, CompletionItem, Diff, Done, Edit, Error, Event, FileLocation, Found,
-    FoundBuffer, FoundLine, Item, Kind, Location, NewAgent, NewTerminal, OpenFile, Outcome,
-    PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Query, Request, Response, Search,
-    ServerFeatures, ServerMessage, Side, Size, Span, TerminalId, TerminalStatus, TextChange, Tool,
-    ToolContent, ToolKind, ToolStatus, Trigger, View, ViewUpdate, Workspaces,
+    ChatState, ClientMessage, CompletionItem, Construct, Diff, Done, Edit, Error, Event,
+    FileLocation, Found, FoundBuffer, FoundLine, Item, Kind, Location, NewAgent, NewTerminal,
+    OpenFile, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Query, Request,
+    Response, Search, ServerFeatures, ServerMessage, Side, Size, Span, TerminalId, TerminalStatus,
+    TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -3357,6 +3357,153 @@ fn a_buffer_in_a_language_with_a_pack_is_highlighted_as_it_changes() {
             span(10, 13, Kind::String),
         ]
     );
+}
+
+/// A daemon with the test language packs, a client following the file
+/// `name`, whose text is `text`, and its buffer.
+fn parsed_buffer(text: &str, name: &str) -> (TestDaemon, Client, BufferId) {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.languages =
+            Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"));
+    });
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join(name), text).unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, name))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    (daemon, client, buffer)
+}
+
+/// The answer to the query numbered `id`, and the version it's for.
+fn answer_to(client: &mut Client, id: u64) -> (u64, Answer) {
+    loop {
+        if let BufferUpdate::Answer {
+            id: answered,
+            version,
+            answer,
+        } = next_buffer_update(client)
+            && answered == id
+        {
+            return (version, answer);
+        }
+    }
+}
+
+#[test]
+fn the_pieces_of_code_around_a_place_come_from_the_syntax_tree() {
+    // The fixture's textobjects.scm makes an array's items arguments.
+    let (_daemon, mut client, buffer) = parsed_buffer("[1, 22, 333]", "a.json");
+    let argument = Query::Pieces(Construct::Argument);
+    client.query(buffer, 1, (0, 4), argument).unwrap();
+    let piece = Piece {
+        start: 2,
+        end: 6,
+        inner: Some((4, 6)),
+    };
+    assert_eq!(answer_to(&mut client, 1), (0, Answer::Pieces(vec![piece])));
+    let starts = Query::Starts {
+        construct: Construct::Argument,
+        backward: false,
+        count: 9,
+    };
+    client.query(buffer, 2, (0, 0), starts).unwrap();
+    let (_, Answer::Pieces(pieces)) = answer_to(&mut client, 2) else {
+        panic!("no pieces");
+    };
+    let starts: Vec<usize> = pieces.iter().map(|piece| piece.start).collect();
+    assert_eq!(starts, [1, 2, 6]);
+}
+
+#[test]
+fn an_edit_racing_a_question_about_pieces_moves_its_answer() {
+    let (daemon, mut client, buffer) = parsed_buffer("[1, 22, 333]", "a.json");
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    let argument = Query::Pieces(Construct::Argument);
+    // Another window's edit, made before the question about the text
+    // before it: the place asked about moves with it.
+    send_change(&mut other, buffer, 0, insert(12, 1, "0, ", 0));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    client.query(buffer, 1, (0, 4), argument).unwrap();
+    let (version, answer) = answer_to(&mut client, 1);
+    let piece = |start, end| Piece {
+        start,
+        end,
+        inner: Some((end - 2, end)),
+    };
+    assert_eq!((version, answer), (1, Answer::Pieces(vec![piece(5, 9)])));
+    // One made at once: the answer is for the text at its version, before
+    // the edit or after it.
+    client.query(buffer, 2, (1, 7), argument).unwrap();
+    send_change(&mut other, buffer, 1, insert(15, 1, "9, ", 1));
+    match answer_to(&mut client, 2) {
+        (1, answer) => assert_eq!(answer, Answer::Pieces(vec![piece(5, 9)])),
+        (2, answer) => assert_eq!(answer, Answer::Pieces(vec![piece(8, 12)])),
+        other => panic!("{other:?}"),
+    }
+    let text = attach_buffer(&mut client, buffer).text;
+    assert_eq!(text, "[9, 0, 1, 22, 333]");
+}
+
+#[test]
+fn a_window_gone_before_its_pieces_are_found_is_passed_over() {
+    let (daemon, mut client, buffer) = parsed_buffer("[1, 22]", "a.json");
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    let argument = Query::Pieces(Construct::Argument);
+    client.query(buffer, 1, (0, 4), argument).unwrap();
+    drop(client);
+    other.query(buffer, 2, (0, 1), argument).unwrap();
+    let (_, answer) = answer_to(&mut other, 2);
+    assert!(matches!(answer, Answer::Pieces(pieces) if pieces.len() == 1));
+}
+
+#[test]
+fn a_question_about_pieces_that_cant_be_answered_says_why() {
+    // A grammar that can't be loaded.
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let pack = dir.join("languages/broken");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(
+            pack.join("language.toml"),
+            "grammar = \"json\"\nextensions = [\"json\"]\n",
+        )
+        .unwrap();
+        std::fs::write(pack.join("grammar.wasm"), "not wasm").unwrap();
+        config.languages = Some(dir.join("languages"));
+    });
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("a.json"), "[1]").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "a.json"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    let function = Query::Pieces(Construct::Function);
+    // Asked by a window not following the file.
+    client.query(buffer, 1, (0, 0), function).unwrap();
+    let failed = |why: &str| Answer::Failed(why.into());
+    assert_eq!(
+        answer_to(&mut client, 1).1,
+        failed("the file isn't followed")
+    );
+    attach_buffer(&mut client, buffer);
+    client.query(buffer, 2, (0, 0), function).unwrap();
+    let (_, answer) = answer_to(&mut client, 2);
+    assert_eq!(answer, failed("its grammar couldn't be loaded"));
+    // Of a buffer that isn't open.
+    client.query(BufferId(99), 3, (0, 0), function).unwrap();
+    assert_eq!(answer_to(&mut client, 3).1, failed("the file isn't open"));
+}
+
+#[test]
+fn a_buffer_with_no_grammar_has_no_pieces() {
+    let (_daemon, mut client, buffer) = parsed_buffer("fn a() {}", "a.unknown");
+    client
+        .query(buffer, 1, (0, 4), Query::Pieces(Construct::Function))
+        .unwrap();
+    assert_eq!(answer_to(&mut client, 1), (0, Answer::Nothing));
 }
 
 #[test]

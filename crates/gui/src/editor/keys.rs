@@ -6,7 +6,7 @@
 //! `o`). The keys are read afresh as each arrives, until they make a
 //! command or can't.
 
-use clackatoo_protocol::Query;
+use clackatoo_protocol::{Construct, Query};
 
 use crate::motion::Motion;
 use crate::objects::Object;
@@ -186,6 +186,12 @@ pub(crate) enum Action {
     Hunk {
         backward: bool,
     },
+    /// `]f`, or `[f` if `backward`: to the start of the next function, as
+    /// the grammar finds them; `]C` and `[C` to the next class.
+    Piece {
+        construct: Construct,
+        backward: bool,
+    },
     /// `gd` and the like: ask the language server, and go where it says.
     Ask(Query),
     /// `K`: ask the language server what's under the cursor, and show
@@ -230,7 +236,8 @@ impl Action {
     }
 
     /// Whether it's a jump, which the jump list records, as Vim's are:
-    /// `gg`, `G`, `n` and `N`, `]d` and `[d`, and `]c` and `[c`. A search
+    /// `gg`, `G`, `n` and `N`, `]d` and `[d`, `]c` and `[c`, and `]f` and
+    /// the like. A search
     /// typed after `/` is too, once Enter finds it, as is going where a
     /// language server says, once it answers.
     pub(crate) fn jumps(self) -> bool {
@@ -242,6 +249,7 @@ impl Action {
                 | Self::SearchWord { .. }
                 | Self::Diagnostic { .. }
                 | Self::Hunk { .. }
+                | Self::Piece { .. }
         )
     }
 }
@@ -413,6 +421,14 @@ impl Reader<'_> {
                         backward: bracket == '[',
                     },
                     Some('c') => Action::Hunk {
+                        backward: bracket == '[',
+                    },
+                    Some(key @ ('f' | 'C')) => Action::Piece {
+                        construct: if key == 'f' {
+                            Construct::Function
+                        } else {
+                            Construct::Class
+                        },
                         backward: bracket == '[',
                     },
                     _ => return Err(Parsed::Nothing),
@@ -688,5 +704,33 @@ mod tests {
             inner: false,
         };
         assert_eq!(visual("aw"), command(None, word));
+    }
+
+    #[test]
+    fn pieces_of_code_are_objects_and_brackets_go_to_them() {
+        let function = Target::Object {
+            object: Object::Code(Construct::Function),
+            inner: false,
+        };
+        assert_eq!(
+            read("daf"),
+            command(None, Action::Operate(Operator::Delete, function))
+        );
+        let argument = Action::Select {
+            object: Object::Code(Construct::Argument),
+            inner: true,
+        };
+        assert_eq!(parse(&keys("ia"), true), command(None, argument));
+        let piece = |construct, backward| Action::Piece {
+            construct,
+            backward,
+        };
+        assert_eq!(
+            read("2]f"),
+            command(Some(2), piece(Construct::Function, false))
+        );
+        assert_eq!(read("[C"), command(None, piece(Construct::Class, true)));
+        assert_eq!(read("]c"), command(None, Action::Hunk { backward: false }));
+        assert!(piece(Construct::Function, true).jumps());
     }
 }

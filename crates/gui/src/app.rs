@@ -1763,9 +1763,11 @@ impl ApplicationHandler<SessionEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // An editor may have something to ask, now typing has paused.
+        // An editor may have something to ask, now typing has paused, or
+        // a command to give up on, that waited too long for the grammar.
         if self.desk.tick_editors(Instant::now()) {
             self.send_outbox();
+            self.request_redraw();
         }
         // While the daemon is out of contact, the top bar counts the
         // seconds, a highlight on text just copied goes after a moment, and

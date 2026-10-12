@@ -4,14 +4,15 @@
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    Answer, BufferId, BufferUpdate, ClientMessage, CodeAction, CompletionItem, FileLocation, Query,
-    ServerFeatures, Size, TextChange, Trigger,
+    Answer, BufferId, BufferUpdate, ClientMessage, CodeAction, CompletionItem, Construct,
+    FileLocation, Piece, Query, ServerFeatures, Size, TextChange, Trigger,
 };
 use clackatoo_text::Sign;
 
 use super::copy::tests::Daemon;
 use super::keys::Stroke;
 use super::{BufferCopy, Editor, HunkAction, Mode, Register};
+use crate::motion::{Cursor, Point};
 use crate::options::{CompleteAccept, Options};
 use crate::pane::Selection;
 use crate::render::{HighlightKind, Ink};
@@ -143,6 +144,10 @@ impl Setup {
             answer,
         });
         self.editor.heard(&mut heard, true, &mut self.copy);
+        // As the desk does, for a command that waited for it.
+        if self.editor.resumable() {
+            self.editor.resume(&mut self.copy, &mut self.register);
+        }
         self.serve();
     }
 
@@ -2035,4 +2040,316 @@ fn a_calls_signature_shows_over_the_cursor_as_its_arguments_are_typed() {
     assert!(bold(&mut setup).is_some());
     setup.keys("<Esc>");
     assert!(setup.editor.signature.is_none());
+}
+
+// --- Pieces of code, from the grammar -----------------------------------------
+
+/// The piece of `text` that's `whole`, with `inner` in it as its insides.
+fn piece_of(text: &str, whole: &str, inner: Option<&str>) -> Piece {
+    let start = text.find(whole).expect("the piece is in the text");
+    let inner = inner.map(|inner| {
+        let at = start + whole.find(inner).expect("its insides are in it");
+        (at, at + inner.len())
+    });
+    Piece {
+        start,
+        end: start + whole.len(),
+        inner,
+    }
+}
+
+const TWO: &str = "fn one(a, bb) {\n    two(a);\n}\n\nfn three() {\n    x;\n}";
+
+fn one(text: &str) -> Piece {
+    piece_of(text, "fn one(a, bb) {\n    two(a);\n}", Some("two(a);"))
+}
+
+#[test]
+fn a_function_is_deleted_once_the_grammar_says_where_it_is() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("jdaf");
+    let (asked, at, query) = setup.last_query();
+    assert_eq!(query, Query::Pieces(Construct::Function));
+    assert_eq!(at, TWO.find("    two").unwrap());
+    assert_eq!(setup.text(), TWO, "not until it answers");
+    setup.answer(asked, Answer::Pieces(vec![one(TWO)]));
+    assert_eq!(setup.text(), "\n\nfn three() {\n    x;\n}");
+    assert_eq!(setup.register.text, "fn one(a, bb) {\n    two(a);\n}");
+    assert_eq!(setup.cursor(), (0, 0));
+}
+
+#[test]
+fn keys_typed_while_waiting_are_read_after_the_answer() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("jdafiy<Esc>");
+    assert_eq!(setup.text(), TWO);
+    assert_eq!(setup.editor.mode, Mode::Normal, "the i is held");
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![one(TWO)]));
+    assert_eq!(setup.text(), "y\n\nfn three() {\n    x;\n}");
+    assert_eq!(setup.editor.mode, Mode::Normal);
+    // A command in the keys held waits in turn, and the keys after it.
+    setup.keys("Gdafx");
+    let text = setup.copy.text().to_string();
+    let three = piece_of(&text, "fn three() {\n    x;\n}", Some("x;"));
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![three]));
+    assert_eq!(setup.text(), "y\n\n", "the x had nothing to delete");
+}
+
+#[test]
+fn change_inside_a_function_and_dot_does_it_again() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("jcif");
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![one(TWO)]));
+    assert_eq!(setup.editor.mode, Mode::Insert);
+    setup.keys("y();<Esc>");
+    let text = "fn one(a, bb) {\n    y();\n}\n\nfn three() {\n    x;\n}";
+    assert_eq!(setup.text(), text);
+    // `.` asks again, where the cursor is, and types the same once it's
+    // answered.
+    setup.keys("G.");
+    let (asked, at, query) = setup.last_query();
+    assert_eq!(
+        (at, query),
+        (text.len() - 1, Query::Pieces(Construct::Function))
+    );
+    assert_eq!(setup.text(), text, "not until it answers");
+    let three = piece_of(text, "fn three() {\n    x;\n}", Some("x;"));
+    setup.answer(asked, Answer::Pieces(vec![three]));
+    assert_eq!(
+        setup.text(),
+        "fn one(a, bb) {\n    y();\n}\n\nfn three() {\n    y();\n}"
+    );
+    assert_eq!(setup.editor.mode, Mode::Normal);
+}
+
+#[test]
+fn arguments_are_copied_and_changed_with_their_commas() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("fbyaa");
+    let argument = piece_of(TWO, ", bb", Some("bb"));
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![argument]));
+    assert_eq!(setup.register.text, ", bb");
+    assert_eq!(setup.text(), TWO);
+    setup.keys("cia");
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![argument]));
+    setup.keys("c<Esc>");
+    assert!(setup.text().starts_with("fn one(a, c) {"));
+}
+
+#[test]
+fn af_again_in_visual_mode_grows_to_the_function_around() {
+    let text = "fn outer() {\n    fn inner() {\n        z;\n    }\n}";
+    let inner = piece_of(text, "fn inner() {\n        z;\n    }", Some("z;"));
+    let outer = piece_of(text, text, Some("fn inner() {\n        z;\n    }"));
+    let anchor = |setup: &Setup| setup.editor.anchor.map(|at| (at.line, at.col));
+    let mut setup = Setup::new(text);
+    setup.keys("jjvaf");
+    let (asked, at, _) = setup.last_query();
+    assert_eq!(at, text.find("        z").unwrap());
+    setup.answer(asked, Answer::Pieces(vec![inner, outer]));
+    assert_eq!(setup.editor.mode, Mode::Visual(Selection::Characters));
+    assert_eq!(anchor(&setup), Some((1, 4)));
+    assert_eq!(setup.cursor(), (3, 4));
+    // Asked about the selection's start, and the next out picked.
+    setup.keys("af");
+    let (asked, at, _) = setup.last_query();
+    assert_eq!(at, text.find("fn inner").unwrap());
+    setup.answer(asked, Answer::Pieces(vec![inner, outer]));
+    assert_eq!(anchor(&setup), Some((0, 0)));
+    assert_eq!(setup.cursor(), (4, 0));
+    // And `if` within it, then out a step.
+    setup.keys("<Esc>ggjjvif");
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![inner, outer]));
+    assert_eq!(anchor(&setup), Some((2, 8)));
+    setup.keys("if");
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![inner, outer]));
+    assert_eq!(anchor(&setup), Some((1, 4)));
+    setup.keys("d");
+    assert_eq!(setup.text(), "fn outer() {\n    \n}");
+}
+
+#[test]
+fn a_count_picks_the_piece_that_many_out() {
+    let text = "fn outer() {\n    fn inner() {\n        z;\n    }\n}";
+    let inner = piece_of(text, "fn inner() {\n        z;\n    }", Some("z;"));
+    let outer = piece_of(text, text, Some("fn inner() {\n        z;\n    }"));
+    let mut setup = Setup::new(text);
+    setup.keys("jjy2af");
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![inner, outer]));
+    assert_eq!(setup.register.text, text);
+}
+
+#[test]
+fn bracket_f_goes_to_the_next_function_and_is_a_jump() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("]f");
+    let (asked, at, query) = setup.last_query();
+    let starts = |backward, count| Query::Starts {
+        construct: Construct::Function,
+        backward,
+        count,
+    };
+    assert_eq!((at, query), (0, starts(false, 1)));
+    let three = piece_of(TWO, "fn three() {\n    x;\n}", None);
+    setup.answer(asked, Answer::Pieces(vec![three]));
+    assert_eq!(setup.cursor(), (4, 0));
+    assert_eq!(setup.editor.take_left(), Some(0), "a jump");
+    // A count asks for that many, and goes as far as there are.
+    setup.keys("j3[f");
+    let (asked, _, query) = setup.last_query();
+    assert_eq!(query, starts(true, 3));
+    let one = piece_of(TWO, "fn one", None);
+    setup.answer(asked, Answer::Pieces(vec![three, one]));
+    assert_eq!(setup.cursor(), (0, 0));
+    // `]C` and `[C` are classes'.
+    setup.keys("]C");
+    assert_eq!(
+        setup.last_query().2,
+        Query::Starts {
+            construct: Construct::Class,
+            backward: false,
+            count: 1,
+        }
+    );
+    setup.answer(setup.last_query().0, Answer::Pieces(Vec::new()));
+    assert_eq!(setup.editor.status.as_deref(), Some("no class after here"));
+}
+
+#[test]
+fn without_a_grammar_or_a_piece_the_bar_says_so() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("daf");
+    setup.answer(setup.last_query().0, Answer::Nothing);
+    assert_eq!(setup.text(), TWO);
+    assert!(
+        (setup.editor.status.as_deref()).is_some_and(|status| status.contains("no grammar")),
+        "{:?}",
+        setup.editor.status
+    );
+    setup.keys("dac");
+    setup.answer(setup.last_query().0, Answer::Pieces(Vec::new()));
+    assert_eq!(setup.editor.status.as_deref(), Some("no class here"));
+    setup.keys("dia");
+    setup.answer(setup.last_query().0, Answer::Failed("it broke".into()));
+    assert_eq!(setup.editor.status.as_deref(), Some("it broke"));
+    assert_eq!(setup.text(), TWO);
+}
+
+#[test]
+fn a_new_snapshot_while_waiting_gives_up_and_drops_the_keys() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("dafx");
+    let mut heard = setup.copy.update(setup.daemon.snapshot());
+    setup.editor.heard(&mut heard, true, &mut setup.copy);
+    assert!(!setup.editor.waiting_for_grammar());
+    assert!(setup.editor.take_gave_up(), "for the desk to drop its keys");
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("the file was read again: nothing was done")
+    );
+    // A late answer does nothing.
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![one(TWO)]));
+    assert_eq!(setup.text(), TWO, "nor did the x");
+}
+
+#[test]
+fn an_answer_too_late_does_nothing_and_drops_the_keys() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("jcifreturn x");
+    assert!(setup.editor.waiting_for_grammar());
+    assert!(!setup.editor.waited_too_long(Instant::now()));
+    setup.editor.age_awaiting(Duration::from_secs(2));
+    assert!(setup.editor.waited_too_long(Instant::now()));
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![one(TWO)]));
+    assert_eq!(setup.text(), TWO, "not cif, and no keys read as commands");
+    assert_eq!(setup.editor.mode, Mode::Normal);
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("the grammar took too long: nothing was done")
+    );
+    assert!(setup.editor.take_gave_up());
+}
+
+#[test]
+fn a_command_waiting_too_long_is_given_up_on_with_no_key_and_none_is_eaten() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("jdaf");
+    let deadline = setup.editor.wakes().expect("woken to give up");
+    assert!(!setup.editor.tick(
+        deadline.checked_sub(Duration::from_millis(1)).unwrap(),
+        &mut setup.copy
+    ));
+    assert!(setup.editor.tick(deadline, &mut setup.copy));
+    assert!(!setup.editor.waiting_for_grammar());
+    assert!(setup.editor.take_gave_up());
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("the grammar took too long: nothing was done")
+    );
+    // The next key is had, and the bar says what it did.
+    setup.keys("x");
+    assert_eq!(setup.text(), TWO.replacen("    two", "   two", 1));
+    assert_eq!(setup.editor.status, None);
+}
+
+#[test]
+fn a_cursor_moved_while_waiting_gives_up_but_others_edits_dont() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("jdafx");
+    // As a click moves it.
+    setup.editor.cursor = Cursor::new(Point { line: 4, col: 0 });
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![one(TWO)]));
+    assert_eq!(setup.text(), TWO);
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("the cursor moved meanwhile: nothing was done")
+    );
+    // Someone else's edit before it moves the cursor and the place asked
+    // about alike.
+    setup.keys("ggjdaf");
+    let edited = setup.daemon.agent(0, "// x\n");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(edited);
+    setup.editor.heard(&mut heard, true, &mut setup.copy);
+    let text = format!("// x\n{TWO}");
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![one(&text)]));
+    assert_eq!(setup.text(), "// x\n\n\nfn three() {\n    x;\n}");
+}
+
+#[test]
+fn bracket_f_in_visual_mode_asks_from_the_cursor() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("vj]f");
+    let (_, at, query) = setup.last_query();
+    assert!(matches!(query, Query::Starts { .. }));
+    assert_eq!(
+        at,
+        TWO.find("    two").unwrap(),
+        "not the selection's start"
+    );
+}
+
+#[test]
+fn the_menu_of_code_actions_and_keys_held_for_the_grammar_get_along() {
+    let mut setup = Setup::new(TWO);
+    let actions = vec![code_action("Fix it", "quickfix", None)];
+    setup.keys("gra");
+    setup.answer(setup.last_query().0, Answer::CodeActions(actions.clone()));
+    assert!(action_menu(&mut setup).is_some());
+    // y isn't the menu's: it closes it, and the j waits with the yank.
+    setup.keys("yafj");
+    assert!(action_menu(&mut setup).is_none());
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![one(TWO)]));
+    assert_eq!(setup.register.text, "fn one(a, bb) {\n    two(a);\n}");
+    assert_eq!(setup.cursor(), (1, 0), "the j moved the cursor");
+    // gra typed while waiting is held too, and asks once it's read.
+    setup.keys("ggdafgra");
+    let (pieces, _, query) = setup.last_query();
+    assert_eq!(query, Query::Pieces(Construct::Function), "gra is held");
+    setup.answer(pieces, Answer::Pieces(vec![one(TWO)]));
+    let (list, _, query) = setup.last_query();
+    assert!(matches!(query, Query::CodeActions { .. }), "{query:?}");
+    setup.answer(list, Answer::CodeActions(actions));
+    assert!(action_menu(&mut setup).is_some());
+    assert_eq!(setup.text(), "\n\nfn three() {\n    x;\n}");
 }

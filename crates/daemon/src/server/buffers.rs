@@ -9,7 +9,7 @@ use clackatoo_protocol::{
     Author, BufferId, BufferUpdate, Change, Content, Edit, Error, Event, OpenFile, PaneId,
     Response, ServerMessage, frame,
 };
-use clackatoo_syntax::{Highlighted, Syntax};
+use clackatoo_syntax::{Found, Highlighted, Syntax};
 use clackatoo_text::{Highlights, Hunks};
 use mio::Token;
 
@@ -143,6 +143,7 @@ impl Daemon {
         }
         self.forget_queries(token, Some(id));
         self.forget_stages(token, Some(id));
+        self.forget_piece_questions(token, Some(id));
     }
 
     /// Makes a change the client at `token` sent to buffer `id`, and tells
@@ -341,34 +342,47 @@ impl Daemon {
     }
 
     /// Sends the highlights parses have found since last asked to every
-    /// client following their buffers.
+    /// client following their buffers, and the answers to questions about
+    /// their pieces of code to the clients that asked.
     pub(super) fn take_highlights(&mut self) {
         let Some(syntax) = &self.syntax else {
             return;
         };
-        let found: Vec<Highlighted> = syntax.take().collect();
+        let found: Vec<Found> = syntax.take().collect();
+        let stopped = syntax.stopped();
         for found in found {
-            let Some(id) = u32::try_from(found.buffer).ok().map(BufferId) else {
-                continue;
-            };
-            let Some(slot) = self.buffers.get_mut(&id) else {
-                continue;
-            };
-            // Edits made while it was parsing move it along, as they moved
-            // what was there.
-            let Some(edits) = slot.buffer.edits_since(found.version) else {
-                log::warn!("buffer {id}: highlights for a version long gone");
-                continue;
-            };
-            let range = (slot.highlights).replace_since(found.range, found.spans, edits);
-            let update = BufferUpdate::Highlights {
-                version: slot.buffer.version(),
-                start: range.start,
-                end: range.end,
-                spans: slot.highlights.within(range.start, range.end).to_vec(),
-            };
-            self.tell_viewers(id, None, &update);
+            match found {
+                Found::Highlighted(found) => self.highlighted(found),
+                Found::Answered(answered) => self.answered_pieces(answered),
+            }
         }
+        if stopped {
+            self.fail_piece_questions();
+        }
+    }
+
+    /// Sends what a parse found to every client following its buffer.
+    fn highlighted(&mut self, found: Highlighted) {
+        let Some(id) = u32::try_from(found.buffer).ok().map(BufferId) else {
+            return;
+        };
+        let Some(slot) = self.buffers.get_mut(&id) else {
+            return;
+        };
+        // Edits made while it was parsing move it along, as they moved
+        // what was there.
+        let Some(edits) = slot.buffer.edits_since(found.version) else {
+            log::warn!("buffer {id}: highlights for a version long gone");
+            return;
+        };
+        let range = (slot.highlights).replace_since(found.range, found.spans, edits);
+        let update = BufferUpdate::Highlights {
+            version: slot.buffer.version(),
+            start: range.start,
+            end: range.end,
+            spans: slot.highlights.within(range.start, range.end).to_vec(),
+        };
+        self.tell_viewers(id, None, &update);
     }
 
     /// Tells every client following `id` whether it's modified, if that's
@@ -423,7 +437,7 @@ impl Daemon {
 }
 
 /// Buffer `id`, as the thread parsing buffers knows it.
-fn key(id: BufferId) -> clackatoo_syntax::Key {
+pub(super) fn key(id: BufferId) -> clackatoo_syntax::Key {
     u64::from(id.0)
 }
 

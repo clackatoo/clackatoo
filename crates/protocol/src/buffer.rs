@@ -31,10 +31,16 @@
 //! changes, off the event loop, and its [`BufferUpdate::Hunks`] sent: the
 //! lines added, changed and deleted, for the signs beside them. The window
 //! moves them along with each edit too.
+//!
+//! A window asks where the functions, classes and arguments around a place
+//! are, for text objects such as `af`, or where the next one starts, for
+//! motions such as `]f`, as it asks a language server about a place: with
+//! a [`Query`](crate::ClientMessage::Query). The daemon answers those
+//! from the buffer's syntax tree, off the event loop.
 
 use std::fmt;
 
-use clackatoo_text::{Diagnostic, Edit, Hunk, Span};
+use clackatoo_text::{Construct, Diagnostic, Edit, Hunk, Piece, Span};
 use serde::{Deserialize, Serialize};
 
 use crate::TerminalId;
@@ -209,7 +215,9 @@ pub struct ServerFeatures {
     pub signature_again: Vec<char>,
 }
 
-/// What a client asks a buffer's language server about a place in it.
+/// What a client asks about a place in a buffer: most questions are for
+/// its language server, and [`Pieces`](Self::Pieces) and
+/// [`Starts`](Self::Starts) for its grammar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Query {
     /// Where what's there is defined, as `gd` goes.
@@ -275,6 +283,31 @@ pub enum Query {
         /// The action's index in its answer.
         item: u32,
     },
+    /// The pieces of code of this kind around the place, innermost first,
+    /// each with its insides, as `af` and `if` pick from; or if there are
+    /// none, the first after it. Answered from the syntax tree with
+    /// [`Answer::Pieces`].
+    Pieces(Construct),
+    /// Where the next `count` pieces of code of this kind start after the
+    /// place, or before it if `backward`, nearest first, as `]f` and `[f`
+    /// go. Answered from the syntax tree with [`Answer::Pieces`], without
+    /// their insides.
+    Starts {
+        /// The kind.
+        construct: Construct,
+        /// Whether to look before the place.
+        backward: bool,
+        /// How many.
+        count: u32,
+    },
+}
+
+impl Query {
+    /// Whether the buffer's grammar answers it, not its language server.
+    #[must_use]
+    pub fn for_grammar(self) -> bool {
+        matches!(self, Self::Pieces(_) | Self::Starts { .. })
+    }
 }
 
 /// Why a language server is asked what could be typed, or about a call,
@@ -359,8 +392,9 @@ pub enum Answer {
         files: usize,
     },
     /// Nothing: there's nothing there to ask about, or the server doesn't
-    /// know. For a [`ClientMessage::Stage`](crate::ClientMessage::Stage),
-    /// there's no hunk there.
+    /// know. For a question for the grammar, the buffer has none. For a
+    /// [`ClientMessage::Stage`](crate::ClientMessage::Stage), there's no
+    /// hunk there.
     Nothing,
     /// The file is formatted: its edits, if `changed`, have been made.
     Formatted {
@@ -372,6 +406,11 @@ pub enum Answer {
     /// nothing, unless a file it wrote couldn't then be put back as it
     /// was, which this says. So does a stage git refused.
     Failed(String),
+    /// Pieces of code, as [`Query::Pieces`] and [`Query::Starts`] ask, as
+    /// bytes of the text at the answer's version, which a client moves
+    /// past its own changes that haven't been made yet, as it moves
+    /// diagnostics. There are none if the buffer has no grammar.
+    Pieces(Vec<Piece>),
     /// A [`ClientMessage::Stage`](crate::ClientMessage::Stage) was made:
     /// the hunk's lines are in git's index, and the buffer's hunks, sent
     /// before this, no longer have it.

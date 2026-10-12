@@ -17,7 +17,8 @@
 //! grammar reads it, for colouring it; they move along with edits, as
 //! [`Diagnostics`] do: what a language server says is wrong with it, and
 //! [`Hunks`]: what's changed in it since a base, such as the file's text
-//! in git.
+//! in git. [`Piece`]s are the functions, classes and arguments a grammar
+//! finds in it, for text objects and motions.
 //!
 //! Places in a text are byte offsets into its UTF-8, as tree-sitter's are.
 //!
@@ -32,10 +33,12 @@ mod edit;
 mod highlights;
 mod history;
 mod hunks;
+mod pieces;
 
 pub use diagnostics::{Diagnostic, Diagnostics, Severity};
 pub use edit::{Bias, Edit, EditError, Op, compose, transform};
 pub use highlights::{Highlights, Kind, Span};
 pub use history::{History, HistoryError, HistorySnapshot, Steps};
 pub use hunks::{Difference, Hunk, HunkKind, Hunks, Sign, diff, line_starts};
+pub use pieces::{Construct, Piece};
 pub use ropey::Rope;

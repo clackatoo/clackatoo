@@ -6,10 +6,16 @@ use std::ops::Range;
 use clackatoo_text::{Kind, Rope, Span};
 use tree_sitter::{Language, Node, Query, QueryCursor, StreamingIterator, TextProvider, Tree};
 
-/// A language's grammar and highlight query, loaded.
+use crate::pieces::Objects;
+
+/// A language's grammar and highlight query, loaded, and its query for
+/// pieces of code, if it has one.
 #[derive(Debug)]
 pub(crate) struct Grammar {
     pub(crate) language: Language,
+    pub(crate) objects: Option<Objects>,
+    /// Which constructs its kinds could be, for finding pieces by them.
+    pub(crate) findable: [bool; 3],
     query: Query,
     /// The kind each of the query's captures is, by its index.
     kinds: Vec<Option<Kind>>,
@@ -25,7 +31,9 @@ impl Grammar {
             .map(|name| Kind::of_capture(name))
             .collect();
         Ok(Self {
+            findable: crate::pieces::findable_by_kinds(&language),
             language,
+            objects: None,
             query,
             kinds,
         })
@@ -141,7 +149,7 @@ impl Flattener {
 
 /// A rope's text, as a query reads it to check its predicates, such as
 /// `#eq?`.
-struct RopeText<'a>(&'a Rope);
+pub(crate) struct RopeText<'a>(pub(crate) &'a Rope);
 
 type Chunks<'a> = std::iter::Map<ropey::iter::Chunks<'a>, fn(&'a str) -> &'a [u8]>;
 

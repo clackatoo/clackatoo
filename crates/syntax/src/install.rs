@@ -24,6 +24,10 @@ pub struct Known {
     pub wasm: Download,
     /// The highlight queries, in the order they go in `highlights.scm`.
     pub highlights: &'static [Download],
+    /// The queries saying where its functions, classes and arguments are,
+    /// from nvim-treesitter-textobjects, in the order they go in
+    /// `textobjects.scm`: none if it has none of those.
+    pub textobjects: &'static [Download],
 }
 
 /// A file to download, and what it must be.
@@ -87,11 +91,8 @@ pub fn known_for(path: &Path) -> Option<&'static Known> {
 /// written.
 pub fn install(known: &Known, dir: &Path) -> Result<(), InstallError> {
     let wasm = download(&known.wasm)?;
-    let mut highlights = Vec::new();
-    for query in known.highlights {
-        highlights.extend(download(query)?);
-        highlights.push(b'\n');
-    }
+    let highlights = download_all(known.highlights)?;
+    let textobjects = download_all(known.textobjects)?;
     let manifest = manifest(known);
 
     fs::create_dir_all(dir)?;
@@ -101,6 +102,14 @@ pub fn install(known: &Known, dir: &Path) -> Result<(), InstallError> {
         // manifest last.
         write(&pack, "grammar.wasm", &wasm)?;
         write(&pack, "highlights.scm", &highlights)?;
+        if textobjects.is_empty() {
+            match fs::remove_file(pack.join("textobjects.scm")) {
+                Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err.into()),
+                _ => {}
+            }
+        } else {
+            write(&pack, "textobjects.scm", &textobjects)?;
+        }
         return write(&pack, "language.toml", manifest.as_bytes());
     }
     // Hidden, so it isn't taken for a pack while it's being written.
@@ -108,6 +117,9 @@ pub fn install(known: &Known, dir: &Path) -> Result<(), InstallError> {
     fs::create_dir(&partial)?;
     fs::write(partial.join("grammar.wasm"), &wasm)?;
     fs::write(partial.join("highlights.scm"), &highlights)?;
+    if !textobjects.is_empty() {
+        fs::write(partial.join("textobjects.scm"), &textobjects)?;
+    }
     fs::write(partial.join("language.toml"), manifest)?;
     fs::rename(&partial, &pack)?;
     Ok(())
@@ -137,6 +149,16 @@ fn write(dir: &Path, name: &str, contents: &[u8]) -> Result<(), InstallError> {
     fs::write(&partial, contents)?;
     fs::rename(&partial, dir.join(name))?;
     Ok(())
+}
+
+/// Downloads each of `files`, and puts them one after another.
+fn download_all(files: &[Download]) -> Result<Vec<u8>, InstallError> {
+    let mut all = Vec::new();
+    for file in files {
+        all.extend(download(file)?);
+        all.push(b'\n');
+    }
+    Ok(all)
 }
 
 /// Downloads `file` with curl, and checks it.
@@ -178,6 +200,12 @@ mod tests {
             assert!(all[..index].iter().all(|other| other.name != language.name));
             assert_eq!(language.wasm.sha256.len(), 64, "{}", language.name);
             assert!(!language.highlights.is_empty(), "{}", language.name);
+            let files = language.highlights.iter().chain(language.textobjects);
+            assert!(
+                files
+                    .chain([&language.wasm])
+                    .all(|file| file.sha256.len() == 64)
+            );
         }
         assert_eq!(known("rust").map(|rust| rust.extensions), Some(&["rs"][..]));
         assert_eq!(

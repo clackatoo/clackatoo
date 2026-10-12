@@ -25,7 +25,7 @@ use winit::keyboard::{Key, NamedKey};
 use crate::chrome::{ModeName, Status};
 use crate::command::{self, Command, Kind, Place};
 use crate::finder::Finder;
-use crate::input::{self, KeyPress, Modifiers};
+use crate::input::{self, KeptPress, KeyPress, Modifiers};
 use crate::keymap::{Chord, Pressed};
 use crate::layout::{Area, Direction, Divider, Placement};
 use crate::options::Options;
@@ -952,6 +952,19 @@ impl Desk {
         if input::is_modifier(press.key) {
             return false;
         }
+        // While an editor's command waits for the grammar, keys wait too,
+        // so none, not even a binding's, gets ahead of it.
+        let typing = self.script.typing;
+        let held = || editors::Held::Key {
+            press: KeptPress::of(press),
+            handlers,
+            typing,
+        };
+        // Esc pressed cancels it; one a binding types waits its turn.
+        let escape = *press.key == Key::Named(NamedKey::Escape) || pane::enters_normal_mode(press);
+        if let Some(redraw) = self.hold_for_grammar(escape && !typing, held) {
+            return redraw;
+        }
         let asked = self.offer_asked();
         if asked && self.offer_key(press) {
             return true;
@@ -1034,6 +1047,12 @@ impl Desk {
     /// Pastes `text` into the command line, if it's open, or else the
     /// focused pane.
     pub(crate) fn paste(&mut self, text: &str) {
+        if self
+            .hold_for_grammar(false, || editors::Held::Paste(text.to_owned()))
+            .is_some()
+        {
+            return;
+        }
         if let Some(input) = &mut self.input {
             input
                 .text
@@ -3260,6 +3279,228 @@ mod tests {
             .finder_view((10, 60), Some((10, 60)))
             .expect("the finder");
         view.rows.into_iter().map(|row| row.text).collect()
+    }
+
+    #[test]
+    fn an_object_from_the_grammar_is_copied_to_the_clipboard_once_it_answers() {
+        use clackatoo_protocol::{Answer, BufferUpdate, Construct, Piece, Query};
+        let text = "fn a() {}\nfn b() {}\n";
+        let mut desk = editing("/p/a.rs", text);
+        type_keys(&mut desk, "jyafx");
+        let asked: Vec<(u64, usize, Query)> = (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Query { id, at, query, .. } => Some((id, at, query)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked.len(), 1);
+        let (id, at, query) = asked[0];
+        assert_eq!((at, query), (10, Query::Pieces(Construct::Function)));
+        assert!(desk.yanked.is_none());
+        let piece = Piece {
+            start: 10,
+            end: 19,
+            inner: None,
+        };
+        let answer = BufferUpdate::Answer {
+            id,
+            version: 0,
+            answer: Answer::Pieces(vec![piece]),
+        };
+        assert!(desk.buffer_changed(BufferId(7), answer));
+        assert_eq!(desk.yanked, Some(("fn b() {}".to_owned(), Copy::Clipboard)));
+        // The x held meanwhile is read after it.
+        let changes = buffer_changes(&mut desk);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+    }
+
+    /// The grammar question the desk's editor asked last: its number and
+    /// place.
+    fn grammar_question(desk: &mut Desk) -> (u64, usize) {
+        let asked = (desk.take_outbox().into_iter())
+            .rev()
+            .find_map(|message| match message {
+                ClientMessage::Query { id, at, .. } => Some((id, at)),
+                _ => None,
+            });
+        asked.expect("a question")
+    }
+
+    /// Answers the question numbered `id` of the editor of `desk`'s
+    /// buffer with `pieces`.
+    fn answer_pieces(desk: &mut Desk, id: u64, pieces: Vec<clackatoo_protocol::Piece>) {
+        use clackatoo_protocol::{Answer, BufferUpdate};
+        let answer = BufferUpdate::Answer {
+            id,
+            version: 0,
+            answer: Answer::Pieces(pieces),
+        };
+        desk.buffer_changed(BufferId(7), answer);
+    }
+
+    /// The text of `desk`'s focused editor.
+    fn editor_text(desk: &Desk) -> String {
+        desk.focused_editor()
+            .expect("an editor")
+            .1
+            .text()
+            .to_string()
+    }
+
+    const FUNCTIONS: &str = "fn a() {}\nfn b() {}\n";
+
+    fn function_b() -> clackatoo_protocol::Piece {
+        clackatoo_protocol::Piece {
+            start: 10,
+            end: 19,
+            inner: None,
+        }
+    }
+
+    #[test]
+    fn the_windows_keys_and_pastes_wait_for_the_grammar_too() {
+        let mut desk = editing("/p/a.rs", FUNCTIONS);
+        // `:` would open the command line at once, and the paste go in.
+        type_keys(&mut desk, "jdaf:");
+        desk.paste("zz");
+        assert!(desk.input.is_none(), "the : is held");
+        assert_eq!(editor_text(&desk), FUNCTIONS, "and the paste");
+        let (id, _) = grammar_question(&mut desk);
+        answer_pieces(&mut desk, id, vec![function_b()]);
+        assert!(desk.input.is_some(), "the command line opened after");
+        // The paste went into the command line, as it would have.
+        assert_eq!(desk.input.as_ref().unwrap().text, "zz");
+        assert_eq!(editor_text(&desk), "fn a() {}\n\n");
+    }
+
+    /// What the focused editor's bar says.
+    fn editor_label(desk: &Desk) -> String {
+        let (editor, copy) = desk.focused_editor().expect("an editor");
+        editor.label(copy)
+    }
+
+    #[test]
+    fn a_command_waiting_too_long_is_given_up_on_by_the_clock() {
+        let mut desk = editing("/p/a.rs", FUNCTIONS);
+        type_keys(&mut desk, "jcifabc");
+        let (id, _) = grammar_question(&mut desk);
+        let deadline = desk.editor_wakes().expect("woken to give up");
+        assert!(desk.tick_editors(deadline));
+        assert_eq!(
+            editor_label(&desk),
+            "the grammar took too long: nothing was done"
+        );
+        // Neither the command nor the keys held, nor the answer, when it
+        // comes; and the next key isn't eaten.
+        answer_pieces(&mut desk, id, vec![function_b()]);
+        assert_eq!(editor_text(&desk), FUNCTIONS);
+        assert!(buffer_changes(&mut desk).is_empty());
+        type_keys(&mut desk, "daf");
+        assert_eq!(grammar_question(&mut desk).1, 10, "the d was had");
+    }
+
+    #[test]
+    fn a_key_just_as_the_wait_runs_out_is_had_and_the_bar_says_why() {
+        let mut desk = editing("/p/a.rs", FUNCTIONS);
+        type_keys(&mut desk, "jdafx");
+        desk.age_grammar_questions(std::time::Duration::from_secs(2));
+        type_keys(&mut desk, "x");
+        assert_eq!(editor_text(&desk), "fn a() {}\nn b() {}\n", "the x");
+        assert_eq!(
+            editor_label(&desk),
+            "the grammar took too long: nothing was done"
+        );
+        type_keys(&mut desk, "l");
+        assert!(editor_label(&desk).starts_with("a.rs"));
+    }
+
+    #[test]
+    fn esc_cancels_a_command_waiting_for_the_grammar() {
+        let mut desk = editing("/p/a.rs", FUNCTIONS);
+        type_keys(&mut desk, "jdafx");
+        let (id, _) = grammar_question(&mut desk);
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(editor_label(&desk), "cancelled: nothing was done");
+        answer_pieces(&mut desk, id, vec![function_b()]);
+        assert_eq!(editor_text(&desk), FUNCTIONS, "nor the x");
+        type_keys(&mut desk, "x");
+        assert_eq!(editor_text(&desk), "fn a() {}\nn b() {}\n");
+    }
+
+    #[test]
+    fn keys_a_held_key_sets_off_come_before_the_rest_held() {
+        let mut desk = editing("/p/a.rs", FUNCTIONS);
+        desk.lua_from(r#"client.keys.map("n", "-", "ggdafox<Esc>")"#);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "jdaf-");
+        type_keys(&mut desk, "Oz");
+        let (first, _) = grammar_question(&mut desk);
+        answer_pieces(&mut desk, first, vec![function_b()]);
+        // The binding's daf asks in turn, once the daemon has the first's
+        // edit; its o, x and Esc wait ahead of O and z.
+        let mut second = None;
+        for message in desk.take_outbox() {
+            match message {
+                ClientMessage::Edit { seq, .. } => {
+                    let acked = clackatoo_protocol::BufferUpdate::Acked { version: 1, seq };
+                    desk.buffer_changed(BufferId(7), acked);
+                }
+                ClientMessage::Query { id, .. } => second = Some(id),
+                _ => {}
+            }
+        }
+        let second = second.unwrap_or_else(|| grammar_question(&mut desk).0);
+        let a = clackatoo_protocol::Piece {
+            start: 0,
+            end: 9,
+            inner: None,
+        };
+        let answer = clackatoo_protocol::BufferUpdate::Answer {
+            id: second,
+            version: 1,
+            answer: clackatoo_protocol::Answer::Pieces(vec![a]),
+        };
+        desk.buffer_changed(BufferId(7), answer);
+        assert_eq!(editor_text(&desk), "\nz\nx\n\n");
+    }
+
+    #[test]
+    fn a_focus_moved_or_an_editor_gone_while_waiting_gives_up() {
+        let mut desk = editing("/p/a.rs", FUNCTIONS);
+        type_keys(&mut desk, "jdafx");
+        let (id, _) = grammar_question(&mut desk);
+        // As a click on another pane moves it.
+        let shown = desk.shown.unwrap();
+        desk.shown = Some(Shown {
+            pane: PaneId(2),
+            ..shown
+        });
+        assert!(desk.tick_editors(std::time::Instant::now()));
+        let (label, held) = desk.editor_label_and_held(PaneId(1));
+        assert_eq!(label.as_deref(), Some("the focus moved: nothing was done"));
+        assert_eq!(held, 0, "the x is dropped");
+        desk.shown = Some(shown);
+        answer_pieces(&mut desk, id, vec![function_b()]);
+        assert_eq!(editor_text(&desk), FUNCTIONS, "nor the x");
+
+        // The editor gone, as its pane shows another file.
+        type_keys(&mut desk, "dafx");
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(BufferId(8)),
+        });
+        desk.workspaces_changed(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+        assert!(
+            (desk.message.as_deref()).is_some_and(|message| message.contains("nothing was done")),
+            "{:?}",
+            desk.message
+        );
+        assert_eq!(desk.editor_label_and_held(PaneId(1)).1, 0);
     }
 
     #[test]

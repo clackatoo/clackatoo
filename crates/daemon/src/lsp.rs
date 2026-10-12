@@ -378,6 +378,8 @@ impl LanguageServer {
             | Query::TypeDefinition
             | Query::Implementation
             | Query::References => true,
+            // The buffer's grammar answers those.
+            Query::Pieces(_) | Query::Starts { .. } => false,
         }
     }
 
@@ -418,6 +420,7 @@ impl LanguageServer {
             Query::Resolve { .. } => unreachable!("resolved with the item, by resolve"),
             Query::CodeActions { .. } => unreachable!("asked with what's wrong, by code_actions"),
             Query::Act { .. } => unreachable!("done by the daemon, with the action"),
+            Query::Pieces(_) | Query::Starts { .. } => unreachable!("answered by the grammar"),
         };
         let mut params = json!({
             "textDocument": { "uri": uri(path) },
