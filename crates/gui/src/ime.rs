@@ -12,9 +12,10 @@
 //! Text can reach the window two ways: as a key, when the input method lets
 //! one through untouched, and as a commit. Each keypress should come only
 //! one way, but some setups send it both, which would type it twice. So a
-//! key and a commit of the same text, one straight after the other, count
-//! once. See [`InputMethod`].
+//! key and a commit of the same text, close together, count once. See
+//! [`InputMethod`].
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use clackatoo_term::{Row, RowBuilder, Style, Underline};
@@ -23,10 +24,15 @@ use winit::event::Ime;
 
 /// How far apart a key and a commit of the same text can come and still be
 /// one keypress sent twice. The second comes after the input method's
-/// round trip, a few milliseconds on a busy machine. A person can't type
-/// one character twice this fast, and when a key is held, its repeats all
-/// come the same way, so they're never taken for each other.
-const ECHO: Duration = Duration::from_millis(50);
+/// round trip, and both are timed when the window gets to them, which can
+/// be a frame or two late. Two real keypresses never pair up in this time:
+/// they'd have to come one each way, and a setup sends each key one way,
+/// or both.
+const ECHO: Duration = Duration::from_millis(200);
+
+/// The most typed texts kept for pairing: far more than anyone types in
+/// [`ECHO`], so the list can't grow without end.
+const KEPT: usize = 32;
 
 /// What the input method is doing, and what's been typed through it lately,
 /// to decide what keys and commits type. The window drives it with the
@@ -37,9 +43,9 @@ pub(crate) struct InputMethod {
     allowed: bool,
     /// What it's composing.
     preedit: Option<Preedit>,
-    /// The last text typed, if nothing has happened since, to drop the
-    /// same text coming the other way.
-    last: Option<Typed>,
+    /// Text typed in the last [`ECHO`], oldest first, each waiting for the
+    /// same text to come the other way, which is then dropped.
+    typed: VecDeque<Typed>,
 }
 
 /// Text typed by a key or a commit, and when.
@@ -73,8 +79,7 @@ impl InputMethod {
         }
         self.allowed = wanted;
         if !wanted {
-            self.preedit = None;
-            self.last = None;
+            self.reset();
         }
         Some(wanted)
     }
@@ -86,39 +91,36 @@ impl InputMethod {
 
     /// Whether a key that types `text`, if any, goes on to the window.
     /// While the input method composes, keys are its. A key that types
-    /// what was just committed is that commit sent twice.
+    /// what was just committed is that commit sent twice. Keys that only
+    /// hold a modifier, such as Shift, needn't be passed.
     pub(crate) fn key(&mut self, text: Option<&str>, now: Instant) -> bool {
-        if self.preedit.is_some() {
-            return false;
-        }
         if !self.allowed {
             return true;
         }
-        let Some(text) = text.filter(|text| !text.is_empty()) else {
-            // A key that types nothing, such as an arrow, comes between.
-            self.last = None;
-            return true;
-        };
-        if self.echoes(Way::Commit, text, now) {
-            self.last = None;
+        if self.preedit.is_some() {
             return false;
         }
-        self.typed(Way::Key, text, now);
-        true
+        match text.filter(|text| !text.is_empty()) {
+            Some(text) => self.pair(Way::Key, text, now),
+            None => true,
+        }
     }
 
     /// Takes an event from the input method. Returns text it committed,
-    /// to be typed, unless a key typed it already.
+    /// to be typed, unless a key typed it already. While it isn't allowed,
+    /// what it composes or commits is late, and dropped: in normal mode it
+    /// would be taken for commands, or hold keys back for good.
     pub(crate) fn event(&mut self, event: Ime, now: Instant) -> Option<String> {
         match event {
             Ime::Enabled => None,
+            Ime::Preedit(..) | Ime::Commit(_) if !self.allowed => None,
             Ime::Preedit(text, cursor) => {
                 // An empty preedit ends composing, and comes before every
-                // commit: it isn't something happening in between.
+                // commit.
                 if text.is_empty() {
                     self.preedit = None;
                 } else {
-                    self.last = None;
+                    self.typed.clear();
                     self.preedit = Some(Preedit {
                         text,
                         cursor: cursor.map(|(start, _)| start),
@@ -128,19 +130,10 @@ impl InputMethod {
             }
             Ime::Commit(text) => {
                 self.preedit = None;
-                if text.is_empty() {
-                    return None;
-                }
-                if self.echoes(Way::Key, &text, now) {
-                    self.last = None;
-                    return None;
-                }
-                self.typed(Way::Commit, &text, now);
-                Some(text)
+                (!text.is_empty() && self.pair(Way::Commit, &text, now)).then_some(text)
             }
             Ime::Disabled => {
-                self.preedit = None;
-                self.last = None;
+                self.reset();
                 None
             }
         }
@@ -151,22 +144,30 @@ impl InputMethod {
     /// would be held back for it until it did.
     pub(crate) fn reset(&mut self) {
         self.preedit = None;
-        self.last = None;
+        self.typed.clear();
     }
 
-    /// Whether `text` is what came `by` that way last, just now.
-    fn echoes(&self, by: Way, text: &str, now: Instant) -> bool {
-        self.last.as_ref().is_some_and(|last| {
-            last.by == by && last.text == text && now.duration_since(last.at) <= ECHO
-        })
-    }
-
-    fn typed(&mut self, by: Way, text: &str, at: Instant) {
-        self.last = Some(Typed {
+    /// Whether `text`, which just came `by` one way, is to be typed: not if
+    /// it came the other way lately, which counts once, and is forgotten.
+    /// Otherwise it's kept, for its twin to be dropped.
+    fn pair(&mut self, by: Way, text: &str, now: Instant) -> bool {
+        while (self.typed.front()).is_some_and(|old| now.duration_since(old.at) > ECHO) {
+            self.typed.pop_front();
+        }
+        let twin = (self.typed.iter()).position(|old| old.by != by && old.text == text);
+        if let Some(twin) = twin {
+            self.typed.remove(twin);
+            return false;
+        }
+        if self.typed.len() == KEPT {
+            self.typed.pop_front();
+        }
+        self.typed.push_back(Typed {
             text: text.to_owned(),
             by,
-            at,
+            at: now,
         });
+        true
     }
 }
 
@@ -360,15 +361,37 @@ mod tests {
         assert_eq!(ime.event(commit("b"), t + ms(1)).as_deref(), Some("b"));
         // The same text, but too long after to be one keypress.
         assert!(ime.key(Some("c"), t + ms(100)));
-        assert_eq!(ime.event(commit("c"), t + ms(200)).as_deref(), Some("c"));
-        // Something in between: a key that types nothing...
-        assert!(ime.key(Some("d"), t + ms(300)));
-        assert!(ime.key(None, t + ms(301)));
-        assert_eq!(ime.event(commit("d"), t + ms(302)).as_deref(), Some("d"));
-        // ...or composing.
-        assert!(ime.key(Some("e"), t + ms(400)));
-        assert_eq!(ime.event(compose("x"), t + ms(401)), None);
-        assert_eq!(ime.event(commit("e"), t + ms(402)).as_deref(), Some("e"));
+        assert_eq!(ime.event(commit("c"), t + ms(400)).as_deref(), Some("c"));
+        // Composing in between starts something new.
+        assert!(ime.key(Some("e"), t + ms(1000)));
+        assert_eq!(ime.event(compose("x"), t + ms(1001)), None);
+        assert_eq!(ime.event(commit("e"), t + ms(1002)).as_deref(), Some("e"));
+    }
+
+    #[test]
+    fn keypresses_sent_twice_pair_up_however_they_interleave() {
+        let (mut ime, t) = allowed();
+        // Typed fast: both keys come before either commit.
+        assert!(ime.key(Some("a"), t));
+        assert!(ime.key(Some("b"), t + ms(20)));
+        assert_eq!(ime.event(commit("a"), t + ms(40)), None);
+        assert_eq!(ime.event(commit("b"), t + ms(60)), None);
+        // A held key: each repeat sent twice still types once.
+        let t = t + ms(1000);
+        assert!(ime.key(Some("j"), t));
+        assert!(ime.key(Some("j"), t + ms(30)));
+        assert_eq!(ime.event(commit("j"), t + ms(35)), None);
+        assert_eq!(ime.event(commit("j"), t + ms(65)), None);
+        // A key that types nothing, such as an arrow, coming between a key
+        // and its twin doesn't part them.
+        let t = t + ms(1000);
+        assert!(ime.key(Some("d"), t));
+        assert!(ime.key(None, t + ms(1)));
+        assert_eq!(ime.event(commit("d"), t + ms(2)), None);
+        // Nor does the window being slow to get to the twin.
+        let t = t + ms(1000);
+        assert!(ime.key(Some("f"), t));
+        assert_eq!(ime.event(commit("f"), t + ms(150)), None);
     }
 
     #[test]
@@ -381,6 +404,12 @@ mod tests {
         for n in 0..5 {
             assert_eq!(ime.event(commit("j"), t + ms(n * 30)).as_deref(), Some("j"));
         }
+        // However many come, only so many are kept.
+        let t = t + ms(1000);
+        for n in 0..100 {
+            assert!(ime.key(Some("k"), t + ms(n)));
+        }
+        assert!(ime.typed.len() <= KEPT);
     }
 
     #[test]
@@ -393,11 +422,17 @@ mod tests {
         assert!(!ime.allowed());
         assert!(ime.preedit().is_none());
         assert!(ime.key(Some("j"), t), "normal mode's keys go through");
-        // While it's off, keys aren't remembered, so a commit that comes
-        // late is typed.
+        // What it composes or commits late, after Esc, is dropped: it
+        // mustn't hold normal mode's keys back, or be taken for commands.
+        assert_eq!(ime.event(compose("j"), t + ms(1)), None);
+        assert!(ime.preedit().is_none());
+        assert!(ime.key(Some("j"), t + ms(2)));
+        assert_eq!(ime.event(commit("x"), t + ms(3)), None);
+        // While it's off, keys aren't remembered, so a commit after it's
+        // back on is typed.
         assert!(ime.key(Some("a"), t));
         assert_eq!(ime.allow(true), Some(true));
-        assert_eq!(ime.event(commit("a"), t + ms(1)).as_deref(), Some("a"));
+        assert_eq!(ime.event(commit("a"), t + ms(4)).as_deref(), Some("a"));
     }
 
     #[test]

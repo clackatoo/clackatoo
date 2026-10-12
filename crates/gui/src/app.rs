@@ -1766,8 +1766,11 @@ impl App {
                 ..
             } if event.state.is_pressed() => {
                 // While the input method composes, keys are its, and a key
-                // it committed as well counts once.
-                if self.ime.key(event.text.as_deref(), Instant::now()) {
+                // it committed as well counts once. A modifier alone types
+                // nothing, so it's none of the input method's business.
+                if input::is_modifier(&event.logical_key)
+                    || self.ime.key(event.text.as_deref(), Instant::now())
+                {
                     self.key_pressed(event_loop, &event);
                     self.sync_ime();
                 }
