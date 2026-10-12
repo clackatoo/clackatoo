@@ -13,16 +13,27 @@
 //! until the parse that follows it sends new ones.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use clackatoo_protocol::{BufferId, BufferUpdate, Change, ClientMessage, Edit};
-use clackatoo_text::{Diagnostic, Diagnostics, Highlights, Rope, Span, compose, transform};
+use clackatoo_protocol::{Answer, BufferId, BufferUpdate, Change, ClientMessage, Edit, Query};
+use clackatoo_text::{Bias, Diagnostic, Diagnostics, Highlights, Rope, Span, compose, transform};
 
 /// A change waiting for the daemon's answer, or to be sent.
 #[derive(Debug)]
 enum Waiting {
-    Edit { edit: Edit, step: bool },
+    Edit {
+        edit: Edit,
+        step: bool,
+    },
     Undo,
     Redo,
+    /// A question for the language server about byte `at`, sent once the
+    /// changes before it have been made, so the daemon has the same text.
+    Query {
+        id: u64,
+        at: usize,
+        query: Query,
+    },
 }
 
 /// What an update from the daemon did to the copy, for the panes showing
@@ -39,6 +50,8 @@ pub(crate) enum Heard {
     Reversed(Edit),
     /// The window's undo or redo found nothing to do: an undo if `undo`.
     NothingToReverse { undo: bool },
+    /// The language server answered the query numbered `id`.
+    Answer { id: u64, answer: Answer },
 }
 
 /// A window's copy of a buffer.
@@ -98,6 +111,11 @@ impl BufferCopy {
         &self.diagnostics
     }
 
+    /// The file's path on the daemon's machine.
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
     /// The file's name, for titles.
     pub(crate) fn name(&self) -> &str {
         self.path.rsplit('/').next().unwrap_or(&self.path)
@@ -147,6 +165,19 @@ impl BufferCopy {
         self.waiting
             .push_back(if undo { Waiting::Undo } else { Waiting::Redo });
         self.send_next();
+    }
+
+    /// Asks the buffer's language server `query` about byte `at` of the
+    /// copy's text, once the changes before it have been made. Returns the
+    /// query's number, which [`Heard::Answer`] gives back.
+    pub(crate) fn ask(&mut self, query: Query, at: usize) -> u64 {
+        // Numbered across every copy, so a late answer to a copy since
+        // made again goes nowhere.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        self.waiting.push_back(Waiting::Query { id, at, query });
+        self.send_next();
+        id
     }
 
     /// Takes in what the daemon says about the buffer.
@@ -230,7 +261,43 @@ impl BufferCopy {
                 self.diagnose(version, diagnostics);
                 Heard::Nothing
             }
+            BufferUpdate::Answer {
+                id,
+                version,
+                answer,
+            } => Heard::Answer {
+                id,
+                answer: self.past_waiting(version, answer),
+            },
         }
+    }
+
+    /// `answer`, with places in this buffer, counted in the daemon's text
+    /// at `version`, moved past the window's edits waiting, as diagnostics
+    /// are.
+    fn past_waiting(&self, version: u64, answer: Answer) -> Answer {
+        let Answer::Locations(mut found) = answer else {
+            return answer;
+        };
+        for place in &mut found {
+            let Some(offset) = place.offset else { continue };
+            if version != self.version {
+                log::debug!("buffer {}: an answer for version {version}", self.id);
+                continue;
+            }
+            let offset = (self.waiting.iter())
+                .filter_map(|waiting| match waiting {
+                    Waiting::Edit { edit, .. } => Some(edit),
+                    _ => None,
+                })
+                .fold(offset, |offset, edit| edit.map(offset, Bias::Before))
+                .min(self.text.len_bytes());
+            let line = self.text.byte_to_line(offset);
+            place.line = line as u64;
+            place.col = offset - self.text.line_to_byte(line);
+            place.offset = Some(offset);
+        }
+        Answer::Locations(found)
     }
 
     /// Takes the diagnostics for the daemon's text at `version`, moving
@@ -260,7 +327,7 @@ impl BufferCopy {
         }
         let waiting = (self.waiting.iter()).filter_map(|waiting| match waiting {
             Waiting::Edit { edit, .. } => Some(edit),
-            Waiting::Undo | Waiting::Redo => None,
+            Waiting::Undo | Waiting::Redo | Waiting::Query { .. } => None,
         });
         (self.highlights).replace_since(start..end, spans, waiting);
     }
@@ -285,8 +352,14 @@ impl BufferCopy {
     /// waiting, which are brought past it in turn.
     fn bring_past_waiting(&mut self, mut edit: Edit) -> Option<Edit> {
         for waiting in &mut self.waiting {
-            let Waiting::Edit { edit: mine, .. } = waiting else {
-                continue;
+            let mine = match waiting {
+                Waiting::Edit { edit: mine, .. } => mine,
+                // A place asked about moves with the text around it.
+                Waiting::Query { at, .. } => {
+                    *at = edit.map(*at, Bias::Before);
+                    continue;
+                }
+                Waiting::Undo | Waiting::Redo => continue,
             };
             match transform(mine, &edit) {
                 Ok((mine_after, edit_after)) => {
@@ -302,10 +375,21 @@ impl BufferCopy {
         Some(edit)
     }
 
-    /// Sends the first change waiting, if none is on its way.
+    /// Sends the first change waiting, if none is on its way, and the
+    /// queries before it, which aren't waited on.
     fn send_next(&mut self) {
         if self.sent.is_some() || !self.loaded {
             return;
+        }
+        while let Some(&Waiting::Query { id, at, query }) = self.waiting.front() {
+            self.waiting.pop_front();
+            self.outbox.push(ClientMessage::Query {
+                buffer: self.id,
+                id,
+                version: self.version,
+                at,
+                query,
+            });
         }
         let Some(first) = self.waiting.front() else {
             return;
@@ -318,6 +402,7 @@ impl BufferCopy {
             },
             Waiting::Undo => Change::Undo,
             Waiting::Redo => Change::Redo,
+            Waiting::Query { .. } => unreachable!("sent above"),
         };
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -332,7 +417,7 @@ impl BufferCopy {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use clackatoo_protocol::{Author, BufferSnapshot};
+    use clackatoo_protocol::{Author, BufferSnapshot, FileLocation};
     use clackatoo_text::History;
 
     use super::*;
@@ -456,6 +541,56 @@ pub(super) mod tests {
         }
         assert_eq!(daemon.text.to_string(), "pub fn main() {xy}\n");
         assert_eq!(copy.text.to_string(), daemon.text.to_string());
+    }
+
+    #[test]
+    fn a_query_waits_for_the_edits_before_it_and_moves_with_others() {
+        let mut daemon = Daemon::new("abc");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        typed(&mut copy, 0, "X", true);
+        let sent = copy.take_outbox();
+        // About the "b" of "Xabc", which the daemon doesn't have yet.
+        let id = copy.ask(Query::Definition, 2);
+        assert!(copy.take_outbox().is_empty(), "it waits for the edit");
+        // An agent's edit, made first, moves it.
+        let agents = daemon.agent(0, "ZZ");
+        let (ack, _) = daemon.take(sent.into_iter().next().unwrap());
+        copy.update(agents);
+        copy.update(ack);
+        let at = copy.text.to_string().find('b').unwrap();
+        assert_eq!(
+            copy.take_outbox(),
+            [ClientMessage::Query {
+                buffer: BufferId(1),
+                id,
+                version: 2,
+                at,
+                query: Query::Definition,
+            }]
+        );
+        assert_eq!(copy.text.to_string(), daemon.text.to_string());
+
+        // An answer in this buffer moves past the window's edits waiting.
+        typed(&mut copy, 0, "!", true);
+        let place = |offset| FileLocation {
+            path: "/a".into(),
+            line: 0,
+            col: offset,
+            offset: Some(offset),
+        };
+        let heard = copy.update(BufferUpdate::Answer {
+            id,
+            version: 2,
+            answer: Answer::Locations(vec![place(at)]),
+        });
+        assert_eq!(
+            heard,
+            Heard::Answer {
+                id,
+                answer: Answer::Locations(vec![place(at + 1)])
+            }
+        );
     }
 
     #[test]

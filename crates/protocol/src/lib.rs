@@ -52,7 +52,9 @@ pub use clackatoo_term::{
 };
 use serde::{Deserialize, Serialize};
 
-pub use buffer::{Author, BufferId, BufferSnapshot, BufferUpdate, Change, OpenFile};
+pub use buffer::{
+    Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, FileLocation, OpenFile, Query,
+};
 pub use chat::{
     ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome,
     Question, Setting, SettingChoice, SettingKind, Tool, ToolContent, ToolKind, ToolStatus, Turn,
@@ -70,7 +72,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -119,6 +121,25 @@ pub enum ClientMessage {
         seq: u64,
         /// The change.
         change: Change,
+    },
+    /// Asks the language server of a buffer the client attached to about
+    /// the text at a place, as the text is after every change the client
+    /// has sent. Not answered as a request is, since the server may take
+    /// its time: the answer comes as [`BufferUpdate::Answer`], in order
+    /// with the buffer's edits.
+    Query {
+        /// The buffer.
+        buffer: BufferId,
+        /// The client's number for the query, which the answer gives back.
+        id: u64,
+        /// The version of the text `at` is in: the client's copy's, after
+        /// every change it has sent has been made. The daemon moves `at`
+        /// along with edits made since.
+        version: u64,
+        /// The place asked about, in bytes.
+        at: usize,
+        /// What's asked.
+        query: Query,
     },
 }
 

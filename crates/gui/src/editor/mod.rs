@@ -19,7 +19,7 @@ mod text;
 
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{BufferId, Edit, Size};
+use clackatoo_protocol::{Answer, BufferId, Edit, FileLocation, Query, Size};
 use clackatoo_term::{Row, RowBuilder, Style};
 use clackatoo_text::{Bias, Diagnostic, Severity};
 use winit::keyboard::{Key, NamedKey};
@@ -234,6 +234,12 @@ pub(crate) struct Editor {
     found: Option<(Point, Point)>,
     /// A short message for the bar, until the next key.
     status: Option<String>,
+    /// The number of the language server query asked last, until it's
+    /// answered.
+    asked: Option<u64>,
+    /// A place in another file an answer goes to, and how many places it
+    /// gave, for the desk to open.
+    opening: Option<(FileLocation, usize)>,
     /// Text just copied, highlighted for a moment.
     flash: Option<(Point, Point, Selection, Instant)>,
     /// Where the cursor and selection's start were in the text, before
@@ -273,6 +279,8 @@ impl Editor {
             search: None,
             found: None,
             status: None,
+            asked: None,
+            opening: None,
             flash: None,
             held: None,
             rows: Vec::new(),
@@ -547,6 +555,7 @@ impl Editor {
             }
             Action::View(at) => self.view_at(at),
             Action::Diagnostic { backward } => self.next_diagnostic(backward, times, copy),
+            Action::Ask(query) => self.ask(query, copy),
             Action::OtherEnd => {
                 if let Some(anchor) = self.anchor {
                     self.anchor = Some(self.cursor.at);
@@ -1476,7 +1485,6 @@ impl Editor {
     /// asked for the undo or redo it made.
     pub(crate) fn heard(&mut self, heard: &Heard, jump: bool, copy: &BufferCopy) {
         match heard {
-            Heard::Nothing => {}
             Heard::Replaced => {
                 self.held = None;
                 self.normal_cursor(copy);
@@ -1503,11 +1511,74 @@ impl Editor {
                     });
                 }
             }
+            Heard::Answer { id, answer } if self.asked == Some(*id) => {
+                self.asked = None;
+                self.answered(answer, copy);
+            }
+            Heard::Nothing | Heard::Answer { .. } => {}
         }
         if self.mode != Mode::Insert {
             self.normal_cursor(copy);
         }
         self.follow(copy);
+    }
+
+    /// `gd` and the like: asks the language server about where the cursor
+    /// is.
+    fn ask(&mut self, query: Query, copy: &mut BufferCopy) {
+        let at = self.text(copy).byte_at(self.cursor.at);
+        self.asked = Some(copy.ask(query, at));
+    }
+
+    /// Goes where the language server's answer to the last query says:
+    /// the first place, if it gives several, here or, in another file,
+    /// for the desk to open.
+    fn answered(&mut self, answer: &Answer, copy: &BufferCopy) {
+        match answer {
+            Answer::Locations(found) => {
+                let Some(first) = found.first() else {
+                    return;
+                };
+                if first.path == copy.path() {
+                    self.go_to(first.line, first.col, copy);
+                    self.say_how_many(found.len());
+                } else {
+                    self.opening = Some((first.clone(), found.len()));
+                }
+            }
+            Answer::Nothing => {
+                self.status = Some("the language server knows of nothing there".into());
+            }
+            Answer::Failed(why) => self.status = Some(why.clone()),
+        }
+    }
+
+    /// Puts the cursor on `line`, `col` bytes into it, as far as the line
+    /// goes.
+    pub(crate) fn go_to(&mut self, line: u64, col: usize, copy: &BufferCopy) {
+        let text = self.text(copy);
+        let line = line.min(text.last_line());
+        let (start, end) = (text.line_start(line), text.line_end(line));
+        // Back to a character's start, from inside one.
+        let rope = text.rope();
+        let at = rope.char_to_byte(rope.byte_to_char((start + col).min(end)));
+        self.cursor = Cursor::new(text.point_of(at));
+        drop(text);
+        self.normal_cursor(copy);
+        self.follow(copy);
+    }
+
+    /// Says, if an answer gave more places than the one gone to, how many.
+    pub(crate) fn say_how_many(&mut self, places: usize) {
+        if places > 1 {
+            self.status = Some(format!("1 of {places} places"));
+        }
+    }
+
+    /// The place in another file the last answer goes to, and how many
+    /// places it gave, for the desk to open, if there's one.
+    pub(crate) fn take_opening(&mut self) -> Option<(FileLocation, usize)> {
+        self.opening.take()
     }
 
     fn place_held(&mut self, copy: &BufferCopy) {

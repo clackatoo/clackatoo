@@ -1,7 +1,9 @@
 //! An editor driven by keys, with its buffer's copy talking to a daemon as
 //! the real one does.
 
-use clackatoo_protocol::{BufferId, Size};
+use clackatoo_protocol::{
+    Answer, BufferId, BufferUpdate, ClientMessage, FileLocation, Query, Size,
+};
 
 use super::copy::tests::Daemon;
 use super::keys::Stroke;
@@ -16,6 +18,8 @@ struct Setup {
     daemon: Daemon,
     register: Register,
     options: Options,
+    /// The queries sent, for the language server.
+    queries: Vec<(u64, usize, Query)>,
 }
 
 impl Setup {
@@ -32,6 +36,7 @@ impl Setup {
             daemon,
             register: Register::default(),
             options,
+            queries: Vec::new(),
         }
     }
 
@@ -66,14 +71,35 @@ impl Setup {
         }
     }
 
-    /// Passes the window's changes to the daemon, and its answers back.
+    /// Passes the window's changes to the daemon, and its answers back,
+    /// keeping its queries for the language server.
     fn serve(&mut self) {
-        while let Some(message) = self.copy.take_outbox().into_iter().next() {
-            let (answer, _) = self.daemon.take(message);
-            self.editor.hold(&self.copy);
-            let heard = self.copy.update(answer);
-            self.editor.heard(&heard, true, &self.copy);
+        loop {
+            let messages = self.copy.take_outbox();
+            if messages.is_empty() {
+                return;
+            }
+            for message in messages {
+                if let ClientMessage::Query { id, at, query, .. } = message {
+                    self.queries.push((id, at, query));
+                    continue;
+                }
+                let (answer, _) = self.daemon.take(message);
+                self.editor.hold(&self.copy);
+                let heard = self.copy.update(answer);
+                self.editor.heard(&heard, true, &self.copy);
+            }
         }
+    }
+
+    /// Gives the editor the language server's answer to query `id`.
+    fn answer(&mut self, id: u64, answer: Answer) {
+        let heard = (self.copy).update(BufferUpdate::Answer {
+            id,
+            version: 0,
+            answer,
+        });
+        self.editor.heard(&heard, true, &self.copy);
     }
 
     fn text(&self) -> String {
@@ -772,4 +798,55 @@ fn diagnostics_are_written_after_lines_numbered_and_gone_to() {
     setup.set(|options| options.virtualtext = false);
     setup.editor.settle(&setup.copy);
     assert_eq!(setup.editor.scene().0[1].text(), "  1 let x = y;");
+}
+
+#[test]
+fn gd_asks_the_language_server_and_goes_where_it_says() {
+    let mut setup = Setup::new("let x = y;\nfn y() {}\n");
+    setup.keys("fygd");
+    let (asked, at, query) = setup.queries[0];
+    assert_eq!((at, query), (8, Query::Definition));
+    let here = |line, col| FileLocation {
+        path: "/a".into(),
+        line,
+        col,
+        offset: None,
+    };
+    setup.answer(asked, Answer::Locations(vec![here(1, 3), here(0, 0)]));
+    assert_eq!(setup.cursor(), (1, 3), "the first place");
+    assert_eq!(setup.editor.status.as_deref(), Some("1 of 2 places"));
+
+    // Another file's is for the desk to open.
+    setup.keys("gD");
+    let (asked, ..) = setup.queries[1];
+    let elsewhere = FileLocation {
+        path: "/b.rs".into(),
+        line: 9,
+        col: 2,
+        offset: None,
+    };
+    setup.answer(asked, Answer::Locations(vec![elsewhere.clone()]));
+    assert_eq!(setup.editor.take_opening(), Some((elsewhere, 1)));
+    assert_eq!(setup.cursor(), (1, 3), "staying put here");
+
+    // An answer to an older query, or another pane's, goes nowhere; and
+    // what goes wrong is said.
+    setup.keys("gri");
+    let (asked, at, query) = setup.queries[2];
+    assert_eq!((at, query), (14, Query::Implementation));
+    setup.answer(asked - 1, Answer::Locations(vec![here(0, 0)]));
+    assert_eq!(setup.cursor(), (1, 3));
+    setup.answer(
+        asked,
+        Answer::Failed("its language server is still starting".into()),
+    );
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("its language server is still starting")
+    );
+    // An empty list, which the daemon never sends, does nothing.
+    setup.keys("gd");
+    let (asked, ..) = setup.queries[3];
+    setup.answer(asked, Answer::Locations(Vec::new()));
+    assert_eq!(setup.cursor(), (1, 3));
 }

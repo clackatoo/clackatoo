@@ -6,6 +6,8 @@
 //! `o`). The keys are read afresh as each arrives, until they make a
 //! command or can't.
 
+use clackatoo_protocol::Query;
+
 use crate::motion::Motion;
 use crate::objects::Object;
 
@@ -174,6 +176,8 @@ pub(crate) enum Action {
     Diagnostic {
         backward: bool,
     },
+    /// `gd` and the like: ask the language server, and go where it says.
+    Ask(Query),
     /// `o` in visual mode: to the other end of the selection.
     OtherEnd,
     /// `i` or `a` and an object, in visual mode: select it.
@@ -401,13 +405,23 @@ impl Reader<'_> {
                 'E' => Motion::BigWordEnd,
                 'G' => Motion::Last,
                 'g' => {
-                    return Some(match self.next() {
-                        None => Read::More,
-                        Some(Stroke::Char {
-                            ch: 'g',
-                            ctrl: false,
-                        }) => Read::Yes(Action::Move(Motion::First)),
-                        Some(_) => Read::No,
+                    // What a language server knows: `gd`, `gD`, `gy` and
+                    // `gri`, as Neovim's are.
+                    let ask = |query| Read::Yes(Action::Ask(query));
+                    let Some(next) = self.next() else {
+                        return Some(Read::More);
+                    };
+                    return Some(match next.plain() {
+                        Some('g') => Read::Yes(Action::Move(Motion::First)),
+                        Some('d') => ask(Query::Definition),
+                        Some('D') => ask(Query::Declaration),
+                        Some('y') => ask(Query::TypeDefinition),
+                        Some('r') => match self.next() {
+                            None => Read::More,
+                            Some(last) if last.plain() == Some('i') => ask(Query::Implementation),
+                            Some(_) => Read::No,
+                        },
+                        _ => Read::No,
                     });
                 }
                 'f' | 't' | 'F' | 'T' => {

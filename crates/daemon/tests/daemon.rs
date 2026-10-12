@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode, ChatState, ClientMessage,
-    Diff, Edit, Error, Event, Item, Kind, Location, NewAgent, NewTerminal, OpenFile, Outcome,
-    PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Request, Response, ServerMessage, Side, Size,
-    Span, TerminalId, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, View, ViewUpdate,
-    Workspaces,
+    Answer, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode, ChatState,
+    ClientMessage, Diff, Edit, Error, Event, FileLocation, Item, Kind, Location, NewAgent,
+    NewTerminal, OpenFile, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Query, Request,
+    Response, ServerMessage, Side, Size, Span, TerminalId, TerminalStatus, Tool, ToolContent,
+    ToolKind, ToolStatus, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -53,6 +53,8 @@ impl TestDaemon {
             agent: Vec::new(),
             udp_ports: Some(0..=0),
             languages: None,
+            // Stopped with their last file, unless a test says otherwise.
+            server_idle: Duration::ZERO,
         };
         change(dir.path(), &mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
@@ -1625,23 +1627,150 @@ fn next_diagnostics(client: &mut Client) -> (u64, Vec<(usize, usize)>) {
 /// from the daemon's directory, for projects marked by a file `project`.
 fn with_fake_language_server(args: impl FnOnce(&Path) -> Vec<String>) -> TestDaemon {
     TestDaemon::start_with(|dir, config| {
-        let pack = dir.join("languages/fake");
-        std::fs::create_dir_all(&pack).unwrap();
-        let server: Vec<String> =
-            std::iter::once(example("fake_language_server").display().to_string())
-                .chain(args(dir))
-                .map(|arg| format!("{arg:?}"))
-                .collect();
-        std::fs::write(
-            pack.join("language.toml"),
-            format!(
-                "grammar = \"fake\"\nextensions = [\"fk\"]\nserver = [{}]\nroots = [\"project\"]\n",
-                server.join(", ")
-            ),
-        )
-        .unwrap();
-        config.languages = Some(dir.join("languages"));
+        config.languages = Some(fake_language_server_pack(dir, args(dir)));
     })
+}
+
+/// Writes the language pack [`with_fake_language_server`] says, in `dir`,
+/// returning the directory of language packs it's in.
+fn fake_language_server_pack(dir: &Path, args: Vec<String>) -> PathBuf {
+    let pack = dir.join("languages/fake");
+    std::fs::create_dir_all(&pack).unwrap();
+    let server: Vec<String> =
+        std::iter::once(example("fake_language_server").display().to_string())
+            .chain(args)
+            .map(|arg| format!("{arg:?}"))
+            .collect();
+    std::fs::write(
+        pack.join("language.toml"),
+        format!(
+            "grammar = \"fake\"\nextensions = [\"fk\"]\nserver = [{}]\nroots = [\"project\"]\n",
+            server.join(", ")
+        ),
+    )
+    .unwrap();
+    dir.join("languages")
+}
+
+/// The next answer to a query, skipping other updates.
+fn next_answer(client: &mut Client) -> (u64, Answer) {
+    loop {
+        if let BufferUpdate::Answer { id, answer, .. } = next_buffer_update(client) {
+            return (id, answer);
+        }
+    }
+}
+
+#[test]
+fn a_language_server_says_where_things_are_defined() {
+    // Once counting columns in bytes, once in UTF-16, which "é" tells
+    // apart.
+    for flag in ["--incremental", "--utf16"] {
+        let daemon = with_fake_language_server(|_| vec![flag.to_owned()]);
+        let dir = daemon.dir.path();
+        std::fs::create_dir(dir.join("app")).unwrap();
+        std::fs::write(dir.join("app/project"), "").unwrap();
+        std::fs::write(dir.join("app/a.fk"), "é bad\nuse it\n").unwrap();
+        std::fs::write(dir.join("app/defs.fk"), "// defs\nfn é_bad() {}\n").unwrap();
+        let mut client = daemon.client();
+        client.watch_workspaces().unwrap();
+        let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+        let buffer = buffer_in(&mut client, pane);
+        attach_buffer(&mut client, buffer);
+        // Once the server has said what's wrong, it's ready.
+        next_diagnostics(&mut client);
+        let path = |name: &str| dir.join("app").join(name).display().to_string();
+
+        client.query(buffer, 1, (0, 0), Query::Definition).unwrap();
+        let place = |path, line, col, offset| FileLocation {
+            path,
+            line,
+            col,
+            offset,
+        };
+        assert_eq!(
+            next_answer(&mut client),
+            (
+                1,
+                Answer::Locations(vec![place(path("a.fk"), 0, 3, Some(3))])
+            ),
+            "{flag}"
+        );
+        // In a file not open, counted from disk.
+        client.query(buffer, 2, (0, 8), Query::Definition).unwrap();
+        assert_eq!(
+            next_answer(&mut client),
+            (
+                2,
+                Answer::Locations(vec![place(path("defs.fk"), 1, "fn é_".len(), None)])
+            ),
+            "{flag}"
+        );
+    }
+
+    // A file with no server is told so.
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("notes.txt"), "hi\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "notes.txt"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    client.query(buffer, 7, (0, 0), Query::Definition).unwrap();
+    assert!(matches!(next_answer(&mut client), (7, Answer::Failed(_))));
+}
+
+#[test]
+fn a_library_gone_to_is_the_projects_servers_and_a_server_waits_a_while() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let library = dir.join("library/defs.fk").display().to_string();
+        let log = dir.join("server.log").display().to_string();
+        let args = vec!["--log".to_owned(), log, "--defs".to_owned(), library];
+        config.languages = Some(fake_language_server_pack(dir, args));
+        config.server_idle = Duration::from_mins(1);
+    });
+    let dir = daemon.dir.path();
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::create_dir_all(dir.join("library")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    std::fs::write(dir.join("app/a.fk"), "bad\nuse it\n").unwrap();
+    std::fs::write(dir.join("library/defs.fk"), "\nfn bad() {}\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    next_diagnostics(&mut client);
+
+    // Going to a library's file opens it in the project's server, which
+    // keeps going though the project's file closes.
+    client.query(buffer, 1, (0, 5), Query::Definition).unwrap();
+    let (_, Answer::Locations(found)) = next_answer(&mut client) else {
+        panic!("a place");
+    };
+    let open_here = |client: &mut Client, path: &str| {
+        let file = OpenFile {
+            path: path.to_owned(),
+            cwd: None,
+        };
+        client.request(&Request::OpenHere { pane, file }).unwrap()
+    };
+    assert_eq!(open_here(&mut client, &found[0].path), Response::Done);
+    let library = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, library);
+    next_diagnostics(&mut client);
+    // And back again, with no file of its open meanwhile.
+    open_here(&mut client, "app/a.fk");
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    next_diagnostics(&mut client);
+    let heard = std::fs::read_to_string(dir.join("server.log")).unwrap();
+    assert_eq!(
+        heard.lines().filter(|&line| line == "initialized").count(),
+        1,
+        "one server all along: {heard}"
+    );
 }
 
 #[test]
@@ -1729,7 +1858,9 @@ fn a_language_server_says_whats_wrong_as_a_buffer_changes() {
             "{flag}"
         );
 
-        // Saving tells it, and closing the last buffer stops it.
+        // Saving tells it, and closing the last buffer closes it there,
+        // and stops the server once it has been idle long enough, which
+        // in tests is no time.
         let saved = client.request(&Request::Save {
             buffer,
             force: false,
@@ -1754,6 +1885,7 @@ fn a_language_server_says_whats_wrong_as_a_buffer_changes() {
                 "textDocument/didChange",
                 "textDocument/didChange",
                 "textDocument/didSave",
+                "textDocument/didClose",
                 "exit",
             ]
         );
@@ -1781,7 +1913,7 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
         "[package]\nname = \"krate\"\nedition = \"2024\"\n",
     )
     .unwrap();
-    let text = "pub fn f() -> u32 {\n    \"not a number\"\n}\n";
+    let text = "pub fn f() -> u32 {\n    \"not a number\"\n}\npub fn g() -> u32 {\n    f()\n}\n";
     std::fs::write(dir.join("krate/src/lib.rs"), text).unwrap();
     let mut client = daemon.client();
     client.watch_workspaces().unwrap();
@@ -1808,9 +1940,19 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
         {
             assert_eq!(found.end, wrong + "\"not a number\"".len());
             assert_eq!(found.severity, clackatoo_protocol::Severity::Error);
-            return;
+            break;
         }
     }
+    // And where f, called in g, is defined.
+    let call = text.rfind("f()").unwrap();
+    client
+        .query(buffer, 1, (0, call), Query::Definition)
+        .unwrap();
+    let (_, answer) = next_answer(&mut client);
+    let Answer::Locations(found) = answer else {
+        panic!("{answer:?}");
+    };
+    assert_eq!((found[0].line, found[0].col), (0, "pub fn ".len()));
 }
 
 #[test]

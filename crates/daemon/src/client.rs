@@ -9,7 +9,7 @@ use std::path::Path;
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
 use clackatoo_protocol::{
     Block, BufferId, Change, ChatAction, ClientMessage, Error, Event, HistoryLines, NewTerminal,
-    PROTOCOL_VERSION, PaneId, PaneTerminal, Request, Response, ServerMessage, Side, Size,
+    PROTOCOL_VERSION, PaneId, PaneTerminal, Query, Request, Response, ServerMessage, Side, Size,
     TerminalId, TerminalInfo, Udp, View, Which, WorkspaceId, Workspaces,
 };
 
@@ -244,6 +244,29 @@ impl Client {
             buffer,
             seq,
             change,
+        })
+    }
+
+    /// Asks the language server of a buffer the client follows `query`
+    /// about byte `at` of its text at `version`, numbered `id`. The answer
+    /// comes in an [`Event::Buffer`].
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn query(
+        &mut self,
+        buffer: BufferId,
+        id: u64,
+        (version, at): (u64, usize),
+        query: Query,
+    ) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Query {
+            buffer,
+            id,
+            version,
+            at,
+            query,
         })
     }
 

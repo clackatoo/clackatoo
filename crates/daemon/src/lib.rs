@@ -65,7 +65,14 @@ pub struct DaemonConfig {
     /// directory each (see [`clackatoo_syntax::pack`]). `None` parses
     /// nothing.
     pub languages: Option<PathBuf>,
+    /// How long a language server is kept with no files open in it, so
+    /// coming back to its project soon doesn't start it again.
+    pub server_idle: std::time::Duration,
 }
+
+/// How long a language server is kept with no files open in it, unless
+/// told otherwise.
+pub const DEFAULT_SERVER_IDLE: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// The agent chats talk to unless told otherwise: Claude Code, through
 /// the adapter that speaks ACP for it, at the version tried with
@@ -115,6 +122,7 @@ impl DaemonConfig {
                 }),
             },
             languages: languages_dir(),
+            server_idle: DEFAULT_SERVER_IDLE,
         }
     }
 }

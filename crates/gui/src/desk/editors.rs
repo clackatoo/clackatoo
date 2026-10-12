@@ -8,7 +8,8 @@
 use std::collections::{HashMap, HashSet};
 
 use clackatoo_protocol::{
-    BufferId, BufferUpdate, ClientMessage, Content, OpenFile, PaneId, PaneTerminal, Request, Size,
+    BufferId, BufferUpdate, ClientMessage, Content, FileLocation, OpenFile, PaneId, PaneTerminal,
+    Request, Size,
 };
 
 use super::{Asked, Desk};
@@ -27,6 +28,9 @@ pub(super) struct Editors {
     register: Register,
     /// The buffers attached to on this connection.
     attached: HashSet<BufferId>,
+    /// Places in files being opened in panes, which their cursors go to
+    /// once the files' text has come.
+    landings: HashMap<PaneId, (FileLocation, usize)>,
 }
 
 impl Editors {
@@ -82,6 +86,10 @@ impl Desk {
         editors
             .panes
             .retain(|pane, editor| anywhere.get(pane) == Some(&editor.buffer()));
+        // Where a closed pane's cursor was to go, it won't.
+        editors
+            .landings
+            .retain(|pane, _| anywhere.contains_key(pane));
         for &(pane, buffer) in &shown {
             editors
                 .panes
@@ -94,11 +102,14 @@ impl Desk {
         }
         let wanted: HashSet<BufferId> = editors.panes.values().map(Editor::buffer).collect();
         editors.buffers.retain(|buffer, _| wanted.contains(buffer));
+        // A file opened to show a place in it may be open already.
+        self.land();
         if !self.connected {
             return;
         }
-        let gone: Vec<BufferId> = editors.attached.difference(&wanted).copied().collect();
-        let new: Vec<BufferId> = wanted.difference(&editors.attached).copied().collect();
+        let attached = &self.editors.attached;
+        let gone: Vec<BufferId> = attached.difference(&wanted).copied().collect();
+        let new: Vec<BufferId> = wanted.difference(attached).copied().collect();
         for buffer in gone {
             self.editors.attached.remove(&buffer);
             self.request(Request::DetachBuffer { buffer }, Asked::Quiet);
@@ -114,6 +125,48 @@ impl Desk {
         if let Some(editor) = self.editors.panes.get_mut(&pane) {
             editor.resize(size);
         }
+    }
+
+    /// Puts the cursors of panes opened to show a place in another file on
+    /// it, once the file's text has come.
+    fn land(&mut self) {
+        let editors = &mut self.editors;
+        editors.landings.retain(|pane, (place, places)| {
+            let Some(editor) = editors.panes.get_mut(pane) else {
+                return true;
+            };
+            match editors.buffers.get(&editor.buffer()) {
+                Some(copy) if copy.loaded() && copy.path() == place.path => {
+                    editor.go_to(place.line, place.col, copy);
+                    editor.say_how_many(*places);
+                    false
+                }
+                _ => true,
+            }
+        });
+    }
+
+    /// `pane` shows `path` in place of its file, as `:e` does, saying so if
+    /// the file it showed has changes that aren't written, which are kept,
+    /// unseen.
+    fn open_here(&mut self, pane: PaneId, path: String) {
+        let kept = (self.editors.panes.get(&pane))
+            .and_then(|editor| self.editors.buffers.get(&editor.buffer()))
+            .filter(|copy| copy.modified() && copy.path() != path)
+            .map(|copy| copy.path().to_owned());
+        if let Some(kept) = kept {
+            self.message = Some(format!(
+                "{kept} has changes not written, kept unseen: :e it to go back"
+            ));
+        }
+        let file = OpenFile { path, cwd: None };
+        self.request(Request::OpenHere { pane, file }, Asked::OpenedHere(pane));
+    }
+
+    /// Opening a file in `pane` in place of its own failed: its cursor
+    /// goes nowhere.
+    pub(super) fn not_opened_here(&mut self, pane: PaneId) {
+        self.editors.landings.remove(&pane);
     }
 
     /// Takes in a change to `buffer`. Returns whether a pane showing it is
@@ -132,10 +185,19 @@ impl Desk {
             editors.panes.get_mut(pane).expect("just found").hold(copy);
         }
         let heard = copy.update(update);
+        let mut opening = Vec::new();
         for pane in &showing {
             let editor = editors.panes.get_mut(pane).expect("just found");
             editor.heard(&heard, Some(*pane) == focused, copy);
+            opening.extend(editor.take_opening().map(|place| (*pane, place)));
         }
+        // An answer that goes to another file opens it in the pane, and
+        // the cursor goes to the place once its text has come.
+        for (pane, (place, places)) in opening {
+            self.open_here(pane, place.path.clone());
+            self.editors.landings.insert(pane, (place, places));
+        }
+        self.land();
         self.shown_tab().is_some_and(|tab| {
             (tab.layout.panes().iter()).any(|pane| pane.content == Content::Buffer(buffer))
         })
@@ -290,9 +352,7 @@ impl Desk {
         let Some(shown) = self.shown else { return };
         let file = OpenFile { path, cwd: None };
         if place == Place::Here && self.focused_editor().is_some() {
-            let pane = shown.pane;
-            self.request(Request::OpenHere { pane, file }, Asked::Command);
-            return;
+            return self.open_here(shown.pane, file.path);
         }
         let terminal = PaneTerminal::File(file);
         let request = match place {

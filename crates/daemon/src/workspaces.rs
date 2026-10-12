@@ -529,8 +529,6 @@ fn split(layout: &mut Layout, target: PaneId, side: Side, new: Pane) {
     }
 }
 
-/// Takes `pane` out of `tab`, and focuses the pane before it if it had the
-/// focus. Returns `false`, changing nothing, if it's the tab's only pane.
 /// `pane`, if it's in `layout`.
 fn pane_mut(layout: &mut Layout, pane: PaneId) -> Option<&mut Pane> {
     match layout {
@@ -539,6 +537,8 @@ fn pane_mut(layout: &mut Layout, pane: PaneId) -> Option<&mut Pane> {
     }
 }
 
+/// Takes `pane` out of `tab`, and focuses the pane before it if it had the
+/// focus. Returns `false`, changing nothing, if it's the tab's only pane.
 fn remove(tab: &mut Tab, pane: PaneId) -> bool {
     let Layout::Split { .. } = tab.layout else {
         return false;

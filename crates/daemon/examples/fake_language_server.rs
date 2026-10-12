@@ -3,11 +3,17 @@
 //! an error, counting columns as it agreed to. So if the changes or places
 //! it's sent are wrong, its errors land in the wrong places.
 //!
+//! Asked where something is defined, it says the first `bad` in the file,
+//! when asked about its first line, or else the first `bad` on the second
+//! line of `defs.fk` beside it, or of the file `--defs` names, as a link,
+//! read from disk.
+//!
 //! | Flag | Does |
 //! |---|---|
 //! | `--utf16` | Counts columns in UTF-16, as LSP does unless asked |
 //! | `--full` | Asks for the whole text after each edit |
 //! | `--log FILE` | Writes the method of each notification there, a line each |
+//! | `--defs FILE` | Answers where things are defined with FILE, not `defs.fk` |
 //! | `--crash-once FILE` | Exits, as if it crashed, the first time a file has `crash` in it, making FILE so the next one started doesn't |
 
 use std::collections::BTreeMap;
@@ -22,6 +28,8 @@ fn main() {
         utf16: flag("--utf16"),
         full: flag("--full"),
         log: (args.iter().position(|arg| arg == "--log")).and_then(|at| args.get(at + 1).cloned()),
+        defs: (args.iter().position(|arg| arg == "--defs"))
+            .and_then(|at| args.get(at + 1).cloned()),
         crash_once: (args.iter().position(|arg| arg == "--crash-once"))
             .and_then(|at| args.get(at + 1).cloned()),
         files: BTreeMap::new(),
@@ -39,6 +47,7 @@ struct Fake {
     full: bool,
     log: Option<String>,
     crash_once: Option<String>,
+    defs: Option<String>,
     /// Each file's text, by URI.
     files: BTreeMap<String, String>,
 }
@@ -132,6 +141,31 @@ impl Fake {
                     }
                 }
                 self.publish(&uri, &document["version"]);
+            }
+            "textDocument/definition" => {
+                let uri = params["textDocument"]["uri"].as_str().unwrap();
+                let result = if params["position"]["line"] == 0 {
+                    let text = &self.files[uri];
+                    let at = text.find("bad").unwrap_or(0);
+                    json!({ "uri": uri, "range": { "start": place(text, at, self.utf16), "end": place(text, at, self.utf16) } })
+                } else {
+                    let defs = self.defs.as_ref().map_or_else(
+                        || format!("{}/defs.fk", &uri[..uri.rfind('/').unwrap()]),
+                        |path| format!("file://{path}"),
+                    );
+                    let file =
+                        std::fs::read_to_string(defs.strip_prefix("file://").unwrap()).unwrap();
+                    let line = file.lines().nth(1).unwrap();
+                    let column =
+                        place(line, line.find("bad").unwrap(), self.utf16)["character"].clone();
+                    let start = json!({ "line": 1, "character": column });
+                    json!([{
+                        "targetUri": defs,
+                        "targetRange": { "start": start, "end": start },
+                        "targetSelectionRange": { "start": start, "end": start },
+                    }])
+                };
+                send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
             }
             "exit" => return false,
             _ => {}

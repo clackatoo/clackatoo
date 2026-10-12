@@ -150,4 +150,54 @@ pub enum BufferUpdate {
         /// The diagnostics, in order of where they start.
         diagnostics: Vec<Diagnostic>,
     },
+    /// The answer to the client's
+    /// [`ClientMessage::Query`](crate::ClientMessage::Query) numbered `id`.
+    Answer {
+        /// The query's number.
+        id: u64,
+        /// The version of the text places in this buffer are counted in.
+        version: u64,
+        /// What the language server said.
+        answer: Answer,
+    },
+}
+
+/// What a client asks a buffer's language server about a place in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Query {
+    /// Where what's there is defined, as `gd` goes.
+    Definition,
+    /// Where it's declared, as `gD` goes: for most languages, the same.
+    Declaration,
+    /// Where its type is defined.
+    TypeDefinition,
+    /// What implements it, such as a trait's impls.
+    Implementation,
+}
+
+/// What a language server answered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Answer {
+    /// Places, best first.
+    Locations(Vec<FileLocation>),
+    /// Nothing: there's nothing there to ask about, or the server doesn't
+    /// know.
+    Nothing,
+    /// The buffer has no language server, or it failed, as this says.
+    Failed(String),
+}
+
+/// A place in a file, on the daemon's machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileLocation {
+    /// The file's path, made absolute.
+    pub path: String,
+    /// Its line, from 0.
+    pub line: u64,
+    /// Its column, in bytes from the line's start.
+    pub col: usize,
+    /// For a place in the buffer asked about, its byte in the text at the
+    /// answer's version, which a client moves past its own changes that
+    /// haven't been made yet, as it moves diagnostics.
+    pub offset: Option<usize>,
 }

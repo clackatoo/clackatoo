@@ -660,7 +660,8 @@ impl Daemon {
             let timeout = if self.unread.is_empty() && !agent_unread && !servers_unread {
                 let compaction = self.compactions.values().min().copied();
                 let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
-                let next = compaction.into_iter().chain(quic).min();
+                let idle = self.next_idle_stop();
+                let next = compaction.into_iter().chain(quic).chain(idle).min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
                 Some(Duration::ZERO)
@@ -684,6 +685,7 @@ impl Daemon {
                 self.read_servers_unread();
             }
             self.take_highlights();
+            self.stop_idle_servers();
             self.compact_scrollbacks();
             self.send_view_updates();
             self.transmit_quic();
@@ -1596,6 +1598,16 @@ impl Daemon {
                     self.serve_edit(token, buffer, seq, change);
                     continue;
                 }
+                ClientMessage::Query {
+                    buffer,
+                    id,
+                    version,
+                    at,
+                    query,
+                } => {
+                    self.serve_query(token, buffer, id, version, at, query);
+                    continue;
+                }
             };
 
             let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
@@ -1972,6 +1984,7 @@ impl Daemon {
     fn drop_client(&mut self, token: Token) {
         if let Some(Source::Client(client)) = self.sources.try_remove(token.0) {
             self.forget_viewer(token, &client);
+            self.forget_queries(token, None);
             if let Link::Quic(handle) = client.link
                 && let Some(quic) = self.quic.as_mut()
             {

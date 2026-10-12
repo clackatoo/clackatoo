@@ -20,6 +20,7 @@ use std::io;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 
+use clackatoo_protocol::Query;
 use clackatoo_text::{Edit, Rope, Severity};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -75,6 +76,12 @@ pub(crate) enum Incoming {
         path: PathBuf,
         version: Option<u64>,
         diagnostics: Vec<Reported>,
+    },
+    /// The answer to the request [`ask`](LanguageServer::ask) numbered
+    /// `id`, or why there's none.
+    Answer {
+        id: u64,
+        result: Result<Value, String>,
     },
 }
 
@@ -232,6 +239,34 @@ impl LanguageServer {
         }
     }
 
+    /// Whether it has answered `initialize`, and so can be asked things:
+    /// before, the columns places are counted in aren't known.
+    pub(crate) fn ready(&self) -> bool {
+        self.ready
+    }
+
+    /// Asks the server, which is [`ready`](Self::ready), `query` about byte
+    /// `at` of the file at `path`, whose text the server has as `text`.
+    /// Returns the request's number, which its [`Incoming::Answer`] gives
+    /// back.
+    pub(crate) fn ask(&mut self, query: Query, path: &Path, text: &Rope, at: usize) -> u64 {
+        let method = match query {
+            Query::Definition => "textDocument/definition",
+            Query::Declaration => "textDocument/declaration",
+            Query::TypeDefinition => "textDocument/typeDefinition",
+            Query::Implementation => "textDocument/implementation",
+        };
+        let id = self.next_id;
+        self.next_id += 1;
+        let params = json!({
+            "textDocument": { "uri": uri(path) },
+            "position": position(text, at, self.encoding),
+        });
+        self.peer
+            .send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        id
+    }
+
     /// Writes queued messages until the pipe is full. An error means the
     /// server has gone.
     pub(crate) fn flush(&mut self) -> io::Result<()> {
@@ -303,6 +338,13 @@ impl LanguageServer {
             }
             (None, Some(id)) => {
                 if self.initialize.is_none() || id.as_u64() != self.initialize {
+                    if let Some(id) = id.as_u64() {
+                        let result = match (message.result, message.error) {
+                            (_, Some(error)) => Err(error.message),
+                            (result, None) => Ok(result.unwrap_or(Value::Null)),
+                        };
+                        incoming.push(Incoming::Answer { id, result });
+                    }
                     return;
                 }
                 self.initialize = None;
@@ -374,6 +416,30 @@ impl LanguageServer {
             .send(&json!({ "jsonrpc": "2.0", "method": "exit" }));
         let _ = self.peer.flush();
         self.peer.stop()
+    }
+}
+
+/// The places an answer such as `textDocument/definition`'s gives: one
+/// `Location`, a list of them, or a list of `LocationLink`s, each the
+/// file and where in it, best first. Places in files that aren't, such as
+/// a URI of another scheme, are left out.
+pub(crate) fn locations(answer: &Value) -> Vec<(PathBuf, Position)> {
+    let one = |location: &Value| {
+        // A link's target's name, or else the whole target, or a location.
+        let uri = location
+            .get("targetUri")
+            .or_else(|| location.get("uri"))?
+            .as_str()?;
+        let range = ["targetSelectionRange", "targetRange", "range"]
+            .iter()
+            .find_map(|key| location.get(*key))?;
+        let start = serde_json::from_value(range.get("start")?.clone()).ok()?;
+        Some((path_of(uri)?, start))
+    };
+    match answer {
+        Value::Array(list) => list.iter().filter_map(one).collect(),
+        Value::Object(_) => one(answer).into_iter().collect(),
+        _ => Vec::new(),
     }
 }
 

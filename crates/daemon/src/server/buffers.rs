@@ -122,6 +122,7 @@ impl Daemon {
         if let Some(slot) = self.buffers.get_mut(&id) {
             slot.viewers.retain(|&viewer| viewer != token);
         }
+        self.forget_queries(token, Some(id));
     }
 
     /// Makes a change the client at `token` sent to buffer `id`, and tells
@@ -370,7 +371,7 @@ impl Daemon {
     }
 
     /// Sends `update` about buffer `id` to the client at `token`.
-    fn tell(&mut self, token: Token, id: BufferId, update: BufferUpdate) {
+    pub(super) fn tell(&mut self, token: Token, id: BufferId, update: BufferUpdate) {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return;
         };

@@ -86,6 +86,9 @@ enum Asked {
         buffer: BufferId,
         then_close: Option<PaneId>,
     },
+    /// A file opened in place of the one this pane showed, whose failure
+    /// is shown, and forgets where its cursor was to go.
+    OpenedHere(PaneId),
 }
 
 mod bindings;
@@ -820,6 +823,13 @@ impl Desk {
                 self.saved(buffer, then_close, &response);
                 true
             }
+            Some(Asker::Window(Asked::OpenedHere(pane))) => {
+                if let Response::Error(err) = response {
+                    self.not_opened_here(pane);
+                    self.message = Some(err.to_string());
+                }
+                true
+            }
             Some(Asker::Window(asked)) => match (asked, response) {
                 (Asked::Quiet, Response::Error(err)) => {
                     log::warn!("the daemon refused a request: {err}");
@@ -1541,6 +1551,7 @@ mod tests {
                 ClientMessage::Request(request) => Some(request),
                 ClientMessage::FrameDone { .. }
                 | ClientMessage::Edit { .. }
+                | ClientMessage::Query { .. }
                 | ClientMessage::Hello { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
