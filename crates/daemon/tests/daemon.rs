@@ -399,9 +399,16 @@ fn read_until_hangup(stream: &mut UnixStream) -> Vec<u8> {
 fn raw_exchange(socket: &Path, messages: &[ClientMessage]) -> Vec<ServerMessage> {
     let mut stream = UnixStream::connect(socket).expect("connect");
     for message in messages {
-        stream.write_all(&frame::encode(message).unwrap()).unwrap();
+        match stream.write_all(&frame::encode(message).unwrap()) {
+            Ok(()) => {}
+            // The daemon may hang up on a client that breaks the protocol
+            // before it's sent all it means to, as a busy machine lets the
+            // daemon read the first frame alone.
+            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => break,
+            Err(err) => panic!("write failed: {err}"),
+        }
     }
-    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let _ = stream.shutdown(std::net::Shutdown::Write);
     let bytes = read_until_hangup(&mut stream);
     let mut decoder = FrameDecoder::new();
     decoder.push(&bytes);
