@@ -3865,9 +3865,10 @@ fn files_git_converts_are_compared_as_checked_out_and_not_staged_by_hunks() {
     std::fs::write(repo.join("a.txt"), "a\r\nB\r\n").unwrap();
     let mut client = daemon.client();
     let buffer = open_attached(&mut client, dir, "repo/a.txt");
-    // Only the line changed, not every line's end.
-    assert_eq!(next_hunks(&mut client), (0, hunks(&[(3, 6, "b\r\n")])));
-    client.stage(buffer, 1, (0, 4)).unwrap();
+    // Only the line changed, the buffer and its base both ending lines
+    // with `\n`.
+    assert_eq!(next_hunks(&mut client), (0, hunks(&[(2, 4, "b\n")])));
+    client.stage(buffer, 1, (0, 2)).unwrap();
     assert_eq!(
         next_answer(&mut client),
         (
@@ -4022,4 +4023,59 @@ fn whats_wrong_is_listed_for_the_project_open_or_not_the_worst_first() {
         .filter(|line| line.path == "there.fk")
         .count();
     assert_eq!(theres, 1);
+}
+
+#[test]
+fn a_file_whose_lines_end_with_crlf_is_edited_with_lf_and_written_with_crlf() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("w.txt"), "one\r\ntwo\r\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "w.txt"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    let snapshot = attach_buffer(&mut client, buffer);
+    assert_eq!(snapshot.text, "one\ntwo\n", "no ^M at the ends of lines");
+    send_change(&mut client, buffer, 0, insert(8, 4, "new\n", 0));
+    let saved = client.request(&Request::Save {
+        buffer,
+        force: false,
+    });
+    assert!(matches!(saved, Ok(Response::Done)), "{saved:?}");
+    let written = std::fs::read_to_string(dir.join("w.txt")).unwrap();
+    assert_eq!(written, "one\r\nnew\r\ntwo\r\n");
+    // A file whose lines end with LF stays so.
+    std::fs::write(dir.join("u.txt"), "a\n").unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "u.txt"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    send_change(&mut client, buffer, 0, insert(2, 2, "b\n", 0));
+    let saved = client.request(&Request::Save {
+        buffer,
+        force: false,
+    });
+    assert!(matches!(saved, Ok(Response::Done)), "{saved:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("u.txt")).unwrap(),
+        "a\nb\n"
+    );
+}
+
+#[test]
+fn files_kept_with_crlf_are_compared_by_lines_and_not_staged_by_hunks() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let repo = repo_with(dir, "a\r\nb\r\n", "a\r\nB\r\n");
+    let mut client = daemon.client();
+    let buffer = open_attached(&mut client, dir, "repo/a.txt");
+    assert_eq!(next_hunks(&mut client), (0, hunks(&[(2, 4, "b\n")])));
+    client.stage(buffer, 1, (0, 2)).unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (
+            1,
+            Answer::Failed("this file's lines end with CRLF: stage it in a terminal".into())
+        )
+    );
+    assert_eq!(run_git(&repo, &["show", ":a.txt"]), "a\r\nb\r\n");
 }

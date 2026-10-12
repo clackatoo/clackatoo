@@ -199,6 +199,9 @@ struct Base {
     entry: Entry,
     /// Its text, or `None` if it isn't text, or is too big to compare.
     text: Option<String>,
+    /// Its lines end with CRLF in the index, which a patch made from the
+    /// buffer, whose lines end `\n`, wouldn't match.
+    crlf: bool,
 }
 
 /// A file's entry in the index.
@@ -398,6 +401,11 @@ impl Worker {
             Some(_) if tracked.converted => {
                 return Answer::Failed("git converts this file: stage it in a terminal".into());
             }
+            Some(base) if base.crlf => {
+                return Answer::Failed(
+                    "this file's lines end with CRLF: stage it in a terminal".into(),
+                );
+            }
             Some(_) => {}
         }
         // The index may have changed since its base was read, and the
@@ -513,7 +521,10 @@ fn read_base(top: &Path, path: &str, entry: Entry, converted: bool) -> Base {
     let text = output(&mut command)
         .filter(|blob| blob.len() <= MAX_TEXT && !blob.contains(&0))
         .and_then(|blob| String::from_utf8(blob).ok());
-    Base { entry, text }
+    // Kept with CRLF, it's compared as the buffer keeps it, with `\n`.
+    let crlf = text.as_ref().is_some_and(|text| text.contains("\r\n"));
+    let text = text.map(crate::buffer::lf);
+    Base { entry, text, crlf }
 }
 
 /// Whether git converts the file at `path` from `top` on its way in and

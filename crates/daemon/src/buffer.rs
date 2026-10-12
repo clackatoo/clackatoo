@@ -94,7 +94,7 @@ impl Buffer {
             }
             Err(err) => return Err(failed(err.to_string())),
         };
-        let text = Rope::from_str(&text);
+        let text = Rope::from_str(&lf(text));
         Ok(Self {
             path,
             dir,
@@ -196,7 +196,13 @@ impl Buffer {
         if !force && DiskStamp::now(&self.path).map_err(failed)? != self.disk {
             return Err(Error::ChangedOnDisk(self.path.display().to_string()));
         }
-        self.disk = Some(write(&self.path, &self.text).map_err(failed)?);
+        // A file whose lines end with CRLF is written so again.
+        let written = if crlf(&self.path) {
+            Rope::from_str(&self.text.to_string().replace('\n', "\r\n"))
+        } else {
+            self.text.clone()
+        };
+        self.disk = Some(write(&self.path, &written).map_err(failed)?);
         self.saved = self.text.clone();
         Ok(self.check_modified())
     }
@@ -216,6 +222,7 @@ impl Buffer {
             }
         };
         let now = self.text.to_string();
+        let text = lf(text);
         self.disk = disk;
         self.saved = Rope::from_str(&text);
         Ok(Edit::replace(now.len(), 0, &now, &text))
@@ -297,6 +304,33 @@ impl Buffer {
         buffer.check_modified();
         buffer
     }
+}
+
+/// `text` with its lines ending `\n`, as a buffer keeps them, though the
+/// file ends them `\r\n`, as Windows does: every edit, place and
+/// language server then counts one way, and saving puts the `\r` back.
+pub(crate) fn lf(text: String) -> String {
+    if text.contains("\r\n") {
+        text.replace("\r\n", "\n")
+    } else {
+        text
+    }
+}
+
+/// Whether the file at `path` ends its lines with CRLF, as its first line
+/// says. One that doesn't exist, or has one line, doesn't.
+fn crlf(path: &Path) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let mut start = Vec::new();
+    if file.take(64 * 1024).read_to_end(&mut start).is_err() {
+        return false;
+    }
+    start
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .is_some_and(|at| at > 0 && start[at - 1] == b'\r')
 }
 
 /// The biggest file read, in bytes: far more than any file edited by
