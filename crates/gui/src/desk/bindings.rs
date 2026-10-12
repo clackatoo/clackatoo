@@ -11,7 +11,7 @@
 //! | `h` `j` `k` `l` | The pane left, below, above, right |
 //! | `\|` `-` | Splits the pane, to the right or below |
 //! | `x` | Closes the pane |
-//! | `o` `i` | Back and forward through the tab's panes (see [`super::jumps`]) |
+//! | `o` `i` | Back and forward through the jump list, within the tab (see [`super::jumps`]) |
 //! | `a` | Opens a chat with an agent, to the right |
 //! | `w` | Picks a workspace, or makes one, in the palette |
 //! | Ctrl+B | Sends Ctrl+B to the program |
@@ -22,8 +22,9 @@
 //! In normal and visual mode, `:` opens the command line, Ctrl with `h`,
 //! `j`, `k` or `l` moves to the pane that way, Alt with them moves the
 //! pane's edge, and Ctrl+O and Ctrl+I go back and forward through the
-//! tab's panes. Ctrl+Shift+O and Ctrl+Shift+I go back and forward through
-//! every pane, in any mode, a pane's prompt included.
+//! jump list, within the tab: panes, and places in files. Ctrl+Shift+O
+//! and Ctrl+Shift+I go back and forward through all of it, in any mode, a
+//! pane's prompt included.
 
 use clackatoo_protocol::{Side, WorkspaceId};
 
@@ -62,8 +63,7 @@ pub(crate) enum Action {
     /// A new pane beside the focused one.
     Split(Side, Kind),
     Close,
-    /// Back through where the focus has been, or forward, within the tab
-    /// or anywhere.
+    /// Back through the jump list, or forward, within the tab or anywhere.
     Jump {
         back: bool,
         within_tab: bool,

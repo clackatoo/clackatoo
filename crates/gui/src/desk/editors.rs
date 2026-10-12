@@ -5,16 +5,17 @@
 //! Every editor of one buffer shares the window's copy of it, so an edit
 //! made in one, or by anyone else, moves the others' cursors with the text.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use clackatoo_protocol::{
     BufferId, BufferUpdate, ClientMessage, Content, FileLocation, OpenFile, PaneId, PaneTerminal,
     Request, Size,
 };
 
+use super::jumps::{FilePlace, Jump};
 use super::{Asked, Desk};
 use crate::command::Place;
-use crate::editor::{BufferCopy, Editor, Register};
+use crate::editor::{BufferCopy, Editor, Heard, Register};
 use crate::input::KeyPress;
 use crate::options::Options;
 use crate::pane::{Copy, Mode};
@@ -31,13 +32,18 @@ pub(super) struct Editors {
     /// Places in files being opened in panes, which their cursors go to
     /// once the files' text has come.
     landings: HashMap<PaneId, (FileLocation, usize)>,
+    /// The files asked to open in panes, in place of theirs, that the
+    /// daemon hasn't answered about yet, oldest first. Until it has, what
+    /// a pane shows is about to change, so no cursor lands in it.
+    opening: HashMap<PaneId, VecDeque<String>>,
 }
 
 impl Editors {
     /// Forgets what was attached, as a new connection does. Changes not
-    /// yet answered are lost with the old one.
+    /// yet answered are lost with the old one, as are files being opened.
     pub(super) fn reconnected(&mut self) {
         self.attached.clear();
+        self.opening.clear();
         for copy in self.buffers.values_mut() {
             copy.reconnected();
         }
@@ -128,10 +134,14 @@ impl Desk {
     }
 
     /// Puts the cursors of panes opened to show a place in another file on
-    /// it, once the file's text has come.
+    /// it, once the file's text has come, and every file asked to open in
+    /// the pane has opened, or failed to.
     fn land(&mut self) {
         let editors = &mut self.editors;
         editors.landings.retain(|pane, (place, places)| {
+            if editors.opening.contains_key(pane) {
+                return true;
+            }
             let Some(editor) = editors.panes.get_mut(pane) else {
                 return true;
             };
@@ -148,8 +158,13 @@ impl Desk {
 
     /// `pane` shows `path` in place of its file, as `:e` does, saying so if
     /// the file it showed has changes that aren't written, which are kept,
-    /// unseen.
+    /// unseen. Where its cursor was to go before, it won't.
     fn open_here(&mut self, pane: PaneId, path: String) {
+        self.editors.landings.remove(&pane);
+        if self.connected {
+            let opening = self.editors.opening.entry(pane).or_default();
+            opening.push_back(path.clone());
+        }
         let kept = (self.editors.panes.get(&pane))
             .and_then(|editor| self.editors.buffers.get(&editor.buffer()))
             .filter(|copy| copy.modified() && copy.path() != path)
@@ -163,10 +178,85 @@ impl Desk {
         self.request(Request::OpenHere { pane, file }, Asked::OpenedHere(pane));
     }
 
-    /// Opening a file in `pane` in place of its own failed: its cursor
-    /// goes nowhere.
-    pub(super) fn not_opened_here(&mut self, pane: PaneId) {
-        self.editors.landings.remove(&pane);
+    /// The daemon has answered about the oldest file asked to open in
+    /// `pane`. If it `failed` to open, the cursor won't go to a place in
+    /// it; a place in a file asked for since is still gone to.
+    pub(super) fn opened_here(&mut self, pane: PaneId, failed: bool) {
+        let editors = &mut self.editors;
+        let Some(opening) = editors.opening.get_mut(&pane) else {
+            return;
+        };
+        let path = opening.pop_front();
+        if opening.is_empty() {
+            editors.opening.remove(&pane);
+        }
+        if failed
+            && let Some(path) = path
+            && (editors.landings.get(&pane)).is_some_and(|(place, _)| place.path == path)
+        {
+            editors.landings.remove(&pane);
+        }
+        self.land();
+    }
+
+    /// The file `pane` shows, or is about to: the last asked to open in
+    /// it, if the daemon hasn't answered yet.
+    fn file_in(&self, pane: PaneId) -> Option<&str> {
+        let editors = &self.editors;
+        if let Some(path) = editors.opening.get(&pane).and_then(VecDeque::back) {
+            return Some(path);
+        }
+        let editor = editors.panes.get(&pane)?;
+        editors.buffers.get(&editor.buffer()).map(BufferCopy::path)
+    }
+
+    /// Where `pane` is, for the jump list: in an editor whose file has
+    /// come, where its cursor is, or `byte` of its file if given. One
+    /// whose cursor is on its way to a place, as in a file being opened,
+    /// is at that place.
+    pub(super) fn place_of(&self, pane: PaneId, byte: Option<usize>) -> Option<Jump> {
+        self.workspaces.find_pane(pane)?;
+        let editors = &self.editors;
+        if byte.is_none()
+            && let Some((place, _)) = editors.landings.get(&pane)
+        {
+            let text = (editors.buffers.values())
+                .find(|copy| copy.loaded() && copy.path() == place.path)
+                .map(BufferCopy::text);
+            let file = FilePlace::at_line(&place.path, place.line, place.col, text);
+            return Some(Jump {
+                pane,
+                file: Some(file),
+            });
+        }
+        let file = (editors.panes.get(&pane))
+            .and_then(|editor| Some((editor, editors.buffers.get(&editor.buffer())?)))
+            .filter(|(_, copy)| copy.loaded())
+            .map(|(editor, copy)| {
+                let byte = byte.unwrap_or_else(|| editor.cursor_byte(copy));
+                FilePlace::at(copy.path(), copy.text(), byte)
+            });
+        Some(Jump { pane, file })
+    }
+
+    /// Puts the cursor of the editor `pane` on `place`, once its file's
+    /// text is there, opening the file in the pane, as `:e` does, if it
+    /// shows another, or is about to.
+    pub(super) fn show_file_place(&mut self, pane: PaneId, place: &FilePlace) {
+        if !self.editors.panes.contains_key(&pane) {
+            return;
+        }
+        if self.file_in(pane) != Some(place.path.as_str()) {
+            self.open_here(pane, place.path.clone());
+        }
+        let location = FileLocation {
+            path: place.path.clone(),
+            line: place.line,
+            col: place.col,
+            offset: None,
+        };
+        self.editors.landings.insert(pane, (location, 1));
+        self.land();
     }
 
     /// Takes in a change to `buffer`. Returns whether a pane showing it is
@@ -193,11 +283,23 @@ impl Desk {
             editors.panes.get_mut(pane).expect("just found").hold(copy);
         }
         let heard = copy.update(update);
+        match &heard {
+            Heard::Edited(edit) | Heard::Reversed(edit) => {
+                (self.jumps).edited(copy.path(), std::slice::from_ref(edit), copy.text());
+            }
+            Heard::Replaced => self.jumps.replaced(copy.path(), copy.text()),
+            _ => {}
+        }
         let mut opening = Vec::new();
+        let mut left = Vec::new();
         for pane in &showing {
             let editor = editors.panes.get_mut(pane).expect("just found");
             editor.heard(&heard, Some(*pane) == focused, copy);
+            left.extend(editor.take_left().map(|byte| (*pane, byte)));
             opening.extend(editor.take_opening().map(|place| (*pane, place)));
+        }
+        for (pane, byte) in left {
+            self.record_jump(pane, Some(byte));
         }
         // An answer that goes to another file opens it in the pane, and
         // the cursor goes to the place once its text has come.
@@ -234,12 +336,17 @@ impl Desk {
         }
         let editor = editors.panes.get_mut(&focused).expect("just found");
         let done = editor.key(press, copy, &mut editors.register);
+        let left = editor.take_left();
         let made = copy.take_made();
         for pane in &others {
             let editor = editors.panes.get_mut(pane).expect("just found");
             for edit in &made {
                 editor.follow_edit(edit, copy);
             }
+        }
+        self.jumps.edited(copy.path(), &made, copy.text());
+        if let Some(byte) = left {
+            self.record_jump(focused, Some(byte));
         }
         if let Some(text) = done.yanked {
             self.yanked = Some((text, Copy::Clipboard));
@@ -260,7 +367,8 @@ impl Desk {
             return true;
         };
         editor.paste(text, copy);
-        let _ = copy.take_made();
+        let made = copy.take_made();
+        self.jumps.edited(copy.path(), &made, copy.text());
         true
     }
 
@@ -272,7 +380,8 @@ impl Desk {
             && let Some(copy) = editors.buffers.get_mut(&editor.buffer())
         {
             editor.enter_normal_mode(copy);
-            let _ = copy.take_made();
+            let made = copy.take_made();
+            self.jumps.edited(copy.path(), &made, copy.text());
         }
     }
 
@@ -360,6 +469,7 @@ impl Desk {
         let Some(shown) = self.shown else { return };
         let file = OpenFile { path, cwd: None };
         if place == Place::Here && self.focused_editor().is_some() {
+            self.record_jump(shown.pane, None);
             return self.open_here(shown.pane, file.path);
         }
         let terminal = PaneTerminal::File(file);

@@ -187,6 +187,40 @@ pub(crate) enum Action {
     },
 }
 
+impl Action {
+    /// Whether it changes the text, and so is a change for `.` to make
+    /// again.
+    pub(crate) fn changes(self) -> bool {
+        matches!(
+            self,
+            Self::Operate(
+                Operator::Delete | Operator::Change | Operator::Indent | Operator::Dedent,
+                _
+            ) | Self::DeleteChars { .. }
+                | Self::DeleteToEnd { .. }
+                | Self::Substitute
+                | Self::Put { .. }
+                | Self::Join
+                | Self::Replace(_)
+                | Self::Insert(_)
+        )
+    }
+
+    /// Whether it's a jump, which the jump list records, as Vim's are:
+    /// `gg`, `G`, `n` and `N`, and `]d` and `[d`. A search typed after `/`
+    /// is too, once Enter finds it, as is going where a language server
+    /// says, once it answers.
+    pub(crate) fn jumps(self) -> bool {
+        matches!(
+            self,
+            Self::Move(Motion::First | Motion::Last)
+                | Self::GoToLine
+                | Self::SearchAgain { .. }
+                | Self::Diagnostic { .. }
+        )
+    }
+}
+
 /// What the keys typed so far make.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Parsed {

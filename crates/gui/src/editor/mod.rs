@@ -240,6 +240,9 @@ pub(crate) struct Editor {
     /// A place in another file an answer goes to, and how many places it
     /// gave, for the desk to open.
     opening: Option<(FileLocation, usize)>,
+    /// The byte the cursor left, on a jump such as `G` or a search, for
+    /// the desk's jump list.
+    jumped_from: Option<usize>,
     /// Text just copied, highlighted for a moment.
     flash: Option<(Point, Point, Selection, Instant)>,
     /// Where the cursor and selection's start were in the text, before
@@ -281,6 +284,7 @@ impl Editor {
             status: None,
             asked: None,
             opening: None,
+            jumped_from: None,
             flash: None,
             held: None,
             rows: Vec::new(),
@@ -484,21 +488,8 @@ impl Editor {
             redraw: true,
             yanked: None,
         };
-        let changes = matches!(
-            command.action,
-            Action::Operate(
-                Operator::Delete | Operator::Change | Operator::Indent | Operator::Dedent,
-                _
-            ) | Action::DeleteChars { .. }
-                | Action::DeleteToEnd { .. }
-                | Action::Substitute
-                | Action::Put { .. }
-                | Action::Join
-                | Action::Replace(_)
-                | Action::Insert(_)
-        );
         let visual = matches!(self.mode, Mode::Visual(_));
-        if changes && !again && !visual {
+        if command.action.changes() && !again && !visual {
             self.changing = Some(Change {
                 command,
                 typed: Vec::new(),
@@ -506,6 +497,7 @@ impl Editor {
         }
         self.new_step = true;
         let times = command.times();
+        let from = self.cursor.at;
         match command.action {
             Action::Move(motion) => {
                 let motion = self.remember_find(motion);
@@ -570,6 +562,9 @@ impl Editor {
                     self.cursor = Cursor::new(last);
                 }
             }
+        }
+        if command.action.jumps() && self.cursor.at != from {
+            self.left_from(from, copy);
         }
         // A change done in normal mode is finished; one that went into
         // insert mode finishes when that does.
@@ -1250,12 +1245,7 @@ impl Editor {
             | Stroke::End
             | Stroke::PageUp
             | Stroke::PageDown => {
-                // Moving starts a new undo step, and stops what `.` makes
-                // again, as in Vim.
-                self.new_step = true;
-                if let Some(change) = self.changing.take() {
-                    self.last_change = Some(change);
-                }
+                self.moved_while_inserting();
                 let text = self.text(copy);
                 let line = self.cursor.at.line;
                 let cells = text.laid(line).map_or(0, |laid| laid.cells());
@@ -1271,6 +1261,16 @@ impl Editor {
                     _ => self.cursor.apply(Motion::Down(1), &text),
                 }
             }
+        }
+    }
+
+    /// The cursor moved in insert mode other than by typing: what's typed
+    /// next starts a new undo step, and isn't part of what `.` makes
+    /// again, as in Vim.
+    fn moved_while_inserting(&mut self) {
+        self.new_step = true;
+        if let Some(change) = self.changing.take() {
+            self.last_change = Some(change);
         }
     }
 
@@ -1345,7 +1345,11 @@ impl Editor {
                 if !search.0.is_empty() {
                     self.search = Some(search);
                 }
+                let from = self.cursor.at;
                 self.search_again(false, copy);
+                if self.cursor.at != from {
+                    self.left_from(from, copy);
+                }
             }
             Stroke::Char { ch, ctrl: false } => query.push(ch),
             _ => {}
@@ -1539,6 +1543,7 @@ impl Editor {
                 let Some(first) = found.first() else {
                     return;
                 };
+                self.left_from(self.cursor.at, copy);
                 if first.path == copy.path() {
                     self.go_to(first.line, first.col, copy);
                     self.say_how_many(found.len());
@@ -1554,8 +1559,10 @@ impl Editor {
     }
 
     /// Puts the cursor on `line`, `col` bytes into it, as far as the line
-    /// goes.
+    /// goes. A message about where it was, such as a search's that found
+    /// nothing, goes with it.
     pub(crate) fn go_to(&mut self, line: u64, col: usize, copy: &BufferCopy) {
+        self.status = None;
         let text = self.text(copy);
         let line = line.min(text.last_line());
         let (start, end) = (text.line_start(line), text.line_end(line));
@@ -1564,7 +1571,13 @@ impl Editor {
         let at = rope.char_to_byte(rope.byte_to_char((start + col).min(end)));
         self.cursor = Cursor::new(text.point_of(at));
         drop(text);
-        self.normal_cursor(copy);
+        if self.mode == Mode::Insert {
+            // It may stay past the line's end, where typing goes, and it
+            // moved, as the arrow keys move it.
+            self.moved_while_inserting();
+        } else {
+            self.normal_cursor(copy);
+        }
         self.follow(copy);
     }
 
@@ -1579,6 +1592,22 @@ impl Editor {
     /// places it gave, for the desk to open, if there's one.
     pub(crate) fn take_opening(&mut self) -> Option<(FileLocation, usize)> {
         self.opening.take()
+    }
+
+    /// Notes that the cursor jumped from `from`, for the desk's jump list.
+    fn left_from(&mut self, from: Point, copy: &BufferCopy) {
+        self.jumped_from = Some(self.text(copy).byte_at(from));
+    }
+
+    /// The byte the cursor left on its last jump, if it's jumped since
+    /// this was last asked, for the desk's jump list.
+    pub(crate) fn take_left(&mut self) -> Option<usize> {
+        self.jumped_from.take()
+    }
+
+    /// The byte the cursor is on.
+    pub(crate) fn cursor_byte(&self, copy: &BufferCopy) -> usize {
+        self.text(copy).byte_at(self.cursor.at)
     }
 
     fn place_held(&mut self, copy: &BufferCopy) {

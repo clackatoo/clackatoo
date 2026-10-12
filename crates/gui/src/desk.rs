@@ -87,7 +87,7 @@ enum Asked {
         then_close: Option<PaneId>,
     },
     /// A file opened in place of the one this pane showed, whose failure
-    /// is shown, and forgets where its cursor was to go.
+    /// is shown, and forgets where its cursor was to go in that file.
     OpenedHere(PaneId),
 }
 
@@ -179,7 +179,7 @@ pub(crate) struct Desk {
     script: script::Script,
     /// Panes editing files.
     editors: editors::Editors,
-    /// Where the focus has been.
+    /// Where you've been, to go back to.
     jumps: jumps::Jumps,
     /// The options, as config and `:set` have set them.
     options: Options,
@@ -585,25 +585,8 @@ impl Desk {
         self.move_focus(pane, true);
     }
 
-    /// Goes back through the places the focus has been, or forward again:
-    /// within the tab shown, or anywhere.
-    fn jump(&mut self, back: bool, within_tab: bool) {
-        let Some(shown) = self.shown else { return };
-        let workspaces = &self.workspaces;
-        let wanted = |place: &Shown| {
-            *place != shown
-                && workspaces
-                    .find_pane(place.pane)
-                    .is_some_and(|(_, tab, _)| !within_tab || tab.id == shown.tab)
-        };
-        if let Some((index, place)) = self.jumps.step(back, wanted) {
-            self.jumps.go(index);
-            self.move_focus(place.pane, false);
-        }
-    }
-
     /// Switches to `pane`, as [`show_pane`](Self::show_pane) does, adding
-    /// the move to where the focus has been if `record`.
+    /// the pane left to the jump list if `record`.
     fn move_focus(&mut self, pane: PaneId, record: bool) {
         let Some((workspace, tab, _)) = self.workspaces.find_pane(pane) else {
             return;
@@ -616,8 +599,8 @@ impl Desk {
         if self.shown == Some(shown) {
             return;
         }
-        if record {
-            self.jumps.moved(self.shown, shown);
+        if record && let Some(left) = self.shown {
+            self.record_jump(left.pane, None);
         }
         let unfocused = self.unfocused;
         let left_editor = self
@@ -831,9 +814,13 @@ impl Desk {
                 true
             }
             Some(Asker::Window(Asked::OpenedHere(pane))) => {
-                if let Response::Error(err) = response {
-                    self.not_opened_here(pane);
-                    self.message = Some(err.to_string());
+                let failed = match response {
+                    Response::Error(err) => Some(err.to_string()),
+                    _ => None,
+                };
+                self.opened_here(pane, failed.is_some());
+                if let Some(err) = failed {
+                    self.message = Some(err);
                 }
                 true
             }
@@ -2624,5 +2611,406 @@ mod tests {
             answer_all(&mut desk),
             [Request::ClosePane { pane: PaneId(1) }]
         );
+    }
+
+    // --- The jump list, in editors ------------------------------------------
+
+    fn file_pane(pane: u32, buffer: u32) -> Layout {
+        Layout::Pane(LayoutPane {
+            id: PaneId(pane),
+            content: Content::Buffer(BufferId(buffer)),
+        })
+    }
+
+    /// One workspace of one tab laid out as `layout`.
+    fn one_tab(layout: Layout) -> Workspaces {
+        workspaces(vec![workspace(1, "w", vec![tab(1, layout)])])
+    }
+
+    /// Gives `buffer` its text, as attaching does.
+    fn load(desk: &mut Desk, buffer: u32, path: &str, text: &str) {
+        let snapshot = clackatoo_protocol::BufferSnapshot {
+            path: path.into(),
+            text: text.into(),
+            version: 0,
+            modified: false,
+        };
+        desk.buffer_changed(
+            BufferId(buffer),
+            clackatoo_protocol::BufferUpdate::Snapshot(snapshot),
+        );
+    }
+
+    /// What the bar says of the focused pane: for an editor, the file and
+    /// where its cursor is.
+    fn note(desk: &Desk) -> String {
+        let Status::Tabs { note, .. } = desk.status() else {
+            panic!("the tabs");
+        };
+        note.unwrap_or_default()
+    }
+
+    /// Answers what was asked, which must include opening the file at
+    /// `path` in pane 1, and opens it, as the daemon would, as `buffer`,
+    /// with `text`.
+    fn open_asked(desk: &mut Desk, buffer: u32, path: &str, text: &str) {
+        let asked = answer_all(desk);
+        let opened: Vec<(PaneId, &str)> = (asked.iter())
+            .filter_map(|request| match request {
+                Request::OpenHere { pane, file } => Some((*pane, file.path.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, [(PaneId(1), path)], "{asked:?}");
+        desk.workspaces_changed(one_tab(file_pane(1, buffer)));
+        answer_all(desk);
+        load(desk, buffer, path, text);
+    }
+
+    /// The files asked to open in panes in place of theirs, not answered
+    /// yet.
+    fn opens_asked(desk: &mut Desk) -> Vec<String> {
+        (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(Request::OpenHere { file, .. }) => Some(file.path),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The daemon opens the oldest file asked for in pane 1, as `buffer`:
+    /// it shows the pane with it, then answers.
+    fn opened(desk: &mut Desk, buffer: u32) {
+        desk.workspaces_changed(one_tab(file_pane(1, buffer)));
+        desk.answered(Response::Done);
+    }
+
+    fn b_rs_line_3() -> clackatoo_protocol::FileLocation {
+        clackatoo_protocol::FileLocation {
+            path: "/src/b.rs".into(),
+            line: 2,
+            col: 1,
+            offset: None,
+        }
+    }
+
+    const A_RS: &str = "fn a() {}\nfn b() {}\nfn c() {}\n";
+    const B_RS: &str = "x\ny\nzzz\n";
+
+    #[test]
+    fn a_second_jump_while_a_file_opens_goes_where_it_points() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/c.rs", TEN_LINES);
+        type_text(&mut desk, "5G");
+        command(&mut desk, "e /b.rs");
+        open_asked(&mut desk, 8, "/b.rs", B_RS);
+        command(&mut desk, "e /c.rs");
+        open_asked(&mut desk, 9, "/c.rs", TEN_LINES);
+        type_text(&mut desk, "8j");
+        // Back to b.rs, and before it's open, back again to c.rs's line 5.
+        ctrl(&mut desk, "o");
+        ctrl(&mut desk, "o");
+        assert_eq!(opens_asked(&mut desk), ["/b.rs", "/c.rs"]);
+        opened(&mut desk, 10);
+        load(&mut desk, 10, "/b.rs", B_RS);
+        opened(&mut desk, 11);
+        answer_all(&mut desk);
+        load(&mut desk, 11, "/c.rs", TEN_LINES);
+        assert_eq!(note(&desk), "c.rs  5:1");
+    }
+
+    #[test]
+    fn ctrl_o_while_gd_opens_a_file_comes_back_and_ctrl_i_goes_there() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/src/a.rs", A_RS);
+        type_text(&mut desk, "jwgd");
+        answer_query(&mut desk, 7, vec![b_rs_line_3()]);
+        // Before b.rs is open: you're where gd goes, as far as the jump
+        // list knows, so there's somewhere to come back to.
+        ctrl(&mut desk, "o");
+        assert_eq!(opens_asked(&mut desk), ["/src/b.rs", "/src/a.rs"]);
+        opened(&mut desk, 8);
+        load(&mut desk, 8, "/src/b.rs", B_RS);
+        opened(&mut desk, 9);
+        answer_all(&mut desk);
+        load(&mut desk, 9, "/src/a.rs", A_RS);
+        assert_eq!(note(&desk), "a.rs  2:4");
+        ctrl(&mut desk, "i");
+        open_asked(&mut desk, 10, "/src/b.rs", B_RS);
+        assert_eq!(note(&desk), "b.rs  3:2");
+    }
+
+    #[test]
+    fn a_file_that_fails_to_open_keeps_a_later_jumps_place() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/src/a.rs", A_RS);
+        type_text(&mut desk, "jwgd");
+        answer_query(&mut desk, 7, vec![b_rs_line_3()]);
+        type_text(&mut desk, "j");
+        ctrl(&mut desk, "o");
+        assert_eq!(opens_asked(&mut desk), ["/src/b.rs", "/src/a.rs"]);
+        // b.rs can't be opened; a.rs is shown already.
+        desk.answered(Response::Error(clackatoo_protocol::Error::NotAFile(
+            PaneId(1),
+        )));
+        assert!(desk.message.take().is_some());
+        desk.answered(Response::Done);
+        assert_eq!(note(&desk), "a.rs  2:4");
+    }
+
+    #[test]
+    fn opening_a_file_forgets_where_the_cursor_was_to_go_before() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/src/a.rs", A_RS);
+        type_text(&mut desk, "jwgd");
+        answer_query(&mut desk, 7, vec![b_rs_line_3()]);
+        // Another file, before b.rs is open.
+        command(&mut desk, "e /src/c.rs");
+        assert_eq!(opens_asked(&mut desk), ["/src/b.rs", "/src/c.rs"]);
+        opened(&mut desk, 8);
+        load(&mut desk, 8, "/src/b.rs", B_RS);
+        opened(&mut desk, 9);
+        answer_all(&mut desk);
+        load(&mut desk, 9, "/src/c.rs", "c\n");
+        // b.rs opened later isn't where gd went.
+        command(&mut desk, "e /src/b.rs");
+        open_asked(&mut desk, 10, "/src/b.rs", B_RS);
+        assert_eq!(note(&desk), "b.rs  1:1");
+    }
+
+    #[test]
+    fn going_back_in_insert_mode_keeps_typing_where_it_was_as_a_new_step() {
+        use clackatoo_protocol::{BufferUpdate, Change};
+
+        let mut desk = desk(one_tab(side_by_side(vec![file_pane(1, 7), pane(2)])));
+        load(&mut desk, 7, "/t.txt", "abc\nxyz\n");
+        type_text(&mut desk, "Ad");
+        assert_eq!(buffer_changes(&mut desk).len(), 1);
+        desk.buffer_changed(BufferId(7), BufferUpdate::Acked { version: 1, seq: 0 });
+        // To the terminal and back, still in insert mode.
+        ctrl_b(&mut desk, "l");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            alt: false,
+        };
+        press(&mut desk, Key::Character("O".into()), None, ctrl_shift);
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        assert_eq!(note(&desk), "t.txt  1:5", "past the line's end");
+        type_text(&mut desk, "e");
+        let sent = buffer_changes(&mut desk);
+        let [(_, Change::Edit { edit, step, .. })] = sent.as_slice() else {
+            panic!("one edit: {sent:?}");
+        };
+        assert_eq!(*edit, clackatoo_text::Edit::replace(9, 4, "", "e"));
+        assert!(*step, "a new undo step");
+    }
+
+    /// Answers the language server query just asked with `found`.
+    fn answer_query(desk: &mut Desk, buffer: u32, found: Vec<clackatoo_protocol::FileLocation>) {
+        let mut id = None;
+        for message in desk.take_outbox() {
+            match message {
+                ClientMessage::Query { id: asked, .. } => id = Some(asked),
+                ClientMessage::Request(_) => {
+                    desk.answered(Response::Done);
+                }
+                _ => {}
+            }
+        }
+        let update = clackatoo_protocol::BufferUpdate::Answer {
+            id: id.expect("a query"),
+            version: 0,
+            answer: clackatoo_protocol::Answer::Locations(found),
+        };
+        desk.buffer_changed(BufferId(buffer), update);
+    }
+
+    fn escape(desk: &mut Desk) {
+        press(
+            desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+    }
+
+    const TEN_LINES: &str = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
+
+    #[test]
+    fn ctrl_o_comes_back_from_gd_to_another_file_and_ctrl_i_goes_again() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/src/a.rs", "fn a() {}\nfn b() {}\n");
+        type_text(&mut desk, "jw");
+        assert_eq!(note(&desk), "a.rs  2:4");
+        type_text(&mut desk, "gd");
+        let there = clackatoo_protocol::FileLocation {
+            path: "/src/b.rs".into(),
+            line: 2,
+            col: 1,
+            offset: None,
+        };
+        answer_query(&mut desk, 7, vec![there]);
+        // Each file opens in the pane in turn, as the daemon would, with a
+        // buffer of its own, and the cursor lands once its text is there.
+        open_asked(&mut desk, 8, "/src/b.rs", "x\ny\nzzz\n");
+        assert_eq!(note(&desk), "b.rs  3:2");
+        ctrl(&mut desk, "o");
+        open_asked(&mut desk, 9, "/src/a.rs", "fn a() {}\nfn b() {}\n");
+        assert_eq!(note(&desk), "a.rs  2:4", "back where gd left");
+        ctrl(&mut desk, "i");
+        open_asked(&mut desk, 10, "/src/b.rs", "x\ny\nzzz\n");
+        assert_eq!(note(&desk), "b.rs  3:2", "forward again");
+        // Nothing further forward.
+        ctrl(&mut desk, "i");
+        assert!(answer_all(&mut desk).is_empty());
+    }
+
+    #[test]
+    fn going_back_then_jumping_elsewhere_forgets_the_way_forward() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/t.txt", TEN_LINES);
+        type_text(&mut desk, "G");
+        assert_eq!(note(&desk), "t.txt  10:1");
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  1:1");
+        type_text(&mut desk, "5G");
+        ctrl(&mut desk, "i");
+        assert_eq!(note(&desk), "t.txt  5:1", "line 10 is forgotten");
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  1:1");
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  1:1", "nothing further back");
+        ctrl(&mut desk, "i");
+        assert_eq!(note(&desk), "t.txt  5:1");
+        ctrl(&mut desk, "i");
+        assert_eq!(note(&desk), "t.txt  5:1");
+        assert!(
+            answer_all(&mut desk).is_empty(),
+            "nothing opened: it's the file shown"
+        );
+    }
+
+    #[test]
+    fn jumps_from_one_line_one_after_another_are_remembered_once() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/t.txt", "a foo foo\nb\nfoo\n");
+        // Two jumps along line 1, then off it.
+        type_text(&mut desk, "/foo");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(note(&desk), "t.txt  1:3");
+        type_text(&mut desk, "n");
+        assert_eq!(note(&desk), "t.txt  1:7");
+        type_text(&mut desk, "n");
+        assert_eq!(note(&desk), "t.txt  3:1");
+        // Back to where line 1 was left last, and no further, even from
+        // another line.
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  1:7");
+        type_text(&mut desk, "j");
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  2:1");
+        type_text(&mut desk, "k$");
+        // A search that finds nothing isn't a jump.
+        ctrl(&mut desk, "i");
+        assert_eq!(note(&desk), "t.txt  3:1");
+        type_text(&mut desk, "/nowhere");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  1:7");
+    }
+
+    #[test]
+    fn places_in_panes_closed_since_are_skipped() {
+        let layout = side_by_side(vec![pane(1), file_pane(2, 8), pane(3)]);
+        let mut desk = desk(one_tab(layout));
+        load(&mut desk, 8, "/t.txt", TEN_LINES);
+        normal_mode(&mut desk);
+        ctrl(&mut desk, "l");
+        type_text(&mut desk, "G");
+        ctrl(&mut desk, "l");
+        assert_eq!(shown_pane(&desk), PaneId(3));
+        // The editor closes, its jumps with it.
+        desk.workspaces_changed(one_tab(side_by_side(vec![pane(1), pane(3)])));
+        answer_all(&mut desk);
+        ctrl(&mut desk, "o");
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        ctrl(&mut desk, "i");
+        assert_eq!(shown_pane(&desk), PaneId(3));
+        assert!(
+            !answer_all(&mut desk)
+                .iter()
+                .any(|request| matches!(request, Request::OpenHere { .. })),
+            "nothing opened in place of what's shown"
+        );
+    }
+
+    #[test]
+    fn places_move_with_edits_made_since() {
+        use clackatoo_protocol::{Author, BufferUpdate};
+        use clackatoo_text::Edit;
+
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/t.txt", TEN_LINES);
+        type_text(&mut desk, "5Gl");
+        type_text(&mut desk, "G");
+        // Someone else puts a line in at the top...
+        let edit = Edit::replace(TEN_LINES.len(), 0, "", "new\n");
+        let update = BufferUpdate::Edited {
+            version: 1,
+            edit,
+            author: Author::Agent(TerminalId(9)),
+            answers: None,
+        };
+        desk.buffer_changed(BufferId(7), update);
+        assert_eq!(note(&desk), "t.txt  11:1");
+        // ...and so does this window, after going to the top.
+        type_text(&mut desk, "ggOtop");
+        escape(&mut desk);
+        assert_eq!(note(&desk), "t.txt  1:3");
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  12:1", "where gg left");
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  7:2", "where G left");
+        // The start of the file, where both lines went in, went down with
+        // its line.
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  3:1", "where 5G left");
+        // As it does with a line opened above it from there.
+        type_text(&mut desk, "Oabove");
+        escape(&mut desk);
+        ctrl(&mut desk, "i");
+        assert_eq!(note(&desk), "t.txt  8:2", "where G left, moved down");
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  4:1", "where 5G left, moved down");
+    }
+
+    #[test]
+    fn a_file_opened_again_keeps_its_places_within_its_text() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/a.txt", TEN_LINES);
+        type_text(&mut desk, "3G9G");
+        command(&mut desk, "e /b.txt");
+        open_asked(&mut desk, 8, "/b.txt", "b\n");
+        // a.txt was cut short while it wasn't open here: line 9 is gone.
+        ctrl(&mut desk, "o");
+        open_asked(&mut desk, 9, "/a.txt", "a\nb\nc\nd\ne\nf\n");
+        assert_eq!(note(&desk), "a.txt  6:1");
+        // Its places are in the new text, and move with edits to it.
+        type_text(&mut desk, "5kOx");
+        escape(&mut desk);
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "a.txt  4:1", "line 3, moved down by one");
     }
 }
