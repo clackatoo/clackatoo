@@ -58,12 +58,23 @@ pub enum InstallError {
     /// The pack couldn't be written.
     #[error("{0}")]
     Io(#[from] io::Error),
+    /// It can't be installed here, as this says: a language server not
+    /// built for this machine, or one installed by hand.
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 /// The known language called `name`.
 #[must_use]
 pub fn known(name: &str) -> Option<&'static Known> {
     crate::known::KNOWN.iter().find(|known| known.name == name)
+}
+
+/// The known language for the file at `path`, as its pack would be.
+#[must_use]
+pub fn known_for(path: &Path) -> Option<&'static Known> {
+    (crate::known::KNOWN.iter())
+        .find(|known| crate::pack::is_for(known.extensions, known.filenames, path))
 }
 
 /// Downloads `known` and writes it as a pack in `dir`, replacing any
@@ -129,7 +140,7 @@ fn write(dir: &Path, name: &str, contents: &[u8]) -> Result<(), InstallError> {
 }
 
 /// Downloads `file` with curl, and checks it.
-fn download(file: &Download) -> Result<Vec<u8>, InstallError> {
+pub(crate) fn download(file: &Download) -> Result<Vec<u8>, InstallError> {
     let output = Command::new("curl")
         .args(["--fail", "--silent", "--show-error", "--location"])
         .args(["--max-time", "300", file.url])
@@ -169,6 +180,14 @@ mod tests {
             assert!(!language.highlights.is_empty(), "{}", language.name);
         }
         assert_eq!(known("rust").map(|rust| rust.extensions), Some(&["rs"][..]));
+        assert_eq!(
+            known_for(Path::new("/a/b.rs")).map(|known| known.name),
+            Some("rust")
+        );
+        assert_eq!(
+            known_for(Path::new("/a/b.unknown")).map(|known| known.name),
+            None
+        );
     }
 
     #[test]

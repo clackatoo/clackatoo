@@ -261,6 +261,8 @@ impl BufferCopy {
                 self.diagnose(version, diagnostics);
                 Heard::Nothing
             }
+            // The window asks, not the editor.
+            BufferUpdate::Offer { .. } => Heard::Nothing,
             BufferUpdate::Answer {
                 id,
                 version,

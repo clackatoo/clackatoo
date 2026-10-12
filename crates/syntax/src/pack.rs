@@ -105,12 +105,18 @@ impl Pack {
     /// Whether it's for the file at `path`.
     #[must_use]
     pub fn is_for(&self, path: &Path) -> bool {
-        let named = |names: &[String], name: Option<&std::ffi::OsStr>| {
-            name.and_then(|name| name.to_str())
-                .is_some_and(|name| names.iter().any(|candidate| candidate == name))
-        };
-        named(&self.filenames, path.file_name()) || named(&self.extensions, path.extension())
+        is_for(&self.extensions, &self.filenames, path)
     }
+}
+
+/// Whether a language for files with these `extensions`, and these
+/// `filenames`, is for the file at `path`.
+pub(crate) fn is_for<S: AsRef<str>>(extensions: &[S], filenames: &[S], path: &Path) -> bool {
+    let named = |names: &[S], name: Option<&std::ffi::OsStr>| {
+        name.and_then(|name| name.to_str())
+            .is_some_and(|name| names.iter().any(|candidate| candidate.as_ref() == name))
+    };
+    named(filenames, path.file_name()) || named(extensions, path.extension())
 }
 
 /// The packs in one directory, read again when it changes.

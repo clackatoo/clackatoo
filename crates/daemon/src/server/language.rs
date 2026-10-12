@@ -43,6 +43,10 @@ pub(super) enum Pipe {
 /// stopped: once, and once again after it stops by itself.
 const STARTS: u8 = 2;
 
+/// What a server's start count is set to when its program isn't found:
+/// it's not started again until the program is there.
+const NOT_FOUND: u8 = u8::MAX;
+
 /// A language server, its event-loop registrations, and what it's for.
 #[derive(Debug)]
 pub(super) struct ServerSlot {
@@ -72,6 +76,15 @@ pub(super) struct Servers {
     /// they're opened in rather than one of their own: a library's file
     /// gone to from a project is the project's server's to know.
     reached: HashMap<PathBuf, ServerId>,
+}
+
+impl Servers {
+    /// Forgets how often servers whose program is `program` have been
+    /// started, as it's just been installed.
+    pub(super) fn forget_starts(&mut self, program: &str) {
+        (self.started)
+            .retain(|(command, _, _)| command.first().is_none_or(|first| first != program));
+    }
 }
 
 /// A client's query, as asked of a server.
@@ -176,19 +189,41 @@ impl Daemon {
                 servers.started.len() - 1
             });
         let started = &mut servers.started[index].2;
+        let name = command.first().map_or("language server", String::as_str);
+        if *started == NOT_FOUND {
+            // Looked for again, as it may have been installed meanwhile.
+            let found = if name.contains('/') {
+                Path::new(name).is_file()
+            } else {
+                match self.config.servers.as_deref() {
+                    Some(servers) => clackatoo_syntax::servers::find_program(name, servers),
+                    None => clackatoo_syntax::servers::on_path(name),
+                }
+                .is_some()
+            };
+            if !found {
+                return None;
+            }
+            *started = 0;
+        }
         if *started >= STARTS {
             return None;
         }
         *started += 1;
-        let name = command.first().map_or("language server", String::as_str);
-        let args: Vec<OsString> = command.iter().map(OsString::from).collect();
+        let mut args: Vec<OsString> = command.iter().map(OsString::from).collect();
+        // Not on PATH, it may be where clackatoo installed it.
+        if let Some(program) = (self.config.servers.as_deref())
+            .and_then(|servers| clackatoo_syntax::servers::find_program(name, servers))
+        {
+            args[0] = program.into_os_string();
+        }
         let server = match LanguageServer::start(name, &args, &root) {
             Ok(server) => server,
             Err(err) => {
                 log::warn!("{name} couldn't start for {}: {err}", root.display());
                 if err.kind() == std::io::ErrorKind::NotFound {
-                    // Not installed: not looked for again.
-                    *started = STARTS;
+                    // Not installed: not started until it is.
+                    *started = NOT_FOUND;
                 }
                 return None;
             }

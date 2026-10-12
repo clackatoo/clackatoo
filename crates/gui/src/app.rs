@@ -1777,6 +1777,10 @@ impl App {
                     self.request_redraw();
                 }
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Installed { outcome, .. })) => {
+                self.desk.installed(outcome);
+                self.request_redraw();
+            }
             SessionEvent::Message(ServerMessage::Event(Event::Workspaces(workspaces))) => {
                 self.desk.workspaces_changed(workspaces);
                 self.update_title();

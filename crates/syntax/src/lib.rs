@@ -22,9 +22,10 @@ pub mod install;
 mod known;
 pub mod pack;
 mod server;
+pub mod servers;
 mod worker;
 
-pub use install::{InstallError, Known, install, known};
+pub use install::{InstallError, Known, install, known, known_for};
 pub use known::KNOWN;
 pub use pack::{Languages, Pack};
 pub use server::Server;

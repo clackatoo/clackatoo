@@ -56,9 +56,11 @@ use crate::workspaces::WorkspaceState;
 
 mod buffers;
 mod language;
+mod offers;
 
 use buffers::BufferSlot;
 use language::{Pipe, ServerId, Servers};
+use offers::Installs;
 
 const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);
@@ -378,6 +380,8 @@ pub struct Daemon {
     syntax: Option<Syntax>,
     /// The language servers buffers are open in.
     servers: Servers,
+    /// Languages offered to clients to install, and being installed.
+    installs: Installs,
     /// The agent chats talk to, while any chat needs it.
     agent: Option<AgentSlot>,
     /// What the agent sent last, for the chats to act on.
@@ -473,6 +477,7 @@ impl Daemon {
             languages: config.languages.clone().map(Languages::new),
             syntax: None,
             servers: Servers::default(),
+            installs: Installs::new(config.declined.as_deref()),
             agent: None,
             incoming: Vec::new(),
             quic: None,
@@ -685,6 +690,7 @@ impl Daemon {
                 self.read_servers_unread();
             }
             self.take_highlights();
+            self.take_installs();
             self.stop_idle_servers();
             self.compact_scrollbacks();
             self.send_view_updates();
@@ -1797,6 +1803,10 @@ impl Daemon {
             }
             Request::Save { buffer, force } => self.save_buffer(buffer, force),
             Request::Discard { buffer } => self.discard_buffer(buffer),
+            request @ (Request::Install { .. } | Request::Decline { .. }) => {
+                self.respond_about_installs(token, request);
+                Ok(Response::Done)
+            }
         };
         response.unwrap_or_else(Response::Error)
     }
@@ -1985,6 +1995,7 @@ impl Daemon {
         if let Some(Source::Client(client)) = self.sources.try_remove(token.0) {
             self.forget_viewer(token, &client);
             self.forget_queries(token, None);
+            self.installs.forget(token);
             if let Link::Quic(handle) = client.link
                 && let Some(quic) = self.quic.as_mut()
             {

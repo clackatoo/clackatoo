@@ -94,6 +94,7 @@ enum Asked {
 mod bindings;
 mod editors;
 mod jumps;
+mod offers;
 mod script;
 mod settings;
 
@@ -147,6 +148,9 @@ pub(crate) struct Desk {
     /// A message for the focused pane's label, until the next key, such as
     /// why a command failed.
     message: Option<String>,
+    /// The daemon's offer to install a language, asked in the bar until
+    /// the next key.
+    offer: Option<offers::Offer>,
     /// Text copied, waiting for the window to put on the clipboard or the
     /// primary selection.
     yanked: Option<(String, Copy)>,
@@ -375,6 +379,9 @@ impl Desk {
                 text: format!("{prefix}{}▏", input.text),
                 choices,
             };
+        }
+        if let Some(status) = self.offer_status() {
+            return status;
         }
         if let Some((editor, copy)) = self.focused_editor() {
             let label = editor.label(copy);
@@ -904,6 +911,10 @@ impl Desk {
         if input::is_modifier(press.key) {
             return false;
         }
+        let asked = self.offer_asked();
+        if asked && self.offer_key(press) {
+            return true;
+        }
         if self.input.is_some() {
             // Ctrl+; and its kin close the command line, and go on to the
             // pane, which stays in normal mode.
@@ -942,7 +953,7 @@ impl Desk {
                 Pressed::Unbound => {}
             }
         }
-        let had_message = self.message.take().is_some();
+        let had_message = self.message.take().is_some() || asked;
         if self.focused_editor().is_some() {
             return self.editor_key(press) || had_message;
         }
@@ -2442,6 +2453,86 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn a_language_offered_is_asked_about_as_languageinstall_says() {
+        use clackatoo_protocol::BufferUpdate;
+
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+        });
+        let mut desk = Desk::default();
+        desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+        answer_all(&mut desk);
+        let offer = || BufferUpdate::Offer {
+            language: "toml".into(),
+            grammar: true,
+            server: Some("taplo".into()),
+        };
+        let install = Request::Install {
+            language: "toml".into(),
+            grammar: true,
+            server: Some("taplo".into()),
+        };
+        let asked = |desk: &Desk| {
+            matches!(desk.status(), Status::Typing { text, .. }
+                if text == "Install toml's grammar and taplo? [Y/n]")
+        };
+
+        // Asked, and y installs.
+        assert!(desk.buffer_changed(buffer, offer()));
+        assert!(asked(&desk));
+        type_keys(&mut desk, "y");
+        assert!(!asked(&desk));
+        assert_eq!(answer_all(&mut desk), std::slice::from_ref(&install));
+        desk.installed(Ok("toml's grammar and taplo".into()));
+        assert!(
+            matches!(desk.status(), Status::Tabs { note: Some(note), .. }
+            if note == "Installed toml's grammar and taplo")
+        );
+
+        // n declines for good.
+        desk.buffer_changed(buffer, offer());
+        type_keys(&mut desk, "n");
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::Decline {
+                language: "toml".into()
+            }]
+        );
+
+        // Not asked while the command line is open: n is typed there.
+        type_keys(&mut desk, ":");
+        desk.buffer_changed(buffer, offer());
+        assert!(!asked(&desk));
+        type_keys(&mut desk, "n");
+        assert!(matches!(desk.status(), Status::Typing { text, .. } if text == ":n▏"));
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        assert!(asked(&desk), "asked once it's closed");
+
+        // Any other key leaves it unanswered, and goes on to the editor.
+        type_keys(&mut desk, "j");
+        assert!(!asked(&desk));
+        assert_eq!(answer_all(&mut desk), []);
+
+        // Or it's installed without asking, or never.
+        command(&mut desk, "set languageinstall=always");
+        answer_all(&mut desk);
+        desk.buffer_changed(buffer, offer());
+        assert!(!asked(&desk));
+        assert_eq!(answer_all(&mut desk), [install]);
+        command(&mut desk, "set li=never");
+        answer_all(&mut desk);
+        assert!(!desk.buffer_changed(buffer, offer()));
+        assert_eq!(answer_all(&mut desk), []);
     }
 
     #[test]

@@ -16,6 +16,8 @@ pub(crate) enum Value {
     Bool(bool),
     Number(u32),
     List(List),
+    /// One of the words an option of [`Kind::Choice`] can be.
+    Choice(&'static str),
 }
 
 /// Whole numbers, as an option holds several: `colorcolumn`'s columns.
@@ -36,6 +38,8 @@ pub(crate) enum Kind {
         min: u32,
         max: u32,
     },
+    /// One of these words.
+    Choice(&'static [&'static str]),
 }
 
 /// An option, as config and `:set` know it.
@@ -60,6 +64,7 @@ impl Info {
             {
                 Ok(())
             }
+            (Kind::Choice(words), Value::Choice(word)) if words.contains(word) => Ok(()),
             _ => Err(self.wants()),
         }
     }
@@ -75,6 +80,9 @@ impl Info {
             Kind::List { .. } => {
                 Value::List(text.split(',').map(number).collect::<Result<_, _>>()?)
             }
+            Kind::Choice(words) => Value::Choice(
+                (words.iter().find(|&&word| word == text)).ok_or_else(|| self.wants())?,
+            ),
         };
         self.check(&value)?;
         Ok(value)
@@ -91,6 +99,13 @@ impl Info {
                 "{} is whole numbers from {min} to {max}, with commas between them",
                 self.name
             ),
+            Kind::Choice(words) => match words {
+                [] => format!("{} can't be set", self.name),
+                [only] => format!("{} is {only}", self.name),
+                [first @ .., last] => {
+                    format!("{} is {} or {last}", self.name, first.join(", "))
+                }
+            },
         }
     }
 }
@@ -140,8 +155,45 @@ impl Held for List {
     }
 }
 
+/// An option's type that's one of a few words, declared by [`choice!`].
+trait Choice: Held {
+    /// The words, in the order they're listed.
+    const WORDS: &'static [&'static str];
+}
+
+/// Declares an option's type that's one of a few words: an enum with a
+/// variant for each, as [`Choice`] and [`Held`].
+macro_rules! choice {
+    ($(#[doc = $doc:literal])+ $name:ident { $($(#[doc = $variant_doc:literal])+ $variant:ident = $word:literal,)+ }) => {
+        $(#[doc = $doc])+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub(crate) enum $name {
+            $($(#[doc = $variant_doc])+ $variant,)+
+        }
+
+        impl Choice for $name {
+            const WORDS: &'static [&'static str] = &[$($word),+];
+        }
+
+        impl Held for $name {
+            fn value(&self) -> Value {
+                Value::Choice(match self {
+                    $(Self::$variant => $word,)+
+                })
+            }
+
+            fn from_value(value: Value) -> Option<Self> {
+                match value {
+                    $(Value::Choice($word) => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
 /// The [`Kind`] of an option of type `bool`, or `u32` or [`List`] with
-/// its range.
+/// its range, or a [`Choice`].
 macro_rules! kind {
     (bool) => {
         Kind::Bool
@@ -157,6 +209,9 @@ macro_rules! kind {
             min: $min,
             max: $max,
         }
+    };
+    ($choice:ident) => {
+        Kind::Choice(<$choice as Choice>::WORDS)
     };
 }
 
@@ -250,6 +305,22 @@ options! {
     ignorecase("ic"): bool = true;
     /// ...unless, with `ignorecase`, what's searched for has a capital.
     smartcase("scs"): bool = true;
+    /// What's done when a file is opened in a language that isn't
+    /// installed, or whose language server isn't.
+    languageinstall("li"): LanguageInstall = LanguageInstall::Ask;
+}
+
+choice! {
+    /// What `languageinstall` says to do about a language that isn't
+    /// installed.
+    LanguageInstall {
+        /// Ask, in the bottom bar.
+        Ask = "ask",
+        /// Install it without asking.
+        Always = "always",
+        /// Don't.
+        Never = "never",
+    }
 }
 
 /// The option called `name`, or by its short name.
@@ -292,6 +363,7 @@ impl Options {
                 let numbers: Vec<String> = numbers.iter().map(u32::to_string).collect();
                 format!("{}={}", info.name, numbers.join(","))
             }
+            Value::Choice(word) => format!("{}={word}", info.name),
         }
     }
 }
@@ -438,6 +510,20 @@ mod tests {
         for text in ["80,", "80 120", "x", "0"] {
             assert!(cc.parse(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_choice_is_one_of_its_words() {
+        let mut options = Options::default();
+        let li = info("li");
+        assert_eq!(options.show(li), "languageinstall=ask");
+        assert_eq!(li.parse("never"), Ok(Value::Choice("never")));
+        assert_eq!(options.set(li, Value::Choice("never")), Ok(true));
+        assert_eq!(options.languageinstall, LanguageInstall::Never);
+        assert_eq!(
+            li.parse("sometimes"),
+            Err("languageinstall is ask, always or never".into())
+        );
     }
 
     #[test]

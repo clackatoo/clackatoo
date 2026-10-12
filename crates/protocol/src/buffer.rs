@@ -150,6 +150,17 @@ pub enum BufferUpdate {
         /// The diagnostics, in order of where they start.
         diagnostics: Vec<Diagnostic>,
     },
+    /// The buffer's language isn't installed, or its language server
+    /// isn't, and the daemon can install them: offered once to each client
+    /// for each language, unless the answer was once no.
+    Offer {
+        /// The language, as language packs name it, such as `rust`.
+        language: String,
+        /// Its grammar isn't installed.
+        grammar: bool,
+        /// Its language server isn't, by its program's name.
+        server: Option<String>,
+    },
     /// The answer to the client's
     /// [`ClientMessage::Query`](crate::ClientMessage::Query) numbered `id`.
     Answer {

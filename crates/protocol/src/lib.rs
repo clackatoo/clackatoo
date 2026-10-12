@@ -72,7 +72,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -183,6 +183,14 @@ pub enum Event {
         buffer: BufferId,
         /// The change.
         update: BufferUpdate,
+    },
+    /// A language the client asked to install with [`Request::Install`]
+    /// is installed, as this says, or couldn't be, saying why.
+    Installed {
+        /// The language.
+        language: String,
+        /// What was installed, or why it couldn't be.
+        outcome: Result<String, String>,
     },
 }
 
@@ -405,6 +413,24 @@ pub enum Request {
     Discard {
         /// The buffer.
         buffer: BufferId,
+    },
+    /// Installs a language, as a [`BufferUpdate::Offer`] offered: its
+    /// grammar if `grammar`, and its language server `server`. Answered
+    /// at once; the install goes on meanwhile, and
+    /// [`Event::Installed`] says how it went.
+    Install {
+        /// The language.
+        language: String,
+        /// Install its grammar.
+        grammar: bool,
+        /// Install this language server, by its program's name.
+        server: Option<String>,
+    },
+    /// Don't offer to install a language again: the answer to an offer was
+    /// no. Kept on the daemon's machine.
+    Decline {
+        /// The language.
+        language: String,
     },
     /// Shows `file` in `pane`, which shows a file, in place of that file,
     /// as Vim's `:e` does. The file it showed closes if nothing else shows

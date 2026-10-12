@@ -172,6 +172,14 @@ impl Desk {
     /// Takes in a change to `buffer`. Returns whether a pane showing it is
     /// shown, and so the window must be redrawn.
     pub(crate) fn buffer_changed(&mut self, buffer: BufferId, update: BufferUpdate) -> bool {
+        if let BufferUpdate::Offer {
+            language,
+            grammar,
+            server,
+        } = update
+        {
+            return self.offered(language, grammar, server);
+        }
         let focused = self.shown.map(|shown| shown.pane);
         let editors = &mut self.editors;
         let Some(copy) = editors.buffers.get_mut(&buffer) else {

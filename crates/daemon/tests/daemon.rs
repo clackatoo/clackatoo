@@ -53,6 +53,8 @@ impl TestDaemon {
             agent: Vec::new(),
             udp_ports: Some(0..=0),
             languages: None,
+            servers: None,
+            declined: None,
             // Stopped with their last file, unless a test says otherwise.
             server_idle: Duration::ZERO,
         };
@@ -1563,7 +1565,9 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
         match client.next_event().expect("a buffer update") {
             Event::Buffer { update, .. } => return update,
             Event::Workspaces(_) => {}
-            other @ Event::View { .. } => panic!("expected a buffer update, got {other:?}"),
+            other @ (Event::View { .. } | Event::Installed { .. }) => {
+                panic!("expected a buffer update, got {other:?}")
+            }
         }
     }
 }
@@ -2192,4 +2196,173 @@ fn a_pane_shows_another_file_in_place_as_e_does() {
         },
     });
     assert_eq!(refused.unwrap(), Response::Error(Error::NotAFile(terminal)));
+}
+
+/// A daemon that installs languages and their servers in its directory,
+/// with none installed.
+fn with_installs() -> TestDaemon {
+    TestDaemon::start_with(|dir, config| {
+        config.languages = Some(dir.join("languages"));
+        config.servers = Some(dir.join("servers"));
+        config.declined = Some(dir.join("declined"));
+    })
+}
+
+/// The offers among the events that came before the last answer.
+fn offers(client: &mut Client) -> Vec<BufferUpdate> {
+    (client.take_events().into_iter())
+        .filter_map(|event| match event {
+            Event::Buffer {
+                update: update @ BufferUpdate::Offer { .. },
+                ..
+            } => Some(update),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_language_not_installed_is_offered_once_to_each_window_unless_declined() {
+    let daemon = with_installs();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "Cargo.toml"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    // Its server too, unless it's on PATH already.
+    let taplo = clackatoo_syntax::servers::on_path("taplo").is_none();
+    let offer = BufferUpdate::Offer {
+        language: "toml".into(),
+        grammar: true,
+        server: taplo.then(|| "taplo".into()),
+    };
+    client.take_events();
+    client.attach_buffer(buffer).unwrap();
+    assert_eq!(offers(&mut client), std::slice::from_ref(&offer));
+    client.attach_buffer(buffer).unwrap();
+    assert_eq!(offers(&mut client), [], "once to each window");
+
+    let mut other = daemon.client();
+    other.attach_buffer(buffer).unwrap();
+    assert_eq!(offers(&mut other), [offer]);
+    other.decline("toml").unwrap();
+    let mut third = daemon.client();
+    third.attach_buffer(buffer).unwrap();
+    assert_eq!(offers(&mut third), [], "declined");
+    let declined = std::fs::read_to_string(dir.join("declined")).unwrap();
+    assert_eq!(declined, "toml\n", "kept, for the next daemon");
+}
+
+#[test]
+fn a_file_in_no_language_clackatoo_knows_is_offered_nothing() {
+    let daemon = with_installs();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("notes.unknown"), "hi\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "notes.unknown"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    client.attach_buffer(buffer).unwrap();
+    assert_eq!(offers(&mut client), []);
+}
+
+#[test]
+#[ignore = "downloads TOML's grammar and taplo from GitHub: run with --ignored"]
+fn a_language_installed_when_offered_parses_and_has_its_server() {
+    let daemon = with_installs();
+    let dir = daemon.dir.path();
+    // In a project: a file in home has no server.
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "app/Cargo.toml"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    client.attach_buffer(buffer).unwrap();
+    client.install("toml", true, Some("taplo")).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_mins(2)))
+        .unwrap();
+    let (mut installed, mut highlighted, mut diagnosed) = (false, false, false);
+    while !(installed && highlighted && diagnosed) {
+        let event = client.next_event();
+        let event = event.unwrap_or_else(|err| {
+            panic!("{err}: installed {installed}, highlighted {highlighted}, diagnosed {diagnosed}")
+        });
+        match event {
+            Event::Installed { language, outcome } => {
+                assert_eq!(language, "toml");
+                assert_eq!(outcome, Ok("toml's grammar and taplo".to_owned()));
+                installed = true;
+            }
+            Event::Buffer { update, .. } => match update {
+                BufferUpdate::Highlights { spans, .. } => highlighted |= !spans.is_empty(),
+                BufferUpdate::Diagnostics { diagnostics, .. } => {
+                    diagnosed |= !diagnostics.is_empty();
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    assert!(dir.join("servers/taplo/taplo").is_file());
+}
+
+#[test]
+fn a_language_taken_off_the_declined_file_is_offered_again() {
+    let daemon = with_installs();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "Cargo.toml"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    client.decline("toml").unwrap();
+    client.decline("bash").unwrap();
+    client.take_events();
+    client.attach_buffer(buffer).unwrap();
+    assert_eq!(offers(&mut client), [], "declined");
+    // As `clackatoo language install toml` does.
+    std::fs::write(dir.join("declined"), "bash\n").unwrap();
+    let mut other = daemon.client();
+    other.attach_buffer(buffer).unwrap();
+    assert_eq!(offers(&mut other).len(), 1, "offered again");
+    other.decline("lua").unwrap();
+    let declined = std::fs::read_to_string(dir.join("declined")).unwrap();
+    assert_eq!(declined, "bash\nlua\n", "toml stays off");
+}
+
+#[test]
+fn a_server_installed_after_it_wasnt_found_is_started() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let pack = dir.join("languages/fake");
+        std::fs::create_dir_all(&pack).unwrap();
+        let server = dir.join("later-server").display().to_string();
+        std::fs::write(
+            pack.join("language.toml"),
+            format!(
+                "grammar = \"fake\"\nextensions = [\"fk\"]\nserver = [{server:?}]\nroots = [\"project\"]\n"
+            ),
+        )
+        .unwrap();
+        config.languages = Some(dir.join("languages"));
+    });
+    let dir = daemon.dir.path();
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    std::fs::write(dir.join("app/a.fk"), "bad\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    // Not found, so not started, however often it's shown...
+    attach_buffer(&mut client, buffer);
+    // ...until it's there.
+    let server = dir.join("later-server");
+    std::os::unix::fs::symlink(example("fake_language_server"), server).unwrap();
+    attach_buffer(&mut client, buffer);
+    let (_, places) = next_diagnostics(&mut client);
+    assert_eq!(places, [(0, 3)]);
 }

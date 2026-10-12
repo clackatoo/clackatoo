@@ -26,7 +26,7 @@ pub(super) struct BufferSlot {
     /// since.
     highlights: Highlights,
     /// Whether it's being parsed: its language has a pack.
-    parsed: bool,
+    pub(super) parsed: bool,
     /// How its language server knows it, while it's open in one.
     pub(super) server: Option<Opened>,
 }
@@ -88,6 +88,7 @@ impl Daemon {
         // which servers don't.
         self.open_in_server(id);
         self.send_snapshot(token, id);
+        self.offer_install(token, id);
         Ok(())
     }
 
@@ -372,14 +373,18 @@ impl Daemon {
 
     /// Sends `update` about buffer `id` to the client at `token`.
     pub(super) fn tell(&mut self, token: Token, id: BufferId, update: BufferUpdate) {
+        self.send_event(token, Event::Buffer { buffer: id, update });
+    }
+
+    /// Sends `event` to the client at `token`.
+    pub(super) fn send_event(&mut self, token: Token, event: Event) {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return;
         };
-        let message = ServerMessage::Event(Event::Buffer { buffer: id, update });
-        match frame::encode(&message) {
+        match frame::encode(&ServerMessage::Event(event)) {
             Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
             Err(err) => {
-                log::error!("encoding a buffer's update failed: {err}");
+                log::error!("encoding an event failed: {err}");
                 return;
             }
         }

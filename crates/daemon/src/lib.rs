@@ -65,6 +65,13 @@ pub struct DaemonConfig {
     /// directory each (see [`clackatoo_syntax::pack`]). `None` parses
     /// nothing.
     pub languages: Option<PathBuf>,
+    /// Where language servers are installed, one directory each (see
+    /// [`clackatoo_syntax::servers`]), and looked for when they aren't on
+    /// `PATH`. `None` installs none, and offers none.
+    pub servers: Option<PathBuf>,
+    /// The file the languages are listed in that the answer to an offer
+    /// to install them was no, so they aren't offered again.
+    pub declined: Option<PathBuf>,
     /// How long a language server is kept with no files open in it, so
     /// coming back to its project soon doesn't start it again.
     pub server_idle: std::time::Duration,
@@ -122,13 +129,16 @@ impl DaemonConfig {
                 }),
             },
             languages: languages_dir(),
+            servers: languages_dir().map(|dir| dir.with_file_name("servers")),
+            declined: languages_dir().map(|dir| dir.with_file_name("declined")),
             server_idle: DEFAULT_SERVER_IDLE,
         }
     }
 }
 
 /// Where language packs are installed: `clackatoo/languages` in
-/// `$XDG_DATA_HOME`, or else in `~/.local/share`.
+/// `$XDG_DATA_HOME`, or else in `~/.local/share`. Language servers are
+/// installed beside it, in `servers`.
 #[must_use]
 pub fn languages_dir() -> Option<PathBuf> {
     let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());

@@ -164,6 +164,12 @@ impl Client {
         }
     }
 
+    /// The events that came before the last answer, not yet taken, without
+    /// waiting for more.
+    pub fn take_events(&mut self) -> Vec<Event> {
+        self.events.drain(..).collect()
+    }
+
     /// Splits the connection in two, so one thread can wait for messages
     /// while another sends. Requests sent through the [`Sender`] get their
     /// answers through the [`Receiver`], in order, among the events.
@@ -228,6 +234,45 @@ impl Client {
     /// See [`ClientError`].
     pub fn attach_buffer(&mut self, buffer: BufferId) -> Result<(), ClientError> {
         match self.request(&Request::AttachBuffer { buffer })? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Installs `language`'s grammar if `grammar`, and the language server
+    /// `server`, as a [`BufferUpdate::Offer`](clackatoo_protocol::BufferUpdate::Offer)
+    /// offered. The daemon says how it went in an [`Event::Installed`].
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn install(
+        &mut self,
+        language: &str,
+        grammar: bool,
+        server: Option<&str>,
+    ) -> Result<(), ClientError> {
+        let request = Request::Install {
+            language: language.to_owned(),
+            grammar,
+            server: server.map(str::to_owned),
+        };
+        match self.request(&request)? {
+            Response::Done => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Has `language` never offered again.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn decline(&mut self, language: &str) -> Result<(), ClientError> {
+        let request = Request::Decline {
+            language: language.to_owned(),
+        };
+        match self.request(&request)? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
         }
