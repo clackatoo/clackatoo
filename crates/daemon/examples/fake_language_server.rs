@@ -203,21 +203,29 @@ impl Fake {
                 let result = self.rename(params);
                 send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
             }
-            "textDocument/implementation" => {
-                let uri = params["textDocument"]["uri"].as_str().unwrap();
-                let text = &self.files[uri];
-                let result: Vec<Value> = (text.match_indices("bad"))
-                    .map(|(at, _)| {
-                        let start = place(text, at, self.utf16);
-                        json!({ "uri": uri, "range": { "start": start, "end": start } })
-                    })
-                    .collect();
-                send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
-            }
+            "textDocument/implementation" | "textDocument/references" => self.places(message),
             "exit" => return false,
             _ => {}
         }
         true
+    }
+
+    /// Answers with every "bad", as where it's implemented or, if the
+    /// declaration's asked for too, where it's used.
+    fn places(&self, message: &Value) {
+        let params = &message["params"];
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let text = &self.files[uri];
+        let asked = message["method"] == "textDocument/implementation"
+            || params["context"]["includeDeclaration"] == true;
+        let result: Vec<Value> = (text.match_indices("bad"))
+            .filter(|_| asked)
+            .map(|(at, _)| {
+                let start = place(text, at, self.utf16);
+                json!({ "uri": uri, "range": { "start": start, "end": start } })
+            })
+            .collect();
+        send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
     }
 
     /// Answers where what's at the place `message` asks about is defined.

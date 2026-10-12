@@ -848,6 +848,9 @@ fn gd_asks_the_language_server_and_goes_where_it_says() {
 
     // An answer to an older query, or another pane's, goes nowhere; and
     // what goes wrong is said.
+    setup.keys("grr");
+    assert_eq!(setup.queries[3].2, Query::References);
+    setup.queries.remove(3);
     setup.keys("gri");
     let (asked, at, query) = setup.queries[3];
     assert_eq!((at, query), (14, Query::Implementation));

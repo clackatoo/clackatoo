@@ -458,8 +458,8 @@ impl Reader<'_> {
                 'E' => Motion::BigWordEnd,
                 'G' => Motion::Last,
                 'g' => {
-                    // What a language server knows: `gd`, `gD`, `gy`, `gri`
-                    // and `grn`, as Neovim's are.
+                    // What a language server knows: `gd`, `gD`, `gy`, `gri`,
+                    // `grr` and `grn`, as Neovim's are.
                     let ask = |query| Read::Yes(Action::Ask(query));
                     let Some(next) = self.next() else {
                         return Some(Read::More);
@@ -473,6 +473,7 @@ impl Reader<'_> {
                             None => Read::More,
                             Some(last) => match last.plain() {
                                 Some('i') => ask(Query::Implementation),
+                                Some('r') => ask(Query::References),
                                 Some('n') => Read::Yes(Action::Rename),
                                 _ => Read::No,
                             },

@@ -1991,14 +1991,26 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
     };
     assert!(markdown && said.contains("pub fn f() -> u32"), "{said}");
 
+    // Where f is used, its declaration included.
+    client
+        .query(buffer, 4, (0, call), Query::References)
+        .unwrap();
+    let (_, answer) = next_answer(&mut client);
+    let Answer::Locations(found) = answer else {
+        panic!("{answer:?}");
+    };
+    let mut lines: Vec<u64> = found.iter().map(|place| place.line).collect();
+    lines.sort_unstable();
+    assert_eq!(lines, [0, 4]);
+
     // And f renamed, where it's defined and where it's called, as one
     // edit to the buffer.
-    client.rename(buffer, 3, (0, call), "first").unwrap();
+    client.rename(buffer, 5, (0, call), "first").unwrap();
     let (updates, answer) = updates_to_answer(&mut client);
     assert_eq!(
         answer,
         (
-            3,
+            5,
             Answer::Renamed {
                 occurrences: 2,
                 files: 1
@@ -2901,6 +2913,12 @@ fn a_language_server_can_give_several_places_each_with_its_line() {
     let (1, Answer::Locations(found)) = next_answer(&mut client) else {
         panic!("several places");
     };
+    // References, the declaration included, are as many.
+    client.query(buffer, 2, (0, 0), Query::References).unwrap();
+    let (2, Answer::Locations(references)) = next_answer(&mut client) else {
+        panic!("references");
+    };
+    assert_eq!(references, found);
     let places: Vec<(u64, usize, &str)> = (found.iter())
         .map(|place| (place.line, place.col, place.text.as_str()))
         .collect();

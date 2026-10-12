@@ -293,12 +293,16 @@ impl LanguageServer {
             Query::Declaration => "textDocument/declaration",
             Query::TypeDefinition => "textDocument/typeDefinition",
             Query::Implementation => "textDocument/implementation",
+            Query::References => "textDocument/references",
             Query::Hover => "textDocument/hover",
         };
-        let params = json!({
+        let mut params = json!({
             "textDocument": { "uri": uri(path) },
             "position": position(text, at, self.encoding),
         });
+        if query == Query::References {
+            params["context"] = json!({ "includeDeclaration": true });
+        }
         self.request(method, &params)
     }
 

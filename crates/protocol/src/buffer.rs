@@ -184,6 +184,8 @@ pub enum Query {
     TypeDefinition,
     /// What implements it, such as a trait's impls.
     Implementation,
+    /// Everywhere it's used, its declaration included, as `grr` lists.
+    References,
     /// What it is: its type, and its documentation, as `K` shows.
     Hover,
 }
