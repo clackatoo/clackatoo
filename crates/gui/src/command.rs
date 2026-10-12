@@ -6,7 +6,8 @@
 //! tab, and with a mark before it, beside the focused pane (`|` right, `|<`
 //! left, `-` below, `-^` above). `Terminal@host` asks for it on another
 //! machine's daemon. A number moves to that tab. Lowercase words are the
-//! window's own commands, and Vim's for files: `w`, `q`, `wq` and `e`.
+//! window's own commands, and Vim's for files, `w`, `q`, `wq` and `e`, and
+//! for options, `set`.
 
 use clackatoo_protocol::Side;
 
@@ -43,6 +44,8 @@ pub(crate) enum Command {
     Discard,
     /// Run the config again, from the start.
     Reload,
+    /// `:set`: change options, or say what they are, as these words say.
+    Set(String),
 }
 
 /// Where a new pane goes.
@@ -69,7 +72,7 @@ const KINDS: [(&str, Kind); 2] = [("Terminal", Kind::Terminal), ("Agent", Kind::
 const EDITOR: &str = "Editor";
 
 /// The window's own commands, for messages.
-const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, w, q and e";
+const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, w, q and e";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -88,6 +91,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         }
         "close" => return Ok(Command::Close),
         "reload" => return Ok(Command::Reload),
+        "set" | "se" => return Ok(Command::Set(argument.unwrap_or_default().to_owned())),
         _ => {}
     }
     if let Some(command) = file_command(word, argument) {

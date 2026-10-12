@@ -97,11 +97,17 @@ impl Laid {
             .map_or(self.text.len(), |&(_, end)| end)
     }
 
-    /// The line as drawn in `width` cells from cell `left`, coloured as
-    /// `spans` say. The line starts at byte `start` of the text they're
-    /// for.
-    pub(crate) fn shown(&self, left: usize, width: usize, spans: &[Span], start: usize) -> Row {
-        let mut builder = RowBuilder::new(width);
+    /// Appends the line to `builder` as drawn in `width` cells from cell
+    /// `left`, coloured as `spans` say. The line starts at byte `start` of
+    /// the text they're for.
+    pub(crate) fn show(
+        &self,
+        builder: &mut RowBuilder,
+        left: usize,
+        width: usize,
+        spans: &[Span],
+        start: usize,
+    ) {
         let mut spans = spans.iter().peekable();
         for (index, &(cell, byte)) in self.starts.iter().enumerate() {
             let (next_cell, next_byte) =
@@ -125,11 +131,10 @@ impl Laid {
             };
             match piece.chars().next() {
                 Some('\t') => builder.push(&" ".repeat(next_cell - cell), &Style::DEFAULT, true),
-                Some(ch) if ch.is_control() => push(&mut builder, ch, cell),
+                Some(ch) if ch.is_control() => push(builder, ch, cell),
                 _ => builder.push(piece, &style, false),
             }
         }
-        builder.finish(false)
     }
 }
 
@@ -336,13 +341,20 @@ mod tests {
         assert_eq!(laid.row.text().trim_start(), "x字^Aé");
     }
 
+    /// `laid` as drawn in a row of `width` cells of its own.
+    fn shown(laid: &Laid, left: usize, width: usize, spans: &[Span], start: usize) -> Row {
+        let mut builder = RowBuilder::new(width);
+        laid.show(&mut builder, left, width, spans, start);
+        builder.finish(false)
+    }
+
     #[test]
     fn a_line_is_drawn_from_any_column() {
         let laid = Laid::new("ab字cd".to_owned());
-        assert_eq!(laid.shown(0, 4, &[], 0).text(), "ab字");
-        assert_eq!(laid.shown(1, 3, &[], 0).text(), "b字");
+        assert_eq!(shown(&laid, 0, 4, &[], 0).text(), "ab字");
+        assert_eq!(shown(&laid, 1, 3, &[], 0).text(), "b字");
         // Half of 字 off the left edge.
-        assert_eq!(laid.shown(3, 3, &[], 0).text(), " cd");
+        assert_eq!(shown(&laid, 3, 3, &[], 0).text(), " cd");
     }
 
     #[test]
@@ -367,7 +379,7 @@ mod tests {
                 kind: Kind::Function,
             },
         ];
-        let row = laid.shown(0, 6, &spans, 10);
+        let row = shown(&laid, 0, 6, &spans, 10);
         let fg = |col: usize| row.style(row.cells()[col]).fg;
         assert_eq!(fg(0), colors::syntax(Kind::Keyword).fg);
         assert_eq!(fg(1), colors::syntax(Kind::Keyword).fg);

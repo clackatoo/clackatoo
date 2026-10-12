@@ -5,6 +5,9 @@ use clackatoo_protocol::{Attributes, Color, Kind, Style};
 /// A colour as red, green, blue and alpha, each from 0 to 1, in sRGB.
 pub(crate) type Rgba = [f32; 4];
 
+/// clackatoo's own colour, the cockatoo's crest.
+const ACCENT: u32 = 0xd9_b2_4a;
+
 /// White, `alpha` opaque, for faint lines that lighten what's behind them.
 const fn white(alpha: f32) -> Rgba {
     [1.0, 1.0, 1.0, alpha]
@@ -85,7 +88,7 @@ impl Default for Theme {
             foreground: hex_rgba(0xdd_e1_e6),
             background: hex_rgba(0x0c_0e_10),
             cursor: hex_rgba(0xdd_e1_e6),
-            accent: hex_rgba(0xd9_b2_4a),
+            accent: hex_rgba(ACCENT),
             bar: hex_rgba(0x0012_1416),
             divider: hex_rgba(0x25_26_2c),
             picked: hex_rgba(0x1f_20_27),
@@ -149,6 +152,22 @@ pub(crate) const fn syntax(kind: Kind) -> Style {
         | Kind::Property
         | Kind::Operator
         | Kind::Punctuation => Color::Default,
+    };
+    Style {
+        fg,
+        ..Style::DEFAULT
+    }
+}
+
+/// How an editor's line numbers are drawn: faint, but the cursor's line in
+/// clackatoo's accent, so the eye finds it.
+#[must_use]
+pub(crate) const fn line_number(cursor: bool) -> Style {
+    let fg = if cursor {
+        let [_, r, g, b] = ACCENT.to_be_bytes();
+        Color::Rgb(r, g, b)
+    } else {
+        Color::Rgb(0x4f, 0x54, 0x5c)
     };
     Style {
         fg,

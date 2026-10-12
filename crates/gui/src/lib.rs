@@ -32,6 +32,7 @@ mod layout;
 mod lua;
 mod motion;
 mod objects;
+mod options;
 mod pane;
 mod render;
 mod screen;

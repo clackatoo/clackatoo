@@ -26,6 +26,7 @@ use crate::command::{self, Command, Kind, Place};
 use crate::input::{self, KeyPress, Modifiers};
 use crate::keymap::{Chord, Pressed};
 use crate::layout::{Area, Direction, Divider, Placement};
+use crate::options::Options;
 use crate::pane::{self, Copy, Mode, Pane, PaneMouse, Selection};
 use bindings::Binding;
 
@@ -91,6 +92,7 @@ mod bindings;
 mod editors;
 mod jumps;
 mod script;
+mod settings;
 
 pub(crate) use script::LuaStart;
 
@@ -172,6 +174,8 @@ pub(crate) struct Desk {
     editors: editors::Editors,
     /// Where the focus has been.
     jumps: jumps::Jumps,
+    /// The options, as config and `:set` have set them.
+    options: Options,
 }
 
 impl Desk {
@@ -1313,9 +1317,10 @@ impl Desk {
 
     /// Carries out a command.
     fn run(&mut self, command: Command) {
-        if command == Command::Reload {
-            self.reload_lua();
-            return;
+        match &command {
+            Command::Reload => return self.reload_lua(),
+            Command::Set(words) => return self.run_set(words),
+            _ => {}
         }
         let Some(shown) = self.shown else { return };
         let new = |kind, size| match kind {
@@ -1408,7 +1413,7 @@ impl Desk {
             Command::Quit { force } => self.quit(force),
             Command::Write { force, quit } => self.write_file(force, quit),
             Command::Discard => self.discard_changes(),
-            Command::Reload => {}
+            Command::Reload | Command::Set(_) => {}
         }
     }
 
@@ -1929,6 +1934,46 @@ mod tests {
         desk.lua_ready();
         ctrl_b(&mut desk, "x");
         assert!(answer_all(&mut desk).is_empty(), "unbound again");
+    }
+
+    #[test]
+    fn options_are_set_by_config_and_set_and_lua_reads_them() {
+        let mut desk = three_tabs();
+        snapshot(&mut desk, 1);
+        desk.lua_from(
+            r#"
+            client.opt.rnu = false
+            client.opt.numberwidth = 6
+            client.keys.map("n", "<C-b>n", function()
+                client.opt.number = not client.opt.number
+            end)
+            "#,
+        );
+        assert!(!desk.options.relativenumber);
+        assert_eq!(desk.options.numberwidth, 6);
+        normal_mode(&mut desk);
+        command(&mut desk, "set rnu? nu");
+        assert_eq!(desk.message.as_deref(), Some("norelativenumber"));
+        command(&mut desk, "set nonu");
+        assert!(!desk.options.number);
+        // Lua's copy heard, so it turns it back on.
+        ctrl_b(&mut desk, "n");
+        assert!(desk.options.number);
+        command(&mut desk, "set");
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("norelativenumber  numberwidth=6")
+        );
+        command(&mut desk, "set nuw=99");
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("numberwidth is a whole number from 1 to 20")
+        );
+        // A reload starts again from the options as they start.
+        command(&mut desk, "reload");
+        assert!(desk.options.relativenumber);
+        desk.lua_ready();
+        assert!(!desk.options.relativenumber);
     }
 
     #[test]

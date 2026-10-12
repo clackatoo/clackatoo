@@ -15,6 +15,7 @@ use super::{Asked, Desk};
 use crate::command::Place;
 use crate::editor::{BufferCopy, Editor, Register};
 use crate::input::KeyPress;
+use crate::options::Options;
 use crate::pane::{Copy, Mode};
 
 /// The editors, by the pane each is, and the buffers they show.
@@ -35,6 +36,15 @@ impl Editors {
         self.attached.clear();
         for copy in self.buffers.values_mut() {
             copy.reconnected();
+        }
+    }
+
+    /// Passes the options on to every editor, as they've changed.
+    pub(super) fn set_options(&mut self, options: &Options) {
+        for editor in self.panes.values_mut() {
+            if let Some(copy) = self.buffers.get(&editor.buffer()) {
+                editor.set_options(options, copy);
+            }
         }
     }
 }
@@ -68,7 +78,7 @@ impl Desk {
             .and_then(|shown| self.workspaces.get(shown.workspace))
             .map(panes)
             .unwrap_or_default();
-        let editors = &mut self.editors;
+        let (editors, options) = (&mut self.editors, &self.options);
         editors
             .panes
             .retain(|pane, editor| anywhere.get(pane) == Some(&editor.buffer()));
@@ -76,7 +86,7 @@ impl Desk {
             editors
                 .panes
                 .entry(pane)
-                .or_insert_with(|| Editor::new(buffer));
+                .or_insert_with(|| Editor::new(buffer, options));
             editors
                 .buffers
                 .entry(buffer)

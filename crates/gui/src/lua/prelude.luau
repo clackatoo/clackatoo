@@ -177,6 +177,16 @@ local client = {
 	on = function(event, handler)
 		return subscription(call(core.on, "client", 0, event, handler))
 	end,
+	-- The options, by name or short name, as Vim's `vim.opt`:
+	-- `client.opt.number = false`.
+	opt = setmetatable({}, {
+		__index = function(_, name)
+			return call(core.get_option, name)
+		end,
+		__newindex = function(_, name, value)
+			call(core.set_option, name, value)
+		end,
+	}),
 }
 setmetatable(client, {
 	__index = function(_, key)

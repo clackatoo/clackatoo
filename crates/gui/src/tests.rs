@@ -964,7 +964,7 @@ fn renders_an_editor_pane() {
         ],
     });
     let (cols, rows) = (32u16, 5u16);
-    let mut editor = Editor::new(BufferId(1));
+    let mut editor = Editor::new(BufferId(1), &crate::options::Options::default());
     editor.resize(Size::new(cols, rows).unwrap());
     editor.settle(&copy);
     let (lines, cursor) = editor.scene();
@@ -997,10 +997,11 @@ fn renders_an_editor_pane() {
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
     save("editor", size, &pixels);
-    assert_eq!(lines[1].text().trim_start(), "println!(\"hello, 世界\");");
+    // Right of the line numbers, four cells wide.
+    assert_eq!(lines[1].text(), "  1     println!(\"hello, 世界\");");
     let fg = |row: &clackatoo_term::Row, col: usize| row.style(row.cells()[col]).fg;
-    assert_eq!(fg(lines[0], 0), crate::colors::syntax(Kind::Keyword).fg);
-    assert_eq!(fg(lines[1], 4), crate::colors::syntax(Kind::Macro).fg);
+    assert_eq!(fg(lines[0], 4), crate::colors::syntax(Kind::Keyword).fg);
+    assert_eq!(fg(lines[1], 8), crate::colors::syntax(Kind::Macro).fg);
     assert_eq!(lines[3].text(), "~", "past the end");
     let background = &pixels[..4];
     assert!(pixels.chunks(4).any(|pixel| pixel != background));

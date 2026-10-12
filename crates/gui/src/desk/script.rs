@@ -55,6 +55,7 @@ impl Desk {
         }
         self.script = super::script::Script::default();
         self.keymap = super::bindings::Keys::default();
+        self.reset_options();
         self.script.lua = start.as_ref().and_then(|start| (start.0)());
         self.message = Some(match &self.script.lua {
             Some(_) => "reloaded the config".into(),
@@ -94,6 +95,13 @@ impl Desk {
             lua.send(ToLua::World(world.clone()));
         }
         self.script.told = Some(world);
+    }
+
+    /// Tells Lua something, if there's a Lua.
+    pub(super) fn tell_lua(&self, message: ToLua) {
+        if let Some(lua) = &self.script.lua {
+            lua.send(message);
+        }
     }
 
     /// Does what Lua has said since last asked. Returns whether the window
@@ -275,6 +283,7 @@ impl Desk {
                 self.request(Request::ClosePane { pane }, Asked::Command);
             }
             FromLua::Focus { pane } => self.show_pane(pane),
+            FromLua::Set { option, value } => self.set_option(option, value),
             FromLua::Error(text) => {
                 log::warn!("config: {text}");
                 self.message = Some(text);

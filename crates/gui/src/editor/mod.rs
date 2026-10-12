@@ -20,7 +20,7 @@ mod text;
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{BufferId, Edit, Size};
-use clackatoo_term::Row;
+use clackatoo_term::{Row, RowBuilder, Style};
 use clackatoo_text::Bias;
 use winit::keyboard::{Key, NamedKey};
 
@@ -28,13 +28,19 @@ pub(crate) use copy::{BufferCopy, Heard};
 use keys::{Action, Command, Entry, Operator, Parsed, Stroke, Target, ViewAt};
 use text::{Laid, TAB, Text};
 
+use crate::colors;
 use crate::input::KeyPress;
 use crate::motion::{Class, Cursor, Lines, Motion, Point, Reach, before, class_at};
+use crate::options::Options;
 use crate::pane::{Mode, Selection, enters_normal_mode};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 
 /// How long text copied stays highlighted, as in a terminal's normal mode.
 const FLASH: Duration = Duration::from_millis(150);
+
+/// The fewest cells left for the text beside the line numbers. A narrower
+/// pane shows no numbers.
+const LEAST_TEXT: usize = 12;
 
 /// Text kept to put back with `p`: what was last copied or deleted, by
 /// characters, or whole lines.
@@ -70,6 +76,38 @@ struct Change {
     typed: Vec<Stroke>,
 }
 
+/// How an editor numbers its lines, as the options say.
+#[derive(Clone, Copy, Debug)]
+struct Numbers {
+    /// The cursor's line shows its own number (`number`)...
+    absolute: bool,
+    /// ...and the others how far they are from it (`relativenumber`).
+    relative: bool,
+    /// The fewest cells the numbers take, with the space after them.
+    least: usize,
+}
+
+impl Numbers {
+    fn of(options: &Options) -> Self {
+        Self {
+            absolute: options.number,
+            relative: options.relativenumber,
+            least: options.numberwidth as usize,
+        }
+    }
+
+    /// The number shown on `line`, with the cursor on `cursor`.
+    fn label(self, line: u64, cursor: u64) -> u64 {
+        if self.relative && line != cursor {
+            line.abs_diff(cursor)
+        } else if self.absolute {
+            line + 1
+        } else {
+            0
+        }
+    }
+}
+
 /// A pane editing a buffer.
 #[derive(Debug)]
 pub(crate) struct Editor {
@@ -83,6 +121,10 @@ pub(crate) struct Editor {
     left: usize,
     height: usize,
     width: usize,
+    /// How lines are numbered.
+    numbers: Numbers,
+    /// The cells the line numbers take, at the pane's left, out of `width`.
+    gutter: usize,
     /// The keys of a command being typed in normal or visual mode.
     typed: Vec<Stroke>,
     /// Whether the next edit starts an undo step: it's the first of a
@@ -114,7 +156,7 @@ pub(crate) struct Editor {
 }
 
 impl Editor {
-    pub(crate) fn new(buffer: BufferId) -> Self {
+    pub(crate) fn new(buffer: BufferId, options: &Options) -> Self {
         Self {
             buffer,
             mode: Mode::Normal,
@@ -124,6 +166,8 @@ impl Editor {
             left: 0,
             height: 1,
             width: 1,
+            numbers: Numbers::of(options),
+            gutter: 0,
             typed: Vec::new(),
             new_step: true,
             changing: None,
@@ -152,6 +196,16 @@ impl Editor {
     pub(crate) fn resize(&mut self, size: Size) {
         self.height = usize::from(size.rows());
         self.width = usize::from(size.cols());
+        if self.width < self.gutter + LEAST_TEXT {
+            // Until the next settle works out the numbers afresh.
+            self.gutter = 0;
+        }
+    }
+
+    /// Takes in the options, as they've changed.
+    pub(crate) fn set_options(&mut self, options: &Options, copy: &BufferCopy) {
+        self.numbers = Numbers::of(options);
+        self.follow(copy);
     }
 
     /// Enters normal mode, as moving the focus here from a pane in normal
@@ -1205,10 +1259,11 @@ impl Editor {
         } else if line >= self.top + height {
             self.top = line + 1 - height;
         }
-        let last = Text::new(copy.text()).last_line();
-        self.top = self.top.min(last);
+        let text = Text::new(copy.text());
+        self.top = self.top.min(text.last_line());
+        self.gutter = self.gutter_for(text.lines());
         let col = self.cursor.at.col;
-        let width = self.width.max(1);
+        let width = self.text_width().max(1);
         if col < self.left {
             self.left = col;
         } else if col >= self.left + width {
@@ -1244,14 +1299,16 @@ impl Editor {
         }
     }
 
-    /// Puts the cursor at `line` and `col` of the view, as a click does.
+    /// Puts the cursor at `line` and `col` of the pane, as a click does. A
+    /// click on a line's number goes to the line's start.
     pub(crate) fn click(&mut self, line: usize, col: usize, copy: &BufferCopy) {
         let text = Text::new(copy.text());
         let line = (self.top + line as u64).min(text.last_line());
-        self.cursor = Cursor::new(Point {
-            line,
-            col: self.left + col,
-        });
+        let col = match col.checked_sub(self.gutter) {
+            Some(col) => self.left + col,
+            None => 0,
+        };
+        self.cursor = Cursor::new(Point { line, col });
         drop(text);
         if self.mode == Mode::Insert {
             let byte = self.insert_byte(copy);
@@ -1263,27 +1320,65 @@ impl Editor {
 
     // --- Drawing ------------------------------------------------------------
 
+    /// The cells line numbers take for a text of `lines` lines: the widest
+    /// number and a space, at least `numberwidth`, or none if they're off
+    /// or would leave the text too little room.
+    fn gutter_for(&self, lines: u64) -> usize {
+        let Numbers {
+            absolute,
+            relative,
+            least,
+        } = self.numbers;
+        if !absolute && !relative {
+            return 0;
+        }
+        let widest = if absolute {
+            // The line after the last line break is numbered too, while
+            // it's typed on.
+            lines.max(self.cursor.at.line + 1)
+        } else {
+            // Distances from the cursor, which stays in view.
+            self.height.max(1) as u64
+        };
+        let gutter = (widest.ilog10() as usize + 2).max(least);
+        if self.width >= gutter + LEAST_TEXT {
+            gutter
+        } else {
+            0
+        }
+    }
+
+    /// The cells the text is shown in, right of the line numbers.
+    fn text_width(&self) -> usize {
+        self.width.saturating_sub(self.gutter)
+    }
+
     /// Lays out the lines shown, for [`scene`](Self::scene).
     pub(crate) fn settle(&mut self, copy: &BufferCopy) {
         let text = Text::new(copy.text());
         let lines = text.lines();
+        self.gutter = self.gutter_for(lines);
+        let cursor = self.cursor.at.line;
         self.rows = (0..self.height as u64)
             .map(|offset| {
                 let line = self.top + offset;
+                let mut builder = RowBuilder::new(self.width);
                 // The line after the last line break, while typed on.
-                let typing_after = line == lines && self.cursor.at.line == lines;
+                let typing_after = line == lines && cursor == lines;
                 if line < lines || typing_after {
+                    if self.gutter > 0 {
+                        let number = self.numbers.label(line, cursor);
+                        let number = format!("{number:>0$} ", self.gutter - 1);
+                        builder.push(&number, &colors::line_number(line == cursor), true);
+                    }
                     let laid = Laid::new(text.line_text(line));
                     let (start, end) = (text.line_start(line), text.line_end(line));
                     let spans = copy.highlights().within(start, end);
-                    laid.shown(self.left, self.width, spans, start)
-                } else {
-                    let mut builder = clackatoo_term::RowBuilder::new(self.width);
-                    if copy.loaded() {
-                        builder.push("~", &clackatoo_term::Style::DEFAULT, true);
-                    }
-                    builder.finish(false)
+                    laid.show(&mut builder, self.left, self.text_width(), spans, start);
+                } else if copy.loaded() {
+                    builder.push("~", &Style::DEFAULT, true);
                 }
+                builder.finish(false)
             })
             .collect();
     }
@@ -1295,10 +1390,10 @@ impl Editor {
         let shown = at.line >= self.top
             && at.line < self.top + self.height as u64
             && at.col >= self.left
-            && at.col < self.left + self.width;
+            && at.col < self.left + self.text_width();
         let cursor = shown.then(|| SceneCursor {
             line: usize::try_from(at.line - self.top).unwrap_or(0),
-            col: at.col - self.left,
+            col: self.gutter + at.col - self.left,
             style: if self.mode == Mode::Insert {
                 CursorStyle::Bar
             } else {
@@ -1364,11 +1459,11 @@ impl Editor {
                 ),
             };
             let from = from.saturating_sub(self.left);
-            let to = to.saturating_sub(self.left).min(self.width);
+            let to = to.saturating_sub(self.left).min(self.text_width());
             if from < to {
                 into.push(Highlight {
                     line: usize::try_from(line - self.top).unwrap_or(0),
-                    cols: from..to,
+                    cols: self.gutter + from..self.gutter + to,
                     kind: why,
                 });
             }

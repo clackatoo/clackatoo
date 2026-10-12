@@ -24,6 +24,7 @@ use clackatoo_protocol::{PaneId, Side, TabId, Workspaces};
 use crate::command::Kind;
 use crate::desk::Shown;
 use crate::keymap::{Chord, KeyMode};
+use crate::options::{Info, Value};
 
 /// How long a key waits for Lua to say whether it goes on, before it goes
 /// on as if Lua had said nothing.
@@ -125,6 +126,8 @@ pub(crate) enum ToLua {
         request: u64,
         result: Result<PaneId, String>,
     },
+    /// An option is set to this now, whoever set it.
+    Option { option: &'static Info, value: Value },
 }
 
 /// What Lua tells the window.
@@ -165,6 +168,11 @@ pub(crate) enum FromLua {
     },
     Focus {
         pane: PaneId,
+    },
+    /// Set an option, to a value it can hold.
+    Set {
+        option: &'static Info,
+        value: Value,
     },
     /// Something went wrong, as this says.
     Error(String),
@@ -520,6 +528,65 @@ mod tests {
             [FromLua::Focus { pane: PaneId(1) }],
             "and Lua carries on"
         );
+    }
+
+    #[test]
+    fn options_are_set_read_and_checked() {
+        use crate::options::find;
+        let (mut lua, mut said) = start(
+            r#"
+            client.opt.nu = false
+            client.opt.numberwidth = client.opt.numberwidth + 1
+            if client.opt.number == false then client.opt.rnu = false end
+            client.keys.map("n", "k", function()
+                client.opt.number = client.opt.numberwidth == 9
+            end)
+            "#,
+        );
+        assert!(matches!(said.pop(), Some(FromLua::Map { .. })));
+        let set = |name, value| FromLua::Set {
+            option: find(name).unwrap(),
+            value,
+        };
+        assert_eq!(
+            said,
+            [
+                set("number", Value::Bool(false)),
+                set("numberwidth", Value::Number(5)),
+                set("relativenumber", Value::Bool(false)),
+            ]
+        );
+        // What the window sets, Lua reads.
+        lua.send(ToLua::Option {
+            option: find("numberwidth").unwrap(),
+            value: Value::Number(9),
+        });
+        assert_eq!(bound(&mut lua, 1, 1).1, [set("number", Value::Bool(true))]);
+        for (config, wanted) in [
+            (
+                "client.opt.wrap = true",
+                "init.lua:1: there's no option called `wrap`",
+            ),
+            ("client.opt.nu = 1", "init.lua:1: number is true or false"),
+            (
+                "client.opt.nuw = 2.5",
+                "init.lua:1: numberwidth is a whole number from 1 to 20",
+            ),
+            (
+                "\nclient.opt.nuw = 0",
+                "init.lua:2: numberwidth is a whole number from 1 to 20",
+            ),
+            (
+                "print(client.opt.list)",
+                "init.lua:1: there's no option called `list`",
+            ),
+        ] {
+            let (_, said) = start(config);
+            assert!(
+                matches!(&said[..], [FromLua::Error(err)] if err.starts_with(wanted)),
+                "{config}: {said:?}"
+            );
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ use clackatoo_protocol::{BufferId, Size};
 use super::copy::tests::Daemon;
 use super::keys::Stroke;
 use super::{BufferCopy, Editor, Mode, Register};
+use crate::options::Options;
 
 struct Setup {
     editor: Editor,
@@ -19,7 +20,7 @@ impl Setup {
         let daemon = Daemon::new(text);
         let mut copy = BufferCopy::new(BufferId(1));
         copy.update(daemon.snapshot());
-        let mut editor = Editor::new(BufferId(1));
+        let mut editor = Editor::new(BufferId(1), &Options::default());
         editor.resize(Size::new(40, 10).unwrap());
         Self {
             editor,
@@ -268,4 +269,90 @@ fn an_agents_edit_moves_the_cursor_with_the_text() {
     setup.keys("u");
     assert_eq!(setup.text(), "// a\nhello world");
     assert_eq!(setup.cursor(), (1, 6));
+}
+
+#[test]
+fn lines_are_numbered_from_the_cursors() {
+    let mut setup = Setup::new("a\nb\nc\nd\n");
+    setup.keys("jj");
+    setup.editor.settle(&setup.copy);
+    let (rows, cursor) = setup.editor.scene();
+    let numbers: Vec<String> = rows[..4]
+        .iter()
+        .map(|row| row.text()[..4].to_owned())
+        .collect();
+    assert_eq!(numbers, ["  2 ", "  1 ", "  3 ", "  1 "]);
+    assert_eq!(rows[2].text(), "  3 c");
+    assert_eq!(rows[4].text(), "~", "past the end, no number");
+    let cursor = cursor.unwrap();
+    assert_eq!((cursor.line, cursor.col), (2, 4), "right of the numbers");
+    let fg = |row: &clackatoo_term::Row| row.style(row.cells()[2]).fg;
+    assert_eq!(fg(rows[2]), crate::colors::line_number(true).fg);
+    assert_eq!(fg(rows[1]), crate::colors::line_number(false).fg);
+}
+
+#[test]
+fn the_numbers_widen_with_the_file_and_go_in_a_narrow_pane() {
+    let text = "x\n".repeat(12_345);
+    let mut setup = Setup::new(&text);
+    setup.keys("G");
+    setup.editor.settle(&setup.copy);
+    let (rows, cursor) = setup.editor.scene();
+    assert!(rows.iter().any(|row| row.text() == "12345 x"));
+    assert_eq!(cursor.unwrap().col, 6);
+
+    setup.editor.resize(Size::new(17, 10).unwrap());
+    setup.editor.settle(&setup.copy);
+    let (rows, cursor) = setup.editor.scene();
+    assert!(
+        rows.iter()
+            .all(|row| row.text() == "x" || row.text() == "~")
+    );
+    assert_eq!(cursor.unwrap().col, 0);
+}
+
+#[test]
+fn clicks_and_selections_are_beside_the_numbers() {
+    let mut setup = Setup::new("hello\nworld\n");
+    setup.editor.settle(&setup.copy);
+    setup.editor.click(1, 6, &setup.copy);
+    assert_eq!(setup.cursor(), (1, 2));
+    setup.editor.click(0, 1, &setup.copy);
+    assert_eq!(setup.cursor(), (0, 0), "on a number, the line's start");
+    setup.keys("vl");
+    assert_eq!(setup.editor.highlights()[0].cols, 4..6);
+}
+
+#[test]
+fn the_options_choose_the_numbers() {
+    let mut setup = Setup::new("a\nb\nc\n");
+    setup.keys("j");
+    let mut shown = |options: &Options| {
+        setup.editor.set_options(options, &setup.copy);
+        setup.editor.settle(&setup.copy);
+        let (rows, _) = setup.editor.scene();
+        rows[..3].iter().map(|row| row.text()).collect::<Vec<_>>()
+    };
+    let mut options = Options {
+        relativenumber: false,
+        ..Options::default()
+    };
+    assert_eq!(shown(&options), ["  1 a", "  2 b", "  3 c"]);
+    options.number = false;
+    assert_eq!(shown(&options), ["a", "b", "c"]);
+    options.relativenumber = true;
+    options.numberwidth = 3;
+    assert_eq!(shown(&options), [" 1 a", " 0 b", " 1 c"]);
+}
+
+#[test]
+fn the_line_typed_on_after_the_last_is_numbered_in_the_gutter() {
+    // 999 lines, then Enter at the end of the last: line 1000.
+    let mut setup = Setup::new(&format!("{}x", "x\n".repeat(998)));
+    setup.keys("GA<CR>");
+    setup.editor.settle(&setup.copy);
+    let (rows, cursor) = setup.editor.scene();
+    let cursor = cursor.unwrap();
+    assert_eq!(rows[cursor.line].text(), "1000");
+    assert_eq!(cursor.col, 5, "right of the numbers, which widened");
 }

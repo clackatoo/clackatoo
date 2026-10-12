@@ -23,6 +23,7 @@ use mlua::{Function, Lua, MultiValue, Table, Thread, Value, VmState};
 use super::{FromLua, KeyInfo, Scope, Source, ToLua, WINDOW, Wake, World};
 use crate::command::Kind;
 use crate::keymap::{KeyMode, parse_keys, parse_modes};
+use crate::options::{self, Options};
 
 /// How long `init.lua` may run before it's stopped.
 const INIT_TIME: Duration = Duration::from_secs(2);
@@ -36,6 +37,8 @@ const PRELUDE: &str = include_str!("prelude.luau");
 /// What the core functions share.
 struct State {
     world: RefCell<World>,
+    /// The options, as the window last said, and as set since.
+    options: RefCell<Options>,
     to_window: Sender<FromLua>,
     wake: Wake,
     bindings: RefCell<HashMap<u64, Function>>,
@@ -69,6 +72,7 @@ pub(super) fn run(
 ) {
     let state = Rc::new(State {
         world: RefCell::default(),
+        options: RefCell::default(),
         to_window,
         wake,
         bindings: RefCell::default(),
@@ -112,7 +116,15 @@ struct Runtime {
 impl Runtime {
     fn new(source: &Source, state: &Rc<State>) -> mlua::Result<Self> {
         let lua = Lua::new();
-        lua.set_compiler(mlua::chunk::Compiler::new().set_optimization_level(2));
+        // `client` changes under Luau: its fields, such as `client.opt.number`
+        // and `client.windows`, are read through metatables each time. Luau
+        // would otherwise read a global's fields once, as a chunk loads, and
+        // keep what it read.
+        lua.set_compiler(
+            mlua::chunk::Compiler::new()
+                .set_optimization_level(2)
+                .set_mutable_globals(["client"]),
+        );
         let watchdog = Watchdog::start();
         let stop = watchdog.stop.clone();
         lua.set_interrupt(move |_| {
@@ -186,6 +198,10 @@ impl Runtime {
                     Err(err) => self.watched(HANDLER_TIME, || thread.resume((Value::Nil, err))),
                 };
                 self.settle(&thread, resumed);
+            }
+            ToLua::Option { option, value } => {
+                // The window's own value, so it suits the option.
+                let _ = self.state.options.borrow_mut().set(option, value);
             }
         }
     }
@@ -303,7 +319,46 @@ fn core(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
     listening(lua, state, &core)?;
     reading(lua, state, &core)?;
     acting(lua, state, &core)?;
+    setting(lua, state, &core)?;
     Ok(core)
+}
+
+/// `get_option` and `set_option`, which `client.opt` reads and writes
+/// through.
+fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
+    let s = state.clone();
+    core.set(
+        "get_option",
+        lua.create_function(move |_, name: String| {
+            let option = options::find(&name).map_err(mlua::Error::runtime)?;
+            Ok(match s.options.borrow().get(option) {
+                options::Value::Bool(value) => Value::Boolean(value),
+                options::Value::Number(value) => Value::Integer(value.into()),
+            })
+        })?,
+    )?;
+    let s = state.clone();
+    core.set(
+        "set_option",
+        lua.create_function(move |_, (name, value): (String, Value)| {
+            let option = options::find(&name).map_err(mlua::Error::runtime)?;
+            let value = match value {
+                Value::Boolean(value) => Some(options::Value::Bool(value)),
+                // Luau passes a whole number as an integer; anything else,
+                // such as 2.5, isn't one.
+                Value::Integer(value) => u32::try_from(value).ok().map(options::Value::Number),
+                _ => None,
+            };
+            let value = value.ok_or_else(|| mlua::Error::runtime(option.wants()))?;
+            s.options
+                .borrow_mut()
+                .set(option, value)
+                .map_err(mlua::Error::runtime)?;
+            s.tell(FromLua::Set { option, value });
+            Ok(())
+        })?,
+    )?;
+    Ok(())
 }
 
 /// `map`, `unmap`, `on` and `off`.
