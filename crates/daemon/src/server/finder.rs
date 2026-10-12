@@ -80,6 +80,20 @@ impl Daemon {
                     .map(|slot| (slot.buffer.path().to_owned(), slot.buffer.modified()))
                     .collect(),
             },
+            Search::Diagnostics => Job::Diagnostics {
+                project: self.project(pane),
+                open: (self.buffers.values())
+                    .filter_map(|slot| {
+                        let opened = slot.server.as_ref()?;
+                        let all = opened.diagnostics.all();
+                        (!all.is_empty()).then(|| {
+                            let path = slot.buffer.path().to_owned();
+                            (path, all.to_vec(), slot.buffer.text().clone())
+                        })
+                    })
+                    .collect(),
+                elsewhere: self.servers.diagnosed_elsewhere(),
+            },
             Search::Preview { path, line, lines } => {
                 let path = self.config.home.join(path);
                 let open = (self.buffers.values())

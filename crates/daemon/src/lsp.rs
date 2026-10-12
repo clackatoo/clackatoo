@@ -67,6 +67,25 @@ pub(crate) struct Reported {
     pub(crate) code: Option<String>,
 }
 
+/// `reported` placed in `text`, its lines and columns, counted in
+/// `encoding`'s, made bytes of the text.
+pub(crate) fn diagnostic(
+    text: &Rope,
+    reported: Reported,
+    encoding: Encoding,
+) -> clackatoo_text::Diagnostic {
+    let start = place(text, reported.start, encoding);
+    let end = place(text, reported.end, encoding).max(start);
+    clackatoo_text::Diagnostic {
+        start,
+        end,
+        severity: reported.severity,
+        message: reported.message,
+        source: reported.source,
+        code: reported.code,
+    }
+}
+
 /// Something the server said that a buffer must act on.
 #[derive(Debug)]
 pub(crate) enum Incoming {

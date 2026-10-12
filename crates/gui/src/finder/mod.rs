@@ -44,8 +44,8 @@ pub(crate) enum Kind {
     Buffers,
     /// The places a language server's answer gave.
     Places,
-    /// What's wrong in the focused editor's file, as its language server
-    /// says.
+    /// What's wrong in the project's files, as their language servers
+    /// say.
     Diagnostics,
 }
 

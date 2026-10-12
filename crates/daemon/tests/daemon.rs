@@ -3948,3 +3948,78 @@ fn comparisons_wait_for_typing_to_pause_but_not_forever() {
     let (_, during) = type_steadily(&mut client, buffer, (18, version), 80, every);
     assert!(during.is_some(), "never compared while typing went on");
 }
+
+#[test]
+fn whats_wrong_is_listed_for_the_project_open_or_not_the_worst_first() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let there = dir.join("app/there.fk").display().to_string();
+        config.languages = Some(fake_language_server_pack(
+            dir,
+            vec!["--elsewhere".to_owned(), there],
+        ));
+    });
+    let dir = daemon.dir.path();
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    std::fs::write(dir.join("app/a.fk"), "ok\nbad\n").unwrap();
+    std::fs::write(dir.join("app/there.fk"), "x bad\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    next_diagnostics(&mut client);
+    // What the server says of the file not open comes just after what it
+    // says of the one open: asked again until it has.
+    let mut lines: Vec<(String, u64, usize, String)> = Vec::new();
+    for id in 1..100 {
+        client.find(id, Some(pane), Search::Diagnostics).unwrap();
+        let (shown, done) = found(&mut client, id);
+        assert_eq!(done, Done::All);
+        lines = (shown.into_iter())
+            .flat_map(|found| match found {
+                Found::Lines(lines) => lines,
+                _ => Vec::new(),
+            })
+            .map(|line| (line.path, line.line, line.col, line.text))
+            .collect();
+        if lines.len() == 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        lines,
+        [
+            (
+                "a.fk".to_owned(),
+                1,
+                0,
+                "error: bad is bad [7 fake]".to_owned()
+            ),
+            (
+                "there.fk".to_owned(),
+                0,
+                2,
+                "warning: bad is bad there".to_owned()
+            ),
+        ]
+    );
+    // Opened, a file is listed once, as its buffer says.
+    client
+        .split_pane(pane, Side::Right, open_file(dir, "app/there.fk"))
+        .unwrap();
+    let there = buffer_in(&mut client, PaneId(pane.0 + 1));
+    attach_buffer(&mut client, there);
+    next_diagnostics(&mut client);
+    client.find(200, Some(pane), Search::Diagnostics).unwrap();
+    let (shown, _) = found(&mut client, 200);
+    let theres = (shown.iter())
+        .flat_map(|found| match found {
+            Found::Lines(lines) => lines.clone(),
+            _ => Vec::new(),
+        })
+        .filter(|line| line.path == "there.fk")
+        .count();
+    assert_eq!(theres, 1);
+}

@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{Answer, BufferId, Edit, FileLocation, Query, Size, Trigger};
 use clackatoo_term::{Row, RowBuilder, Style};
-use clackatoo_text::{Bias, Diagnostic, Hunk, Severity};
+use clackatoo_text::{Bias, Diagnostic, Hunk};
 use winit::keyboard::{Key, NamedKey};
 
 pub use complete::Ranking;
@@ -547,7 +547,7 @@ impl Editor {
         let at = self.cursor.at;
         let label = format!("{}{modified}  {}:{}", copy.name(), at.line + 1, at.col + 1);
         match self.diagnostic_here(copy) {
-            Some(diagnostic) => format!("{label}  {}", describe(diagnostic)),
+            Some(diagnostic) => format!("{label}  {}", diagnostic.described()),
             None => label,
         }
     }
@@ -3187,29 +3187,6 @@ fn indent_before(text: &Text<'_>, byte: usize) -> usize {
     let start = text.line_start(line);
     let indent = start + indent_of(&text.line_text(line)).len();
     if byte > indent { indent } else { start }
-}
-
-/// A diagnostic as the bar tells of it: how much it matters, and the
-/// first line of what it says, with its name and who says so, as
-/// `error: mismatched types [E0308 rustc]`.
-pub(crate) fn describe(diagnostic: &Diagnostic) -> String {
-    let severity = match diagnostic.severity {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
-        Severity::Info => "info",
-        Severity::Hint => "hint",
-    };
-    let message = diagnostic.message.lines().next().unwrap_or_default();
-    let by: Vec<&str> = [&diagnostic.code, &diagnostic.source]
-        .into_iter()
-        .flatten()
-        .map(String::as_str)
-        .collect();
-    if by.is_empty() {
-        format!("{severity}: {message}")
-    } else {
-        format!("{severity}: {message} [{}]", by.join(" "))
-    }
 }
 
 /// What an operator takes of `text` with an exclusive motion from

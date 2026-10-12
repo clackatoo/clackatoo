@@ -22,6 +22,7 @@
 //! | `--log FILE` | Writes the method of each notification there, a line each |
 //! | `--defs FILE` | Answers where things are defined with FILE, not `defs.fk` |
 //! | `--crash-once FILE` | Exits, as if it crashed, the first time a file has `crash` in it, making FILE so the next one started doesn't |
+//! | `--elsewhere FILE` | Says what's wrong in FILE too, as warnings, whenever it says of a file open |
 //! | `--bare` | Doesn't say what things are, rename them or format |
 //! | `--modified-once` | Answers the first question of what something is by saying the text changed while it worked, as rust-analyzer does while it reads a project |
 //! | `--rename-changes` | Renames with a `WorkspaceEdit`'s `changes`, not its `documentChanges` |
@@ -69,6 +70,8 @@ fn main() {
         hold_rename: (args.iter().position(|arg| arg == "--hold-rename"))
             .and_then(|at| args.get(at + 1).cloned()),
         incomplete: flag("--incomplete"),
+        elsewhere: (args.iter().position(|arg| arg == "--elsewhere"))
+            .and_then(|at| args.get(at + 1).cloned()),
         no_resolve: flag("--no-resolve"),
         many: (args.iter().position(|arg| arg == "--many"))
             .and_then(|at| args.get(at + 1)?.parse().ok())
@@ -101,6 +104,8 @@ struct Fake {
     rename_alias: bool,
     rename_also: Option<String>,
     hold_rename: Option<String>,
+    /// A file not open to say what's wrong with too.
+    elsewhere: Option<String>,
     incomplete: bool,
     no_resolve: bool,
     many: usize,
@@ -590,6 +595,26 @@ impl Fake {
             "method": "textDocument/publishDiagnostics",
             "params": { "uri": uri, "version": version, "diagnostics": diagnostics },
         }));
+        // And a file not open, as a server that checks a whole project
+        // says of one.
+        if let Some(path) = &self.elsewhere {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            let diagnostics: Vec<Value> = (text.match_indices("bad"))
+                .map(|(at, _)| {
+                    let start = place(&text, at, self.utf16);
+                    json!({
+                        "range": { "start": start, "end": start },
+                        "severity": 2,
+                        "message": "bad is bad there",
+                    })
+                })
+                .collect();
+            send(&json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": { "uri": format!("file://{path}"), "diagnostics": diagnostics },
+            }));
+        }
     }
 }
 

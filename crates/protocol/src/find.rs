@@ -32,6 +32,10 @@ pub enum Search {
     /// The files open in buffers, the newest first, including those no pane
     /// shows that have changes not written.
     Buffers,
+    /// What's wrong, as the language servers say: in the files open, and
+    /// in those not open that they've said of, the worst first, as lines
+    /// found, each saying what's wrong.
+    Diagnostics,
     /// Up to `lines` lines of the file at `path`, around line `line`: a
     /// third of them before it.
     Preview {
@@ -58,7 +62,7 @@ pub enum Found {
     },
     /// Files, for [`Search::Files`].
     Files(Vec<String>),
-    /// Lines, for [`Search::Grep`].
+    /// Lines, for [`Search::Grep`] and [`Search::Diagnostics`].
     Lines(Vec<FoundLine>),
     /// Files open in buffers, for [`Search::Buffers`].
     Buffers(Vec<FoundBuffer>),

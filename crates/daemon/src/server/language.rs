@@ -79,6 +79,9 @@ pub(super) struct Servers {
     /// they're opened in rather than one of their own: a library's file
     /// gone to from a project is the project's server's to know.
     reached: HashMap<PathBuf, ServerId>,
+    /// What servers say is wrong in files not open, by path, with the
+    /// server that said it.
+    elsewhere: HashMap<PathBuf, (ServerId, std::sync::Arc<[Reported]>)>,
     /// Queries to ask again, and when: their servers said the text changed
     /// while they worked.
     again: Vec<(Instant, Again)>,
@@ -109,6 +112,43 @@ struct Again {
 }
 
 impl Servers {
+    /// Keeps what server `server` says is wrong in the file at `path`,
+    /// which isn't open, in place of what it said before; or forgets it, if
+    /// nothing is. Past [`MAX_ELSEWHERE`] files, more aren't kept.
+    fn elsewhere(
+        &mut self,
+        server: ServerId,
+        path: &std::path::Path,
+        mut diagnostics: Vec<Reported>,
+    ) {
+        if diagnostics.is_empty() {
+            // Another server's say about the file stays.
+            if self
+                .elsewhere
+                .get(path)
+                .is_some_and(|(said, _)| *said == server)
+            {
+                self.elsewhere.remove(path);
+            }
+        } else if self.elsewhere.len() < MAX_ELSEWHERE || self.elsewhere.contains_key(path) {
+            diagnostics.truncate(MAX_ELSEWHERE_EACH);
+            (self.elsewhere).insert(path.to_owned(), (server, diagnostics.into()));
+        }
+    }
+
+    /// What servers say is wrong in files not open, with each server's
+    /// columns.
+    pub(super) fn diagnosed_elsewhere(
+        &self,
+    ) -> Vec<(PathBuf, lsp::Encoding, std::sync::Arc<[Reported]>)> {
+        (self.elsewhere.iter())
+            .filter_map(|(path, (server, diagnostics))| {
+                let encoding = self.slots.get(server)?.server.encoding();
+                Some((path.clone(), encoding, diagnostics.clone()))
+            })
+            .collect()
+    }
+
     /// Whether buffer `buffer` is being formatted.
     fn formatting(&self, buffer: BufferId) -> bool {
         let format = |ask: &Ask| matches!(ask, Ask::Query(Query::Format { .. }));
@@ -183,6 +223,12 @@ pub(super) struct Before {
     pub(super) text: Rope,
 }
 
+/// How many files not open what's wrong in them is kept for, at most.
+const MAX_ELSEWHERE: usize = 5_000;
+
+/// How many diagnostics of each file not open are kept, at most.
+const MAX_ELSEWHERE_EACH: usize = 1_000;
+
 /// The most places of one answer passed on: far more than anyone looks
 /// through, but short of reading thousands of files for one.
 const MAX_LOCATIONS: usize = 100;
@@ -243,6 +289,8 @@ impl Daemon {
         let Some(spec) = languages.find(&path).and_then(|pack| pack.server.clone()) else {
             return;
         };
+        // Open, it's its buffer's to say what's wrong with now.
+        self.servers.elsewhere.remove(&path);
         // A file an answer went to is opened in the server that answered,
         // if it's of the file's language.
         let reached = (self.servers.reached.get(&path).copied()).filter(|server| {
@@ -1055,6 +1103,8 @@ impl Daemon {
                     .as_ref()
                     .is_some_and(|opened| opened.server == server)
         }) else {
+            // A file not open, kept as it's said, to list.
+            self.servers.elsewhere(server, path, diagnostics);
             return;
         };
         let Some(running) = self.servers.slots.get(&server) else {
@@ -1075,7 +1125,7 @@ impl Daemon {
             return;
         };
         let found: Vec<Diagnostic> = (diagnostics.into_iter())
-            .map(|reported| diagnostic(text, reported, encoding))
+            .map(|reported| lsp::diagnostic(text, reported, encoding))
             .collect();
         let mut found = Diagnostics::of(found);
         // Edits made since the server had that text move them on, as they
@@ -1105,6 +1155,9 @@ impl Daemon {
         };
         self.servers.asked.retain(|asked| asked.server != id);
         self.servers.reached.retain(|_, server| *server != id);
+        self.servers
+            .elsewhere
+            .retain(|_, (server, _)| *server != id);
         for token in slot.tokens {
             self.sources.remove(token.0);
         }
@@ -1207,20 +1260,6 @@ fn line_text(text: &Rope, line: u64) -> String {
         .take_while(|&ch| ch != '\n' && ch != '\r')
         .take(MAX_LINE_TEXT)
         .collect()
-}
-
-/// A diagnostic as reported, counted in `text`, as one at byte offsets.
-fn diagnostic(text: &Rope, reported: Reported, encoding: lsp::Encoding) -> Diagnostic {
-    let start = lsp::place(text, reported.start, encoding);
-    let end = lsp::place(text, reported.end, encoding).max(start);
-    Diagnostic {
-        start,
-        end,
-        severity: reported.severity,
-        message: reported.message,
-        source: reported.source,
-        code: reported.code,
-    }
 }
 
 /// Asks `server` to resolve item `item` of the completions answered to

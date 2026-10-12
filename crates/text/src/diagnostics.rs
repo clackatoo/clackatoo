@@ -41,6 +41,32 @@ pub struct Diagnostic {
     pub code: Option<String>,
 }
 
+impl Diagnostic {
+    /// What it says, as a bar or a list says it: how much it matters, and
+    /// the first line of what it says, with its name and who says so, as
+    /// `error: mismatched types [E0308 rustc]`.
+    #[must_use]
+    pub fn described(&self) -> String {
+        let severity = match self.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
+            Severity::Hint => "hint",
+        };
+        let message = self.message.lines().next().unwrap_or_default();
+        let by: Vec<&str> = [&self.code, &self.source]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        if by.is_empty() {
+            format!("{severity}: {message}")
+        } else {
+            format!("{severity}: {message} [{}]", by.join(" "))
+        }
+    }
+}
+
 /// A text's diagnostics, in order of where they start. Unlike highlights,
 /// they can overlap.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

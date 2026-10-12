@@ -3415,36 +3415,37 @@ mod tests {
     }
 
     #[test]
-    fn space_ds_lists_whats_wrong_in_the_file_worst_first() {
-        use clackatoo_protocol::{BufferUpdate, Diagnostic, Severity};
+    fn space_ds_lists_whats_wrong_in_the_project() {
+        use clackatoo_protocol::{Found, FoundLine, Search};
         let mut desk = editing("/p/a.rs", "one\ntwo\nthree\n");
         type_keys(&mut desk, " ds");
-        let Status::Tabs { note, .. } = desk.status() else {
-            panic!("the tabs");
-        };
-        assert!(note.unwrap().starts_with("nothing's wrong"));
-        let diagnostic = |start, severity, message: &str| Diagnostic {
-            start,
-            end: start + 1,
-            severity,
-            message: message.into(),
-            source: None,
-            code: None,
-        };
-        desk.buffer_changed(
-            BufferId(7),
-            BufferUpdate::Diagnostics {
-                version: 0,
-                diagnostics: vec![
-                    diagnostic(1, Severity::Warning, "unused"),
-                    diagnostic(9, Severity::Error, "wrong\nmore"),
-                ],
+        let asked = finds(&mut desk);
+        let (id, search) = search_in(&asked);
+        assert_eq!(search, Search::Diagnostics);
+        desk.found(
+            id,
+            Found::Root {
+                path: "/p".into(),
+                name: "~/p".into(),
             },
         );
-        type_keys(&mut desk, " ds");
+        let line = |path: &str, line, text: &str| FoundLine {
+            path: path.into(),
+            line,
+            col: 1,
+            text: text.into(),
+            matches: Vec::new(),
+        };
+        desk.found(
+            id,
+            Found::Lines(vec![
+                line("a.rs", 2, "error: wrong"),
+                line("b.rs", 0, "warning: unused"),
+            ]),
+        );
         assert_eq!(
             finder_rows(&mut desk),
-            ["a.rs:3: error: wrong", "a.rs:1: warning: unused"]
+            ["a.rs:3: error: wrong", "b.rs:1: warning: unused"]
         );
         assert_eq!(
             desk.finder_view((10, 60), None).unwrap().title,

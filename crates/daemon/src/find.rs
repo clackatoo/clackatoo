@@ -30,9 +30,12 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{Done, Found, FoundBuffer, FoundLine};
 use clackatoo_syntax::Server;
-use clackatoo_text::Rope;
+use clackatoo_text::{Diagnostic, Rope, Severity};
+
 use ignore::{DirEntry, ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
 use regex::bytes::{Regex, RegexBuilder};
+
+use crate::lsp::{self, Encoding, Reported};
 
 /// The most files one search lists: far more than a project has, but short
 /// of listing all of a home directory that has no project in it.
@@ -138,6 +141,14 @@ pub(crate) enum Job {
     Buffers {
         project: Project,
         buffers: Vec<(PathBuf, bool)>,
+    },
+    /// What's wrong in the project's files: those open, with their texts,
+    /// and those not open, as their servers said, counting columns as each
+    /// does.
+    Diagnostics {
+        project: Project,
+        open: Vec<(PathBuf, Vec<Diagnostic>, Rope)>,
+        elsewhere: Vec<(PathBuf, Encoding, Arc<[Reported]>)>,
     },
     /// Up to `lines` lines of the file at `path`, around line `line`, from
     /// its buffer's text if it's open.
@@ -355,6 +366,11 @@ fn run(job: Job, home: &Path, out: &Out) {
             out.send(Found::Buffers(buffers));
             out.done();
         }
+        Job::Diagnostics {
+            project,
+            open,
+            elsewhere,
+        } => diagnostics(out, home, &project, &open, elsewhere),
         Job::Preview {
             path,
             line,
@@ -553,6 +569,85 @@ fn regex(pattern: &str, exact: bool) -> Regex {
     build(pattern)
         .or_else(|_| build(&regex::escape(pattern)))
         .expect("plain text is a valid regular expression")
+}
+
+/// Sends what's wrong in `open` files and `elsewhere`, the worst first,
+/// then by file and place, as lines from the project's root, each saying
+/// what's wrong as the bar does. A file not open is read to place its
+/// columns; one that can't be is placed at its lines' starts.
+fn diagnostics(
+    out: &Out,
+    home: &Path,
+    project: &Project,
+    open: &[(PathBuf, Vec<Diagnostic>, Rope)],
+    elsewhere: Vec<(PathBuf, Encoding, Arc<[Reported]>)>,
+) {
+    let root = project.root(home).unwrap_or_else(|_| home.to_owned());
+    out.send(root_found(&root, home));
+    let mut found: Vec<(Severity, String, u64, usize, String)> = Vec::new();
+    let shown = |path: &Path| {
+        path.strip_prefix(&root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    };
+    let at = |text: &Rope, byte: usize| {
+        let byte = byte.min(text.len_bytes());
+        let line = text.byte_to_line(byte);
+        (line as u64, byte - text.line_to_byte(line))
+    };
+    for (path, diagnostics, text) in open {
+        if !path.starts_with(&root) {
+            continue;
+        }
+        for diagnostic in diagnostics {
+            let (line, col) = at(text, diagnostic.start);
+            let said = diagnostic.described();
+            found.push((diagnostic.severity, shown(path), line, col, said));
+        }
+    }
+    let mut read = Vec::new();
+    for (path, encoding, reported) in elsewhere {
+        if out.stopped() {
+            return;
+        }
+        if !path.starts_with(&root) {
+            continue;
+        }
+        let text =
+            (read_text(&path, &mut read)).map(|()| Rope::from_str(&String::from_utf8_lossy(&read)));
+        for reported in reported.iter().cloned() {
+            let first = u64::from(reported.start.line);
+            let (diagnostic, (line, col)) = match &text {
+                Some(text) => {
+                    let diagnostic = lsp::diagnostic(text, reported, encoding);
+                    let place = at(text, diagnostic.start);
+                    (diagnostic, place)
+                }
+                None => (
+                    lsp::diagnostic(&Rope::new(), reported, encoding),
+                    (first, 0),
+                ),
+            };
+            let said = diagnostic.described();
+            found.push((diagnostic.severity, shown(&path), line, col, said));
+        }
+    }
+    found.sort_by(|a, b| (a.0, &a.1, a.2, a.3).cmp(&(b.0, &b.1, b.2, b.3)));
+    found.truncate(MAX_LINES);
+    for batch in found.chunks(BATCH) {
+        let lines = (batch.iter())
+            .map(|(_, path, line, col, text)| FoundLine {
+                path: path.clone(),
+                line: *line,
+                col: *col,
+                text: text.clone(),
+                matches: Vec::new(),
+            })
+            .collect();
+        out.send(Found::Lines(lines));
+    }
+    out.done();
 }
 
 /// Reads the file at `path` into `into`, if it's text and not too big.
