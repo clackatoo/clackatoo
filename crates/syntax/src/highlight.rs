@@ -52,22 +52,23 @@ impl Grammar {
         while let Some((matched, index)) = captures.next() {
             let capture = matched.captures()[*index];
             let node = capture.node.byte_range();
-            let (start, end) = (node.start.max(range.start), node.end.min(range.end));
             // Captures not coloured, such as ones a pattern only checks,
             // don't hide others of the same text.
             if let Some(kind) = self.kinds[capture.index as usize]
-                && start < end
+                && node.start.max(range.start) < node.end.min(range.end)
             {
-                found.push((start, end, kind));
+                found.push((node.start, node.end, kind));
             }
         }
         // Outer before inner, and for one piece of text, its first capture
-        // first: the sort is stable.
+        // first: the sort is stable. They're cut to the range only after,
+        // as cutting can make an outer capture and an inner one the same
+        // text, and the inner one must still win.
         found.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
         found.dedup_by(|later, first| (later.0, later.1) == (first.0, first.1));
         let mut flat = Flattener::new(range.start);
         for (start, end, kind) in found {
-            flat.open(start, end, kind);
+            flat.open(start.max(range.start), end.min(range.end), kind);
         }
         flat.finish()
     }

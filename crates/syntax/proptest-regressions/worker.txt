@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 2350200d678fc747579c376048032a514051c3ba32c25184565a71e6cda0d89d # shrinks to text = "aa}aa,0a }0\"\n\"\n[}\na ", steps = [([(Index(0), 0, "\"")], false)]
 cc 2c27d52d41a8d5d6791c7e5ec88e9a549d14197aa89d23a59b9c1bd3988d41b6 # shrinks to text = " a},a:0[0}", steps = [([(Index(11738837137815169211), 1, "a0 ")], true), ([(Index(7094901566811366007), 1, ",0,0"), (Index(0), 0, "\n}00")], false)]
+cc 25683cbeeac3c157beec2e8c3de4e1358acfcc8d3ac1bb8aaad89fdaa7a9b0e6 # shrinks to text = "0}[a\n}\"}}a0", steps = [([(Index(0), 0, "\"")], false), ([(Index(1418980313362273202), 0, "a\n}\n")], true), ([(Index(3255307777713450286), 2, "1")], false)]
