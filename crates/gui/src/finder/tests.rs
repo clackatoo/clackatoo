@@ -282,7 +282,12 @@ fn places_are_listed_from_the_directory_they_share_and_filtered() {
         place("/p/crates/gui/src/a.rs", 0, "impl A for X"),
         place("/p/crates/daemon/src/b.rs", 9, "impl A for Y"),
     ];
-    let mut finder = Finder::places(&found, "/p/crates/gui/src/main.rs", Case::default());
+    let mut finder = Finder::places(
+        Kind::Places,
+        &found,
+        "/p/crates/gui/src/main.rs",
+        Case::default(),
+    );
     assert_eq!(
         shown(&mut finder),
         [
@@ -305,7 +310,7 @@ fn places_are_listed_from_the_directory_they_share_and_filtered() {
     );
     // Sharing no directory, they're whole.
     let found = [place("/a/x", 0, ""), place("/b/y", 0, "")];
-    let mut finder = Finder::places(&found, "/a/z", Case::default());
+    let mut finder = Finder::places(Kind::Places, &found, "/a/z", Case::default());
     assert_eq!(shown(&mut finder), ["/a/x:1: ", "/b/y:1: "]);
 }
 
@@ -317,7 +322,7 @@ fn the_preview_follows_what_is_picked() {
         place("/p/a.rs", 200, "far"),
         place("/p/b.rs", 0, "other"),
     ];
-    let mut finder = Finder::places(&found, "/p/main.rs", Case::default());
+    let mut finder = Finder::places(Kind::Places, &found, "/p/main.rs", Case::default());
     assert_eq!(finder.preview_wanted(), Some(("/p/a.rs".into(), 50)));
     finder.previewing(7, "/p/a.rs".into(), 50);
     assert_eq!(finder.preview_search(), Some(7));

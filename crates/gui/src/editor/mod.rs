@@ -2295,7 +2295,7 @@ fn indent_before(text: &Text<'_>, byte: usize) -> usize {
 /// A diagnostic as the bar tells of it: how much it matters, and the
 /// first line of what it says, with its name and who says so, as
 /// `error: mismatched types [E0308 rustc]`.
-fn describe(diagnostic: &Diagnostic) -> String {
+pub(crate) fn describe(diagnostic: &Diagnostic) -> String {
     let severity = match diagnostic.severity {
         Severity::Error => "error",
         Severity::Warning => "warning",

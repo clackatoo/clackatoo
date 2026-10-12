@@ -80,15 +80,15 @@ const KINDS: [(&str, Kind); 2] = [("Terminal", Kind::Terminal), ("Agent", Kind::
 const EDITOR: &str = "Editor";
 
 /// What the finder lists, by name.
-const FINDERS: [(&str, finder::Kind); 3] = [
+const FINDERS: [(&str, finder::Kind); 4] = [
     ("Files", finder::Kind::Files),
     ("Grep", finder::Kind::Grep),
     ("Buffers", finder::Kind::Buffers),
+    ("Diagnostics", finder::Kind::Diagnostics),
 ];
 
 /// The window's own commands, for messages.
-const COMMANDS: &str =
-    "a tab's number, workspace, rename, close, reload, set, w, q, e, Files, Grep and Buffers";
+const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, w, q, e, Files, Grep, Buffers and Diagnostics";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {

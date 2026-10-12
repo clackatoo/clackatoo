@@ -3326,6 +3326,54 @@ mod tests {
     }
 
     #[test]
+    fn space_ds_lists_whats_wrong_in_the_file_worst_first() {
+        use clackatoo_protocol::{BufferUpdate, Diagnostic, Severity};
+        let mut desk = editing("/p/a.rs", "one\ntwo\nthree\n");
+        type_keys(&mut desk, " ds");
+        let Status::Tabs { note, .. } = desk.status() else {
+            panic!("the tabs");
+        };
+        assert!(note.unwrap().starts_with("nothing's wrong"));
+        let diagnostic = |start, severity, message: &str| Diagnostic {
+            start,
+            end: start + 1,
+            severity,
+            message: message.into(),
+            source: None,
+            code: None,
+        };
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Diagnostics {
+                version: 0,
+                diagnostics: vec![
+                    diagnostic(1, Severity::Warning, "unused"),
+                    diagnostic(9, Severity::Error, "wrong\nmore"),
+                ],
+            },
+        );
+        type_keys(&mut desk, " ds");
+        assert_eq!(
+            finder_rows(&mut desk),
+            ["a.rs:3: error: wrong", "a.rs:1: warning: unused"]
+        );
+        assert_eq!(
+            desk.finder_view((10, 60), None).unwrap().title,
+            "Diagnostics"
+        );
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        let Status::Tabs { note, .. } = desk.status() else {
+            panic!("the tabs");
+        };
+        assert!(note.unwrap().starts_with("a.rs  3:2"));
+    }
+
+    #[test]
     fn several_places_an_answer_gives_are_picked_from_in_the_finder() {
         use clackatoo_protocol::{Answer, BufferUpdate, FileLocation, OpenFile};
         let mut desk = editing("/p/a.rs", "one\ntwo\nthree\n");

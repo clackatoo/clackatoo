@@ -44,14 +44,51 @@ impl Desk {
             return;
         }
         let case = Case::of(&self.options);
+        if kind == Kind::Diagnostics {
+            self.pick_diagnostic();
+            return;
+        }
         self.finder = Some(Finder::new(kind, query, case));
         match kind {
             Kind::Files => self.search(Search::Files),
             Kind::Buffers => self.search(Search::Buffers),
             Kind::Grep => self.grep(),
-            // Its places are given it.
-            Kind::Places => {}
+            // Their places are given them.
+            Kind::Places | Kind::Diagnostics => {}
         }
+    }
+
+    /// Opens the finder on what's wrong in the focused editor's file, the
+    /// worst first and then in order, each said as the bar says it.
+    fn pick_diagnostic(&mut self) {
+        let Some((_, copy)) = self.focused_editor() else {
+            self.message = Some("diagnostics are a file's: an editor has no focus".into());
+            return;
+        };
+        let text = copy.text();
+        let mut diagnostics: Vec<&clackatoo_text::Diagnostic> =
+            copy.diagnostics().all().iter().collect();
+        if diagnostics.is_empty() {
+            self.message = Some("nothing's wrong, as far as its language server says".into());
+            return;
+        }
+        diagnostics.sort_by_key(|diagnostic| diagnostic.severity);
+        let path = copy.path().to_owned();
+        let found: Vec<FileLocation> = (diagnostics.into_iter())
+            .map(|diagnostic| {
+                let start = diagnostic.start.min(text.len_bytes());
+                let line = text.byte_to_line(start);
+                FileLocation {
+                    path: path.clone(),
+                    line: line as u64,
+                    col: start - text.line_to_byte(line),
+                    offset: Some(start),
+                    text: crate::editor::describe(diagnostic),
+                }
+            })
+            .collect();
+        let case = Case::of(&self.options);
+        self.finder = Some(Finder::places(Kind::Diagnostics, &found, &path, case));
     }
 
     /// Opens the finder on `found`, the places an answer about the file at
@@ -60,7 +97,7 @@ impl Desk {
         self.close_finder();
         self.close_focused_panel();
         let case = Case::of(&self.options);
-        self.finder = Some(Finder::places(found, here, case));
+        self.finder = Some(Finder::places(Kind::Places, found, here, case));
     }
 
     /// Closes the panel by the focused editor's cursor, which the finder

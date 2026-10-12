@@ -44,6 +44,9 @@ pub(crate) enum Kind {
     Buffers,
     /// The places a language server's answer gave.
     Places,
+    /// What's wrong in the focused editor's file, as its language server
+    /// says.
+    Diagnostics,
 }
 
 impl Kind {
@@ -53,6 +56,7 @@ impl Kind {
             Self::Grep => "Grep",
             Self::Buffers => "Buffers",
             Self::Places => "Places",
+            Self::Diagnostics => "Diagnostics",
         }
     }
 }
@@ -169,10 +173,10 @@ impl Finder {
         }
     }
 
-    /// A finder of the places an answer gave, about the file at `here`,
-    /// shown from the deepest directory they and it share.
-    pub(crate) fn places(found: &[FileLocation], here: &str, case: Case) -> Self {
-        let mut finder = Self::new(Kind::Places, String::new(), case);
+    /// A finder of `kind` listing `found`, places given it about the file
+    /// at `here`, shown from the deepest directory they and it share.
+    pub(crate) fn places(kind: Kind, found: &[FileLocation], here: &str, case: Case) -> Self {
+        let mut finder = Self::new(kind, String::new(), case);
         let mut root = here.rsplit_once('/').map_or("", |(dir, _)| dir);
         for place in found {
             while !place.path.starts_with(&format!("{root}/")) && !root.is_empty() {

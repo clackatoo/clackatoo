@@ -21,7 +21,8 @@
 //!
 //! In normal and visual mode, Space starts the finder's keys, as a leader
 //! key does in Neovim: `<Space>pf` the project's files, `<Space>pgf` a grep
-//! of them, and `<Space>?` the files open (see [`crate::finder`]).
+//! of them, `<Space>?` the files open, and `<Space>ds` what's wrong in the
+//! file (see [`crate::finder`]).
 //!
 //! In normal and visual mode, `:` opens the command line, Ctrl with `h`,
 //! `j`, `k` or `l` moves to the pane that way, Alt with them moves the
@@ -174,6 +175,12 @@ fn defaults() -> Keymap<Binding> {
     bind("nv", "<Space>pf", Action::Find(finder::Kind::Files), find);
     bind("nv", "<Space>pgf", Action::Find(finder::Kind::Grep), find);
     bind("nv", "<Space>?", Action::Find(finder::Kind::Buffers), find);
+    bind(
+        "nv",
+        "<Space>ds",
+        Action::Find(finder::Kind::Diagnostics),
+        find,
+    );
     for (letter, direction) in DIRECTIONS {
         bind(
             "nv",
