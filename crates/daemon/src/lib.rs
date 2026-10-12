@@ -23,6 +23,7 @@ mod memory;
 mod pty;
 mod quic;
 pub mod remote;
+mod rpc;
 mod runtime;
 mod server;
 mod shell;

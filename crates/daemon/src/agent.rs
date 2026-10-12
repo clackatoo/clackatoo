@@ -16,26 +16,21 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, RawFd};
-use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::io;
+use std::os::fd::RawFd;
 
 use agent_client_protocol_schema::v1::{
     PermissionOption, PromptResponse, RequestPermissionRequest, SessionConfigOption,
     SessionNotification, SessionUpdate, StopReason, ToolCallUpdate,
 };
 use clackatoo_protocol::TerminalId;
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::pty::Process;
+use crate::rpc::{Framing, Message, Peer};
 
 /// The ACP version spoken.
 const PROTOCOL_VERSION: u16 = 1;
-
-/// The most a line from the agent may hold before it's dropped as broken:
-/// far more than any message.
-const MAX_LINE: usize = 64 * 1024 * 1024;
 
 /// What a request the daemon sent was for, so its answer can be acted on.
 #[derive(Clone, Copy, Debug)]
@@ -96,39 +91,14 @@ pub(crate) struct Opened {
     pub(crate) settings: Option<Vec<SessionConfigOption>>,
 }
 
-/// One JSON-RPC message from the agent, of any kind.
-#[derive(Deserialize)]
-struct Message {
-    id: Option<Value>,
-    method: Option<String>,
-    #[serde(default)]
-    params: Value,
-    result: Option<Value>,
-    error: Option<RpcError>,
-}
-
-#[derive(Deserialize)]
-struct RpcError {
-    message: String,
-}
-
 /// A running agent.
 #[derive(Debug)]
 pub(crate) struct Agent {
-    process: Process,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
-    stderr: ChildStderr,
-    /// Encoded messages not yet written.
-    outgoing: Vec<u8>,
-    /// What's been read of a line not yet ended.
-    incoming: Vec<u8>,
-    /// What's been read of a line of stderr not yet ended.
-    errors: Vec<u8>,
+    peer: Peer,
     next_id: u64,
     pending: BTreeMap<u64, Pending>,
     /// Messages held back until the agent has answered `initialize`.
-    held: Option<Vec<Vec<u8>>>,
+    held: Option<Vec<Value>>,
     /// Whether the agent can close a session, ending its work.
     can_close: bool,
 }
@@ -136,35 +106,8 @@ pub(crate) struct Agent {
 impl Agent {
     /// Starts `command`, and introduces the daemon to it.
     pub(crate) fn start(command: &[OsString]) -> io::Result<Self> {
-        let (program, args) = command
-            .split_first()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no agent command"))?;
-        let mut child = Command::new(program)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let pid = rustix::process::Pid::from_child(&child);
-        // Taken first, so failing below drops the pipes, which ends it.
-        let (stdin, stdout, stderr) = (
-            child.stdin.take().expect("piped"),
-            child.stdout.take().expect("piped"),
-            child.stderr.take().expect("piped"),
-        );
-        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())?;
-        for fd in [stdin.as_fd(), stdout.as_fd(), stderr.as_fd()] {
-            rustix::io::ioctl_fionbio(fd, true)?;
-        }
-        log::info!("agent started: pid {}", pid.as_raw_nonzero());
         let mut agent = Self {
-            process: Process::from_parts(pid, pidfd),
-            stdin,
-            stdout,
-            stderr,
-            outgoing: Vec::new(),
-            incoming: Vec::new(),
-            errors: Vec::new(),
+            peer: Peer::start("agent", command, None, Framing::Lines)?,
             next_id: 0,
             pending: BTreeMap::new(),
             held: None,
@@ -264,43 +207,26 @@ impl Agent {
     /// Queues a request or notification, held back until the agent has
     /// answered `initialize`.
     fn send(&mut self, message: &Value) {
-        let mut line = message.to_string().into_bytes();
-        line.push(b'\n');
         match &mut self.held {
-            Some(held) => held.push(line),
-            None => self.outgoing.extend_from_slice(&line),
+            Some(held) => held.push(message.clone()),
+            None => self.peer.send(message),
         }
     }
 
     /// Queues an answer to the agent's own request, which never waits.
     fn reply(&mut self, message: &Value) {
-        self.outgoing
-            .extend_from_slice(message.to_string().as_bytes());
-        self.outgoing.push(b'\n');
+        self.peer.send(message);
     }
 
     /// Writes queued messages until the pipe is full. An error means the
     /// agent has gone.
     pub(crate) fn flush(&mut self) -> io::Result<()> {
-        let mut written = 0;
-        let result = loop {
-            if written == self.outgoing.len() {
-                break Ok(());
-            }
-            match self.stdin.write(&self.outgoing[written..]) {
-                Ok(n) => written += n,
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break Ok(()),
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(err) => break Err(err),
-            }
-        };
-        self.outgoing.drain(..written);
-        result
+        self.peer.flush()
     }
 
     /// Whether messages are waiting for the pipe to take them.
     pub(crate) fn has_outgoing(&self) -> bool {
-        !self.outgoing.is_empty()
+        self.peer.has_outgoing()
     }
 
     /// Reads what the agent sent, up to `budget` bytes, into `incoming`.
@@ -312,58 +238,17 @@ impl Agent {
         budget: usize,
         incoming: &mut Vec<Incoming>,
     ) -> io::Result<bool> {
-        let mut total = 0;
         let mut messages = Vec::new();
-        let more = loop {
-            match self.stdout.read(buffer) {
-                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
-                Ok(n) => {
-                    total += n;
-                    self.incoming.extend_from_slice(&buffer[..n]);
-                    let mut start = 0;
-                    while let Some(end) = self.incoming[start..].iter().position(|&b| b == b'\n') {
-                        messages.extend(parse(&self.incoming[start..start + end]));
-                        start += end + 1;
-                    }
-                    self.incoming.drain(..start);
-                    if self.incoming.len() > MAX_LINE {
-                        log::warn!("agent: dropping a line longer than {MAX_LINE} bytes");
-                        self.incoming.clear();
-                    }
-                    if total >= budget {
-                        break true;
-                    }
-                }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break false,
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(err) => return Err(err),
-            }
-        };
+        let read = self.peer.read(buffer, budget, &mut messages);
         for message in messages {
             self.receive(message, incoming);
         }
-        Ok(more)
+        read
     }
 
     /// Reads what the agent wrote to stderr, and logs it at debug level.
     pub(crate) fn read_errors(&mut self, buffer: &mut [u8]) {
-        loop {
-            match self.stderr.read(buffer) {
-                Ok(0) => return,
-                Ok(n) => {
-                    self.errors.extend_from_slice(&buffer[..n]);
-                    while let Some(end) = self.errors.iter().position(|&byte| byte == b'\n') {
-                        let line: Vec<u8> = self.errors.drain(..=end).collect();
-                        log::debug!("agent: {}", String::from_utf8_lossy(&line).trim_end());
-                    }
-                    if self.errors.len() > MAX_LINE {
-                        self.errors.clear();
-                    }
-                }
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => return,
-            }
-        }
+        self.peer.read_errors(buffer);
     }
 
     fn receive(&mut self, message: Message, incoming: &mut Vec<Incoming>) {
@@ -433,8 +318,8 @@ impl Agent {
                         .pointer("/agentCapabilities/sessionCapabilities/close")
                         .is_some()
                 });
-                for line in self.held.take().unwrap_or_default() {
-                    self.outgoing.extend_from_slice(&line);
+                for message in self.held.take().unwrap_or_default() {
+                    self.peer.send(&message);
                 }
             }
             Pending::Session(terminal) => incoming.push(Incoming::Session {
@@ -478,26 +363,25 @@ impl Agent {
     }
 
     pub(crate) fn stdout_fd(&self) -> RawFd {
-        self.stdout.as_raw_fd()
+        self.peer.stdout_fd()
     }
 
     pub(crate) fn stderr_fd(&self) -> RawFd {
-        self.stderr.as_raw_fd()
+        self.peer.stderr_fd()
     }
 
     pub(crate) fn stdin_fd(&self) -> RawFd {
-        self.stdin.as_raw_fd()
+        self.peer.stdin_fd()
     }
 
     pub(crate) fn exit_fd(&self) -> RawFd {
-        self.process.as_raw_fd()
+        self.peer.exit_fd()
     }
 
     /// Stops the agent: closing its pipes ends it. Returns its process,
     /// to be reaped once it has exited.
     pub(crate) fn stop(self) -> Process {
-        log::info!("agent stopped");
-        self.process
+        self.peer.stop()
     }
 }
 
@@ -511,15 +395,4 @@ fn settings(result: &Value) -> Option<Vec<SessionConfigOption>> {
             .filter_map(|option| serde_json::from_value(option.clone()).ok())
             .collect(),
     )
-}
-
-/// A line from the agent as a message, or `None` if it isn't one.
-fn parse(line: &[u8]) -> Option<Message> {
-    let line = line.trim_ascii();
-    if line.is_empty() {
-        return None;
-    }
-    serde_json::from_slice(line)
-        .map_err(|err| log::debug!("agent: skipping a line that isn't JSON-RPC: {err}"))
-        .ok()
 }
