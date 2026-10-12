@@ -354,6 +354,10 @@ impl Lines for Text<'_> {
     fn bounds(&self) -> (u64, u64) {
         (0, self.last_line())
     }
+
+    fn empty(&self, line: u64) -> bool {
+        self.line_text(line).is_empty()
+    }
 }
 
 #[cfg(test)]

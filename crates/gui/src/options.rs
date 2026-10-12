@@ -396,6 +396,12 @@ impl Case {
     pub(crate) fn exact(self, query: &str) -> bool {
         !self.ignore || (self.smart && query.chars().any(char::is_uppercase))
     }
+
+    /// Whether a search matches case whatever it's for, as `ignorecase`
+    /// says, smart or not: `*`'s.
+    pub(crate) fn exact_always(self) -> bool {
+        !self.ignore
+    }
 }
 
 impl Default for Case {

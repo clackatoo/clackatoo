@@ -163,6 +163,11 @@ pub(crate) enum Action {
     SearchAgain {
         reverse: bool,
     },
+    /// `*`, or `#` if `backward`: the word under the cursor, as a whole
+    /// word.
+    SearchWord {
+        backward: bool,
+    },
     /// `;`, or `,` if `reverse`.
     FindAgain {
         reverse: bool,
@@ -222,9 +227,10 @@ impl Action {
     pub(crate) fn jumps(self) -> bool {
         matches!(
             self,
-            Self::Move(Motion::First | Motion::Last)
+            Self::Move(Motion::First | Motion::Last | Motion::Match | Motion::Paragraph { .. })
                 | Self::GoToLine
                 | Self::SearchAgain { .. }
+                | Self::SearchWord { .. }
                 | Self::Diagnostic { .. }
         )
     }
@@ -376,6 +382,8 @@ impl Reader<'_> {
             '/' => Action::Search { backward: false },
             '?' => Action::Search { backward: true },
             'n' => Action::SearchAgain { reverse: false },
+            '*' => Action::SearchWord { backward: false },
+            '#' => Action::SearchWord { backward: true },
             'N' => Action::SearchAgain { reverse: true },
             ';' => Action::FindAgain { reverse: false },
             ',' => Action::FindAgain { reverse: true },
@@ -457,6 +465,9 @@ impl Reader<'_> {
                 'B' => Motion::BigWordBack,
                 'E' => Motion::BigWordEnd,
                 'G' => Motion::Last,
+                '%' => Motion::Match,
+                '}' => Motion::Paragraph { forward: true },
+                '{' => Motion::Paragraph { forward: false },
                 'g' => {
                     // What a language server knows: `gd`, `gD`, `gy`, `gri`,
                     // `grr` and `grn`, as Neovim's are.

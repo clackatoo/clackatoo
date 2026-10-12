@@ -262,7 +262,7 @@ pub(crate) struct Editor {
     /// What's being typed in the bar.
     prompt: Option<Prompt>,
     /// The last search.
-    search: Option<(String, bool)>,
+    search: Option<Searched>,
     /// The last match found, highlighted until Esc.
     found: Option<(Point, Point)>,
     /// A short message for the bar, until the next key.
@@ -640,6 +640,7 @@ impl Editor {
             Action::Visual { lines } => self.visual(lines),
             Action::Search { backward } => self.prompt = Some(Prompt::search(backward)),
             Action::SearchAgain { reverse } => self.search_again(reverse, copy),
+            Action::SearchWord { backward } => self.search_word(backward, copy),
             Action::FindAgain { reverse } => {
                 if let Some(Motion::Find { ch, forward, till }) = self.last_find {
                     let motion = Motion::Find {
@@ -1026,22 +1027,10 @@ impl Editor {
                 } else {
                     (at, moved.at)
                 };
-                match motion.reach() {
+                match motion.reach_from(at, moved.at, &text)? {
                     Reach::Lines => Some(lines(start.line, end.line)),
                     Reach::Inclusive => Some(chars(start, end)),
-                    Reach::Exclusive => {
-                        // `dw` on a line's last word stops at the line's
-                        // end.
-                        if word && end.line > start.line {
-                            return Some(Span {
-                                start: text.byte_at(start),
-                                end: text.line_end(start.line).max(text.byte_at(start)),
-                                lines: None,
-                            });
-                        }
-                        let last = before(&text, start, end)?;
-                        Some(chars(start, last))
-                    }
+                    Reach::Exclusive => exclusive(&text, start, end, word),
                 }
             }
         }
@@ -1463,7 +1452,11 @@ impl Editor {
             Stroke::Enter => match self.prompt.take() {
                 Some(Prompt::Search { query, backward }) => {
                     if !query.is_empty() {
-                        self.search = Some((query, backward));
+                        self.search = Some(Searched {
+                            query,
+                            backward,
+                            whole: false,
+                        });
                     }
                     let from = self.cursor.at;
                     self.search_again(false, copy);
@@ -1554,15 +1547,27 @@ impl Editor {
 
     /// `n`, or `N` if `reverse`: the next match of the last search.
     fn search_again(&mut self, reverse: bool, copy: &BufferCopy) {
-        let Some((query, backward)) = self.search.clone() else {
+        let Some(Searched {
+            query,
+            backward,
+            whole,
+        }) = self.search.clone()
+        else {
             self.status = Some("no search yet".into());
             return;
         };
         let text = self.text(copy);
         let from = text.byte_at(self.cursor.at);
-        let whole = text.slice(0, text.rope().len_bytes());
-        let exact = self.case.exact(&query);
-        if let Some(start) = find(&whole, &query, from, backward != reverse, exact) {
+        let all = text.slice(0, text.rope().len_bytes());
+        // A whole word, as `*` searches, ignores case or not as
+        // `ignorecase` says, never as `smartcase`, as in Vim.
+        let exact = if whole {
+            self.case.exact_always()
+        } else {
+            self.case.exact(&query)
+        };
+        let backward = backward != reverse;
+        if let Some(start) = find(&all, &query, from, (backward, exact, whole)) {
             let last = start + query.len() - 1;
             self.found = Some((text.point_of(start), text.point_of(last)));
             self.cursor = Cursor::new(text.point_of(start));
@@ -1570,6 +1575,33 @@ impl Editor {
             self.found = None;
             self.status = Some(format!("{query} isn't in the file"));
         }
+    }
+
+    /// `*`, or `#` if `backward`: searches for the word under the cursor,
+    /// as a whole word, and goes to the next place it is, or the one
+    /// before, going round the file's ends.
+    fn search_word(&mut self, backward: bool, copy: &BufferCopy) {
+        let text = self.text(copy);
+        // The word under the cursor, or the next on its line, as Vim's.
+        let here = text.byte_at(self.cursor.at);
+        let line_end = text.line_end(self.cursor.at.line);
+        let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+        let next = (text.slice(here, line_end).char_indices())
+            .find(|&(_, ch)| is_word(ch))
+            .map(|(at, _)| here + at);
+        let Some((start, end)) = next.map(|at| word_at(&text, at)) else {
+            self.status = Some("no word under the cursor".into());
+            return;
+        };
+        let query = text.slice(start, end);
+        // From the word's start, so going forward finds the next, not this.
+        self.cursor = Cursor::new(text.point_of(start));
+        self.search = Some(Searched {
+            query,
+            backward,
+            whole: true,
+        });
+        self.search_again(false, copy);
     }
 
     /// `]d`, or `[d` if `backward`: to the start of the `times`th
@@ -2315,6 +2347,54 @@ pub(crate) fn describe(diagnostic: &Diagnostic) -> String {
     }
 }
 
+/// What an operator takes of `text` with an exclusive motion from
+/// `start` to `end`, if it's a `w` or `W` if `word`: up to `end`, but
+/// not it.
+fn exclusive(text: &Text<'_>, start: Point, end: Point, word: bool) -> Option<Span> {
+    // `dw` on a line's last word stops at the line's end.
+    if word && end.line > start.line {
+        return Some(Span {
+            start: text.byte_at(start),
+            end: text.line_end(start.line).max(text.byte_at(start)),
+            lines: None,
+        });
+    }
+    // As Vim's: one that ends at a line's start, from another line, ends
+    // at the end of the line before; and from at or before its line's
+    // first character that isn't blank, takes whole lines, as `d}` does.
+    if end.col == 0 && end.line > start.line {
+        let mut first = Cursor::new(start);
+        first.apply(Motion::FirstNonBlank, text);
+        if start.col <= first.at.col {
+            return Some(Span {
+                start: text.line_start(start.line),
+                end: text.line_start(end.line),
+                lines: Some((start.line, end.line - 1)),
+            });
+        }
+        return Some(Span {
+            start: text.byte_at(start),
+            end: text.line_end(end.line - 1).max(text.byte_at(start)),
+            lines: None,
+        });
+    }
+    let last = before(text, start, end)?;
+    Some(Span {
+        start: text.byte_at(start),
+        end: text.char_end(last),
+        lines: None,
+    })
+}
+
+/// The last search: what was searched for, which way, and if only as a
+/// whole word, as `*` searches.
+#[derive(Clone, Debug)]
+struct Searched {
+    query: String,
+    backward: bool,
+    whole: bool,
+}
+
 /// Where the word at byte `at` of `text` starts and ends: letters, digits
 /// and `_`, as `w` reads them. Both are `at` if there's none there.
 fn word_at(text: &Text<'_>, at: usize) -> (usize, usize) {
@@ -2369,10 +2449,21 @@ fn columns(options: &Options) -> Vec<usize> {
 /// Where `query` next is in `text` after `from`, or before it if
 /// `backward`, going round the ends. Case is ignored, for ASCII, unless
 /// `exact`.
-fn find(text: &str, query: &str, from: usize, backward: bool, exact: bool) -> Option<usize> {
+fn find(
+    text: &str,
+    query: &str,
+    from: usize,
+    (backward, exact, whole): (bool, bool, bool),
+) -> Option<usize> {
     if query.is_empty() {
         return None;
     }
+    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let alone = |at: usize| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + query.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    };
     let (haystack, needle) = if exact {
         (
             std::borrow::Cow::Borrowed(text),
@@ -2384,7 +2475,10 @@ fn find(text: &str, query: &str, from: usize, backward: bool, exact: bool) -> Op
             std::borrow::Cow::Owned(query.to_ascii_lowercase()),
         )
     };
-    let all: Vec<usize> = haystack.match_indices(&*needle).map(|(at, _)| at).collect();
+    let all: Vec<usize> = (haystack.match_indices(&*needle))
+        .map(|(at, _)| at)
+        .filter(|&at| !whole || alone(at))
+        .collect();
     if backward {
         all.iter()
             .rev()

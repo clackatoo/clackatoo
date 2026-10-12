@@ -436,6 +436,9 @@ fn motion(key: &Key, character: Option<char>) -> Option<Motion> {
         (_, Some('b')) => Motion::WordBack,
         (_, Some('e')) => Motion::WordEnd,
         (_, Some('G')) => Motion::Last,
+        (_, Some('%')) => Motion::Match,
+        (_, Some('}')) => Motion::Paragraph { forward: true },
+        (_, Some('{')) => Motion::Paragraph { forward: false },
         _ => return None,
     })
 }

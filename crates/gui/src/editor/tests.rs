@@ -1047,3 +1047,91 @@ fn grn_asks_in_the_bar_for_a_new_name_and_renames() {
     // Typed text goes to the name, not to the file.
     assert_eq!(setup.text(), "let value = 1;\nvalue + 1\n");
 }
+
+#[test]
+fn percent_goes_to_the_bracket_that_pairs() {
+    let mut setup = Setup::new("fn f(a, (b)) {\n  x()\n}\n");
+    // From before any, to the pair of the first on the line.
+    setup.keys("%");
+    assert_eq!(setup.cursor(), (0, 11));
+    setup.keys("%");
+    assert_eq!(setup.cursor(), (0, 4));
+    // Across lines, past brackets of other kinds.
+    setup.keys("$%");
+    assert_eq!(setup.cursor(), (2, 0));
+    setup.keys("%");
+    assert_eq!(setup.cursor(), (0, 13));
+    // With an operator, both brackets go.
+    setup.keys("0f(d%");
+    assert_eq!(setup.text(), "fn f {\n  x()\n}\n");
+}
+
+#[test]
+fn braces_go_to_the_blank_lines_round_paragraphs() {
+    let mut setup = Setup::new("a\nb\n\nc\nd\n\ne\n");
+    setup.keys("}");
+    assert_eq!(setup.cursor(), (2, 0));
+    setup.keys("}");
+    assert_eq!(setup.cursor(), (5, 0));
+    setup.keys("{");
+    assert_eq!(setup.cursor(), (2, 0));
+    setup.keys("2{");
+    assert_eq!(
+        setup.cursor(),
+        (0, 0),
+        "the first line, with no blank before"
+    );
+    // A jump, which Ctrl+O comes back from, is the desk's: here, `}`
+    // with an operator deletes to the blank line.
+    setup.keys("d}");
+    assert_eq!(setup.text(), "\nc\nd\n\ne\n");
+}
+
+#[test]
+fn star_and_hash_search_for_the_word_under_the_cursor_whole() {
+    let mut setup = Setup::new("foo foobar foo\nfoo\n");
+    setup.keys("*");
+    assert_eq!(setup.cursor(), (0, 11), "not foobar");
+    setup.keys("n");
+    assert_eq!(setup.cursor(), (1, 0));
+    setup.keys("#");
+    assert_eq!(setup.cursor(), (0, 11));
+    setup.keys("N");
+    assert_eq!(setup.cursor(), (1, 0), "N goes the other way from #");
+    // Over no word, the next on the line, as Vim's.
+    let mut blank = Setup::new("a  b b\n");
+    blank.keys("l*");
+    assert_eq!(blank.cursor(), (0, 5));
+    // With none after it, it says so.
+    let mut none = Setup::new("a  \n");
+    none.keys("$*");
+    assert_eq!(none.cursor(), (0, 0));
+}
+
+#[test]
+fn motions_that_go_nowhere_take_nothing_and_the_last_paragraph_goes_to_the_end() {
+    // `%` with no bracket on the line, and `f` with no such character,
+    // leave the text alone, as Vim's do.
+    let mut setup = Setup::new("hello\nworld\n");
+    setup.keys("d%");
+    setup.keys("dfz");
+    assert_eq!(setup.text(), "hello\nworld\n");
+    // `}` with no empty line after goes to the end of the last line, and
+    // `d}` takes it all.
+    setup.keys("}");
+    assert_eq!(setup.cursor(), (1, 4));
+    setup.keys("ggd}");
+    assert_eq!(setup.text(), "\n");
+    // A line of blanks isn't empty: the paragraph goes on past it.
+    let mut blanks = Setup::new("a\n  \nb\n\nc\n");
+    blanks.keys("}");
+    assert_eq!(blanks.cursor(), (3, 0));
+}
+
+#[test]
+fn star_ignores_case_as_ignorecase_says_whatever_smartcase_says() {
+    // Both on, as by default: `*` on "Foo" finds "foo".
+    let mut setup = Setup::new("Foo bar foo\n");
+    setup.keys("*");
+    assert_eq!(setup.cursor(), (0, 8));
+}

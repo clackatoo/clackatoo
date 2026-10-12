@@ -27,6 +27,12 @@ pub(crate) trait Lines {
     fn row(&self, line: u64) -> Option<Self::Row<'_>>;
     /// The first and last lines, inclusive.
     fn bounds(&self) -> (u64, u64);
+
+    /// Whether line `line` is empty, as a paragraph ends at. A terminal's
+    /// line can't tell blanks typed from none, so it's empty if blank.
+    fn empty(&self, line: u64) -> bool {
+        text_end(self.row(line).as_deref()) == 0
+    }
 }
 
 /// A way to move the cursor.
@@ -66,6 +72,14 @@ pub(crate) enum Motion {
         forward: bool,
         till: bool,
     },
+    /// `%`: the bracket that pairs with the one under the cursor, or with
+    /// the next one on its line.
+    Match,
+    /// `}`: the next blank line after the paragraph, or `{` the blank line
+    /// before it if not `forward`.
+    Paragraph {
+        forward: bool,
+    },
 }
 
 /// What an operator such as `y` takes when given a motion, as in Vim.
@@ -80,6 +94,18 @@ pub(crate) enum Reach {
 }
 
 impl Motion {
+    /// What an operator takes with it from `from` to `to`, in `lines`; or
+    /// `None` if the motion went nowhere it could, as `%` with no bracket,
+    /// which takes nothing.
+    pub(crate) fn reach_from(self, from: Point, to: Point, lines: &impl Lines) -> Option<Reach> {
+        match self {
+            Self::Match | Self::Find { .. } if from == to => None,
+            // `}` with no empty line after takes the last line's end.
+            Self::Paragraph { forward: true } if !lines.empty(to.line) => Some(Reach::Inclusive),
+            _ => Some(self.reach()),
+        }
+    }
+
     pub(crate) fn reach(self) -> Reach {
         match self {
             Self::Left
@@ -89,7 +115,8 @@ impl Motion {
             | Self::WordStart
             | Self::WordBack
             | Self::BigWordStart
-            | Self::BigWordBack => Reach::Exclusive,
+            | Self::BigWordBack
+            | Self::Paragraph { .. } => Reach::Exclusive,
             Self::Find { forward, .. } => {
                 if forward {
                     Reach::Inclusive
@@ -97,7 +124,7 @@ impl Motion {
                     Reach::Exclusive
                 }
             }
-            Self::LineEnd | Self::WordEnd | Self::BigWordEnd => Reach::Inclusive,
+            Self::LineEnd | Self::WordEnd | Self::BigWordEnd | Self::Match => Reach::Inclusive,
             Self::Up(_) | Self::Down(_) | Self::First | Self::Last => Reach::Lines,
         }
     }
@@ -195,6 +222,24 @@ impl Cursor {
             Motion::BigWordStart => self.word_start(lines, Class::big),
             Motion::BigWordBack => self.word_back(lines, Class::big),
             Motion::BigWordEnd => self.word_end(lines, Class::big),
+            Motion::Match => {
+                if let Some(at) = pair(at, lines) {
+                    self.at = at;
+                    self.want = at.col;
+                }
+            }
+            Motion::Paragraph { forward } => {
+                let line = paragraph_end(at.line, forward, lines);
+                // With no empty line after it, `}` goes to the end of the
+                // last line, as Vim's does.
+                let col = if forward && !lines.empty(line) {
+                    last_char(lines.row(line).as_deref())
+                } else {
+                    0
+                };
+                self.at = Point { line, col };
+                self.want = col;
+            }
         }
     }
 
@@ -379,6 +424,94 @@ impl<'a, L: Lines> Walk<'a, L> {
         }
         None
     }
+}
+
+/// The brackets `%` pairs, opening first.
+const PAIRS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
+
+/// How many lines `%` looks through for a pair, so a lone bracket in a
+/// terminal's long history doesn't read all of it.
+const MATCH_REACH: u64 = 10_000;
+
+/// Where the bracket that pairs with the one at `at` is, or with the next
+/// bracket on its line after `at`, counting brackets of its kind between.
+fn pair(at: Point, lines: &impl Lines) -> Option<Point> {
+    let row = lines.row(at.line)?;
+    let (col, ch) = (row.cells().iter().enumerate().skip(at.col))
+        .map(|(col, cell)| (col, cell.ch()))
+        .find(|(_, ch)| {
+            PAIRS
+                .iter()
+                .any(|&(open, close)| *ch == open || *ch == close)
+        })?;
+    let &(open, close) = PAIRS
+        .iter()
+        .find(|&&(open, close)| ch == open || ch == close)?;
+    let forward = ch == open;
+    let (first, last) = lines.bounds();
+    let mut depth = 0_usize;
+    let mut line = at.line;
+    let mut from = Some(col);
+    loop {
+        // A line not to hand might hold a bracket that pairs.
+        let row = lines.row(line)?;
+        let cells = row.cells();
+        let cols: Box<dyn Iterator<Item = usize>> = match (forward, from) {
+            (true, Some(from)) => Box::new(from..cells.len()),
+            (true, None) => Box::new(0..cells.len()),
+            (false, Some(from)) => Box::new((0..=from).rev()),
+            (false, None) => Box::new((0..cells.len()).rev()),
+        };
+        for col in cols {
+            let ch = cells[col].ch();
+            if ch == ch_of(forward, open, close) {
+                depth += 1;
+            } else if ch == ch_of(!forward, open, close) {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(Point { line, col });
+                }
+            }
+        }
+        from = None;
+        let reach = line.abs_diff(at.line) >= MATCH_REACH;
+        line = match forward {
+            true if line < last && !reach => line + 1,
+            false if line > first && !reach => line - 1,
+            _ => return None,
+        };
+    }
+}
+
+/// The bracket going `forward` counts in, `open` or `close`.
+fn ch_of(forward: bool, open: char, close: char) -> char {
+    if forward { open } else { close }
+}
+
+/// The line `{` or `}` goes to from `line`: past the empty lines next to
+/// it, then past the paragraph's lines, to the first empty one, or the
+/// first or last line.
+fn paragraph_end(line: u64, forward: bool, lines: &impl Lines) -> u64 {
+    let (first, last) = lines.bounds();
+    let blank = |line| lines.empty(line);
+    let step = |line: u64| {
+        if forward {
+            (line < last).then(|| line + 1)
+        } else {
+            (line > first).then(|| line - 1)
+        }
+    };
+    let mut line = line;
+    while let Some(next) = step(line).filter(|&next| blank(next)) {
+        line = next;
+    }
+    while let Some(next) = step(line) {
+        line = next;
+        if blank(line) {
+            break;
+        }
+    }
+    line
 }
 
 /// The class of the cell at `col`, with past a line's text blank.

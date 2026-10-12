@@ -40,7 +40,10 @@ impl Pane {
         } else {
             (cursor.at, moved.at)
         };
-        let copied = match motion.reach() {
+        let Some(reach) = motion.reach_from(cursor.at, moved.at, &document) else {
+            return false;
+        };
+        let copied = match reach {
             Reach::Lines => Some((end, Selection::Lines)),
             Reach::Inclusive => Some((end, Selection::Characters)),
             Reach::Exclusive => {
