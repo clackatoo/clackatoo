@@ -1,5 +1,7 @@
-//! Renaming: making the edits a language server answers a rename with,
-//! across every file they touch.
+//! Renaming, and every other edit a language server asks for across files
+//! (a `WorkspaceEdit`): making its edits, in every file they touch. A
+//! rename's are one; so are a code action's, and those a server asks for
+//! itself, as it does when running a command.
 //!
 //! A buffer that's open is edited as the user, one undo step in each, so
 //! every window following it is sent the edit, and `u` undoes it. A file
@@ -27,6 +29,9 @@
 //! file at once: the second is refused. A rename whose client goes while
 //! its files are written is dropped, and an upgrade or shutdown drops
 //! those under way, throwing away what they wrote.
+//!
+//! All of that holds for any edit made here, whatever it's for: "rename"
+//! below means any of them.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -35,7 +40,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{Answer, Author, BufferId, BufferUpdate, Edit};
+use clackatoo_protocol::{Answer, Author, BufferId, Edit};
 use clackatoo_text::{Bias, Rope};
 use mio::Token;
 use serde_json::Value;
@@ -77,14 +82,11 @@ struct StagedFile {
 }
 
 /// A rename, until its files not open have been written, after which
-/// they're put in place, its buffers edited, and the client that asked
-/// told.
+/// they're put in place, its buffers edited, and whoever asked told.
 #[derive(Debug)]
 struct Renaming {
     server: ServerId,
-    token: Token,
-    buffer: BufferId,
-    id: u64,
+    purpose: Purpose,
     buffers: Vec<BufferPlan>,
     occurrences: usize,
     files: usize,
@@ -94,6 +96,63 @@ struct Renaming {
     /// stops, and what it wrote is thrown away.
     cancel: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+}
+
+/// What an edit across files is made for, and so who's told how it went,
+/// and how.
+#[derive(Debug)]
+pub(super) enum Purpose {
+    /// The rename the client at `token` asked for about `buffer`, numbered
+    /// `id`.
+    Rename {
+        token: Token,
+        buffer: BufferId,
+        id: u64,
+    },
+    /// The code action called `title` the client at `token` picked, about
+    /// `buffer`, numbered `id`. Its command, an LSP `Command`, if it has
+    /// one, is run once its edit has been made.
+    Action {
+        token: Token,
+        buffer: BufferId,
+        id: u64,
+        title: String,
+        command: Option<Value>,
+    },
+    /// The server's own request to make it, numbered `request`, as when it
+    /// runs a command.
+    Asked { request: Value },
+}
+
+impl Purpose {
+    /// The client that asked, and about which buffer, if one did.
+    fn client(&self) -> Option<(Token, BufferId)> {
+        match self {
+            Self::Rename { token, buffer, .. } | Self::Action { token, buffer, .. } => {
+                Some((*token, *buffer))
+            }
+            Self::Asked { .. } => None,
+        }
+    }
+}
+
+/// What an edit across files changed: so many places, in so many files.
+/// None, if it asked for nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Made {
+    pub(super) occurrences: usize,
+    pub(super) files: usize,
+}
+
+/// An edit across files, checked and planned: its edits to buffers, and
+/// to files not open, how many places it changes, and how its server
+/// counts columns.
+#[derive(Debug)]
+struct Planned {
+    buffers: Vec<BufferPlan>,
+    disk: Vec<FileEdits>,
+    occurrences: usize,
+    encoding: Encoding,
 }
 
 /// A rename's edit to an open buffer, checked against its text at `base`.
@@ -127,76 +186,47 @@ fn discard(staging: Staging) {
 }
 
 impl Daemon {
-    /// Makes the edits server `server` answered a rename with, `answer`,
-    /// which are counted in the buffers open in it as they were `before`,
-    /// and in the files not open as they are on disk, for the client at
-    /// `token`, which asked about `buffer` with its number `id`. Returns
-    /// what to tell it, or `None` if files are being written first, after
-    /// which it's told.
-    pub(super) fn make_rename(
+    /// Makes the edits server `server` asks for in `edit`, a
+    /// `WorkspaceEdit`, such as its answer to a rename, for `purpose`.
+    /// They're counted in the buffers open in it as they were `before`,
+    /// and in the files not open as they are on disk. Whoever asked is
+    /// told how it went, once it has: at once, or once files not open have
+    /// been written.
+    pub(super) fn edit_workspace(
         &mut self,
         server: ServerId,
         before: &[Before],
-        answer: &Value,
-        (token, buffer, id): (Token, BufferId, u64),
-    ) -> Option<Answer> {
-        if answer.is_null() {
-            return Some(Answer::Nothing);
+        edit: &Value,
+        purpose: Purpose,
+    ) {
+        if let Some((purpose, made)) = self.start_edit(server, before, edit, purpose) {
+            self.edited_workspace(server, purpose, made);
         }
-        let (Some(encoding), Some(root)) = (self.server_encoding(server), self.server_root(server))
-        else {
-            return Some(Answer::Failed("its language server has stopped".into()));
+    }
+
+    /// Starts [`edit_workspace`](Self::edit_workspace)'s work: returns how
+    /// it went, with what it was for, or `None` if files not open are
+    /// being written first, as [`take_renames`](Self::take_renames) says.
+    fn start_edit(
+        &mut self,
+        server: ServerId,
+        before: &[Before],
+        edit: &Value,
+        purpose: Purpose,
+    ) -> Option<(Purpose, Result<Made, String>)> {
+        let Planned {
+            buffers,
+            disk,
+            occurrences,
+            encoding,
+        } = match self.plan_edit(server, before, edit) {
+            Ok(Some(planned)) => planned,
+            Ok(None) => return Some((purpose, Ok(Made::default()))),
+            Err(why) => return Some((purpose, Err(why))),
         };
-        let files = match lsp::workspace_edit(answer) {
-            Ok(files) if files.is_empty() => return Some(Answer::Nothing),
-            Ok(files) => files,
-            Err(why) => return Some(Answer::Failed(why)),
-        };
-        // How many are files not open, before reading any: a buffer's path
-        // is as the server names it, unless it names it through a link.
-        let open = |path: &Path| (self.buffers.values()).any(|slot| slot.buffer.path() == path);
-        let on_disk = files.iter().filter(|file| !open(&file.path)).count();
-        if on_disk > MAX_ON_DISK {
-            return Some(Answer::Failed(format!(
-                "the rename touches {on_disk} files not open, more than the {MAX_ON_DISK} it may"
-            )));
-        }
-        let files = match by_real_path(files, &open) {
-            Ok(files) => files,
-            Err(why) => return Some(Answer::Failed(why)),
-        };
-        let occurrences = files.iter().map(|file| file.edits.len()).sum();
-        let mut buffers = Vec::new();
-        let mut disk = Vec::new();
-        for file in files {
-            if !file.path.starts_with(&root) {
-                return Some(Answer::Failed(format!(
-                    "the language server wants to edit {}, outside its project, {}",
-                    file.path.display(),
-                    root.display()
-                )));
-            }
-            match self.buffer_of(&file.path) {
-                Some(id) => match self.plan(id, &file, (server, before), encoding) {
-                    Ok(plan) => buffers.push(plan),
-                    Err(why) => return Some(Answer::Failed(why)),
-                },
-                None => disk.push(file),
-            }
-        }
-        if let Some(path) =
-            (disk.iter().map(|file| &file.path)).find(|path| self.renames.writing.contains(*path))
-        {
-            return Some(Answer::Failed(format!(
-                "another rename is writing {}: try again once it's done",
-                path.display()
-            )));
-        }
         let mut renaming = Renaming {
             server,
-            token,
-            buffer,
-            id,
+            purpose,
             files: buffers.len() + disk.len(),
             buffers,
             occurrences,
@@ -205,7 +235,8 @@ impl Daemon {
             thread: None,
         };
         if disk.is_empty() {
-            return Some(self.edit_buffers(&renaming));
+            let made = self.edit_buffers(&renaming);
+            return Some((renaming.purpose, made));
         }
         let key = self.renames.next;
         self.renames.next += 1;
@@ -226,7 +257,7 @@ impl Daemon {
                 // wait for it, does: what it wrote goes now.
                 if cancel.load(Ordering::Relaxed) {
                     discard(staging);
-                    staging = Err("the rename was dropped".to_owned());
+                    staging = Err("the edit was dropped".to_owned());
                 }
                 (ended.lock().unwrap_or_else(PoisonError::into_inner)).push((key, staging));
                 if let Err(err) = waker.wake() {
@@ -235,16 +266,83 @@ impl Daemon {
             });
         match spawned {
             Ok(thread) => renaming.thread = Some(thread),
-            Err(err) => return Some(Answer::Failed(format!("the rename couldn't start: {err}"))),
+            Err(err) => {
+                let why = format!("the edit couldn't start: {err}");
+                return Some((renaming.purpose, Err(why)));
+            }
         }
         (self.renames.writing).extend(renaming.paths.iter().cloned());
         self.renames.under_way.insert(key, renaming);
         None
     }
 
+    /// Checks the edits server `server` asks for in `edit`, as
+    /// [`edit_workspace`](Self::edit_workspace) says, and plans them:
+    /// those to buffers, checked against their text, and those to files not
+    /// open. `None` if it asks for none; an error, saying why, if any can't
+    /// be made, when none are.
+    fn plan_edit(
+        &self,
+        server: ServerId,
+        before: &[Before],
+        edit: &Value,
+    ) -> Result<Option<Planned>, String> {
+        if edit.is_null() {
+            return Ok(None);
+        }
+        let (Some(encoding), Some(root)) = (self.server_encoding(server), self.server_root(server))
+        else {
+            return Err("its language server has stopped".into());
+        };
+        let files = lsp::workspace_edit(edit)?;
+        if files.is_empty() {
+            return Ok(None);
+        }
+        // How many are files not open, before reading any: a buffer's path
+        // is as the server names it, unless it names it through a link.
+        let open = |path: &Path| (self.buffers.values()).any(|slot| slot.buffer.path() == path);
+        let on_disk = files.iter().filter(|file| !open(&file.path)).count();
+        if on_disk > MAX_ON_DISK {
+            return Err(format!(
+                "the edit touches {on_disk} files not open, more than the {MAX_ON_DISK} it may"
+            ));
+        }
+        let files = by_real_path(files, &open)?;
+        let occurrences = files.iter().map(|file| file.edits.len()).sum();
+        let mut buffers = Vec::new();
+        let mut disk = Vec::new();
+        for file in files {
+            if !file.path.starts_with(&root) {
+                return Err(format!(
+                    "the language server wants to edit {}, outside its project, {}",
+                    file.path.display(),
+                    root.display()
+                ));
+            }
+            match self.buffer_of(&file.path) {
+                Some(id) => buffers.push(self.plan(id, &file, (server, before), encoding)?),
+                None => disk.push(file),
+            }
+        }
+        if let Some(path) =
+            (disk.iter().map(|file| &file.path)).find(|path| self.renames.writing.contains(*path))
+        {
+            return Err(format!(
+                "another edit is writing {}: try again once it's done",
+                path.display()
+            ));
+        }
+        Ok(Some(Planned {
+            buffers,
+            disk,
+            occurrences,
+            encoding,
+        }))
+    }
+
     /// Finishes the renames whose files have been written: puts the files
     /// in place and edits their buffers, if nothing has changed since,
-    /// and tells the clients that asked.
+    /// and tells whoever asked.
     pub(super) fn take_renames(&mut self) {
         if self.renames.under_way.is_empty() {
             return;
@@ -263,24 +361,49 @@ impl Daemon {
                 discard(staging);
                 continue;
             }
-            let answer = match staging {
-                Err(why) => Answer::Failed(why),
+            let made = match staging {
+                Err(why) => Err(why),
                 Ok(files) => self.commit_rename(&renaming, files),
             };
-            log::info!("rename: {answer:?}");
-            let (token, buffer) = (renaming.token, renaming.buffer);
-            let Some(slot) = self.buffers.get(&buffer) else {
-                continue;
-            };
-            if !slot.viewers.contains(&token) {
-                continue;
+            log::info!("edit across files: {made:?}");
+            self.edited_workspace(renaming.server, renaming.purpose, made);
+        }
+    }
+
+    /// Tells whoever asked for an edit across files, as `purpose` says,
+    /// how it went, `made`: the client, or server `server`. A code action's
+    /// command is run now, its edit made, and its client told once it's
+    /// run.
+    fn edited_workspace(&mut self, server: ServerId, purpose: Purpose, made: Result<Made, String>) {
+        match purpose {
+            Purpose::Rename { token, buffer, id } => {
+                let answer = match made {
+                    Ok(made) if made.files == 0 => Answer::Nothing,
+                    Ok(Made { occurrences, files }) => Answer::Renamed { occurrences, files },
+                    Err(why) => Answer::Failed(why),
+                };
+                self.answer_client((token, buffer, id), answer);
             }
-            let update = BufferUpdate::Answer {
-                id: renaming.id,
-                version: slot.buffer.version(),
-                answer,
-            };
-            self.tell(token, buffer, update);
+            Purpose::Action {
+                token,
+                buffer,
+                id,
+                title,
+                command,
+            } => match (made, command) {
+                (Ok(made), Some(command)) => {
+                    self.run_command(server, (token, buffer, id), title, &command, made.files);
+                }
+                (Ok(made), None) => {
+                    let answer = Answer::Acted {
+                        title,
+                        files: made.files,
+                    };
+                    self.answer_client((token, buffer, id), answer);
+                }
+                (Err(why), _) => self.answer_client((token, buffer, id), Answer::Failed(why)),
+            },
+            Purpose::Asked { request } => self.answer_apply_edit(server, &request, made),
         }
     }
 
@@ -288,18 +411,22 @@ impl Daemon {
     /// edits its buffers, all at once, unless a file has changed on disk
     /// or been opened since it was read, or a buffer has been edited
     /// inside a place: then nothing.
-    fn commit_rename(&mut self, renaming: &Renaming, files: Vec<StagedFile>) -> Answer {
+    fn commit_rename(
+        &mut self,
+        renaming: &Renaming,
+        files: Vec<StagedFile>,
+    ) -> Result<Made, String> {
         let refused = (files.iter())
             .find_map(|file| {
                 let path = file.staged.path();
                 if self.buffer_of(path).is_some() {
                     Some(format!(
-                        "{} was opened while the rename was being written: try again",
+                        "{} was opened while the edit was being written: try again",
                         path.display()
                     ))
                 } else if DiskStamp::now(path).ok().flatten() != Some(file.read) {
                     Some(format!(
-                        "{} changed on disk while the rename was being written: try again",
+                        "{} changed on disk while the edit was being written: try again",
                         path.display()
                     ))
                 } else {
@@ -309,7 +436,7 @@ impl Daemon {
             .or_else(|| (renaming.buffers.iter()).find_map(|plan| self.moved(plan).err()));
         if let Some(why) = refused {
             discard(Ok(files));
-            return Answer::Failed(why);
+            return Err(why);
         }
         let mut placed: Vec<Placed> = Vec::with_capacity(files.len());
         let mut files = files.into_iter();
@@ -326,12 +453,12 @@ impl Daemon {
                         })
                         .collect();
                     if not_put_back.is_empty() {
-                        return Answer::Failed(format!(
-                            "{path} couldn't be put in place, so nothing was renamed: {err}"
+                        return Err(format!(
+                            "{path} couldn't be put in place, so nothing was changed: {err}"
                         ));
                     }
-                    return Answer::Failed(format!(
-                        "{path} couldn't be put in place: {err}; and these, renamed in, couldn't be put back: {}",
+                    return Err(format!(
+                        "{path} couldn't be put in place: {err}; and these, changed, couldn't be put back: {}",
                         not_put_back.join(", ")
                     ));
                 }
@@ -340,9 +467,9 @@ impl Daemon {
         let paths: Vec<PathBuf> = placed.iter().map(|one| one.path().to_owned()).collect();
         placed.into_iter().for_each(Placed::finish);
         // Checked just now, with nothing made since.
-        let answer = self.edit_buffers(renaming);
+        let made = self.edit_buffers(renaming);
         self.changed_on_disk(renaming.server, &paths);
-        answer
+        made
     }
 
     /// Drops the renames under way that the client at `token` asked about
@@ -350,7 +477,21 @@ impl Daemon {
     /// and what they wrote is thrown away.
     pub(super) fn forget_renames(&mut self, token: Token, buffer: Option<BufferId>) {
         for renaming in self.renames.under_way.values() {
-            if renaming.token == token && buffer.is_none_or(|buffer| buffer == renaming.buffer) {
+            let forgotten = (renaming.purpose.client()).is_some_and(|(asker, about)| {
+                asker == token && buffer.is_none_or(|buffer| buffer == about)
+            });
+            if forgotten {
+                renaming.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Drops the edits under way that server `server` asked for itself, as
+    /// it's stopping, and so won't hear how they went: their threads stop,
+    /// and what they wrote is thrown away.
+    pub(super) fn forget_asked_edits(&mut self, server: ServerId) {
+        for renaming in self.renames.under_way.values() {
+            if renaming.server == server && matches!(renaming.purpose, Purpose::Asked { .. }) {
                 renaming.cancel.store(true, Ordering::Relaxed);
             }
         }
@@ -394,13 +535,10 @@ impl Daemon {
     /// Makes a rename's edits to its buffers, all or none: each place moved
     /// along with the edits made since it was planned, and none edited
     /// inside meanwhile.
-    fn edit_buffers(&mut self, renaming: &Renaming) -> Answer {
+    fn edit_buffers(&mut self, renaming: &Renaming) -> Result<Made, String> {
         let mut made = Vec::with_capacity(renaming.buffers.len());
         for plan in &renaming.buffers {
-            match self.moved(plan) {
-                Ok(edit) => made.push((plan.id, edit)),
-                Err(why) => return Answer::Failed(why),
-            }
+            made.push((plan.id, self.moved(plan)?));
         }
         for (id, edit) in made {
             let Some(slot) = self.buffers.get_mut(&id) else {
@@ -414,14 +552,14 @@ impl Daemon {
             }
         }
         log::info!(
-            "renamed {} places in {} files",
+            "edited {} places in {} files",
             renaming.occurrences,
             renaming.files
         );
-        Answer::Renamed {
+        Ok(Made {
             occurrences: renaming.occurrences,
             files: renaming.files,
-        }
+        })
     }
 
     /// Makes the edits server `server` answered with, `value`, when asked
@@ -534,7 +672,7 @@ impl Daemon {
     /// there now.
     fn moved(&self, plan: &BufferPlan) -> Result<Edit, String> {
         let Some(slot) = self.buffers.get(&plan.id) else {
-            return Err("a file being renamed in has closed".into());
+            return Err("a file being edited has closed".into());
         };
         let changed = || changed(slot.buffer.path());
         let mut places: Vec<(usize, usize)> = (plan.replaces.iter())
@@ -611,7 +749,7 @@ fn stage_files(files: &[FileEdits], encoding: Encoding, cancel: &AtomicBool) -> 
     for file in files {
         let one = (!cancel.load(Ordering::Relaxed))
             .then_some(())
-            .ok_or_else(|| "the rename was dropped".to_owned())
+            .ok_or_else(|| "the edit was dropped".to_owned())
             .and_then(|()| stage_file(file, encoding));
         match one {
             Ok(one) => staged.push(one),
@@ -634,7 +772,7 @@ fn stage_file(file: &FileEdits, encoding: Encoding) -> Result<StagedFile, String
     edit.apply(&mut text).map_err(|err| err.to_string())?;
     let staged = buffer::stage(path, &text).map_err(|err| {
         format!(
-            "{} couldn't be written, so nothing was renamed: {err}",
+            "{} couldn't be written, so nothing was changed: {err}",
             path.display()
         )
     })?;
@@ -807,7 +945,7 @@ mod tests {
         std::fs::set_permissions(dir.join("locked"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
         let why = staged.unwrap_err();
-        assert!(why.contains("nothing was renamed"), "{why}");
+        assert!(why.contains("nothing was changed"), "{why}");
         assert_eq!(listed(), before, "no new files left");
 
         // Writable, both are written beside their files, which are as

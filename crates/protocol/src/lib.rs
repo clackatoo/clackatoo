@@ -54,8 +54,8 @@ pub use clackatoo_term::{
 use serde::{Deserialize, Serialize};
 
 pub use buffer::{
-    Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, CompletionItem, FileLocation,
-    OpenFile, Query, ServerFeatures, TextChange, Trigger,
+    Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, CodeAction, CompletionItem,
+    FileLocation, OpenFile, Query, ServerFeatures, TextChange, Trigger,
 };
 pub use chat::{
     ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome,
@@ -75,7 +75,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 34;
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

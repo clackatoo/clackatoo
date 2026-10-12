@@ -255,6 +255,26 @@ pub enum Query {
         /// Whether its help is shown already.
         retrigger: bool,
     },
+    /// What the language server could do to the text from the place to
+    /// byte `end`, as `gra` asks: fix what's wrong there, or rewrite it.
+    /// The server is told what's wrong there too. Answered with
+    /// [`Answer::CodeActions`]. For the cursor alone, `end` is the place.
+    CodeActions {
+        /// The byte after the last asked about, in the same text as the
+        /// place, which the daemon moves along with it.
+        end: usize,
+    },
+    /// Does action `item` of those answered to the
+    /// [`CodeActions`](Self::CodeActions) query numbered `list`: its edits
+    /// are made, as a rename's are, and its command run. Answered with
+    /// [`Answer::Acted`]. The place isn't looked at. The list is used up:
+    /// another action of it is out of date, as it may make edits again.
+    Act {
+        /// The code actions query's number.
+        list: u64,
+        /// The action's index in its answer.
+        item: u32,
+    },
 }
 
 /// Why a language server is asked what could be typed, or about a call,
@@ -315,6 +335,20 @@ pub enum Answer {
         /// ...of how many it has, as an overloaded one has several.
         count: usize,
     },
+    /// What could be done to the text asked about, as
+    /// [`Query::CodeActions`] asks: quick fixes first, and of those, and
+    /// then of the rest, those the server would have picked first.
+    CodeActions(Vec<CodeAction>),
+    /// A [`Query::Act`] was done: every edit it took, to buffers open and
+    /// files not, has been made, the buffers' sent as edits before this,
+    /// one undo step in each, and its command has been run.
+    Acted {
+        /// The action's title.
+        title: String,
+        /// How many files its edits changed, the language server's own
+        /// edits while its command ran included.
+        files: usize,
+    },
     /// A [`ClientMessage::Rename`](crate::ClientMessage::Rename) was
     /// made: every edit it took, to buffers open and files not, has been
     /// made, the buffers' sent as edits before this.
@@ -342,6 +376,22 @@ pub enum Answer {
     /// the hunk's lines are in git's index, and the buffer's hunks, sent
     /// before this, no longer have it.
     Staged,
+}
+
+/// Something a language server could do to some text, such as fix what's
+/// wrong with it, or rewrite it, as [`Query::CodeActions`] asks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeAction {
+    /// What it does, as the server says, such as `Add explicit type`.
+    pub title: String,
+    /// What sort of action it is, as LSP names them: `quickfix`,
+    /// `refactor.extract`, `source.organizeImports` and the like. Empty if
+    /// the server doesn't say.
+    pub kind: String,
+    /// Whether the server would have it picked first.
+    pub preferred: bool,
+    /// Why it can't be done now, if it can't, as the server says.
+    pub disabled: Option<String>,
 }
 
 /// Something that could be typed, as a language server suggests it.

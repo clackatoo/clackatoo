@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    Answer, BufferId, BufferUpdate, ClientMessage, CompletionItem, FileLocation, Query,
+    Answer, BufferId, BufferUpdate, ClientMessage, CodeAction, CompletionItem, FileLocation, Query,
     ServerFeatures, Size, TextChange, Trigger,
 };
 use clackatoo_text::Sign;
@@ -1088,6 +1088,186 @@ fn grn_asks_in_the_bar_for_a_new_name_and_renames() {
     );
     // Typed text goes to the name, not to the file.
     assert_eq!(setup.text(), "let value = 1;\nvalue + 1\n");
+}
+
+fn code_action(title: &str, kind: &str, disabled: Option<&str>) -> CodeAction {
+    CodeAction {
+        title: title.into(),
+        kind: kind.into(),
+        preferred: false,
+        disabled: disabled.map(str::to_owned),
+    }
+}
+
+/// The lines of the menu of code actions, if it's shown.
+fn action_menu(setup: &mut Setup) -> Option<Vec<(String, bool)>> {
+    setup.editor.settle(&setup.copy);
+    let menu = setup.editor.actions.as_ref()?.view()?;
+    Some(
+        (menu.lines.iter())
+            .map(|line| (line.text(), line.picked))
+            .collect(),
+    )
+}
+
+#[test]
+fn gra_asks_for_code_actions_at_the_cursor_and_picks_one_from_a_menu() {
+    let mut setup = Setup::new("let value = 1;\nvalue + 1\n");
+    let line = "let value = 1;\n".len();
+    setup.keys("jgra");
+    // Asked of the cursor alone.
+    let (list, at, query) = setup.queries[0];
+    assert_eq!((at, query), (line, Query::CodeActions { end: line }));
+    let actions = vec![
+        code_action("Fix it", "quickfix", None),
+        code_action("Rewrite it", "refactor.rewrite", None),
+        code_action("Can't", "refactor", Some("not here")),
+    ];
+    setup.answer(list, Answer::CodeActions(actions.clone()));
+    assert_eq!(
+        action_menu(&mut setup).unwrap(),
+        [
+            ("1  Fix it  quickfix".to_owned(), true),
+            ("2  Rewrite it  refactor.rewrite".to_owned(), false),
+            ("3  Can't  not here".to_owned(), false),
+        ]
+    );
+    // j moves through the menu, not the cursor, and Enter picks.
+    setup.keys("j");
+    assert_eq!(setup.cursor(), (1, 0));
+    assert!(action_menu(&mut setup).unwrap()[1].1);
+    setup.keys("<CR>");
+    assert_eq!(setup.queries[1].2, Query::Act { list, item: 1 });
+    assert!(action_menu(&mut setup).is_none(), "picking closes it");
+    // K while it's done doesn't lose its answer.
+    setup.keys("K");
+    setup.answer(setup.queries[2].0, Answer::Nothing);
+    let acted = Answer::Acted {
+        title: "Rewrite it".into(),
+        files: 1,
+    };
+    setup.answer(setup.queries[1].0, acted);
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("Rewrite it: changed 1 file")
+    );
+
+    // A number picks at once; one that can't be done now isn't asked for.
+    setup.keys("gra");
+    setup.answer(setup.queries[3].0, Answer::CodeActions(actions.clone()));
+    setup.keys("3");
+    assert_eq!(setup.editor.status.as_deref(), Some("Can't: not here"));
+    assert_eq!(setup.queries.len(), 4);
+    setup.keys("gra");
+    let list = setup.queries[4].0;
+    setup.answer(list, Answer::CodeActions(actions.clone()));
+    setup.keys("1");
+    assert_eq!(setup.queries[5].2, Query::Act { list, item: 0 });
+    setup.answer(
+        setup.queries[5].0,
+        Answer::Failed("it changed meanwhile".into()),
+    );
+    assert_eq!(setup.editor.status.as_deref(), Some("it changed meanwhile"));
+
+    // Esc closes it; another key closes it and does what it does.
+    setup.keys("gra");
+    setup.answer(setup.queries[6].0, Answer::CodeActions(actions.clone()));
+    setup.keys("<Esc>");
+    assert!(action_menu(&mut setup).is_none());
+    setup.keys("gra");
+    setup.answer(setup.queries[7].0, Answer::CodeActions(actions.clone()));
+    setup.keys("l");
+    assert!(action_menu(&mut setup).is_none());
+    assert_eq!(setup.cursor(), (1, 1));
+    // Answered once the cursor has moved on, it's not shown.
+    setup.keys("grah");
+    setup.answer(setup.queries[8].0, Answer::CodeActions(actions));
+    assert!(action_menu(&mut setup).is_none());
+    // None, or none to be had, is said.
+    setup.keys("gra");
+    setup.answer(setup.queries[9].0, Answer::CodeActions(Vec::new()));
+    assert_eq!(setup.editor.status.as_deref(), Some("no code actions here"));
+    setup.keys("gra");
+    let failed = Answer::Failed("its language server has no code actions".into());
+    setup.answer(setup.queries[10].0, failed);
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("its language server has no code actions")
+    );
+    assert_eq!(setup.text(), "let value = 1;\nvalue + 1\n");
+}
+
+#[test]
+fn the_menu_of_code_actions_is_normal_modes_alone() {
+    let mut setup = Setup::new("let value = 1;\n");
+    let actions = vec![code_action("Fix it", "quickfix", None)];
+    // Answered once insert mode has begun, it isn't shown, and j, Enter
+    // and a digit are typed.
+    setup.keys("gra");
+    setup.keys("i");
+    setup.answer(setup.queries[0].0, Answer::CodeActions(actions.clone()));
+    assert!(action_menu(&mut setup).is_none());
+    setup.keys("j1<Esc>");
+    assert_eq!(setup.text(), "j1let value = 1;\n");
+    assert_eq!(setup.queries.len(), 1, "nothing picked");
+    // Nor once a search is being typed.
+    setup.keys("gra/");
+    setup.answer(setup.queries[1].0, Answer::CodeActions(actions.clone()));
+    assert!(action_menu(&mut setup).is_none());
+    setup.keys("<Esc>");
+    // Shown, then insert mode: it closes, and keys are typed.
+    setup.keys("gra");
+    setup.answer(setup.queries[2].0, Answer::CodeActions(actions));
+    assert!(action_menu(&mut setup).is_some());
+    setup.keys("ak<Esc>");
+    assert!(action_menu(&mut setup).is_none());
+    assert_eq!(setup.text(), "j1klet value = 1;\n");
+    assert_eq!(setup.queries.len(), 3);
+}
+
+#[test]
+fn gra_in_visual_mode_asks_for_code_actions_on_the_selection() {
+    let mut setup = Setup::new("let value = 1;\nvalue + 1\n");
+    let line = "let value = 1;\n".len();
+    // From the second line's start to the end of its first word.
+    setup.keys("jvegra");
+    assert_eq!(setup.editor.mode, Mode::Normal, "visual mode is left");
+    let (_, at, query) = setup.queries[0];
+    assert_eq!(
+        (at, query),
+        (
+            line,
+            Query::CodeActions {
+                end: line + "value".len()
+            }
+        )
+    );
+    // Selected backwards, the same.
+    setup.keys("vbgra");
+    assert_eq!(setup.queries[1].1, line);
+    assert_eq!(
+        setup.queries[1].2,
+        Query::CodeActions {
+            end: line + "value".len()
+        }
+    );
+    // Whole lines, from the first's start to the last's end.
+    setup.keys("kVjgra");
+    assert_eq!(
+        (setup.queries[2].1, setup.queries[2].2),
+        (
+            0,
+            Query::CodeActions {
+                end: "let value = 1;\nvalue + 1".len()
+            }
+        )
+    );
+    // The menu shows by the cursor.
+    setup.answer(
+        setup.queries[2].0,
+        Answer::CodeActions(vec![code_action("Extract", "refactor.extract", None)]),
+    );
+    assert_eq!(action_menu(&mut setup).unwrap().len(), 1);
 }
 
 #[test]

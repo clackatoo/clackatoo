@@ -19,7 +19,13 @@
 //! shows over it. Typing never waits for either: they're asked when typing
 //! pauses, and their answers are shown when they come, if they're still
 //! about where the cursor is.
+//!
+//! `gra` asks the language server what it could do to the text at the
+//! cursor, or selected, and shows it in a menu by the cursor to pick from
+//! (see [`actions`]). The daemon does what's picked, as the user, so `u`
+//! undoes it.
 
+mod actions;
 mod complete;
 mod copy;
 mod keys;
@@ -33,6 +39,7 @@ use clackatoo_term::{Row, RowBuilder, Style};
 use clackatoo_text::{Bias, Diagnostic, Hunk};
 use winit::keyboard::{Key, NamedKey};
 
+use actions::{ActionMenu, MenuKey, MenuStroke};
 pub use complete::Ranking;
 use complete::{Completion, Resolved, is_word};
 pub(crate) use copy::{BufferCopy, Heard};
@@ -300,6 +307,9 @@ enum Asking {
     /// What's at this place, as `K` asks: the answer's shown only if the
     /// cursor's still there.
     Hover(Point),
+    /// What could be done to the text at this place, or selected from it,
+    /// as `gra` asks: the menu's shown only if the cursor's still there.
+    Actions(Point),
 }
 
 /// A pane editing a buffer.
@@ -368,6 +378,13 @@ pub(crate) struct Editor {
     renaming: Option<u64>,
     /// The numbers of the stages asked for, until each is answered.
     staging: Vec<u64>,
+    /// The code actions answered to `gra`, in a menu by the cursor, until
+    /// one's picked.
+    actions: Option<ActionMenu>,
+    /// The number of the code action picked last, until it's done: as a
+    /// rename does, it takes a while, and `K` or `gd` meanwhile mustn't
+    /// lose its answer.
+    acting: Option<u64>,
     /// What the language server says is at the cursor, with what's wrong
     /// there, shown by it.
     panel: Option<Panel>,
@@ -443,6 +460,8 @@ impl Editor {
             asked: None,
             renaming: None,
             staging: Vec::new(),
+            actions: None,
+            acting: None,
             panel: None,
             opening: None,
             jumped_from: None,
@@ -601,6 +620,7 @@ impl Editor {
     /// Puts `text` in at the cursor, as typed in insert mode.
     pub(crate) fn paste(&mut self, text: &str, copy: &mut BufferCopy) {
         self.panel = None;
+        self.actions = None;
         self.close_completion();
         let at = self.insert_byte(copy);
         self.new_step |= self.mode != Mode::Insert;
@@ -613,6 +633,14 @@ impl Editor {
 
     fn stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, register: &mut Register) -> Done {
         self.status = None;
+        if self.actions.is_some()
+            && self.typed.is_empty()
+            && self.prompt.is_none()
+            && self.mode == Mode::Normal
+            && let Some(done) = self.actions_stroke(stroke, copy)
+        {
+            return done;
+        }
         if self.panel.is_some()
             && self.typed.is_empty()
             && self.prompt.is_none()
@@ -635,6 +663,11 @@ impl Editor {
             let changed = copy.edits_made() != edits || self.cursor_byte(copy) != at;
             self.as_you_type(stroke, changed, copy);
         }
+        // Changing mode or typing in the bar closes the menu of code
+        // actions, whose keys are normal mode's.
+        if self.mode != mode || self.prompt.is_some() {
+            self.actions = None;
+        }
         // Moving the cursor, changing mode, editing or typing in the bar
         // closes the panel.
         if let Some(panel) = &self.panel
@@ -646,6 +679,84 @@ impl Editor {
             self.panel = None;
         }
         done
+    }
+
+    /// The keys the menu of code actions takes while it's shown: j, k, the
+    /// arrows, Tab, Ctrl+N and Ctrl+P move through it; Enter does the
+    /// action picked, and 1 to 9 the action so numbered; Esc, `q` and
+    /// Ctrl+C close it. `None` for any other key, which closes it and goes
+    /// on to do what it does.
+    fn actions_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy) -> Option<Done> {
+        let menu_stroke = match stroke {
+            Stroke::Char {
+                ch: 'j',
+                ctrl: false,
+            }
+            | Stroke::Char {
+                ch: 'n',
+                ctrl: true,
+            }
+            | Stroke::Down
+            | Stroke::Tab => MenuStroke::Down,
+            Stroke::Char {
+                ch: 'k',
+                ctrl: false,
+            }
+            | Stroke::Char {
+                ch: 'p',
+                ctrl: true,
+            }
+            | Stroke::Up => MenuStroke::Up,
+            Stroke::Enter => MenuStroke::Pick,
+            Stroke::Char {
+                ch: digit @ '1'..='9',
+                ctrl: false,
+            } => MenuStroke::Number(u8::try_from(digit.to_digit(10)?).ok()?),
+            Stroke::Escape
+            | Stroke::Char {
+                ch: 'q',
+                ctrl: false,
+            }
+            | Stroke::Char {
+                ch: 'c',
+                ctrl: true,
+            } => MenuStroke::Close,
+            _ => {
+                self.actions = None;
+                return None;
+            }
+        };
+        let menu = self.actions.as_mut()?;
+        match menu.key(menu_stroke) {
+            Some(MenuKey::Moved) | None => {}
+            Some(MenuKey::Picked(item)) => self.act(item, copy),
+            Some(MenuKey::Closed) => self.actions = None,
+        }
+        Some(Done {
+            redraw: true,
+            yanked: None,
+        })
+    }
+
+    /// Does action `item` of the menu, closing it: the daemon makes its
+    /// edits and runs its command, then says how it went, in the bar. One
+    /// it says can't be done now isn't asked for.
+    fn act(&mut self, item: u32, copy: &mut BufferCopy) {
+        let Some(menu) = self.actions.take() else {
+            return;
+        };
+        let Some(action) = menu.action(item) else {
+            return;
+        };
+        if let Some(why) = &action.disabled {
+            self.status = Some(format!("{}: {why}", action.title));
+            return;
+        }
+        let query = Query::Act {
+            list: menu.list,
+            item,
+        };
+        self.acting = Some(copy.ask(query, 0));
     }
 
     /// The keys a panel by the cursor takes while it's shown: `K` again
@@ -802,7 +913,11 @@ impl Editor {
             Action::View(at) => self.view_at(at),
             Action::Diagnostic { backward } => self.next_diagnostic(backward, times, copy),
             Action::Hunk { backward } => self.next_hunk(backward, times, copy),
-            Action::Ask(_) | Action::Hover | Action::ShowDiagnostics | Action::Rename => {
+            Action::Ask(_)
+            | Action::Hover
+            | Action::ShowDiagnostics
+            | Action::Rename
+            | Action::CodeActions => {
                 self.language_server(command.action, copy);
             }
             Action::OtherEnd => {
@@ -2082,8 +2197,36 @@ impl Editor {
             Action::Hover => self.hover(copy),
             Action::ShowDiagnostics => self.show_diagnostics(copy),
             Action::Rename => self.ask_for_name(copy),
+            Action::CodeActions => self.ask_actions(copy),
             _ => {}
         }
+    }
+
+    /// `gra`: asks the language server what it could do to the text under
+    /// the cursor, or to what's selected, leaving visual mode. The menu
+    /// shows once it answers.
+    fn ask_actions(&mut self, copy: &mut BufferCopy) {
+        let text = self.text(copy);
+        let cursor = text.byte_at(self.cursor.at);
+        let (start, end) = match (self.mode, self.anchor) {
+            (Mode::Visual(selection), Some(anchor)) => {
+                let (first, last) = if anchor <= self.cursor.at {
+                    (anchor, self.cursor.at)
+                } else {
+                    (self.cursor.at, anchor)
+                };
+                match selection {
+                    // To the last line's end, not into the line after.
+                    Selection::Lines => (text.line_start(first.line), text.line_end(last.line)),
+                    Selection::Characters => (text.byte_at(first), text.char_end(last)),
+                }
+            }
+            _ => (cursor, cursor),
+        };
+        drop(text);
+        self.leave_visual();
+        let id = copy.ask(Query::CodeActions { end }, start);
+        self.asked = Some((id, Asking::Actions(self.cursor.at)));
     }
 
     /// `K`: asks the language server what's under the cursor.
@@ -2475,10 +2618,13 @@ impl Editor {
                     && asked == *id
                 {
                     self.asked = None;
-                    self.answered(asking, answer, copy);
+                    self.answered((asked, asking), answer, copy);
                 } else if self.renaming == Some(*id) {
                     self.renaming = None;
                     self.renamed(answer);
+                } else if self.acting == Some(*id) {
+                    self.acting = None;
+                    self.acted(answer);
                 } else if let Some(index) = self.staging.iter().position(|staging| staging == id) {
                     self.staging.remove(index);
                     self.staged(answer);
@@ -2501,6 +2647,7 @@ impl Editor {
         // edit typed does, and the menu.
         if matches!(heard, Heard::Replaced | Heard::Reversed(_)) {
             self.panel = None;
+            self.actions = None;
             self.close_completion();
         }
         if self.mode == Mode::Insert {
@@ -2564,8 +2711,9 @@ impl Editor {
         self.asked = Some((copy.ask(query, at), Asking::Jump));
     }
 
-    /// Acts on the language server's answer to what it was last asked.
-    fn answered(&mut self, asking: Asking, answer: &Answer, copy: &BufferCopy) {
+    /// Acts on the language server's answer to what it was last asked, in
+    /// the query numbered `asked`.
+    fn answered(&mut self, (asked, asking): (u64, Asking), answer: &Answer, copy: &BufferCopy) {
         match asking {
             Asking::Jump => self.jump(answer, copy),
             Asking::Hover(at) if at == self.cursor.at => {
@@ -2582,9 +2730,43 @@ impl Editor {
                     });
                 }
             }
-            // The cursor has moved since.
-            Asking::Hover(_) => {}
+            // Shown only in normal mode, whose keys the menu takes: not once
+            // insert mode, or typing in the bar, has begun since.
+            Asking::Actions(at)
+                if at == self.cursor.at && self.mode == Mode::Normal && self.prompt.is_none() =>
+            {
+                self.show_actions(asked, answer);
+            }
+            // The cursor has moved since, or the keys are another mode's.
+            Asking::Hover(_) | Asking::Actions(_) => {}
         }
+    }
+
+    /// Shows the code actions answered to the query numbered `asked` in a
+    /// menu by the cursor, or says there are none, or why.
+    fn show_actions(&mut self, asked: u64, answer: &Answer) {
+        match answer {
+            Answer::CodeActions(actions) => {
+                self.panel = None;
+                self.actions = ActionMenu::new(asked, actions.clone());
+                if self.actions.is_none() {
+                    self.status = Some("no code actions here".into());
+                }
+            }
+            Answer::Failed(why) => self.status = Some(why.clone()),
+            _ => self.status = Some("no code actions here".into()),
+        }
+    }
+
+    /// Says in the bar how the code action picked last went.
+    fn acted(&mut self, answer: &Answer) {
+        self.status = Some(match answer {
+            Answer::Acted { title, files: 0 } => format!("{title}: done"),
+            Answer::Acted { title, files: 1 } => format!("{title}: changed 1 file"),
+            Answer::Acted { title, files } => format!("{title}: changed {files} files"),
+            Answer::Failed(why) => why.clone(),
+            _ => "the code action did nothing".into(),
+        });
     }
 
     /// Says in the bar how the rename asked last went.
@@ -2634,7 +2816,9 @@ impl Editor {
             | Answer::Staged
             | Answer::Completions { .. }
             | Answer::Resolved { .. }
-            | Answer::Signature { .. } => {}
+            | Answer::Signature { .. }
+            | Answer::CodeActions(_)
+            | Answer::Acted { .. } => {}
         }
     }
 
@@ -2644,6 +2828,7 @@ impl Editor {
     pub(crate) fn go_to(&mut self, line: u64, col: usize, copy: &BufferCopy) {
         self.status = None;
         self.panel = None;
+        self.actions = None;
         self.close_completion();
         let text = self.text(copy);
         let line = line.min(text.last_line());
@@ -2748,9 +2933,11 @@ impl Editor {
         };
         let at = self.cursor.at;
         self.cursor_into_view(&text);
-        // Moving the cursor away from the word closes the menu.
+        // Moving the cursor away from the word closes the menu, as it
+        // does the menu of code actions about it.
         if self.cursor.at != at {
             self.close_completion();
+            self.actions = None;
         }
     }
 
@@ -2791,6 +2978,7 @@ impl Editor {
     /// click on a line's number goes to the line's start.
     pub(crate) fn click(&mut self, line: usize, col: usize, copy: &BufferCopy) {
         self.panel = None;
+        self.actions = None;
         self.close_completion();
         let text = self.text(copy);
         let line = (self.top + line as u64).min(text.last_line());
@@ -2946,6 +3134,9 @@ impl Editor {
         if let Some(panel) = &mut self.panel {
             panel.settle(pane, cursor);
         }
+        if let Some(menu) = &mut self.actions {
+            menu.settle(pane, cursor);
+        }
         // The menu goes under the cursor, and the signature over it, or
         // the other way round if the menu has no room under it.
         let mut menu_under = None;
@@ -2971,6 +3162,7 @@ impl Editor {
     /// signature, as the focus leaving does.
     pub(crate) fn close_panel(&mut self) {
         self.panel = None;
+        self.actions = None;
         self.close_completion();
         self.close_signature();
     }
@@ -2982,12 +3174,14 @@ impl Editor {
     }
 
     /// Everything shown over the text by the cursor, as it's to be drawn,
-    /// in cells of the pane, in the order it's drawn: the panel, the
-    /// signature, the completion menu and the documentation beside it.
+    /// in cells of the pane, in the order it's drawn: the panel, the menu
+    /// of code actions, the signature, the completion menu and the
+    /// documentation beside it.
     pub(crate) fn panels(&self) -> Vec<PanelView<'_>> {
         let completion = self.completion.as_ref();
         [
             self.panel(),
+            self.actions.as_ref().and_then(ActionMenu::view),
             self.signature.as_ref().and_then(Panel::view),
             completion.and_then(Completion::menu),
             completion.and_then(Completion::docs),

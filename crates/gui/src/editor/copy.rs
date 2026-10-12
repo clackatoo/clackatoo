@@ -479,7 +479,17 @@ impl BufferCopy {
         for waiting in &mut self.waiting {
             let mine = match waiting {
                 Waiting::Edit { edit: mine, .. } => mine,
-                // A place asked about moves with the text around it.
+                // A place asked about moves with the text around it, as
+                // does the end of what's asked about from it.
+                Waiting::Query {
+                    at,
+                    query: Query::CodeActions { end },
+                    ..
+                } => {
+                    *at = edit.map(*at, Bias::Before);
+                    *end = edit.map(*end, Bias::Before).max(*at);
+                    continue;
+                }
                 Waiting::Query { at, .. }
                 | Waiting::Rename { at, .. }
                 | Waiting::Stage { at, .. } => {
@@ -796,6 +806,33 @@ pub(super) mod tests {
                 id,
                 answer: Answer::Locations(vec![place(at + 1)])
             }
+        );
+    }
+
+    #[test]
+    fn code_actions_are_asked_about_a_range_moving_with_others_edits() {
+        let mut daemon = Daemon::new("abcdef");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        typed(&mut copy, 0, "X", true);
+        let sent = copy.take_outbox();
+        // From the "b" of "Xabcdef" to the "e".
+        let id = copy.ask(Query::CodeActions { end: 5 }, 2);
+        // An agent's edit inside it, made first, moves its end.
+        let agents = daemon.agent(2, "--");
+        let (ack, _) = daemon.take(sent.into_iter().next().unwrap());
+        copy.update(agents);
+        copy.update(ack);
+        assert_eq!(copy.text.to_string(), "Xab--cdef");
+        assert_eq!(
+            copy.take_outbox(),
+            [ClientMessage::Query {
+                buffer: BufferId(1),
+                id,
+                version: 2,
+                at: 2,
+                query: Query::CodeActions { end: 7 },
+            }]
         );
     }
 

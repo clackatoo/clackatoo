@@ -8,7 +8,7 @@
 //! and doesn't come through an upgrade: the next build starts it again
 //! when a buffer of its is next attached to.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -20,8 +20,10 @@ use clackatoo_protocol::{
 use clackatoo_text::{Bias, Diagnostic, Diagnostics, Rope};
 use mio::unix::SourceFd;
 use mio::{Interest, Token};
-use serde_json::Value;
+use serde_json::{Value, json};
 
+use super::buffers::BufferSlot;
+use super::rename::{Made, Purpose};
 use super::{Daemon, OUTPUT_BUDGET, Orphan, Source};
 use crate::lsp::{self, Incoming, LanguageServer, Reported};
 
@@ -88,6 +90,24 @@ pub(super) struct Servers {
     /// The completion items last answered to each client about each
     /// buffer, as their servers sent them, to resolve one when asked.
     listed: Vec<Listed>,
+    /// The code actions last answered to each client about each buffer,
+    /// as their servers sent them, to do one when it's picked.
+    offered: Vec<Offered>,
+}
+
+/// The code actions answered to a client's code actions query, as the
+/// server sent them, in the order passed on.
+#[derive(Debug)]
+struct Offered {
+    token: Token,
+    buffer: BufferId,
+    /// The client's number for the query.
+    id: u64,
+    server: ServerId,
+    actions: Vec<Value>,
+    /// Every buffer open in the server as it was when asked, which the
+    /// edits the actions come with are counted in.
+    before: Vec<Before>,
 }
 
 /// The completion items answered to a client's completion query, as the
@@ -194,6 +214,9 @@ enum Ask {
     Query(Query),
     /// To rename what's at a place to this.
     Rename(String),
+    /// To say the rest of this code action, as sent, so as to do it, once
+    /// it's been taken from the list it was answered in.
+    Action(Value),
 }
 
 /// What a server was asked, as kept until it answers.
@@ -206,6 +229,27 @@ enum Asking {
         name: String,
         before: Vec<Before>,
     },
+    /// What could be done to the text from the place to byte `end`, with
+    /// every buffer open in the server as it was when asked, which the
+    /// edits the actions come with are counted in.
+    CodeActions {
+        end: usize,
+        before: Vec<Before>,
+    },
+    /// The rest of `action`, a code action as sent, called `title`, to do
+    /// once it comes, with every buffer open in the server as it was when
+    /// asked, as for a rename.
+    Act {
+        action: Value,
+        title: String,
+        before: Vec<Before>,
+    },
+    /// A command run, as the code action called `title` says, after its
+    /// edits changed `files` files, and the server's own edits since.
+    Command {
+        title: String,
+        files: usize,
+    },
 }
 
 /// How long to wait before asking a server again what it said it couldn't
@@ -214,9 +258,9 @@ enum Asking {
 /// more than there are waits.
 const AGAIN_AFTER: [Duration; 2] = [Duration::from_millis(300), Duration::from_secs(1)];
 
-/// A buffer open in a server as it was when the server was asked to
-/// rename something.
-#[derive(Debug)]
+/// A buffer open in a server as it was when the server was asked something
+/// it answers with edits, such as a rename, which are counted in it.
+#[derive(Clone, Debug)]
 pub(super) struct Before {
     pub(super) buffer: BufferId,
     pub(super) version: u64,
@@ -246,6 +290,10 @@ const MAX_COMPLETIONS: usize = 5000;
 /// The most of a completion item's documentation passed on, in bytes.
 const MAX_DOCUMENTATION: usize = 16 * 1024;
 
+/// The most code actions of one answer passed on: more than a menu by the
+/// cursor shows, scrolled.
+const MAX_ACTIONS: usize = 200;
+
 /// A buffer as its language server knows it.
 #[derive(Debug)]
 pub(super) struct Opened {
@@ -256,6 +304,11 @@ pub(super) struct Opened {
     sent: VecDeque<(u64, Rope)>,
     /// What it last said is wrong, moved along with each edit since.
     pub(super) diagnostics: Diagnostics,
+    /// Each of those diagnostics as the server sent it, in their order,
+    /// to send back when it's asked what could be done about them. Moving
+    /// them with an edit never changes their order, as every place moves
+    /// the same way and ties keep theirs, so each is still at its index.
+    sent_diagnostics: Vec<Value>,
 }
 
 /// The most versions of a buffer kept for a server that never says what's
@@ -266,6 +319,32 @@ impl Opened {
     /// The server it's open in.
     pub(super) fn server(&self) -> ServerId {
         self.server
+    }
+
+    /// What its server last said is wrong with any of bytes `start` to
+    /// `end` of its text, `text`, or about no text at a place in them, or
+    /// at the place itself, if they're one, as the server sent it, moved to where it is now, in
+    /// `encoding`'s columns: what the server is told is wrong there when
+    /// it's asked what could be done.
+    fn wrong_at(
+        &self,
+        text: &Rope,
+        (start, end): (usize, usize),
+        encoding: lsp::Encoding,
+    ) -> Vec<Value> {
+        (self.diagnostics.all().iter())
+            .zip(&self.sent_diagnostics)
+            .filter(|(diagnostic, _)| {
+                // One starting where a range ends is after it, but for
+                // a range that's a place.
+                let before_end = diagnostic.start < end || diagnostic.start == start;
+                before_end && (start < diagnostic.end || diagnostic.start >= start)
+            })
+            .map(|(diagnostic, sent)| {
+                let place = (diagnostic.start, diagnostic.end);
+                lsp::diagnostic_at(sent, text, place, encoding)
+            })
+            .collect()
     }
 
     /// The text as sent at `version`, if it's still kept.
@@ -322,6 +401,7 @@ impl Daemon {
             server,
             sent: VecDeque::from([(version, text)]),
             diagnostics: Diagnostics::new(),
+            sent_diagnostics: Vec::new(),
         });
         self.flush_server(server);
     }
@@ -529,6 +609,7 @@ impl Daemon {
         (self.servers.asked).retain(|asked| !forgotten(asked.token, asked.buffer));
         (self.servers.again).retain(|(_, again)| !forgotten(again.token, again.buffer));
         (self.servers.listed).retain(|listed| !forgotten(listed.token, listed.buffer));
+        (self.servers.offered).retain(|offered| !forgotten(offered.token, offered.buffer));
         self.forget_renames(token, buffer);
     }
 
@@ -642,6 +723,7 @@ impl Daemon {
             Incoming::Answer { id, result } => self.answered(server, id, result),
             Incoming::Outdated { id } => self.outdated(server, id),
             Incoming::Ready => self.server_ready(server),
+            Incoming::ApplyEdit { id, edit } => self.apply_edit(server, id, &edit),
         }
     }
 
@@ -721,43 +803,44 @@ impl Daemon {
             version: now,
             answer: Answer::Failed(why.to_owned()),
         };
-        let Some(opened) = &slot.server else {
-            return self.tell(token, buffer, failed("this file has no language server"));
+        let server = match self.server_to_ask(buffer, &ask) {
+            Ok(server) => server,
+            Err(why) => return self.tell(token, buffer, failed(why)),
         };
-        // Two answers counted in one text would make the edits twice.
-        if matches!(ask, Ask::Query(Query::Format { .. })) && self.servers.formatting(buffer) {
-            return self.tell(token, buffer, failed("it's being formatted already"));
-        }
-        let server = opened.server;
-        let Some(running) = self.servers.slots.get_mut(&server) else {
-            return self.tell(token, buffer, failed("its language server has stopped"));
-        };
-        if !running.server.ready() {
-            return self.tell(
-                token,
-                buffer,
-                failed("its language server is still starting"),
-            );
-        }
-        let cant = match &ask {
-            Ask::Query(query) => (!running.server.answers(*query)).then(|| cannot(*query)),
-            Ask::Rename(_) => {
-                (!running.server.renames()).then_some("its language server can't rename")
+        match ask {
+            Ask::Query(Query::Act { list, item }) => {
+                return self.pick_action(server, (token, buffer, id), (list, item));
             }
-        };
-        if let Some(why) = cant {
-            return self.tell(token, buffer, failed(why));
+            Ask::Action(action) => {
+                return self.take_action(server, (token, buffer, id), action, &[]);
+            }
+            _ => {}
         }
+        let (Some(slot), Some(running)) = (
+            self.buffers.get(&buffer),
+            self.servers.slots.get_mut(&server),
+        ) else {
+            return;
+        };
+        let Some(opened) = &slot.server else {
+            return;
+        };
         // The place, moved along with edits made since the client's text,
         // such as an agent's. The server has every edit made.
         let Some(edits) = slot.buffer.edits_since(version) else {
             return self.tell(token, buffer, failed("the file has changed since"));
         };
-        let at = edits.fold(at, |at, edit| edit.map(at, Bias::Before));
+        let edits: Vec<&Edit> = edits.collect();
         let text = slot.buffer.text().clone();
-        let at = at.min(text.len_bytes());
+        let moved = |place: usize| {
+            (edits.iter())
+                .fold(place, |place, edit| edit.map(place, Bias::Before))
+                .min(text.len_bytes())
+        };
+        let at = moved(at);
         let path = slot.buffer.path();
         let (request, what) = match ask {
+            Ask::Action(_) => unreachable!("done above"),
             Ask::Query(query @ Query::Resolve { list, item }) => {
                 let listed = &self.servers.listed;
                 match resolve(&mut running.server, listed, (token, buffer), list, item) {
@@ -772,6 +855,15 @@ impl Daemon {
                     }
                 }
             }
+            Ask::Query(Query::CodeActions { end }) => {
+                let end = moved(end).max(at);
+                let wrong = opened.wrong_at(&text, (at, end), running.server.encoding());
+                let request = running.server.code_actions(path, &text, (at, end), &wrong);
+                // As for a rename: the edits the actions come with are
+                // made to the text it has now.
+                let before = sent_last(&self.buffers, server);
+                (request, Asking::CodeActions { end, before })
+            }
             Ask::Query(query) => (
                 running.server.ask(query, path, &text, at),
                 Asking::Query(query),
@@ -781,17 +873,7 @@ impl Daemon {
                 // The server makes the edits it answers with to the text
                 // it has now, which is the text sent last, as it takes
                 // what it's sent in order.
-                let before = (self.buffers.iter())
-                    .filter_map(|(&buffer, slot)| {
-                        let opened = slot.server.as_ref()?;
-                        let (version, text) = opened.sent.back()?;
-                        (opened.server == server).then(|| Before {
-                            buffer,
-                            version: *version,
-                            text: text.clone(),
-                        })
-                    })
-                    .collect();
+                let before = sent_last(&self.buffers, server);
                 (request, Asking::Rename { name, before })
             }
         };
@@ -810,6 +892,32 @@ impl Daemon {
         self.flush_server(server);
     }
 
+    /// The server to ask what `ask` asks about buffer `buffer`, which is
+    /// open: its own, if it has one, ready, that does what's asked. Or why
+    /// it's not asked.
+    fn server_to_ask(&self, buffer: BufferId, ask: &Ask) -> Result<ServerId, &'static str> {
+        let opened = (self.buffers.get(&buffer))
+            .and_then(|slot| slot.server.as_ref())
+            .ok_or("this file has no language server")?;
+        // Two answers counted in one text would make the edits twice.
+        if matches!(ask, Ask::Query(Query::Format { .. })) && self.servers.formatting(buffer) {
+            return Err("it's being formatted already");
+        }
+        let running =
+            (self.servers.slots.get(&opened.server)).ok_or("its language server has stopped")?;
+        if !running.server.ready() {
+            return Err("its language server is still starting");
+        }
+        let cant = match ask {
+            Ask::Query(query) => (!running.server.answers(*query)).then(|| cannot(*query)),
+            Ask::Rename(_) => {
+                (!running.server.renames()).then_some("its language server can't rename")
+            }
+            Ask::Action(_) => None,
+        };
+        cant.map_or(Ok(opened.server), Err)
+    }
+
     /// Asks again, after a while, what server `server` didn't answer, its
     /// request numbered `request`, because the text changed while it
     /// worked, unless it's been asked as often as it may be.
@@ -821,22 +929,19 @@ impl Daemon {
         };
         let asked = self.servers.asked.swap_remove(index);
         let (token, buffer, id) = (asked.token, asked.buffer, asked.id);
+        let busy = "its language server is busy with changes: try again";
         let Some(wait) = AGAIN_AFTER.get(usize::from(asked.tries)) else {
-            let Some(slot) = self.buffers.get(&buffer) else {
-                return;
-            };
-            let update = BufferUpdate::Answer {
-                id,
-                version: slot.buffer.version(),
-                answer: Answer::Failed(
-                    "its language server is busy with changes: try again".into(),
-                ),
-            };
-            return self.tell(token, buffer, update);
+            return self.answer_client((token, buffer, id), Answer::Failed(busy.into()));
         };
         let ask = match asked.what {
             Asking::Query(query) => Ask::Query(query),
             Asking::Rename { name, .. } => Ask::Rename(name),
+            Asking::CodeActions { end, .. } => Ask::Query(Query::CodeActions { end }),
+            Asking::Act { action, .. } => Ask::Action(action),
+            // Running it again would make its action's edits twice.
+            Asking::Command { .. } => {
+                return self.answer_client((token, buffer, id), Answer::Failed(busy.into()));
+            }
         };
         let again = Again {
             token,
@@ -923,13 +1028,37 @@ impl Daemon {
                 })
             }
             (Ok(value), Asking::Rename { before, .. }) => {
-                let client = (asked.token, asked.buffer, asked.id);
-                match self.make_rename(server, before, &value, client) {
-                    Some(answer) => answer,
-                    // Files are being written, after which it's told.
-                    None => return,
-                }
+                let purpose = Purpose::Rename {
+                    token: asked.token,
+                    buffer: asked.buffer,
+                    id: asked.id,
+                };
+                // Told once it's made, which may be once files not open
+                // have been written.
+                return self.edit_workspace(server, before, &value, purpose);
             }
+            (Ok(value), Asking::CodeActions { before, .. }) => {
+                self.offer_actions(server, &asked, value, before.clone())
+            }
+            (
+                Ok(value),
+                Asking::Act {
+                    action,
+                    title,
+                    before,
+                },
+            ) => {
+                let client = (asked.token, asked.buffer, asked.id);
+                let Some(action) = lsp::resolved_action(action, value) else {
+                    let why = format!("{title}: its language server couldn't say what it does");
+                    return self.answer_client(client, Answer::Failed(why));
+                };
+                return self.do_action(server, client, &action, before);
+            }
+            (Ok(_), Asking::Command { title, files }) => Answer::Acted {
+                title: title.clone(),
+                files: *files,
+            },
             (Ok(value), Asking::Query(_)) => {
                 let mut read = HashMap::new();
                 let found: Vec<FileLocation> = (lsp::locations(&value).into_iter())
@@ -962,6 +1091,287 @@ impl Daemon {
             answer,
         };
         self.tell(asked.token, asked.buffer, update);
+    }
+
+    /// The code actions server `server` answered with, `value`, to what
+    /// `asked` asked, as many as are passed on, in the order they're to be
+    /// shown. They're kept, as sent, to be done, with the buffers open in
+    /// the server as they were `before` it was asked, which their edits
+    /// are counted in.
+    fn offer_actions(
+        &mut self,
+        server: ServerId,
+        asked: &Asked,
+        value: Value,
+        before: Vec<Before>,
+    ) -> Answer {
+        let actions = lsp::code_actions(value);
+        let (shown, raw): (Vec<_>, Vec<_>) = actions.into_iter().take(MAX_ACTIONS).unzip();
+        let offered = &mut self.servers.offered;
+        offered.retain(|offered| offered.token != asked.token || offered.buffer != asked.buffer);
+        offered.push(Offered {
+            token: asked.token,
+            buffer: asked.buffer,
+            id: asked.id,
+            server,
+            actions: raw,
+            before,
+        });
+        Answer::CodeActions(shown)
+    }
+
+    /// Tells the client at `token` the answer to its query numbered `id`
+    /// about `buffer`, if it still follows the buffer.
+    pub(super) fn answer_client(
+        &mut self,
+        (token, buffer, id): (Token, BufferId, u64),
+        answer: Answer,
+    ) {
+        let Some(slot) = self.buffers.get(&buffer) else {
+            return;
+        };
+        if !slot.viewers.contains(&token) {
+            return;
+        }
+        let update = BufferUpdate::Answer {
+            id,
+            version: slot.buffer.version(),
+            answer,
+        };
+        self.tell(token, buffer, update);
+    }
+
+    /// Does action `item` of the code actions server `server` answered
+    /// the client's query numbered `list` with, for the client's query
+    /// numbered `id`. The list is used up: doing one of them again would
+    /// make edits that only put text in, such as an import, twice.
+    fn pick_action(
+        &mut self,
+        server: ServerId,
+        client: (Token, BufferId, u64),
+        (list, item): (u64, u32),
+    ) {
+        let (token, buffer, _) = client;
+        let offered = &mut self.servers.offered;
+        let found = (offered.iter())
+            .position(|offered| offered.token == token && offered.buffer == buffer)
+            .filter(|&index| offered[index].id == list && offered[index].server == server)
+            .map(|index| offered.swap_remove(index))
+            .and_then(|mut offered| {
+                let index = usize::try_from(item).ok()?;
+                (index < offered.actions.len())
+                    .then(|| (offered.actions.swap_remove(index), offered.before))
+            });
+        let Some((action, before)) = found else {
+            let why = "those actions are out of date: ask again";
+            return self.answer_client(client, Answer::Failed(why.into()));
+        };
+        self.take_action(server, client, action, &before);
+    }
+
+    /// Does `action`, a code action or a command server `server` sent, for
+    /// the client's query numbered `id`: as it comes, counted in the
+    /// buffers open in the server as they were `before`, or once the
+    /// server has said the rest of it, if it came without its edits.
+    fn take_action(
+        &mut self,
+        server: ServerId,
+        client: (Token, BufferId, u64),
+        action: Value,
+        before: &[Before],
+    ) {
+        let (token, buffer, id) = client;
+        let title = lsp::action_title(&action);
+        if lsp::is_command(&action) {
+            return self.run_command(server, client, title, &action, 0);
+        }
+        let Some(running) = self.servers.slots.get_mut(&server) else {
+            let why = "its language server has stopped";
+            return self.answer_client(client, Answer::Failed(why.into()));
+        };
+        let complete = action.get("edit").is_some_and(|edit| !edit.is_null());
+        let disabled = lsp::code_action(&action).is_none_or(|action| action.disabled.is_some());
+        if complete || disabled || !running.server.resolves_actions() {
+            return self.do_action(server, client, &action, before);
+        }
+        // Its edits are worked out only now, counted in the text the
+        // server has now, as a rename's are.
+        let request = running.server.resolve_action(&action);
+        let before = sent_last(&self.buffers, server);
+        let Some(slot) = self.buffers.get(&buffer) else {
+            return;
+        };
+        self.servers.asked.push(Asked {
+            server,
+            request,
+            token,
+            buffer,
+            id,
+            version: slot.buffer.version(),
+            text: slot.buffer.text().clone(),
+            at: 0,
+            what: Asking::Act {
+                action,
+                title,
+                before,
+            },
+            tries: 0,
+        });
+        self.flush_server(server);
+    }
+
+    /// Does `action`, a code action server `server` sent, whole, for the
+    /// client's query numbered `id`: makes its edits, counted in the
+    /// buffers open in the server as they were `before`, then runs its
+    /// command. The client is told once both are done, or why neither
+    /// will be: the server says it can't be done now, or it does nothing.
+    fn do_action(
+        &mut self,
+        server: ServerId,
+        (token, buffer, id): (Token, BufferId, u64),
+        action: &Value,
+        before: &[Before],
+    ) {
+        let title = lsp::action_title(action);
+        if let Some(why) = lsp::code_action(action).and_then(|action| action.disabled) {
+            return self.answer_client((token, buffer, id), Answer::Failed(why));
+        }
+        let command = (action.get("command"))
+            .filter(|command| command.is_object())
+            .cloned();
+        let edit = action.get("edit").unwrap_or(&Value::Null);
+        if edit.is_null() {
+            let Some(command) = command else {
+                let why = format!("{title}: its language server gave it nothing to do");
+                return self.answer_client((token, buffer, id), Answer::Failed(why));
+            };
+            return self.run_command(server, (token, buffer, id), title, &command, 0);
+        }
+        let purpose = Purpose::Action {
+            token,
+            buffer,
+            id,
+            title,
+            command,
+        };
+        self.edit_workspace(server, before, edit, purpose);
+    }
+
+    /// Asks server `server` to run `command`, an LSP `Command`, as the code
+    /// action called `title` says, its edits having changed `files` files,
+    /// for the client's query numbered `id`. The client is told once it has
+    /// run, or that its edits were made, if the command is one only the
+    /// server's own editor knows.
+    pub(super) fn run_command(
+        &mut self,
+        server: ServerId,
+        client: (Token, BufferId, u64),
+        title: String,
+        command: &Value,
+        files: usize,
+    ) {
+        let (token, buffer, id) = client;
+        // One at a time, so the edits the server asks for while it runs
+        // are the one command's.
+        if self.running_command(server) {
+            let why = format!(
+                "{title}: its language server is running another command: try again once it's done"
+            );
+            return self.answer_client(client, Answer::Failed(why));
+        }
+        let Some(running) = self.servers.slots.get_mut(&server) else {
+            let why = "its language server has stopped";
+            return self.answer_client(client, Answer::Failed(why.into()));
+        };
+        let name = (command.get("command").and_then(Value::as_str)).unwrap_or_default();
+        if !running.server.runs(name) {
+            // Such as one that moves VS Code's cursor after an edit, which
+            // has been made.
+            log::info!("{title}: {name} is its editor's command, not run");
+            if files > 0 {
+                return self.answer_client(client, Answer::Acted { title, files });
+            }
+            let why =
+                format!("{title}: {name} is a command for its editor, which clackatoo can't run");
+            return self.answer_client(client, Answer::Failed(why));
+        }
+        let request = running.server.execute(command);
+        let Some(slot) = self.buffers.get(&buffer) else {
+            return;
+        };
+        self.servers.asked.push(Asked {
+            server,
+            request,
+            token,
+            buffer,
+            id,
+            version: slot.buffer.version(),
+            text: slot.buffer.text().clone(),
+            at: 0,
+            what: Asking::Command { title, files },
+            tries: 0,
+        });
+        self.flush_server(server);
+    }
+
+    /// Whether server `server` is running a command asked of it.
+    fn running_command(&self, server: ServerId) -> bool {
+        (self.servers.asked.iter())
+            .any(|asked| asked.server == server && matches!(asked.what, Asking::Command { .. }))
+    }
+
+    /// Makes the edit server `server` asks for in its request numbered
+    /// `request`, `edit`, a `WorkspaceEdit`, if it's running a command,
+    /// which it's making it for. One asked for unasked is refused, so a
+    /// server can't write files, or change buffers no one is looking at,
+    /// by itself. Some servers do ask unasked, such as after a file is
+    /// renamed, to fix what refers to it; clackatoo refuses those for now.
+    fn apply_edit(&mut self, server: ServerId, request: Value, edit: &Value) {
+        if !self.running_command(server) {
+            let why = "clackatoo makes a language server's edits only while it runs a command \
+                       asked of it";
+            return self.answer_apply_edit(server, &request, Err(why.into()));
+        }
+        // The server made it to the text it has, which is the text sent
+        // last, as it takes what it's sent in order.
+        let before = sent_last(&self.buffers, server);
+        let purpose = Purpose::Asked { request };
+        self.edit_workspace(server, &before, edit, purpose);
+    }
+
+    /// Answers server `server`'s request numbered `request` to make an edit
+    /// across files, which went as `made` says. Files it changed count for
+    /// the command it's running, which it's making it for.
+    pub(super) fn answer_apply_edit(
+        &mut self,
+        server: ServerId,
+        request: &Value,
+        made: Result<Made, String>,
+    ) {
+        let Some(running) = self.servers.slots.get_mut(&server) else {
+            return;
+        };
+        let result = match made {
+            Ok(made) => {
+                // There's one at a time.
+                let command = (self.servers.asked.iter_mut())
+                    .filter(|asked| asked.server == server)
+                    .find_map(|asked| match &mut asked.what {
+                        Asking::Command { files, .. } => Some(files),
+                        _ => None,
+                    });
+                if let Some(files) = command {
+                    *files += made.files;
+                }
+                json!({ "applied": true })
+            }
+            Err(why) => {
+                log::info!("{}: its edit wasn't made: {why}", running.command.join(" "));
+                json!({ "applied": false, "failureReason": why })
+            }
+        };
+        running.server.answer_request(request, &result);
+        self.flush_server(server);
     }
 
     /// The completion items server `server` answered with, `value`, to
@@ -1124,9 +1534,15 @@ impl Daemon {
         let Some((version, text)) = kept.map(|(version, text)| (*version, text)) else {
             return;
         };
-        let found: Vec<Diagnostic> = (diagnostics.into_iter())
-            .map(|reported| lsp::diagnostic(text, reported, encoding))
+        let mut found: Vec<(Diagnostic, Value)> = (diagnostics.into_iter())
+            .map(|mut reported| {
+                let sent = std::mem::take(&mut reported.raw);
+                (lsp::diagnostic(text, reported, encoding), sent)
+            })
             .collect();
+        // In the order they're kept in, as each is sent back by its index.
+        found.sort_by_key(|(diagnostic, _)| diagnostic.start);
+        let (found, sent): (Vec<Diagnostic>, Vec<Value>) = found.into_iter().unzip();
         let mut found = Diagnostics::of(found);
         // Edits made since the server had that text move them on, as they
         // moved the text.
@@ -1141,6 +1557,7 @@ impl Daemon {
             opened.sent.pop_front();
         }
         opened.diagnostics = found;
+        opened.sent_diagnostics = sent;
         let update = BufferUpdate::Diagnostics {
             version: slot.buffer.version(),
             diagnostics: opened.diagnostics.all().to_vec(),
@@ -1155,9 +1572,13 @@ impl Daemon {
         };
         self.servers.asked.retain(|asked| asked.server != id);
         self.servers.reached.retain(|_, server| *server != id);
+        // The edits it asked for itself are its no more.
+        self.forget_asked_edits(id);
         self.servers
             .elsewhere
             .retain(|_, (server, _)| *server != id);
+        // Its code actions can't be done now.
+        self.servers.offered.retain(|offered| offered.server != id);
         for token in slot.tokens {
             self.sources.remove(token.0);
         }
@@ -1262,6 +1683,22 @@ fn line_text(text: &Rope, line: u64) -> String {
         .collect()
 }
 
+/// Every buffer open in server `server`, among `buffers`, as last sent to
+/// it, which is the text it has, as it takes what it's sent in order.
+fn sent_last(buffers: &BTreeMap<BufferId, BufferSlot>, server: ServerId) -> Vec<Before> {
+    (buffers.iter())
+        .filter_map(|(&buffer, slot)| {
+            let opened = slot.server.as_ref()?;
+            let (version, text) = opened.sent.back()?;
+            (opened.server == server).then(|| Before {
+                buffer,
+                version: *version,
+                text: text.clone(),
+            })
+        })
+        .collect()
+}
+
 /// Asks `server` to resolve item `item` of the completions answered to
 /// the client at `token` about `buffer` for its query numbered `list`,
 /// returning the request's number. Or the answer, if there's no need to
@@ -1293,6 +1730,7 @@ fn cannot(query: Query) -> &'static str {
             "its language server doesn't complete what's typed"
         }
         Query::SignatureHelp { .. } => "its language server doesn't help with calls",
+        Query::CodeActions { .. } | Query::Act { .. } => "its language server has no code actions",
         _ => "its language server doesn't say what things are",
     }
 }

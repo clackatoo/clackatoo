@@ -35,6 +35,11 @@
 //! | `--no-resolve` | Sends completion items' documentation with them, not when they're resolved |
 //! | `--many N` | Completes with N made-up words as well |
 //! | `--hold-completion FILE` | Answers a completion only once FILE exists, taking nothing else in meanwhile |
+//! | `--hold-resolve FILE` | Resolves a code action only once FILE exists, taking nothing else in meanwhile |
+//! | `--action-files` | Makes a file in each code action's edits, and its command's, which clackatoo refuses |
+//! | `--resolve-partly` | Offers to put the word in capitals with the command to mark the file too, and resolves it with only its edit |
+//! | `--resolve-null` | Resolves code actions with nothing |
+//! | `--apply-unasked` | Asks its client to edit a file whenever it has `unasked` in it, writing how that went to the `--log` file |
 //!
 //! Asked what could be typed, it offers every other word in the file,
 //! each replacing the word before the place, then `Imported`, which needs
@@ -42,6 +47,14 @@
 //! word's documentation when the item is resolved. Asked about a call, it
 //! says the function the place is in the brackets of takes `a` and `b`,
 //! and which of them the place is at.
+//!
+//! Asked what could be done to some text, it offers, in this order: to
+//! put the word the range starts in in capitals, which it works out only
+//! when the action is resolved; to mark the file, a command, which it runs
+//! by asking its client to put `marked ` at the file's start, and at the
+//! start of `defs.fk` beside it, if that's there and not open; and for each
+//! `bad` it's told is wrong there, with the `data` it sent it with, to make
+//! it `good`, the quick fix it would pick.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -78,6 +91,13 @@ fn main() {
             .unwrap_or(0),
         hold_completion: (args.iter().position(|arg| arg == "--hold-completion"))
             .and_then(|at| args.get(at + 1).cloned()),
+        hold_resolve: (args.iter().position(|arg| arg == "--hold-resolve"))
+            .and_then(|at| args.get(at + 1).cloned()),
+        action_files: flag("--action-files"),
+        resolve_partly: flag("--resolve-partly"),
+        resolve_null: flag("--resolve-null"),
+        apply_unasked: flag("--apply-unasked"),
+        running: None,
         files: BTreeMap::new(),
         versions: BTreeMap::new(),
     };
@@ -110,6 +130,14 @@ struct Fake {
     no_resolve: bool,
     many: usize,
     hold_completion: Option<String>,
+    hold_resolve: Option<String>,
+    action_files: bool,
+    resolve_partly: bool,
+    resolve_null: bool,
+    apply_unasked: bool,
+    /// The `workspace/executeCommand` request it's running, by its number,
+    /// until its client answers the edit it asked for.
+    running: Option<Value>,
     /// Each file's text, by URI.
     files: BTreeMap<String, String>,
     /// The version of each file's text, by URI.
@@ -201,6 +229,15 @@ impl Fake {
                 self.versions
                     .insert(uri.clone(), document["version"].clone());
                 self.publish(&uri, &document["version"]);
+                if self.apply_unasked && self.files[&uri].contains("unasked") {
+                    let edit = self.edit(&uri, (0, 0), "asked ");
+                    send(&json!({
+                        "jsonrpc": "2.0",
+                        "id": "unasked",
+                        "method": "workspace/applyEdit",
+                        "params": { "edit": edit },
+                    }));
+                }
             }
             "textDocument/definition" => self.definition(message),
             "textDocument/didClose" => {
@@ -223,10 +260,152 @@ impl Fake {
             }
             "textDocument/implementation" | "textDocument/references" => self.places(message),
             "textDocument/formatting" => self.format(message),
+            "textDocument/codeAction" => self.code_actions(message),
+            "codeAction/resolve" => {
+                if let Some(gate) = &self.hold_resolve {
+                    while !std::path::Path::new(gate).exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+                self.resolve_action(message);
+            }
+            "workspace/executeCommand" => self.execute(message),
             "exit" => return false,
+            // Its client's answer to an edit it asked for.
+            "" => self.applied(message),
             _ => {}
         }
         true
+    }
+
+    /// Its client says how an edit it asked for went, in `message`: the
+    /// command that asked is done, or failed, if it wasn't made. How one
+    /// asked for unasked went is written to the log.
+    fn applied(&mut self, message: &Value) {
+        let result = &message["result"];
+        if message["id"] == "unasked"
+            && let Some(log) = &self.log
+        {
+            let mut file = (std::fs::OpenOptions::new().create(true).append(true))
+                .open(log)
+                .unwrap();
+            writeln!(file, "unasked: {result}").unwrap();
+        }
+        if message["id"] != "apply" {
+            return;
+        }
+        let Some(id) = self.running.take() else {
+            return;
+        };
+        if result["applied"] == true {
+            send(&json!({ "jsonrpc": "2.0", "id": id, "result": Value::Null }));
+        } else {
+            let why = result["failureReason"].as_str().unwrap_or("not applied");
+            send(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": 1, "message": format!("not marked: {why}") },
+            }));
+        }
+    }
+
+    /// The edit to the file at `uri`, at its version now, replacing bytes
+    /// `start` to `end` of its text with `new`: with a file made too, if
+    /// it was told to.
+    fn edit(&self, uri: &str, (start, end): (usize, usize), new: &str) -> Value {
+        let text = &self.files[uri];
+        let range = json!({
+            "start": place(text, start, self.utf16),
+            "end": place(text, end, self.utf16),
+        });
+        let mut changes = vec![json!({
+            "textDocument": { "uri": uri, "version": self.versions[uri] },
+            "edits": [{ "range": range, "newText": new }],
+        })];
+        if self.action_files {
+            changes.push(json!({ "kind": "create", "uri": format!("{uri}.new") }));
+        }
+        json!({ "documentChanges": changes })
+    }
+
+    /// Answers what could be done to the range `message` asks about.
+    fn code_actions(&self, message: &Value) {
+        let params = &message["params"];
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let mark = json!({ "title": "Mark the file", "command": "fake.mark", "arguments": [uri] });
+        let mut capitalise = json!({
+            "title": "Capitalise the word",
+            "kind": "refactor.rewrite",
+            "data": { "uri": uri, "start": params["range"]["start"] },
+        });
+        if self.resolve_partly {
+            capitalise["command"] = mark.clone();
+        }
+        let mut actions = vec![capitalise, mark];
+        let text = &self.files[uri];
+        for diagnostic in params["context"]["diagnostics"].as_array().unwrap() {
+            // Only its own, as it sent them.
+            if diagnostic["data"]["fake"].is_null() {
+                continue;
+            }
+            let start = byte(text, &diagnostic["range"]["start"], self.utf16);
+            let end = byte(text, &diagnostic["range"]["end"], self.utf16);
+            actions.push(json!({
+                "title": "Make it good",
+                "kind": "quickfix",
+                "isPreferred": true,
+                "diagnostics": [diagnostic],
+                "edit": self.edit(uri, (start, end), "good"),
+            }));
+        }
+        send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": actions }));
+    }
+
+    /// Works out the edit of the action `message` asks to resolve: the
+    /// word it was offered at, in capitals, as the text is now. Answered
+    /// with the whole action, or only its title and edit, or nothing, as
+    /// it was told.
+    fn resolve_action(&self, message: &Value) {
+        if self.resolve_null {
+            send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": Value::Null }));
+            return;
+        }
+        let mut action = message["params"].clone();
+        if self.resolve_partly {
+            action = json!({ "title": action["title"], "data": action["data"] });
+        }
+        let uri = action["data"]["uri"].as_str().unwrap().to_owned();
+        let text = &self.files[&uri];
+        let at = byte(text, &action["data"]["start"], self.utf16);
+        let (start, word) = word_at(text, at);
+        action["edit"] = self.edit(&uri, (start, start + word.len()), &word.to_uppercase());
+        send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": action }));
+    }
+
+    /// Runs the command `message` asks for, marking the file it names, by
+    /// asking its client to: it answers once its client has.
+    fn execute(&mut self, message: &Value) {
+        let params = &message["params"];
+        let uri = params["arguments"][0].as_str().unwrap();
+        let mut edit = self.edit(uri, (0, 0), "marked ");
+        // And `defs.fk` beside it, from disk, if it's there and not open.
+        let defs = format!("{}/defs.fk", &uri[..uri.rfind('/').unwrap()]);
+        if !self.files.contains_key(&defs)
+            && std::path::Path::new(defs.strip_prefix("file://").unwrap()).exists()
+        {
+            let start = json!({ "line": 0, "character": 0 });
+            edit["documentChanges"].as_array_mut().unwrap().push(json!({
+                "textDocument": { "uri": defs, "version": Value::Null },
+                "edits": [{ "range": { "start": start, "end": start }, "newText": "marked " }],
+            }));
+        }
+        self.running = Some(message["id"].clone());
+        send(&json!({
+            "jsonrpc": "2.0",
+            "id": "apply",
+            "method": "workspace/applyEdit",
+            "params": { "label": "Mark the file", "edit": edit },
+        }));
     }
 
     /// Formats a file: each "bad" in capitals, and a tab at a line's
@@ -433,6 +612,8 @@ impl Fake {
                 "triggerCharacters": ["(", ","],
                 "retriggerCharacters": [")"],
             });
+            capabilities["codeActionProvider"] = json!({ "resolveProvider": true });
+            capabilities["executeCommandProvider"] = json!({ "commands": ["fake.mark"] });
         }
         capabilities
     }
@@ -587,6 +768,7 @@ impl Fake {
                     "message": "bad is bad",
                     "source": "fake",
                     "code": 7,
+                    "data": { "fake": at },
                 })
             })
             .collect();

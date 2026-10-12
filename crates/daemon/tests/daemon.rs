@@ -1940,7 +1940,8 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
     .unwrap();
     let text = "pub fn f() -> u32 {\n    \"not a number\"\n}\npub fn g() -> u32 {\n    f()\n}\n\
                 pub fn h(a: u32, b: u32) -> u32 {\n    a + b\n}\n\
-                pub fn k(value: u32) -> u32 {\n    h(1, val)\n}\n";
+                pub fn k(value: u32) -> u32 {\n    h(1, val)\n}\n\
+                pub fn m() -> u32 {\n    let two = 2;\n    two\n}\n";
     std::fs::write(dir.join("krate/src/lib.rs"), text).unwrap();
     let mut client = daemon.client();
     client.watch_workspaces().unwrap();
@@ -1993,13 +1994,48 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
     };
     assert!(markdown && said.contains("pub fn f() -> u32"), "{said}");
     rust_analyzer_completes_and_helps(&mut client, buffer, text);
-    rust_analyzer_finds_renames_and_formats(&mut client, buffer, text);
+    let (version, text) = rust_analyzer_finds_renames_and_formats(&mut client, buffer, text);
+    rust_analyzer_acts(&mut client, buffer, (version, &text));
+}
+
+/// What rust-analyzer could do to m's `two`, in `text`, buffer `buffer` at
+/// `version`: give it its type, which it works out only once that's
+/// picked, and which is made as the user's edit.
+fn rust_analyzer_acts(client: &mut Client, buffer: BufferId, (version, text): (u64, &str)) {
+    let two = text.find("let two").unwrap() + "let ".len();
+    let query = Query::CodeActions { end: two };
+    client.query(buffer, 9, (version, two), query).unwrap();
+    let (_, answer) = next_answer(client);
+    let Answer::CodeActions(actions) = &answer else {
+        panic!("{answer:?}");
+    };
+    let item = (actions.iter())
+        .position(|action| action.title.contains("explicit type"))
+        .unwrap_or_else(|| panic!("{actions:?}"));
+    let item = u32::try_from(item).unwrap();
+    client
+        .query(buffer, 10, (version, 0), Query::Act { list: 9, item })
+        .unwrap();
+    let (updates, answer) = updates_to_answer(client);
+    assert!(
+        matches!(&answer, (10, Answer::Acted { files: 1, .. })),
+        "{answer:?}"
+    );
+    assert_eq!(
+        edited(text, &updates),
+        text.replace("let two = 2;", "let two: u32 = 2;")
+    );
 }
 
 /// What [`rust_analyzer_says_whats_wrong_with_a_rust_file`] asks once the
 /// server has said what f is: where f is used, f renamed, and the file
-/// formatted, in `text`, buffer `buffer`.
-fn rust_analyzer_finds_renames_and_formats(client: &mut Client, buffer: BufferId, text: &str) {
+/// formatted, in `text`, buffer `buffer`. Returns the buffer's version and
+/// text after.
+fn rust_analyzer_finds_renames_and_formats(
+    client: &mut Client,
+    buffer: BufferId,
+    text: &str,
+) -> (u64, String) {
     let call = text.rfind("f()").unwrap();
     // Where f is used, its declaration included.
     client
@@ -2055,6 +2091,7 @@ fn rust_analyzer_finds_renames_and_formats(client: &mut Client, buffer: BufferId
         (6, Answer::Formatted { changed: false }),
         "already formatted"
     );
+    (renamed, edited(text, &updates))
 }
 
 /// What rust-analyzer could type for `val` in `text`'s `k`, and which of
@@ -2688,6 +2725,430 @@ fn a_rename_edits_a_file_under_two_names_once_and_nothing_outside_its_project() 
     );
 }
 
+/// The titles of the code actions in `answer`.
+fn action_titles(answer: &Answer) -> Vec<&str> {
+    let Answer::CodeActions(actions) = answer else {
+        panic!("{answer:?}");
+    };
+    actions.iter().map(|action| action.title.as_str()).collect()
+}
+
+#[test]
+fn code_actions_come_quick_fixes_first_and_are_made_as_the_users_edits() {
+    // Columns in UTF-16, which "é" tells apart from bytes.
+    let daemon = with_fake_language_server(|_| vec!["--utf16".to_owned()]);
+    let text = "é bad\nuse it\n";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    // Asked of the cursor on "bad", which it's told is wrong there, with
+    // what it said of it: its quick fix comes first, though it sent it
+    // last.
+    let bad = "é b".len();
+    let ask = |end| Query::CodeActions { end };
+    client.query(buffer, 1, (0, bad), ask(bad)).unwrap();
+    let (id, answer) = next_answer(&mut client);
+    assert_eq!(id, 1);
+    assert_eq!(
+        action_titles(&answer),
+        ["Make it good", "Capitalise the word", "Mark the file"]
+    );
+    let Answer::CodeActions(actions) = &answer else {
+        unreachable!()
+    };
+    assert_eq!(
+        (actions[0].kind.as_str(), actions[0].preferred),
+        ("quickfix", true)
+    );
+    // On the second line, nothing's wrong; over both, "bad" is.
+    client
+        .query(buffer, 2, (0, "é bad\nu".len()), ask("é bad\nu".len()))
+        .unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1),
+        ["Capitalise the word", "Mark the file"]
+    );
+    // A range ending where "bad" starts isn't about it.
+    client.query(buffer, 7, (0, 0), ask("é ".len())).unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1),
+        ["Capitalise the word", "Mark the file"]
+    );
+    client.query(buffer, 3, (0, 0), ask(text.len())).unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1)[0],
+        "Make it good"
+    );
+
+    // Picked from a list since replaced, it's out of date.
+    client
+        .query(buffer, 4, (0, 0), Query::Act { list: 1, item: 0 })
+        .unwrap();
+    assert!(
+        matches!(next_answer(&mut client), (4, Answer::Failed(why)) if why.contains("out of date")),
+    );
+    // The quick fix: its edit made as the user's, one step, then the
+    // answer.
+    client
+        .query(buffer, 5, (0, 0), Query::Act { list: 3, item: 0 })
+        .unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(
+        answer,
+        (
+            5,
+            Answer::Acted {
+                title: "Make it good".into(),
+                files: 1
+            }
+        )
+    );
+    assert!(
+        matches!(
+            updates[..],
+            [
+                BufferUpdate::Edited {
+                    version: 1,
+                    author: Author::User,
+                    ..
+                },
+                BufferUpdate::Modified(true),
+            ]
+        ),
+        "{updates:?}"
+    );
+    assert_eq!(edited(text, &updates), "é good\nuse it\n");
+    // One undo takes it back.
+    send_change(&mut client, buffer, 0, Change::Undo);
+    loop {
+        if let BufferUpdate::Edited {
+            answers: Some(0),
+            edit,
+            ..
+        } = next_buffer_update(&mut client)
+        {
+            assert_eq!(edit.apply_to("é good\nuse it\n").unwrap(), text);
+            break;
+        }
+    }
+    // A list is used up by doing one of it: done again, the edit isn't
+    // made twice.
+    client
+        .query(buffer, 6, (2, 0), Query::Act { list: 3, item: 0 })
+        .unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(edited(text, &updates), text, "{updates:?}");
+    assert!(
+        matches!(&answer, (6, Answer::Failed(why)) if why.contains("out of date")),
+        "{answer:?}"
+    );
+}
+
+#[test]
+fn a_code_action_without_its_edit_is_resolved_and_a_command_run_edits_through_its_server() {
+    let daemon = with_fake_language_server(|_| vec!["--utf16".to_owned()]);
+    let text = "é bad\nuse it\n";
+    let (mut client, buffer) =
+        fake_project(&daemon, &[("a.fk", text), ("defs.fk", "fn bad() {}\n")]);
+    let at = "é bad\nu".len();
+    client
+        .query(buffer, 1, (0, at), Query::CodeActions { end: at })
+        .unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1)[0],
+        "Capitalise the word"
+    );
+    // Sent without its edit, which the server works out when asked.
+    client
+        .query(buffer, 2, (0, 0), Query::Act { list: 1, item: 0 })
+        .unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(
+        answer,
+        (
+            2,
+            Answer::Acted {
+                title: "Capitalise the word".into(),
+                files: 1
+            }
+        )
+    );
+    let text = edited(text, &updates);
+    assert_eq!(text, "é bad\nUSE it\n");
+
+    // A command, which the server runs by asking for an edit, which is
+    // made, as the user's, before it says it's done.
+    client
+        .query(buffer, 3, (1, at), Query::CodeActions { end: at })
+        .unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1)[1],
+        "Mark the file"
+    );
+    client
+        .query(buffer, 4, (1, 0), Query::Act { list: 3, item: 1 })
+        .unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(
+        answer,
+        (
+            4,
+            Answer::Acted {
+                title: "Mark the file".into(),
+                files: 2
+            }
+        )
+    );
+    assert!(
+        matches!(
+            updates[..],
+            [BufferUpdate::Edited {
+                version: 2,
+                author: Author::User,
+                ..
+            }]
+        ),
+        "{updates:?}"
+    );
+    assert_eq!(edited(&text, &updates), "marked é bad\nUSE it\n");
+    // And defs.fk beside it, not open, on disk.
+    assert_eq!(
+        std::fs::read_to_string(daemon.dir.path().join("app/defs.fk")).unwrap(),
+        "marked fn bad() {}\n"
+    );
+}
+
+#[test]
+fn a_code_action_that_makes_files_or_a_server_without_them_changes_nothing() {
+    let daemon = with_fake_language_server(|_| vec!["--bare".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    client
+        .query(buffer, 1, (0, 0), Query::CodeActions { end: 0 })
+        .unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (
+            1,
+            Answer::Failed("its language server has no code actions".into())
+        )
+    );
+    drop(daemon);
+
+    // Its edit, and the one its command asks for, make a file, which is
+    // refused: the server is told, and says why its command failed.
+    let daemon = with_fake_language_server(|_| vec!["--action-files".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    client
+        .query(buffer, 1, (0, 0), Query::CodeActions { end: 0 })
+        .unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1),
+        ["Make it good", "Capitalise the word", "Mark the file"]
+    );
+    for (id, item) in [(2, 0), (3, 2)] {
+        // Each list is used up by doing one of it.
+        client
+            .query(buffer, id + 10, (0, 0), Query::CodeActions { end: 0 })
+            .unwrap();
+        next_answer(&mut client);
+        let list = id + 10;
+        client
+            .query(buffer, id, (0, 0), Query::Act { list, item })
+            .unwrap();
+        let (updates, answer) = updates_to_answer(&mut client);
+        assert!(updates.is_empty(), "{updates:?}");
+        assert!(
+            matches!(&answer, (got, Answer::Failed(why))
+                if *got == id && why.contains("make, rename or delete files")),
+            "{answer:?}"
+        );
+    }
+    assert_eq!(attach_buffer(&mut client, buffer).text, "bad\n");
+    assert!(!daemon.dir.path().join("app/a.fk.new").exists());
+}
+
+#[test]
+fn a_code_action_is_made_past_edits_made_since_it_was_offered() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        vec!["--hold-resolve".to_owned(), gate]
+    });
+    let text = "bad\nuse it\n";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    let dir = daemon.dir.path();
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    // Offered with its edit, then typed inside what it replaces, by
+    // another window: it's refused.
+    client
+        .query(buffer, 1, (0, 1), Query::CodeActions { end: 1 })
+        .unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1)[0],
+        "Make it good"
+    );
+    send_change(&mut other, buffer, 0, insert(text.len(), 1, "x", 0));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    client
+        .query(buffer, 2, (1, 0), Query::Act { list: 1, item: 0 })
+        .unwrap();
+    let (updates, (_, answer)) = updates_to_answer(&mut client);
+    assert!(
+        matches!(&answer, Answer::Failed(why) if why.contains("changed while")),
+        "{answer:?}"
+    );
+    let text = edited(text, &updates);
+    assert_eq!(text, "bxad\nuse it\n");
+
+    // Resolved while another window types before what it replaces: it's
+    // made where that is now.
+    let at = text.find("use").unwrap();
+    client
+        .query(buffer, 3, (1, at), Query::CodeActions { end: at })
+        .unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1)[0],
+        "Capitalise the word"
+    );
+    client
+        .query(buffer, 4, (1, 0), Query::Act { list: 3, item: 0 })
+        .unwrap();
+    send_change(&mut other, buffer, 1, insert(text.len(), at, "so ", 1));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    std::fs::write(dir.join("gate"), "").unwrap();
+    let (_, answer) = updates_to_answer(&mut client);
+    assert!(
+        matches!(answer, (4, Answer::Acted { files: 1, .. })),
+        "{answer:?}"
+    );
+    assert_eq!(attach_buffer(&mut other, buffer).text, "bxad\nso USE it\n");
+}
+
+#[test]
+fn a_resolved_code_action_keeps_what_its_server_doesnt_say_again() {
+    // Resolved with only its edit: its command is still run.
+    let daemon = with_fake_language_server(|_| vec!["--resolve-partly".to_owned()]);
+    let text = "bad\nuse it\n";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    let at = text.find("use").unwrap();
+    client
+        .query(buffer, 1, (0, at), Query::CodeActions { end: at })
+        .unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1)[0],
+        "Capitalise the word"
+    );
+    client
+        .query(buffer, 2, (0, 0), Query::Act { list: 1, item: 0 })
+        .unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert!(
+        matches!(&answer, (2, Answer::Acted { title, .. }) if title == "Capitalise the word"),
+        "{answer:?}"
+    );
+    assert_eq!(edited(text, &updates), "marked bad\nUSE it\n");
+    drop(daemon);
+
+    // Resolved with nothing: it's said, and nothing's done.
+    let daemon = with_fake_language_server(|_| vec!["--resolve-null".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    client
+        .query(buffer, 1, (0, at), Query::CodeActions { end: at })
+        .unwrap();
+    next_answer(&mut client);
+    client
+        .query(buffer, 2, (0, 0), Query::Act { list: 1, item: 0 })
+        .unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert!(updates.is_empty(), "{updates:?}");
+    assert!(
+        matches!(&answer, (2, Answer::Failed(why)) if why.contains("couldn't say what it does")),
+        "{answer:?}"
+    );
+}
+
+#[test]
+fn a_servers_own_edit_is_refused_unless_its_running_a_command() {
+    let daemon = with_fake_language_server(|dir| {
+        let log = dir.join("log").display().to_string();
+        vec!["--apply-unasked".to_owned(), "--log".to_owned(), log]
+    });
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    // Typing "unasked" has it ask, by itself, to edit the file.
+    send_change(&mut client, buffer, 0, insert(4, 0, "unasked ", 0));
+    let log = daemon.dir.path().join("log");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let said = loop {
+        let said = std::fs::read_to_string(&log).unwrap_or_default();
+        if let Some(line) = said.lines().find(|line| line.starts_with("unasked:")) {
+            break line.to_owned();
+        }
+        assert!(Instant::now() < deadline, "not answered");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(said.contains("\"applied\":false"), "{said}");
+    assert!(said.contains("only while it runs a command"), "{said}");
+    assert_eq!(attach_buffer(&mut client, buffer).text, "unasked bad\n");
+}
+
+#[test]
+fn a_servers_commands_run_one_at_a_time_and_their_edits_go_with_it() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let marker = dir.join("crashed").display().to_string();
+        let args = vec!["--crash-once".to_owned(), marker];
+        config.languages = Some(fake_language_server_pack(dir, args));
+        config.rename_gate = Some(dir.join("rename-gate"));
+    });
+    let text = "bad\n";
+    let (mut client, buffer) =
+        fake_project(&daemon, &[("a.fk", text), ("defs.fk", "fn bad() {}\n")]);
+    let app = daemon.dir.path().join("app");
+    let files = listed(&app);
+    // Marking the file asks for defs.fk, not open, to be marked too, which
+    // waits, written beside it, while the command runs.
+    client
+        .query(buffer, 1, (0, 0), Query::CodeActions { end: 0 })
+        .unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1)[2],
+        "Mark the file"
+    );
+    client
+        .query(buffer, 2, (0, 0), Query::Act { list: 1, item: 2 })
+        .unwrap();
+    let staged = Instant::now() + Duration::from_secs(5);
+    while listed(&app).len() == files.len() {
+        assert!(Instant::now() < staged, "the new text wasn't written");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Another command meanwhile is refused.
+    client
+        .query(buffer, 3, (0, 0), Query::CodeActions { end: 0 })
+        .unwrap();
+    next_answer(&mut client);
+    client
+        .query(buffer, 4, (0, 0), Query::Act { list: 3, item: 2 })
+        .unwrap();
+    assert!(
+        matches!(next_answer(&mut client), (4, Answer::Failed(why)) if why.contains("running another command")),
+    );
+    // The server stops: the edit it asked for is dropped, and what it
+    // wrote thrown away, with nothing changed.
+    send_change(&mut client, buffer, 0, insert(text.len(), 0, "crash ", 0));
+    assert_eq!(
+        next_answer(&mut client),
+        (2, Answer::Failed("its language server stopped".into()))
+    );
+    let dropped = Instant::now() + Duration::from_secs(5);
+    while listed(&app) != files {
+        assert!(Instant::now() < dropped, "what it wrote was left");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        std::fs::read_to_string(app.join("defs.fk")).unwrap(),
+        "fn bad() {}\n"
+    );
+    assert_eq!(attach_buffer(&mut client, buffer).text, "crash bad\n");
+}
+
 /// A daemon with the fake language server, whose renames' threads wait,
 /// once they've written the files not open beside them, until the file
 /// `rename-gate` in its directory exists.
@@ -2731,7 +3192,7 @@ fn a_file_changed_or_opened_while_a_rename_writes_it_isnt_renamed() {
     assert_eq!(id, 2);
     assert!(updates.is_empty(), "{updates:?}");
     assert!(
-        matches!(&answer, Answer::Failed(why) if why.contains("another rename is writing")),
+        matches!(&answer, Answer::Failed(why) if why.contains("another edit is writing")),
         "{answer:?}"
     );
     std::fs::write(dir.join("rename-gate"), "").unwrap();

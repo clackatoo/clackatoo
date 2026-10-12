@@ -197,6 +197,10 @@ pub(crate) enum Action {
     /// `grn`: rename what's under the cursor, everywhere, asking in the
     /// bar for the new name.
     Rename,
+    /// `gra`: ask what the language server could do to the text at the
+    /// cursor, or selected, such as fix what's wrong there, and show it in
+    /// a menu to pick from.
+    CodeActions,
     /// `o` in visual mode: to the other end of the selection.
     OtherEnd,
     /// `i` or `a` and an object, in visual mode: select it.
@@ -479,7 +483,7 @@ impl Reader<'_> {
                 '{' => Motion::Paragraph { forward: false },
                 'g' => {
                     // What a language server knows: `gd`, `gD`, `gy`, `gri`,
-                    // `grr` and `grn`, as Neovim's are.
+                    // `grr`, `grn` and `gra`, as Neovim's are.
                     let ask = |query| Read::Yes(Action::Ask(query));
                     let Some(next) = self.next() else {
                         return Some(Read::More);
@@ -495,6 +499,7 @@ impl Reader<'_> {
                                 Some('i') => ask(Query::Implementation),
                                 Some('r') => ask(Query::References),
                                 Some('n') => Read::Yes(Action::Rename),
+                                Some('a') => Read::Yes(Action::CodeActions),
                                 _ => Read::No,
                             },
                         },

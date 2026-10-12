@@ -20,7 +20,7 @@ use std::io;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 
-use clackatoo_protocol::{Query, ServerFeatures, Trigger};
+use clackatoo_protocol::{CodeAction, Query, ServerFeatures, Trigger};
 use clackatoo_text::{Edit, Rope, Severity};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -65,6 +65,11 @@ pub(crate) struct Reported {
     pub(crate) message: String,
     pub(crate) source: Option<String>,
     pub(crate) code: Option<String>,
+    /// The diagnostic as the server sent it, which it's sent back as, its
+    /// range moved, when the server is asked what could fix it: servers
+    /// such as typescript-language-server know their own by fields only
+    /// they read, such as `data`.
+    pub(crate) raw: Value,
 }
 
 /// `reported` placed in `text`, its lines and columns, counted in
@@ -109,6 +114,11 @@ pub(crate) enum Incoming {
     /// It has answered `initialize`, and so can be asked things, and what
     /// it does as you type is known.
     Ready,
+    /// It asks for `edit`, a `WorkspaceEdit`, to be made, as it does when
+    /// running a command: its request numbered `id`, which
+    /// [`answer_request`](LanguageServer::answer_request) answers once the
+    /// edit has been made, or hasn't.
+    ApplyEdit { id: Value, edit: Value },
 }
 
 /// The error a server answers a request with when what it was working on
@@ -156,6 +166,14 @@ struct Offers {
     signature: Option<Vec<char>>,
     /// ...and these ask again, while it's helping.
     signature_again: Vec<char>,
+    /// Says what could be done to some text, such as fix what's wrong.
+    code_actions: bool,
+    /// Works out an action's edits only when asked, once it's picked.
+    resolve_actions: bool,
+    /// The commands it runs itself, when asked. An action's command that
+    /// isn't one of them is its editor's to run, such as one that shows
+    /// something in VS Code.
+    commands: Vec<String>,
 }
 
 impl LanguageServer {
@@ -196,6 +214,18 @@ impl LanguageServer {
             },
             "contextSupport": true,
         });
+        // Code actions: every kind, with edits worked out only once one's
+        // picked, if the server likes, to keep the list quick.
+        let code_action = json!({
+            "codeActionLiteralSupport": { "codeActionKind": { "valueSet": [
+                "", "quickfix", "refactor", "refactor.extract", "refactor.inline",
+                "refactor.rewrite", "source", "source.organizeImports", "source.fixAll",
+            ]}},
+            "isPreferredSupport": true,
+            "disabledSupport": true,
+            "dataSupport": true,
+            "resolveSupport": { "properties": ["edit"] },
+        });
         let root_uri = uri(root);
         let name = root.file_name().map_or_else(
             || root.display().to_string(),
@@ -218,11 +248,14 @@ impl LanguageServer {
                         "rename": { "prepareSupport": false },
                         "completion": completion,
                         "signatureHelp": signature,
+                        "codeAction": code_action,
                     },
                     "workspace": {
                         "workspaceFolders": true,
                         "configuration": true,
                         "workspaceEdit": { "documentChanges": true },
+                        "applyEdit": true,
+                        "executeCommand": {},
                     },
                     "window": { "workDoneProgress": true },
                 },
@@ -339,6 +372,7 @@ impl LanguageServer {
             Query::Format { .. } => self.offers.format,
             Query::Completion(_) | Query::Resolve { .. } => self.offers.completion.is_some(),
             Query::SignatureHelp { .. } => self.offers.signature.is_some(),
+            Query::CodeActions { .. } | Query::Act { .. } => self.offers.code_actions,
             Query::Definition
             | Query::Declaration
             | Query::TypeDefinition
@@ -382,6 +416,8 @@ impl LanguageServer {
             Query::Completion(_) => "textDocument/completion",
             Query::SignatureHelp { .. } => "textDocument/signatureHelp",
             Query::Resolve { .. } => unreachable!("resolved with the item, by resolve"),
+            Query::CodeActions { .. } => unreachable!("asked with what's wrong, by code_actions"),
+            Query::Act { .. } => unreachable!("done by the daemon, with the action"),
         };
         let mut params = json!({
             "textDocument": { "uri": uri(path) },
@@ -431,6 +467,70 @@ impl LanguageServer {
     /// number, as [`ask`](Self::ask) does.
     pub(crate) fn resolve(&mut self, item: &Value) -> u64 {
         self.request("completionItem/resolve", item)
+    }
+
+    /// Asks the server, which is [`ready`](Self::ready), what could be done
+    /// to bytes `start` to `end` of the file at `path`, whose text it has
+    /// as `text`, where `diagnostics` are what's wrong, as LSP writes them.
+    /// Returns the request's number, as [`ask`](Self::ask) does.
+    pub(crate) fn code_actions(
+        &mut self,
+        path: &Path,
+        text: &Rope,
+        (start, end): (usize, usize),
+        diagnostics: &[Value],
+    ) -> u64 {
+        let params = json!({
+            "textDocument": { "uri": uri(path) },
+            "range": {
+                "start": position(text, start, self.encoding),
+                "end": position(text, end, self.encoding),
+            },
+            // Asked for: every action the server has, not only those it
+            // would offer unasked, as a light bulb shows.
+            "context": { "diagnostics": diagnostics, "triggerKind": 1 },
+        });
+        self.request("textDocument/codeAction", &params)
+    }
+
+    /// Whether it works out an action's edits only when asked.
+    pub(crate) fn resolves_actions(&self) -> bool {
+        self.offers.resolve_actions
+    }
+
+    /// Asks the server, which [`resolves_actions`](Self::resolves_actions),
+    /// for the rest of `action`, a code action as it sent it, such as its
+    /// edits. Returns the request's number, as [`ask`](Self::ask) does.
+    pub(crate) fn resolve_action(&mut self, action: &Value) -> u64 {
+        self.request("codeAction/resolve", action)
+    }
+
+    /// Whether it runs the command named `command` itself.
+    pub(crate) fn runs(&self, command: &str) -> bool {
+        self.offers
+            .commands
+            .iter()
+            .any(|offered| offered == command)
+    }
+
+    /// Asks the server to run `command`, an LSP `Command`, which it
+    /// [`runs`](Self::runs). Returns the request's number, as
+    /// [`ask`](Self::ask) does.
+    pub(crate) fn execute(&mut self, command: &Value) -> u64 {
+        let mut params = json!({ "command": command["command"] });
+        if let Some(arguments) = command
+            .get("arguments")
+            .filter(|arguments| !arguments.is_null())
+        {
+            params["arguments"] = arguments.clone();
+        }
+        self.request("workspace/executeCommand", &params)
+    }
+
+    /// Answers the server's request numbered `id` with `result`.
+    pub(crate) fn answer_request(&mut self, id: &Value, result: &Value) {
+        self.peer
+            .send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
     }
 
     /// Asks the server, which is [`ready`](Self::ready), to rename what's
@@ -505,6 +605,13 @@ impl LanguageServer {
             },
             (Some(method), Some(id)) => {
                 let result = match method.as_str() {
+                    // Answered once it's been made, or hasn't, which may
+                    // take a while, as files not open are written.
+                    "workspace/applyEdit" => {
+                        let edit = message.params.get("edit").cloned().unwrap_or_default();
+                        incoming.push(Incoming::ApplyEdit { id, edit });
+                        return;
+                    }
                     // No settings: each server's defaults.
                     "workspace/configuration" => {
                         let items = message.params.get("items").and_then(Value::as_array);
@@ -601,6 +708,16 @@ impl LanguageServer {
             resolve: completion["resolveProvider"].as_bool() == Some(true),
             signature: (signature.is_object()).then(|| characters(&signature["triggerCharacters"])),
             signature_again: characters(&signature["retriggerCharacters"]),
+            code_actions: offered(&capabilities["codeActionProvider"]),
+            resolve_actions: capabilities["codeActionProvider"]["resolveProvider"].as_bool()
+                == Some(true),
+            commands: (capabilities["executeCommandProvider"]["commands"].as_array())
+                .map(|commands| {
+                    (commands.iter())
+                        .filter_map(|command| Some(command.as_str()?.to_owned()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         self.ready = true;
         self.peer
@@ -881,6 +998,100 @@ pub(crate) fn documentation(item: &Value) -> Option<(String, bool)> {
     (!documentation.0.trim().is_empty()).then_some(documentation)
 }
 
+/// The actions in a `textDocument/codeAction` answer, as sent, in the
+/// order they're to be shown: quick fixes first, and of those, and then of
+/// the rest, those the server would have picked first, with those it says
+/// can't be done now last; otherwise as it sorted them. Each is a
+/// `CodeAction` or a bare `Command`, and read for the windows as
+/// [`CodeAction`]s; those that make no sense are left out.
+pub(crate) fn code_actions(answer: Value) -> Vec<(CodeAction, Value)> {
+    let Value::Array(list) = answer else {
+        return Vec::new();
+    };
+    let mut actions: Vec<(CodeAction, Value)> = (list.into_iter())
+        .filter_map(|action| Some((code_action(&action)?, action)))
+        .collect();
+    actions.sort_by_key(|(action, _)| {
+        let quick = action.kind == "quickfix" || action.kind.starts_with("quickfix.");
+        (action.disabled.is_some(), !quick, !action.preferred)
+    });
+    actions
+}
+
+/// A `CodeAction` or a bare `Command`, as sent, read for the windows; or
+/// `None` if it has no title.
+pub(crate) fn code_action(action: &Value) -> Option<CodeAction> {
+    let title = action.get("title")?.as_str()?.to_owned();
+    if is_command(action) {
+        return Some(CodeAction {
+            title,
+            kind: String::new(),
+            preferred: false,
+            disabled: None,
+        });
+    }
+    Some(CodeAction {
+        title,
+        kind: (action.get("kind").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_owned(),
+        preferred: action.get("isPreferred").and_then(Value::as_bool) == Some(true),
+        disabled: (action.get("disabled"))
+            .filter(|disabled| disabled.is_object())
+            .map(|disabled| {
+                (disabled.get("reason").and_then(Value::as_str))
+                    .unwrap_or("its language server says it can't be done now")
+                    .to_owned()
+            }),
+    })
+}
+
+/// The title of `action`, a code action or a command as sent.
+pub(crate) fn action_title(action: &Value) -> String {
+    (action.get("title").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// `sent`, a code action as sent, with what the server said of it when
+/// asked to resolve it, `resolved`, over it: a server that answers with
+/// only its edit keeps its command. `None` if it said nothing of it.
+pub(crate) fn resolved_action(sent: &Value, resolved: Value) -> Option<Value> {
+    let Value::Object(resolved) = resolved else {
+        return None;
+    };
+    let mut action = sent.clone();
+    let Value::Object(fields) = &mut action else {
+        return Some(Value::Object(resolved));
+    };
+    fields.extend(resolved);
+    Some(action)
+}
+
+/// Whether `action`, as sent in a `textDocument/codeAction` answer, is a
+/// bare `Command`, whose `command` is its name, rather than a `CodeAction`,
+/// whose `command`, if it has one, is a `Command`.
+pub(crate) fn is_command(action: &Value) -> bool {
+    action.get("command").is_some_and(Value::is_string)
+}
+
+/// `raw`, a diagnostic as the server sent it, now about bytes `start` to
+/// `end` of `text`, in `encoding`'s columns, to send back to it, as what's
+/// wrong where it's asked what could be done.
+pub(crate) fn diagnostic_at(
+    raw: &Value,
+    text: &Rope,
+    (start, end): (usize, usize),
+    encoding: Encoding,
+) -> Value {
+    let mut sent = raw.clone();
+    sent["range"] = json!({
+        "start": position(text, start, encoding),
+        "end": position(text, end, encoding),
+    });
+    sent
+}
+
 /// The signature a `textDocument/signatureHelp` answer says is active.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Signature {
@@ -984,7 +1195,7 @@ fn diagnostics(name: &str, params: Value) -> Option<Incoming> {
     struct Params {
         uri: String,
         version: Option<i64>,
-        diagnostics: Vec<Raw>,
+        diagnostics: Vec<Value>,
     }
     #[derive(Deserialize)]
     struct Raw {
@@ -1004,7 +1215,15 @@ fn diagnostics(name: &str, params: Value) -> Option<Incoming> {
         .ok()?;
     let path = path_of(&params.uri)?;
     let diagnostics = (params.diagnostics.into_iter())
-        .map(|raw| Reported {
+        .filter_map(|sent| {
+            let raw: Raw = serde_json::from_value(sent.clone())
+                .map_err(|err| {
+                    log::debug!("{name}: skipping a diagnostic that makes no sense: {err}");
+                })
+                .ok()?;
+            Some((raw, sent))
+        })
+        .map(|(raw, sent)| Reported {
             start: raw.range.start,
             end: raw.range.end,
             severity: match raw.severity {
@@ -1020,6 +1239,7 @@ fn diagnostics(name: &str, params: Value) -> Option<Incoming> {
                 Value::String(code) => code,
                 code => code.to_string(),
             }),
+            raw: sent,
         })
         .collect();
     Some(Incoming::Diagnostics {
@@ -1323,6 +1543,30 @@ mod tests {
             signature(&json!({ "signatures": [] }), Encoding::Utf8),
             None
         );
+    }
+
+    #[test]
+    fn code_actions_come_quick_fixes_first() {
+        let answer = json!([
+            { "title": "rewrite", "kind": "refactor.rewrite" },
+            { "title": "can't", "kind": "quickfix", "disabled": { "reason": "no" } },
+            { "title": "run", "command": "fake.run", "arguments": [1] },
+            { "title": "fix", "kind": "quickfix" },
+            { "title": "best fix", "kind": "quickfix.add", "isPreferred": true },
+            { "title": "best rewrite", "kind": "refactor", "isPreferred": true },
+            { "kind": "quickfix" },
+        ]);
+        let actions = code_actions(answer);
+        let titles: Vec<&str> = actions.iter().map(|(action, _)| &*action.title).collect();
+        assert_eq!(
+            titles,
+            ["best fix", "fix", "best rewrite", "rewrite", "run", "can't"]
+        );
+        let (run, raw) = &actions[4];
+        assert!(run.kind.is_empty() && is_command(raw));
+        assert_eq!(actions[5].0.disabled.as_deref(), Some("no"));
+        assert!(!is_command(&actions[0].1));
+        assert!(code_actions(Value::Null).is_empty());
     }
 
     #[test]
