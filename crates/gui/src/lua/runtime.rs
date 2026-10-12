@@ -388,20 +388,32 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     let s = state.clone();
     core.set(
         "map",
-        lua.create_function(
-            move |_, (modes, keys, handler): (String, String, Function)| {
-                let modes = parse_modes(&modes).map_err(mlua::Error::runtime)?;
-                let keys = parse_keys(&keys).map_err(mlua::Error::runtime)?;
-                let binding = s.next_id();
-                s.bindings.borrow_mut().insert(binding, handler);
-                s.tell(FromLua::Map {
-                    modes,
-                    keys,
-                    binding,
-                });
-                Ok(())
-            },
-        )?,
+        lua.create_function(move |_, (modes, keys, handler): (String, String, Value)| {
+            let modes = parse_modes(&modes).map_err(mlua::Error::runtime)?;
+            let keys = parse_keys(&keys).map_err(mlua::Error::runtime)?;
+            let handler = match handler {
+                Value::Function(handler) => handler,
+                // Keys to type, as Vim's `noremap` maps to.
+                Value::String(to) => {
+                    let to = parse_keys(&to.to_string_lossy()).map_err(mlua::Error::runtime)?;
+                    s.tell(FromLua::Remap { modes, keys, to });
+                    return Ok(());
+                }
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "keys are bound to a function, or to keys to type, as a string",
+                    ));
+                }
+            };
+            let binding = s.next_id();
+            s.bindings.borrow_mut().insert(binding, handler);
+            s.tell(FromLua::Map {
+                modes,
+                keys,
+                binding,
+            });
+            Ok(())
+        })?,
     )?;
     let s = state.clone();
     core.set(

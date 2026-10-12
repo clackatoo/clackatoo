@@ -33,6 +33,8 @@ pub(super) struct Script {
     told: Option<World>,
     /// The keys waiting for the rest of a binding, as pressed.
     waiting: Vec<(KeptPress, Chord)>,
+    /// Keys a binding to keys is typing are being handled.
+    pub(super) typing: bool,
 }
 
 impl Desk {
@@ -185,11 +187,63 @@ impl Desk {
         if stop {
             return;
         }
-        for (press, _) in &pressed {
-            if let Some(pane) = self.focused_pane() {
-                pane.key(&press.press());
+        let kept: Vec<KeptPress> = pressed.into_iter().map(|(press, _)| press).collect();
+        self.type_into_pane(&kept);
+    }
+
+    /// Types `presses` into the focused pane, or its editor, as if
+    /// pressed, past the bindings.
+    pub(super) fn type_into_pane(&mut self, presses: &[KeptPress]) {
+        for press in presses {
+            let press = press.press();
+            if self.focused_editor().is_some() {
+                self.editor_key(&press);
+            } else if let Some(pane) = self.focused_pane() {
+                pane.key(&press);
             }
         }
+    }
+
+    /// Keys that began a binding, which the key after went on to none of:
+    /// they go to the focused pane as if no binding had them, as Vim's do,
+    /// so binding `gi` leaves `gg` as it was, and the key after is to be
+    /// looked up again on its own. Keys that began with Ctrl or Alt held,
+    /// as Ctrl+B's do, are the window's, and go nowhere, nor does the key
+    /// after. Returns whether it's to be looked up.
+    pub(super) fn type_dropped(&mut self) -> bool {
+        let pressed = std::mem::take(&mut self.script.waiting);
+        if pressed
+            .first()
+            .is_some_and(|(_, first)| first.ctrl || first.alt)
+        {
+            return false;
+        }
+        let kept: Vec<KeptPress> = pressed.into_iter().map(|(press, _)| press).collect();
+        self.type_into_pane(&kept);
+        true
+    }
+
+    /// Keys a binding types that make up one of the config's bindings,
+    /// ending with `press`: they go to the focused pane as they are, as
+    /// Vim's `noremap` would have them.
+    pub(super) fn type_bound(&mut self, chord: Chord, press: &KeyPress<'_>) {
+        let mut pressed = std::mem::take(&mut self.script.waiting);
+        pressed.push((KeptPress::of(press), chord));
+        let kept: Vec<KeptPress> = pressed.into_iter().map(|(press, _)| press).collect();
+        self.type_into_pane(&kept);
+    }
+
+    /// Types `keys`, as a binding to keys does: each as if pressed, so the
+    /// window's own keys do what they do (`:` opens the command line), but
+    /// the config's bindings and keypress handlers don't see them, so a
+    /// binding can't set off itself.
+    pub(super) fn type_keys(&mut self, keys: &[Chord]) {
+        let typing = std::mem::replace(&mut self.script.typing, true);
+        for chord in keys {
+            let kept = chord.kept();
+            self.key(&kept.press());
+        }
+        self.script.typing = typing;
     }
 
     /// Answers a request Lua is waiting on, telling it the world first, so
@@ -240,6 +294,10 @@ impl Desk {
                 binding,
             } => {
                 self.keymap.bind(&modes, &keys, Binding::Lua(binding), None);
+                self.forget_waiting();
+            }
+            FromLua::Remap { modes, keys, to } => {
+                self.keymap.bind(&modes, &keys, Binding::Keys(to), None);
                 self.forget_waiting();
             }
             FromLua::Unmap { modes, keys } => {

@@ -143,6 +143,12 @@ pub(crate) enum FromLua {
         modes: Vec<KeyMode>,
         keys: Vec<Chord>,
     },
+    /// Binds `keys` in `modes` to typing `to`.
+    Remap {
+        modes: Vec<KeyMode>,
+        keys: Vec<Chord>,
+        to: Vec<Chord>,
+    },
     /// Send keypresses in `scope` to a handler of Lua's.
     Subscribe {
         handler: u64,

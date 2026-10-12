@@ -51,6 +51,23 @@ pub(crate) struct KeptPress {
 }
 
 impl KeptPress {
+    /// A press of `key`, typing `text`, with `modifiers` held, as if from
+    /// the keyboard: for keys a binding types.
+    pub(crate) fn new(
+        key: Key,
+        text: Option<String>,
+        code: Option<KeyCode>,
+        modifiers: Modifiers,
+    ) -> Self {
+        Self {
+            key,
+            text,
+            location: KeyLocation::Standard,
+            code,
+            modifiers,
+        }
+    }
+
     pub(crate) fn of(press: &KeyPress<'_>) -> Self {
         Self {
             key: press.key.clone(),

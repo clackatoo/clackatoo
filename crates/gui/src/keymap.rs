@@ -15,9 +15,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey};
 
-use crate::input::KeyPress;
+use crate::input::{KeptPress, KeyPress, Modifiers};
 
 /// The modes a binding can apply in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -85,6 +85,25 @@ pub(crate) enum Named {
     F(u8),
 }
 
+/// Function key `n`, from F1 to F12.
+fn function_key(n: u8) -> NamedKey {
+    const KEYS: [NamedKey; 12] = [
+        NamedKey::F1,
+        NamedKey::F2,
+        NamedKey::F3,
+        NamedKey::F4,
+        NamedKey::F5,
+        NamedKey::F6,
+        NamedKey::F7,
+        NamedKey::F8,
+        NamedKey::F9,
+        NamedKey::F10,
+        NamedKey::F11,
+        NamedKey::F12,
+    ];
+    KEYS[usize::from(n.clamp(1, 12)) - 1]
+}
+
 /// The named keys by name, the first of each being how it's written.
 const NAMES: [(&str, Named); 18] = [
     ("Esc", Named::Escape),
@@ -135,6 +154,46 @@ impl Chord {
             alt: false,
             shift: false,
         }
+    }
+
+    /// A press of the key, as if from the keyboard, to type it.
+    pub(crate) fn kept(self) -> KeptPress {
+        let modifiers = Modifiers {
+            shift: self.shift || matches!(self.base, Base::Char(ch) if ch.is_uppercase()),
+            ctrl: self.ctrl,
+            alt: self.alt,
+        };
+        let plain = !self.ctrl && !self.alt;
+        let (key, text) = match self.base {
+            Base::Char(ch) => (
+                Key::Character(ch.to_string().into()),
+                plain.then(|| ch.to_string()),
+            ),
+            Base::Named(named) => {
+                let (named, text) = match named {
+                    Named::Escape => (NamedKey::Escape, None),
+                    Named::Enter => (NamedKey::Enter, Some("\r")),
+                    Named::Tab => (NamedKey::Tab, Some("\t")),
+                    Named::Backspace => (NamedKey::Backspace, None),
+                    Named::Delete => (NamedKey::Delete, None),
+                    Named::Insert => (NamedKey::Insert, None),
+                    Named::Space => (NamedKey::Space, Some(" ")),
+                    Named::Up => (NamedKey::ArrowUp, None),
+                    Named::Down => (NamedKey::ArrowDown, None),
+                    Named::Left => (NamedKey::ArrowLeft, None),
+                    Named::Right => (NamedKey::ArrowRight, None),
+                    Named::Home => (NamedKey::Home, None),
+                    Named::End => (NamedKey::End, None),
+                    Named::PageUp => (NamedKey::PageUp, None),
+                    Named::PageDown => (NamedKey::PageDown, None),
+                    Named::F(n) => (function_key(n), None),
+                };
+                (Key::Named(named), text.filter(|_| plain).map(str::to_owned))
+            }
+        };
+        // Ctrl+; is found by where it is on the keyboard.
+        let code = matches!(self.base, Base::Char(';')).then_some(KeyCode::Semicolon);
+        KeptPress::new(key, text, code, modifiers)
     }
 
     /// The key `press` is, if a binding can have it. A letter is upper
@@ -336,7 +395,8 @@ pub(crate) enum Pressed<T> {
     Bound(T),
     /// It started or continued a binding's keys, which wait for the rest.
     Waiting,
-    /// It ended keys that matched no binding, which are dropped.
+    /// It ended keys that matched no binding, which are typed as if no
+    /// binding had them (see [`Desk::key`](crate::desk::Desk::key)).
     Dropped,
     /// No binding has it, so it goes on.
     Unbound,

@@ -937,6 +937,14 @@ impl Desk {
     /// Handles a key press: the command line's, a binding's, then the
     /// focused pane's. Returns whether the window must be redrawn.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> bool {
+        self.key_with(press, true)
+    }
+
+    /// Handles a key press, as [`key`](Self::key) does, but for the
+    /// config's keypress handlers if not `handlers`, as for a key they've
+    /// had already. Keys a binding types meet neither them nor the
+    /// config's bindings, only the window's.
+    fn key_with(&mut self, press: &KeyPress<'_>, handlers: bool) -> bool {
         // The keyboard reports Shift, Ctrl and the like as keys of their
         // own, on the way to a chord such as Ctrl+Shift+C. They mustn't
         // count as the next key: that would drop a selection or a message,
@@ -965,7 +973,7 @@ impl Desk {
             self.close_finder();
         } else if let Some(chord) = Chord::of(press) {
             // The config's keypress handlers come first, then the bindings.
-            if self.keypress_handled(chord, press) {
+            if handlers && !self.script.typing && self.keypress_handled(chord, press) {
                 return true;
             }
             let mode = self.key_mode();
@@ -983,6 +991,11 @@ impl Desk {
                     self.act(action);
                     return true;
                 }
+                // Keys a binding types are past the config's bindings.
+                Pressed::Bound(Binding::Lua(_) | Binding::Keys(_)) if self.script.typing => {
+                    self.type_bound(chord, press);
+                    return true;
+                }
                 Pressed::Bound(Binding::Lua(binding)) => {
                     self.message = None;
                     self.run_lua_binding(binding, chord, press);
@@ -993,9 +1006,19 @@ impl Desk {
                     self.message = None;
                     return true;
                 }
-                Pressed::Dropped => {
+                Pressed::Bound(Binding::Keys(to)) => {
                     self.forget_waiting();
+                    self.message = None;
+                    self.type_keys(&to);
                     return true;
+                }
+                Pressed::Dropped => {
+                    if !self.type_dropped() {
+                        return true;
+                    }
+                    // Looked up again on its own, past the handlers,
+                    // which have had it.
+                    return self.key_with(press, false);
                 }
                 Pressed::Unbound => {}
             }
@@ -3592,6 +3615,75 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn keys_a_binding_types_reach_the_windows_keys_and_a_key_ending_a_prefix_is_looked_up() {
+        // `:w<CR>` typed by a binding opens the command line and writes.
+        let mut desk = editing("/p/a.rs", "one\n");
+        desk.lua_from(r#"client.keys.map("n", "<Space>w", ":w<CR>")"#);
+        answer_all(&mut desk);
+        type_keys(&mut desk, " w");
+        assert!(matches!(answer_all(&mut desk)[..], [Request::Save { .. }]));
+
+        // In a terminal's insert mode, with `jk` bound: `j` then Ctrl+B
+        // types `j`, and Ctrl+B starts its own keys, not ^B.
+        let mut desk = three_tabs();
+        snapshot(&mut desk, 1);
+        desk.lua_from(r#"client.keys.map("i", "jk", "<C-;>")"#);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "j");
+        assert!(answer_all(&mut desk).is_empty(), "j waits for k");
+        ctrl(&mut desk, "b");
+        let sent: Vec<Vec<u8>> = (answer_all(&mut desk).into_iter())
+            .filter_map(|request| match request {
+                Request::SendInput { bytes, .. } => Some(bytes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [b"j".to_vec()], "not ^B");
+        assert!(
+            matches!(desk.status(), Status::Tabs { note: Some(note), .. } if note.starts_with("tab 1-9"))
+        );
+        assert!(desk.cancel_keys());
+        // And `jk` types Ctrl+;, found by where it is on the keyboard,
+        // which leaves insert mode.
+        type_keys(&mut desk, "jk");
+        assert!(matches!(
+            desk.status(),
+            Status::Tabs {
+                mode: Some(ModeName::Normal),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_config_maps_keys_to_keys_and_a_prefix_that_goes_nowhere_is_typed() {
+        use clackatoo_protocol::Query;
+        let mut desk = editing("/p/a.rs", "one\ntwo\nthree\n");
+        desk.lua_from(r#"client.keys.map("n", "gi", "gri")"#);
+        answer_all(&mut desk);
+        let queries = |desk: &mut Desk| -> Vec<Query> {
+            (desk.take_outbox().into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::Query { query, .. } => Some(query),
+                    _ => None,
+                })
+                .collect()
+        };
+        // `gi` types `gri`, as the config says.
+        type_keys(&mut desk, "gi");
+        assert_eq!(queries(&mut desk), [Query::Implementation]);
+        // `g` waits for `i`; with another key, both are typed, as if no
+        // binding had them: `G` then `gg` still go where they went.
+        type_keys(&mut desk, "Ggg");
+        let Status::Tabs { note, .. } = desk.status() else {
+            panic!("the tabs");
+        };
+        assert!(note.unwrap().starts_with("a.rs  1:1"));
+        type_keys(&mut desk, "gd");
+        assert_eq!(queries(&mut desk), [Query::Definition]);
     }
 
     #[test]

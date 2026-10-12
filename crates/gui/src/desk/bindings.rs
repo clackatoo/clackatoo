@@ -53,6 +53,9 @@ pub(crate) enum Binding {
     Window(Action),
     /// A function of the config's, by its number.
     Lua(u64),
+    /// Keys to type into the focused pane, as if pressed, past the
+    /// bindings: `client.keys.map("n", "gi", "gri")`.
+    Keys(Vec<crate::keymap::Chord>),
 }
 
 /// The window's own actions, which its keys are bound to.
