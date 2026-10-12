@@ -21,9 +21,10 @@
 //! The list is the window's own: each window has its own history.
 
 use clackatoo_protocol::PaneId;
-use clackatoo_text::{Bias, Edit, Rope};
+use clackatoo_text::{Edit, Rope};
 
 use super::Desk;
+pub(super) use crate::editor::FilePlace;
 
 /// How many places are remembered.
 const MAX: usize = 100;
@@ -46,77 +47,6 @@ impl Jump {
                 (Some(mine), Some(theirs)) => mine.path == theirs.path && mine.line == theirs.line,
                 _ => false,
             }
-    }
-}
-
-/// Where a cursor was in a file.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct FilePlace {
-    /// The file's path, made absolute, as the daemon gives it.
-    pub(super) path: String,
-    /// The line, from 0, and the column, in bytes from its start.
-    pub(super) line: u64,
-    pub(super) col: usize,
-    /// The byte in the window's copy of the text, while there is one:
-    /// edits move it, and the line and column follow.
-    byte: usize,
-}
-
-impl FilePlace {
-    /// The place at `byte` of `text`, the file at `path`.
-    pub(super) fn at(path: &str, text: &Rope, byte: usize) -> Self {
-        let mut place = Self {
-            path: path.to_owned(),
-            line: 0,
-            col: 0,
-            byte,
-        };
-        place.find_line(text);
-        place
-    }
-
-    /// The place on `line`, `col` bytes into it, of the file at `path`,
-    /// kept within its `text` if the window has it. If not, its byte is
-    /// worked out when the file's text comes.
-    pub(super) fn at_line(path: &str, line: u64, col: usize, text: Option<&Rope>) -> Self {
-        let mut place = Self {
-            path: path.to_owned(),
-            line,
-            col,
-            byte: 0,
-        };
-        if let Some(text) = text {
-            place.find_byte(text);
-        }
-        place
-    }
-
-    /// Works out the line and column from the byte.
-    fn find_line(&mut self, text: &Rope) {
-        self.byte = self.byte.min(text.len_bytes());
-        let line = text.byte_to_line(self.byte);
-        self.line = line as u64;
-        self.col = self.byte - text.line_to_byte(line);
-    }
-
-    /// Works out the byte from the line and column, keeping them within
-    /// `text` and on a character's start.
-    fn find_byte(&mut self, text: &Rope) {
-        // The empty line after a final line break isn't one of the file's.
-        let len = text.len_bytes();
-        let ends_with_break = len > 0 && text.byte(len - 1) == b'\n';
-        let last = text.len_lines() - 1 - usize::from(ends_with_break);
-        let line = usize::try_from(self.line).map_or(last, |line| line.min(last));
-        let start = text.line_to_byte(line);
-        let end = if line + 1 < text.len_lines() {
-            // Before the line's break.
-            text.line_to_byte(line + 1) - 1
-        } else {
-            text.len_bytes()
-        };
-        let byte = (start + self.col).min(end);
-        self.byte = text.char_to_byte(text.byte_to_char(byte));
-        self.find_line(text);
     }
 }
 
@@ -189,10 +119,7 @@ impl Jumps {
             return;
         }
         for place in self.places_in(path) {
-            for edit in edits {
-                place.byte = edit.map(place.byte, Bias::After);
-            }
-            place.find_line(text);
+            place.edited(edits, text);
         }
     }
 
@@ -234,9 +161,13 @@ impl Desk {
     }
 
     /// Records a jump from where `pane` is: in an editor, from where its
-    /// cursor is, or from `byte` of its file if given.
+    /// cursor is, or from `byte` of its file if given, which is the file's
+    /// `'` mark then.
     pub(super) fn record_jump(&mut self, pane: PaneId, byte: Option<usize>) {
         if let Some(place) = self.place_of(pane, byte) {
+            if let Some(file) = &place.file {
+                self.jumped_from(file);
+            }
             self.jumps.left(place);
         }
     }

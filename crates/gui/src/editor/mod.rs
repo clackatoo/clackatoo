@@ -13,6 +13,13 @@
 //! view. Edits made in one, or by anyone else, move the others' cursors
 //! with the text around them.
 //!
+//! Every editor shares the registers (see [`registers`]) and the marks
+//! (see [`marks`]). A macro recorded with `q` is the keys typed into the
+//! editors; `@` types them again, through the same keys as typing does,
+//! each one in turn, so whoever drives the editor sees each key's effects,
+//! as the desk does the jumps and marks they make. A key that fails, as a
+//! motion that can't move does, stops the macro, as in Vim.
+//!
 //! In insert mode, the language server is asked what could finish the
 //! word being typed, shown in a menu under the cursor (see [`complete`]),
 //! and about the call whose arguments are being typed, whose signature
@@ -29,8 +36,10 @@ mod actions;
 mod complete;
 mod copy;
 mod keys;
+mod marks;
 mod panel;
 mod pieces;
+mod registers;
 mod text;
 
 use std::time::{Duration, Instant};
@@ -44,10 +53,16 @@ use actions::{ActionMenu, MenuKey, MenuStroke};
 pub use complete::Ranking;
 use complete::{Completion, Resolved, is_word};
 pub(crate) use copy::{BufferCopy, Heard};
-use keys::{Action, Command, Entry, Operator, Parsed, Stroke, Target, ViewAt};
+pub(crate) use keys::Stroke;
+use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
+pub(crate) use marks::{FilePlace, Marks};
+#[cfg(test)]
+pub(crate) use panel::Line as PanelLine;
 use panel::Panel;
 pub(crate) use panel::PanelView;
 pub(crate) use pieces::GiveUp;
+use registers::Wrote;
+pub(crate) use registers::{Register, Registers};
 use text::{Laid, Text, tab_end};
 
 use crate::colors;
@@ -79,6 +94,15 @@ const NO_CHANGES: &str = "nothing's changed since git's index";
 /// ...and when there's none at the cursor's line.
 const NO_CHANGE_HERE: &str = "nothing's changed here since git's index";
 
+/// The most keys a macro types before it's stopped: one that types
+/// itself again, and never fails, would go on for ever, and the window
+/// can't be asked to stop it meanwhile. Fewer in tests, which run
+/// unoptimised.
+const MOST_REPLAYED: usize = if cfg!(test) { 20_000 } else { 1_000_000 };
+
+/// The deepest macros type macros, as Vim's `maxmapdepth`.
+const DEEPEST_REPLAY: usize = 1000;
+
 /// What's done to the hunk at an editor's cursor, by the window's keys and
 /// commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,12 +117,11 @@ pub(crate) enum HunkAction {
     Stage,
 }
 
-/// Text kept to put back with `p`: what was last copied or deleted, by
-/// characters, or whole lines.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Register {
-    pub(crate) text: String,
-    pub(crate) lines: bool,
+/// What every editor of the window shares.
+#[derive(Debug, Default)]
+pub(crate) struct Shared {
+    pub(crate) registers: Registers,
+    pub(crate) marks: Marks,
 }
 
 /// What a key did that the window must see to.
@@ -106,8 +129,19 @@ pub(crate) struct Register {
 pub(crate) struct Done {
     /// The pane must be drawn again.
     pub(crate) redraw: bool,
-    /// Text copied, for the clipboard.
-    pub(crate) yanked: Option<String>,
+}
+
+impl Done {
+    const REDRAW: Self = Self { redraw: true };
+}
+
+/// The keys of a macro being typed, as many `times` over again as are
+/// left after this, and how far through them it's got.
+#[derive(Debug)]
+struct Replay {
+    strokes: std::rc::Rc<[Stroke]>,
+    next: usize,
+    times: usize,
 }
 
 /// The text an operator acts on.
@@ -437,6 +471,20 @@ pub(crate) struct Editor {
     gave_up: bool,
     /// Whether what the bar says stays through the next key.
     keep_status: bool,
+    /// The macros being typed, the one typed by the others last.
+    replays: Vec<Replay>,
+    /// How many keys the macros being typed have typed so far.
+    replayed: usize,
+    /// Whether the key being read comes from a macro.
+    replaying: bool,
+    /// Whether the macros being typed have made an edit, which started
+    /// their undo step.
+    replay_edited: bool,
+    /// Whether the command waiting for the grammar is a macro's.
+    resume_replaying: bool,
+    /// The keys to note in a macro being recorded for the key just typed,
+    /// if a menu took it: what it put in, or nothing.
+    menu_keys: Option<Vec<Stroke>>,
 }
 
 impl Editor {
@@ -494,6 +542,12 @@ impl Editor {
             answered: None,
             gave_up: false,
             keep_status: false,
+            replays: Vec::new(),
+            replayed: 0,
+            replaying: false,
+            replay_edited: false,
+            resume_replaying: false,
+            menu_keys: None,
         }
     }
 
@@ -617,21 +671,136 @@ impl Editor {
 
     // --- Keys ---------------------------------------------------------------
 
-    /// Does what `press` does. `register` is shared by every editor.
+    /// Does what `press` does, and what any macro it types does. What
+    /// every editor shares is in `shared`.
+    #[cfg(test)]
     pub(crate) fn key(
         &mut self,
         press: &KeyPress<'_>,
         copy: &mut BufferCopy,
-        register: &mut Register,
+        shared: &mut Shared,
     ) -> Done {
-        let strokes = strokes(press, self.mode == Mode::Insert || self.prompt.is_some());
         let mut done = Done::default();
-        for stroke in strokes {
-            let one = self.stroke(stroke, copy, register);
-            done.redraw |= one.redraw;
-            done.yanked = one.yanked.or(done.yanked);
+        for stroke in self.strokes(press) {
+            done.redraw |= self.typed(stroke, copy, shared).redraw;
+            while let Some(one) = self.replay_next(copy, shared) {
+                done.redraw |= one.redraw;
+            }
         }
         done
+    }
+
+    /// The keys `press` makes, for [`typed`](Self::typed).
+    pub(crate) fn strokes(&self, press: &KeyPress<'_>) -> Vec<Stroke> {
+        strokes(press, self.mode == Mode::Insert || self.prompt.is_some())
+    }
+
+    /// Does what `stroke`, typed, does, noting it in the macro being
+    /// recorded, if one is. A macro it types is typed by
+    /// [`replay_next`](Self::replay_next), a key at a time.
+    pub(crate) fn typed(
+        &mut self,
+        stroke: Stroke,
+        copy: &mut BufferCopy,
+        shared: &mut Shared,
+    ) -> Done {
+        let recording = shared.registers.recording().is_some();
+        self.menu_keys = None;
+        let done = self.stroke(stroke, copy, shared);
+        // Noted once done, so neither the `q` that starts recording nor
+        // the one that stops it is. A key a menu took is noted as what it
+        // put in, if anything, so typing the macro again doesn't need the
+        // menu, which comes only when the language server answers.
+        if recording && shared.registers.recording().is_some() {
+            match self.menu_keys.take() {
+                Some(strokes) => strokes.into_iter().for_each(|s| shared.registers.typed(s)),
+                None => shared.registers.typed(stroke),
+            }
+        }
+        done
+    }
+
+    /// Does what the next key of the macro being typed does, if one is.
+    pub(crate) fn replay_next(
+        &mut self,
+        copy: &mut BufferCopy,
+        shared: &mut Shared,
+    ) -> Option<Done> {
+        // A key waiting for the grammar goes first, as typed keys wait.
+        if self.awaiting.is_some() {
+            return None;
+        }
+        let replay = self.replays.last_mut()?;
+        let stroke = replay.strokes[replay.next];
+        replay.next += 1;
+        if replay.next == replay.strokes.len() {
+            if replay.times > 1 {
+                replay.times -= 1;
+                replay.next = 0;
+            } else {
+                // Done with before its last key is read, so a macro that
+                // types itself last goes no deeper.
+                self.replays.pop();
+            }
+        }
+        self.replayed += 1;
+        if self.replayed > MOST_REPLAYED {
+            self.status = Some(format!(
+                "the macro was stopped after {MOST_REPLAYED} keys: it may type itself for ever"
+            ));
+            self.fail();
+            return Some(Done::REDRAW);
+        }
+        self.replaying = true;
+        let done = self.stroke(stroke, copy, shared);
+        self.replaying = false;
+        // Its command waits for the grammar: the rest wait for it, and
+        // it's done as the macro's when the answer comes.
+        self.resume_replaying = self.awaiting.is_some();
+        self.replay_settled();
+        Some(done)
+    }
+
+    /// Forgets how far the macros typed have got once they're done, and
+    /// not waiting for the grammar.
+    fn replay_settled(&mut self) {
+        if self.replays.is_empty() && self.awaiting.is_none() {
+            self.replayed = 0;
+            self.replay_edited = false;
+        }
+    }
+
+    /// Types `strokes`, a macro, `times` over, once the keys being read
+    /// are done with.
+    fn replay(&mut self, strokes: Vec<Stroke>, times: usize) {
+        if strokes.is_empty() {
+            return;
+        }
+        if self.replays.len() >= DEEPEST_REPLAY {
+            self.status = Some(format!(
+                "macros typed macros {DEEPEST_REPLAY} deep, so they were stopped"
+            ));
+            self.fail();
+            return;
+        }
+        self.replays.push(Replay {
+            strokes: strokes.into(),
+            next: 0,
+            times,
+        });
+    }
+
+    /// A key failed, as a motion that can't move does: the macros being
+    /// typed stop, as in Vim.
+    fn fail(&mut self) {
+        self.replays.clear();
+        self.replayed = 0;
+        self.replay_edited = false;
+    }
+
+    /// Whether a macro is being typed, with keys still to come.
+    pub(crate) fn replaying(&self) -> bool {
+        !self.replays.is_empty() && self.awaiting.is_none()
     }
 
     /// Puts `text` in at the cursor, as typed in insert mode.
@@ -648,19 +817,22 @@ impl Editor {
         }
     }
 
-    fn stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, register: &mut Register) -> Done {
+    fn stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
         if self.hold_stroke(stroke) {
             return Done::default();
         }
         if !std::mem::take(&mut self.keep_status) {
             self.status = None;
         }
+        // A macro types past menus, which it can't know will be there.
         if self.actions.is_some()
+            && !self.replaying
             && self.typed.is_empty()
             && self.prompt.is_none()
             && self.mode == Mode::Normal
             && let Some(done) = self.actions_stroke(stroke, copy)
         {
+            self.menu_keys.get_or_insert_with(Vec::new);
             return done;
         }
         if self.panel.is_some()
@@ -671,18 +843,22 @@ impl Editor {
             return done;
         }
         if self.mode == Mode::Insert
+            && !self.replaying
             && self.prompt.is_none()
             && let Some(done) = self.completion_stroke(stroke, copy)
         {
+            self.menu_keys.get_or_insert_with(Vec::new);
             self.follow(copy);
             return done;
         }
         let (mode, edits) = (self.mode, copy.edits_made());
-        let at = self.cursor_byte(copy);
-        let done = self.read_stroke(stroke, copy, register);
+        // A macro types on without asking the language server.
+        let asks = mode == Mode::Insert && !self.replaying;
+        let at = asks.then(|| self.cursor_byte(copy));
+        let done = self.read_stroke(stroke, copy, shared);
         self.follow(copy);
-        if mode == Mode::Insert {
-            let changed = copy.edits_made() != edits || self.cursor_byte(copy) != at;
+        if asks {
+            let changed = copy.edits_made() != edits || Some(self.cursor_byte(copy)) != at;
             self.as_you_type(stroke, changed, copy);
         }
         // Changing mode or typing in the bar closes the menu of code
@@ -754,10 +930,7 @@ impl Editor {
             Some(MenuKey::Picked(item)) => self.act(item, copy),
             Some(MenuKey::Closed) => self.actions = None,
         }
-        Some(Done {
-            redraw: true,
-            yanked: None,
-        })
+        Some(Done::REDRAW)
     }
 
     /// Does action `item` of the menu, closing it: the daemon makes its
@@ -811,18 +984,10 @@ impl Editor {
             }
             _ => return None,
         }
-        Some(Done {
-            redraw: true,
-            yanked: None,
-        })
+        Some(Done::REDRAW)
     }
 
-    fn read_stroke(
-        &mut self,
-        stroke: Stroke,
-        copy: &mut BufferCopy,
-        register: &mut Register,
-    ) -> Done {
+    fn read_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
         if self.prompt.is_some() {
             return self.prompt_stroke(stroke, copy);
         }
@@ -833,19 +998,21 @@ impl Editor {
                 change.typed.push(Typed::Key(stroke));
             }
             self.insert_stroke(stroke, copy);
-            return Done {
-                redraw: true,
-                yanked: None,
-            };
+            return Done::REDRAW;
         }
         if stroke == Stroke::Escape && self.typed.is_empty() {
             self.mode = Mode::Normal;
             self.anchor = None;
             self.found = None;
-            return Done {
-                redraw: true,
-                yanked: None,
-            };
+            return Done::REDRAW;
+        }
+        // `q` stops a macro being recorded, whatever comes after.
+        if stroke == Stroke::char('q')
+            && self.typed.is_empty()
+            && shared.registers.recording().is_some()
+        {
+            shared.registers.stop_recording();
+            return Done::REDRAW;
         }
         self.typed.push(stroke);
         let visual = matches!(self.mode, Mode::Visual(_));
@@ -853,11 +1020,12 @@ impl Editor {
             Parsed::Incomplete => Done::default(),
             Parsed::Nothing => {
                 self.typed.clear();
+                self.fail();
                 Done::default()
             }
             Parsed::Command(command) => {
                 self.typed.clear();
-                self.execute(command, copy, register, false)
+                self.execute(command, copy, shared, false)
             }
         }
     }
@@ -867,16 +1035,13 @@ impl Editor {
         &mut self,
         command: Command,
         copy: &mut BufferCopy,
-        register: &mut Register,
+        shared: &mut Shared,
         again: bool,
     ) -> Done {
         if self.waits_for_grammar(command, copy) {
             return Done::default();
         }
-        let mut done = Done {
-            redraw: true,
-            yanked: None,
-        };
+        let done = Done::REDRAW;
         let visual = matches!(self.mode, Mode::Visual(_));
         if command.action.changes() && !again && !visual {
             self.changing = Some(Change {
@@ -891,6 +1056,9 @@ impl Editor {
             Action::Move(motion) => {
                 let motion = self.remember_find(motion);
                 self.cursor = self.moved(copy, motion, times);
+                if self.cursor.at == from && can_fail(motion) {
+                    self.fail();
+                }
             }
             Action::GoToLine => {
                 let text = self.text(copy);
@@ -898,16 +1066,11 @@ impl Editor {
                 self.cursor = Cursor::new(Point { line, col: 0 });
                 self.cursor.apply(Motion::FirstNonBlank, &text);
             }
-            Action::Operate(operator, target) => {
-                done.yanked = self.operate(operator, target, times, copy, register);
-            }
-            Action::DeleteChars { before } => self.delete_chars(before, times, copy, register),
-            Action::DeleteToEnd { change } => self.delete_to_end(change, times, copy, register),
-            Action::Substitute => {
-                self.delete_chars(false, times, copy, register);
-                self.enter_insert(1);
-            }
-            Action::Put { before } => self.put(before, times, copy, register),
+            Action::Operate(..)
+            | Action::DeleteChars { .. }
+            | Action::DeleteToEnd { .. }
+            | Action::Substitute
+            | Action::Put { .. } => self.keep_or_put(command, copy, shared),
             Action::Join => self.join(times.max(2) - 1, copy),
             Action::Replace(ch) => self.replace_chars(ch, times, copy),
             Action::Insert(entry) => self.insert(entry, times, copy),
@@ -916,21 +1079,12 @@ impl Editor {
                     copy.reverse(command.action == Action::Undo);
                 }
             }
-            Action::Repeat => return self.repeat(command.count, copy, register),
+            Action::Repeat => return self.repeat(command.count, copy, shared),
             Action::Visual { lines } => self.visual(lines),
             Action::Search { backward } => self.prompt = Some(Prompt::search(backward)),
             Action::SearchAgain { reverse } => self.search_again(reverse, copy),
             Action::SearchWord { backward } => self.search_word(backward, copy),
-            Action::FindAgain { reverse } => {
-                if let Some(Motion::Find { ch, forward, till }) = self.last_find {
-                    let motion = Motion::Find {
-                        ch,
-                        forward: forward != reverse,
-                        till,
-                    };
-                    self.cursor = self.moved(copy, motion, times);
-                }
-            }
+            Action::FindAgain { reverse } => self.find_again(reverse, times, copy),
             Action::HalfPage(direction) => self.page(i64::from(direction), self.height / 2, copy),
             Action::Page(direction) => {
                 self.page(i64::from(direction), self.height.saturating_sub(2), copy);
@@ -956,6 +1110,16 @@ impl Editor {
                 backward,
             } => self.go_to_piece(construct, backward, copy),
             Action::Select { object, inner } => self.select(object, inner, times, copy),
+            Action::Record(name) => shared.registers.record(name),
+            Action::Replay(name) => match shared.registers.macro_keys(name) {
+                Ok(strokes) => self.replay(strokes, times),
+                Err(why) => {
+                    self.status = Some(why);
+                    self.fail();
+                }
+            },
+            Action::SetMark(mark) => self.set_mark(mark, copy, &mut shared.marks),
+            Action::Mark { mark, exact } => self.go_to_mark(mark, exact, copy, &shared.marks),
         }
         if command.action.jumps() && self.cursor.at != from {
             self.left_from(from, copy);
@@ -987,20 +1151,65 @@ impl Editor {
         }
     }
 
-    /// `.`: makes the last change again, `count` times if given.
-    fn repeat(
-        &mut self,
-        count: Option<usize>,
-        copy: &mut BufferCopy,
-        register: &mut Register,
-    ) -> Done {
+    /// Does `command`, which keeps text in a register or puts it from one:
+    /// an operator, `x`, `D`, `s` or `p` and their kin. Fails if there's
+    /// nothing to act on.
+    fn keep_or_put(&mut self, command: Command, copy: &mut BufferCopy, shared: &mut Shared) {
+        let (times, name) = (command.times(), command.register);
+        let registers = (&mut shared.registers, name);
+        match command.action {
+            Action::Operate(operator, target) => {
+                if !self.operate(operator, target, times, copy, &shared.marks, registers) {
+                    self.fail();
+                }
+            }
+            Action::DeleteChars { before } => self.delete_chars(before, times, copy, registers),
+            Action::DeleteToEnd { change } => self.delete_to_end(change, times, copy, registers),
+            Action::Substitute => {
+                self.delete_chars(false, times, copy, registers);
+                self.enter_insert(1);
+            }
+            Action::Put { before } if matches!(self.mode, Mode::Visual(_)) => {
+                self.put_over(before, times, copy, registers);
+            }
+            Action::Put { before } => self.put(before, times, copy, (&shared.registers, name)),
+            _ => {}
+        }
+    }
+
+    /// `;`, or `,` if `reverse`: the last `f`, `t`, `F` or `T` again, `times`
+    /// over. Fails if it can't move.
+    fn find_again(&mut self, reverse: bool, times: usize, copy: &BufferCopy) {
+        let from = self.cursor.at;
+        if let Some(Motion::Find { ch, forward, till }) = self.last_find {
+            let motion = Motion::Find {
+                ch,
+                forward: forward != reverse,
+                till,
+            };
+            self.cursor = self.moved(copy, motion, times);
+        }
+        if self.cursor.at == from {
+            self.fail();
+        }
+    }
+
+    /// `.`: makes the last change again, `count` times if given. A change
+    /// that put text from a numbered register puts the next's, as in Vim,
+    /// so `"1p` then `.` goes back through what was deleted.
+    fn repeat(&mut self, count: Option<usize>, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
         let Some(mut change) = self.last_change.clone() else {
             return Done::default();
         };
         if count.is_some() {
             change.command.count = count;
         }
-        let done = self.execute(change.command, copy, register, true);
+        if let (Action::Put { .. }, Some(digit @ '1'..='8')) =
+            (change.command.action, change.command.register)
+        {
+            change.command.register = char::from_digit(digit as u32 - '0' as u32 + 1, 10);
+        }
+        let done = self.execute(change.command, copy, shared, true);
         // A command waiting for the daemon finishes once it answers.
         if let Some(change) = self.awaiting_again(change) {
             self.finish_repeat(change, copy);
@@ -1062,19 +1271,26 @@ impl Editor {
 
     // --- Operators ----------------------------------------------------------
 
-    /// Makes `operator` act on `target`, keeping the text in the register,
-    /// unless it indents. Returns text copied, for the clipboard: what's
-    /// deleted goes only to the register, so deleting doesn't lose what
-    /// was copied elsewhere.
+    /// Makes `operator` act on `target`, keeping the text in `registers`
+    /// under `name`, as [`Registers::wrote`] keeps it, unless it indents.
+    /// Returns whether there was anything to act on: not if the motion
+    /// couldn't move, the object isn't there, or the mark isn't set.
     fn operate(
         &mut self,
         operator: Operator,
         target: Target,
         times: usize,
         copy: &mut BufferCopy,
-        register: &mut Register,
-    ) -> Option<String> {
-        let span = self.span(operator, target, times, copy)?;
+        marks: &Marks,
+        (registers, name): (&mut Registers, Option<char>),
+    ) -> bool {
+        let span = match target {
+            Target::Mark { mark, exact } => self.mark_span(mark, exact, copy, marks),
+            _ => self.span(operator, target, times, copy),
+        };
+        let Some(span) = span else {
+            return false;
+        };
         if let Operator::Indent | Operator::Dedent = operator {
             // A count is how many lines, or for a selection, how many steps.
             let steps = if target == Target::Selection {
@@ -1083,26 +1299,60 @@ impl Editor {
                 1
             };
             self.shift(span, steps, operator == Operator::Dedent, copy);
-            return None;
+            return true;
         }
-        let mut taken = self.text(copy).slice(span.start, span.end);
-        if span.lines.is_some() && !taken.ends_with('\n') {
-            taken.push('\n');
+        let mut text = self.text(copy).slice(span.start, span.end);
+        let lines = span.lines.is_some();
+        if lines && !text.ends_with('\n') {
+            text.push('\n');
         }
-        *register = Register {
-            text: taken.clone(),
-            lines: span.lines.is_some(),
-        };
-        match operator {
-            Operator::Yank => {
-                self.yanked(span, copy);
-                return Some(taken);
+        let wrote = if operator == Operator::Yank {
+            Wrote::Yank
+        } else {
+            let small = !lines && !text.contains('\n');
+            // As in Vim, a delete within a line goes to `"1` too if it's
+            // over one of these motions, which usually go further.
+            let far = matches!(
+                target,
+                Target::Mark { .. } | Target::Motion(Motion::Match | Motion::Paragraph { .. })
+            );
+            Wrote::Delete {
+                small,
+                history: !small || far,
             }
+        };
+        registers.wrote(name, Register { text, lines }, wrote);
+        match operator {
+            Operator::Yank => self.yanked(span, copy),
             Operator::Delete => self.delete_span(span, copy),
             Operator::Change => self.change_span(span, copy),
             Operator::Indent | Operator::Dedent => {}
         }
-        None
+        true
+    }
+
+    /// What an operator acting up to `mark` acts on: its line and the
+    /// cursor's, and those between, or exactly, up to the mark but not
+    /// it, as an exclusive motion. `None` if it isn't set here.
+    fn mark_span(
+        &mut self,
+        mark: char,
+        exact: bool,
+        copy: &BufferCopy,
+        marks: &Marks,
+    ) -> Option<Span> {
+        let to = self.mark_here(mark, copy, marks)?;
+        let text = self.text(copy);
+        let at = self.cursor.at;
+        let (start, end) = if to < at { (to, at) } else { (at, to) };
+        if exact {
+            return exclusive(&text, start, end, false);
+        }
+        Some(Span {
+            start: text.line_start(start.line),
+            end: text.line_start(end.line + 1),
+            lines: Some((start.line, end.line)),
+        })
     }
 
     /// `>` and `<`: indents the lines `span` is on by `steps` of
@@ -1271,6 +1521,8 @@ impl Editor {
                 let last = (at.line + times as u64 - 1).min(text.last_line());
                 Some(lines(at.line, last))
             }
+            // Marks are the window's, which `mark_span` is given.
+            Target::Mark { .. } => None,
             Target::Selection => {
                 let anchor = self.anchor?;
                 let (start, last) = if anchor <= at {
@@ -1339,6 +1591,10 @@ impl Editor {
                     return Some(chars(at, cursor.at));
                 }
                 let moved = self.moved(copy, motion, times);
+                // `dj` on the last line has no line to take with it.
+                if matches!(motion, Motion::Up(_) | Motion::Down(_)) && moved.at.line == at.line {
+                    return None;
+                }
                 let (start, end) = if moved.at < at {
                     (moved.at, at)
                 } else {
@@ -1354,13 +1610,13 @@ impl Editor {
     }
 
     /// `x`, or `X` if `before`: `times` characters at the cursor, or
-    /// before it, on its line.
+    /// before it, on its line, kept in `registers` under `name`.
     fn delete_chars(
         &mut self,
         before: bool,
         times: usize,
         copy: &mut BufferCopy,
-        register: &mut Register,
+        (registers, name): (&mut Registers, Option<char>),
     ) {
         let text = self.text(copy);
         let at = self.cursor.at;
@@ -1394,22 +1650,23 @@ impl Editor {
         let removed = laid.text()[start..end].to_owned();
         let edit = Edit::replace(text.rope().len_bytes(), line_start + start, &removed, "");
         drop(text);
-        *register = Register {
-            text: removed,
-            lines: false,
+        let small = Wrote::Delete {
+            small: true,
+            history: false,
         };
+        registers.wrote(name, Register::chars(removed), small);
         self.make(edit, copy);
         self.cursor = Cursor::new(self.text(copy).point_of(line_start + start));
     }
 
     /// `D`, or `C` if `change`: from the cursor to its line's end, and to
-    /// the end of `times - 1` lines more.
+    /// the end of `times - 1` lines more, kept in `registers` under `name`.
     fn delete_to_end(
         &mut self,
         change: bool,
         times: usize,
         copy: &mut BufferCopy,
-        register: &mut Register,
+        (registers, name): (&mut Registers, Option<char>),
     ) {
         let text = self.text(copy);
         let at = self.cursor.at;
@@ -1419,10 +1676,12 @@ impl Editor {
         let removed = text.slice(start, end);
         let edit = Edit::replace(text.rope().len_bytes(), start, &removed, "");
         drop(text);
-        *register = Register {
-            text: removed,
-            lines: false,
+        let small = !removed.contains('\n');
+        let wrote = Wrote::Delete {
+            small,
+            history: !small,
         };
+        registers.wrote(name, Register::chars(removed), wrote);
         self.make(edit, copy);
         self.cursor = Cursor::new(self.text(copy).point_of(start));
         if change {
@@ -1430,8 +1689,105 @@ impl Editor {
         }
     }
 
-    /// `p`, or `P` if `before`: what's in the register, `times` over.
-    fn put(&mut self, before: bool, times: usize, copy: &mut BufferCopy, register: &Register) {
+    /// `p`, or `P` if `before`: what the register `name` holds, or the
+    /// unnamed, `times` over.
+    fn put(
+        &mut self,
+        before: bool,
+        times: usize,
+        copy: &mut BufferCopy,
+        (registers, name): (&Registers, Option<char>),
+    ) {
+        let Some(register) = self.register(registers, name) else {
+            return;
+        };
+        let register = register.clone();
+        self.put_register(before, times, copy, &register);
+    }
+
+    /// The register `name`, or the unnamed, if it holds anything; if not,
+    /// says so, and fails.
+    fn register<'r>(
+        &mut self,
+        registers: &'r Registers,
+        name: Option<char>,
+    ) -> Option<&'r Register> {
+        let register = registers.get(name);
+        if register.is_none() {
+            let name = name.unwrap_or('"');
+            self.status = Some(format!("register {name} is empty"));
+            self.fail();
+        }
+        register
+    }
+
+    /// `p` and `P` in visual mode: puts what the register `name` holds, or
+    /// the unnamed, `times` over, in place of what's selected. What was selected
+    /// is kept as a delete, after `p` but not `P`, as in Vim, so `P` can
+    /// put the same text over one selection after another.
+    fn put_over(
+        &mut self,
+        before: bool,
+        times: usize,
+        copy: &mut BufferCopy,
+        (registers, name): (&mut Registers, Option<char>),
+    ) {
+        let Some(register) = self.register(registers, name).cloned() else {
+            self.leave_visual();
+            return;
+        };
+        let Some(span) = self.span(Operator::Delete, Target::Selection, 1, copy) else {
+            return;
+        };
+        let mut taken = self.text(copy).slice(span.start, span.end);
+        let lines = span.lines.is_some();
+        if lines && !taken.ends_with('\n') {
+            taken.push('\n');
+        }
+        let len = self.text(copy).rope().len_bytes();
+        // Whole lines taken from the end leave none after to put before.
+        let at_end = lines && span.end >= len;
+        self.delete_span(span, copy);
+        if !before {
+            let small = !lines && !taken.contains('\n');
+            let wrote = Wrote::Delete {
+                small,
+                history: !small,
+            };
+            registers.wrote(None, Register { text: taken, lines }, wrote);
+        }
+        match (lines, register.lines) {
+            // Lines in place of characters go between the two halves of the
+            // line, which is broken.
+            (false, true) => {
+                let byte = self.cursor_byte(copy);
+                let put = format!("\n{}", register.text.repeat(times));
+                let edit = Edit::replace(copy.text().len_bytes(), byte, "", &put);
+                self.make(edit, copy);
+                let text = self.text(copy);
+                self.cursor = Cursor::new(text.point_of(byte + 1));
+                self.cursor.apply(Motion::FirstNonBlank, &text);
+            }
+            // Characters in place of lines go on a line of their own.
+            (true, false) => {
+                let mut register = register;
+                register.text.push('\n');
+                register.lines = true;
+                self.put_register(!at_end, times, copy, &register);
+            }
+            _ => self.put_register(!at_end, times, copy, &register),
+        }
+    }
+
+    /// Puts `register`, `times` over, after the cursor or its line, or
+    /// before them if `before`.
+    fn put_register(
+        &mut self,
+        before: bool,
+        times: usize,
+        copy: &mut BufferCopy,
+        register: &Register,
+    ) {
         if register.text.is_empty() {
             return;
         }
@@ -1742,7 +2098,14 @@ impl Editor {
     /// Makes `edit` to the buffer, as part of the change being made.
     fn make(&mut self, edit: Edit, copy: &mut BufferCopy) {
         self.edited(&edit);
-        copy.edit(edit, self.new_step);
+        // A macro's edits, however many, are one undo step, as in Vim,
+        // which its first starts.
+        let step = if self.replaying {
+            !std::mem::replace(&mut self.replay_edited, true)
+        } else {
+            self.new_step
+        };
+        copy.edit(edit, step);
         self.new_step = false;
     }
 
@@ -1818,10 +2181,7 @@ impl Editor {
             }
             _ => return None,
         }
-        Some(Done {
-            redraw: true,
-            yanked: None,
-        })
+        Some(Done::REDRAW)
     }
 
     /// What a key typed in insert mode asks of the language server, after
@@ -2071,6 +2431,12 @@ impl Editor {
                 replaced: accepted.replaced,
             });
         }
+        // For a macro being recorded, the keys that type the same.
+        let mut keys = vec![Stroke::Backspace; accepted.replaced];
+        keys.extend(accepted.text.chars().map(Stroke::char));
+        let after = accepted.text[accepted.offset..].chars().count();
+        keys.extend(std::iter::repeat_n(Stroke::Left, after));
+        self.menu_keys = Some(keys);
         self.make(accepted.edit, copy);
         self.cursor = Cursor::new(self.text(copy).point_of(accepted.cursor));
         // A call it put in, such as `f(`, is asked about.
@@ -2243,10 +2609,7 @@ impl Editor {
             Stroke::Char { ch, ctrl: false } => typed.push(ch),
             _ => {}
         }
-        Done {
-            redraw: true,
-            yanked: None,
-        }
+        Done::REDRAW
     }
 
     /// What `action` asks of the language server, or shows of what it
@@ -2355,6 +2718,7 @@ impl Editor {
         }) = self.search.clone()
         else {
             self.status = Some("no search yet".into());
+            self.fail();
             return;
         };
         let text = self.text(copy);
@@ -2375,6 +2739,7 @@ impl Editor {
         } else {
             self.found = None;
             self.status = Some(format!("{query} isn't in the file"));
+            self.fail();
         }
     }
 
@@ -2392,6 +2757,7 @@ impl Editor {
             .map(|(at, _)| here + at);
         let Some((start, end)) = next.map(|at| word_at(&text, at)) else {
             self.status = Some("no word under the cursor".into());
+            self.fail();
             return;
         };
         let query = text.slice(start, end);
@@ -2497,10 +2863,7 @@ impl Editor {
             self.normal_cursor(copy);
         }
         self.follow(copy);
-        Done {
-            redraw: true,
-            yanked: None,
-        }
+        Done::REDRAW
     }
 
     /// The hunk at the cursor's line, and its place among the copy's.
@@ -2895,14 +3258,7 @@ impl Editor {
         self.panel = None;
         self.actions = None;
         self.close_completion();
-        let text = self.text(copy);
-        let line = line.min(text.last_line());
-        let (start, end) = (text.line_start(line), text.line_end(line));
-        // Back to a character's start, from inside one.
-        let rope = text.rope();
-        let at = rope.char_to_byte(rope.byte_to_char((start + col).min(end)));
-        self.cursor = Cursor::new(text.point_of(at));
-        drop(text);
+        self.cursor = Cursor::new(self.point_at(line, col, copy));
         if self.mode == Mode::Insert {
             // It may stay past the line's end, where typing goes, and it
             // moved, as the arrow keys move it.
@@ -2911,6 +3267,84 @@ impl Editor {
             self.normal_cursor(copy);
         }
         self.follow(copy);
+    }
+
+    /// The point on `line`, `col` bytes into it, as far as the text goes,
+    /// on a character's start.
+    fn point_at(&self, line: u64, col: usize, copy: &BufferCopy) -> Point {
+        let text = self.text(copy);
+        let line = line.min(text.last_line());
+        let (start, end) = (text.line_start(line), text.line_end(line));
+        // Back to a character's start, from inside one.
+        let rope = text.rope();
+        let at = rope.char_to_byte(rope.byte_to_char((start + col).min(end)));
+        text.point_of(at)
+    }
+
+    // --- Marks --------------------------------------------------------------
+
+    /// `m`: sets `mark` at the cursor; or for `'` and `` ` ``, notes the
+    /// cursor's place in the jump list, which is where `''` goes back to.
+    fn set_mark(&mut self, mark: char, copy: &BufferCopy, marks: &mut Marks) {
+        if matches!(mark, '\'' | '`') {
+            self.left_from(self.cursor.at, copy);
+            return;
+        }
+        let byte = self.cursor_byte(copy);
+        marks.set(mark, FilePlace::at(copy.path(), copy.text(), byte));
+    }
+
+    /// `` ` ``, or `'` if not `exact`: to `mark`, or to its line's first
+    /// character that isn't blank. A mark in another file is for the desk
+    /// to open, which a macro being typed can't wait for, so it stops.
+    fn go_to_mark(&mut self, mark: char, exact: bool, copy: &BufferCopy, marks: &Marks) {
+        if let Some(place) = marks.get(previous(mark), copy.path())
+            && place.path != copy.path()
+            && self.mode == Mode::Normal
+        {
+            self.left_from(self.cursor.at, copy);
+            self.opening = Some(FileLocation {
+                path: place.path.clone(),
+                line: place.line,
+                col: place.col,
+                offset: None,
+                text: String::new(),
+            });
+            self.fail();
+            return;
+        }
+        let Some(to) = self.mark_here(mark, copy, marks) else {
+            self.fail();
+            return;
+        };
+        self.cursor = Cursor::new(to);
+        if !exact {
+            self.cursor = Cursor::new(Point {
+                line: to.line,
+                col: 0,
+            });
+            self.cursor.apply(Motion::FirstNonBlank, &self.text(copy));
+        }
+    }
+
+    /// Where `mark` is in this file, if it's set, and here; if not, says
+    /// why.
+    fn mark_here(&mut self, mark: char, copy: &BufferCopy, marks: &Marks) -> Option<Point> {
+        let place = marks.get(previous(mark), copy.path());
+        match place {
+            Some(place) if place.path == copy.path() => {
+                Some(self.point_at(place.line, place.col, copy))
+            }
+            Some(place) => {
+                let file = place.path.rsplit('/').next().unwrap_or(&place.path);
+                self.status = Some(format!("mark {mark} is in {file}"));
+                None
+            }
+            None => {
+                self.status = Some(format!("mark {mark} isn't set"));
+                None
+            }
+        }
     }
 
     /// The place in another file the last answer goes to, for the desk to
@@ -3232,6 +3666,13 @@ impl Editor {
         self.close_signature();
     }
 
+    /// Shows `rows`, a list such as `:registers` makes, under `heading`, in
+    /// the panel by the cursor, until the cursor moves.
+    pub(crate) fn show_listing(&mut self, heading: &str, rows: Vec<String>) {
+        self.close_completion();
+        self.panel = Panel::listing(heading, rows, self.cursor.at);
+    }
+
     /// The panel by the cursor, if it's shown, as it's to be drawn, in
     /// cells of the pane.
     pub(crate) fn panel(&self) -> Option<PanelView<'_>> {
@@ -3415,6 +3856,22 @@ fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
         .filter(|ch| !ch.is_control())
         .map(Stroke::char)
         .collect()
+}
+
+/// The mark `mark` is kept as: `` ` `` is `'`, the place before the last
+/// jump, by either name.
+fn previous(mark: char) -> char {
+    if mark == '`' { '\'' } else { mark }
+}
+
+/// Whether `motion` fails when it doesn't move the cursor, which stops a
+/// macro being typed, as in Vim: all but those that go to a place on the
+/// line, or in the file, whatever's there.
+fn can_fail(motion: Motion) -> bool {
+    !matches!(
+        motion,
+        Motion::LineStart | Motion::LineEnd | Motion::FirstNonBlank | Motion::First | Motion::Last
+    )
 }
 
 /// Where the word before `byte` starts, on its line, taking the blanks

@@ -78,6 +78,10 @@ pub(crate) enum SessionEvent {
     /// The config's Lua has something for the window. Sent from the Lua
     /// thread, not the session's.
     Lua,
+    /// What's on the clipboard and the primary selection, as far as they
+    /// could be read, for the editors. Sent from a thread reading them, not
+    /// the session's.
+    Clipboard(Vec<(crate::pane::Copy, String)>),
 }
 
 /// What the window tells the session thread.
@@ -151,6 +155,11 @@ impl Session {
             }
             Location::Remote(_) => false,
         }
+    }
+
+    /// A way to wake the window with an event, from another thread.
+    pub(crate) fn proxy(&self) -> EventLoopProxy<SessionEvent> {
+        self.proxy.clone()
     }
 
     /// Connects again after the connection was lost.

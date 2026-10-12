@@ -341,6 +341,25 @@ options! {
     /// over the cursor, with the argument being typed in bold, as the
     /// language server says.
     signaturehelp("sig"): bool = true;
+    /// Which of the desktop's the unnamed register goes along with, as in
+    /// Neovim: the clipboard, so what's yanked or deleted in an editor can
+    /// be pasted anywhere, and `p` puts what was copied anywhere; the
+    /// primary selection, which a middle click pastes; or neither, the
+    /// registers being the window's own but for `"+` and `"*`.
+    clipboard("cb"): Clipboard = Clipboard::UnnamedPlus;
+}
+
+choice! {
+    /// Which of the desktop's `clipboard` says the unnamed register goes
+    /// along with.
+    Clipboard {
+        /// The clipboard, `"+`.
+        UnnamedPlus = "unnamedplus",
+        /// The primary selection, `"*`.
+        Unnamed = "unnamed",
+        /// Neither.
+        Off = "none",
+    }
 }
 
 choice! {

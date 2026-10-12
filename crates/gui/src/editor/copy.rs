@@ -23,6 +23,11 @@ use clackatoo_text::{
     Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span, compose, transform,
 };
 
+/// The most pieces an edit waiting to be sent grows to by joining the
+/// edits after it in its undo step; those after go on their own, in the
+/// same step.
+const MOST_JOINED: usize = 16;
+
 /// A change waiting for the daemon's answer, or to be sent.
 #[derive(Debug)]
 enum Waiting {
@@ -185,11 +190,14 @@ impl BufferCopy {
         self.hunks.map(&edit);
         self.made.push(edit.clone());
         // An edit joining the last step joins the last edit, if that's
-        // still to be sent.
+        // still to be sent, unless that's grown long, as a macro's many
+        // edits all over the file would make it: joining one more costs
+        // as much as the edit is long.
         let unsent = usize::from(self.sent.is_some());
         if !step
             && self.waiting.len() > unsent
             && let Some(Waiting::Edit { edit: last, .. }) = self.waiting.back_mut()
+            && last.ops().len() < MOST_JOINED
             && let Ok(both) = compose(last, &edit)
         {
             *last = both;

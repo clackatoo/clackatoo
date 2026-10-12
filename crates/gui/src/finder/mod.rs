@@ -47,6 +47,8 @@ pub(crate) enum Kind {
     /// What's wrong in the project's files, as their language servers
     /// say.
     Diagnostics,
+    /// The marks the focused editor's file can go to.
+    Marks,
 }
 
 impl Kind {
@@ -57,6 +59,7 @@ impl Kind {
             Self::Buffers => "Buffers",
             Self::Places => "Places",
             Self::Diagnostics => "Diagnostics",
+            Self::Marks => "Marks",
         }
     }
 }

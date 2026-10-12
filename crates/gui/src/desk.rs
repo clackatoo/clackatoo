@@ -160,8 +160,8 @@ pub(crate) struct Desk {
     /// the next key.
     offer: Option<offers::Offer>,
     /// Text copied, waiting for the window to put on the clipboard or the
-    /// primary selection.
-    yanked: Option<(String, Copy)>,
+    /// primary selection, oldest first.
+    yanked: Vec<(String, Copy)>,
     /// URLs links asked to open, waiting for the window to hand to the
     /// desktop's opener.
     opened: Vec<String>,
@@ -290,9 +290,9 @@ impl Desk {
     }
 
     /// Takes text copied, for the window to put on the clipboard or the
-    /// primary selection.
-    pub(crate) fn take_yanked(&mut self) -> Option<(String, Copy)> {
-        self.yanked.take()
+    /// primary selection, oldest first.
+    pub(crate) fn take_yanked(&mut self) -> Vec<(String, Copy)> {
+        std::mem::take(&mut self.yanked)
     }
 
     /// The terminal the focused pane shows.
@@ -421,11 +421,16 @@ impl Desk {
                     choices: Vec::new(),
                 };
             }
+            let note = (self.keymap.hint())
+                .or_else(|| self.message.clone())
+                .unwrap_or(label);
+            let note = match self.recording() {
+                Some(register) => format!("recording @{register}  {note}"),
+                None => note,
+            };
             return Status::Tabs {
                 mode: Some(mode_name(editor.mode)),
-                note: (self.keymap.hint())
-                    .or_else(|| self.message.clone())
-                    .or(Some(label)),
+                note: Some(note),
                 panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
             };
         }
@@ -816,8 +821,8 @@ impl Desk {
                     return false;
                 };
                 let redraw = pane.answered(response);
-                if let Some(text) = pane.take_yanked() {
-                    self.yanked = Some(text);
+                if let Some((text, to)) = pane.take_yanked() {
+                    self.copied(text, to);
                 }
                 redraw
             }
@@ -1005,6 +1010,7 @@ impl Desk {
                 Pressed::Bound(Binding::Window(action)) => {
                     self.forget_waiting();
                     self.message = None;
+                    self.stop_recording_for_window();
                     self.act(action);
                     return true;
                 }
@@ -1015,6 +1021,7 @@ impl Desk {
                 }
                 Pressed::Bound(Binding::Lua(binding)) => {
                     self.message = None;
+                    self.stop_recording_for_window();
                     self.run_lua_binding(binding, chord, press);
                     return true;
                 }
@@ -1563,6 +1570,8 @@ impl Desk {
             Command::Format => self.format_file(),
             Command::Find { kind, query } => self.open_finder(kind, query),
             Command::Hunk(action) => self.editor_hunk(action),
+            Command::Registers => self.show_registers(),
+            Command::Marks => self.open_finder(crate::finder::Kind::Marks, String::new()),
             Command::Reload | Command::Set(_) => {}
         }
     }
@@ -3333,7 +3342,9 @@ mod tests {
         use clackatoo_protocol::{Answer, BufferUpdate, Construct, Piece, Query};
         let text = "fn a() {}\nfn b() {}\n";
         let mut desk = editing("/p/a.rs", text);
-        type_keys(&mut desk, "jyafx");
+        // Into `"+`, so the x's delete doesn't go to the clipboard after.
+        command(&mut desk, "set clipboard=none");
+        type_keys(&mut desk, "j\"+yafx");
         let asked: Vec<(u64, usize, Query)> = (desk.take_outbox().into_iter())
             .filter_map(|message| match message {
                 ClientMessage::Query { id, at, query, .. } => Some((id, at, query)),
@@ -3343,7 +3354,7 @@ mod tests {
         assert_eq!(asked.len(), 1);
         let (id, at, query) = asked[0];
         assert_eq!((at, query), (10, Query::Pieces(Construct::Function)));
-        assert!(desk.yanked.is_none());
+        assert!(desk.yanked.is_empty());
         let piece = Piece {
             start: 10,
             end: 19,
@@ -3355,7 +3366,7 @@ mod tests {
             answer: Answer::Pieces(vec![piece]),
         };
         assert!(desk.buffer_changed(BufferId(7), answer));
-        assert_eq!(desk.yanked, Some(("fn b() {}".to_owned(), Copy::Clipboard)));
+        assert_eq!(desk.yanked, [("fn b() {}".to_owned(), Copy::Clipboard)]);
         // The x held meanwhile is read after it.
         let changes = buffer_changes(&mut desk);
         assert_eq!(changes.len(), 1, "{changes:?}");
@@ -4387,5 +4398,371 @@ mod tests {
         assert!(desk.link_at(cell_point(0, 8), ctrl_shift));
         click(&mut desk, cell_point(0, 8), ctrl_shift);
         assert_eq!(desk.take_opened(), ["https://x.example/a"]);
+    }
+
+    // --- Registers, macros and marks, in editors ------------------------------
+
+    /// A function of `start`, through `end`, its insides `inner`.
+    fn function(
+        start: usize,
+        end: usize,
+        inner: Option<(usize, usize)>,
+    ) -> clackatoo_protocol::Piece {
+        clackatoo_protocol::Piece { start, end, inner }
+    }
+
+    /// Answers the edits sent, as the daemon would, each taking `version`
+    /// on by one, until none are left, and returns the last grammar
+    /// question asked meanwhile: its number and place, if there was one.
+    /// A question waits for the edits before it.
+    fn serve_edits(desk: &mut Desk, version: &mut u64) -> Option<(u64, usize)> {
+        let mut asked = None;
+        loop {
+            let mut sent_more = false;
+            for message in desk.take_outbox() {
+                match message {
+                    ClientMessage::Edit { seq, .. } => {
+                        *version += 1;
+                        let acked_update = clackatoo_protocol::BufferUpdate::Acked {
+                            version: *version,
+                            seq,
+                        };
+                        desk.buffer_changed(BufferId(7), acked_update);
+                        sent_more = true;
+                    }
+                    ClientMessage::Query { id, at, .. } => asked = Some((id, at)),
+                    _ => {}
+                }
+            }
+            if !sent_more {
+                return asked;
+            }
+        }
+    }
+
+    /// Answers the grammar question `id` with `pieces`, counted in the
+    /// daemon's text at `version`.
+    fn answer_at(desk: &mut Desk, id: u64, version: u64, pieces: Vec<clackatoo_protocol::Piece>) {
+        let answer = clackatoo_protocol::BufferUpdate::Answer {
+            id,
+            version,
+            answer: clackatoo_protocol::Answer::Pieces(pieces),
+        };
+        desk.buffer_changed(BufferId(7), answer);
+    }
+
+    #[test]
+    fn a_macro_waits_for_the_grammar_at_each_key_that_asks_in_turn() {
+        let text = "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n";
+        let mut desk = editing("/p/a.rs", text);
+        let mut version = 0;
+        type_keys(&mut desk, "qadaf");
+        let (id, _) = serve_edits(&mut desk, &mut version).expect("a question");
+        answer_at(&mut desk, id, version, vec![function(0, 9, None)]);
+        type_keys(&mut desk, "jq");
+        assert_eq!(editor_text(&desk), "\nfn b() {}\nfn c() {}\nfn d() {}\n");
+        // Each daf asks once the keys before it are done, and the keys
+        // after it wait for its answer, as the x typed meanwhile does.
+        type_keys(&mut desk, "2@ax");
+        let (id, at) = serve_edits(&mut desk, &mut version).expect("a question");
+        assert_eq!(at, 1, "on b's line");
+        assert_eq!(editor_text(&desk), "\nfn b() {}\nfn c() {}\nfn d() {}\n");
+        answer_at(&mut desk, id, version, vec![function(1, 10, None)]);
+        assert_eq!(editor_text(&desk), "\n\nfn c() {}\nfn d() {}\n");
+        let (id, at) = serve_edits(&mut desk, &mut version).expect("a question");
+        assert_eq!(at, 2, "the second go, on c's line, after the j");
+        answer_at(&mut desk, id, version, vec![function(2, 11, None)]);
+        assert_eq!(
+            editor_text(&desk),
+            "\n\n\nn d() {}\n",
+            "then the j, and the x typed after"
+        );
+    }
+
+    #[test]
+    fn keys_typed_while_recording_waits_for_the_grammar_are_recorded_once() {
+        let text = "fn a() {1}\nfn b() {2}\n";
+        let mut desk = editing("/p/a.rs", text);
+        let mut version = 0;
+        // The zz comes while cif waits, and is held, then read.
+        type_keys(&mut desk, "qacifzz");
+        let (id, _) = serve_edits(&mut desk, &mut version).expect("a question");
+        answer_at(&mut desk, id, version, vec![function(0, 10, Some((8, 9)))]);
+        escape(&mut desk);
+        type_keys(&mut desk, "jq");
+        assert_eq!(editor_text(&desk), "fn a() {zz}\nfn b() {2}\n");
+        type_keys(&mut desk, "@a");
+        let (id, at) = serve_edits(&mut desk, &mut version).expect("a question");
+        assert_eq!(at, 21);
+        let b = function(12, 22, Some((20, 21)));
+        answer_at(&mut desk, id, version, vec![b]);
+        assert_eq!(editor_text(&desk), "fn a() {zz}\nfn b() {zz}\n");
+        // What was recorded, once.
+        type_keys(&mut desk, "o");
+        escape(&mut desk);
+        type_keys(&mut desk, "\"ap");
+        assert_eq!(
+            editor_text(&desk),
+            "fn a() {zz}\nfn b() {zz}\ncifzz<Esc>j\n"
+        );
+    }
+
+    #[test]
+    fn a_macro_waiting_for_the_grammar_stops_if_it_is_given_up_on() {
+        let mut desk = editing("/p/a.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
+        let mut version = 0;
+        type_keys(&mut desk, "qadaf");
+        let (id, _) = serve_edits(&mut desk, &mut version).expect("a question");
+        answer_at(&mut desk, id, version, vec![function(0, 9, None)]);
+        type_keys(&mut desk, "jq2@a");
+        let (id, _) = serve_edits(&mut desk, &mut version).expect("a question");
+        // Esc gives up on it, and the rest of the macro goes too: the next
+        // key types no more of it, and the answer, when it comes, nothing.
+        escape(&mut desk);
+        type_keys(&mut desk, "k");
+        answer_at(&mut desk, id, version, vec![function(1, 10, None)]);
+        assert_eq!(
+            serve_edits(&mut desk, &mut version),
+            None,
+            "no daf asks again"
+        );
+        assert_eq!(editor_text(&desk), "\nfn b() {}\nfn c() {}\n");
+    }
+
+    #[test]
+    fn marks_move_with_edits_made_here_and_by_others() {
+        use clackatoo_protocol::{Author, BufferUpdate};
+        use clackatoo_text::Edit;
+
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/t.txt", TEN_LINES);
+        type_text(&mut desk, "5Glma");
+        // Someone else puts a line in at the top...
+        let edit = Edit::replace(TEN_LINES.len(), 0, "", "new\n");
+        let update = BufferUpdate::Edited {
+            version: 1,
+            edit,
+            author: Author::Agent(TerminalId(9)),
+            answers: None,
+        };
+        desk.buffer_changed(BufferId(7), update);
+        // ...and so does this window.
+        type_text(&mut desk, "ggOtop");
+        escape(&mut desk);
+        type_text(&mut desk, "G`a");
+        assert_eq!(
+            note(&desk),
+            "t.txt  7:2",
+            "down two lines, on its character"
+        );
+        // `.` is where the last change was.
+        type_text(&mut desk, "'.");
+        assert_eq!(note(&desk), "t.txt  1:1");
+        type_text(&mut desk, "`.");
+        assert_eq!(note(&desk), "t.txt  1:3");
+        // A mark on a line deleted goes to where the line was.
+        type_text(&mut desk, "7Gdd'a");
+        assert_eq!(note(&desk), "t.txt  7:1");
+    }
+
+    #[test]
+    fn a_mark_in_another_file_opens_it_in_place() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/src/a.rs", A_RS);
+        type_text(&mut desk, "jwmA");
+        command(&mut desk, "e /src/b.rs");
+        open_asked(&mut desk, 8, "/src/b.rs", B_RS);
+        // A file's own marks are its own, `'` among them.
+        type_text(&mut desk, "`a");
+        let said = note(&desk);
+        assert!(said.starts_with("mark a isn't set"), "{said}");
+        type_text(&mut desk, "''");
+        let said = note(&desk);
+        assert!(said.starts_with("mark ' isn't set"), "{said}");
+        assert!(answer_all(&mut desk).is_empty(), "a.rs isn't opened");
+        type_text(&mut desk, "jjma`A");
+        open_asked(&mut desk, 9, "/src/a.rs", A_RS);
+        assert_eq!(note(&desk), "a.rs  2:4");
+        // It was a jump, which Ctrl+O comes back from.
+        ctrl(&mut desk, "o");
+        open_asked(&mut desk, 10, "/src/b.rs", B_RS);
+        assert_eq!(note(&desk), "b.rs  3:1");
+        type_text(&mut desk, "gg`a");
+        assert_eq!(note(&desk), "b.rs  3:1", "b.rs's a is still there");
+    }
+
+    #[test]
+    fn quote_quote_goes_back_and_forth_from_the_last_jump() {
+        let mut desk = editing("/t.txt", "one two\nthree\nfour\nfive five\n");
+        type_text(&mut desk, "wG");
+        assert_eq!(note(&desk), "t.txt  4:1");
+        type_text(&mut desk, "``");
+        assert_eq!(note(&desk), "t.txt  1:5");
+        type_text(&mut desk, "``");
+        assert_eq!(note(&desk), "t.txt  4:1");
+        type_text(&mut desk, "w''");
+        assert_eq!(note(&desk), "t.txt  1:1", "to the line's start");
+        // Ctrl+O knows of the jumps `''` made.
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  4:6");
+        // `m'` makes the place a jump to come back to.
+        type_text(&mut desk, "kkm'G''");
+        assert_eq!(note(&desk), "t.txt  2:1");
+        // And it's a motion too.
+        type_text(&mut desk, "Gd''");
+        assert_eq!(editor_text(&desk), "one two\n");
+    }
+
+    #[test]
+    fn macros_and_keys_mapped_to_keys_work_together() {
+        let mut desk = editing("/t.txt", "a\nb\nc\nd\n");
+        desk.lua_from(
+            r#"
+            client.keys.map("n", "<Space>x", "A!<Esc>")
+            client.keys.map("n", "<Space>m", "@q")
+            "#,
+        );
+        answer_all(&mut desk);
+        // A macro recorded with a mapped key keeps what it typed, so it
+        // types the same again, whatever the key's mapped to by then.
+        type_keys(&mut desk, "qq x");
+        type_keys(&mut desk, "jq");
+        assert_eq!(editor_text(&desk), "a!\nb\nc\nd\n");
+        desk.lua_from(r#"client.keys.map("n", "<Space>x", "dd")"#);
+        answer_all(&mut desk);
+        // A mapping that types `@q` types the macro.
+        type_keys(&mut desk, " m");
+        assert_eq!(editor_text(&desk), "a!\nb!\nc\nd\n");
+        type_keys(&mut desk, "@@");
+        assert_eq!(editor_text(&desk), "a!\nb!\nc!\nd\n");
+        // And it's a macro's keys that are typed, not the mapping's: `"qp`
+        // puts what the editor was given.
+        type_keys(&mut desk, "\"qp");
+        assert_eq!(editor_text(&desk), "a!\nb!\nc!\ndA!<Esc>j\n");
+    }
+
+    #[test]
+    fn a_macro_sets_marks_and_jumps_as_it_goes() {
+        let mut desk = editing("/t.txt", TEN_LINES);
+        // Each line it puts in at the top takes the mark it set down.
+        type_text(&mut desk, "qajmaggOx");
+        escape(&mut desk);
+        type_text(&mut desk, "`aq");
+        assert_eq!(note(&desk), "t.txt  3:1");
+        type_text(&mut desk, "@a");
+        assert_eq!(note(&desk), "t.txt  5:1");
+        assert_eq!(&editor_text(&desk)[..10], "x\nx\nl1\nl2\n");
+        // Its jumps are in the jump list, in order.
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  1:1", "where `a left");
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  5:1", "where gg left");
+    }
+
+    #[test]
+    fn recording_is_shown_in_the_bar_until_q() {
+        let mut desk = editing("/t.txt", "x\n");
+        type_text(&mut desk, "qz");
+        assert_eq!(note(&desk), "recording @z  t.txt  1:1");
+        type_text(&mut desk, "ihi");
+        assert_eq!(note(&desk), "recording @z  t.txt  1:3");
+        escape(&mut desk);
+        type_text(&mut desk, "q");
+        assert_eq!(note(&desk), "t.txt  1:2");
+        // `q` in insert mode is typed, and so is a macro's.
+        type_text(&mut desk, "@z");
+        assert_eq!(editor_text(&desk), "hhiix\n");
+        // A key the window takes, such as `:`, stops recording, saying so,
+        // as the macro would lose it.
+        type_text(&mut desk, "qyx");
+        type_text(&mut desk, ":");
+        escape(&mut desk);
+        assert!(desk.recording().is_none());
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("recording stopped: macros record an editor's keys only")
+        );
+        type_text(&mut desk, "@y");
+        assert_eq!(editor_text(&desk), "hhx\n", "the x it did record");
+    }
+
+    #[test]
+    fn yanks_go_to_the_clipboard_and_what_was_copied_elsewhere_is_put() {
+        let mut desk = editing("/t.txt", "a\nb\n");
+        type_text(&mut desk, "yy");
+        assert_eq!(desk.take_yanked(), [("a\n".to_owned(), Copy::Clipboard)]);
+        // Copied in another program, while the window hadn't the focus.
+        desk.clipboard_asked();
+        desk.clipboard_heard(Copy::Clipboard, "z\n".into());
+        type_text(&mut desk, "p");
+        assert_eq!(editor_text(&desk), "a\nz\nb\n");
+        // Copied in a terminal: `"*` holds it at once.
+        desk.copied("sel".into(), Copy::Primary);
+        type_text(&mut desk, "\"*P");
+        assert_eq!(editor_text(&desk), "a\nselz\nb\n");
+        assert_eq!(desk.take_yanked(), [("sel".to_owned(), Copy::Primary)]);
+        // A macro that copies again and again leaves the clipboard one
+        // copy to make.
+        type_text(&mut desk, "qmyyjq3@m");
+        assert_eq!(desk.take_yanked(), [("b\n".to_owned(), Copy::Clipboard)]);
+        // Not, once `clipboard` says neither.
+        command(&mut desk, "set clipboard=none");
+        type_text(&mut desk, "dd");
+        assert!(desk.take_yanked().is_empty());
+    }
+
+    #[test]
+    fn colon_registers_and_marks_list_them() {
+        let mut desk = editing("/p/t.txt", "one\ntwo\n");
+        command(&mut desk, "registers");
+        assert_eq!(note(&desk), "the registers are empty");
+        type_text(&mut desk, "\"ayyjmb");
+        command(&mut desk, "reg");
+        desk.settle_editors();
+        let editor = desk.editor(PaneId(1)).expect("an editor");
+        let lines: Vec<String> = (editor.panel().expect("a panel").lines.iter())
+            .map(crate::editor::PanelLine::text)
+            .collect();
+        assert_eq!(
+            lines,
+            ["type name content", "l  \"\"   one^J", "l  \"a   one^J"]
+        );
+        command(&mut desk, "marks");
+        assert_eq!(finder_rows(&mut desk), ["t.txt:2: b  two"]);
+    }
+
+    #[test]
+    #[ignore = "a measurement, to run optimised: cargo test --release -- --ignored replaying"]
+    fn replaying_a_20_key_macro_1000_times_on_10000_lines() {
+        let lines: Vec<String> = (0..10_000)
+            .map(|line| format!("line {line} of the file\n"))
+            .collect();
+        let text = lines.concat();
+        let mut desk = editing("/big.txt", &text);
+        // Twenty keys: motions, a change, an insert at the end, a delete.
+        type_text(&mut desk, "qa0wcwnew");
+        escape(&mut desk);
+        type_text(&mut desk, "A end");
+        escape(&mut desk);
+        type_text(&mut desk, "bxj^llq");
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            type_text(&mut desk, "1000@a");
+            times.push(started.elapsed().as_secs_f64() * 1000.0);
+            // What the daemon would be sent, so the next go starts afresh.
+            desk.take_outbox();
+        }
+        let line = |n: usize| editor_text(&desk).lines().nth(n).unwrap().to_owned();
+        assert_eq!(line(5000), "line new of the file nd");
+        times.sort_by(f64::total_cmp);
+        eprintln!(
+            "1000@a of 20 keys on 10,000 lines: best {:.1} ms, median {:.1} ms, worst {:.1} ms \
+             ({:.2} µs a key at best)",
+            times[0],
+            times[2],
+            times[4],
+            times[0] * 1000.0 / 20_000.0
+        );
     }
 }

@@ -181,6 +181,21 @@ impl Panel {
         })
     }
 
+    /// A list, as `:registers` shows, a line for each of `rows`, under a
+    /// quieter `heading`. `None` if there are no rows.
+    pub(crate) fn listing(
+        heading: &str,
+        rows: Vec<String>,
+        anchor: crate::motion::Point,
+    ) -> Option<Self> {
+        if rows.is_empty() {
+            return None;
+        }
+        let mut blocks = vec![Block::Code(heading.to_owned(), Ink::Muted)];
+        blocks.extend(rows.into_iter().map(|row| Block::Code(row, Ink::Plain)));
+        Self::of(blocks, anchor)
+    }
+
     /// A completion item's documentation, as shown beside the menu: what
     /// it is, `detail`, as code, then `documentation`, as markdown if it
     /// says so. `None` if there's neither.

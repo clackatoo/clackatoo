@@ -1218,7 +1218,7 @@ fn an_editors_completion_menu_and_signature_are_drawn_by_its_cursor() {
     };
     use winit::keyboard::{Key, KeyLocation};
 
-    use crate::editor::{BufferCopy, Editor, Register};
+    use crate::editor::{BufferCopy, Editor, Shared};
     use crate::input::KeyPress;
 
     let Some(gpu) = gpu() else {
@@ -1242,7 +1242,7 @@ fn an_editors_completion_menu_and_signature_are_drawn_by_its_cursor() {
     let (cols, rows) = (84u16, 14u16);
     let mut editor = Editor::new(BufferId(1), &crate::options::Options::default());
     editor.resize(Size::new(cols, rows).unwrap());
-    let mut register = Register::default();
+    let mut shared = Shared::default();
     let mut version = 0;
     // Types `keys`, answering each edit as the daemon would, and returns
     // the queries sent.
@@ -1257,7 +1257,7 @@ fn an_editors_completion_menu_and_signature_are_drawn_by_its_cursor() {
                 code: None,
                 modifiers: crate::input::Modifiers::default(),
             };
-            editor.key(&press, copy, &mut register);
+            editor.key(&press, copy, &mut shared);
         }
         editor.tick(
             std::time::Instant::now() + std::time::Duration::from_secs(1),
@@ -1413,7 +1413,7 @@ fn an_editors_panel_is_drawn_over_its_text() {
     use clackatoo_protocol::{Answer, BufferId, BufferSnapshot, BufferUpdate, ClientMessage};
     use winit::keyboard::{Key, KeyLocation};
 
-    use crate::editor::{BufferCopy, Editor, Register};
+    use crate::editor::{BufferCopy, Editor, Shared};
     use crate::input::KeyPress;
 
     let Some(gpu) = gpu() else {
@@ -1443,7 +1443,7 @@ fn an_editors_panel_is_drawn_over_its_text() {
         code: None,
         modifiers: crate::input::Modifiers::default(),
     };
-    editor.key(&press, &mut copy, &mut Register::default());
+    editor.key(&press, &mut copy, &mut Shared::default());
     let Some(ClientMessage::Query { id, .. }) = copy.take_outbox().pop() else {
         panic!("a query");
     };

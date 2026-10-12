@@ -7,7 +7,8 @@
 //! left, `-` below, `-^` above). `Terminal@host` asks for it on another
 //! machine's daemon. A number moves to that tab. Lowercase words are the
 //! window's own commands, and Vim's for files, `w`, `q`, `wq` and `e`, and
-//! for options, `set`. The finder's are capitalised too, as fzf.vim's are:
+//! for options, `set`, and for registers and marks, `registers` and
+//! `marks`, which list them. The finder's are capitalised too, as fzf.vim's are:
 //! `Files`, `Grep` and `Buffers`, each with what to start with typed. So is
 //! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
 //! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
@@ -60,6 +61,12 @@ pub(crate) enum Command {
     Find { kind: finder::Kind, query: String },
     /// `:Gitsigns`: this, to the hunk at the focused editor's cursor.
     Hunk(HunkAction),
+    /// `:registers`: list what the registers hold, by the focused editor's
+    /// cursor.
+    Registers,
+    /// `:marks`: the finder, on the marks the focused editor's file can go
+    /// to.
+    Marks,
 }
 
 /// Where a new pane goes.
@@ -107,8 +114,8 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 ];
 
 /// The window's own commands, for messages.
-const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, w, q, e, Format, \
-                        Files, Grep, Buffers, Diagnostics and Gitsigns";
+const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
+                        w, q, e, Format, Files, Grep, Buffers, Diagnostics and Gitsigns";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -128,6 +135,8 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "close" => return Ok(Command::Close),
         "reload" => return Ok(Command::Reload),
         "set" | "se" => return Ok(Command::Set(argument.unwrap_or_default().to_owned())),
+        "registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
+        "marks" => return Ok(Command::Marks),
         _ => {}
     }
     if let Some(command) = file_command(word, argument) {

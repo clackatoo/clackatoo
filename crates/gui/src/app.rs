@@ -300,6 +300,8 @@ pub(crate) struct App {
     wheel_remainder: f64,
     /// Opened on the first paste.
     clipboard: Option<Clipboard>,
+    /// Whether a thread is reading the clipboard, for the editors.
+    reading_clipboard: Arc<std::sync::atomic::AtomicBool>,
     /// The connection to the daemon.
     session: Session,
     /// Shown instead of the panes, while there's no connection.
@@ -344,6 +346,7 @@ impl App {
             focused: true,
             wheel_remainder: 0.0,
             clipboard: None,
+            reading_clipboard: Arc::default(),
             session,
             // Shown from the first frame, so the window appears at once:
             // on Wayland, a window that hasn't drawn isn't shown at all.
@@ -815,6 +818,12 @@ impl App {
     /// what's changed.
     fn send_outbox(&mut self) {
         self.desk.sync_lua();
+        // Text copied, by a key, a click or an answer from the daemon.
+        for (text, to) in self.desk.take_yanked() {
+            if let Err(err) = copy_text(&mut self.clipboard, text, to) {
+                log::warn!("copying failed: {err:#}");
+            }
+        }
         // What was typed or clicked in a chat goes first, as it needs the
         // fonts, which the desk hasn't got.
         if let Some(frame) = &mut self.frame
@@ -1068,8 +1077,51 @@ impl App {
         if !drawn.is_empty() && !self.first_frame_drawn {
             self.first_frame_drawn = true;
             log::info!("first frame after {:.1?}", self.started.elapsed());
+            // Not before, so opening the clipboard doesn't slow the start.
+            if self.focused {
+                self.hear_clipboard();
+            }
         }
         self.desk.drawn(&drawn);
+    }
+
+    /// Tells the desk what's on the clipboard and the primary selection,
+    /// which may have been copied elsewhere while the window didn't have
+    /// the focus, for the editors' `"+` and `"*`. The editors can't wait for
+    /// the clipboard as keys are typed, so it's asked now, on a thread of
+    /// its own: an owner that's slow to answer, as a hung one is for
+    /// seconds on X11, mustn't hold the window up. The answer comes as
+    /// [`SessionEvent::Clipboard`]. One read at a time: a focus that comes
+    /// back while one is under way waits for that one.
+    fn hear_clipboard(&mut self) {
+        use std::sync::atomic::Ordering;
+        if self.reading_clipboard.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.desk.clipboard_asked();
+        let (proxy, reading) = (self.session.proxy(), self.reading_clipboard.clone());
+        let spawned = std::thread::Builder::new()
+            .name("clipboard".into())
+            .spawn(move || {
+                let mut slot = None;
+                let heard = [Copy::Clipboard, Copy::Primary]
+                    .into_iter()
+                    .filter_map(|from| match paste_text(&mut slot, from) {
+                        Ok(text) => Some((from, text)),
+                        Err(err) => {
+                            log::debug!("reading the {from:?} failed: {err:#}");
+                            None
+                        }
+                    })
+                    .collect();
+                reading.store(false, Ordering::Release);
+                // The window has closed if this fails.
+                let _ = proxy.send_event(SessionEvent::Clipboard(heard));
+            });
+        if let Err(err) = spawned {
+            log::warn!("no thread to read the clipboard: {err}");
+            self.reading_clipboard.store(false, Ordering::Release);
+        }
     }
 
     /// Whether the window has rounded corners: where it can be
@@ -1883,6 +1935,9 @@ impl App {
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 self.desk.window_focus(focused);
+                if focused && self.first_frame_drawn {
+                    self.hear_clipboard();
+                }
                 if !focused {
                     self.ime.reset();
                     self.composing_in_chat = false;
@@ -1958,11 +2013,6 @@ impl App {
             }
             SessionEvent::Message(ServerMessage::Response(response)) => {
                 let redraw = self.desk.answered(response);
-                if let Some((text, to)) = self.desk.take_yanked()
-                    && let Err(err) = copy_text(&mut self.clipboard, text, to)
-                {
-                    log::warn!("copying failed: {err:#}");
-                }
                 self.update_title();
                 if redraw {
                     self.request_redraw();
@@ -1971,6 +2021,11 @@ impl App {
             SessionEvent::Message(
                 ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. },
             ) => {}
+            SessionEvent::Clipboard(heard) => {
+                for (from, text) in heard {
+                    self.desk.clipboard_heard(from, text);
+                }
+            }
             SessionEvent::Lua => {
                 if self.desk.lua_said() {
                     self.update_title();

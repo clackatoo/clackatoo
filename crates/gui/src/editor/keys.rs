@@ -3,8 +3,13 @@
 //!
 //! A command is a count, then an operator and what it acts on (`d2w`,
 //! `ci"`, `yy`), or a motion (`3j`, `f(`), or a key of its own (`x`, `p`,
-//! `o`). The keys are read afresh as each arrives, until they make a
-//! command or can't.
+//! `o`). A register can come before it, after `"`, with a count either
+//! side (`"a3yy`, `2"bp`). The keys are read afresh as each arrives, until
+//! they make a command or can't.
+//!
+//! Keys are written down as Vim writes them in mappings (`ihi<Esc>`), so a
+//! macro, which is the keys typed, can be kept in a register as text, put
+//! in a file with `p`, and run again after it's been changed there.
 
 use clackatoo_protocol::{Construct, Query};
 
@@ -49,6 +54,133 @@ impl Stroke {
             _ => None,
         }
     }
+
+    /// The keys `text` writes down, as [`write`](Self::write) writes them:
+    /// a character for itself, and a key that types none by its name in
+    /// angle brackets, `<Esc>`, `<CR>` or `<C-r>`, with `<lt>` for `<`. A
+    /// `<` that starts no name is itself. Line breaks are Enter, and the
+    /// other control characters the keys that type them, as text yanked
+    /// from a file runs.
+    pub(crate) fn read(text: &str) -> Vec<Self> {
+        let mut strokes = Vec::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(ch) = rest.chars().next() {
+            if ch == '<'
+                && let Some(end) = rest[1..].find('>').map(|end| end + 1)
+                && let Some(stroke) = Self::named(&rest[1..end])
+            {
+                strokes.push(stroke);
+                rest = &rest[end + 1..];
+                continue;
+            }
+            strokes.push(match ch {
+                '\n' | '\r' => Self::Enter,
+                '\t' => Self::Tab,
+                '\u{1b}' => Self::Escape,
+                '\u{8}' | '\u{7f}' => Self::Backspace,
+                // Ctrl+A to Ctrl+Z.
+                '\u{1}'..='\u{1a}' => Self::ctrl(char::from(ch as u8 + b'a' - 1)),
+                _ => Self::char(ch),
+            });
+            rest = &rest[ch.len_utf8()..];
+        }
+        strokes
+    }
+
+    /// The key called `name`, between angle brackets, if it's one.
+    fn named(name: &str) -> Option<Self> {
+        Some(match name {
+            "Esc" => Self::Escape,
+            "CR" => Self::Enter,
+            "Tab" => Self::Tab,
+            "BS" => Self::Backspace,
+            "Del" => Self::Delete,
+            "Left" => Self::Left,
+            "Right" => Self::Right,
+            "Up" => Self::Up,
+            "Down" => Self::Down,
+            "Home" => Self::Home,
+            "End" => Self::End,
+            "PageUp" => Self::PageUp,
+            "PageDown" => Self::PageDown,
+            "lt" => Self::char('<'),
+            "Space" => Self::char(' '),
+            "C-Space" => Self::ctrl(' '),
+            _ => {
+                let mut key = name.strip_prefix("C-")?.chars();
+                let ch = key.next()?;
+                if key.next().is_some() {
+                    return None;
+                }
+                Self::ctrl(ch)
+            }
+        })
+    }
+
+    /// `strokes` written down, as [`read`](Self::read) reads them.
+    pub(crate) fn write(strokes: &[Self]) -> String {
+        let mut text = String::with_capacity(strokes.len());
+        for stroke in strokes {
+            let name = match stroke {
+                Self::Char {
+                    ch: '<',
+                    ctrl: false,
+                } => "lt",
+                Self::Char { ch, ctrl: false } => {
+                    text.push(*ch);
+                    continue;
+                }
+                Self::Char {
+                    ch: ' ',
+                    ctrl: true,
+                } => "C-Space",
+                Self::Char { ch, ctrl: true } => {
+                    text.push_str("<C-");
+                    text.push(*ch);
+                    text.push('>');
+                    continue;
+                }
+                Self::Escape => "Esc",
+                Self::Enter => "CR",
+                Self::Tab => "Tab",
+                Self::Backspace => "BS",
+                Self::Delete => "Del",
+                Self::Left => "Left",
+                Self::Right => "Right",
+                Self::Up => "Up",
+                Self::Down => "Down",
+                Self::Home => "Home",
+                Self::End => "End",
+                Self::PageUp => "PageUp",
+                Self::PageDown => "PageDown",
+            };
+            text.push('<');
+            text.push_str(name);
+            text.push('>');
+        }
+        text
+    }
+}
+
+/// Whether `ch` names a register, after `"`: `a` to `z`, or `A` to `Z` to
+/// add to them, `0` to `9`, `"` for the unnamed, `-` for small deletes,
+/// `_` for none, and `+` and `*` for the clipboard and the primary
+/// selection.
+pub(crate) fn is_register(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '"' | '-' | '_' | '+' | '*')
+}
+
+/// Whether `ch` names a mark that can be set, after `m`: `a` to `z` in
+/// the file, `A` to `Z` anywhere, and `'` or `` ` `` for the place before
+/// the last jump.
+fn is_settable_mark(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || matches!(ch, '\'' | '`')
+}
+
+/// Whether `ch` names a mark to go to, after `'` or `` ` ``: one that can
+/// be set, or `.` for the last change.
+fn is_mark(ch: char) -> bool {
+    is_settable_mark(ch) || ch == '.'
 }
 
 /// What an operator does to the text it's given.
@@ -77,6 +209,9 @@ pub(crate) enum Target {
     Lines,
     /// What's selected, in visual mode.
     Selection,
+    /// To a mark: from line to line after `'`, or exactly, as an exclusive
+    /// motion, after `` ` ``.
+    Mark { mark: char, exact: bool },
 }
 
 /// Where insert mode starts.
@@ -107,11 +242,13 @@ pub(crate) enum ViewAt {
     Bottom,
 }
 
-/// A command, and how many times to do it.
+/// A command, how many times to do it, and the register it takes text
+/// from or keeps it in, if one's named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Command {
     pub(crate) count: Option<usize>,
     pub(crate) action: Action,
+    pub(crate) register: Option<char>,
 }
 
 impl Command {
@@ -214,6 +351,20 @@ pub(crate) enum Action {
         object: Object,
         inner: bool,
     },
+    /// `q` and a register: record the keys typed into it, until `q`.
+    Record(char),
+    /// `@` and a register: type the keys it holds, as if typed again.
+    /// `@@` types the last register typed so again.
+    Replay(char),
+    /// `m` and a mark: set it at the cursor.
+    SetMark(char),
+    /// `` ` `` and a mark: go to it, or with `'`, to its line's first
+    /// character that isn't blank. `''` and ``` `` ``` go back to before
+    /// the last jump.
+    Mark {
+        mark: char,
+        exact: bool,
+    },
 }
 
 impl Action {
@@ -236,10 +387,10 @@ impl Action {
     }
 
     /// Whether it's a jump, which the jump list records, as Vim's are:
-    /// `gg`, `G`, `n` and `N`, `]d` and `[d`, `]c` and `[c`, and `]f` and
-    /// the like. A search
-    /// typed after `/` is too, once Enter finds it, as is going where a
-    /// language server says, once it answers.
+    /// `gg`, `G`, `n` and `N`, `]d` and `[d`, `]c` and `[c`, `]f` and the
+    /// like, and going to a mark. A search typed after `/` is too, once
+    /// Enter finds it, as is going where a language server says, once it
+    /// answers.
     pub(crate) fn jumps(self) -> bool {
         matches!(
             self,
@@ -250,6 +401,7 @@ impl Action {
                 | Self::Diagnostic { .. }
                 | Self::Hunk { .. }
                 | Self::Piece { .. }
+                | Self::Mark { .. }
         )
     }
 }
@@ -267,9 +419,32 @@ pub(crate) enum Parsed {
 /// Reads `keys` as a normal-mode command, or in `visual` mode, where
 /// operators act on the selection and `i` and `a` start an object.
 pub(crate) fn parse(keys: &[Stroke], visual: bool) -> Parsed {
-    let mut reader = Reader { keys, at: 0 };
+    let mut reader = Reader {
+        keys,
+        at: 0,
+        register: None,
+    };
     let first = reader.count();
-    let command = |count, action| Parsed::Command(Command { count, action });
+    // A register, and a count after it, which multiplies the first.
+    let first = if reader.peek() == Some(Stroke::char('"')) {
+        reader.at += 1;
+        match reader.next().map(Stroke::plain) {
+            None => return Parsed::Incomplete,
+            Some(Some(name)) if is_register(name) => reader.register = Some(name),
+            Some(_) => return Parsed::Nothing,
+        }
+        times(first, reader.count())
+    } else {
+        first
+    };
+    let register = reader.register;
+    let command = |count, action| {
+        Parsed::Command(Command {
+            count,
+            action,
+            register,
+        })
+    };
     let Some(stroke) = reader.next() else {
         return Parsed::Incomplete;
     };
@@ -330,16 +505,66 @@ enum Read<T> {
     No,
 }
 
+/// Two counts, one multiplying the other, as in `2d3w`.
+fn times(first: Option<usize>, second: Option<usize>) -> Option<usize> {
+    match (first, second) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(1).saturating_mul(b.unwrap_or(1))),
+    }
+}
+
 struct Reader<'a> {
     keys: &'a [Stroke],
     at: usize,
+    /// The register named before the command, if one was.
+    register: Option<char>,
 }
 
 impl Reader<'_> {
+    /// The plain key after this one, if it's one `wanted` accepts, made
+    /// into an action by `make`.
+    fn then(
+        &mut self,
+        wanted: impl Fn(char) -> bool,
+        make: impl FnOnce(char) -> Action,
+    ) -> Result<Action, Parsed> {
+        match self.next() {
+            None => Err(Parsed::Incomplete),
+            Some(next) => match next.plain().filter(|&ch| wanted(ch)) {
+                Some(ch) => Ok(make(ch)),
+                None => Err(Parsed::Nothing),
+            },
+        }
+    }
+
+    /// What `q`, `@`, `m`, `'` or `` ` ``, `ch`, does with the register or
+    /// mark named after it.
+    fn macro_or_mark(&mut self, ch: char) -> Result<Action, Parsed> {
+        match ch {
+            'q' => self.then(|name| name.is_ascii_alphanumeric(), Action::Record),
+            '@' => self.then(
+                |name| (is_register(name) && name != '_') || name == '@',
+                Action::Replay,
+            ),
+            'm' => self.then(is_settable_mark, Action::SetMark),
+            _ => self.then(is_mark, |mark| Action::Mark {
+                mark,
+                exact: ch == '`',
+            }),
+        }
+    }
+
     /// The action of the plain key `ch`, which may read keys after it, or
     /// what the keys make if not an action: an operator reads its target.
     fn key(&mut self, ch: char, first: Option<usize>, visual: bool) -> Result<Action, Parsed> {
-        let command = |count, action| Parsed::Command(Command { count, action });
+        let register = self.register;
+        let command = |count, action| {
+            Parsed::Command(Command {
+                count,
+                action,
+                register,
+            })
+        };
         Ok(match ch {
             'd' | 'c' | 'y' | '>' | '<' => {
                 let operator = match ch {
@@ -369,6 +594,7 @@ impl Reader<'_> {
                 }
             }
             'o' if visual => Action::OtherEnd,
+            'q' | '@' | 'm' | '\'' | '`' => self.macro_or_mark(ch)?,
             'x' => Action::DeleteChars { before: false },
             'X' => Action::DeleteChars { before: true },
             'D' => Action::DeleteToEnd { change: false },
@@ -414,25 +640,27 @@ impl Reader<'_> {
                     _ => return Err(Parsed::Nothing),
                 },
             },
-            bracket @ (']' | '[') => match self.next() {
-                None => return Err(Parsed::Incomplete),
-                Some(next) => match next.plain() {
-                    Some('d') => Action::Diagnostic {
-                        backward: bracket == '[',
-                    },
-                    Some('c') => Action::Hunk {
-                        backward: bracket == '[',
-                    },
-                    Some(key @ ('f' | 'C')) => Action::Piece {
-                        construct: if key == 'f' {
-                            Construct::Function
-                        } else {
-                            Construct::Class
-                        },
-                        backward: bracket == '[',
-                    },
-                    _ => return Err(Parsed::Nothing),
+            bracket @ (']' | '[') => self.bracket(bracket == '[')?,
+            _ => return Err(Parsed::Nothing),
+        })
+    }
+
+    /// What `]`, or `[` if `backward`, goes to by the key after it: the
+    /// next diagnostic, hunk, function or class, or the one before.
+    fn bracket(&mut self, backward: bool) -> Result<Action, Parsed> {
+        let Some(next) = self.next() else {
+            return Err(Parsed::Incomplete);
+        };
+        Ok(match next.plain() {
+            Some('d') => Action::Diagnostic { backward },
+            Some('c') => Action::Hunk { backward },
+            Some(key @ ('f' | 'C')) => Action::Piece {
+                construct: if key == 'f' {
+                    Construct::Function
+                } else {
+                    Construct::Class
                 },
+                backward,
             },
             _ => return Err(Parsed::Nothing),
         })
@@ -545,15 +773,13 @@ impl Reader<'_> {
     /// What an operator typed as `key` acts on: a motion or an object, or
     /// `key` again for lines.
     fn target(&mut self, first: Option<usize>, operator: Operator, key: char) -> Parsed {
-        let second = self.count();
-        let count = match (first, second) {
-            (None, None) => None,
-            (a, b) => Some(a.unwrap_or(1).saturating_mul(b.unwrap_or(1))),
-        };
+        let count = times(first, self.count());
+        let register = self.register;
         let command = |target| {
             Parsed::Command(Command {
                 count,
                 action: Action::Operate(operator, target),
+                register,
             })
         };
         let Some(stroke) = self.next() else {
@@ -562,6 +788,17 @@ impl Reader<'_> {
         if stroke == Stroke::char(key) {
             return command(Target::Lines);
         }
+        if let Some(kind @ ('\'' | '`')) = stroke.plain() {
+            return match self.then(is_mark, |mark| Action::Mark {
+                mark,
+                exact: kind == '`',
+            }) {
+                Ok(Action::Mark { mark, exact }) => command(Target::Mark { mark, exact }),
+                Ok(_) => Parsed::Nothing,
+                Err(parsed) => parsed,
+            };
+        }
+
         if let Some(Stroke::Char {
             ch: kind @ ('i' | 'a'),
             ctrl: false,
@@ -599,7 +836,19 @@ mod tests {
     }
 
     fn command(count: Option<usize>, action: Action) -> Parsed {
-        Parsed::Command(Command { count, action })
+        Parsed::Command(Command {
+            count,
+            action,
+            register: None,
+        })
+    }
+
+    fn with_register(register: char, count: Option<usize>, action: Action) -> Parsed {
+        Parsed::Command(Command {
+            count,
+            action,
+            register: Some(register),
+        })
     }
 
     #[test]
@@ -704,6 +953,84 @@ mod tests {
             inner: false,
         };
         assert_eq!(visual("aw"), command(None, word));
+        assert_eq!(
+            visual("\"+y"),
+            with_register(
+                '+',
+                None,
+                Action::Operate(Operator::Yank, Target::Selection)
+            )
+        );
+    }
+
+    #[test]
+    fn registers_come_before_commands_with_counts_either_side() {
+        let lines = |operator| Action::Operate(operator, Target::Lines);
+        assert_eq!(read("\""), Parsed::Incomplete);
+        assert_eq!(read("\"a"), Parsed::Incomplete);
+        assert_eq!(read("\"!"), Parsed::Nothing);
+        assert_eq!(
+            read("\"ayy"),
+            with_register('a', None, lines(Operator::Yank))
+        );
+        assert_eq!(
+            read("2\"A3dd"),
+            with_register('A', Some(6), lines(Operator::Delete))
+        );
+        assert_eq!(
+            read("\"_x"),
+            with_register('_', None, Action::DeleteChars { before: false })
+        );
+        assert_eq!(
+            read("\"+2P"),
+            with_register('+', Some(2), Action::Put { before: true })
+        );
+    }
+
+    #[test]
+    fn macros_and_marks() {
+        assert_eq!(read("q"), Parsed::Incomplete);
+        assert_eq!(read("qa"), command(None, Action::Record('a')));
+        assert_eq!(read("q-"), Parsed::Nothing);
+        assert_eq!(read("3@a"), command(Some(3), Action::Replay('a')));
+        assert_eq!(read("@@"), command(None, Action::Replay('@')));
+        assert_eq!(read("@_"), Parsed::Nothing);
+        assert_eq!(read("mA"), command(None, Action::SetMark('A')));
+        assert_eq!(read("m."), Parsed::Nothing);
+        let to = |mark, exact| Action::Mark { mark, exact };
+        assert_eq!(read("'a"), command(None, to('a', false)));
+        assert_eq!(read("`."), command(None, to('.', true)));
+        assert_eq!(read("''"), command(None, to('\'', false)));
+        assert_eq!(read("'"), Parsed::Incomplete);
+        let target = Target::Mark {
+            mark: 'b',
+            exact: true,
+        };
+        assert_eq!(
+            read("\"ad`b"),
+            with_register('a', None, Action::Operate(Operator::Delete, target))
+        );
+        assert_eq!(read("y'"), Parsed::Incomplete);
+    }
+
+    #[test]
+    fn keys_are_written_and_read_back_as_vim_writes_them() {
+        let strokes = [
+            Stroke::char('i'),
+            Stroke::char('<'),
+            Stroke::Enter,
+            Stroke::ctrl('w'),
+            Stroke::ctrl(' '),
+            Stroke::Left,
+            Stroke::Escape,
+        ];
+        let written = Stroke::write(&strokes);
+        assert_eq!(written, "i<lt><CR><C-w><C-Space><Left><Esc>");
+        assert_eq!(Stroke::read(&written), strokes);
+        // A `<` that names no key is itself, and a line break is Enter.
+        let mut expected: Vec<Stroke> = "a<b <C-ww>".chars().map(Stroke::char).collect();
+        expected.push(Stroke::Enter);
+        assert_eq!(Stroke::read("a<b <C-ww>\n"), expected);
     }
 
     #[test]

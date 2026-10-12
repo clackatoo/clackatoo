@@ -26,7 +26,7 @@ use clackatoo_protocol::{Answer, Construct, Edit, Piece, Query};
 use clackatoo_text::Bias;
 
 use super::keys::{Action, Target};
-use super::{BufferCopy, Change, Command, Done, Editor, Register, Stroke};
+use super::{BufferCopy, Change, Command, Done, Editor, Shared, Stroke};
 use crate::motion::Cursor;
 use crate::objects::Object;
 use crate::pane::{Mode, Selection};
@@ -214,6 +214,9 @@ impl Editor {
         if self.awaiting.take().is_some() {
             self.status = Some(why.to_owned());
             self.gave_up = true;
+            // A macro waiting for it stops, as at a key that fails.
+            self.resume_replaying = false;
+            self.fail();
         }
     }
 
@@ -237,8 +240,10 @@ impl Editor {
 
     /// Does the command that was waiting, now that its answer's come, and
     /// then the rest of the key it was read from. Unless the answer took
-    /// too long, or the cursor has moved: then it's given up on.
-    pub(crate) fn resume(&mut self, copy: &mut BufferCopy, register: &mut Register) -> Done {
+    /// too long, or the cursor has moved: then it's given up on. A macro
+    /// whose key it was goes on after, as its driver types the rest (see
+    /// [`replay_next`](Self::replay_next)).
+    pub(crate) fn resume(&mut self, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
         let Some(awaiting) = self.awaiting.take_if(|awaiting| awaiting.answer.is_some()) else {
             return Done::default();
         };
@@ -252,24 +257,23 @@ impl Editor {
             } else {
                 "the cursor moved meanwhile: nothing was done"
             });
-            return Done {
-                redraw: true,
-                yanked: None,
-            };
+            return Done::REDRAW;
         }
         self.answered = awaiting.answer;
         let again = awaiting.again.is_some();
-        let mut done = self.execute(awaiting.command, copy, register, again);
+        // A macro's key is done as one, in its undo step.
+        self.replaying = std::mem::take(&mut self.resume_replaying);
+        let mut done = self.execute(awaiting.command, copy, shared, again);
+        self.replaying = false;
         self.answered = None;
         if let Some(change) = awaiting.again {
             self.finish_repeat(change, copy);
         }
         for stroke in awaiting.strokes {
             // Held again if a command starts waiting.
-            let one = self.stroke(stroke, copy, register);
-            done.redraw |= one.redraw;
-            done.yanked = one.yanked.or(done.yanked.take());
+            done.redraw |= self.stroke(stroke, copy, shared).redraw;
         }
+        self.replay_settled();
         self.follow(copy);
         done
     }

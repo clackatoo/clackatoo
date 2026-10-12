@@ -4,6 +4,11 @@
 //! The buffers of the workspace shown are attached, as its terminals are.
 //! Every editor of one buffer shares the window's copy of it, so an edit
 //! made in one, or by anyone else, moves the others' cursors with the text.
+//!
+//! Every editor shares the registers and marks too. A key is handed to the
+//! focused editor one stroke at a time, and so is each key of a macro it
+//! types, so what each does, such as a jump, a mark set or a file opened,
+//! is seen to before the next.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -11,11 +16,12 @@ use clackatoo_protocol::{
     Answer, BufferId, BufferUpdate, ClientMessage, Content, FileLocation, OpenFile, PaneId,
     PaneTerminal, Request, Size,
 };
+use clackatoo_text::Edit;
 
-use super::jumps::{FilePlace, Jump};
+use super::jumps::{FilePlace, Jump, Jumps};
 use super::{Asked, Desk};
 use crate::command::Place;
-use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Register};
+use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Marks, Shared, Stroke};
 use crate::input::{KeptPress, KeyPress};
 use crate::options::Options;
 use crate::pane::{Copy, Mode};
@@ -25,8 +31,8 @@ use crate::pane::{Copy, Mode};
 pub(super) struct Editors {
     panes: HashMap<PaneId, Editor>,
     buffers: HashMap<BufferId, BufferCopy>,
-    /// What `p` puts, shared by every editor, as Vim's registers are.
-    register: Register,
+    /// What every editor shares, as Vim's registers and marks are.
+    shared: Shared,
     /// The buffers attached to on this connection.
     attached: HashSet<BufferId>,
     /// Places in files being opened in panes, which their cursors go to
@@ -67,11 +73,42 @@ impl Editors {
 
     /// Passes the options on to every editor, as they've changed.
     pub(super) fn set_options(&mut self, options: &Options) {
+        self.shared.registers.set_sync(options.clipboard);
         for editor in self.panes.values_mut() {
             if let Some(copy) = self.buffers.get(&editor.buffer()) {
                 editor.set_options(options, copy);
             }
         }
+    }
+}
+
+/// Adds `text`, for the window to put on the clipboard or the primary
+/// selection, in place of what's waiting to go there: only the last
+/// counts, however many a macro copies.
+fn copy_later(yanked: &mut Vec<(String, Copy)>, text: String, to: Copy) {
+    yanked.retain(|&(_, waiting)| waiting != to);
+    yanked.push((text, to));
+}
+
+/// Moves the places kept in the file `copy` is of, the jump list's and the
+/// marks, through `made`, edits just made to it in turn. Those the window
+/// made, if `ours`, set the file's `.` mark, at the last.
+fn follow_places(
+    jumps: &mut Jumps,
+    marks: &mut Marks,
+    copy: &BufferCopy,
+    made: &[Edit],
+    ours: bool,
+) {
+    let (path, text) = (copy.path(), copy.text());
+    jumps.edited(path, made, text);
+    marks.edited(path, made, text);
+    if ours
+        && let Some(last) = made.last()
+        && let Some((at, _, _)) = last.changes().last()
+    {
+        let at = last.map(at, clackatoo_text::Bias::Before);
+        marks.set('.', FilePlace::at(path, text, at));
     }
 }
 
@@ -314,11 +351,17 @@ impl Desk {
             }
             _ => None,
         };
+        let marks = &mut editors.shared.marks;
         match &heard {
             Heard::Edited(edit) | Heard::Reversed(edit) => {
-                (self.jumps).edited(copy.path(), std::slice::from_ref(edit), copy.text());
+                let ours = matches!(heard, Heard::Reversed(_));
+                let made = std::slice::from_ref(edit);
+                follow_places(&mut self.jumps, marks, copy, made, ours);
             }
-            Heard::Replaced => self.jumps.replaced(copy.path(), copy.text()),
+            Heard::Replaced => {
+                self.jumps.replaced(copy.path(), copy.text());
+                marks.replaced(copy.path(), copy.text());
+            }
             _ => {}
         }
         let mut opening = Vec::new();
@@ -347,6 +390,9 @@ impl Desk {
             if (self.editors.panes.get_mut(&pane)).is_some_and(Editor::take_gave_up) {
                 self.editors.held.clear();
             }
+            // A macro whose key waited goes on, before the keys held,
+            // which were typed after it.
+            self.replay_in(pane);
         }
         self.read_held();
         for (pane, byte) in left {
@@ -500,11 +546,53 @@ impl Desk {
     }
 
     /// Hands `press` to the focused pane's editor, moving the cursors of
-    /// the other editors of its buffer with any edits it makes. Returns
-    /// whether the window must be redrawn.
+    /// the other editors of its buffer with any edits it makes. Each key of
+    /// a macro it types is handed over in turn. Returns whether the window
+    /// must be redrawn.
     pub(super) fn editor_key(&mut self, press: &KeyPress<'_>) -> bool {
-        self.in_focused_editor(|editor, copy, register| editor.key(press, copy, register))
-            .unwrap_or(false)
+        let Some(strokes) = (self.shown)
+            .and_then(|shown| self.editors.panes.get(&shown.pane))
+            .map(|editor| editor.strokes(press))
+        else {
+            return false;
+        };
+        let mut redraw = false;
+        for stroke in strokes {
+            redraw |= self.editor_stroke(stroke);
+        }
+        redraw
+    }
+
+    /// Hands `stroke`, typed, to the focused pane's editor, and then the
+    /// keys of any macro it types, until it's done.
+    fn editor_stroke(&mut self, stroke: Stroke) -> bool {
+        let Some(focused) = self.shown.map(|shown| shown.pane) else {
+            return false;
+        };
+        let typed = |editor: &mut Editor, copy: &mut BufferCopy, shared: &mut Shared| {
+            editor.typed(stroke, copy, shared)
+        };
+        let redraw = self.in_editor(focused, typed).unwrap_or(false);
+        self.replay_in(focused) || redraw
+    }
+
+    /// Hands the editor `pane` the keys of the macro it's typing, one at a
+    /// time, until it's done, or a key waits for the grammar: the rest
+    /// wait too, and go on once it's answered. Returns whether the window
+    /// must be redrawn.
+    fn replay_in(&mut self, pane: PaneId) -> bool {
+        let mut redraw = false;
+        while (self.editors.panes.get(&pane)).is_some_and(Editor::replaying) {
+            let next = |editor: &mut Editor, copy: &mut BufferCopy, shared: &mut Shared| {
+                editor.replay_next(copy, shared).unwrap_or_default()
+            };
+            // Without its file, it can't go on.
+            let Some(more) = self.in_editor(pane, next) else {
+                break;
+            };
+            redraw |= more;
+        }
+        redraw
     }
 
     /// Does `action` to the hunk at the focused editor's cursor, as
@@ -524,7 +612,7 @@ impl Desk {
     /// focused pane isn't an editor.
     fn in_focused_editor(
         &mut self,
-        act: impl FnOnce(&mut Editor, &mut BufferCopy, &mut Register) -> Done,
+        act: impl FnOnce(&mut Editor, &mut BufferCopy, &mut Shared) -> Done,
     ) -> Option<bool> {
         let focused = self.shown.map(|shown| shown.pane)?;
         self.in_editor(focused, act)
@@ -536,7 +624,7 @@ impl Desk {
     fn in_editor(
         &mut self,
         focused: PaneId,
-        act: impl FnOnce(&mut Editor, &mut BufferCopy, &mut Register) -> Done,
+        act: impl FnOnce(&mut Editor, &mut BufferCopy, &mut Shared) -> Done,
     ) -> Option<bool> {
         let editors = &mut self.editors;
         let buffer = editors.panes.get(&focused).map(Editor::buffer)?;
@@ -549,8 +637,9 @@ impl Desk {
             editors.panes.get_mut(pane).expect("just found").hold(copy);
         }
         let editor = editors.panes.get_mut(&focused).expect("just found");
-        let done = act(editor, copy, &mut editors.register);
+        let done = act(editor, copy, &mut editors.shared);
         let left = editor.take_left();
+        let opening = editor.take_opening();
         let made = copy.take_made();
         for pane in &others {
             let editor = editors.panes.get_mut(pane).expect("just found");
@@ -558,14 +647,121 @@ impl Desk {
                 editor.follow_edit(edit, copy);
             }
         }
-        self.jumps.edited(copy.path(), &made, copy.text());
+        follow_places(
+            &mut self.jumps,
+            &mut editors.shared.marks,
+            copy,
+            &made,
+            true,
+        );
+        for (text, to) in editors.shared.registers.take_to_system() {
+            copy_later(&mut self.yanked, text, to);
+        }
         if let Some(byte) = left {
             self.record_jump(focused, Some(byte));
         }
-        if let Some(text) = done.yanked {
-            self.yanked = Some((text, Copy::Clipboard));
+        // A mark in another file opens it in the pane, as an answer does.
+        if let Some(place) = opening {
+            self.open_here(focused, place.path.clone());
+            self.editors.landings.insert(focused, place);
         }
         Some(done.redraw)
+    }
+
+    /// Puts `text` on the clipboard, or the primary selection, once the
+    /// window sends it on, as copying in a terminal does: the editors' `"+`
+    /// or `"*` hold it at once.
+    pub(super) fn copied(&mut self, text: String, to: Copy) {
+        self.editors.shared.registers.copied(to, text.clone());
+        copy_later(&mut self.yanked, text, to);
+    }
+
+    /// The window is asking what's on the clipboard and the primary
+    /// selection, to hear in [`clipboard_heard`](Self::clipboard_heard).
+    pub(crate) fn clipboard_asked(&mut self) {
+        self.editors.shared.registers.asking_system();
+    }
+
+    /// The clipboard, or the primary selection, holds `text`, as the
+    /// window found when it got the focus back: `"+` or `"*` hold it, and
+    /// so `p` puts it if `clipboard` says. It's dropped if the window has
+    /// put something there since it asked.
+    pub(crate) fn clipboard_heard(&mut self, from: Copy, text: String) {
+        self.editors.shared.registers.heard_system(from, text);
+    }
+
+    /// A key the window takes itself, such as a binding's or `:`, which
+    /// stops a macro being recorded: it records only an editor's keys, and
+    /// would otherwise lose this one silently.
+    pub(super) fn stop_recording_for_window(&mut self) {
+        let registers = &mut self.editors.shared.registers;
+        if registers.recording().is_some() {
+            registers.stop_recording();
+            self.message = Some("recording stopped: macros record an editor's keys only".into());
+        }
+    }
+
+    /// `:registers`: lists what the registers hold, in a panel by the
+    /// focused editor's cursor.
+    pub(super) fn show_registers(&mut self) {
+        let editors = &mut self.editors;
+        let Some(editor) = (self.shown).and_then(|shown| editors.panes.get_mut(&shown.pane)) else {
+            self.message =
+                Some("registers are listed by an editor's cursor: none has the focus".into());
+            return;
+        };
+        let rows = editors.shared.registers.listing();
+        if rows.is_empty() {
+            self.message = Some("the registers are empty".into());
+            return;
+        }
+        editor.show_listing("type name content", rows);
+    }
+
+    /// `:marks`: the finder, on the marks the focused editor's file can go
+    /// to, its own and then the others, each with its line's text, if the
+    /// window has it.
+    pub(super) fn pick_mark(&mut self) {
+        let Some((_, copy)) = self.focused_editor() else {
+            self.message = Some("marks are a file's: an editor has no focus".into());
+            return;
+        };
+        let path = copy.path().to_owned();
+        let editors = &self.editors;
+        let line_of = |place: &FilePlace| -> Option<String> {
+            let copy = (editors.buffers.values())
+                .find(|copy| copy.loaded() && copy.path() == place.path)?;
+            let line = usize::try_from(place.line).ok()?;
+            let text = copy.text().get_line(line)?.to_string();
+            Some(text.trim().to_owned())
+        };
+        let found: Vec<FileLocation> = (editors.shared.marks.of(&path).into_iter())
+            .map(|(mark, place)| FileLocation {
+                path: place.path.clone(),
+                line: place.line,
+                col: place.col,
+                offset: None,
+                text: format!("{mark}  {}", line_of(place).unwrap_or_default()),
+            })
+            .collect();
+        if found.is_empty() {
+            self.message = Some("no marks are set: m and a letter sets one".into());
+            return;
+        }
+        let case = crate::options::Case::of(&self.options);
+        let finder = crate::finder::Finder::places(crate::finder::Kind::Marks, &found, &path, case);
+        self.finder = Some(finder);
+    }
+
+    /// The register a macro is being recorded into, if one is.
+    pub(super) fn recording(&self) -> Option<char> {
+        self.editors.shared.registers.recording()
+    }
+
+    /// Notes `place`, just jumped from, as its file's `'` mark, which `''`
+    /// goes back to.
+    pub(super) fn jumped_from(&mut self, place: &FilePlace) {
+        self.editors.shared.marks.set('\'', place.clone());
     }
 
     /// Pastes `text` into the focused editor. Returns whether there is one.
@@ -582,7 +778,13 @@ impl Desk {
         };
         editor.paste(text, copy);
         let made = copy.take_made();
-        self.jumps.edited(copy.path(), &made, copy.text());
+        follow_places(
+            &mut self.jumps,
+            &mut editors.shared.marks,
+            copy,
+            &made,
+            true,
+        );
         true
     }
 
@@ -595,7 +797,13 @@ impl Desk {
         {
             editor.enter_normal_mode(copy);
             let made = copy.take_made();
-            self.jumps.edited(copy.path(), &made, copy.text());
+            follow_places(
+                &mut self.jumps,
+                &mut editors.shared.marks,
+                copy,
+                &made,
+                true,
+            );
         }
     }
 

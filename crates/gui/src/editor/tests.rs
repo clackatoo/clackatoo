@@ -10,8 +10,7 @@ use clackatoo_protocol::{
 use clackatoo_text::Sign;
 
 use super::copy::tests::Daemon;
-use super::keys::Stroke;
-use super::{BufferCopy, Editor, HunkAction, Mode, Register};
+use super::{BufferCopy, Editor, HunkAction, Mode, Register, Shared, Stroke, Wrote};
 use crate::motion::{Cursor, Point};
 use crate::options::{CompleteAccept, Options};
 use crate::pane::Selection;
@@ -21,7 +20,7 @@ struct Setup {
     editor: Editor,
     copy: BufferCopy,
     daemon: Daemon,
-    register: Register,
+    shared: Shared,
     options: Options,
     /// The queries sent, for the language server.
     queries: Vec<(u64, usize, Query)>,
@@ -48,7 +47,7 @@ impl Setup {
             editor,
             copy,
             daemon,
-            register: Register::default(),
+            shared: Shared::default(),
             options,
             queries: Vec::new(),
             renames: Vec::new(),
@@ -80,9 +79,14 @@ impl Setup {
     /// Types `keys`, Vim's way: `<Esc>`, `<CR>`, `<BS>`, `<Tab>`, `<C-r>`,
     /// and `<lt>` for `<`.
     fn keys(&mut self, keys: &str) {
-        for stroke in strokes(keys) {
-            self.editor
-                .stroke(stroke, &mut self.copy, &mut self.register);
+        for stroke in Stroke::read(keys) {
+            self.editor.typed(stroke, &mut self.copy, &mut self.shared);
+            // A macro's keys are typed before the daemon hears of any, as
+            // a window types them.
+            while (self.editor)
+                .replay_next(&mut self.copy, &mut self.shared)
+                .is_some()
+            {}
             self.serve();
         }
     }
@@ -146,7 +150,12 @@ impl Setup {
         self.editor.heard(&mut heard, true, &mut self.copy);
         // As the desk does, for a command that waited for it.
         if self.editor.resumable() {
-            self.editor.resume(&mut self.copy, &mut self.register);
+            self.editor.resume(&mut self.copy, &mut self.shared);
+            // And a macro whose key waited goes on.
+            while (self.editor)
+                .replay_next(&mut self.copy, &mut self.shared)
+                .is_some()
+            {}
         }
         self.serve();
     }
@@ -161,42 +170,20 @@ impl Setup {
         text
     }
 
+    /// What `p` puts.
+    fn register(&self) -> Register {
+        (self.shared.registers.get(None).cloned()).unwrap_or_default()
+    }
+
+    /// What the register `name` holds.
+    fn held(&self, name: char) -> Option<String> {
+        let register = self.shared.registers.get(Some(name))?;
+        Some(register.text.clone())
+    }
+
     fn cursor(&self) -> (u64, usize) {
         (self.editor.cursor.at.line, self.editor.cursor.at.col)
     }
-}
-
-fn strokes(keys: &str) -> Vec<Stroke> {
-    let mut strokes = Vec::new();
-    let mut rest = keys;
-    while let Some(ch) = rest.chars().next() {
-        if ch == '<'
-            && let Some(end) = rest.find('>')
-        {
-            let name = &rest[1..end];
-            strokes.push(match name {
-                "Esc" => Stroke::Escape,
-                "CR" => Stroke::Enter,
-                "BS" => Stroke::Backspace,
-                "Tab" => Stroke::Tab,
-                "Right" => Stroke::Right,
-                "Left" => Stroke::Left,
-                "Up" => Stroke::Up,
-                "Down" => Stroke::Down,
-                "lt" => Stroke::char('<'),
-                "C-Space" => Stroke::ctrl(' '),
-                _ => match name.strip_prefix("C-") {
-                    Some(key) => Stroke::ctrl(key.chars().next().unwrap()),
-                    None => panic!("no key <{name}>"),
-                },
-            });
-            rest = &rest[end + 1..];
-            continue;
-        }
-        strokes.push(Stroke::char(ch));
-        rest = &rest[ch.len_utf8()..];
-    }
-    strokes
 }
 
 #[test]
@@ -326,8 +313,8 @@ fn visual_mode_selects_then_acts() {
     assert_eq!(setup.text(), "af\n");
     setup.keys("u");
     setup.keys("Vjy");
-    assert_eq!(setup.register.text, "abc\ndef\n");
-    assert!(setup.register.lines);
+    assert_eq!(setup.register().text, "abc\ndef\n");
+    assert!(setup.register().lines);
 }
 
 #[test]
@@ -494,7 +481,8 @@ fn tab_indents_as_the_line_is_or_as_expandtab_says() {
 #[test]
 fn indent_operators_shift_whole_lines_by_shiftwidth() {
     let mut setup = Setup::new("fn a\n\n  b\nc\n");
-    setup.register.text = "kept".into();
+    let kept = Register::chars("kept".into());
+    setup.shared.registers.wrote(None, kept, Wrote::Yank);
     setup.keys("w>G");
     assert_eq!(
         setup.text(),
@@ -506,7 +494,7 @@ fn indent_operators_shift_whole_lines_by_shiftwidth() {
         (0, 4),
         "on the first line's first character"
     );
-    assert_eq!(setup.register.text, "kept", "the register isn't touched");
+    assert_eq!(setup.register().text, "kept", "the register isn't touched");
     setup.keys("u");
     assert_eq!(setup.text(), "fn a\n\n  b\nc\n", "one undo step");
 
@@ -2074,7 +2062,7 @@ fn a_function_is_deleted_once_the_grammar_says_where_it_is() {
     assert_eq!(setup.text(), TWO, "not until it answers");
     setup.answer(asked, Answer::Pieces(vec![one(TWO)]));
     assert_eq!(setup.text(), "\n\nfn three() {\n    x;\n}");
-    assert_eq!(setup.register.text, "fn one(a, bb) {\n    two(a);\n}");
+    assert_eq!(setup.register().text, "fn one(a, bb) {\n    two(a);\n}");
     assert_eq!(setup.cursor(), (0, 0));
 }
 
@@ -2128,7 +2116,7 @@ fn arguments_are_copied_and_changed_with_their_commas() {
     setup.keys("fbyaa");
     let argument = piece_of(TWO, ", bb", Some("bb"));
     setup.answer(setup.last_query().0, Answer::Pieces(vec![argument]));
-    assert_eq!(setup.register.text, ", bb");
+    assert_eq!(setup.register().text, ", bb");
     assert_eq!(setup.text(), TWO);
     setup.keys("cia");
     setup.answer(setup.last_query().0, Answer::Pieces(vec![argument]));
@@ -2176,7 +2164,7 @@ fn a_count_picks_the_piece_that_many_out() {
     let mut setup = Setup::new(text);
     setup.keys("jjy2af");
     setup.answer(setup.last_query().0, Answer::Pieces(vec![inner, outer]));
-    assert_eq!(setup.register.text, text);
+    assert_eq!(setup.register().text, text);
 }
 
 #[test]
@@ -2340,7 +2328,7 @@ fn the_menu_of_code_actions_and_keys_held_for_the_grammar_get_along() {
     setup.keys("yafj");
     assert!(action_menu(&mut setup).is_none());
     setup.answer(setup.last_query().0, Answer::Pieces(vec![one(TWO)]));
-    assert_eq!(setup.register.text, "fn one(a, bb) {\n    two(a);\n}");
+    assert_eq!(setup.register().text, "fn one(a, bb) {\n    two(a);\n}");
     assert_eq!(setup.cursor(), (1, 0), "the j moved the cursor");
     // gra typed while waiting is held too, and asks once it's read.
     setup.keys("ggdafgra");
@@ -2352,4 +2340,275 @@ fn the_menu_of_code_actions_and_keys_held_for_the_grammar_get_along() {
     setup.answer(list, Answer::CodeActions(actions));
     assert!(action_menu(&mut setup).is_some());
     assert_eq!(setup.text(), "\n\nfn three() {\n    x;\n}");
+}
+
+// --- Registers, macros and marks --------------------------------------------
+
+#[test]
+fn capital_registers_add_to_the_named_and_p_puts_them() {
+    let mut setup = Setup::new("one\ntwo\nthree\n");
+    setup.keys("\"ayyj\"Ayy");
+    assert_eq!(setup.held('a').as_deref(), Some("one\ntwo\n"));
+    setup.keys("G\"ap");
+    assert_eq!(setup.text(), "one\ntwo\nthree\none\ntwo\n");
+    // Characters added to lines go on a line of their own.
+    setup.keys("gg\"Ayw");
+    assert_eq!(setup.held('a').as_deref(), Some("one\ntwo\none\n"));
+    // A register named to `x`, and a count with it either side.
+    setup.keys("gg\"b2x");
+    assert_eq!(setup.held('b').as_deref(), Some("on"));
+    setup.keys("2\"b2P");
+    assert_eq!(setup.text(), "onononone\ntwo\nthree\none\ntwo\n");
+}
+
+#[test]
+fn deletes_push_down_the_numbered_registers_and_yanks_go_to_0() {
+    let mut setup = Setup::new("a\nb\nc\nd\n");
+    setup.keys("yyjddddx");
+    assert_eq!(setup.held('0').as_deref(), Some("a\n"), "the yank");
+    assert_eq!(setup.held('1').as_deref(), Some("c\n"));
+    assert_eq!(setup.held('2').as_deref(), Some("b\n"));
+    // `x` within a line goes to `-`, not `1`.
+    assert_eq!(setup.held('-').as_deref(), Some("d"));
+    assert_eq!(setup.text(), "a\n\n");
+    // `"1p`, then `.` puts `"2`'s, going back through the deletes.
+    setup.keys("gg\"1p.");
+    assert_eq!(setup.text(), "a\nc\nb\n\n");
+    // `0` keeps the yank through deletes.
+    setup.keys("dd\"0P");
+    assert_eq!(setup.text(), "a\nc\na\n\n");
+}
+
+#[test]
+fn the_black_hole_takes_deletes_and_leaves_the_registers_alone() {
+    let mut setup = Setup::new("keep\ngone\n");
+    setup.keys("yyj\"_dd");
+    assert_eq!(setup.text(), "keep\n");
+    assert_eq!(setup.register().text, "keep\n");
+    assert_eq!(setup.held('1'), None);
+    setup.keys("p");
+    assert_eq!(setup.text(), "keep\nkeep\n");
+    // `"_p` puts nothing, and stops a macro, as an empty register does.
+    setup.keys("\"_p");
+    assert_eq!(setup.text(), "keep\nkeep\n");
+    assert_eq!(setup.editor.status.as_deref(), Some("register _ is empty"));
+}
+
+#[test]
+fn registers_in_visual_mode_and_p_over_a_selection() {
+    let mut setup = Setup::new("one two\nthree\n");
+    setup.keys("v$\"cy");
+    assert_eq!(setup.held('c').as_deref(), Some("one two"));
+    // `p` over a word puts in its place, keeping the word.
+    setup.keys("wyiwbviwp");
+    assert_eq!(setup.text(), "two two\nthree\n");
+    assert_eq!(setup.register().text, "one");
+    // `P` keeps what it puts, so it can go over one selection after
+    // another; whole lines go in place of whole lines.
+    setup.keys("yyjVP");
+    assert_eq!(setup.text(), "two two\ntwo two\n");
+    assert_eq!(setup.register().text, "two two\n");
+    // Characters in place of lines go on a line of their own, and lines in
+    // place of characters break the line around them.
+    setup.keys("ggV\"cp");
+    assert_eq!(setup.text(), "one two\ntwo two\n");
+    setup.keys("jwviwp");
+    assert_eq!(setup.text(), "one two\ntwo \ntwo two\n\n");
+}
+
+#[test]
+fn the_clipboard_goes_along_with_the_unnamed_register_as_clipboard_says() {
+    let mut setup = Setup::new("a\nb\n");
+    setup.keys("yy");
+    assert_eq!(
+        setup.shared.registers.take_to_system(),
+        [("a\n".to_owned(), crate::pane::Copy::Clipboard)]
+    );
+    // Copied elsewhere, `p` puts it, and so does `"+p`.
+    let copied = "pasted".to_owned();
+    setup.shared.registers.asking_system();
+    (setup.shared.registers).heard_system(crate::pane::Copy::Clipboard, copied);
+    setup.keys("jp\"+p");
+    assert_eq!(setup.text(), "a\nbpastedpasted\n");
+    (setup.shared.registers).set_sync(crate::options::Clipboard::Off);
+    setup.keys("dd");
+    assert!(setup.shared.registers.take_to_system().is_empty());
+    assert_eq!(setup.register().text, "bpastedpasted\n");
+    setup.keys("\"*yy");
+    assert_eq!(
+        setup.shared.registers.take_to_system(),
+        [("a\n".to_owned(), crate::pane::Copy::Primary)]
+    );
+}
+
+#[test]
+fn a_macro_types_through_insert_mode_and_a_count_types_it_again() {
+    let mut setup = Setup::new("a\nb\nc\nd\ne\n");
+    setup.keys("qaA!<Esc>jq");
+    assert_eq!(setup.shared.registers.recording(), None);
+    assert_eq!(setup.held('a').as_deref(), Some("A!<Esc>j"));
+    setup.keys("2@a");
+    assert_eq!(setup.text(), "a!\nb!\nc!\nd\ne\n");
+    // `u` undoes all a macro typed, as in Vim, and Ctrl+R redoes it.
+    setup.keys("u");
+    assert_eq!(setup.text(), "a!\nb\nc\nd\ne\n");
+    setup.keys("<C-r>");
+    assert_eq!(setup.text(), "a!\nb!\nc!\nd\ne\n");
+    setup.keys("4G@@");
+    assert_eq!(setup.text(), "a!\nb!\nc!\nd!\ne\n");
+    setup.keys("u");
+    assert_eq!(setup.text(), "a!\nb!\nc!\nd\ne\n");
+    // `"ap` puts the keys, which can be changed and typed again.
+    setup.keys("G\"ap");
+    assert_eq!(setup.text(), "a!\nb!\nc!\nd\neA!<Esc>j\n");
+    setup.keys("0f!r?0l\"by$gg@b");
+    assert_eq!(setup.text(), "a!?\nb!\nc!\nd\neA?<Esc>j\n");
+}
+
+#[test]
+fn a_macro_types_what_a_completion_put_in_without_asking() {
+    let mut setup = Setup::new("\n\n");
+    setup.server();
+    setup.keys("qaial");
+    setup.tick();
+    let mut call = item("call", 0);
+    call.text = "call(${1:a})$0".into();
+    call.snippet = true;
+    setup.answer(setup.last_query().0, completions(vec![call], false));
+    setup.keys("<C-y><Esc>jq");
+    assert_eq!(setup.text(), "call(a)\n\n");
+    // Not the key that accepted it, but what it put in.
+    assert_eq!(
+        setup.held('a').as_deref(),
+        Some("ial<BS><BS>call(a)<Left><Left><Esc>j")
+    );
+    let asked = setup.queries.len();
+    setup.keys("@a");
+    setup.tick();
+    assert_eq!(setup.text(), "call(a)\ncall(a)\n");
+    assert_eq!(setup.queries.len(), asked, "the server isn't asked");
+    // Keys a menu would take are typed as they are: Ctrl+N asks nothing,
+    // and Enter, which would accept, makes a new line.
+    let mut setup = Setup::new("x\n");
+    setup.server();
+    let asked = setup.queries.len();
+    setup.shared.registers.record('c');
+    for stroke in Stroke::read("A<C-n>y<CR>z<Esc>") {
+        setup.shared.registers.typed(stroke);
+    }
+    setup.shared.registers.stop_recording();
+    setup.keys("@c");
+    setup.tick();
+    assert_eq!(setup.queries.len(), asked);
+    assert_eq!(setup.text(), "xy\nz\n");
+}
+
+#[test]
+fn nothing_deleted_keeps_the_registers() {
+    let mut setup = Setup::new("kept\n\n");
+    setup.keys("yyjD");
+    assert_eq!(setup.register().text, "kept\n");
+    setup.keys("C<Esc>\"_x");
+    assert_eq!(setup.register().text, "kept\n");
+    assert_eq!(setup.held('-'), None);
+    assert_eq!(
+        setup.shared.registers.take_to_system(),
+        [("kept\n".to_owned(), crate::pane::Copy::Clipboard)],
+        "the clipboard has only the yank"
+    );
+}
+
+#[test]
+fn a_macro_that_types_itself_stops_where_a_motion_fails() {
+    let mut setup = Setup::new("1\n2\n3\n4\n");
+    // Cleared first, so recording `@a` types nothing.
+    setup.keys("qaq");
+    setup.keys("qaI- <Esc>j@aq");
+    assert_eq!(setup.text(), "- 1\n2\n3\n4\n");
+    setup.keys("@a");
+    assert_eq!(
+        setup.text(),
+        "- 1\n- 2\n- 3\n- 4\n",
+        "j on the last line stops it"
+    );
+    assert!(!setup.editor.replaying());
+    // A count stops too, where it fails, rather than going on with what's
+    // left of it.
+    let mut setup = Setup::new("a\nb\n");
+    setup.keys("qbA.<Esc>jq5@b");
+    assert_eq!(setup.text(), "a.\nb.\n");
+
+    // Keys that make nothing stop it, as unknown keys do in Vim.
+    let mut setup = Setup::new("x\n");
+    setup.keys("qcA1<Esc>Q<C-k>A2<Esc>q");
+    assert_eq!(setup.text(), "x12\n", "recording, it goes on");
+    setup.keys("@c");
+    assert_eq!(setup.text(), "x121\n", "replaying, it stops at Q");
+}
+
+#[test]
+fn a_macro_that_never_fails_is_stopped() {
+    let mut setup = Setup::new("x\n");
+    setup.keys("qaq");
+    setup.keys("qa0@aq");
+    setup.keys("@a");
+    assert!(!setup.editor.replaying());
+    let status = setup.editor.status.clone().unwrap_or_default();
+    assert!(status.contains("stopped"), "{status}");
+}
+
+#[test]
+fn marks_go_to_their_place_or_line_and_operators_act_up_to_them() {
+    let mut setup = Setup::new("  one\n  two\n  three\n");
+    setup.keys("wlmajjmb");
+    setup.keys("`a");
+    assert_eq!(setup.cursor(), (0, 3));
+    setup.keys("'b");
+    assert_eq!(setup.cursor(), (2, 2), "the line's first character");
+    setup.keys("y'a");
+    assert_eq!(setup.register().text, "  one\n  two\n  three\n");
+    assert!(setup.register().lines);
+    setup.keys("`bd`a");
+    assert_eq!(setup.text(), "  ohree\n");
+    setup.keys("'z");
+    assert_eq!(setup.editor.status.as_deref(), Some("mark z isn't set"));
+    // A mark in another file is said to be there.
+    let text = clackatoo_text::Rope::from_str("x");
+    let elsewhere = super::FilePlace::at("/src/other.rs", &text, 0);
+    setup.shared.marks.set('Q', elsewhere);
+    setup.keys("d'Q");
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("mark Q is in other.rs")
+    );
+    assert_eq!(setup.text(), "  ohree\n");
+}
+
+#[test]
+fn a_search_that_finds_nothing_stops_a_macro() {
+    let mut setup = Setup::new("x x x\n");
+    setup.keys("qa/x<CR>r-A!<Esc>q");
+    assert_eq!(setup.text(), "x - x!\n");
+    setup.keys("5@a");
+    assert_eq!(setup.text(), "- - -!!!\n", "two found, then none");
+    assert_eq!(setup.editor.status.as_deref(), Some("x isn't in the file"));
+}
+
+#[test]
+fn a_macro_waiting_for_the_grammar_is_still_one_undo_step() {
+    let mut setup = Setup::new(TWO);
+    setup.keys("qadaf");
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![one(TWO)]));
+    setup.keys("ix<Esc>q");
+    let changed = "x\n\nfn three() {\n    x;\n}";
+    assert_eq!(setup.text(), changed);
+    setup.keys("uu");
+    assert_eq!(setup.text(), TWO);
+    // The x waits for the answer, and goes in after, in the same step.
+    setup.keys("@a");
+    assert_eq!(setup.text(), TWO);
+    setup.answer(setup.last_query().0, Answer::Pieces(vec![one(TWO)]));
+    assert_eq!(setup.text(), changed);
+    setup.keys("u");
+    assert_eq!(setup.text(), TWO, "one u undoes all of it");
 }

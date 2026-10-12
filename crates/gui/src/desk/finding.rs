@@ -44,14 +44,17 @@ impl Desk {
             return;
         }
         let case = Case::of(&self.options);
+        if kind == Kind::Marks {
+            return self.pick_mark();
+        }
         self.finder = Some(Finder::new(kind, query, case));
         match kind {
             Kind::Files => self.search(Search::Files),
             Kind::Buffers => self.search(Search::Buffers),
             Kind::Grep => self.grep(),
             Kind::Diagnostics => self.search(Search::Diagnostics),
-            // Its places are given it.
-            Kind::Places => {}
+            // Their places are given them.
+            Kind::Places | Kind::Marks => {}
         }
     }
 
