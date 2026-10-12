@@ -289,6 +289,10 @@ impl Desk {
             editors.panes.get_mut(pane).expect("just found").hold(copy);
         }
         let heard = copy.update(update);
+        let answered = match &heard {
+            Heard::Answer { id, answer } => Some((*id, answer.clone())),
+            _ => None,
+        };
         match &heard {
             Heard::Edited(edit) | Heard::Reversed(edit) => {
                 (self.jumps).edited(copy.path(), std::slice::from_ref(edit), copy.text());
@@ -321,9 +325,24 @@ impl Desk {
             self.pick_place(&places, &here);
         }
         self.land();
-        self.shown_tab().is_some_and(|tab| {
-            (tab.layout.panes().iter()).any(|pane| pane.content == Content::Buffer(buffer))
-        })
+        let formatted = answered.is_some_and(|(id, answer)| self.formatted(id, &answer));
+        formatted
+            || self.shown_tab().is_some_and(|tab| {
+                (tab.layout.panes().iter()).any(|pane| pane.content == Content::Buffer(buffer))
+            })
+    }
+
+    /// Asks the language server of the focused editor's file `query`,
+    /// which isn't about a place in it. The buffer and the query's
+    /// number, or `None` if no editor has the focus.
+    pub(super) fn ask_about_focused_file(
+        &mut self,
+        query: clackatoo_protocol::Query,
+    ) -> Option<(BufferId, u64)> {
+        let editor = self.editors.panes.get(&self.shown?.pane)?;
+        let buffer = editor.buffer();
+        let copy = self.editors.buffers.get_mut(&buffer)?;
+        Some((buffer, copy.ask(query, 0)))
     }
 
     /// Hands `press` to the focused pane's editor, moving the cursors of
@@ -507,14 +526,17 @@ impl Desk {
         self.request(request, Asked::Pane);
     }
 
-    /// `:w`, and `:wq`: writes the focused pane's file, then closes the
-    /// pane if `quit`.
+    /// `:w`, and `:wq`: writes the focused pane's file, formatting it
+    /// first if `formatonsave` says, then closes the pane if `quit`.
     pub(super) fn write_file(&mut self, force: bool, quit: bool) {
         let Some(shown) = self.shown else { return };
         let Some((editor, _)) = self.focused_editor() else {
             self.message = Some("this pane has no file to write".into());
             return;
         };
+        if self.options.formatonsave {
+            return self.format_then_write(force, quit);
+        }
         let buffer = editor.buffer();
         let then_close = quit.then_some(shown.pane);
         self.request(
@@ -565,6 +587,7 @@ impl Desk {
         then_close: Option<PaneId>,
         response: &clackatoo_protocol::Response,
     ) {
+        let unformatted = self.unformatted.remove(&buffer);
         if let clackatoo_protocol::Response::Error(err) = response {
             self.message = Some(match err {
                 clackatoo_protocol::Error::ChangedOnDisk(path) => {
@@ -575,7 +598,11 @@ impl Desk {
             return;
         }
         let name = self.editors.buffers.get(&buffer).map(BufferCopy::name);
-        self.message = Some(format!("{} written", name.unwrap_or("the file")));
+        let name = name.unwrap_or("the file");
+        self.message = Some(match unformatted {
+            Some(why) => format!("{name} written, not formatted: {why}"),
+            None => format!("{name} written"),
+        });
         if let Some(pane) = then_close {
             self.request(Request::ClosePane { pane }, Asked::Command);
         }

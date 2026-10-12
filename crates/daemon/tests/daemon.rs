@@ -1990,12 +1990,19 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
         panic!("{answer:?}");
     };
     assert!(markdown && said.contains("pub fn f() -> u32"), "{said}");
+    rust_analyzer_finds_renames_and_formats(&mut client, buffer, text);
+}
 
+/// What [`rust_analyzer_says_whats_wrong_with_a_rust_file`] asks once the
+/// server has said what f is: where f is used, f renamed, and the file
+/// formatted, in `text`, buffer `buffer`.
+fn rust_analyzer_finds_renames_and_formats(client: &mut Client, buffer: BufferId, text: &str) {
+    let call = text.rfind("f()").unwrap();
     // Where f is used, its declaration included.
     client
         .query(buffer, 4, (0, call), Query::References)
         .unwrap();
-    let (_, answer) = next_answer(&mut client);
+    let (_, answer) = next_answer(client);
     let Answer::Locations(found) = answer else {
         panic!("{answer:?}");
     };
@@ -2006,7 +2013,7 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
     // And f renamed, where it's defined and where it's called, as one
     // edit to the buffer.
     client.rename(buffer, 5, (0, call), "first").unwrap();
-    let (updates, answer) = updates_to_answer(&mut client);
+    let (updates, answer) = updates_to_answer(client);
     assert_eq!(
         answer,
         (
@@ -2021,6 +2028,29 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
         edited(text, &updates),
         text.replace("fn f()", "fn first()")
             .replace("    f()", "    first()")
+    );
+
+    // And formatted, through rustfmt, which finds it formatted already.
+    let renamed = updates.iter().fold(0, |version, update| match update {
+        BufferUpdate::Edited { version, .. } => *version,
+        _ => version,
+    });
+    client
+        .query(
+            buffer,
+            6,
+            (renamed, 0),
+            Query::Format {
+                tab_size: 4,
+                spaces: true,
+            },
+        )
+        .unwrap();
+    let (_, answer) = updates_to_answer(client);
+    assert_eq!(
+        answer,
+        (6, Answer::Formatted { changed: false }),
+        "already formatted"
     );
 }
 
@@ -2110,6 +2140,44 @@ fn a_language_server_is_never_asked_what_it_cant_do() {
     assert_eq!(
         next_answer(&mut client),
         (2, failed("its language server can't rename"))
+    );
+    let format = Query::Format {
+        tab_size: 4,
+        spaces: true,
+    };
+    client.query(buffer, 3, (0, 0), format).unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (3, failed("its language server doesn't format files"))
+    );
+}
+
+#[test]
+fn formatting_edits_the_buffer_as_the_user_and_says_whether_it_changed() {
+    let daemon = with_fake_language_server(|_| Vec::new());
+    let text = "\tbad x\nok\n";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    let format = Query::Format {
+        tab_size: 2,
+        spaces: true,
+    };
+    client.query(buffer, 1, (0, 0), format).unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(answer, (1, Answer::Formatted { changed: true }));
+    assert_eq!(edited(text, &updates), "  BAD x\nok\n");
+    // As the user's edit, which `u` undoes in one go.
+    let authors: Vec<_> = (updates.iter())
+        .filter_map(|update| match update {
+            BufferUpdate::Edited { author, .. } => Some(*author),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(authors, [Author::User]);
+    // Formatted again, nothing changes.
+    client.query(buffer, 2, (1, 0), format).unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (2, Answer::Formatted { changed: false })
     );
 }
 

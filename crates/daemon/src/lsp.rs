@@ -116,6 +116,7 @@ pub(crate) struct LanguageServer {
 /// What a server does, beyond keeping files open and saying what's wrong
 /// with them.
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(clippy::struct_excessive_bools, reason = "each is offered or not")]
 struct Offers {
     /// Wants to hear when a buffer is saved.
     save: bool,
@@ -123,6 +124,8 @@ struct Offers {
     hover: bool,
     /// Renames things.
     rename: bool,
+    /// Formats whole files.
+    format: bool,
 }
 
 impl LanguageServer {
@@ -275,7 +278,11 @@ impl LanguageServer {
     /// Whether it can answer `query`. Places are asked for whatever it
     /// says, as servers answer what they can't with nothing.
     pub(crate) fn answers(&self, query: Query) -> bool {
-        query != Query::Hover || self.offers.hover
+        match query {
+            Query::Hover => self.offers.hover,
+            Query::Format { .. } => self.offers.format,
+            _ => true,
+        }
     }
 
     /// Whether it renames things.
@@ -295,13 +302,21 @@ impl LanguageServer {
             Query::Implementation => "textDocument/implementation",
             Query::References => "textDocument/references",
             Query::Hover => "textDocument/hover",
+            Query::Format { .. } => "textDocument/formatting",
         };
         let mut params = json!({
             "textDocument": { "uri": uri(path) },
             "position": position(text, at, self.encoding),
         });
-        if query == Query::References {
-            params["context"] = json!({ "includeDeclaration": true });
+        match query {
+            Query::References => params["context"] = json!({ "includeDeclaration": true }),
+            Query::Format { tab_size, spaces } => {
+                params = json!({
+                    "textDocument": { "uri": uri(path) },
+                    "options": { "tabSize": tab_size, "insertSpaces": spaces },
+                });
+            }
+            _ => {}
         }
         self.request(method, &params)
     }
@@ -455,6 +470,7 @@ impl LanguageServer {
             save: offered(&sync["save"]),
             hover: offered(&capabilities["hoverProvider"]),
             rename: offered(&capabilities["renameProvider"]),
+            format: offered(&capabilities["documentFormattingProvider"]),
         };
         self.ready = true;
         self.peer
@@ -565,6 +581,37 @@ pub(crate) struct FileEdits {
     pub(crate) edits: Vec<TextEdit>,
 }
 
+/// The edits in a list of `TextEdit`s, as formatting answers with, or a
+/// `WorkspaceEdit` has for a file. `null` is none. An error if it makes no
+/// sense.
+pub(crate) fn text_edits(list: &Value) -> Result<Vec<TextEdit>, String> {
+    let nonsense = || "the language server's edits make no sense".to_owned();
+    if list.is_null() {
+        return Ok(Vec::new());
+    }
+    let list = list.as_array().ok_or_else(nonsense)?;
+    (list.iter())
+        .map(|edit| {
+            // A `SnippetTextEdit`'s snippet is taken as it is: renames and
+            // formatting have no placeholders.
+            let text = (edit.get("newText"))
+                .or_else(|| edit.get("snippet").and_then(|snippet| snippet.get("value")))
+                .and_then(Value::as_str)
+                .ok_or_else(nonsense)?;
+            let range = edit.get("range").ok_or_else(nonsense)?;
+            let at = |key: &str| {
+                let position = range.get(key).cloned().unwrap_or_default();
+                serde_json::from_value::<Position>(position).map_err(|_| nonsense())
+            };
+            Ok(TextEdit {
+                start: at("start")?,
+                end: at("end")?,
+                text: text.to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// Adds `more` to `edits`, but those already there: the same edits given
 /// twice, as for one file listed under two names, are made once.
 pub(crate) fn merge(edits: &mut Vec<TextEdit>, more: Vec<TextEdit>) {
@@ -582,29 +629,6 @@ pub(crate) fn merge(edits: &mut Vec<TextEdit>, more: Vec<TextEdit>) {
 /// or makes no sense: then none of it is to be made.
 pub(crate) fn workspace_edit(answer: &Value) -> Result<Vec<FileEdits>, String> {
     let nonsense = || "the language server's edits make no sense".to_owned();
-    let edits_of = |list: &Value| -> Result<Vec<TextEdit>, String> {
-        let list = list.as_array().ok_or_else(nonsense)?;
-        (list.iter())
-            .map(|edit| {
-                // A `SnippetTextEdit`'s snippet is taken as it is: renames
-                // have no placeholders.
-                let text = (edit.get("newText"))
-                    .or_else(|| edit.get("snippet").and_then(|snippet| snippet.get("value")))
-                    .and_then(Value::as_str)
-                    .ok_or_else(nonsense)?;
-                let range = edit.get("range").ok_or_else(nonsense)?;
-                let at = |key: &str| {
-                    let position = range.get(key).cloned().unwrap_or_default();
-                    serde_json::from_value::<Position>(position).map_err(|_| nonsense())
-                };
-                Ok(TextEdit {
-                    start: at("start")?,
-                    end: at("end")?,
-                    text: text.to_owned(),
-                })
-            })
-            .collect()
-    };
     let mut files: Vec<FileEdits> = Vec::new();
     let mut add = |uri: &str, version: Option<u64>, edits: Vec<TextEdit>| {
         let path = path_of(uri).ok_or_else(|| {
@@ -633,12 +657,12 @@ pub(crate) fn workspace_edit(answer: &Value) -> Result<Vec<FileEdits>, String> {
             let document = change.get("textDocument").ok_or_else(nonsense)?;
             let uri = (document.get("uri").and_then(Value::as_str)).ok_or_else(nonsense)?;
             let version = document.get("version").and_then(Value::as_u64);
-            let edits = edits_of(change.get("edits").unwrap_or(&Value::Null))?;
+            let edits = text_edits(change.get("edits").unwrap_or(&Value::Null))?;
             add(uri, version, edits)?;
         }
     } else if let Some(changes) = (answer.get("changes")).filter(|changes| !changes.is_null()) {
         for (uri, edits) in changes.as_object().ok_or_else(nonsense)? {
-            add(uri, None, edits_of(edits)?)?;
+            add(uri, None, text_edits(edits)?)?;
         }
     }
     files.retain(|file| !file.edits.is_empty());

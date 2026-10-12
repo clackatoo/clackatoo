@@ -22,7 +22,7 @@
 //! | `--log FILE` | Writes the method of each notification there, a line each |
 //! | `--defs FILE` | Answers where things are defined with FILE, not `defs.fk` |
 //! | `--crash-once FILE` | Exits, as if it crashed, the first time a file has `crash` in it, making FILE so the next one started doesn't |
-//! | `--bare` | Doesn't say what things are, or rename them |
+//! | `--bare` | Doesn't say what things are, rename them or format |
 //! | `--modified-once` | Answers the first question of what something is by saying the text changed while it worked, as rust-analyzer does while it reads a project |
 //! | `--rename-changes` | Renames with a `WorkspaceEdit`'s `changes`, not its `documentChanges` |
 //! | `--rename-files` | Renames `defs.fk` too, which clackatoo refuses |
@@ -144,6 +144,7 @@ impl Fake {
                 if !self.bare {
                     capabilities["hoverProvider"] = json!(true);
                     capabilities["renameProvider"] = json!({ "prepareProvider": false });
+                    capabilities["documentFormattingProvider"] = json!(true);
                 }
                 send(&json!({
                     "jsonrpc": "2.0",
@@ -204,10 +205,47 @@ impl Fake {
                 send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
             }
             "textDocument/implementation" | "textDocument/references" => self.places(message),
+            "textDocument/formatting" => self.format(message),
             "exit" => return false,
             _ => {}
         }
         true
+    }
+
+    /// Formats a file: each "bad" in capitals, and a tab at a line's
+    /// start as spaces, if asked to indent with them; and the first
+    /// character replaced with itself, which changes nothing.
+    fn format(&self, message: &Value) {
+        let params = &message["params"];
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let text = &self.files[uri];
+        let edit = |at: usize, len: usize, new: &str| {
+            let range = json!({
+                "start": place(text, at, self.utf16),
+                "end": place(text, at + len, self.utf16),
+            });
+            json!({ "range": range, "newText": new })
+        };
+        let mut edits: Vec<Value> = text
+            .get(..1)
+            .map(|first| edit(0, 1, first))
+            .into_iter()
+            .collect();
+        edits.extend(text.match_indices("bad").map(|(at, _)| edit(at, 3, "BAD")));
+        let options = &params["options"];
+        if options["insertSpaces"] == true {
+            let width = options["tabSize"]
+                .as_u64()
+                .and_then(|width| usize::try_from(width).ok());
+            let spaces = " ".repeat(width.unwrap_or(4));
+            let starts = std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1));
+            edits.extend(
+                starts
+                    .filter(|&at| text[at..].starts_with('\t'))
+                    .map(|at| edit(at, 1, &spaces)),
+            );
+        }
+        send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": edits }));
     }
 
     /// Answers with every "bad", as where it's implemented or, if the

@@ -99,6 +99,7 @@ enum Asked {
 mod bindings;
 mod editors;
 mod finding;
+mod formatting;
 mod jumps;
 mod offers;
 mod script;
@@ -197,6 +198,11 @@ pub(crate) struct Desk {
     /// When the finder's grep is to search for what's been typed, a moment
     /// after the last key.
     grep_at: Option<std::time::Instant>,
+    /// Files being formatted, by the number of the query that asked.
+    formatting: HashMap<u64, formatting::Formatting>,
+    /// Why files being written weren't formatted first, to say when
+    /// they're written.
+    unformatted: HashMap<BufferId, String>,
 }
 
 impl Desk {
@@ -756,6 +762,8 @@ impl Desk {
         self.editors_reconnected();
         self.asked.clear();
         self.outbox.clear();
+        self.formatting.clear();
+        self.unformatted.clear();
         self.resizes_pending = 0;
         self.split_shares = None;
         self.dragging_divider = None;
@@ -1477,6 +1485,7 @@ impl Desk {
             Command::Quit { force } => self.quit(force),
             Command::Write { force, quit } => self.write_file(force, quit),
             Command::Discard => self.discard_changes(),
+            Command::Format => self.format_file(),
             Command::Find { kind, query } => self.open_finder(kind, query),
             Command::Reload | Command::Set(_) => {}
         }
@@ -3371,6 +3380,84 @@ mod tests {
             panic!("the tabs");
         };
         assert!(note.unwrap().starts_with("a.rs  3:2"));
+    }
+
+    #[test]
+    fn format_formats_and_formatonsave_formats_before_writing() {
+        use clackatoo_protocol::{Answer, BufferUpdate, Query};
+        let mut desk = editing("/p/a.rs", "one\n");
+        // The query formatting asks, and none else is sent.
+        let format_asked = |desk: &mut Desk| {
+            let messages = desk.take_outbox();
+            let saves = (messages.iter())
+                .filter(|message| matches!(message, ClientMessage::Request(Request::Save { .. })))
+                .count();
+            let id = (messages.into_iter()).find_map(|message| match message {
+                ClientMessage::Query {
+                    id,
+                    query: Query::Format { tab_size, spaces },
+                    ..
+                } => {
+                    assert_eq!((tab_size, spaces), (4, true), "as >> indents");
+                    Some(id)
+                }
+                _ => None,
+            });
+            (id.expect("formatting asked"), saves)
+        };
+        let answer = |desk: &mut Desk, id, answer| {
+            desk.buffer_changed(
+                BufferId(7),
+                BufferUpdate::Answer {
+                    id,
+                    version: 0,
+                    answer,
+                },
+            )
+        };
+        let note = |desk: &Desk| match desk.status() {
+            Status::Tabs { note, .. } => note.unwrap_or_default(),
+            Status::Typing { .. } => panic!("the tabs"),
+        };
+        command(&mut desk, "Format");
+        let (id, saves) = format_asked(&mut desk);
+        assert_eq!(saves, 0);
+        assert!(answer(&mut desk, id, Answer::Formatted { changed: true }));
+        assert_eq!(note(&desk), "formatted");
+
+        // With formatonsave, :w formats, then writes once it's answered,
+        // whatever the answer.
+        command(&mut desk, "set fos");
+        command(&mut desk, "w");
+        let (id, saves) = format_asked(&mut desk);
+        assert_eq!(saves, 0, "not yet");
+        answer(
+            &mut desk,
+            id,
+            Answer::Failed("its language server doesn't format files".into()),
+        );
+        assert!(matches!(
+            answer_all(&mut desk)[..],
+            [Request::Save { force: false, .. }]
+        ));
+        // A file being formatted isn't asked again: a :w then writes it
+        // once the answer comes.
+        command(&mut desk, "Format");
+        let (id, _) = format_asked(&mut desk);
+        command(&mut desk, "w");
+        assert!(desk.take_outbox().is_empty(), "not asked twice");
+        answer(&mut desk, id, Answer::Formatted { changed: true });
+        assert!(matches!(answer_all(&mut desk)[..], [Request::Save { .. }]));
+
+        // Or after a moment, if the server is slow.
+        command(&mut desk, "w");
+        format_asked(&mut desk);
+        assert!(desk.format_at().is_some(), "the window wakes for it");
+        assert!(!desk.format_if_due(std::time::Instant::now()));
+        assert!(desk.format_if_due(std::time::Instant::now() + std::time::Duration::from_secs(4)));
+        assert!(matches!(answer_all(&mut desk)[..], [Request::Save { .. }]));
+        assert!(note(&desk).ends_with("written, not formatted: its language server took too long"));
+        assert!(desk.format_at().is_none());
     }
 
     #[test]

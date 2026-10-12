@@ -424,6 +424,51 @@ impl Daemon {
         }
     }
 
+    /// Makes the edits server `server` answered with, `value`, when asked
+    /// to format buffer `id` at version `version`, when its text was
+    /// `text`, as one edit by the user. They're counted in that text, and
+    /// moved along with edits made since, as a rename's are; if text they
+    /// replace has changed meanwhile, none are made.
+    pub(super) fn formatted(
+        &mut self,
+        server: ServerId,
+        (id, version, text): (BufferId, u64, &Rope),
+        value: &Value,
+    ) -> Answer {
+        let Some(encoding) = self.server_encoding(server) else {
+            return Answer::Failed("its language server has stopped".into());
+        };
+        let edits = match lsp::text_edits(value) {
+            Ok(edits) => edits,
+            Err(why) => return Answer::Failed(why),
+        };
+        let replaces: Vec<Replace> = (replaces(text, &edits, encoding).into_iter())
+            .map(|replace| trimmed(&replace))
+            .filter(|replace| replace.removed != replace.inserted)
+            .collect();
+        if replaces.is_empty() {
+            return Answer::Formatted { changed: false };
+        }
+        let plan = BufferPlan {
+            id,
+            base: version,
+            replaces,
+        };
+        let edit = match self.moved(&plan) {
+            Ok(edit) => edit,
+            Err(why) => return Answer::Failed(why),
+        };
+        let Some(slot) = self.buffers.get_mut(&id) else {
+            return Answer::Nothing;
+        };
+        let base = slot.buffer.version();
+        match slot.buffer.edit(edit, base, true, Author::User) {
+            Ok(made) => self.made_for_user(id, made),
+            Err(err) => return Answer::Failed(format!("formatting couldn't be made: {err}")),
+        }
+        Answer::Formatted { changed: true }
+    }
+
     /// The buffer open for the file at `path`, if there's one.
     fn buffer_of(&self, path: &Path) -> Option<BufferId> {
         (self.buffers.iter())
@@ -625,6 +670,29 @@ fn replaces(text: &Rope, edits: &[TextEdit], encoding: Encoding) -> Vec<Replace>
     replaces
 }
 
+/// `replace` without what it removes and puts back alike at its start and
+/// end: formatting often replaces a whole line, or file, to change a few
+/// characters, and a place that isn't replaced doesn't move.
+fn trimmed(replace: &Replace) -> Replace {
+    let alike = |removed: &mut dyn Iterator<Item = char>,
+                 inserted: &mut dyn Iterator<Item = char>| {
+        removed
+            .zip(inserted)
+            .take_while(|(removed, inserted)| removed == inserted)
+            .map(|(removed, _)| removed.len_utf8())
+            .sum::<usize>()
+    };
+    let front = alike(&mut replace.removed.chars(), &mut replace.inserted.chars());
+    let (removed, inserted) = (&replace.removed[front..], &replace.inserted[front..]);
+    let back = alike(&mut removed.chars().rev(), &mut inserted.chars().rev());
+    Replace {
+        start: replace.start + front,
+        end: replace.end - back,
+        removed: removed[..removed.len() - back].to_owned(),
+        inserted: inserted[..inserted.len() - back].to_owned(),
+    }
+}
+
 /// `replaces`, in order, as one edit to `text`. Edits that overlap make
 /// no sense.
 fn edit_of(text: &Rope, replaces: &[Replace]) -> Result<Edit, String> {
@@ -662,6 +730,29 @@ mod tests {
     fn made(text: &Rope, edits: &[TextEdit], encoding: Encoding) -> Result<String, String> {
         let edit = edit_of(text, &replaces(text, edits, encoding))?;
         Ok(edit.apply_to(&text.to_string()).unwrap())
+    }
+
+    #[test]
+    fn a_replacement_is_trimmed_to_what_changes() {
+        let replace = |start, removed: &str, inserted: &str| Replace {
+            start,
+            end: start + removed.len(),
+            removed: removed.into(),
+            inserted: inserted.into(),
+        };
+        // A whole line replaced to put in a space keeps what's either side.
+        let trimmed = trimmed(&replace(4, "fn é(){}", "fn é() {}"));
+        assert_eq!(
+            (
+                trimmed.start,
+                trimmed.end,
+                trimmed.removed.as_str(),
+                trimmed.inserted.as_str()
+            ),
+            (4 + "fn é()".len(), 4 + "fn é()".len(), "", " ")
+        );
+        let same = super::trimmed(&replace(0, "abc", "abc"));
+        assert_eq!((same.removed.as_str(), same.inserted.as_str()), ("", ""));
     }
 
     #[test]

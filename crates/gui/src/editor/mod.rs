@@ -1807,7 +1807,7 @@ impl Editor {
                 self.status = Some("the language server knows of nothing there".into());
             }
             Answer::Failed(why) => self.status = Some(why.clone()),
-            Answer::Hover { .. } | Answer::Renamed { .. } => {}
+            Answer::Hover { .. } | Answer::Renamed { .. } | Answer::Formatted { .. } => {}
         }
     }
 

@@ -305,6 +305,8 @@ options! {
     ignorecase("ic"): bool = true;
     /// ...unless, with `ignorecase`, what's searched for has a capital.
     smartcase("scs"): bool = true;
+    /// `:w` formats the file first, as its language server does.
+    formatonsave("fos"): bool = false;
     /// What's done when a file is opened in a language that isn't
     /// installed, or whose language server isn't.
     languageinstall("li"): LanguageInstall = LanguageInstall::Ask;

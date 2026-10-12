@@ -188,6 +188,16 @@ pub enum Query {
     References,
     /// What it is: its type, and its documentation, as `K` shows.
     Hover,
+    /// The whole file formatted, as `:Format` does, with tabs `tab_size`
+    /// columns wide, and indenting with spaces if `spaces`. The place is
+    /// ignored. The server's edits are made to the buffer, as the user's,
+    /// before the answer comes.
+    Format {
+        /// How many columns a tab is.
+        tab_size: u32,
+        /// Whether to indent with spaces rather than tabs.
+        spaces: bool,
+    },
 }
 
 /// What a language server answered.
@@ -215,6 +225,11 @@ pub enum Answer {
     /// Nothing: there's nothing there to ask about, or the server doesn't
     /// know.
     Nothing,
+    /// The file is formatted: its edits, if `changed`, have been made.
+    Formatted {
+        /// Whether formatting changed anything.
+        changed: bool,
+    },
     /// The buffer has no language server, or it failed, or what it said
     /// couldn't be done, as this says. A rename that fails changes
     /// nothing, unless a file it wrote couldn't then be put back as it

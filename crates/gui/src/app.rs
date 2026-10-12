@@ -1753,6 +1753,9 @@ impl ApplicationHandler<SessionEvent> for App {
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if let StartCause::ResumeTimeReached { .. } = cause {
+            if self.desk.format_if_due(Instant::now()) {
+                self.send_outbox();
+            }
             self.request_redraw();
         }
     }
@@ -1769,6 +1772,7 @@ impl ApplicationHandler<SessionEvent> for App {
         let soonest = (counting.into_iter())
             .chain(self.desk.flash_ends())
             .chain(self.desk.grep_at())
+            .chain(self.desk.format_at())
             .min();
         let flow = match soonest {
             Some(wake) => ControlFlow::WaitUntil(wake),

@@ -94,6 +94,14 @@ struct Again {
 }
 
 impl Servers {
+    /// Whether buffer `buffer` is being formatted.
+    fn formatting(&self, buffer: BufferId) -> bool {
+        let format = |ask: &Ask| matches!(ask, Ask::Query(Query::Format { .. }));
+        (self.asked.iter()).any(|asked| {
+            asked.buffer == buffer && matches!(asked.what, Asking::Query(Query::Format { .. }))
+        }) || (self.again.iter()).any(|(_, again)| again.buffer == buffer && format(&again.ask))
+    }
+
     /// Forgets how often servers whose program is `program` have been
     /// started, as it's just been installed.
     pub(super) fn forget_starts(&mut self, program: &str) {
@@ -616,6 +624,10 @@ impl Daemon {
         let Some(opened) = &slot.server else {
             return self.tell(token, buffer, failed("this file has no language server"));
         };
+        // Two answers counted in one text would make the edits twice.
+        if matches!(ask, Ask::Query(Query::Format { .. })) && self.servers.formatting(buffer) {
+            return self.tell(token, buffer, failed("it's being formatted already"));
+        }
         let server = opened.server;
         let Some(running) = self.servers.slots.get_mut(&server) else {
             return self.tell(token, buffer, failed("its language server has stopped"));
@@ -628,8 +640,10 @@ impl Daemon {
             );
         }
         let cant = match &ask {
-            Ask::Query(query) => (!running.server.answers(*query))
-                .then_some("its language server doesn't say what things are"),
+            Ask::Query(query) => (!running.server.answers(*query)).then_some(match query {
+                Query::Format { .. } => "its language server doesn't format files",
+                _ => "its language server doesn't say what things are",
+            }),
             Ask::Rename(_) => {
                 (!running.server.renames()).then_some("its language server can't rename")
             }
@@ -723,6 +737,39 @@ impl Daemon {
         self.servers.again.push((Instant::now() + *wait, again));
     }
 
+    /// Forgets formatting buffer `id` asked for but not yet made, as it's
+    /// being written as it is: edits made after would leave it changed
+    /// again, unseen. Whoever asked is told.
+    pub(super) fn forget_formats(&mut self, id: BufferId) {
+        let mut told = Vec::new();
+        self.servers.asked.retain(|asked| {
+            let format = matches!(asked.what, Asking::Query(Query::Format { .. }));
+            if asked.buffer == id && format {
+                told.push((asked.token, asked.id));
+            }
+            !(asked.buffer == id && format)
+        });
+        self.servers.again.retain(|(_, again)| {
+            let format = matches!(again.ask, Ask::Query(Query::Format { .. }));
+            if again.buffer == id && format {
+                told.push((again.token, again.place.0));
+            }
+            !(again.buffer == id && format)
+        });
+        let Some(slot) = self.buffers.get(&id) else {
+            return;
+        };
+        let version = slot.buffer.version();
+        for (token, query) in told {
+            let update = BufferUpdate::Answer {
+                id: query,
+                version,
+                answer: Answer::Failed("it was written before it was formatted".into()),
+            };
+            self.tell(token, id, update);
+        }
+    }
+
     /// Passes on the answer to the request numbered `request` to server
     /// `server`, to the client that asked, if it still follows the buffer.
     fn answered(&mut self, server: ServerId, request: u64, result: Result<Value, String>) {
@@ -745,6 +792,9 @@ impl Daemon {
                     text: cut(text, MAX_HOVER),
                     markdown,
                 })
+            }
+            (Ok(value), Asking::Query(Query::Format { .. })) => {
+                self.formatted(server, (asked.buffer, asked.version, &asked.text), &value)
             }
             (Ok(value), Asking::Rename { before, .. }) => {
                 let client = (asked.token, asked.buffer, asked.id);

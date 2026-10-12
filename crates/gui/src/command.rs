@@ -45,6 +45,9 @@ pub(crate) enum Command {
     /// `:e!`: throw away the focused pane's file's changes that aren't
     /// saved.
     Discard,
+    /// `:Format`: format the focused pane's file, as its language server
+    /// does.
+    Format,
     /// Run the config again, from the start.
     Reload,
     /// `:set`: change options, or say what they are, as these words say.
@@ -88,7 +91,7 @@ const FINDERS: [(&str, finder::Kind); 4] = [
 ];
 
 /// The window's own commands, for messages.
-const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, w, q, e, Files, Grep, Buffers and Diagnostics";
+const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, w, q, e, Format, Files, Grep, Buffers and Diagnostics";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -185,6 +188,7 @@ fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
         "wq" | "x" => write(false, true),
         "wq!" | "x!" => write(true, true),
         "e!" | "edit!" => Some(Ok(Command::Discard)),
+        "Format" => Some(Ok(Command::Format)),
         "e" | "edit" => Some(
             argument
                 .map(|path| Command::Edit {

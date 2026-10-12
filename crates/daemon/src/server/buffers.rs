@@ -180,6 +180,7 @@ impl Daemon {
 
     /// Answers [`Request::Save`](clackatoo_protocol::Request::Save).
     pub(super) fn save_buffer(&mut self, id: BufferId, force: bool) -> Result<Response, Error> {
+        self.forget_formats(id);
         let slot = self.buffers.get_mut(&id).ok_or(Error::NoSuchBuffer(id))?;
         if let Some(modified) = slot.buffer.save(force)? {
             self.tell_viewers(id, None, &BufferUpdate::Modified(modified));
