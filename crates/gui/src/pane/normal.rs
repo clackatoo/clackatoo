@@ -260,6 +260,7 @@ impl Pane {
         self.request(
             Request::Search {
                 terminal: self.terminal,
+                exact: self.case.exact(&query),
                 query,
                 from: position(cursor.at),
                 backward: backward != reverse,

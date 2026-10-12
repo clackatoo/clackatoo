@@ -590,6 +590,58 @@ mod tests {
     }
 
     #[test]
+    fn a_list_is_set_with_a_string_a_table_or_a_number() {
+        use crate::options::find;
+        let (mut lua, mut said) = start(
+            r#"
+            client.opt.cc = "80,120"
+            client.opt.colorcolumn = { client.opt.cc[2], 100 }
+            client.opt.cc = 72
+            client.opt.cc = ""
+            client.keys.map("n", "k", function()
+                client.opt.ts = #client.opt.cc
+            end)
+            "#,
+        );
+        assert!(matches!(said.pop(), Some(FromLua::Map { .. })));
+        let set = |name, value| FromLua::Set {
+            option: find(name).unwrap(),
+            value,
+        };
+        assert_eq!(
+            said,
+            [
+                set("colorcolumn", Value::List(vec![80, 120])),
+                set("colorcolumn", Value::List(vec![120, 100])),
+                set("colorcolumn", Value::List(vec![72])),
+                set("colorcolumn", Value::List(Vec::new())),
+            ]
+        );
+        lua.send(ToLua::Option {
+            option: find("cc").unwrap(),
+            value: Value::List(vec![1, 2, 3]),
+        });
+        assert_eq!(bound(&mut lua, 1, 1).1, [set("tabstop", Value::Number(3))]);
+        let list = "colorcolumn is whole numbers from 1 to 9999, with commas between them";
+        for (config, wanted) in [
+            ("client.opt.cc = '80,x'", list),
+            ("client.opt.cc = {80, 2.5}", list),
+            ("client.opt.cc = 0", list),
+            ("client.opt.cc = true", list),
+            (
+                "client.opt.ts = '4'",
+                "tabstop is a whole number from 1 to 32",
+            ),
+        ] {
+            let (_, said) = start(config);
+            assert!(
+                matches!(&said[..], [FromLua::Error(err)] if err.starts_with(&format!("init.lua:1: {wanted}"))),
+                "{config}: {said:?}"
+            );
+        }
+    }
+
+    #[test]
     fn handles_read_the_world_and_mistakes_are_reported() {
         let (mut lua, said) = start(
             r#"

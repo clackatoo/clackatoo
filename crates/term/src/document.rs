@@ -106,14 +106,19 @@ impl Terminal {
 
     /// The next place `query` appears after `from`, or before it if
     /// `backward`, wrapping around the document's ends. Case is ignored
-    /// unless the query has a capital letter. Matches don't cross lines.
+    /// unless `exact`. Matches don't cross lines.
     #[must_use]
-    pub fn search(&self, query: &str, from: Position, backward: bool) -> Option<Match> {
+    pub fn search(
+        &self,
+        query: &str,
+        from: Position,
+        backward: bool,
+        exact: bool,
+    ) -> Option<Match> {
         let query: Vec<char> = query.chars().collect();
         if query.is_empty() {
             return None;
         }
-        let exact = query.iter().any(|ch| ch.is_uppercase());
         let (first, last) = self.document_bounds();
         let from_line = from.line.clamp(first, last);
         let lines = last - first + 1;
@@ -233,7 +238,7 @@ mod tests {
     fn search_finds_forward_backward_and_wraps() {
         let t = terminal("cat\r\ndog cat\r\nbird\r\nCat");
         let found = |query, from, backward| {
-            t.search(query, from, backward)
+            t.search(query, from, backward, false)
                 .map(|m| (m.start.line, m.start.col, m.cells))
         };
         assert_eq!(found("cat", at(0, 0), false), Some((1, 4, 3)));
@@ -242,15 +247,19 @@ mod tests {
         assert_eq!(found("cat", at(3, 0), false), Some((0, 0, 3)));
         assert_eq!(found("cat", at(1, 4), true), Some((0, 0, 3)));
         assert_eq!(found("cat", at(0, 0), true), Some((3, 0, 3)));
-        // A capital letter makes the search exact.
-        assert_eq!(found("Cat", at(0, 0), false), Some((3, 0, 3)));
+        assert_eq!(found("CAT", at(1, 4), false), Some((3, 0, 3)));
         assert_eq!(found("fish", at(0, 0), false), None);
+        // An exact search matches case.
+        let exact = |query| t.search(query, at(0, 0), false, true).map(|m| m.start.line);
+        assert_eq!(exact("Cat"), Some(3));
+        assert_eq!(exact("cat"), Some(1));
+        assert_eq!(exact("CAT"), None);
     }
 
     #[test]
     fn matches_count_wide_characters_as_two_cells() {
         let t = terminal("a字b");
-        let found = t.search("字b", at(0, 0), false).unwrap();
+        let found = t.search("字b", at(0, 0), false, false).unwrap();
         assert_eq!((found.start.col, found.cells), (1, 3));
     }
 }

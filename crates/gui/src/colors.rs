@@ -208,6 +208,20 @@ impl Theme {
         }
     }
 
+    /// The colour of a highlight of `kind`: translucent, so the text's own
+    /// colours show through.
+    pub(crate) fn highlight(&self, kind: crate::render::HighlightKind) -> Rgba {
+        use crate::render::HighlightKind;
+        let faint = |[r, g, b, _]: Rgba, alpha: f32| [r, g, b, alpha];
+        match kind {
+            HighlightKind::Selection => faint(self.accent, 0.35),
+            HighlightKind::Match | HighlightKind::Copied => faint(self.accent, 0.6),
+            // Only just there: they say where things are, not what they are.
+            HighlightKind::CursorLine => white(0.035),
+            HighlightKind::ColorColumn => white(0.05),
+        }
+    }
+
     /// The colours for a cell in `style`.
     pub(crate) fn cell(&self, style: &Style) -> CellColors {
         let attributes = style.attributes;

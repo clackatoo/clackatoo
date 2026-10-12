@@ -70,7 +70,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -245,8 +245,7 @@ pub enum Request {
     },
     /// Searches the terminal's document for `query`, from just after
     /// `from` (or just before it, if `backward`), wrapping around the
-    /// ends. Case is ignored unless the query has a capital letter.
-    /// Answered with [`Response::Found`].
+    /// ends. Answered with [`Response::Found`].
     Search {
         /// The terminal.
         terminal: TerminalId,
@@ -256,6 +255,9 @@ pub enum Request {
         from: Position,
         /// Search towards the start of the document.
         backward: bool,
+        /// Match case exactly; otherwise case is ignored. The client
+        /// decides, by its options, such as Vim's `smartcase`.
+        exact: bool,
     },
     /// Finds the block (the prompt, command and output of one command,
     /// as the shell marked them) at the document's line `line`, or the one

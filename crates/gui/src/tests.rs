@@ -964,7 +964,11 @@ fn renders_an_editor_pane() {
         ],
     });
     let (cols, rows) = (32u16, 5u16);
-    let mut editor = Editor::new(BufferId(1), &crate::options::Options::default());
+    let options = crate::options::Options {
+        colorcolumn: vec![20],
+        ..crate::options::Options::default()
+    };
+    let mut editor = Editor::new(BufferId(1), &options);
     editor.resize(Size::new(cols, rows).unwrap());
     editor.settle(&copy);
     let (lines, cursor) = editor.scene();
@@ -1005,4 +1009,19 @@ fn renders_an_editor_pane() {
     assert_eq!(lines[3].text(), "~", "past the end");
     let background = &pixels[..4];
     assert!(pixels.chunks(4).any(|pixel| pixel != background));
+    // The middle of the cell at `line` and `col`.
+    let at = |line: u32, col: u32| {
+        let x = padding + col * fonts.cell.width + fonts.cell.width / 2;
+        let y = padding + line * fonts.cell.height + fonts.cell.height / 2;
+        let start = ((y * size[0] + x) * 4) as usize;
+        &pixels[start..start + 4]
+    };
+    // The cursor's line is lit across the pane, and column 20 down the
+    // file's lines, behind the text, but not past the end. Column 20 is
+    // the 20th cell right of the line numbers.
+    let column = 4 + 19;
+    assert_ne!(at(0, 25), background, "the cursor's line");
+    assert_ne!(at(2, column), background, "the column");
+    assert_eq!(at(2, column + 2), background);
+    assert_eq!(at(3, column), background, "no column past the end");
 }

@@ -58,6 +58,10 @@ pub(crate) enum Operator {
     Change,
     /// `y`: copy it.
     Yank,
+    /// `>`: indent its lines, whole, by `shiftwidth`.
+    Indent,
+    /// `<`: take as much off their indent.
+    Dedent,
 }
 
 /// What an operator acts on.
@@ -253,11 +257,13 @@ impl Reader<'_> {
     fn key(&mut self, ch: char, first: Option<usize>, visual: bool) -> Result<Action, Parsed> {
         let command = |count, action| Parsed::Command(Command { count, action });
         Ok(match ch {
-            'd' | 'c' | 'y' => {
+            'd' | 'c' | 'y' | '>' | '<' => {
                 let operator = match ch {
                     'd' => Operator::Delete,
                     'c' => Operator::Change,
-                    _ => Operator::Yank,
+                    'y' => Operator::Yank,
+                    '>' => Operator::Indent,
+                    _ => Operator::Dedent,
                 };
                 if visual {
                     return Err(command(first, Action::Operate(operator, Target::Selection)));
@@ -523,6 +529,17 @@ mod tests {
         assert_eq!(read("dz"), Parsed::Nothing);
         assert_eq!(read("dc"), Parsed::Nothing);
         assert_eq!(read("df"), Parsed::Incomplete);
+        let indent = |target| Action::Operate(Operator::Indent, target);
+        assert_eq!(read("3>>"), command(Some(3), indent(Target::Lines)));
+        assert_eq!(
+            read(">j"),
+            command(None, indent(Target::Motion(Motion::Down(1))))
+        );
+        assert_eq!(
+            read("<<"),
+            command(None, Action::Operate(Operator::Dedent, Target::Lines))
+        );
+        assert_eq!(read("><"), Parsed::Nothing);
     }
 
     #[test]
@@ -549,6 +566,13 @@ mod tests {
             command(None, Action::Operate(Operator::Delete, Target::Selection))
         );
         assert_eq!(visual("o"), command(None, Action::OtherEnd));
+        assert_eq!(
+            visual("2<"),
+            command(
+                Some(2),
+                Action::Operate(Operator::Dedent, Target::Selection)
+            )
+        );
         assert_eq!(visual("i"), Parsed::Incomplete);
         let word = Action::Select {
             object: Object::Word,

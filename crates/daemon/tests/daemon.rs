@@ -645,6 +645,7 @@ fn text_and_search_cover_history_and_screen() {
         query: "NEEDLE".to_lowercase(),
         from: at(0, 0),
         backward: false,
+        exact: true,
     });
     assert_eq!(
         found.unwrap(),

@@ -329,11 +329,12 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     let s = state.clone();
     core.set(
         "get_option",
-        lua.create_function(move |_, name: String| {
+        lua.create_function(move |lua, name: String| {
             let option = options::find(&name).map_err(mlua::Error::runtime)?;
             Ok(match s.options.borrow().get(option) {
                 options::Value::Bool(value) => Value::Boolean(value),
                 options::Value::Number(value) => Value::Integer(value.into()),
+                options::Value::List(numbers) => Value::Table(lua.create_sequence_from(numbers)?),
             })
         })?,
     )?;
@@ -342,23 +343,41 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
         "set_option",
         lua.create_function(move |_, (name, value): (String, Value)| {
             let option = options::find(&name).map_err(mlua::Error::runtime)?;
-            let value = match value {
-                Value::Boolean(value) => Some(options::Value::Bool(value)),
-                // Luau passes a whole number as an integer; anything else,
-                // such as 2.5, isn't one.
-                Value::Integer(value) => u32::try_from(value).ok().map(options::Value::Number),
-                _ => None,
-            };
-            let value = value.ok_or_else(|| mlua::Error::runtime(option.wants()))?;
+            let value = option_value(option, &value).map_err(mlua::Error::runtime)?;
             s.options
                 .borrow_mut()
-                .set(option, value)
+                .set(option, value.clone())
                 .map_err(mlua::Error::runtime)?;
             s.tell(FromLua::Set { option, value });
             Ok(())
         })?,
     )?;
     Ok(())
+}
+
+/// `value`, from Lua, as a value for `option`: true or false, or a whole
+/// number. A list takes a table of numbers, a string as `:set` takes one
+/// (`"80,120"`), or one number alone.
+fn option_value(option: &options::Info, value: &Value) -> Result<options::Value, String> {
+    // Luau passes a whole number as an integer; anything else, such as
+    // 2.5, isn't one.
+    let number = |value: &Value| match value {
+        Value::Integer(value) => u32::try_from(*value).ok(),
+        _ => None,
+    };
+    let list = matches!(option.kind, options::Kind::List { .. });
+    let value = match value {
+        Value::Boolean(value) => Some(options::Value::Bool(*value)),
+        Value::Integer(_) if list => number(value).map(|number| options::Value::List(vec![number])),
+        Value::Integer(_) => number(value).map(options::Value::Number),
+        Value::String(text) if list => return option.parse(&text.to_string_lossy()),
+        Value::Table(table) if list => (table.sequence_values::<Value>())
+            .map(|value| value.ok().as_ref().and_then(number))
+            .collect::<Option<_>>()
+            .map(options::Value::List),
+        _ => None,
+    };
+    value.ok_or_else(|| option.wants())
 }
 
 /// `map`, `unmap`, `on` and `off`.

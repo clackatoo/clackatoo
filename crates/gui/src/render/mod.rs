@@ -239,6 +239,18 @@ pub(crate) enum HighlightKind {
     Match,
     /// It was just copied.
     Copied,
+    /// It's the cursor's line (`cursorline`).
+    CursorLine,
+    /// It's a column marked down an editor (`colorcolumn`).
+    ColorColumn,
+}
+
+impl HighlightKind {
+    /// Whether it's drawn behind the text's own backgrounds and the
+    /// cursor, as a mark of where things are rather than of the text.
+    fn behind(self) -> bool {
+        matches!(self, Self::CursorLine | Self::ColorColumn)
+    }
 }
 
 /// Where the cursor is drawn, and how.
@@ -708,6 +720,7 @@ impl Renderer {
         let cols = (scene.size[0] / cell_width).round() as usize;
         let lines = (scene.size[1] / cell_height).round() as usize;
         let cursor = scene.cursor;
+        self.push_highlights(scene, true, [cols, lines], [cell_width, cell_height]);
         for (line, row) in scene.rows.iter().take(lines).enumerate() {
             let top = origin_y + line as f32 * cell_height;
             let baseline = top + cell.baseline;
@@ -771,16 +784,24 @@ impl Renderer {
                 }
             }
         }
+        self.push_highlights(scene, false, [cols, lines], [cell_width, cell_height]);
+    }
+
+    /// Adds a pane's highlights drawn `behind` its cells, or those over
+    /// them, in a pane `cols` by `lines` of cells `cell` pixels in size.
+    #[allow(clippy::cast_precision_loss)]
+    fn push_highlights(
+        &mut self,
+        scene: &Scene<'_>,
+        behind: bool,
+        [cols, lines]: [usize; 2],
+        [cell_width, cell_height]: [f32; 2],
+    ) {
+        let [origin_x, origin_y] = scene.origin;
         for highlight in scene.highlights {
-            if highlight.line >= lines {
+            if highlight.line >= lines || highlight.kind.behind() != behind {
                 continue;
             }
-            let [r, g, b, _] = self.theme.accent;
-            // Translucent, so the text's own colours show through.
-            let alpha = match highlight.kind {
-                HighlightKind::Selection => 0.35,
-                HighlightKind::Match | HighlightKind::Copied => 0.6,
-            };
             let start = highlight.cols.start.min(cols);
             let end = highlight.cols.end.min(cols);
             self.rects.push(Rect::solid(
@@ -789,7 +810,7 @@ impl Renderer {
                     origin_y + highlight.line as f32 * cell_height,
                 ],
                 [(end - start) as f32 * cell_width, cell_height],
-                [r, g, b, alpha],
+                self.theme.highlight(highlight.kind),
             ));
         }
     }

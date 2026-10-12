@@ -4,8 +4,8 @@
 //!
 //! Lines end at `\n` only, as Vim's do, and the line break that ends the
 //! last line isn't the start of another. A tab takes the cells to the next
-//! multiple of [`TAB`], drawn blank; a control character is drawn as `^`
-//! and a letter, as Vim draws it.
+//! multiple of the tab stop (the `tabstop` option), drawn blank; a control
+//! character is drawn as `^` and a letter, as Vim draws it.
 
 use std::cell::RefCell;
 use std::ops::Deref;
@@ -17,8 +17,11 @@ use clackatoo_text::{Rope, Span};
 use crate::colors;
 use crate::motion::{Lines, Point};
 
-/// Columns a tab stops at a multiple of.
-pub(crate) const TAB: usize = 4;
+/// The column after a tab that starts at column `col`, with tabs stopping
+/// at multiples of `tabstop`.
+pub(crate) fn tab_end(col: usize, tabstop: usize) -> usize {
+    (col / tabstop + 1) * tabstop
+}
 
 /// One line, laid out in cells.
 #[derive(Debug)]
@@ -34,15 +37,21 @@ pub(crate) struct Laid {
 }
 
 impl Laid {
-    pub(crate) fn new(text: String) -> Self {
+    /// Lays out `text`, with tabs stopping at multiples of `tabstop`.
+    pub(crate) fn new(text: String, tabstop: usize) -> Self {
         let room = (text.chars())
-            .map(|ch| if ch == '\t' { TAB } else { 2 })
+            .map(|ch| if ch == '\t' { tabstop } else { 2 })
             .sum();
         let mut builder = RowBuilder::new(room);
         let mut starts = Vec::new();
         for (byte, ch) in text.char_indices() {
             let before = builder.filled();
-            push(&mut builder, ch, before);
+            if ch == '\t' {
+                let blank = " ".repeat(tab_end(before, tabstop) - before);
+                builder.push(&blank, &Style::DEFAULT, true);
+            } else {
+                push(&mut builder, ch);
+            }
             if builder.filled() > before {
                 starts.push((before, byte));
             }
@@ -131,7 +140,7 @@ impl Laid {
             };
             match piece.chars().next() {
                 Some('\t') => builder.push(&" ".repeat(next_cell - cell), &Style::DEFAULT, true),
-                Some(ch) if ch.is_control() => push(builder, ch, cell),
+                Some(ch) if ch.is_control() => push(builder, ch),
                 _ => builder.push(piece, &style, false),
             }
         }
@@ -146,13 +155,9 @@ impl Deref for Laid {
     }
 }
 
-/// Lays `ch` out at cell `col`.
-fn push(builder: &mut RowBuilder, ch: char, col: usize) {
+/// Lays `ch`, which isn't a tab, out at the end of `builder`.
+fn push(builder: &mut RowBuilder, ch: char) {
     match ch {
-        '\t' => {
-            let next = (col / TAB + 1) * TAB;
-            builder.push(&" ".repeat(next - col), &Style::DEFAULT, true);
-        }
         '\0'..='\x1f' | '\x7f' => {
             let letter = char::from(u8::try_from(ch).unwrap_or(b'?') ^ 0x40);
             builder.push(&format!("^{letter}"), &Style::DEFAULT, true);
@@ -181,6 +186,8 @@ impl Deref for LaidRow {
 /// times.
 pub(crate) struct Text<'a> {
     rope: &'a Rope,
+    /// The columns tabs stop at multiples of.
+    tabstop: usize,
     kept: RefCell<Vec<(u64, Rc<Laid>)>>,
 }
 
@@ -188,9 +195,11 @@ pub(crate) struct Text<'a> {
 const KEPT: usize = 4;
 
 impl<'a> Text<'a> {
-    pub(crate) fn new(rope: &'a Rope) -> Self {
+    /// `rope`, with tabs stopping at multiples of `tabstop`.
+    pub(crate) fn new(rope: &'a Rope, tabstop: usize) -> Self {
         Self {
             rope,
+            tabstop: tabstop.max(1),
             kept: RefCell::new(Vec::new()),
         }
     }
@@ -220,7 +229,7 @@ impl<'a> Text<'a> {
         if let Some((_, laid)) = kept.iter().find(|(kept, _)| *kept == line) {
             return Some(Rc::clone(laid));
         }
-        let laid = Rc::new(Laid::new(self.line_text(line)));
+        let laid = Rc::new(Laid::new(self.line_text(line), self.tabstop));
         if kept.len() == KEPT {
             kept.remove(0);
         }
@@ -318,27 +327,39 @@ mod tests {
     fn lines_end_at_line_breaks_and_the_last_break_ends_the_last_line() {
         for (text, lines) in [("", 1), ("a", 1), ("a\n", 1), ("a\nb", 2), ("a\n\n", 2)] {
             let rope = Rope::from_str(text);
-            assert_eq!(Text::new(&rope).lines(), lines, "{text:?}");
+            assert_eq!(Text::new(&rope, 4).lines(), lines, "{text:?}");
         }
         let rope = Rope::from_str("one\ntwo\n");
-        let text = Text::new(&rope);
+        let text = Text::new(&rope, 4);
         assert_eq!(text.line_text(1), "two");
         assert_eq!((text.line_start(1), text.line_end(1)), (4, 7));
     }
 
     #[test]
     fn tabs_wide_characters_and_controls_take_their_cells() {
-        let laid = Laid::new("\tx字\x01é".to_owned());
-        assert_eq!(laid.cells(), TAB + 1 + 2 + 2 + 1);
+        let laid = Laid::new("\tx字\x01é".to_owned(), 4);
+        assert_eq!(laid.cells(), 4 + 1 + 2 + 2 + 1);
         // Every cell of the tab is the tab.
         assert_eq!((laid.byte_at(0), laid.byte_at(3)), (0, 0));
-        assert_eq!(laid.byte_at(TAB), 1);
+        assert_eq!(laid.byte_at(4), 1);
         assert_eq!((laid.byte_at(5), laid.byte_at(6)), (2, 2));
         assert_eq!(laid.byte_at(7), 5, "^A");
         assert_eq!(laid.col_of(6), 9, "é");
         assert_eq!(laid.col_of(99), laid.cells());
         assert_eq!(laid.char_end(2), 5);
         assert_eq!(laid.row.text().trim_start(), "x字^Aé");
+    }
+
+    #[test]
+    fn a_tab_goes_to_the_next_tab_stop() {
+        for (tabstop, cells) in [(4, [4, 4, 12]), (8, [8, 8, 16]), (3, [3, 3, 9])] {
+            // A tab at the start, after two characters, and after eight.
+            let starts = ["\t", "ab\t", "abcdefgh\t"];
+            let laid: Vec<usize> = (starts.iter())
+                .map(|text| Laid::new((*text).to_owned(), tabstop).cells())
+                .collect();
+            assert_eq!(laid, cells, "tabstop {tabstop}");
+        }
     }
 
     /// `laid` as drawn in a row of `width` cells of its own.
@@ -350,7 +371,7 @@ mod tests {
 
     #[test]
     fn a_line_is_drawn_from_any_column() {
-        let laid = Laid::new("ab字cd".to_owned());
+        let laid = Laid::new("ab字cd".to_owned(), 4);
         assert_eq!(shown(&laid, 0, 4, &[], 0).text(), "ab字");
         assert_eq!(shown(&laid, 1, 3, &[], 0).text(), "b字");
         // Half of 字 off the left edge.
@@ -361,7 +382,7 @@ mod tests {
     fn a_line_is_coloured_as_its_spans_say() {
         use clackatoo_text::Kind;
         // The line "fn x()" starts at byte 10 of its text.
-        let laid = Laid::new("fn x()".to_owned());
+        let laid = Laid::new("fn x()".to_owned(), 4);
         let spans = [
             Span {
                 start: 2,
@@ -391,12 +412,12 @@ mod tests {
     #[test]
     fn places_go_between_points_and_bytes() {
         let rope = Rope::from_str("a\tb\n字x\n");
-        let text = Text::new(&rope);
+        let text = Text::new(&rope, 4);
         let point = Point { line: 1, col: 2 };
         assert_eq!(text.byte_at(point), 7);
         assert_eq!(text.point_of(7), point);
         assert_eq!(text.char_end(Point { line: 1, col: 0 }), 7);
-        assert_eq!(text.point_of(2), Point { line: 0, col: TAB });
+        assert_eq!(text.point_of(2), Point { line: 0, col: 4 });
         // After the last line break: the line after, to type on.
         assert_eq!(text.point_of(9), Point { line: 2, col: 0 });
         assert_eq!(text.byte_at(Point { line: 2, col: 0 }), 9);

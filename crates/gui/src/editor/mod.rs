@@ -26,12 +26,12 @@ use winit::keyboard::{Key, NamedKey};
 
 pub(crate) use copy::{BufferCopy, Heard};
 use keys::{Action, Command, Entry, Operator, Parsed, Stroke, Target, ViewAt};
-use text::{Laid, TAB, Text};
+use text::{Laid, Text, tab_end};
 
 use crate::colors;
 use crate::input::KeyPress;
 use crate::motion::{Class, Cursor, Lines, Motion, Point, Reach, before, class_at};
-use crate::options::Options;
+use crate::options::{Case, Options};
 use crate::pane::{Mode, Selection, enters_normal_mode};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 
@@ -41,6 +41,14 @@ const FLASH: Duration = Duration::from_millis(150);
 /// The fewest cells left for the text beside the line numbers. A narrower
 /// pane shows no numbers.
 const LEAST_TEXT: usize = 12;
+
+/// How many lines either side of those indented are looked at to see
+/// whether the file is indented with tabs.
+const NEARBY: u64 = 100;
+
+/// The deepest `>` indents a line, in columns: far deeper than any code,
+/// but short of a count such as `100000000>` asking for gigabytes.
+const MAX_INDENT: usize = 1000;
 
 /// Text kept to put back with `p`: what was last copied or deleted, by
 /// characters, or whole lines.
@@ -108,6 +116,71 @@ impl Numbers {
     }
 }
 
+/// How an editor indents, as the options say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Indent {
+    /// The columns tabs stop at multiples of (`tabstop`).
+    tabstop: usize,
+    /// The columns `>>`, `<<` and Tab indent by (`shiftwidth`, or
+    /// `tabstop` for 0).
+    step: usize,
+    /// A line not indented yet is indented with spaces (`expandtab`).
+    spaces: bool,
+}
+
+impl Indent {
+    fn of(options: &Options) -> Self {
+        let tabstop = options.tabstop as usize;
+        Self {
+            tabstop,
+            step: match options.shiftwidth {
+                0 => tabstop,
+                shiftwidth => shiftwidth as usize,
+            },
+            spaces: options.expandtab,
+        }
+    }
+
+    /// Whether lines `first` to `last` of `text` are indented with tabs:
+    /// as the first of them that's indented is, or else the nearest
+    /// indented line around them. So a file stays as it's indented,
+    /// whatever `expandtab` says, which decides only where no line nearby
+    /// is indented.
+    fn tabs_near(self, text: &Text<'_>, first: u64, last: u64) -> bool {
+        let indented = |line| {
+            let line_text = text.line_text(line);
+            let indent = indent_of(&line_text);
+            (!indent.is_empty()).then(|| indent.contains('\t'))
+        };
+        let last = last.min(text.last_line());
+        let above = (first.saturating_sub(NEARBY)..first).rev();
+        let below = last + 1..=(last + NEARBY).min(text.last_line());
+        ((first..=last).chain(above).chain(below))
+            .find_map(indented)
+            .unwrap_or(!self.spaces)
+    }
+
+    /// The columns `blanks`, the start of a line, reach.
+    fn width(self, blanks: &str) -> usize {
+        blanks.chars().fold(0, |col, ch| match ch {
+            '\t' => tab_end(col, self.tabstop),
+            _ => col + 1,
+        })
+    }
+
+    /// An indent reaching `width` columns: as many tabs as fit and spaces
+    /// for the rest, if `tabs`, or all spaces.
+    fn blanks(self, width: usize, tabs: bool) -> String {
+        if tabs {
+            let mut blanks = "\t".repeat(width / self.tabstop);
+            blanks.push_str(&" ".repeat(width % self.tabstop));
+            blanks
+        } else {
+            " ".repeat(width)
+        }
+    }
+}
+
 /// A pane editing a buffer.
 #[derive(Debug)]
 pub(crate) struct Editor {
@@ -125,6 +198,19 @@ pub(crate) struct Editor {
     numbers: Numbers,
     /// The cells the line numbers take, at the pane's left, out of `width`.
     gutter: usize,
+    /// How lines are indented, and tabs drawn.
+    indent: Indent,
+    /// The fewest lines kept in view above and below the cursor
+    /// (`scrolloff`).
+    scrolloff: usize,
+    /// The cursor's line is lit (`cursorline`).
+    cursorline: bool,
+    /// The columns marked down the pane, counting from 0 (`colorcolumn`).
+    columns: Vec<usize>,
+    /// How searches treat case.
+    case: Case,
+    /// How many of the rows shown are the file's lines, not past its end.
+    filled: usize,
     /// The keys of a command being typed in normal or visual mode.
     typed: Vec<Stroke>,
     /// Whether the next edit starts an undo step: it's the first of a
@@ -168,6 +254,12 @@ impl Editor {
             width: 1,
             numbers: Numbers::of(options),
             gutter: 0,
+            indent: Indent::of(options),
+            scrolloff: options.scrolloff as usize,
+            cursorline: options.cursorline,
+            columns: columns(options),
+            case: Case::of(options),
+            filled: 0,
             typed: Vec::new(),
             new_step: true,
             changing: None,
@@ -204,8 +296,33 @@ impl Editor {
 
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options, copy: &BufferCopy) {
+        let indent = Indent::of(options);
+        if indent.tabstop != self.indent.tabstop {
+            // A column is a cell, and tabs take more or fewer of them now:
+            // the cursor, the selection and the match found stay on their
+            // characters.
+            let text = self.text(copy);
+            let found = (self.found).map(|(start, last)| (text.byte_at(start), text.byte_at(last)));
+            drop(text);
+            self.hold(copy);
+            self.indent = indent;
+            self.place_held(copy);
+            let text = self.text(copy);
+            self.found = found.map(|(start, last)| (text.point_of(start), text.point_of(last)));
+            self.flash = None;
+        }
+        self.indent = indent;
         self.numbers = Numbers::of(options);
+        self.scrolloff = options.scrolloff as usize;
+        self.cursorline = options.cursorline;
+        self.columns = columns(options);
+        self.case = Case::of(options);
         self.follow(copy);
+    }
+
+    /// The buffer's text, laid out as the options say.
+    fn text<'c>(&self, copy: &'c BufferCopy) -> Text<'c> {
+        Text::new(copy.text(), self.indent.tabstop)
     }
 
     /// Enters normal mode, as moving the focus here from a pane in normal
@@ -326,8 +443,10 @@ impl Editor {
         };
         let changes = matches!(
             command.action,
-            Action::Operate(Operator::Delete | Operator::Change, _)
-                | Action::DeleteChars { .. }
+            Action::Operate(
+                Operator::Delete | Operator::Change | Operator::Indent | Operator::Dedent,
+                _
+            ) | Action::DeleteChars { .. }
                 | Action::DeleteToEnd { .. }
                 | Action::Substitute
                 | Action::Put { .. }
@@ -350,7 +469,7 @@ impl Editor {
                 self.cursor = self.moved(copy, motion, times);
             }
             Action::GoToLine => {
-                let text = Text::new(copy.text());
+                let text = self.text(copy);
                 let line = (times as u64).saturating_sub(1).min(text.last_line());
                 self.cursor = Cursor::new(Point { line, col: 0 });
                 self.cursor.apply(Motion::FirstNonBlank, &text);
@@ -399,7 +518,7 @@ impl Editor {
                 }
             }
             Action::Select { object, inner } => {
-                let text = Text::new(copy.text());
+                let text = self.text(copy);
                 if let Some((start, last)) = object.find(&text, self.cursor.at, inner) {
                     self.mode = Mode::Visual(Selection::Characters);
                     self.anchor = Some(start);
@@ -457,7 +576,7 @@ impl Editor {
 
     /// The cursor moved by `motion`, `times` times.
     fn moved(&self, copy: &BufferCopy, motion: Motion, times: usize) -> Cursor {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let mut cursor = self.cursor;
         match motion {
             Motion::Up(_) => cursor.apply(Motion::Up(times as u64), &text),
@@ -486,9 +605,10 @@ impl Editor {
 
     // --- Operators ----------------------------------------------------------
 
-    /// Makes `operator` act on `target`, keeping the text in the register.
-    /// Returns text copied, for the clipboard: what's deleted goes only to
-    /// the register, so deleting doesn't lose what was copied elsewhere.
+    /// Makes `operator` act on `target`, keeping the text in the register,
+    /// unless it indents. Returns text copied, for the clipboard: what's
+    /// deleted goes only to the register, so deleting doesn't lose what
+    /// was copied elsewhere.
     fn operate(
         &mut self,
         operator: Operator,
@@ -498,7 +618,17 @@ impl Editor {
         register: &mut Register,
     ) -> Option<String> {
         let span = self.span(operator, target, times, copy)?;
-        let mut taken = Text::new(copy.text()).slice(span.start, span.end);
+        if let Operator::Indent | Operator::Dedent = operator {
+            // A count is how many lines, or for a selection, how many steps.
+            let steps = if target == Target::Selection {
+                times
+            } else {
+                1
+            };
+            self.shift(span, steps, operator == Operator::Dedent, copy);
+            return None;
+        }
+        let mut taken = self.text(copy).slice(span.start, span.end);
         if span.lines.is_some() && !taken.ends_with('\n') {
             taken.push('\n');
         }
@@ -513,14 +643,77 @@ impl Editor {
             }
             Operator::Delete => self.delete_span(span, copy),
             Operator::Change => self.change_span(span, copy),
+            Operator::Indent | Operator::Dedent => {}
         }
         None
+    }
+
+    /// `>` and `<`: indents the lines `span` is on by `steps` of
+    /// `shiftwidth`, or takes as much off their indent if `out`, as one
+    /// edit. Each indent is written afresh, with tabs or spaces as the line
+    /// has them. Empty lines stay empty.
+    ///
+    /// The cursor goes to the first line's first character that isn't
+    /// blank; a selection stays, on the same characters, so `>` can be
+    /// pressed again.
+    fn shift(&mut self, span: Span, steps: usize, out: bool, copy: &mut BufferCopy) {
+        let text = self.text(copy);
+        let (first, last) = span.lines.unwrap_or_else(|| {
+            let last = span.end.saturating_sub(1).max(span.start);
+            (text.point_of(span.start).line, text.point_of(last).line)
+        });
+        let by = self.indent.step.saturating_mul(steps);
+        let tabs = self.indent.tabs_near(&text, first, last);
+        let mut edit = Edit::new();
+        // How far through the text the edit has gone.
+        let mut through = 0;
+        for line in first..=last.min(text.last_line()) {
+            let line_text = text.line_text(line);
+            if line_text.is_empty() {
+                continue;
+            }
+            let old = indent_of(&line_text);
+            let width = self.indent.width(old);
+            let width = if out {
+                width.saturating_sub(by)
+            } else {
+                width.saturating_add(by).min(MAX_INDENT)
+            };
+            let new = self.indent.blanks(width, tabs);
+            // Only what differs changes, so marks in the rest stay put.
+            let same = (old.bytes().zip(new.bytes()))
+                .take_while(|(a, b)| a == b)
+                .count();
+            let start = text.line_start(line);
+            edit.retain(start + same - through)
+                .delete(&old[same..])
+                .insert(&new[same..]);
+            through = start + old.len();
+        }
+        let len = text.rope().len_bytes();
+        edit.retain(len - through);
+        // Where the selection's ends go, keeping to their characters.
+        let anchor = (self.anchor).map(|anchor| edit.map(text.byte_at(anchor), Bias::After));
+        let cursor = edit.map(text.byte_at(self.cursor.at), Bias::After);
+        drop(text);
+        self.make(edit, copy);
+        let text = self.text(copy);
+        if let Some(anchor) = anchor {
+            self.anchor = Some(text.point_of(anchor));
+            self.cursor = Cursor::new(text.point_of(cursor));
+        } else {
+            self.cursor = Cursor::new(Point {
+                line: first,
+                col: 0,
+            });
+            self.cursor.apply(Motion::FirstNonBlank, &text);
+        }
     }
 
     /// Highlights `span`, just copied, and moves the cursor to its start
     /// if that's before it.
     fn yanked(&mut self, span: Span, copy: &BufferCopy) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let (start, last, kind) = match span.lines {
             Some((first, last)) => (
                 Point {
@@ -548,7 +741,7 @@ impl Editor {
     }
 
     fn delete_span(&mut self, span: Span, copy: &mut BufferCopy) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let len = text.rope().len_bytes();
         // Whole lines at the end take the line break before them.
         let last_lines = span.lines.is_some()
@@ -563,7 +756,7 @@ impl Editor {
         let edit = Edit::replace(len, start, &text.slice(start, span.end), "");
         drop(text);
         self.make(edit, copy);
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         match span.lines {
             Some((first, _)) => {
                 self.cursor = Cursor::new(Point {
@@ -578,7 +771,7 @@ impl Editor {
     }
 
     fn change_span(&mut self, span: Span, copy: &mut BufferCopy) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let (start, end) = match span.lines {
             // Lines keep the first's indent, and one line break.
             Some((first, last)) => {
@@ -591,7 +784,7 @@ impl Editor {
         let edit = Edit::replace(text.rope().len_bytes(), start, &text.slice(start, end), "");
         drop(text);
         self.make(edit, copy);
-        self.cursor = Cursor::new(Text::new(copy.text()).point_of(start));
+        self.cursor = Cursor::new(self.text(copy).point_of(start));
         self.anchor = None;
         self.enter_insert(1);
     }
@@ -604,7 +797,7 @@ impl Editor {
         times: usize,
         copy: &BufferCopy,
     ) -> Option<Span> {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let at = self.cursor.at;
         let lines = |first: u64, last: u64| Span {
             start: text.line_start(first),
@@ -712,7 +905,7 @@ impl Editor {
         copy: &mut BufferCopy,
         register: &mut Register,
     ) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let at = self.cursor.at;
         let Some(laid) = text.laid(at.line) else {
             return;
@@ -749,7 +942,7 @@ impl Editor {
             lines: false,
         };
         self.make(edit, copy);
-        self.cursor = Cursor::new(Text::new(copy.text()).point_of(line_start + start));
+        self.cursor = Cursor::new(self.text(copy).point_of(line_start + start));
     }
 
     /// `D`, or `C` if `change`: from the cursor to its line's end, and to
@@ -761,7 +954,7 @@ impl Editor {
         copy: &mut BufferCopy,
         register: &mut Register,
     ) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let at = self.cursor.at;
         let start = text.byte_at(at);
         let last = (at.line + times as u64 - 1).min(text.last_line());
@@ -774,7 +967,7 @@ impl Editor {
             lines: false,
         };
         self.make(edit, copy);
-        self.cursor = Cursor::new(Text::new(copy.text()).point_of(start));
+        self.cursor = Cursor::new(self.text(copy).point_of(start));
         if change {
             self.enter_insert(1);
         }
@@ -785,7 +978,7 @@ impl Editor {
         if register.text.is_empty() {
             return;
         }
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let len = text.rope().len_bytes();
         let at = self.cursor.at;
         let mut put = register.text.repeat(times);
@@ -812,7 +1005,7 @@ impl Editor {
         let edit = Edit::replace(len, byte, "", &put);
         drop(text);
         self.make(edit, copy);
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         self.cursor = Cursor::new(text.point_of(landing));
         if register.lines {
             self.cursor.apply(Motion::FirstNonBlank, &text);
@@ -823,7 +1016,7 @@ impl Editor {
     /// space between each, their indents gone.
     fn join(&mut self, times: usize, copy: &mut BufferCopy) {
         for _ in 0..times {
-            let text = Text::new(copy.text());
+            let text = self.text(copy);
             let line = self.cursor.at.line;
             if line >= text.last_line() {
                 break;
@@ -842,14 +1035,14 @@ impl Editor {
             let edit = Edit::replace(text.rope().len_bytes(), end, &removed, space);
             drop(text);
             self.make(edit, copy);
-            self.cursor = Cursor::new(Text::new(copy.text()).point_of(end));
+            self.cursor = Cursor::new(self.text(copy).point_of(end));
         }
     }
 
     /// `r`: replaces `times` characters at the cursor with `ch`, if there
     /// are that many on the line.
     fn replace_chars(&mut self, ch: char, times: usize, copy: &mut BufferCopy) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let at = self.cursor.at;
         let Some(laid) = text.laid(at.line) else {
             return;
@@ -869,13 +1062,13 @@ impl Editor {
         drop(text);
         self.make(edit, copy);
         let last = line_start + start + with.len() - ch.len_utf8();
-        self.cursor = Cursor::new(Text::new(copy.text()).point_of(last));
+        self.cursor = Cursor::new(self.text(copy).point_of(last));
     }
 
     // --- Insert mode --------------------------------------------------------
 
     fn insert(&mut self, entry: Entry, times: usize, copy: &mut BufferCopy) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let at = self.cursor.at;
         let laid = text.laid(at.line);
         let cells = laid.as_ref().map_or(0, |laid| laid.cells());
@@ -905,7 +1098,7 @@ impl Editor {
                 let edit = Edit::replace(len, byte, "", &inserted);
                 drop(text);
                 self.make(edit, copy);
-                let text = Text::new(copy.text());
+                let text = self.text(copy);
                 let col = text.laid(line).map_or(0, |laid| laid.cells());
                 self.cursor = Cursor::new(Point { line, col });
             }
@@ -939,7 +1132,7 @@ impl Editor {
         self.new_step = true;
         // As in Vim, the cursor steps back onto the character before.
         let mut cursor = self.cursor;
-        cursor.apply(Motion::Left, &Text::new(copy.text()));
+        cursor.apply(Motion::Left, &self.text(copy));
         self.cursor = Cursor::new(cursor.at);
         self.normal_cursor(copy);
     }
@@ -952,7 +1145,7 @@ impl Editor {
                 self.insert_text(at, ch.encode_utf8(&mut [0; 4]), copy);
             }
             Stroke::Enter => {
-                let text = Text::new(copy.text());
+                let text = self.text(copy);
                 let line = text.point_of(at).line;
                 let line_text = text.line_text(line);
                 let before_cursor = at - text.line_start(line);
@@ -961,15 +1154,15 @@ impl Editor {
                 self.insert_text(at, &format!("\n{indent}"), copy);
             }
             Stroke::Tab => {
-                let text = Text::new(copy.text());
-                let line = text.point_of(at).line;
-                let tabs = text.line_text(line).starts_with('\t');
-                let col = text.point_of(at).col;
+                let text = self.text(copy);
+                let point = text.point_of(at);
+                let tabs = self.indent.tabs_near(&text, point.line, point.line);
                 drop(text);
+                let step = self.indent.step;
                 let indent = if tabs {
                     "\t".to_owned()
                 } else {
-                    " ".repeat(TAB - col % TAB)
+                    " ".repeat(step - point.col % step)
                 };
                 self.insert_text(at, &indent, copy);
             }
@@ -978,13 +1171,13 @@ impl Editor {
                 ch: 'h',
                 ctrl: true,
             } => {
-                let text = Text::new(copy.text());
+                let text = self.text(copy);
                 let start = previous_char(&text, at);
                 drop(text);
                 self.delete_text(start, at, copy);
             }
             Stroke::Delete => {
-                let text = Text::new(copy.text());
+                let text = self.text(copy);
                 let end = next_char(&text, at);
                 drop(text);
                 self.delete_text(at, end, copy);
@@ -993,14 +1186,14 @@ impl Editor {
                 ch: 'w',
                 ctrl: true,
             } => {
-                let start = word_before(&Text::new(copy.text()), at);
+                let start = word_before(&self.text(copy), at);
                 self.delete_text(start, at, copy);
             }
             Stroke::Char {
                 ch: 'u',
                 ctrl: true,
             } => {
-                let start = indent_before(&Text::new(copy.text()), at);
+                let start = indent_before(&self.text(copy), at);
                 self.delete_text(start, at, copy);
             }
             Stroke::Char { ctrl: true, .. } => {}
@@ -1018,7 +1211,7 @@ impl Editor {
                 if let Some(change) = self.changing.take() {
                     self.last_change = Some(change);
                 }
-                let text = Text::new(copy.text());
+                let text = self.text(copy);
                 let line = self.cursor.at.line;
                 let cells = text.laid(line).map_or(0, |laid| laid.cells());
                 match stroke {
@@ -1038,25 +1231,25 @@ impl Editor {
 
     /// The byte the cursor is at, to type before.
     fn insert_byte(&self, copy: &BufferCopy) -> usize {
-        Text::new(copy.text()).byte_at(self.cursor.at)
+        self.text(copy).byte_at(self.cursor.at)
     }
 
     fn insert_text(&mut self, at: usize, inserted: &str, copy: &mut BufferCopy) {
         let len = copy.text().len_bytes();
         self.make(Edit::replace(len, at, "", inserted), copy);
-        self.cursor = Cursor::new(Text::new(copy.text()).point_of(at + inserted.len()));
+        self.cursor = Cursor::new(self.text(copy).point_of(at + inserted.len()));
     }
 
     fn delete_text(&mut self, start: usize, end: usize, copy: &mut BufferCopy) {
         if start >= end {
             return;
         }
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let removed = text.slice(start, end);
         let edit = Edit::replace(text.rope().len_bytes(), start, &removed, "");
         drop(text);
         self.make(edit, copy);
-        self.cursor = Cursor::new(Text::new(copy.text()).point_of(start));
+        self.cursor = Cursor::new(self.text(copy).point_of(start));
     }
 
     /// Makes `edit` to the buffer, as part of the change being made.
@@ -1124,10 +1317,11 @@ impl Editor {
             self.status = Some("no search yet".into());
             return;
         };
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let from = text.byte_at(self.cursor.at);
         let whole = text.slice(0, text.rope().len_bytes());
-        if let Some(start) = find(&whole, &query, from, backward != reverse) {
+        let exact = self.case.exact(&query);
+        if let Some(start) = find(&whole, &query, from, backward != reverse, exact) {
             let last = start + query.len() - 1;
             self.found = Some((text.point_of(start), text.point_of(last)));
             self.cursor = Cursor::new(text.point_of(start));
@@ -1141,15 +1335,16 @@ impl Editor {
     /// negative, moving the view and the cursor together.
     fn page(&mut self, direction: i64, lines: usize, copy: &BufferCopy) {
         let lines = lines.max(1) as u64;
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let last = text.last_line();
         if direction > 0 {
-            self.top = (self.top + lines).min(last);
+            self.top = (self.top + lines).min(self.lowest_top(last));
             self.cursor.apply(Motion::Down(lines), &text);
         } else {
             self.top = self.top.saturating_sub(lines);
             self.cursor.apply(Motion::Up(lines), &text);
         }
+        self.cursor_into_view(&text);
     }
 
     fn view_at(&mut self, at: ViewAt) {
@@ -1167,7 +1362,7 @@ impl Editor {
     /// In normal or visual mode, puts the cursor on a character: back from
     /// past the line's end, and onto the start of a wide or tab character.
     fn normal_cursor(&mut self, copy: &BufferCopy) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let at = &mut self.cursor.at;
         at.line = at.line.min(text.last_line());
         let laid = text.laid(at.line);
@@ -1185,7 +1380,7 @@ impl Editor {
     /// Notes where the cursor is in the text, before an edit from
     /// elsewhere changes it: see [`follow_edit`](Self::follow_edit).
     pub(crate) fn hold(&mut self, copy: &BufferCopy) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let cursor = text.byte_at(self.cursor.at);
         let anchor = self.anchor.map(|anchor| text.byte_at(anchor));
         self.held = Some((cursor, anchor));
@@ -1245,22 +1440,37 @@ impl Editor {
         let Some((cursor, anchor)) = self.held.take() else {
             return;
         };
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         self.cursor = Cursor::new(text.point_of(cursor));
         self.anchor = anchor.map(|anchor| text.point_of(anchor));
     }
 
-    /// Scrolls the view to keep the cursor in it.
+    /// The lines kept in view above and below the cursor: `scrolloff`, but
+    /// no more than will fit, so a big one keeps the cursor in the middle.
+    fn margin(&self) -> u64 {
+        let height = self.height.max(1) as u64;
+        (self.scrolloff as u64).min((height - 1) / 2)
+    }
+
+    /// Scrolls the view to keep the cursor in it, with `scrolloff` lines
+    /// above and below it, short of the file's ends.
     fn follow(&mut self, copy: &BufferCopy) {
         let height = self.height.max(1) as u64;
         let line = self.cursor.at.line;
-        if line < self.top {
-            self.top = line;
-        } else if line >= self.top + height {
-            self.top = line + 1 - height;
+        let margin = self.margin();
+        let text = self.text(copy);
+        let last = text.last_line();
+        if line < self.top + margin {
+            self.top = line.saturating_sub(margin);
+        } else {
+            // Not so far as to show past the file's end, unless the cursor
+            // is on the line after it, being typed on.
+            let below = (line + margin).min(last.max(line));
+            if below >= self.top + height {
+                self.top = below + 1 - height;
+            }
         }
-        let text = Text::new(copy.text());
-        self.top = self.top.min(text.last_line());
+        self.top = self.top.min(last);
         self.gutter = self.gutter_for(text.lines());
         let col = self.cursor.at.col;
         let width = self.text_width().max(1);
@@ -1274,26 +1484,44 @@ impl Editor {
     /// Scrolls the view by `lines`, up if negative, as the mouse wheel does,
     /// keeping the cursor in it.
     pub(crate) fn wheel(&mut self, lines: i64, copy: &BufferCopy) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let last = text.last_line();
         self.top = if lines > 0 {
             self.top.saturating_sub(lines.unsigned_abs())
         } else {
-            (self.top + lines.unsigned_abs()).min(last)
+            (self.top + lines.unsigned_abs()).min(self.lowest_top(last))
         };
-        let height = self.height.max(1) as u64;
-        let line = self
-            .cursor
-            .at
-            .line
-            .clamp(self.top, self.top + height - 1)
-            .min(last);
+        self.cursor_into_view(&text);
+    }
+
+    /// The furthest down the view scrolls, in a text whose last line is
+    /// `last`: as far as leaves `scrolloff` lines above the last, which the
+    /// cursor can then sit on without the view jumping back to show them.
+    fn lowest_top(&self, last: u64) -> u64 {
+        last.saturating_sub(self.margin())
+    }
+
+    /// Moves the cursor into the view where it is, `scrolloff` lines from
+    /// its top and bottom unless that's the file's start or end, as
+    /// scrolling the view does. So the next key doesn't scroll it back.
+    fn cursor_into_view(&mut self, text: &Text<'_>) {
+        let last = text.last_line();
+        let margin = self.margin();
+        let bottom = self.top + self.height.max(1) as u64 - 1;
+        let highest = if self.top == 0 { 0 } else { self.top + margin };
+        let lowest = if bottom >= last {
+            last
+        } else {
+            bottom - margin
+        };
+        // Past the end, with only a few lines in view, the last.
+        let line = self.cursor.at.line.max(highest).min(lowest);
         if line != self.cursor.at.line {
             let mut cursor = self.cursor;
             if line > cursor.at.line {
-                cursor.apply(Motion::Down(line - cursor.at.line), &text);
+                cursor.apply(Motion::Down(line - cursor.at.line), text);
             } else {
-                cursor.apply(Motion::Up(cursor.at.line - line), &text);
+                cursor.apply(Motion::Up(cursor.at.line - line), text);
             }
             self.cursor = cursor;
         }
@@ -1302,7 +1530,7 @@ impl Editor {
     /// Puts the cursor at `line` and `col` of the pane, as a click does. A
     /// click on a line's number goes to the line's start.
     pub(crate) fn click(&mut self, line: usize, col: usize, copy: &BufferCopy) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let line = (self.top + line as u64).min(text.last_line());
         let col = match col.checked_sub(self.gutter) {
             Some(col) => self.left + col,
@@ -1312,10 +1540,13 @@ impl Editor {
         drop(text);
         if self.mode == Mode::Insert {
             let byte = self.insert_byte(copy);
-            self.cursor = Cursor::new(Text::new(copy.text()).point_of(byte));
+            self.cursor = Cursor::new(self.text(copy).point_of(byte));
         } else {
             self.normal_cursor(copy);
         }
+        // Near the view's edge, it scrolls to keep `scrolloff` lines in
+        // view, as in Vim, rather than on the next key.
+        self.follow(copy);
     }
 
     // --- Drawing ------------------------------------------------------------
@@ -1355,10 +1586,13 @@ impl Editor {
 
     /// Lays out the lines shown, for [`scene`](Self::scene).
     pub(crate) fn settle(&mut self, copy: &BufferCopy) {
-        let text = Text::new(copy.text());
+        let text = self.text(copy);
         let lines = text.lines();
         self.gutter = self.gutter_for(lines);
         let cursor = self.cursor.at.line;
+        let end = if cursor == lines { lines + 1 } else { lines };
+        self.filled = usize::try_from(end.saturating_sub(self.top))
+            .map_or(self.height, |filled| filled.min(self.height));
         self.rows = (0..self.height as u64)
             .map(|offset| {
                 let line = self.top + offset;
@@ -1371,7 +1605,7 @@ impl Editor {
                         let number = format!("{number:>0$} ", self.gutter - 1);
                         builder.push(&number, &colors::line_number(line == cursor), true);
                     }
-                    let laid = Laid::new(text.line_text(line));
+                    let laid = Laid::new(text.line_text(line), self.indent.tabstop);
                     let (start, end) = (text.line_start(line), text.line_end(line));
                     let spans = copy.highlights().within(start, end);
                     laid.show(&mut builder, self.left, self.text_width(), spans, start);
@@ -1408,10 +1642,35 @@ impl Editor {
         self.flash.map(|(_, _, _, until)| until)
     }
 
-    /// What's highlighted in view: the selection, the match found, and text
-    /// just copied.
+    /// What's highlighted in view: the cursor's line and the columns
+    /// marked, as the options say, the selection, the match found, and
+    /// text just copied.
     pub(crate) fn highlights(&self) -> Vec<Highlight> {
         let mut highlights = Vec::new();
+        if self.cursorline
+            && let Some(line) = (self.cursor.at.line.checked_sub(self.top))
+                .and_then(|line| usize::try_from(line).ok())
+                .filter(|&line| line < self.height)
+        {
+            highlights.push(Highlight {
+                line,
+                cols: self.gutter..self.width,
+                kind: HighlightKind::CursorLine,
+            });
+        }
+        // Down the file's lines, not the rows past its end, as in Vim.
+        for &column in &self.columns {
+            if let Some(col) =
+                (column.checked_sub(self.left)).filter(|&col| col < self.text_width())
+            {
+                let col = self.gutter + col;
+                highlights.extend((0..self.filled).map(|line| Highlight {
+                    line,
+                    cols: col..col + 1,
+                    kind: HighlightKind::ColorColumn,
+                }));
+            }
+        }
         if let (Some(anchor), Mode::Visual(kind)) = (self.anchor, self.mode) {
             let (start, last) = if anchor <= self.cursor.at {
                 (anchor, self.cursor.at)
@@ -1573,14 +1832,20 @@ fn next_char(text: &Text<'_>, byte: usize) -> usize {
     rope.char_to_byte(rope.byte_to_char(byte) + 1)
 }
 
+/// The columns `colorcolumn` marks, counting from 0.
+fn columns(options: &Options) -> Vec<usize> {
+    (options.colorcolumn.iter())
+        .map(|&column| (column as usize).saturating_sub(1))
+        .collect()
+}
+
 /// Where `query` next is in `text` after `from`, or before it if
-/// `backward`, going round the ends. Case is ignored, for ASCII, unless the
-/// query has a capital letter, as in a terminal's search.
-fn find(text: &str, query: &str, from: usize, backward: bool) -> Option<usize> {
+/// `backward`, going round the ends. Case is ignored, for ASCII, unless
+/// `exact`.
+fn find(text: &str, query: &str, from: usize, backward: bool, exact: bool) -> Option<usize> {
     if query.is_empty() {
         return None;
     }
-    let exact = query.chars().any(char::is_uppercase);
     let (haystack, needle) = if exact {
         (
             std::borrow::Cow::Borrowed(text),

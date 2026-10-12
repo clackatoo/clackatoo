@@ -26,6 +26,7 @@ use crate::fonts::Fonts;
 use crate::history::History;
 use crate::input::{self, KeyPress};
 use crate::motion::{Cursor, Lines, Point};
+use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
 
@@ -127,6 +128,8 @@ pub(crate) struct Pane {
     prompt: Option<normal::Prompt>,
     /// The last search, and whether it went backward.
     search: Option<(String, bool)>,
+    /// How searches treat case, as the options say.
+    case: Case,
     /// The last match found, highlighted until Esc.
     found: Option<Match>,
     /// A short message for the label, until the next key.
@@ -161,6 +164,7 @@ impl Pane {
             anchor: None,
             prompt: None,
             search: None,
+            case: Case::default(),
             found: None,
             status: None,
             yanked: None,
@@ -171,6 +175,11 @@ impl Pane {
             prefix: None,
             blank: RowBuilder::new(0).finish(false),
         }
+    }
+
+    /// Takes in the options, as they've changed.
+    pub(crate) fn set_options(&mut self, options: &Options) {
+        self.case = Case::of(options);
     }
 
     pub(crate) fn screen(&self) -> Option<&Screen> {
@@ -963,8 +972,9 @@ mod tests {
                     query,
                     from,
                     backward,
+                    exact,
                     ..
-                }) => Response::Found(terminal.search(&query, from, backward)),
+                }) => Response::Found(terminal.search(&query, from, backward, exact)),
                 ClientMessage::Request(Request::Block { line, which, .. }) => {
                     Response::Block(terminal.block(line, which))
                 }
@@ -1243,6 +1253,25 @@ mod tests {
         named(&mut pane, NamedKey::Enter);
         serve(&mut pane, &terminal);
         assert_eq!(pane.label().as_deref(), Some("not found: zebra"));
+    }
+
+    #[test]
+    fn search_matches_case_as_the_options_say() {
+        let terminal = terminal("cat Cat\r\nx");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let found = |pane: &mut Pane| {
+            keys(pane, "gg0/cat");
+            named(pane, NamedKey::Enter);
+            serve(pane, &terminal);
+            cursor(pane).2
+        };
+        assert_eq!(found(&mut pane), 4, "case ignored, to begin with");
+        pane.set_options(&Options {
+            ignorecase: false,
+            ..Options::default()
+        });
+        assert_eq!(found(&mut pane), 0, "round to the only `cat`");
     }
 
     /// What `keys` copy, the daemon answering as `terminal`.

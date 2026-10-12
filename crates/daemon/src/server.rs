@@ -1727,9 +1727,10 @@ impl Daemon {
                 query,
                 from,
                 backward,
+                exact,
             } => self
                 .grid(terminal)
-                .map(|grid| Response::Found(grid.search(&query, from, backward))),
+                .map(|grid| Response::Found(grid.search(&query, from, backward, exact))),
             Request::Block {
                 terminal,
                 line,

@@ -63,6 +63,9 @@ impl Desk {
     /// Passes the options on to the panes, as they've changed.
     fn options_changed(&mut self) {
         self.editors.set_options(&self.options);
+        for pane in self.panes.values_mut() {
+            pane.set_options(&self.options);
+        }
     }
 
     /// Puts the options back as they start, as a config run again from

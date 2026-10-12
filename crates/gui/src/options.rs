@@ -11,11 +11,15 @@
 //! whatever order changes cross in.
 
 /// An option's value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Value {
     Bool(bool),
     Number(u32),
+    List(List),
 }
+
+/// Whole numbers, as an option holds several: `colorcolumn`'s columns.
+pub(crate) type List = Vec<u32>;
 
 /// What an option holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +27,12 @@ pub(crate) enum Kind {
     Bool,
     /// A whole number from `min` to `max`.
     Number {
+        min: u32,
+        max: u32,
+    },
+    /// Any number of whole numbers, each from `min` to `max`, written with
+    /// commas between them: `80,120`. None is written as nothing.
+    List {
         min: u32,
         max: u32,
     },
@@ -39,14 +49,35 @@ pub(crate) struct Info {
 
 impl Info {
     /// Checks `value` is one this option can hold, saying why not.
-    fn check(&self, value: Value) -> Result<(), String> {
+    fn check(&self, value: &Value) -> Result<(), String> {
         match (self.kind, value) {
             (Kind::Bool, Value::Bool(_)) => Ok(()),
-            (Kind::Number { min, max }, Value::Number(number)) if (min..=max).contains(&number) => {
+            (Kind::Number { min, max }, Value::Number(number)) if (min..=max).contains(number) => {
+                Ok(())
+            }
+            (Kind::List { min, max }, Value::List(numbers))
+                if numbers.iter().all(|number| (min..=max).contains(number)) =>
+            {
                 Ok(())
             }
             _ => Err(self.wants()),
         }
+    }
+
+    /// Reads `text` as a value for this option, as `:set` gives one after
+    /// `=`: a number, or for a list, numbers with commas between them.
+    pub(crate) fn parse(&self, text: &str) -> Result<Value, String> {
+        let number = |text: &str| text.parse::<u32>().map_err(|_| self.wants());
+        let value = match self.kind {
+            Kind::Bool => return Err(format!("{} is set with {0} or no{0}, not =", self.name)),
+            Kind::Number { .. } => Value::Number(number(text)?),
+            Kind::List { .. } if text.is_empty() => Value::List(List::new()),
+            Kind::List { .. } => {
+                Value::List(text.split(',').map(number).collect::<Result<_, _>>()?)
+            }
+        };
+        self.check(&value)?;
+        Ok(value)
     }
 
     /// What values the option holds, for messages.
@@ -56,49 +87,73 @@ impl Info {
             Kind::Number { min, max } => {
                 format!("{} is a whole number from {min} to {max}", self.name)
             }
+            Kind::List { min, max } => format!(
+                "{} is whole numbers from {min} to {max}, with commas between them",
+                self.name
+            ),
         }
     }
 }
 
 /// A type options hold, and its [`Value`].
 trait Held: Sized {
-    fn value(self) -> Value;
+    fn value(&self) -> Value;
     fn from_value(value: Value) -> Option<Self>;
 }
 
 impl Held for bool {
-    fn value(self) -> Value {
-        Value::Bool(self)
+    fn value(&self) -> Value {
+        Value::Bool(*self)
     }
 
     fn from_value(value: Value) -> Option<Self> {
         match value {
             Value::Bool(value) => Some(value),
-            Value::Number(_) => None,
+            _ => None,
         }
     }
 }
 
 impl Held for u32 {
-    fn value(self) -> Value {
-        Value::Number(self)
+    fn value(&self) -> Value {
+        Value::Number(*self)
     }
 
     fn from_value(value: Value) -> Option<Self> {
         match value {
             Value::Number(value) => Some(value),
-            Value::Bool(_) => None,
+            _ => None,
         }
     }
 }
 
-/// The [`Kind`] of an option of type `bool`, or `u32` with its range.
+impl Held for List {
+    fn value(&self) -> Value {
+        Value::List(self.clone())
+    }
+
+    fn from_value(value: Value) -> Option<Self> {
+        match value {
+            Value::List(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+/// The [`Kind`] of an option of type `bool`, or `u32` or [`List`] with
+/// its range.
 macro_rules! kind {
     (bool) => {
         Kind::Bool
     };
     (u32 $min:literal ..= $max:literal) => {
         Kind::Number {
+            min: $min,
+            max: $max,
+        }
+    };
+    (List $min:literal ..= $max:literal) => {
+        Kind::List {
             min: $min,
             max: $max,
         }
@@ -141,7 +196,7 @@ macro_rules! options {
             /// The value of the option called `name`.
             fn value(&self, name: &str) -> Option<Value> {
                 match name {
-                    $(stringify!($name) => Some(Held::value(self.$name)),)+
+                    $(stringify!($name) => Some(Held::value(&self.$name)),)+
                     _ => None,
                 }
             }
@@ -171,6 +226,28 @@ options! {
     relativenumber("rnu"): bool = true;
     /// The fewest cells the line numbers take, with the space after them.
     numberwidth("nuw"): u32 (1..=20) = 4;
+    /// The cursor's line lit faintly, across the pane, so the eye finds it.
+    cursorline("cul"): bool = true;
+    /// Columns marked down an editor, such as 80, to keep lines short by.
+    /// They count from 1, as the bar's column does.
+    colorcolumn("cc"): List (1..=9999) = List::new();
+    /// The fewest lines kept in view above and below the cursor, so what's
+    /// around it shows as it moves. Half the pane or more keeps the
+    /// cursor's line in the middle.
+    scrolloff("so"): u32 (0..=9999) = 5;
+    /// How wide a tab is drawn: to the next column that's a multiple of it.
+    tabstop("ts"): u32 (1..=32) = 4;
+    /// The columns `>>`, `<<` and Tab indent by. 0 means `tabstop`'s, so
+    /// the two can't drift apart.
+    shiftwidth("sw"): u32 (0..=32) = 0;
+    /// Indent a line that isn't indented yet with spaces, not tabs. A line
+    /// that's indented already keeps its kind of indent: tabs if it has
+    /// one, spaces if not, so a file stays as it's indented.
+    expandtab("et"): bool = true;
+    /// Searches ignore case...
+    ignorecase("ic"): bool = true;
+    /// ...unless, with `ignorecase`, what's searched for has a capital.
+    smartcase("scs"): bool = true;
 }
 
 /// The option called `name`, or by its short name.
@@ -196,25 +273,58 @@ impl Options {
     /// Sets `info`'s option to `value`, if it can hold it. Returns whether
     /// that changed it.
     pub(crate) fn set(&mut self, info: &Info, value: Value) -> Result<bool, String> {
-        info.check(value)?;
+        info.check(&value)?;
         let changed = self.get(info) != value;
         self.put(info.name, value);
         Ok(changed)
     }
 
-    /// How `info`'s option is written in `:set`: `number`, `nonumber`, or
-    /// `numberwidth=4`.
+    /// How `info`'s option is written in `:set`: `number`, `nonumber`,
+    /// `numberwidth=4`, or `colorcolumn=80,120`.
     pub(crate) fn show(&self, info: &Info) -> String {
         match self.get(info) {
             Value::Bool(true) => info.name.to_owned(),
             Value::Bool(false) => format!("no{}", info.name),
             Value::Number(number) => format!("{}={number}", info.name),
+            Value::List(numbers) => {
+                let numbers: Vec<String> = numbers.iter().map(u32::to_string).collect();
+                format!("{}={}", info.name, numbers.join(","))
+            }
         }
     }
 }
 
-/// One change, or question, a `:set` asks for.
+/// How searches treat case, as `ignorecase` and `smartcase` say. An
+/// editor's search and a terminal's in normal mode both go by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Case {
+    ignore: bool,
+    smart: bool,
+}
+
+impl Case {
+    pub(crate) fn of(options: &Options) -> Self {
+        Self {
+            ignore: options.ignorecase,
+            smart: options.smartcase,
+        }
+    }
+
+    /// Whether a search for `query` matches case exactly: always without
+    /// `ignorecase`, and with `smartcase`, when `query` has a capital.
+    pub(crate) fn exact(self, query: &str) -> bool {
+        !self.ignore || (self.smart && query.chars().any(char::is_uppercase))
+    }
+}
+
+impl Default for Case {
+    fn default() -> Self {
+        Self::of(&Options::default())
+    }
+}
+
+/// One change, or question, a `:set` asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Setting {
     /// Set the option to this.
     To(&'static Info, Value),
@@ -225,7 +335,8 @@ pub(crate) enum Setting {
 }
 
 /// What the words after `:set` ask for, as Vim reads them: `number`,
-/// `nonumber`, `number!` or `invnumber`, `number?`, `numberwidth=5`.
+/// `nonumber`, `number!` or `invnumber`, `number?`, `numberwidth=5`,
+/// `colorcolumn=80,120`, and `colorcolumn=` for none.
 pub(crate) fn parse_set(words: &str) -> Result<Vec<Setting>, String> {
     words.split_whitespace().map(parse_setting).collect()
 }
@@ -233,17 +344,12 @@ pub(crate) fn parse_set(words: &str) -> Result<Vec<Setting>, String> {
 fn parse_setting(word: &str) -> Result<Setting, String> {
     if ["+=", "-=", "^="].iter().any(|sign| word.contains(sign)) {
         return Err(format!(
-            "can't read {word}: a number is set with =, and +=, -= and ^= aren't supported yet"
+            "can't read {word}: an option is set with =, and +=, -= and ^= aren't supported yet"
         ));
     }
     if let Some((name, value)) = word.split_once('=') {
         let info = find(name)?;
-        let value = match info.kind {
-            Kind::Bool => return Err(format!("{} is set with {0} or no{0}, not =", info.name)),
-            Kind::Number { .. } => value.parse().map(Value::Number).map_err(|_| info.wants())?,
-        };
-        info.check(value)?;
-        return Ok(Setting::To(info, value));
+        return Ok(Setting::To(info, info.parse(value)?));
     }
     if let Some(name) = word.strip_suffix('?') {
         return Ok(Setting::Show(find(name)?));
@@ -266,11 +372,11 @@ fn parse_setting(word: &str) -> Result<Setting, String> {
     match info.kind {
         Kind::Bool if flip => Ok(Setting::Flip(info)),
         Kind::Bool => Ok(Setting::To(info, Value::Bool(on))),
-        Kind::Number { .. } if flip => Err(format!(
-            "{} is a number, so can't be turned over",
+        _ if flip => Err(format!(
+            "{} isn't true or false, so can't be turned over",
             info.name
         )),
-        Kind::Number { .. } => Ok(Setting::Show(info)),
+        _ => Ok(Setting::Show(info)),
     }
 }
 
@@ -314,10 +420,29 @@ mod tests {
     }
 
     #[test]
-    fn set_reads_as_vims_does() {
-        let (nu, rnu, nuw) = (info("nu"), info("rnu"), info("nuw"));
+    fn a_list_holds_any_number_of_numbers() {
+        let mut options = Options::default();
+        let cc = info("cc");
+        assert_eq!(options.show(cc), "colorcolumn=");
+        assert_eq!(options.set(cc, Value::List(vec![80, 120])), Ok(true));
+        assert_eq!(options.colorcolumn, [80, 120]);
+        assert_eq!(options.show(cc), "colorcolumn=80,120");
         assert_eq!(
-            parse_set("nonu rnu! invnumber nonu! nuw=7 nuw nu?"),
+            options.set(cc, Value::List(vec![80, 0])),
+            Err("colorcolumn is whole numbers from 1 to 9999, with commas between them".into())
+        );
+        assert_eq!(cc.parse("100"), Ok(Value::List(vec![100])));
+        assert_eq!(cc.parse(""), Ok(Value::List(Vec::new())));
+        for text in ["80,", "80 120", "x", "0"] {
+            assert!(cc.parse(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn set_reads_as_vims_does() {
+        let (nu, rnu, nuw, cc) = (info("nu"), info("rnu"), info("nuw"), info("cc"));
+        assert_eq!(
+            parse_set("nonu rnu! invnumber nonu! nuw=7 nuw nu? cc=80,120 cc= cc"),
             Ok(vec![
                 Setting::To(nu, Value::Bool(false)),
                 Setting::Flip(rnu),
@@ -326,6 +451,9 @@ mod tests {
                 Setting::To(nuw, Value::Number(7)),
                 Setting::Show(nuw),
                 Setting::Show(nu),
+                Setting::To(cc, Value::List(vec![80, 120])),
+                Setting::To(cc, Value::List(Vec::new())),
+                Setting::Show(cc),
             ])
         );
         for (words, wanted) in [
@@ -334,11 +462,36 @@ mod tests {
             ("nu=1", "set with number or nonumber"),
             ("nonuw", "no option called `nonuw`"),
             ("nuw!", "can't be turned over"),
+            ("cc!", "can't be turned over"),
+            ("nocc", "no option called `nocc`"),
+            ("cc=80,x", "with commas between them"),
             ("nowrap", "no option called `nowrap`"),
             ("nuw+=1", "+=, -= and ^= aren't supported"),
         ] {
             let err = parse_set(words).unwrap_err();
             assert!(err.contains(wanted), "{words}: {err}");
+        }
+    }
+
+    #[test]
+    fn case_is_matched_as_ignorecase_and_smartcase_say() {
+        let case = |ignorecase, smartcase| {
+            Case::of(&Options {
+                ignorecase,
+                smartcase,
+                ..Options::default()
+            })
+        };
+        assert_eq!(Case::default(), case(true, true));
+        for (ic, scs, exact_lower, exact_upper) in [
+            (true, true, false, true),
+            (true, false, false, false),
+            // As in Vim, smartcase does nothing without ignorecase.
+            (false, true, true, true),
+            (false, false, true, true),
+        ] {
+            assert_eq!(case(ic, scs).exact("word"), exact_lower, "{ic} {scs}");
+            assert_eq!(case(ic, scs).exact("Word"), exact_upper, "{ic} {scs}");
         }
     }
 }

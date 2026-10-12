@@ -655,9 +655,11 @@ impl Desk {
             .collect();
         self.panes.retain(|terminal, _| anywhere.contains(terminal));
         for &terminal in &shown {
-            self.panes
-                .entry(terminal)
-                .or_insert_with(|| Pane::new(terminal));
+            self.panes.entry(terminal).or_insert_with(|| {
+                let mut pane = Pane::new(terminal);
+                pane.set_options(&self.options);
+                pane
+            });
         }
         self.attach_shown_buffers();
         if !self.connected {
@@ -1944,6 +1946,8 @@ mod tests {
             r#"
             client.opt.rnu = false
             client.opt.numberwidth = 6
+            client.opt.cc = { 80, 120 }
+            client.opt.ic = false
             client.keys.map("n", "<C-b>n", function()
                 client.opt.number = not client.opt.number
             end)
@@ -1962,8 +1966,24 @@ mod tests {
         command(&mut desk, "set");
         assert_eq!(
             desk.message.as_deref(),
-            Some("norelativenumber  numberwidth=6")
+            Some("norelativenumber  numberwidth=6  colorcolumn=80,120  noignorecase")
         );
+        command(&mut desk, "set cc= ts=8");
+        command(&mut desk, "set cc? ts");
+        assert_eq!(desk.message.as_deref(), Some("colorcolumn=  tabstop=8"));
+        // The terminal's search heard: without ignorecase, it's exact.
+        answer_all(&mut desk);
+        type_keys(&mut desk, "/x");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert!(matches!(
+            &answer_all(&mut desk)[..],
+            [Request::Search { exact: true, .. }]
+        ));
         command(&mut desk, "set nuw=99");
         assert_eq!(
             desk.message.as_deref(),
