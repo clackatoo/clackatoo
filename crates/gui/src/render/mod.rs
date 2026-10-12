@@ -193,6 +193,11 @@ pub(crate) enum Ink {
     Added,
     /// ...and red, for what's removed.
     Removed,
+    /// Bold, in the text colour, as a heading is.
+    Bold,
+    /// In a terminal's colour, as the theme draws it, as an editor's text
+    /// is drawn.
+    Color(clackatoo_protocol::Color),
 }
 
 /// Which font text of the window's own is drawn in.
@@ -752,13 +757,14 @@ impl Renderer {
     /// The colour text in `ink` is drawn in.
     fn ink(&self, ink: Ink) -> Rgba {
         match ink {
-            Ink::Plain => self.theme.foreground,
+            Ink::Plain | Ink::Bold => self.theme.foreground,
             Ink::OnColor => self.theme.bar,
             Ink::Muted => self.theme.muted,
             Ink::Warning => self.theme.warning,
             Ink::Accent => self.theme.accent,
             Ink::Added => self.theme.added,
             Ink::Removed => self.theme.removed,
+            Ink::Color(color) => self.theme.resolve(color).unwrap_or(self.theme.foreground),
         }
     }
 
@@ -944,7 +950,7 @@ impl Renderer {
     fn push_text(&mut self, text: &Text<'_>, fonts: &mut Fonts) {
         let cell = fonts.cell;
         let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
-        let bold = text.ink == Ink::OnColor;
+        let bold = matches!(text.ink, Ink::OnColor | Ink::Bold);
         let color = self.ink(text.ink);
         let [mut pen_x, top] = text.origin;
         match text.font {

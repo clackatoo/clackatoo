@@ -83,7 +83,15 @@ pub(crate) enum Incoming {
         id: u64,
         result: Result<Value, String>,
     },
+    /// The request numbered `id` wasn't answered because the text changed
+    /// while the server worked on it, as rust-analyzer says while it's
+    /// still reading the project: asking again may be answered.
+    Outdated { id: u64 },
 }
+
+/// The error a server answers a request with when what it was working on
+/// has changed, LSP's `ContentModified`.
+const CONTENT_MODIFIED: i64 = -32801;
 
 /// A running language server.
 #[derive(Debug)]
@@ -100,8 +108,21 @@ pub(crate) struct LanguageServer {
     held: Vec<Value>,
     encoding: Encoding,
     sync: Sync,
-    /// Whether it wants to hear when a buffer is saved.
+    /// What it does beyond keeping files open, from its answer to
+    /// `initialize`.
+    offers: Offers,
+}
+
+/// What a server does, beyond keeping files open and saying what's wrong
+/// with them.
+#[derive(Clone, Copy, Debug, Default)]
+struct Offers {
+    /// Wants to hear when a buffer is saved.
     save: bool,
+    /// Says what's at a place, as `K` shows.
+    hover: bool,
+    /// Renames things.
+    rename: bool,
 }
 
 impl LanguageServer {
@@ -118,7 +139,7 @@ impl LanguageServer {
             encoding: Encoding::Utf16,
             // Until it says, the whole text is safe.
             sync: Sync::Full,
-            save: false,
+            offers: Offers::default(),
         };
         let root_uri = uri(root);
         let name = root.file_name().map_or_else(
@@ -138,8 +159,14 @@ impl LanguageServer {
                     "textDocument": {
                         "synchronization": { "didSave": true },
                         "publishDiagnostics": { "versionSupport": true },
+                        "hover": { "contentFormat": ["markdown", "plaintext"] },
+                        "rename": { "prepareSupport": false },
                     },
-                    "workspace": { "workspaceFolders": true, "configuration": true },
+                    "workspace": {
+                        "workspaceFolders": true,
+                        "configuration": true,
+                        "workspaceEdit": { "documentChanges": true },
+                    },
                     "window": { "workDoneProgress": true },
                 },
             }),
@@ -204,7 +231,7 @@ impl LanguageServer {
     /// Tells the server the file at `path` has been saved, if it wants to
     /// know.
     pub(crate) fn saved(&mut self, path: &Path) {
-        if self.save {
+        if self.offers.save {
             self.notify(
                 "textDocument/didSave",
                 &json!({ "textDocument": { "uri": uri(path) } }),
@@ -245,6 +272,17 @@ impl LanguageServer {
         self.ready
     }
 
+    /// Whether it can answer `query`. Places are asked for whatever it
+    /// says, as servers answer what they can't with nothing.
+    pub(crate) fn answers(&self, query: Query) -> bool {
+        query != Query::Hover || self.offers.hover
+    }
+
+    /// Whether it renames things.
+    pub(crate) fn renames(&self) -> bool {
+        self.offers.rename
+    }
+
     /// Asks the server, which is [`ready`](Self::ready), `query` about byte
     /// `at` of the file at `path`, whose text the server has as `text`.
     /// Returns the request's number, which its [`Incoming::Answer`] gives
@@ -255,16 +293,37 @@ impl LanguageServer {
             Query::Declaration => "textDocument/declaration",
             Query::TypeDefinition => "textDocument/typeDefinition",
             Query::Implementation => "textDocument/implementation",
+            Query::Hover => "textDocument/hover",
         };
-        let id = self.next_id;
-        self.next_id += 1;
         let params = json!({
             "textDocument": { "uri": uri(path) },
             "position": position(text, at, self.encoding),
         });
-        self.peer
-            .send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
-        id
+        self.request(method, &params)
+    }
+
+    /// Asks the server, which is [`ready`](Self::ready), to rename what's
+    /// at byte `at` of the file at `path`, whose text it has as `text`, to
+    /// `name`. Returns the request's number, as [`ask`](Self::ask) does.
+    pub(crate) fn rename(&mut self, path: &Path, text: &Rope, at: usize, name: &str) -> u64 {
+        let params = json!({
+            "textDocument": { "uri": uri(path) },
+            "position": position(text, at, self.encoding),
+            "newName": name,
+        });
+        self.request("textDocument/rename", &params)
+    }
+
+    /// Tells the server the files at `paths`, which it has no buffers open
+    /// for, have been changed on disk, so it reads them again.
+    pub(crate) fn changed_on_disk(&mut self, paths: &[PathBuf]) {
+        let changes: Vec<Value> = (paths.iter())
+            .map(|path| json!({ "uri": uri(path), "type": 2 }))
+            .collect();
+        self.notify(
+            "workspace/didChangeWatchedFiles",
+            &json!({ "changes": changes }),
+        );
     }
 
     /// Writes queued messages until the pipe is full. An error means the
@@ -340,6 +399,10 @@ impl LanguageServer {
                 if self.initialize.is_none() || id.as_u64() != self.initialize {
                     if let Some(id) = id.as_u64() {
                         let result = match (message.result, message.error) {
+                            (_, Some(error)) if error.code == CONTENT_MODIFIED => {
+                                incoming.push(Incoming::Outdated { id });
+                                return;
+                            }
                             (_, Some(error)) => Err(error.message),
                             (result, None) => Ok(result.unwrap_or(Value::Null)),
                         };
@@ -379,10 +442,15 @@ impl LanguageServer {
             Some(2) => Sync::Incremental,
             _ => Sync::Full,
         };
-        self.save = match &sync["save"] {
-            Value::Bool(save) => *save,
+        let offered = |capability: &Value| match capability {
+            Value::Bool(offered) => *offered,
             Value::Object(_) => true,
             _ => false,
+        };
+        self.offers = Offers {
+            save: offered(&sync["save"]),
+            hover: offered(&capabilities["hoverProvider"]),
+            rename: offered(&capabilities["renameProvider"]),
         };
         self.ready = true;
         self.peer
@@ -441,6 +509,136 @@ pub(crate) fn locations(answer: &Value) -> Vec<(PathBuf, Position)> {
         Value::Object(_) => one(answer).into_iter().collect(),
         _ => Vec::new(),
     }
+}
+
+/// What a `textDocument/hover` answer says, and whether it's markdown,
+/// or `None` if it says nothing. Its contents are a `MarkupContent`, or
+/// one or more `MarkedString`s, which are markdown, or code in a language,
+/// made a fenced block of it.
+pub(crate) fn hover(answer: &Value) -> Option<(String, bool)> {
+    let marked = |part: &Value| match part {
+        Value::String(text) => Some(text.clone()),
+        Value::Object(_) => {
+            let value = part.get("value")?.as_str()?;
+            let language = part.get("language")?.as_str()?;
+            Some(format!("```{language}\n{value}\n```"))
+        }
+        _ => None,
+    };
+    let contents = answer.get("contents")?;
+    let (text, markdown) = match contents {
+        Value::Object(markup) if markup.contains_key("kind") => (
+            markup.get("value")?.as_str()?.to_owned(),
+            markup.get("kind").and_then(Value::as_str) == Some("markdown"),
+        ),
+        Value::Array(parts) => {
+            let parts: Vec<String> = parts.iter().filter_map(marked).collect();
+            (parts.join("\n\n"), true)
+        }
+        one => (marked(one)?, true),
+    };
+    (!text.trim().is_empty()).then_some((text, markdown))
+}
+
+/// One edit to a file's text that a server asks for: what's from `start`
+/// to `end` is replaced with `text`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TextEdit {
+    pub(crate) start: Position,
+    pub(crate) end: Position,
+    pub(crate) text: String,
+}
+
+/// The edits a server asks for to one file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileEdits {
+    pub(crate) path: PathBuf,
+    /// The version of the file's text they're counted in, if the server
+    /// says: the version the daemon sent it, for a buffer open in it.
+    pub(crate) version: Option<u64>,
+    /// The edits, in the order given, each counted in the text before any
+    /// of them is made.
+    pub(crate) edits: Vec<TextEdit>,
+}
+
+/// Adds `more` to `edits`, but those already there: the same edits given
+/// twice, as for one file listed under two names, are made once.
+pub(crate) fn merge(edits: &mut Vec<TextEdit>, more: Vec<TextEdit>) {
+    for edit in more {
+        if !edits.contains(&edit) {
+            edits.push(edit);
+        }
+    }
+}
+
+/// The edits a `WorkspaceEdit` asks for, file by file, from its
+/// `documentChanges` if it has them, or else its `changes`. Edits to one
+/// file given in several places are put together. An error, saying why,
+/// if it asks to make, rename or delete files, which clackatoo can't yet,
+/// or makes no sense: then none of it is to be made.
+pub(crate) fn workspace_edit(answer: &Value) -> Result<Vec<FileEdits>, String> {
+    let nonsense = || "the language server's edits make no sense".to_owned();
+    let edits_of = |list: &Value| -> Result<Vec<TextEdit>, String> {
+        let list = list.as_array().ok_or_else(nonsense)?;
+        (list.iter())
+            .map(|edit| {
+                // A `SnippetTextEdit`'s snippet is taken as it is: renames
+                // have no placeholders.
+                let text = (edit.get("newText"))
+                    .or_else(|| edit.get("snippet").and_then(|snippet| snippet.get("value")))
+                    .and_then(Value::as_str)
+                    .ok_or_else(nonsense)?;
+                let range = edit.get("range").ok_or_else(nonsense)?;
+                let at = |key: &str| {
+                    let position = range.get(key).cloned().unwrap_or_default();
+                    serde_json::from_value::<Position>(position).map_err(|_| nonsense())
+                };
+                Ok(TextEdit {
+                    start: at("start")?,
+                    end: at("end")?,
+                    text: text.to_owned(),
+                })
+            })
+            .collect()
+    };
+    let mut files: Vec<FileEdits> = Vec::new();
+    let mut add = |uri: &str, version: Option<u64>, edits: Vec<TextEdit>| {
+        let path = path_of(uri).ok_or_else(|| {
+            format!("the language server wants to edit {uri}, which isn't a file")
+        })?;
+        match files.iter_mut().find(|file| file.path == path) {
+            Some(file) if file.version == version => merge(&mut file.edits, edits),
+            Some(_) => return Err(nonsense()),
+            None => files.push(FileEdits {
+                path,
+                version,
+                edits,
+            }),
+        }
+        Ok(())
+    };
+    if let Some(changes) = (answer.get("documentChanges")).filter(|changes| !changes.is_null()) {
+        for change in changes.as_array().ok_or_else(nonsense)? {
+            if change.get("kind").is_some() {
+                return Err(
+                    "the language server wants to make, rename or delete files, \
+                     which clackatoo can't do yet"
+                        .to_owned(),
+                );
+            }
+            let document = change.get("textDocument").ok_or_else(nonsense)?;
+            let uri = (document.get("uri").and_then(Value::as_str)).ok_or_else(nonsense)?;
+            let version = document.get("version").and_then(Value::as_u64);
+            let edits = edits_of(change.get("edits").unwrap_or(&Value::Null))?;
+            add(uri, version, edits)?;
+        }
+    } else if let Some(changes) = (answer.get("changes")).filter(|changes| !changes.is_null()) {
+        for (uri, edits) in changes.as_object().ok_or_else(nonsense)? {
+            add(uri, None, edits_of(edits)?)?;
+        }
+    }
+    files.retain(|file| !file.edits.is_empty());
+    Ok(files)
 }
 
 /// The diagnostics in a `publishDiagnostics` notification.
@@ -572,7 +770,12 @@ pub(crate) fn uri(path: &Path) -> String {
 /// The path a `file:` URI names, or `None` if it isn't one.
 fn path_of(uri: &str) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
-    let escaped = uri.strip_prefix("file://")?.as_bytes();
+    let rest = uri.strip_prefix("file://")?;
+    // No host, or this one: another machine's file isn't one here.
+    let escaped = rest.strip_prefix("localhost").unwrap_or(rest).as_bytes();
+    if escaped.first() != Some(&b'/') {
+        return None;
+    }
     let mut bytes = Vec::with_capacity(escaped.len());
     let mut index = 0;
     while index < escaped.len() {
@@ -589,7 +792,8 @@ fn path_of(uri: &str) -> Option<PathBuf> {
             index += 1;
         }
     }
-    Some(PathBuf::from(OsString::from_vec(bytes)))
+    let path = PathBuf::from(OsString::from_vec(bytes));
+    path.is_absolute().then_some(path)
 }
 
 #[cfg(test)]
@@ -624,12 +828,86 @@ mod tests {
     }
 
     #[test]
+    fn hovers_come_in_every_shape_lsp_has() {
+        let markup = json!({ "contents": { "kind": "plaintext", "value": "u32" } });
+        assert_eq!(hover(&markup), Some(("u32".to_owned(), false)));
+        let marked = json!({ "contents": [
+            { "language": "rust", "value": "fn f()" },
+            "Does *f*.",
+        ]});
+        assert_eq!(
+            hover(&marked),
+            Some(("```rust\nfn f()\n```\n\nDoes *f*.".to_owned(), true))
+        );
+        assert_eq!(hover(&json!({ "contents": "" })), None);
+        assert_eq!(hover(&Value::Null), None);
+    }
+
+    #[test]
+    fn workspace_edits_come_as_changes_or_document_changes() {
+        let range = json!({
+            "start": { "line": 0, "character": 1 },
+            "end": { "line": 0, "character": 2 },
+        });
+        let edit = json!({ "range": range, "newText": "x" });
+        let made = TextEdit {
+            start: at(0, 1),
+            end: at(0, 2),
+            text: "x".to_owned(),
+        };
+        let changes = json!({ "changes": { "file:///a": [edit, edit] } });
+        assert_eq!(
+            workspace_edit(&changes),
+            Ok(vec![FileEdits {
+                path: PathBuf::from("/a"),
+                version: None,
+                edits: vec![made.clone(), made.clone()],
+            }])
+        );
+        // One file's edits in two places are put together, and the same
+        // edits given twice, as for a file under two names, are made once.
+        let document = |version: Value, text: &str| {
+            let edit = json!({ "range": range, "newText": text });
+            json!({ "textDocument": { "uri": "file:///a", "version": version }, "edits": [edit] })
+        };
+        let changes = json!({ "documentChanges": [
+            document(json!(3), "x"),
+            document(json!(3), "y"),
+            document(json!(3), "x"),
+        ]});
+        let made_y = TextEdit {
+            text: "y".to_owned(),
+            ..made.clone()
+        };
+        assert_eq!(
+            workspace_edit(&changes).unwrap()[0].edits,
+            vec![made, made_y]
+        );
+        let other =
+            json!({ "documentChanges": [document(json!(3), "x"), document(Value::Null, "x")] });
+        assert!(workspace_edit(&other).is_err(), "two versions of one file");
+        let making = json!({ "documentChanges": [
+            document(json!(3), "x"),
+            { "kind": "create", "uri": "file:///b" },
+        ]});
+        assert!(workspace_edit(&making).is_err());
+        assert_eq!(workspace_edit(&json!({})), Ok(Vec::new()));
+    }
+
+    #[test]
     fn paths_are_uris() {
         let path = Path::new("/home/me/my code/100%.rs");
         let uri = uri(path);
         assert_eq!(uri, "file:///home/me/my%20code/100%25.rs");
         assert_eq!(path_of(&uri).as_deref(), Some(path));
         assert_eq!(path_of("https://example.com"), None);
+        // With this machine named, and not another's; never relative.
+        assert_eq!(
+            path_of("file://localhost/a%20b"),
+            Some(PathBuf::from("/a b"))
+        );
+        assert_eq!(path_of("file://elsewhere/a"), None);
+        assert_eq!(path_of("file://a/b"), None);
     }
 
     #[test]

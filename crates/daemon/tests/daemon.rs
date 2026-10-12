@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    Answer, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode, ChatState,
-    ClientMessage, Diff, Edit, Error, Event, FileLocation, Item, Kind, Location, NewAgent,
-    NewTerminal, OpenFile, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Query, Request,
-    Response, ServerMessage, Side, Size, Span, TerminalId, TerminalStatus, Tool, ToolContent,
-    ToolKind, ToolStatus, View, ViewUpdate, Workspaces,
+    Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode,
+    ChatState, ClientMessage, Diff, Edit, Error, Event, FileLocation, Item, Kind, Location,
+    NewAgent, NewTerminal, OpenFile, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Query,
+    Request, Response, ServerMessage, Side, Size, Span, TerminalId, TerminalStatus, Tool,
+    ToolContent, ToolKind, ToolStatus, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -57,6 +57,7 @@ impl TestDaemon {
             declined: None,
             // Stopped with their last file, unless a test says otherwise.
             server_idle: Duration::ZERO,
+            rename_gate: None,
         };
         change(dir.path(), &mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
@@ -1964,6 +1965,500 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
         panic!("{answer:?}");
     };
     assert_eq!((found[0].line, found[0].col), (0, "pub fn ".len()));
+
+    // What f is.
+    client.query(buffer, 2, (0, call), Query::Hover).unwrap();
+    let (_, answer) = next_answer(&mut client);
+    let Answer::Hover {
+        text: said,
+        markdown,
+    } = answer
+    else {
+        panic!("{answer:?}");
+    };
+    assert!(markdown && said.contains("pub fn f() -> u32"), "{said}");
+
+    // And f renamed, where it's defined and where it's called, as one
+    // edit to the buffer.
+    client.rename(buffer, 3, (0, call), "first").unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(
+        answer,
+        (
+            3,
+            Answer::Renamed {
+                occurrences: 2,
+                files: 1
+            }
+        )
+    );
+    assert_eq!(
+        edited(text, &updates),
+        text.replace("fn f()", "fn first()")
+            .replace("    f()", "    first()")
+    );
+}
+
+/// A project for the fake language server: `app/`, marked as one, with
+/// `files` in it, and `app/a.fk` open and attached to. Returns once the
+/// server has said what's wrong with it, and so is ready.
+fn fake_project(daemon: &TestDaemon, files: &[(&str, &str)]) -> (Client, BufferId) {
+    let dir = daemon.dir.path();
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    for (name, text) in files {
+        std::fs::write(dir.join("app").join(name), text).unwrap();
+    }
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    next_diagnostics(&mut client);
+    (client, buffer)
+}
+
+/// The updates about a buffer up to the next answer, but diagnostics and
+/// highlights, which come whenever they come, and the answer.
+fn updates_to_answer(client: &mut Client) -> (Vec<BufferUpdate>, (u64, Answer)) {
+    let mut updates = Vec::new();
+    loop {
+        match next_buffer_update(client) {
+            BufferUpdate::Answer { id, answer, .. } => return (updates, (id, answer)),
+            BufferUpdate::Diagnostics { .. } | BufferUpdate::Highlights { .. } => {}
+            update => updates.push(update),
+        }
+    }
+}
+
+/// `text` with the edits in `updates` made to it.
+fn edited(text: &str, updates: &[BufferUpdate]) -> String {
+    let mut text = text.to_owned();
+    for update in updates {
+        if let BufferUpdate::Edited { edit, .. } = update {
+            text = edit.apply_to(&text).unwrap();
+        }
+    }
+    text
+}
+
+#[test]
+fn a_language_server_says_what_things_are() {
+    // Saying, the first time, that the text changed while it worked, as
+    // rust-analyzer does while it reads a project: it's asked again, after
+    // a while.
+    let daemon = with_fake_language_server(|_| vec!["--utf16".into(), "--modified-once".into()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "é bad\nuse it\n")]);
+    let asked = Instant::now();
+    client
+        .query(buffer, 1, (0, "é b".len()), Query::Hover)
+        .unwrap();
+    let (id, answer) = next_answer(&mut client);
+    assert_eq!(id, 1);
+    assert!(asked.elapsed() >= Duration::from_millis(300), "not at once");
+    let Answer::Hover {
+        text,
+        markdown: true,
+    } = answer
+    else {
+        panic!("{answer:?}");
+    };
+    assert!(text.starts_with("# bad\n\nIt's **bad**"), "{text}");
+    // Nothing to say of what's not a `bad`.
+    client
+        .query(buffer, 2, (0, "é bad\nu".len()), Query::Hover)
+        .unwrap();
+    assert_eq!(next_answer(&mut client), (2, Answer::Nothing));
+}
+
+#[test]
+fn a_language_server_is_never_asked_what_it_cant_do() {
+    let daemon = with_fake_language_server(|_| vec!["--bare".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    client.query(buffer, 1, (0, 0), Query::Hover).unwrap();
+    let failed = |why: &str| Answer::Failed(why.to_owned());
+    assert_eq!(
+        next_answer(&mut client),
+        (1, failed("its language server doesn't say what things are"))
+    );
+    client.rename(buffer, 2, (0, 0), "good").unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (2, failed("its language server can't rename"))
+    );
+}
+
+#[test]
+fn a_rename_edits_open_buffers_as_the_user_and_files_not_open_on_disk() {
+    // Edits given as `documentChanges` and as `changes`, with columns in
+    // UTF-16, which "é" tells apart from bytes.
+    for flag in ["--utf16", "--rename-changes"] {
+        let daemon = with_fake_language_server(|_| vec![flag.to_owned(), "--utf16".to_owned()]);
+        let text = "é bad = bad\n";
+        let (mut client, buffer) = fake_project(
+            &daemon,
+            &[("a.fk", text), ("defs.fk", "fn bad() {}\nbadly\n")],
+        );
+        let dir = daemon.dir.path();
+        // Another window follows the buffer.
+        let mut other = daemon.client();
+        attach_buffer(&mut other, buffer);
+
+        client.rename(buffer, 1, (0, "é b".len()), "good").unwrap();
+        // The buffer's edit comes as one, the user's, then the answer.
+        let (updates, answer) = updates_to_answer(&mut client);
+        assert_eq!(
+            answer,
+            (
+                1,
+                Answer::Renamed {
+                    occurrences: 3,
+                    files: 2
+                }
+            ),
+            "{flag}"
+        );
+        assert!(
+            matches!(
+                updates[..],
+                [
+                    BufferUpdate::Edited {
+                        version: 1,
+                        author: Author::User,
+                        answers: None,
+                        ..
+                    },
+                    BufferUpdate::Modified(true),
+                ]
+            ),
+            "{updates:?}"
+        );
+        assert_eq!(edited(text, &updates), "é good = good\n");
+        // The file not open is written, every word "bad" in it, but not
+        // "badly".
+        assert_eq!(
+            std::fs::read_to_string(dir.join("app/defs.fk")).unwrap(),
+            "fn good() {}\nbadly\n"
+        );
+        // The other window is sent the same edit.
+        let mut heard = next_buffer_update(&mut other);
+        while matches!(
+            heard,
+            BufferUpdate::Diagnostics { .. } | BufferUpdate::Highlights { .. }
+        ) {
+            heard = next_buffer_update(&mut other);
+        }
+        assert_eq!(heard, updates[0]);
+
+        // One undo takes it all back, in the buffer.
+        send_change(&mut client, buffer, 0, Change::Undo);
+        loop {
+            if let BufferUpdate::Edited {
+                answers: Some(0),
+                edit,
+                ..
+            } = next_buffer_update(&mut client)
+            {
+                assert_eq!(edit.apply_to("é good = good\n").unwrap(), text);
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn a_rename_is_made_past_edits_made_while_the_server_worked() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        vec!["--hold-rename".to_owned(), gate]
+    });
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad bad\n")]);
+    let dir = daemon.dir.path();
+    client.rename(buffer, 1, (0, 0), "good").unwrap();
+    // While the server works, another window types before the first
+    // "bad", and between the two.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    send_change(&mut other, buffer, 0, insert(8, 0, "x", 0));
+    send_change(&mut other, buffer, 1, insert(9, 4, " z", 1));
+    let mut acked = 0;
+    while acked < 2 {
+        if let BufferUpdate::Acked { .. } = next_buffer_update(&mut other) {
+            acked += 1;
+        }
+    }
+    std::fs::write(dir.join("gate"), "").unwrap();
+    let (_, answer) = updates_to_answer(&mut client);
+    assert_eq!(
+        answer,
+        (
+            1,
+            Answer::Renamed {
+                occurrences: 2,
+                files: 1
+            }
+        )
+    );
+    let mut third = daemon.client();
+    let snapshot = attach_buffer(&mut third, buffer);
+    assert_eq!(
+        (snapshot.text.as_str(), snapshot.version),
+        ("xgood z good\n", 3)
+    );
+
+    // Typed inside a name being renamed: the name isn't there now, so the
+    // rename is refused.
+    std::fs::remove_file(dir.join("gate")).unwrap();
+    client.rename(buffer, 2, (3, 1), "best").unwrap();
+    send_change(&mut other, buffer, 2, insert(13, 3, "o", 3));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    std::fs::write(dir.join("gate"), "").unwrap();
+    let (_, (_, answer)) = updates_to_answer(&mut client);
+    assert!(
+        matches!(&answer, Answer::Failed(why) if why.contains("changed while")),
+        "{answer:?}"
+    );
+    assert_eq!(attach_buffer(&mut third, buffer).text, "xgoood z good\n");
+}
+
+#[test]
+fn a_rename_that_cant_be_made_changes_nothing() {
+    // Counted in a version of the buffer never sent; and making a file.
+    let cases = [
+        (
+            "--rename-wrong-version",
+            "changed while the language server worked",
+        ),
+        ("--rename-files", "make, rename or delete files"),
+    ];
+    for (flag, why) in cases {
+        let daemon = with_fake_language_server(|_| vec![flag.to_owned()]);
+        let (mut client, buffer) =
+            fake_project(&daemon, &[("a.fk", "bad\n"), ("defs.fk", "fn bad() {}\n")]);
+        client.rename(buffer, 1, (0, 0), "good").unwrap();
+        let (updates, (_, answer)) = updates_to_answer(&mut client);
+        assert!(updates.is_empty(), "{updates:?}");
+        let Answer::Failed(said) = answer else {
+            panic!("{answer:?}");
+        };
+        assert!(said.contains(why), "{said}");
+        let dir = daemon.dir.path();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("app/defs.fk")).unwrap(),
+            "fn bad() {}\n"
+        );
+        assert_eq!(attach_buffer(&mut client, buffer).version, 0);
+    }
+}
+
+#[test]
+fn a_rename_edits_a_file_under_two_names_once_and_nothing_outside_its_project() {
+    let daemon = with_fake_language_server(|_| vec!["--rename-alias".to_owned()]);
+    let text = "bad bad\n";
+    let (mut client, buffer) =
+        fake_project(&daemon, &[("a.fk", text), ("defs.fk", "fn bad() {}\n")]);
+    let dir = daemon.dir.path();
+    std::os::unix::fs::symlink(dir.join("app"), dir.join("app/alias")).unwrap();
+    client.rename(buffer, 1, (0, 0), "good").unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(
+        answer,
+        (
+            1,
+            Answer::Renamed {
+                occurrences: 3,
+                files: 2
+            }
+        )
+    );
+    assert_eq!(edited(text, &updates), "good good\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app/defs.fk")).unwrap(),
+        "fn good() {}\n"
+    );
+
+    // A file outside the project isn't written, nor anything else.
+    let daemon = with_fake_language_server(|dir| {
+        let outside = dir.join("outside.fk").display().to_string();
+        vec!["--rename-also".to_owned(), outside]
+    });
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("outside.fk"), "bad\n").unwrap();
+    let (mut client, buffer) =
+        fake_project(&daemon, &[("a.fk", "bad\n"), ("defs.fk", "fn bad() {}\n")]);
+    client.rename(buffer, 1, (0, 0), "good").unwrap();
+    let (updates, (_, answer)) = updates_to_answer(&mut client);
+    assert!(updates.is_empty(), "{updates:?}");
+    assert!(
+        matches!(&answer, Answer::Failed(why) if why.contains("outside its project")),
+        "{answer:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("outside.fk")).unwrap(),
+        "bad\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app/defs.fk")).unwrap(),
+        "fn bad() {}\n"
+    );
+}
+
+/// A daemon with the fake language server, whose renames' threads wait,
+/// once they've written the files not open beside them, until the file
+/// `rename-gate` in its directory exists.
+fn with_rename_gate() -> TestDaemon {
+    TestDaemon::start_with(|dir, config| {
+        config.languages = Some(fake_language_server_pack(dir, Vec::new()));
+        config.rename_gate = Some(dir.join("rename-gate"));
+    })
+}
+
+/// The names of the files in `dir`, sorted.
+fn listed(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = (std::fs::read_dir(dir).unwrap())
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_file_changed_or_opened_while_a_rename_writes_it_isnt_renamed() {
+    let daemon = with_rename_gate();
+    let (mut client, buffer) =
+        fake_project(&daemon, &[("a.fk", "bad\n"), ("defs.fk", "fn bad() {}\n")]);
+    let dir = daemon.dir.path();
+    let files = listed(&dir.join("app"));
+
+    // Changed on disk, by something else, while its new text waits: the
+    // change is kept, and nothing is renamed.
+    client.rename(buffer, 1, (0, 0), "good").unwrap();
+    let staged = Instant::now() + Duration::from_secs(5);
+    while listed(&dir.join("app")).len() == files.len() {
+        assert!(Instant::now() < staged, "the new text wasn't written");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::fs::write(dir.join("app/defs.fk"), "fn bad() { changed }\n").unwrap();
+    // Another rename, meanwhile, of a file the first is writing, waits
+    // for none: it's refused.
+    client.rename(buffer, 2, (0, 0), "best").unwrap();
+    let (updates, (id, answer)) = updates_to_answer(&mut client);
+    assert_eq!(id, 2);
+    assert!(updates.is_empty(), "{updates:?}");
+    assert!(
+        matches!(&answer, Answer::Failed(why) if why.contains("another rename is writing")),
+        "{answer:?}"
+    );
+    std::fs::write(dir.join("rename-gate"), "").unwrap();
+    let (updates, (id, answer)) = updates_to_answer(&mut client);
+    assert_eq!(id, 1);
+    assert!(updates.is_empty(), "{updates:?}");
+    assert!(
+        matches!(&answer, Answer::Failed(why) if why.contains("changed on disk")),
+        "{answer:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app/defs.fk")).unwrap(),
+        "fn bad() { changed }\n"
+    );
+    assert_eq!(listed(&dir.join("app")), files, "nothing left beside it");
+
+    // Opened while its new text waits: nothing is renamed, and the buffer
+    // has the name as it was.
+    std::fs::remove_file(dir.join("rename-gate")).unwrap();
+    client.rename(buffer, 3, (0, 0), "good").unwrap();
+    while listed(&dir.join("app")).len() == files.len() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let pane = (client.new_workspace(None, open_file(dir, "app/defs.fk"))).unwrap();
+    let defs = buffer_in(&mut client, pane);
+    std::fs::write(dir.join("rename-gate"), "").unwrap();
+    let (_, (id, answer)) = updates_to_answer(&mut client);
+    assert_eq!(id, 3);
+    assert!(
+        matches!(&answer, Answer::Failed(why) if why.contains("was opened")),
+        "{answer:?}"
+    );
+    assert_eq!(
+        attach_buffer(&mut client, defs).text,
+        "fn bad() { changed }\n"
+    );
+    assert_eq!(attach_buffer(&mut client, buffer).text, "bad\n");
+    assert_eq!(listed(&dir.join("app")), files);
+}
+
+#[test]
+fn a_rename_writing_files_is_dropped_when_its_window_goes_or_the_daemon_stops() {
+    let mut daemon = with_rename_gate();
+    let (mut client, buffer) =
+        fake_project(&daemon, &[("a.fk", "bad\n"), ("defs.fk", "fn bad() {}\n")]);
+    let dir = daemon.dir.path().to_owned();
+    let files = listed(&dir.join("app"));
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    let staged = || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while listed(&dir.join("app")).len() == files.len() {
+            assert!(Instant::now() < deadline, "the new text wasn't written");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    // The window goes while the new text waits: nothing is renamed, and
+    // what was written is thrown away.
+    client.rename(buffer, 1, (0, 0), "good").unwrap();
+    staged();
+    drop(client);
+    // A query after the window has gone is answered once that's seen.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while listed(&dir.join("app")).len() != files.len() {
+        assert!(Instant::now() < deadline, "what was written stays");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    other.query(buffer, 9, (0, 0), Query::Hover).unwrap();
+    let (updates, (id, _)) = updates_to_answer(&mut other);
+    assert_eq!(id, 9);
+    assert!(updates.is_empty(), "{updates:?}");
+    assert_eq!(attach_buffer(&mut other, buffer).text, "bad\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app/defs.fk")).unwrap(),
+        "fn bad() {}\n"
+    );
+
+    // The daemon stops while the new text waits: it's thrown away.
+    other.rename(buffer, 2, (0, 0), "good").unwrap();
+    staged();
+    daemon.shutdown.shutdown();
+    daemon.thread.take().unwrap().join().unwrap();
+    assert_eq!(listed(&dir.join("app")), files);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app/defs.fk")).unwrap(),
+        "fn bad() {}\n"
+    );
+}
+
+#[test]
+fn a_rename_asked_by_a_window_that_goes_isnt_made() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        vec!["--hold-rename".to_owned(), gate]
+    });
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    client.rename(buffer, 1, (0, 0), "good").unwrap();
+    // A request answered means the rename before it has been taken in.
+    client.watch_workspaces().unwrap();
+    drop(client);
+    // Time for the daemon to see the window go, before the server answers.
+    std::thread::sleep(Duration::from_millis(200));
+    std::fs::write(daemon.dir.path().join("gate"), "").unwrap();
+    // A query asked after it is answered after it.
+    other.query(buffer, 9, (0, 0), Query::Hover).unwrap();
+    let (updates, answer) = updates_to_answer(&mut other);
+    assert_eq!(answer.0, 9);
+    assert!(updates.is_empty(), "{updates:?}");
+    assert_eq!(attach_buffer(&mut other, buffer).text, "bad\n");
 }
 
 #[test]

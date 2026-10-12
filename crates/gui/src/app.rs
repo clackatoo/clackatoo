@@ -27,6 +27,7 @@ use crate::chat::{ChatPaint, Pointer};
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, Status};
 use crate::desk::{Desk, TextTarget};
 use crate::desktop::{Button, ButtonLayout, Desktop};
+use crate::editor::Editor;
 use crate::fonts::{CellMetrics, Fonts};
 use crate::ime::{InputMethod, Preedit};
 use crate::input;
@@ -1138,7 +1139,17 @@ impl App {
             .collect();
         let mut texts = painted.texts;
         texts.extend(painted.over_texts);
-        let mut over: Vec<Fill> = painted.over.into_iter().chain(chat_paint.over).collect();
+        let mut over: Vec<Fill> = Vec::new();
+        // The focused editor's panel by its cursor, under the palette and
+        // menus. Hidden while the palette is open, as their text would
+        // mix.
+        if chrome.palette.is_none()
+            && let Some(view) = desk.editor(shown.pane).and_then(Editor::panel)
+            && let Some(&(_, tile)) = (placement.panes.iter()).find(|(id, _)| *id == shown.pane)
+        {
+            chrome::paint_panel(geometry, tile.origin, &view, &mut over, &mut texts);
+        }
+        over.extend(painted.over.into_iter().chain(chat_paint.over));
         over.extend(bar_underline);
         // Ctrl+B p: each pane's number, over it, to pick it by.
         if desk.numbering_panes() {

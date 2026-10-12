@@ -1149,3 +1149,107 @@ fn report(name: &str, mut times: Vec<f64>) {
         times[0],
     );
 }
+
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn an_editors_panel_is_drawn_over_its_text() {
+    use clackatoo_protocol::{Answer, BufferId, BufferSnapshot, BufferUpdate, ClientMessage};
+    use winit::keyboard::{Key, KeyLocation};
+
+    use crate::editor::{BufferCopy, Editor, Register};
+    use crate::input::KeyPress;
+
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut copy = BufferCopy::new(BufferId(1));
+    let text = format!(
+        "fn bad() {{}}\n{}",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxx\n".repeat(8)
+    );
+    copy.update(BufferUpdate::Snapshot(BufferSnapshot {
+        path: "/a.rs".into(),
+        text,
+        version: 0,
+        modified: false,
+    }));
+    let (cols, rows) = (32u16, 9u16);
+    let mut editor = Editor::new(BufferId(1), &crate::options::Options::default());
+    editor.resize(Size::new(cols, rows).unwrap());
+    // K, and the language server's answer.
+    let key = Key::Character("K".into());
+    let press = KeyPress {
+        key: &key,
+        text: Some("K"),
+        location: KeyLocation::Standard,
+        code: None,
+        modifiers: crate::input::Modifiers::default(),
+    };
+    editor.key(&press, &mut copy, &mut Register::default());
+    let Some(ClientMessage::Query { id, .. }) = copy.take_outbox().pop() else {
+        panic!("a query");
+    };
+    let heard = copy.update(BufferUpdate::Answer {
+        id,
+        version: 0,
+        answer: Answer::Hover {
+            text: "```rust\nfn bad()\n```\n\nIt's **bad**: see `good`.".into(),
+            markdown: true,
+        },
+    });
+    editor.heard(&heard, true, &copy);
+    editor.settle(&copy);
+    let view = editor.panel().expect("a panel");
+    assert_eq!((view.placed.top, view.placed.left), (1, 4));
+
+    let mut fonts = fonts(2.0);
+    let metrics = Metrics {
+        cell: [fonts.cell.width as f32, fonts.cell.height as f32],
+        ui_line: fonts.ui.height,
+        padding: 8.0,
+    };
+    let padding = 4;
+    let size = [
+        u32::from(cols) * fonts.cell.width + 2 * padding,
+        u32::from(rows) * fonts.cell.height + 2 * padding,
+    ];
+    let geometry = Geometry::new(size, metrics);
+    let origin = [padding as f32; 2];
+    let (mut over, mut texts) = (Vec::new(), Vec::new());
+    chrome::paint_panel(&geometry, origin, &view, &mut over, &mut texts);
+    let (lines, cursor) = editor.scene();
+    let scene = Scene {
+        origin,
+        size: [
+            (size[0] - 2 * padding) as f32,
+            (size[1] - 2 * padding) as f32,
+        ],
+        rows: &lines,
+        cursor,
+        normal_mode: true,
+        highlights: &[],
+    };
+    let picture = Picture {
+        scenes: &[scene],
+        fills: &[],
+        over: &over,
+        texts: &texts,
+        glyphs: &[],
+        over_glyphs: &[],
+        transparent: false,
+    };
+    let pixels = draw(&gpu, size, &picture, &mut fonts);
+    save("editor-panel", size, &pixels);
+    let at = |line: u32, col: u32| {
+        let x = padding + col * fonts.cell.width + fonts.cell.width / 2;
+        let y = padding + line * fonts.cell.height + fonts.cell.height / 2;
+        let start = ((y * size[0] + x) * 4) as usize;
+        [pixels[start], pixels[start + 1], pixels[start + 2]]
+    };
+    // In the room left of its text, over an "x" of the file's, only the
+    // panel's background; and the file's text beside it, not.
+    let palette = [0x16, 0x18, 0x1c];
+    assert_eq!(at(3, 4), palette, "the panel, over the text");
+    assert_ne!(at(3, 30), palette, "the file, beside it");
+}

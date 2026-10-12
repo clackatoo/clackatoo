@@ -184,6 +184,8 @@ pub enum Query {
     TypeDefinition,
     /// What implements it, such as a trait's impls.
     Implementation,
+    /// What it is: its type, and its documentation, as `K` shows.
+    Hover,
 }
 
 /// What a language server answered.
@@ -191,10 +193,30 @@ pub enum Query {
 pub enum Answer {
     /// Places, best first.
     Locations(Vec<FileLocation>),
+    /// What's there, to read, as markdown if `markdown`, or else plain
+    /// text.
+    Hover {
+        /// What the server said.
+        text: String,
+        /// Whether it's markdown.
+        markdown: bool,
+    },
+    /// A [`ClientMessage::Rename`](crate::ClientMessage::Rename) was
+    /// made: every edit it took, to buffers open and files not, has been
+    /// made, the buffers' sent as edits before this.
+    Renamed {
+        /// How many places were changed.
+        occurrences: usize,
+        /// In how many files.
+        files: usize,
+    },
     /// Nothing: there's nothing there to ask about, or the server doesn't
     /// know.
     Nothing,
-    /// The buffer has no language server, or it failed, as this says.
+    /// The buffer has no language server, or it failed, or what it said
+    /// couldn't be done, as this says. A rename that fails changes
+    /// nothing, unless a file it wrote couldn't then be put back as it
+    /// was, which this says.
     Failed(String),
 }
 

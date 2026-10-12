@@ -20,6 +20,8 @@ struct Setup {
     options: Options,
     /// The queries sent, for the language server.
     queries: Vec<(u64, usize, Query)>,
+    /// The renames sent, for the language server.
+    renames: Vec<(u64, usize, String)>,
 }
 
 impl Setup {
@@ -37,6 +39,7 @@ impl Setup {
             register: Register::default(),
             options,
             queries: Vec::new(),
+            renames: Vec::new(),
         }
     }
 
@@ -82,6 +85,10 @@ impl Setup {
             for message in messages {
                 if let ClientMessage::Query { id, at, query, .. } = message {
                     self.queries.push((id, at, query));
+                    continue;
+                }
+                if let ClientMessage::Rename { id, at, name, .. } = message {
+                    self.renames.push((id, at, name));
                     continue;
                 }
                 let (answer, _) = self.daemon.take(message);
@@ -849,4 +856,181 @@ fn gd_asks_the_language_server_and_goes_where_it_says() {
     let (asked, ..) = setup.queries[3];
     setup.answer(asked, Answer::Locations(Vec::new()));
     assert_eq!(setup.cursor(), (1, 3));
+}
+
+/// The text of the lines the panel by the cursor shows, if it's shown.
+fn panel_text(setup: &mut Setup) -> Option<Vec<String>> {
+    setup.editor.settle(&setup.copy);
+    let view = setup.editor.panel()?;
+    Some(view.lines.iter().map(super::panel::Line::text).collect())
+}
+
+#[test]
+fn k_shows_what_the_language_server_says_in_a_panel_by_the_cursor() {
+    let mut setup = Setup::new("let x = y;\nfn y() {}\n");
+    setup.keys("fyK");
+    let (asked, at, query) = setup.queries[0];
+    assert_eq!((at, query), (8, Query::Hover));
+    let hover = |text: &str| Answer::Hover {
+        text: text.to_owned(),
+        markdown: true,
+    };
+    setup.answer(asked, hover("```rust\nfn y()\n```\n\nDoes **y**."));
+    assert_eq!(panel_text(&mut setup).unwrap(), ["fn y()", "", "Does y."]);
+    // Under the cursor's line, from its column.
+    let placed = setup.editor.panel().unwrap().placed;
+    assert_eq!((placed.top, placed.left), (1, 4 + 8));
+
+    // K again, and Ctrl+E, scroll it rather than closing it; moving the
+    // cursor closes it.
+    setup.keys("K<C-e>");
+    assert!(panel_text(&mut setup).is_some());
+    setup.keys("l");
+    assert_eq!(panel_text(&mut setup), None);
+
+    // Esc closes it, as does an edit, though the cursor stays put.
+    setup.keys("hK");
+    setup.answer(setup.queries[1].0, hover("y"));
+    setup.keys("<Esc>");
+    assert_eq!(panel_text(&mut setup), None);
+    setup.keys("$hK");
+    setup.answer(setup.queries[2].0, hover("y"));
+    assert!(panel_text(&mut setup).is_some());
+    setup.keys("rz");
+    assert_eq!(panel_text(&mut setup), None);
+    // So does going somewhere else, as Ctrl+O does, and starting a search.
+    setup.keys("K");
+    setup.answer(setup.queries[3].0, hover("y"));
+    setup.editor.go_to(0, 0, &setup.copy);
+    assert_eq!(panel_text(&mut setup), None);
+    setup.keys("$hK");
+    setup.answer(setup.queries[4].0, hover("y"));
+    setup.keys("/");
+    assert_eq!(panel_text(&mut setup), None);
+    setup.keys("<Esc>");
+    // So does an undo, once the daemon has made it.
+    setup.keys("K");
+    setup.answer(setup.queries[5].0, hover("y"));
+    assert!(panel_text(&mut setup).is_some());
+    setup.keys("u");
+    assert_eq!(panel_text(&mut setup), None);
+
+    // An answer once the cursor has moved isn't shown; nothing to say is
+    // said in the bar.
+    setup.keys("K");
+    let asked = setup.queries[6].0;
+    setup.keys("0");
+    setup.answer(asked, hover("y"));
+    assert_eq!(panel_text(&mut setup), None);
+    setup.keys("K");
+    setup.answer(setup.queries[7].0, Answer::Nothing);
+    assert_eq!(panel_text(&mut setup), None);
+    assert_eq!(setup.editor.status.as_deref(), Some("no information"));
+
+    // Esc closes it, and leaves visual mode, as it would have.
+    setup.keys("vK");
+    setup.answer(setup.queries.last().unwrap().0, hover("y"));
+    assert!(panel_text(&mut setup).is_some());
+    setup.keys("<Esc>");
+    assert_eq!(panel_text(&mut setup), None);
+    assert_eq!(setup.editor.mode, Mode::Normal);
+}
+
+#[test]
+fn whats_wrong_is_shown_in_full_in_the_panel() {
+    use clackatoo_protocol::{Diagnostic, Severity};
+
+    let mut setup = Setup::new("let x = y;\nok\n");
+    setup.copy.update(BufferUpdate::Diagnostics {
+        version: 0,
+        diagnostics: vec![Diagnostic {
+            start: 8,
+            end: 9,
+            severity: Severity::Error,
+            message: "cannot find value `y`\nin this scope".into(),
+            source: Some("rustc".into()),
+            code: Some("E0425".into()),
+        }],
+    });
+    // Ctrl+W d on its line, though not on it, shows it.
+    setup.keys("<C-w>d");
+    assert_eq!(
+        panel_text(&mut setup).unwrap(),
+        [
+            "error: cannot find value `y`",
+            "in this scope",
+            "[E0425 rustc]"
+        ]
+    );
+    setup.keys("j<C-w>d");
+    assert_eq!(panel_text(&mut setup), None);
+    assert!(
+        setup
+            .editor
+            .status
+            .as_deref()
+            .unwrap()
+            .starts_with("nothing's wrong")
+    );
+
+    // K on it, where the server says nothing, shows it; and above what the
+    // server says, when it says something.
+    setup.keys("kfyK");
+    setup.answer(setup.queries[0].0, Answer::Nothing);
+    assert_eq!(panel_text(&mut setup).unwrap().len(), 3);
+    setup.keys("<Esc>K");
+    let hover = Answer::Hover {
+        text: "y: u32".into(),
+        markdown: false,
+    };
+    setup.answer(setup.queries[1].0, hover);
+    let text = panel_text(&mut setup).unwrap();
+    assert_eq!(text.last().map(String::as_str), Some("y: u32"));
+    assert!(text[3].starts_with('─'), "{text:?}");
+}
+
+#[test]
+fn grn_asks_in_the_bar_for_a_new_name_and_renames() {
+    let mut setup = Setup::new("let value = 1;\nvalue + 1\n");
+    let mut copy = BufferCopy::new(BufferId(1));
+    copy.update(setup.daemon.snapshot());
+    setup.keys("jgrn");
+    // Started with the word under the cursor.
+    assert_eq!(setup.editor.label(&copy), "rename to: value▏");
+    setup.keys("<C-u>total<CR>");
+    let (asked, at, name) = setup.renames[0].clone();
+    assert_eq!((at, name.as_str()), ("let value = 1;\n".len(), "total"));
+    // K while the rename is on its way doesn't lose its answer.
+    setup.keys("K");
+    setup.answer(setup.queries[0].0, Answer::Nothing);
+    setup.answer(
+        asked,
+        Answer::Renamed {
+            occurrences: 2,
+            files: 1,
+        },
+    );
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("renamed 2 occurrences in 1 file")
+    );
+
+    // Esc, or the name unchanged, renames nothing; what goes wrong is
+    // said.
+    setup.keys("grn<Esc>grn<CR>");
+    assert_eq!(setup.editor.status.as_deref(), Some("not renamed"));
+    assert_eq!(setup.renames.len(), 1);
+    setup.keys("grnX<BS>s<CR>");
+    let (asked, _, name) = setup.renames[1].clone();
+    assert_eq!(name, "values");
+    setup.answer(
+        asked,
+        Answer::Failed("its language server can't rename".into()),
+    );
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("its language server can't rename")
+    );
+    // Typed text goes to the name, not to the file.
+    assert_eq!(setup.text(), "let value = 1;\nvalue + 1\n");
 }

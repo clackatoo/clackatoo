@@ -15,6 +15,7 @@
 
 mod copy;
 mod keys;
+mod panel;
 mod text;
 
 use std::time::{Duration, Instant};
@@ -26,6 +27,8 @@ use winit::keyboard::{Key, NamedKey};
 
 pub(crate) use copy::{BufferCopy, Heard};
 use keys::{Action, Command, Entry, Operator, Parsed, Stroke, Target, ViewAt};
+use panel::Panel;
+pub(crate) use panel::PanelView;
 use text::{Laid, Text, tab_end};
 
 use crate::colors;
@@ -181,6 +184,36 @@ impl Indent {
     }
 }
 
+/// What's being typed in the bar.
+#[derive(Debug)]
+enum Prompt {
+    /// A search, backward if `backward`.
+    Search { query: String, backward: bool },
+    /// A new name for what's under the cursor, which was `was`.
+    Rename { name: String, was: String },
+}
+
+impl Prompt {
+    /// A search being started, backward if `backward`.
+    fn search(backward: bool) -> Self {
+        Self::Search {
+            query: String::new(),
+            backward,
+        }
+    }
+}
+
+/// What the language server was last asked, until it answers. A rename
+/// is kept apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asking {
+    /// Where to go, as `gd` asks.
+    Jump,
+    /// What's at this place, as `K` asks: the answer's shown only if the
+    /// cursor's still there.
+    Hover(Point),
+}
+
 /// A pane editing a buffer.
 #[derive(Debug)]
 pub(crate) struct Editor {
@@ -226,17 +259,23 @@ pub(crate) struct Editor {
     insert_times: usize,
     /// The last `f`, `t`, `F` or `T`.
     last_find: Option<Motion>,
-    /// A search being typed: what, and whether backward.
-    prompt: Option<(String, bool)>,
+    /// What's being typed in the bar.
+    prompt: Option<Prompt>,
     /// The last search.
     search: Option<(String, bool)>,
     /// The last match found, highlighted until Esc.
     found: Option<(Point, Point)>,
     /// A short message for the bar, until the next key.
     status: Option<String>,
-    /// The number of the language server query asked last, until it's
-    /// answered.
-    asked: Option<u64>,
+    /// The number of the language server query asked last, and what it
+    /// asked, until it's answered.
+    asked: Option<(u64, Asking)>,
+    /// The number of the rename asked last, until it's answered: a rename
+    /// takes a while, and `K` or `gd` meanwhile mustn't lose its answer.
+    renaming: Option<u64>,
+    /// What the language server says is at the cursor, with what's wrong
+    /// there, shown by it.
+    panel: Option<Panel>,
     /// A place in another file an answer goes to, and how many places it
     /// gave, for the desk to open.
     opening: Option<(FileLocation, usize)>,
@@ -283,6 +322,8 @@ impl Editor {
             found: None,
             status: None,
             asked: None,
+            renaming: None,
+            panel: None,
             opening: None,
             jumped_from: None,
             flash: None,
@@ -295,7 +336,7 @@ impl Editor {
         self.buffer
     }
 
-    /// Whether a search is being typed, in the bar.
+    /// Whether a search or a new name is being typed, in the bar.
     pub(crate) fn prompting(&self) -> bool {
         self.prompt.is_some()
     }
@@ -349,11 +390,15 @@ impl Editor {
         }
     }
 
-    /// What the bar says: a search being typed, a message, or the file and
-    /// where the cursor is in it.
+    /// What the bar says: a search or a name being typed, a message, or
+    /// the file and where the cursor is in it.
     pub(crate) fn label(&self, copy: &BufferCopy) -> String {
-        if let Some((query, backward)) = &self.prompt {
-            return format!("{}{query}▏", if *backward { '?' } else { '/' });
+        match &self.prompt {
+            Some(Prompt::Search { query, backward }) => {
+                return format!("{}{query}▏", if *backward { '?' } else { '/' });
+            }
+            Some(Prompt::Rename { name, .. }) => return format!("rename to: {name}▏"),
+            None => {}
         }
         if let Some(status) = &self.status {
             return status.clone();
@@ -415,6 +460,7 @@ impl Editor {
 
     /// Puts `text` in at the cursor, as typed in insert mode.
     pub(crate) fn paste(&mut self, text: &str, copy: &mut BufferCopy) {
+        self.panel = None;
         let at = self.insert_byte(copy);
         self.new_step |= self.mode != Mode::Insert;
         self.insert_text(at, text, copy);
@@ -426,9 +472,63 @@ impl Editor {
 
     fn stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, register: &mut Register) -> Done {
         self.status = None;
+        if self.panel.is_some()
+            && self.typed.is_empty()
+            && self.prompt.is_none()
+            && let Some(done) = self.panel_stroke(stroke)
+        {
+            return done;
+        }
+        let (mode, edits) = (self.mode, copy.edits_made());
         let done = self.read_stroke(stroke, copy, register);
         self.follow(copy);
+        // Moving the cursor, changing mode, editing or typing in the bar
+        // closes the panel.
+        if let Some(panel) = &self.panel
+            && (panel.anchor != self.cursor.at
+                || self.mode != mode
+                || copy.edits_made() != edits
+                || self.prompt.is_some())
+        {
+            self.panel = None;
+        }
         done
+    }
+
+    /// The keys a panel by the cursor takes while it's shown: `K` again
+    /// pages through it, and Ctrl+E and Ctrl+Y scroll it a line. `None`
+    /// for any other key, which closes it if it moves the cursor. Esc
+    /// closes it, and goes on to do what it does, such as leaving visual
+    /// mode.
+    fn panel_stroke(&mut self, stroke: Stroke) -> Option<Done> {
+        let panel = self.panel.as_mut()?;
+        match stroke {
+            Stroke::Char {
+                ch: 'K',
+                ctrl: false,
+            } => panel.page(),
+            Stroke::Char {
+                ch: 'e',
+                ctrl: true,
+            } => {
+                panel.scroll(1);
+            }
+            Stroke::Char {
+                ch: 'y',
+                ctrl: true,
+            } => {
+                panel.scroll(-1);
+            }
+            Stroke::Escape => {
+                self.panel = None;
+                return None;
+            }
+            _ => return None,
+        }
+        Some(Done {
+            redraw: true,
+            yanked: None,
+        })
     }
 
     fn read_stroke(
@@ -529,7 +629,7 @@ impl Editor {
             }
             Action::Repeat => return self.repeat(command.count, copy, register),
             Action::Visual { lines } => self.visual(lines),
-            Action::Search { backward } => self.prompt = Some((String::new(), backward)),
+            Action::Search { backward } => self.prompt = Some(Prompt::search(backward)),
             Action::SearchAgain { reverse } => self.search_again(reverse, copy),
             Action::FindAgain { reverse } => {
                 if let Some(Motion::Find { ch, forward, till }) = self.last_find {
@@ -547,7 +647,9 @@ impl Editor {
             }
             Action::View(at) => self.view_at(at),
             Action::Diagnostic { backward } => self.next_diagnostic(backward, times, copy),
-            Action::Ask(query) => self.ask(query, copy),
+            Action::Ask(_) | Action::Hover | Action::ShowDiagnostics | Action::Rename => {
+                self.language_server(command.action, copy);
+            }
             Action::OtherEnd => {
                 if let Some(anchor) = self.anchor {
                     self.anchor = Some(self.cursor.at);
@@ -1328,36 +1430,117 @@ impl Editor {
         self.anchor = None;
     }
 
-    fn prompt_stroke(&mut self, stroke: Stroke, copy: &BufferCopy) -> Done {
-        let Some((query, backward)) = &mut self.prompt else {
+    /// A key typed into the bar: a search's, or a new name's. Ctrl+U
+    /// clears it, as in Vim's command line.
+    fn prompt_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy) -> Done {
+        let Some(prompt) = &mut self.prompt else {
             return Done::default();
+        };
+        let typed = match prompt {
+            Prompt::Search { query, .. } => query,
+            Prompt::Rename { name, .. } => name,
         };
         match stroke {
             Stroke::Escape => self.prompt = None,
             Stroke::Backspace => {
-                if query.pop().is_none() {
+                if typed.pop().is_none() {
                     self.prompt = None;
                 }
             }
-            Stroke::Enter => {
-                let search = (std::mem::take(query), *backward);
-                self.prompt = None;
-                if !search.0.is_empty() {
-                    self.search = Some(search);
+            Stroke::Char {
+                ch: 'u',
+                ctrl: true,
+            } => typed.clear(),
+            Stroke::Enter => match self.prompt.take() {
+                Some(Prompt::Search { query, backward }) => {
+                    if !query.is_empty() {
+                        self.search = Some((query, backward));
+                    }
+                    let from = self.cursor.at;
+                    self.search_again(false, copy);
+                    if self.cursor.at != from {
+                        self.left_from(from, copy);
+                    }
                 }
-                let from = self.cursor.at;
-                self.search_again(false, copy);
-                if self.cursor.at != from {
-                    self.left_from(from, copy);
-                }
-            }
-            Stroke::Char { ch, ctrl: false } => query.push(ch),
+                Some(Prompt::Rename { name, was }) => self.rename(name, &was, copy),
+                None => {}
+            },
+            Stroke::Char { ch, ctrl: false } => typed.push(ch),
             _ => {}
         }
         Done {
             redraw: true,
             yanked: None,
         }
+    }
+
+    /// What `action` asks of the language server, or shows of what it
+    /// said.
+    fn language_server(&mut self, action: Action, copy: &mut BufferCopy) {
+        match action {
+            Action::Ask(query) => self.ask(query, copy),
+            Action::Hover => self.hover(copy),
+            Action::ShowDiagnostics => self.show_diagnostics(copy),
+            Action::Rename => self.ask_for_name(copy),
+            _ => {}
+        }
+    }
+
+    /// `K`: asks the language server what's under the cursor.
+    fn hover(&mut self, copy: &mut BufferCopy) {
+        let at = self.text(copy).byte_at(self.cursor.at);
+        let id = copy.ask(Query::Hover, at);
+        self.asked = Some((id, Asking::Hover(self.cursor.at)));
+    }
+
+    /// `grn`: asks in the bar for a new name for what's under the cursor,
+    /// starting with the word there.
+    fn ask_for_name(&mut self, copy: &BufferCopy) {
+        let text = self.text(copy);
+        let (start, end) = word_at(&text, text.byte_at(self.cursor.at));
+        let was = text.slice(start, end);
+        self.prompt = Some(Prompt::Rename {
+            name: was.clone(),
+            was,
+        });
+    }
+
+    /// Asks the language server to rename what's under the cursor, which
+    /// was `was` when the name was asked for, to `name`, unless that's no
+    /// change.
+    fn rename(&mut self, name: String, was: &str, copy: &mut BufferCopy) {
+        if name.is_empty() || name == was {
+            self.status = Some("not renamed".into());
+            return;
+        }
+        let at = self.text(copy).byte_at(self.cursor.at);
+        self.renaming = Some(copy.rename(at, name));
+    }
+
+    /// Ctrl+W `d`: what's wrong under the cursor, or else on its line, in
+    /// full, in the panel by the cursor.
+    fn show_diagnostics(&mut self, copy: &BufferCopy) {
+        let mut shown = self.diagnostics_under(copy);
+        if shown.is_empty() {
+            let text = self.text(copy);
+            let line = self.cursor.at.line;
+            let (start, end) = (text.line_start(line), text.line_end(line));
+            shown = copy.diagnostics().within(start, end).collect();
+        }
+        self.panel = Panel::new(&shown, None, self.cursor.at, self.indent.tabstop);
+        if self.panel.is_none() {
+            self.status = Some("nothing's wrong here, as far as the language server knows".into());
+        }
+    }
+
+    /// The diagnostics about the text under the cursor.
+    fn diagnostics_under<'c>(&self, copy: &'c BufferCopy) -> Vec<&'c Diagnostic> {
+        let at = self.text(copy).byte_at(self.cursor.at);
+        (copy.diagnostics().within(at, at + 1))
+            .filter(|diagnostic| {
+                diagnostic.start <= at && at < diagnostic.end.max(diagnostic.start + 1)
+            })
+            .collect()
     }
 
     /// `n`, or `N` if `reverse`: the next match of the last search.
@@ -1515,29 +1698,89 @@ impl Editor {
                     });
                 }
             }
-            Heard::Answer { id, answer } if self.asked == Some(*id) => {
-                self.asked = None;
-                self.answered(answer, copy);
+            Heard::Answer { id, answer } => {
+                if let Some((asked, asking)) = self.asked
+                    && asked == *id
+                {
+                    self.asked = None;
+                    self.answered(asking, answer, copy);
+                } else if self.renaming == Some(*id) {
+                    self.renaming = None;
+                    self.renamed(answer);
+                }
             }
-            Heard::Nothing | Heard::Answer { .. } => {}
+            Heard::Nothing => {}
+        }
+        // A new text, or the window's own undo, closes the panel, as an
+        // edit typed does.
+        if matches!(heard, Heard::Replaced | Heard::Reversed(_)) {
+            self.panel = None;
         }
         if self.mode != Mode::Insert {
             self.normal_cursor(copy);
         }
         self.follow(copy);
+        // Others' edits move the cursor with the text, and the panel with
+        // it.
+        if let Some(panel) = &mut self.panel {
+            panel.anchor = self.cursor.at;
+        }
     }
 
     /// `gd` and the like: asks the language server about where the cursor
     /// is.
     fn ask(&mut self, query: Query, copy: &mut BufferCopy) {
         let at = self.text(copy).byte_at(self.cursor.at);
-        self.asked = Some(copy.ask(query, at));
+        self.asked = Some((copy.ask(query, at), Asking::Jump));
     }
 
-    /// Goes where the language server's answer to the last query says:
+    /// Acts on the language server's answer to what it was last asked.
+    fn answered(&mut self, asking: Asking, answer: &Answer, copy: &BufferCopy) {
+        match asking {
+            Asking::Jump => self.jump(answer, copy),
+            Asking::Hover(at) if at == self.cursor.at => {
+                let hover = match answer {
+                    Answer::Hover { text, markdown } => Some((text.as_str(), *markdown)),
+                    _ => None,
+                };
+                let tabstop = self.indent.tabstop;
+                self.panel = Panel::new(&self.diagnostics_under(copy), hover, at, tabstop);
+                if self.panel.is_none() {
+                    self.status = Some(match answer {
+                        Answer::Failed(why) => why.clone(),
+                        _ => "no information".into(),
+                    });
+                }
+            }
+            // The cursor has moved since.
+            Asking::Hover(_) => {}
+        }
+    }
+
+    /// Says in the bar how the rename asked last went.
+    fn renamed(&mut self, answer: &Answer) {
+        let plural = |n: usize, one: &str| {
+            if n == 1 {
+                format!("1 {one}")
+            } else {
+                format!("{n} {one}s")
+            }
+        };
+        self.status = Some(match answer {
+            Answer::Renamed { occurrences, files } => format!(
+                "renamed {} in {}",
+                plural(*occurrences, "occurrence"),
+                plural(*files, "file")
+            ),
+            Answer::Failed(why) => why.clone(),
+            _ => "nothing to rename there".into(),
+        });
+    }
+
+    /// Goes where the language server's answer to `gd` and the like says:
     /// the first place, if it gives several, here or, in another file,
     /// for the desk to open.
-    fn answered(&mut self, answer: &Answer, copy: &BufferCopy) {
+    fn jump(&mut self, answer: &Answer, copy: &BufferCopy) {
         match answer {
             Answer::Locations(found) => {
                 let Some(first) = found.first() else {
@@ -1555,6 +1798,7 @@ impl Editor {
                 self.status = Some("the language server knows of nothing there".into());
             }
             Answer::Failed(why) => self.status = Some(why.clone()),
+            Answer::Hover { .. } | Answer::Renamed { .. } => {}
         }
     }
 
@@ -1563,6 +1807,7 @@ impl Editor {
     /// nothing, goes with it.
     pub(crate) fn go_to(&mut self, line: u64, col: usize, copy: &BufferCopy) {
         self.status = None;
+        self.panel = None;
         let text = self.text(copy);
         let line = line.min(text.last_line());
         let (start, end) = (text.line_start(line), text.line_end(line));
@@ -1704,6 +1949,7 @@ impl Editor {
     /// Puts the cursor at `line` and `col` of the pane, as a click does. A
     /// click on a line's number goes to the line's start.
     pub(crate) fn click(&mut self, line: usize, col: usize, copy: &BufferCopy) {
+        self.panel = None;
         let text = self.text(copy);
         let line = (self.top + line as u64).min(text.last_line());
         let col = match col.checked_sub(self.gutter) {
@@ -1824,6 +2070,27 @@ impl Editor {
                 builder.finish(false)
             })
             .collect();
+        // By the cursor, if it's in view.
+        let at = self.cursor.at;
+        let row = (at.line.checked_sub(self.top))
+            .and_then(|row| usize::try_from(row).ok())
+            .filter(|&row| row < self.height);
+        let col = (at.col.checked_sub(self.left)).filter(|&col| col < self.text_width());
+        if let Some(panel) = &mut self.panel {
+            let cursor = row.zip(col).map(|(row, col)| (row, self.gutter + col));
+            panel.settle((self.height, self.width), cursor);
+        }
+    }
+
+    /// Closes the panel by the cursor, as the focus leaving does.
+    pub(crate) fn close_panel(&mut self) {
+        self.panel = None;
+    }
+
+    /// The panel by the cursor, if it's shown, as it's to be drawn, in
+    /// cells of the pane.
+    pub(crate) fn panel(&self) -> Option<PanelView<'_>> {
+        self.panel.as_ref()?.view()
     }
 
     /// The rows to draw, and the cursor.
@@ -2038,6 +2305,26 @@ fn describe(diagnostic: &Diagnostic) -> String {
     } else {
         format!("{severity}: {message} [{}]", by.join(" "))
     }
+}
+
+/// Where the word at byte `at` of `text` starts and ends: letters, digits
+/// and `_`, as `w` reads them. Both are `at` if there's none there.
+fn word_at(text: &Text<'_>, at: usize) -> (usize, usize) {
+    let rope = text.rope();
+    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let char_at = rope.byte_to_char(at.min(rope.len_bytes()));
+    let mut start = char_at;
+    while start > 0 && is_word(rope.char(start - 1)) {
+        start -= 1;
+    }
+    let mut end = char_at;
+    while end < rope.len_chars() && is_word(rope.char(end)) {
+        end += 1;
+    }
+    if start == end {
+        return (at, at);
+    }
+    (rope.char_to_byte(start), rope.char_to_byte(end))
 }
 
 /// The blanks a line starts with.

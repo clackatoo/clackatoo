@@ -618,6 +618,10 @@ impl Desk {
                 }
                 left.mode != Mode::Insert
             });
+        // A panel by the cursor goes with the focus.
+        if let Some(left) = self.shown {
+            self.close_editor_panel(left.pane);
+        }
         self.shown = Some(shown);
         // Before the mode: a pane of another workspace may not exist yet.
         self.attach_shown();
@@ -1555,6 +1559,7 @@ mod tests {
                 ClientMessage::FrameDone { .. }
                 | ClientMessage::Edit { .. }
                 | ClientMessage::Query { .. }
+                | ClientMessage::Rename { .. }
                 | ClientMessage::Hello { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })

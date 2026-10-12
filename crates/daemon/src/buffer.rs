@@ -12,6 +12,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{Author, BufferSnapshot, Edit, Error, Op, TerminalId};
 use clackatoo_text::{History, HistoryError, HistorySnapshot, Rope, Steps};
@@ -36,7 +37,7 @@ pub(crate) struct Buffer {
 
 /// What tells one version of a file from another without reading it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DiskStamp {
+pub(crate) struct DiskStamp {
     seconds: i64,
     nanoseconds: i64,
     len: u64,
@@ -56,7 +57,7 @@ impl DiskStamp {
     }
 
     /// The file at `path` as it is now, if it exists.
-    fn now(path: &Path) -> io::Result<Option<Self>> {
+    pub(crate) fn now(path: &Path) -> io::Result<Option<Self>> {
         match fs::metadata(path) {
             Ok(metadata) => Ok(Some(Self::of(&metadata))),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -298,22 +299,74 @@ impl Buffer {
     }
 }
 
-/// Reads the file at `path` as text, and what it was as it was read.
-fn read(path: &Path) -> io::Result<(String, DiskStamp)> {
+/// The biggest file read, in bytes: far more than any file edited by
+/// hand, but short of a device such as `/dev/zero` filling the memory.
+const MAX_FILE: u64 = 256 * 1024 * 1024;
+
+/// Reads the file at `path` as text, and what it was as it was read. Only
+/// a regular file is read: a pipe would hang the daemon as it opened, and
+/// a device could go on for ever.
+pub(crate) fn read(path: &Path) -> io::Result<(String, DiskStamp)> {
+    let regular = |metadata: &fs::Metadata| {
+        if metadata.is_dir() {
+            Err(io::Error::from(io::ErrorKind::IsADirectory))
+        } else if !metadata.is_file() {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "it isn't a regular file",
+            ))
+        } else if metadata.len() > MAX_FILE {
+            Err(io::Error::from(io::ErrorKind::FileTooLarge))
+        } else {
+            Ok(())
+        }
+    };
+    regular(&fs::metadata(path)?)?;
     let mut file = File::open(path)?;
+    // Again, as what's there may have changed since.
     let metadata = file.metadata()?;
-    if metadata.is_dir() {
-        return Err(io::ErrorKind::IsADirectory.into());
-    }
+    regular(&metadata)?;
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    file.read_to_end(&mut bytes)?;
+    (&mut file).take(MAX_FILE + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(io::ErrorKind::FileTooLarge.into());
+    }
     let text = String::from_utf8(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
     Ok((text, DiskStamp::of(&metadata)))
 }
 
 /// Writes `text` to a new file beside `path`, with the same permissions
 /// as the file there, then renames it over that file.
-fn write(path: &Path, text: &Rope) -> io::Result<DiskStamp> {
+pub(crate) fn write(path: &Path, text: &Rope) -> io::Result<DiskStamp> {
+    stage(path, text)?.commit()
+}
+
+/// A file's new text, written and synced beside it, but not yet in its
+/// place: what can go wrong in writing it, such as the disk being full,
+/// has gone right. Dropped without being put in place, the new file is
+/// removed, so a thread that panics leaves none behind.
+#[derive(Debug)]
+pub(crate) struct Staged {
+    temporary: PathBuf,
+    path: PathBuf,
+    /// The new file as written, which renaming it doesn't change.
+    stamp: DiskStamp,
+}
+
+/// A file's new text put in its place, with the old kept under another
+/// name until it's known whether to put it back.
+#[derive(Debug)]
+pub(crate) struct Placed {
+    path: PathBuf,
+    kept: PathBuf,
+}
+
+/// Writes `text` to a new file beside `path`, with the same permissions as
+/// the file there, to be put in its place with [`Staged::commit`].
+pub(crate) fn stage(path: &Path, text: &Rope) -> io::Result<Staged> {
+    // Each new file's name is its own, though several are written beside
+    // one file at once.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -326,7 +379,8 @@ fn write(path: &Path, text: &Rope) -> io::Result<DiskStamp> {
         Err(err) => return Err(err),
     };
     let mut temporary = name.to_owned();
-    temporary.push(format!(".clackatoo-{}", std::process::id()));
+    let number = NEXT.fetch_add(1, Ordering::Relaxed);
+    temporary.push(format!(".clackatoo-{}-{number}", std::process::id()));
     let temporary = dir.join(temporary);
     let written = (|| {
         let mut file = OpenOptions::new()
@@ -342,13 +396,108 @@ fn write(path: &Path, text: &Rope) -> io::Result<DiskStamp> {
             file.write_all(chunk.as_bytes())?;
         }
         file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        DiskStamp::now(path)?.ok_or_else(|| io::ErrorKind::NotFound.into())
+        Ok(DiskStamp::of(&file.metadata()?))
     })();
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
+    match written {
+        Ok(stamp) => Ok(Staged {
+            temporary,
+            path: path.to_owned(),
+            stamp,
+        }),
+        Err(err) => {
+            let _ = fs::remove_file(&temporary);
+            Err(err)
+        }
     }
-    written
+}
+
+impl Staged {
+    /// The file whose new text it is.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Puts the new file in the old one's place. Returns the file as it is
+    /// then: as it was written, as renaming changes nothing of it.
+    pub(crate) fn commit(mut self) -> io::Result<DiskStamp> {
+        fs::rename(&self.temporary, &self.path)?;
+        self.temporary.clear();
+        Ok(self.stamp)
+    }
+
+    /// Puts the new file in the old one's place, keeping the old one, so
+    /// it can be put back with [`Placed::undo`]: by a second link to it,
+    /// or, where links can't be made, by moving it aside. Each step is a
+    /// rename or a link, and so quick, with nothing to sync.
+    pub(crate) fn place(mut self) -> io::Result<Placed> {
+        let mut kept = self.temporary.clone().into_os_string();
+        kept.push("-was");
+        let kept = PathBuf::from(kept);
+        match fs::hard_link(&self.path, &kept) {
+            Ok(()) => {
+                if let Err(err) = fs::rename(&self.temporary, &self.path) {
+                    let _ = fs::remove_file(&kept);
+                    return Err(err);
+                }
+            }
+            Err(err) if links_refused(&err) => {
+                fs::rename(&self.path, &kept)?;
+                if let Err(err) = fs::rename(&self.temporary, &self.path) {
+                    // Back as it was, as nearly as can be.
+                    let _ = fs::rename(&kept, &self.path);
+                    return Err(err);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+        self.temporary.clear();
+        Ok(Placed {
+            path: std::mem::take(&mut self.path),
+            kept,
+        })
+    }
+
+    /// Throws the new file away, leaving the old one as it was.
+    pub(crate) fn discard(self) {
+        drop(self);
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.temporary.as_os_str().is_empty() {
+            let _ = fs::remove_file(&self.temporary);
+        }
+    }
+}
+
+/// Whether making a link failed because links can't be made there, as on
+/// vfat and many FUSE mounts, or to a file someone else owns, under
+/// `fs.protected_hardlinks`, or because the file has as many as it may.
+fn links_refused(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported | io::ErrorKind::TooManyLinks
+    )
+}
+
+impl Placed {
+    /// The file whose new text it is.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Puts the old file back in its place.
+    pub(crate) fn undo(self) -> io::Result<()> {
+        fs::rename(&self.kept, &self.path)
+    }
+
+    /// Lets the old file go, keeping the new.
+    pub(crate) fn finish(self) {
+        if let Err(err) = fs::remove_file(&self.kept) {
+            log::warn!("{}: {err}", self.kept.display());
+        }
+    }
 }
 
 fn edit_ops(edit: &Edit) -> Vec<handover::EditOp> {
@@ -389,6 +538,58 @@ fn resume_author(author: handover::Author) -> Author {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_new_text_put_in_place_can_be_put_back_or_thrown_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        std::fs::write(&path, "old").unwrap();
+        let listed = || std::fs::read_dir(dir.path()).unwrap().count();
+        // Put in place and back.
+        let placed = super::stage(&path, &Rope::from_str("new"))
+            .unwrap()
+            .place()
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        placed.undo().unwrap();
+        assert_eq!(
+            (std::fs::read_to_string(&path).unwrap().as_str(), listed()),
+            ("old", 1)
+        );
+        // Dropped without being put in place, as by a thread that panics,
+        // nothing's left of it.
+        drop(super::stage(&path, &Rope::from_str("new")).unwrap());
+        assert_eq!(listed(), 1);
+        // Where links can't be made, the old is moved aside instead.
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Unsupported,
+            io::ErrorKind::TooManyLinks,
+        ] {
+            assert!(super::links_refused(&io::Error::from(kind)));
+        }
+        assert!(!super::links_refused(&io::Error::from(
+            io::ErrorKind::StorageFull
+        )));
+    }
+
+    #[test]
+    fn only_a_regular_file_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // Not hanging, as opening a pipe with no writer would.
+        let err = super::read(&fifo).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            super::read(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::IsADirectory
+        );
+    }
 
     use super::*;
 

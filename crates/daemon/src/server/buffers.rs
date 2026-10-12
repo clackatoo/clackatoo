@@ -205,6 +205,14 @@ impl Daemon {
                     reason: err.to_string(),
                 }
             })?;
+        self.made_for_user(id, made);
+        Ok(Response::Done)
+    }
+
+    /// Passes on an edit the daemon made to buffer `id` for the user,
+    /// rather than one a window sent: to its server and parser, and to
+    /// every window following it, none of which has made it yet.
+    pub(super) fn made_for_user(&mut self, id: BufferId, made: Made) {
         self.edited(id, made.version, &made.edit);
         let update = BufferUpdate::Edited {
             version: made.version,
@@ -214,7 +222,6 @@ impl Daemon {
         };
         self.tell_viewers(id, None, &update);
         self.note_modified(id);
-        Ok(Response::Done)
     }
 
     /// Closes `pane`, which shows `buffer`. The buffer goes too if no

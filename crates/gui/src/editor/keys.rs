@@ -178,6 +178,15 @@ pub(crate) enum Action {
     },
     /// `gd` and the like: ask the language server, and go where it says.
     Ask(Query),
+    /// `K`: ask the language server what's under the cursor, and show
+    /// what it says, with what's wrong there, in a panel by the cursor.
+    Hover,
+    /// Ctrl+W `d`: show what's wrong at the cursor, or on its line, in
+    /// full, in the same panel.
+    ShowDiagnostics,
+    /// `grn`: rename what's under the cursor, everywhere, asking in the
+    /// bar for the new name.
+    Rename,
     /// `o` in visual mode: to the other end of the selection.
     OtherEnd,
     /// `i` or `a` and an object, in visual mode: select it.
@@ -269,6 +278,15 @@ pub(crate) fn parse(keys: &[Stroke], visual: bool) -> Parsed {
             ch: 'r',
             ctrl: true,
         } => Action::Redo,
+        // Ctrl+W `d`, or Ctrl+W Ctrl+D, as Neovim's.
+        Stroke::Char {
+            ch: 'w',
+            ctrl: true,
+        } => match reader.next() {
+            None => return Parsed::Incomplete,
+            Some(Stroke::Char { ch: 'd', .. }) => Action::ShowDiagnostics,
+            Some(_) => return Parsed::Nothing,
+        },
         Stroke::Delete => Action::DeleteChars { before: false },
         Stroke::Char { ctrl: false, ch } => match reader.key(ch, first, visual) {
             Ok(action) => action,
@@ -351,6 +369,7 @@ impl Reader<'_> {
             'o' => Action::Insert(Entry::Below),
             'O' => Action::Insert(Entry::Above),
             'u' => Action::Undo,
+            'K' => Action::Hover,
             '.' => Action::Repeat,
             'v' => Action::Visual { lines: false },
             'V' => Action::Visual { lines: true },
@@ -439,8 +458,8 @@ impl Reader<'_> {
                 'E' => Motion::BigWordEnd,
                 'G' => Motion::Last,
                 'g' => {
-                    // What a language server knows: `gd`, `gD`, `gy` and
-                    // `gri`, as Neovim's are.
+                    // What a language server knows: `gd`, `gD`, `gy`, `gri`
+                    // and `grn`, as Neovim's are.
                     let ask = |query| Read::Yes(Action::Ask(query));
                     let Some(next) = self.next() else {
                         return Some(Read::More);
@@ -452,8 +471,11 @@ impl Reader<'_> {
                         Some('y') => ask(Query::TypeDefinition),
                         Some('r') => match self.next() {
                             None => Read::More,
-                            Some(last) if last.plain() == Some('i') => ask(Query::Implementation),
-                            Some(_) => Read::No,
+                            Some(last) => match last.plain() {
+                                Some('i') => ask(Query::Implementation),
+                                Some('n') => Read::Yes(Action::Rename),
+                                _ => Read::No,
+                            },
                         },
                         _ => Read::No,
                     });

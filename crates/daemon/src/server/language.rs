@@ -11,9 +11,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{Answer, BufferId, BufferUpdate, Edit, FileLocation, Query};
+use clackatoo_protocol::{
+    Answer, BufferId, BufferUpdate, ClientMessage, Edit, FileLocation, Query,
+};
 use clackatoo_text::{Bias, Diagnostic, Diagnostics, Rope};
 use mio::unix::SourceFd;
 use mio::{Interest, Token};
@@ -76,6 +78,19 @@ pub(super) struct Servers {
     /// they're opened in rather than one of their own: a library's file
     /// gone to from a project is the project's server's to know.
     reached: HashMap<PathBuf, ServerId>,
+    /// Queries to ask again, and when: their servers said the text changed
+    /// while they worked.
+    again: Vec<(Instant, Again)>,
+}
+
+/// A query to ask again.
+#[derive(Debug)]
+struct Again {
+    token: Token,
+    buffer: BufferId,
+    place: (u64, u64, usize),
+    ask: Ask,
+    tries: u8,
 }
 
 impl Servers {
@@ -98,14 +113,60 @@ struct Asked {
     buffer: BufferId,
     id: u64,
     /// The buffer's version and text when the server was asked, which
-    /// places in it are counted in.
+    /// places in it are counted in, and the place asked about.
     version: u64,
     text: Rope,
+    at: usize,
+    /// What was asked.
+    what: Asking,
+    /// How many times it's been asked before, and said the text changed
+    /// while it worked.
+    tries: u8,
+}
+
+/// What a client asks a buffer's language server.
+#[derive(Debug)]
+enum Ask {
+    /// About a place.
+    Query(Query),
+    /// To rename what's at a place to this.
+    Rename(String),
+}
+
+/// What a server was asked, as kept until it answers.
+#[derive(Debug)]
+enum Asking {
+    Query(Query),
+    /// A rename to `name`, with every buffer open in the server as it was
+    /// when asked, which the edits it answers with are counted in.
+    Rename {
+        name: String,
+        before: Vec<Before>,
+    },
+}
+
+/// How long to wait before asking a server again what it said it couldn't
+/// answer because the text changed while it worked, after each time:
+/// rust-analyzer says so for as long as it's reading a project. Asked once
+/// more than there are waits.
+const AGAIN_AFTER: [Duration; 2] = [Duration::from_millis(300), Duration::from_secs(1)];
+
+/// A buffer open in a server as it was when the server was asked to
+/// rename something.
+#[derive(Debug)]
+pub(super) struct Before {
+    pub(super) buffer: BufferId,
+    pub(super) version: u64,
+    pub(super) text: Rope,
 }
 
 /// The most places of one answer passed on: far more than anyone looks
 /// through, but short of reading thousands of files for one.
 const MAX_LOCATIONS: usize = 100;
+
+/// The most of what a server says is at a place that's passed on, in
+/// bytes: far more than anyone reads in a panel by the cursor.
+const MAX_HOVER: usize = 64 * 1024;
 
 /// A buffer as its language server knows it.
 #[derive(Debug)]
@@ -122,6 +183,18 @@ pub(super) struct Opened {
 /// The most versions of a buffer kept for a server that never says what's
 /// wrong with them. Ropes share what doesn't change, so each costs little.
 const KEPT_VERSIONS: usize = 256;
+
+impl Opened {
+    /// The server it's open in.
+    pub(super) fn server(&self) -> ServerId {
+        self.server
+    }
+
+    /// The text as sent at `version`, if it's still kept.
+    pub(super) fn sent_at(&self, version: u64) -> Option<&Rope> {
+        (self.sent.iter()).find_map(|(sent, text)| (*sent == version).then_some(text))
+    }
+}
 
 impl Daemon {
     /// Opens buffer `id` in its language's server, starting one for its
@@ -361,9 +434,57 @@ impl Daemon {
     /// Forgets the queries the client at `token` asked about `buffer`, or
     /// about any buffer, as when it goes.
     pub(super) fn forget_queries(&mut self, token: Token, buffer: Option<BufferId>) {
-        (self.servers.asked).retain(|asked| {
-            asked.token != token || buffer.is_some_and(|buffer| buffer != asked.buffer)
-        });
+        let forgotten = |asker: Token, about: BufferId| {
+            asker == token && buffer.is_none_or(|buffer| buffer == about)
+        };
+        (self.servers.asked).retain(|asked| !forgotten(asked.token, asked.buffer));
+        (self.servers.again).retain(|(_, again)| !forgotten(again.token, again.buffer));
+        self.forget_renames(token, buffer);
+    }
+
+    /// When the next query to ask again is due.
+    pub(super) fn next_retry(&self) -> Option<Instant> {
+        self.servers.again.iter().map(|(due, _)| *due).min()
+    }
+
+    /// Asks again the queries that are due.
+    pub(super) fn ask_again(&mut self) {
+        let now = Instant::now();
+        if self.servers.again.iter().all(|(due, _)| *due > now) {
+            return;
+        }
+        let (due, waiting) = std::mem::take(&mut self.servers.again)
+            .into_iter()
+            .partition(|(due, _)| *due <= now);
+        self.servers.again = waiting;
+        for (_, again) in due {
+            let Again {
+                token,
+                buffer,
+                place,
+                ask,
+                tries,
+            } = again;
+            self.ask_server(token, buffer, place, ask, tries);
+        }
+    }
+
+    /// The directory of server `id`'s project, if it's running.
+    pub(super) fn server_root(&self, id: ServerId) -> Option<PathBuf> {
+        Some(self.servers.slots.get(&id)?.root.clone())
+    }
+
+    /// How server `id` counts columns, if it's running.
+    pub(super) fn server_encoding(&self, id: ServerId) -> Option<lsp::Encoding> {
+        Some(self.servers.slots.get(&id)?.server.encoding())
+    }
+
+    /// Tells server `id` the files at `paths` have changed on disk.
+    pub(super) fn changed_on_disk(&mut self, id: ServerId, paths: &[PathBuf]) {
+        if let Some(slot) = self.servers.slots.get_mut(&id) {
+            slot.server.changed_on_disk(paths);
+        }
+        self.flush_server(id);
     }
 
     /// Writes what's queued for server `id`.
@@ -429,21 +550,46 @@ impl Daemon {
                 diagnostics,
             } => self.diagnosed(server, &path, version, diagnostics),
             Incoming::Answer { id, result } => self.answered(server, id, result),
+            Incoming::Outdated { id } => self.outdated(server, id),
         }
     }
 
     /// Answers a client's
     /// [`ClientMessage::Query`](clackatoo_protocol::ClientMessage::Query)
+    /// or [`ClientMessage::Rename`](clackatoo_protocol::ClientMessage::Rename)
     /// numbered `id` about byte `at` of buffer `buffer`'s text at
     /// `version`, by asking its server.
-    pub(super) fn serve_query(
+    pub(super) fn serve_query(&mut self, token: Token, message: ClientMessage) {
+        let (buffer, place, ask) = match message {
+            ClientMessage::Query {
+                buffer,
+                id,
+                version,
+                at,
+                query,
+            } => (buffer, (id, version, at), Ask::Query(query)),
+            ClientMessage::Rename {
+                buffer,
+                id,
+                version,
+                at,
+                name,
+            } => (buffer, (id, version, at), Ask::Rename(name)),
+            _ => return,
+        };
+        self.ask_server(token, buffer, place, ask, 0);
+    }
+
+    /// Asks buffer `buffer`'s server what the client at `token` asked, as
+    /// [`serve_query`](Self::serve_query) says, having asked it `tries`
+    /// times already.
+    fn ask_server(
         &mut self,
         token: Token,
         buffer: BufferId,
-        id: u64,
-        version: u64,
-        at: usize,
-        query: Query,
+        (id, version, at): (u64, u64, usize),
+        ask: Ask,
+        tries: u8,
     ) {
         let Some(slot) = self.buffers.get(&buffer) else {
             return;
@@ -472,6 +618,16 @@ impl Daemon {
                 failed("its language server is still starting"),
             );
         }
+        let cant = match &ask {
+            Ask::Query(query) => (!running.server.answers(*query))
+                .then_some("its language server doesn't say what things are"),
+            Ask::Rename(_) => {
+                (!running.server.renames()).then_some("its language server can't rename")
+            }
+        };
+        if let Some(why) = cant {
+            return self.tell(token, buffer, failed(why));
+        }
         // The place, moved along with edits made since the client's text,
         // such as an agent's. The server has every edit made.
         let Some(edits) = slot.buffer.edits_since(version) else {
@@ -480,7 +636,31 @@ impl Daemon {
         let at = edits.fold(at, |at, edit| edit.map(at, Bias::Before));
         let text = slot.buffer.text().clone();
         let at = at.min(text.len_bytes());
-        let request = (running.server).ask(query, slot.buffer.path(), &text, at);
+        let path = slot.buffer.path();
+        let (request, what) = match ask {
+            Ask::Query(query) => (
+                running.server.ask(query, path, &text, at),
+                Asking::Query(query),
+            ),
+            Ask::Rename(name) => {
+                let request = running.server.rename(path, &text, at, &name);
+                // The server makes the edits it answers with to the text
+                // it has now, which is the text sent last, as it takes
+                // what it's sent in order.
+                let before = (self.buffers.iter())
+                    .filter_map(|(&buffer, slot)| {
+                        let opened = slot.server.as_ref()?;
+                        let (version, text) = opened.sent.back()?;
+                        (opened.server == server).then(|| Before {
+                            buffer,
+                            version: *version,
+                            text: text.clone(),
+                        })
+                    })
+                    .collect();
+                (request, Asking::Rename { name, before })
+            }
+        };
         self.servers.asked.push(Asked {
             server,
             request,
@@ -489,8 +669,49 @@ impl Daemon {
             id,
             version: now,
             text,
+            at,
+            what,
+            tries,
         });
         self.flush_server(server);
+    }
+
+    /// Asks again, after a while, what server `server` didn't answer, its
+    /// request numbered `request`, because the text changed while it
+    /// worked, unless it's been asked as often as it may be.
+    fn outdated(&mut self, server: ServerId, request: u64) {
+        let Some(index) = (self.servers.asked.iter())
+            .position(|asked| asked.server == server && asked.request == request)
+        else {
+            return;
+        };
+        let asked = self.servers.asked.swap_remove(index);
+        let (token, buffer, id) = (asked.token, asked.buffer, asked.id);
+        let Some(wait) = AGAIN_AFTER.get(usize::from(asked.tries)) else {
+            let Some(slot) = self.buffers.get(&buffer) else {
+                return;
+            };
+            let update = BufferUpdate::Answer {
+                id,
+                version: slot.buffer.version(),
+                answer: Answer::Failed(
+                    "its language server is busy with changes: try again".into(),
+                ),
+            };
+            return self.tell(token, buffer, update);
+        };
+        let ask = match asked.what {
+            Asking::Query(query) => Ask::Query(query),
+            Asking::Rename { name, .. } => Ask::Rename(name),
+        };
+        let again = Again {
+            token,
+            buffer,
+            place: (id, asked.version, asked.at),
+            ask,
+            tries: asked.tries + 1,
+        };
+        self.servers.again.push((Instant::now() + *wait, again));
     }
 
     /// Passes on the answer to the request numbered `request` to server
@@ -508,10 +729,23 @@ impl Daemon {
         if !slot.viewers.contains(&asked.token) {
             return;
         }
-        let version = slot.buffer.version();
-        let answer = match result {
-            Err(err) => Answer::Failed(err),
-            Ok(value) => {
+        let answer = match (result, &asked.what) {
+            (Err(err), _) => Answer::Failed(err),
+            (Ok(value), Asking::Query(Query::Hover)) => {
+                lsp::hover(&value).map_or(Answer::Nothing, |(text, markdown)| Answer::Hover {
+                    text: cut(text, MAX_HOVER),
+                    markdown,
+                })
+            }
+            (Ok(value), Asking::Rename { before, .. }) => {
+                let client = (asked.token, asked.buffer, asked.id);
+                match self.make_rename(server, before, &value, client) {
+                    Some(answer) => answer,
+                    // Files are being written, after which it's told.
+                    None => return,
+                }
+            }
+            (Ok(value), Asking::Query(_)) => {
                 let mut read = HashMap::new();
                 let found: Vec<FileLocation> = (lsp::locations(&value).into_iter())
                     .take(MAX_LOCATIONS)
@@ -533,9 +767,13 @@ impl Daemon {
                 }
             }
         };
+        // A rename's edits have been sent: the answer comes after them.
+        let Some(slot) = self.buffers.get(&asked.buffer) else {
+            return;
+        };
         let update = BufferUpdate::Answer {
             id: asked.id,
-            version,
+            version: slot.buffer.version(),
             answer,
         };
         self.tell(asked.token, asked.buffer, update);
@@ -748,4 +986,17 @@ fn diagnostic(text: &Rope, reported: Reported, encoding: lsp::Encoding) -> Diagn
         source: reported.source,
         code: reported.code,
     }
+}
+
+/// `text`, cut to at most `max` bytes, at a character's start.
+fn cut(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push('…');
+    }
+    text
 }

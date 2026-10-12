@@ -385,6 +385,13 @@ impl Desk {
         }
     }
 
+    /// Closes the panel by the cursor of the editor `pane`, if it's one.
+    pub(super) fn close_editor_panel(&mut self, pane: PaneId) {
+        if let Some(editor) = self.editors.panes.get_mut(&pane) {
+            editor.close_panel();
+        }
+    }
+
     /// Whether `pane` is an editor in a mode other than insert.
     pub(super) fn editor_in_normal_mode(&self, pane: PaneId) -> Option<bool> {
         self.editors

@@ -45,6 +45,8 @@ pub(crate) struct Message {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RpcError {
+    #[serde(default)]
+    pub(crate) code: i64,
     pub(crate) message: String,
 }
 

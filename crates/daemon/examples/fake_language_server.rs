@@ -8,6 +8,12 @@
 //! line of `defs.fk` beside it, or of the file `--defs` names, as a link,
 //! read from disk.
 //!
+//! Asked what's at a place, it describes a `bad` there in markdown, and
+//! knows nothing of anything else. Asked to rename a word, it renames it
+//! everywhere in every file open in it, and in `defs.fk` beside the file
+//! asked about, from disk if it isn't open, with the version of each open
+//! file it counted in.
+//!
 //! | Flag | Does |
 //! |---|---|
 //! | `--utf16` | Counts columns in UTF-16, as LSP does unless asked |
@@ -15,6 +21,14 @@
 //! | `--log FILE` | Writes the method of each notification there, a line each |
 //! | `--defs FILE` | Answers where things are defined with FILE, not `defs.fk` |
 //! | `--crash-once FILE` | Exits, as if it crashed, the first time a file has `crash` in it, making FILE so the next one started doesn't |
+//! | `--bare` | Doesn't say what things are, or rename them |
+//! | `--modified-once` | Answers the first question of what something is by saying the text changed while it worked, as rust-analyzer does while it reads a project |
+//! | `--rename-changes` | Renames with a `WorkspaceEdit`'s `changes`, not its `documentChanges` |
+//! | `--rename-files` | Renames `defs.fk` too, which clackatoo refuses |
+//! | `--rename-wrong-version` | Says its renames are counted in a version of each open file it was never sent |
+//! | `--rename-alias` | Renames in each file under a second name too, as through `alias/`, a link beside it |
+//! | `--rename-also FILE` | Renames in FILE too, wherever it is |
+//! | `--hold-rename FILE` | Answers a rename only once FILE exists, taking nothing else in meanwhile |
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -32,7 +46,18 @@ fn main() {
             .and_then(|at| args.get(at + 1).cloned()),
         crash_once: (args.iter().position(|arg| arg == "--crash-once"))
             .and_then(|at| args.get(at + 1).cloned()),
+        bare: flag("--bare"),
+        modified_once: flag("--modified-once"),
+        rename_changes: flag("--rename-changes"),
+        rename_files: flag("--rename-files"),
+        rename_wrong_version: flag("--rename-wrong-version"),
+        rename_alias: flag("--rename-alias"),
+        rename_also: (args.iter().position(|arg| arg == "--rename-also"))
+            .and_then(|at| args.get(at + 1).cloned()),
+        hold_rename: (args.iter().position(|arg| arg == "--hold-rename"))
+            .and_then(|at| args.get(at + 1).cloned()),
         files: BTreeMap::new(),
+        versions: BTreeMap::new(),
     };
     let mut input = std::io::stdin().lock();
     while let Some(message) = read(&mut input) {
@@ -42,14 +67,25 @@ fn main() {
     }
 }
 
+#[allow(clippy::struct_excessive_bools, reason = "each flag is on or off")]
 struct Fake {
     utf16: bool,
     full: bool,
     log: Option<String>,
     crash_once: Option<String>,
     defs: Option<String>,
+    bare: bool,
+    modified_once: bool,
+    rename_changes: bool,
+    rename_files: bool,
+    rename_wrong_version: bool,
+    rename_alias: bool,
+    rename_also: Option<String>,
+    hold_rename: Option<String>,
     /// Each file's text, by URI.
     files: BTreeMap<String, String>,
+    /// The version of each file's text, by URI.
+    versions: BTreeMap<String, Value>,
 }
 
 fn read(input: &mut impl BufRead) -> Option<Value> {
@@ -104,6 +140,10 @@ impl Fake {
                 if !self.utf16 {
                     capabilities["positionEncoding"] = json!("utf-8");
                 }
+                if !self.bare {
+                    capabilities["hoverProvider"] = json!(true);
+                    capabilities["renameProvider"] = json!({ "prepareProvider": false });
+                }
                 send(&json!({
                     "jsonrpc": "2.0",
                     "id": message["id"],
@@ -122,6 +162,8 @@ impl Fake {
                 let uri = document["uri"].as_str().unwrap().to_owned();
                 self.files
                     .insert(uri.clone(), document["text"].as_str().unwrap().to_owned());
+                self.versions
+                    .insert(uri.clone(), document["version"].clone());
                 self.publish(&uri, &document["version"]);
             }
             "textDocument/didChange" => {
@@ -140,37 +182,158 @@ impl Fake {
                         None => new.clone_into(text),
                     }
                 }
+                self.versions
+                    .insert(uri.clone(), document["version"].clone());
                 self.publish(&uri, &document["version"]);
             }
-            "textDocument/definition" => {
+            "textDocument/definition" => self.definition(message),
+            "textDocument/didClose" => {
                 let uri = params["textDocument"]["uri"].as_str().unwrap();
-                let result = if params["position"]["line"] == 0 {
-                    let text = &self.files[uri];
-                    let at = text.find("bad").unwrap_or(0);
-                    json!({ "uri": uri, "range": { "start": place(text, at, self.utf16), "end": place(text, at, self.utf16) } })
-                } else {
-                    let defs = self.defs.as_ref().map_or_else(
-                        || format!("{}/defs.fk", &uri[..uri.rfind('/').unwrap()]),
-                        |path| format!("file://{path}"),
-                    );
-                    let file =
-                        std::fs::read_to_string(defs.strip_prefix("file://").unwrap()).unwrap();
-                    let line = file.lines().nth(1).unwrap();
-                    let column =
-                        place(line, line.find("bad").unwrap(), self.utf16)["character"].clone();
-                    let start = json!({ "line": 1, "character": column });
-                    json!([{
-                        "targetUri": defs,
-                        "targetRange": { "start": start, "end": start },
-                        "targetSelectionRange": { "start": start, "end": start },
-                    }])
-                };
+                self.files.remove(uri);
+                self.versions.remove(uri);
+            }
+            "textDocument/hover" => self.hover(message),
+            "textDocument/rename" => {
+                if let Some(gate) = &self.hold_rename {
+                    while !std::path::Path::new(gate).exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+                let result = self.rename(params);
                 send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
             }
             "exit" => return false,
             _ => {}
         }
         true
+    }
+
+    /// Answers where what's at the place `message` asks about is defined.
+    fn definition(&self, message: &Value) {
+        let params = &message["params"];
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let result = if params["position"]["line"] == 0 {
+            let text = &self.files[uri];
+            let at = text.find("bad").unwrap_or(0);
+            json!({ "uri": uri, "range": { "start": place(text, at, self.utf16), "end": place(text, at, self.utf16) } })
+        } else {
+            let defs = self.defs.as_ref().map_or_else(
+                || format!("{}/defs.fk", &uri[..uri.rfind('/').unwrap()]),
+                |path| format!("file://{path}"),
+            );
+            let file = std::fs::read_to_string(defs.strip_prefix("file://").unwrap()).unwrap();
+            let line = file.lines().nth(1).unwrap();
+            let column = place(line, line.find("bad").unwrap(), self.utf16)["character"].clone();
+            let start = json!({ "line": 1, "character": column });
+            json!([{
+                "targetUri": defs,
+                "targetRange": { "start": start, "end": start },
+                "targetSelectionRange": { "start": start, "end": start },
+            }])
+        };
+        send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
+    }
+
+    /// Answers what's at the place `message` asks about.
+    fn hover(&mut self, message: &Value) {
+        if self.modified_once {
+            self.modified_once = false;
+            send(&json!({
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "error": { "code": -32801, "message": "content modified" },
+            }));
+            return;
+        }
+        let params = &message["params"];
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let text = &self.files[uri];
+        let at = byte(text, &params["position"], self.utf16);
+        let result = if word_at(text, at).1 == "bad" {
+            json!({ "contents": {
+                "kind": "markdown",
+                "value": "# bad\n\nIt's **bad**: see `good`.\n\n```fake\nfn bad()\n```",
+            }})
+        } else {
+            Value::Null
+        };
+        send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
+    }
+
+    /// Renames the word at the place `params` give to their `newName`, in
+    /// every file open, and `defs.fk` beside the file asked about.
+    fn rename(&self, params: &Value) -> Value {
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let text = &self.files[uri];
+        let at = byte(text, &params["position"], self.utf16);
+        let (_, word) = word_at(text, at);
+        if word.is_empty() {
+            return Value::Null;
+        }
+        let name = params["newName"].as_str().unwrap();
+        let edits = |text: &str| -> Vec<Value> {
+            (text.match_indices(word))
+                .filter(|&(start, _)| word_at(text, start).1 == word)
+                .map(|(start, _)| {
+                    let range = json!({
+                        "start": place(text, start, self.utf16),
+                        "end": place(text, start + word.len(), self.utf16),
+                    });
+                    json!({ "range": range, "newText": name })
+                })
+                .collect()
+        };
+        let mut files: Vec<(String, Value, Vec<Value>)> = (self.files.iter())
+            .map(|(uri, text)| {
+                let version = if self.rename_wrong_version {
+                    json!(999)
+                } else {
+                    self.versions[uri].clone()
+                };
+                (uri.clone(), version, edits(text))
+            })
+            .collect();
+        let dir = &uri[..uri.rfind('/').unwrap()];
+        let defs = format!("{dir}/defs.fk");
+        if !self.files.contains_key(&defs)
+            && let Ok(text) = std::fs::read_to_string(defs.strip_prefix("file://").unwrap())
+        {
+            files.push((defs.clone(), Value::Null, edits(&text)));
+        }
+        if let Some(also) = &self.rename_also
+            && let Ok(text) = std::fs::read_to_string(also)
+        {
+            files.push((format!("file://{also}"), Value::Null, edits(&text)));
+        }
+        if self.rename_alias {
+            let aliased: Vec<_> = (files.iter())
+                .map(|(uri, version, edits)| {
+                    let name = &uri[uri.rfind('/').unwrap()..];
+                    (format!("{dir}/alias{name}"), version.clone(), edits.clone())
+                })
+                .collect();
+            files.extend(aliased);
+        }
+        files.retain(|(_, _, edits)| !edits.is_empty());
+        if self.rename_changes {
+            let changes: serde_json::Map<String, Value> = (files.into_iter())
+                .map(|(uri, _, edits)| (uri, Value::Array(edits)))
+                .collect();
+            return json!({ "changes": changes });
+        }
+        let mut changes: Vec<Value> = (files.into_iter())
+            .map(|(uri, version, edits)| {
+                json!({ "textDocument": { "uri": uri, "version": version }, "edits": edits })
+            })
+            .collect();
+        if self.rename_files {
+            changes.push(json!({
+                "kind": "rename",
+                "oldUri": defs,
+                "newUri": format!("{dir}/{name}.fk"),
+            }));
+        }
+        json!({ "documentChanges": changes })
     }
 
     /// Says where each `bad` in the file at `uri` is.
@@ -212,6 +375,23 @@ fn place(text: &str, at: usize, utf16: bool) -> Value {
         before.len()
     };
     json!({ "line": text[..at].matches('\n').count(), "character": character })
+}
+
+/// Where the word at byte `at` of `text` starts, and the word: letters,
+/// digits and underscores. Empty if there's none there.
+fn word_at(text: &str, at: usize) -> (usize, &str) {
+    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let start = text[..at]
+        .char_indices()
+        .rev()
+        .take_while(|&(_, ch)| is_word(ch))
+        .last()
+        .map_or(at, |(start, _)| start);
+    let end = text[at..]
+        .char_indices()
+        .find(|&(_, ch)| !is_word(ch))
+        .map_or(text.len(), |(end, _)| at + end);
+    (start, &text[start..end])
 }
 
 /// A line and column of `text` as a byte.

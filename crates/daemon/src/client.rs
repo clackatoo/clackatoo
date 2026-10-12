@@ -315,6 +315,29 @@ impl Client {
         })
     }
 
+    /// Asks the language server of a buffer the client follows to rename
+    /// what's at byte `at` of its text at `version` to `name`, numbered
+    /// `id`. The answer comes in an [`Event::Buffer`], after the edits.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn rename(
+        &mut self,
+        buffer: BufferId,
+        id: u64,
+        (version, at): (u64, usize),
+        name: &str,
+    ) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Rename {
+            buffer,
+            id,
+            version,
+            at,
+            name: name.to_owned(),
+        })
+    }
+
     /// Limits how long [`next_event`](Self::next_event) and requests wait.
     /// A wait that runs out fails with an I/O error of kind `WouldBlock`.
     ///

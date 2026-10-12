@@ -72,7 +72,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -140,6 +140,24 @@ pub enum ClientMessage {
         at: usize,
         /// What's asked.
         query: Query,
+    },
+    /// Asks the language server of a buffer the client attached to to
+    /// rename what's at a place, everywhere it's used, as
+    /// [`Query`](Self::Query) asks about one. The daemon makes the edits
+    /// it says, in buffers open as the user's, one undo step in each, and
+    /// in files not open on disk, then answers with
+    /// [`Answer::Renamed`] in a [`BufferUpdate::Answer`].
+    Rename {
+        /// The buffer.
+        buffer: BufferId,
+        /// The client's number for it, which the answer gives back.
+        id: u64,
+        /// The version of the text `at` is in, as for a query.
+        version: u64,
+        /// The place, in bytes.
+        at: usize,
+        /// The name to give it.
+        name: String,
     },
 }
 

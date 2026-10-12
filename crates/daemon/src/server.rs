@@ -57,6 +57,7 @@ use crate::workspaces::WorkspaceState;
 mod buffers;
 mod language;
 mod offers;
+mod rename;
 
 use buffers::BufferSlot;
 use language::{Pipe, ServerId, Servers};
@@ -388,6 +389,8 @@ pub struct Daemon {
     servers: Servers,
     /// Languages offered to clients to install, and being installed.
     installs: Installs,
+    /// Renames whose files are being written.
+    renames: rename::Renames,
     /// The agent chats talk to, while any chat needs it.
     agent: Option<AgentSlot>,
     /// What the agent sent last, for the chats to act on.
@@ -484,6 +487,7 @@ impl Daemon {
             syntax: None,
             servers: Servers::default(),
             installs: Installs::new(config.declined.as_deref()),
+            renames: rename::Renames::default(),
             agent: None,
             incoming: Vec::new(),
             quic: None,
@@ -591,6 +595,9 @@ impl Daemon {
                 Hosted::Chat(chat) => chats.push(chat.hand_over()),
             }
         }
+        // Renames under way are dropped, rather than leave their new files
+        // beside the old.
+        self.abandon_renames();
         // The agent and language servers stop, and the next build reaps
         // them.
         self.stop_agent();
@@ -672,7 +679,8 @@ impl Daemon {
                 let compaction = self.compactions.values().min().copied();
                 let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
                 let idle = self.next_idle_stop();
-                let next = compaction.into_iter().chain(quic).chain(idle).min();
+                let retry = self.next_retry();
+                let next = (compaction.into_iter().chain(quic).chain(idle).chain(retry)).min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
                 Some(Duration::ZERO)
@@ -697,12 +705,15 @@ impl Daemon {
             }
             self.take_highlights();
             self.take_installs();
+            self.take_renames();
+            self.ask_again();
             self.stop_idle_servers();
             self.compact_scrollbacks();
             self.send_view_updates();
             self.transmit_quic();
         }
         log::info!("shutting down");
+        self.abandon_renames();
         Ok(None)
     }
 
@@ -1610,14 +1621,8 @@ impl Daemon {
                     self.serve_edit(token, buffer, seq, change);
                     continue;
                 }
-                ClientMessage::Query {
-                    buffer,
-                    id,
-                    version,
-                    at,
-                    query,
-                } => {
-                    self.serve_query(token, buffer, id, version, at, query);
+                message @ (ClientMessage::Query { .. } | ClientMessage::Rename { .. }) => {
+                    self.serve_query(token, message);
                     continue;
                 }
             };

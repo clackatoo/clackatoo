@@ -34,6 +34,12 @@ enum Waiting {
         at: usize,
         query: Query,
     },
+    /// A rename of what's at byte `at` to `name`, sent as a query is.
+    Rename {
+        id: u64,
+        at: usize,
+        name: String,
+    },
 }
 
 /// What an update from the daemon did to the copy, for the panes showing
@@ -171,13 +177,25 @@ impl BufferCopy {
     /// copy's text, once the changes before it have been made. Returns the
     /// query's number, which [`Heard::Answer`] gives back.
     pub(crate) fn ask(&mut self, query: Query, at: usize) -> u64 {
-        // Numbered across every copy, so a late answer to a copy since
-        // made again goes nowhere.
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let id = next_query();
         self.waiting.push_back(Waiting::Query { id, at, query });
         self.send_next();
         id
+    }
+
+    /// Asks the buffer's language server to rename what's at byte `at` of
+    /// the copy's text to `name`, everywhere, once the changes before it
+    /// have been made. Returns its number, as [`ask`](Self::ask) does.
+    pub(crate) fn rename(&mut self, at: usize, name: String) -> u64 {
+        let id = next_query();
+        self.waiting.push_back(Waiting::Rename { id, at, name });
+        self.send_next();
+        id
+    }
+
+    /// How many edits have been made here since they were last taken.
+    pub(crate) fn edits_made(&self) -> usize {
+        self.made.len()
     }
 
     /// Takes in what the daemon says about the buffer.
@@ -329,7 +347,7 @@ impl BufferCopy {
         }
         let waiting = (self.waiting.iter()).filter_map(|waiting| match waiting {
             Waiting::Edit { edit, .. } => Some(edit),
-            Waiting::Undo | Waiting::Redo | Waiting::Query { .. } => None,
+            Waiting::Undo | Waiting::Redo | Waiting::Query { .. } | Waiting::Rename { .. } => None,
         });
         (self.highlights).replace_since(start..end, spans, waiting);
     }
@@ -357,7 +375,7 @@ impl BufferCopy {
             let mine = match waiting {
                 Waiting::Edit { edit: mine, .. } => mine,
                 // A place asked about moves with the text around it.
-                Waiting::Query { at, .. } => {
+                Waiting::Query { at, .. } | Waiting::Rename { at, .. } => {
                     *at = edit.map(*at, Bias::Before);
                     continue;
                 }
@@ -383,14 +401,24 @@ impl BufferCopy {
         if self.sent.is_some() || !self.loaded {
             return;
         }
-        while let Some(&Waiting::Query { id, at, query }) = self.waiting.front() {
-            self.waiting.pop_front();
-            self.outbox.push(ClientMessage::Query {
-                buffer: self.id,
-                id,
-                version: self.version,
-                at,
-                query,
+        while let Some(Waiting::Query { .. } | Waiting::Rename { .. }) = self.waiting.front() {
+            let (buffer, version) = (self.id, self.version);
+            self.outbox.push(match self.waiting.pop_front() {
+                Some(Waiting::Query { id, at, query }) => ClientMessage::Query {
+                    buffer,
+                    id,
+                    version,
+                    at,
+                    query,
+                },
+                Some(Waiting::Rename { id, at, name }) => ClientMessage::Rename {
+                    buffer,
+                    id,
+                    version,
+                    at,
+                    name,
+                },
+                _ => unreachable!("a query or a rename"),
             });
         }
         let Some(first) = self.waiting.front() else {
@@ -404,7 +432,7 @@ impl BufferCopy {
             },
             Waiting::Undo => Change::Undo,
             Waiting::Redo => Change::Redo,
-            Waiting::Query { .. } => unreachable!("sent above"),
+            Waiting::Query { .. } | Waiting::Rename { .. } => unreachable!("sent above"),
         };
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -415,6 +443,13 @@ impl BufferCopy {
             change,
         });
     }
+}
+
+/// A number for a query, counted across every copy, so a late answer to a
+/// copy since made again goes nowhere.
+fn next_query() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]

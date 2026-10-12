@@ -15,6 +15,7 @@ use winit::window::ResizeDirection;
 use clackatoo_protocol::PaneId;
 
 use crate::desktop::{Button, ButtonLayout};
+use crate::editor::PanelView;
 use crate::layout::{Area, Placement, Rect};
 use crate::render::{Fill, Ink, Paint, Text, TextFont};
 
@@ -1106,6 +1107,95 @@ pub(crate) fn paint_pane_numbers(
         });
     }
     (fills, texts)
+}
+
+/// An editor's panel by its cursor, as `view` places it in the pane whose
+/// cells start at `origin`: raised over the panes as the palette is, with
+/// its text in the terminal's font, code on a faint band or box, and a
+/// scroll bar if there's more than it shows. Its fills go in `over`, and
+/// its text in `texts`.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn paint_panel<'a>(
+    geometry: &Geometry,
+    origin: [f32; 2],
+    view: &PanelView<'a>,
+    over: &mut Vec<Fill>,
+    texts: &mut Vec<Text<'a>>,
+) {
+    let metrics = geometry.metrics;
+    let [cell_width, cell_height] = metrics.cell;
+    let placed = view.placed;
+    // A cell of room either side of the text, and half a cell above and
+    // below.
+    let rect = Rect {
+        x: (origin[0] + placed.left as f32 * cell_width).round(),
+        y: (origin[1] + placed.top as f32 * cell_height).round(),
+        width: ((placed.width + 2) as f32 * cell_width).round(),
+        height: ((placed.height + 1) as f32 * cell_height).round(),
+    };
+    push_shadow(over, rect, geometry.radius, metrics.padding);
+    over.push(
+        Fill::rounded(rect.to_array(), Paint::Palette, geometry.radius)
+            .bordered(geometry.edge, Paint::PaletteEdge),
+    );
+    let left = rect.x + cell_width;
+    let top = (rect.y + cell_height / 2.0).round();
+    for (index, line) in view.lines.iter().enumerate() {
+        let y = top + index as f32 * cell_height;
+        if line.block {
+            over.push(Fill::solid(
+                [
+                    rect.x + geometry.edge,
+                    y,
+                    rect.width - 2.0 * geometry.edge,
+                    cell_height,
+                ],
+                Paint::Code,
+            ));
+        }
+        let mut col = 0;
+        for run in &line.runs {
+            let x = left + col as f32 * cell_width;
+            let cells = crate::render::mono_width(&run.text);
+            if run.code {
+                over.push(Fill::rounded(
+                    [
+                        x - 1.0,
+                        y + 1.0,
+                        cells as f32 * cell_width + 2.0,
+                        cell_height - 2.0,
+                    ],
+                    Paint::Code,
+                    metrics.padding,
+                ));
+            }
+            texts.push(Text {
+                origin: [x, y],
+                content: &run.text,
+                ink: run.ink,
+                font: TextFont::Mono,
+            });
+            col += cells;
+        }
+    }
+    // Where what's shown is in all of it, at the right, in the room
+    // beside the text.
+    if view.total > view.lines.len() {
+        let track = view.lines.len() as f32 * cell_height;
+        let thumb = (track * view.lines.len() as f32 / view.total as f32).max(cell_height / 2.0);
+        let y = top + (track - thumb) * view.first as f32 / (view.total - view.lines.len()) as f32;
+        let width = (metrics.padding * 0.75).max(2.0);
+        over.push(Fill::rounded(
+            [
+                rect.x + rect.width - f32::midpoint(cell_width, width),
+                y,
+                width,
+                thumb,
+            ],
+            Paint::PaletteEdge,
+            width / 2.0,
+        ));
+    }
 }
 
 /// The panes of `placement`: each one's background, side by side, with

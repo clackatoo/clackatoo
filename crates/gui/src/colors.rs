@@ -272,7 +272,7 @@ impl Theme {
     }
 
     /// A program's colour, or `None` for the default.
-    fn resolve(&self, color: Color) -> Option<Rgba> {
+    pub(crate) fn resolve(&self, color: Color) -> Option<Rgba> {
         match color {
             Color::Default => None,
             Color::Indexed(index) => Some(self.palette[usize::from(index)]),

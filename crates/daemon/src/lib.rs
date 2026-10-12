@@ -75,6 +75,11 @@ pub struct DaemonConfig {
     /// How long a language server is kept with no files open in it, so
     /// coming back to its project soon doesn't start it again.
     pub server_idle: std::time::Duration,
+    /// For tests: a file a rename's thread waits for once it has written
+    /// the new text of the files not open beside them, before they're put
+    /// in place, so a test can act while it's under way. `None`, but in
+    /// tests.
+    pub rename_gate: Option<PathBuf>,
 }
 
 /// How long a language server is kept with no files open in it, unless
@@ -132,6 +137,7 @@ impl DaemonConfig {
             servers: languages_dir().map(|dir| dir.with_file_name("servers")),
             declined: languages_dir().map(|dir| dir.with_file_name("declined")),
             server_idle: DEFAULT_SERVER_IDLE,
+            rename_gate: None,
         }
     }
 }
