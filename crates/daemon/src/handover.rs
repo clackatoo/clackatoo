@@ -1206,6 +1206,30 @@ mod tests {
         assert_eq!(state.next_buffer, 1);
     }
 
+    /// Written by a build that wrote version 8. It must always be read.
+    #[test]
+    fn version_8_is_read() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v8.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!((state.next_terminal, state.orphans[0].pid), (9, 94));
+        assert_eq!(state.chats[0].session.as_deref(), Some("s8"));
+        assert_eq!(
+            (state.next_buffer, state.buffers[0].text.as_str()),
+            (2, "new")
+        );
+        let terminal = &state.terminals[0];
+        assert_eq!((terminal.id, terminal.pid), (1, 88));
+        let mut emulator =
+            clackatoo_term::Terminal::restore(&terminal.screen, &clackatoo_term::Config::default())
+                .unwrap();
+        emulator.restore_blocks(&terminal.blocks);
+        assert_eq!(emulator.screen_text(), "two\nthree\nfour");
+        assert_eq!(emulator.primary().scrollback_len(), 1);
+        assert_eq!(emulator.cwd(), Some("/v8"));
+    }
+
     #[test]
     fn each_fd_is_taken_once() {
         let mut fds = Fds::default();
