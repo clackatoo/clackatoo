@@ -8,6 +8,7 @@ use std::ops::Range;
 
 use crate::blocks::Mark;
 use crate::cell::{Cell, CellFlags, StyleIndex};
+use crate::size::Size;
 use crate::style::Style;
 pub use builder::RowBuilder;
 use graphemes::Graphemes;
@@ -25,8 +26,13 @@ use lookup::{LINEAR_SEARCH_MAX, StyleLookup};
 /// followed by a [`CellFlags::WIDE_SPACER`] cell, and a spacer always follows a
 /// wide cell. Every mutation keeps it by blanking the other half of any wide
 /// character it partly overwrites.
+///
+/// A new row allocates no cells until something is written to it: most of a
+/// fresh screen is never written, and until then it reads as blank cells
+/// shared by every row.
 #[derive(Clone, Debug)]
 pub struct Row {
+    /// Empty until the row is first written, then `width` cells.
     cells: Vec<Cell>,
     /// Non-default styles used by cells. [`StyleIndex`] `i` refers to
     /// `palette[i - 1]`, and index 0 is the default style.
@@ -40,12 +46,18 @@ pub struct Row {
     /// raised by writes, so finding where the row's content ends needn't
     /// look at every blank after it.
     written: u16,
+    width: u16,
     wrapped: bool,
 }
 
-// Scrollback is mostly rows, so their size matters. The last-style hint and
-// the wrapped flag fit in what would otherwise be padding.
+// Scrollback is mostly rows, so their size matters. The last-style hint, the
+// width and the wrapped flag fit in what would otherwise be padding.
 const _: () = assert!(size_of::<Row>() <= 64);
+
+/// What a row reads as before it is first written. One copy serves every
+/// row as wide as a terminal can be; a row wider than that (only ever
+/// rebuilt from history) allocates its cells up front.
+static BLANK_CELLS: [Cell; Size::MAX as usize] = [Cell::BLANK; Size::MAX as usize];
 
 /// The rarely needed parts of a row.
 #[derive(Clone, Debug, Default)]
@@ -62,12 +74,18 @@ struct Extras {
 
 impl Row {
     pub(crate) fn new(width: usize) -> Self {
+        let cells = if width > BLANK_CELLS.len() {
+            vec![Cell::BLANK; width]
+        } else {
+            Vec::new()
+        };
         Self {
-            cells: vec![Cell::BLANK; width],
+            cells,
             palette: Vec::new(),
             extras: None,
             last_style: StyleIndex::DEFAULT,
             written: 0,
+            width: u16::try_from(width).expect("columns fit in u16"),
             wrapped: false,
         }
     }
@@ -75,7 +93,7 @@ impl Row {
     /// The number of cells in the row.
     #[must_use]
     pub fn width(&self) -> usize {
-        self.cells.len()
+        usize::from(self.width)
     }
 
     /// Whether this row's text continues on the next row because it reached
@@ -88,7 +106,30 @@ impl Row {
     /// The cells, left to right.
     #[must_use]
     pub fn cells(&self) -> &[Cell] {
-        &self.cells
+        if self.is_allocated() {
+            &self.cells
+        } else {
+            &BLANK_CELLS[..self.width()]
+        }
+    }
+
+    /// Whether the row has cells of its own, rather than being blank and
+    /// never written.
+    fn is_allocated(&self) -> bool {
+        self.cells.len() == self.width()
+    }
+
+    /// Gives the row cells of its own before they're changed. Every method
+    /// that changes cells calls this first, once per call.
+    fn allocate(&mut self) {
+        #[cold]
+        #[inline(never)]
+        fn allocate(row: &mut Row) {
+            row.cells = vec![Cell::BLANK; row.width()];
+        }
+        if !self.is_allocated() {
+            allocate(self);
+        }
     }
 
     /// The style of one of this row's cells.
@@ -110,7 +151,7 @@ impl Row {
     /// [`CellFlags::WIDE_SPACER`] cell adds nothing, because its text belongs
     /// to the cell on its left.
     pub fn push_text(&self, col: usize, out: &mut String) {
-        let cell = self.cells[col];
+        let cell = self.cells()[col];
         if cell.is_wide_spacer() {
             return;
         }
@@ -146,6 +187,7 @@ impl Row {
     /// Like [`write`](Self::write), with a style already interned in this
     /// row by [`intern`](Self::intern).
     pub(crate) fn write_cell(&mut self, col: usize, ch: char, wide: bool, style: StyleIndex) {
+        self.allocate();
         if wide {
             debug_assert!(col + 1 < self.width(), "a wide character needs two cells");
             self.unlink_wide(col);
@@ -165,6 +207,7 @@ impl Row {
         if text.is_empty() {
             return;
         }
+        self.allocate();
         let cols = col..col + text.len();
         // Wide characters entirely inside the range are overwritten whole;
         // only those straddling its edges need their other half blanked.
@@ -192,6 +235,7 @@ impl Row {
     /// Appends a zero-width codepoint (a combining accent, a variation selector,
     /// a joiner…) to the cell at `col`.
     pub(crate) fn append_to_grapheme(&mut self, col: usize, ch: char) {
+        self.allocate();
         debug_assert!(!self.cells[col].is_wide_spacer(), "spacers hold no text");
         if self.extras_mut().graphemes.append(col, ch) {
             self.cells[col].add_flags(CellFlags::GRAPHEME);
@@ -203,7 +247,7 @@ impl Row {
     pub(crate) fn last_char(&self, col: usize) -> char {
         self.grapheme(col)
             .and_then(|extra| extra.last().copied())
-            .unwrap_or_else(|| self.cells[col].ch())
+            .unwrap_or_else(|| self.cells()[col].ch())
     }
 
     /// Blanks `cols` in `style`, clamped to the row.
@@ -213,6 +257,10 @@ impl Row {
             return;
         }
         let blank = Cell::blank(self.intern(style));
+        if blank == Cell::BLANK && !self.is_allocated() {
+            return;
+        }
+        self.allocate();
         self.unlink_wide(cols.start);
         self.unlink_wide(cols.end - 1);
         self.remove_graphemes(&cols);
@@ -235,13 +283,16 @@ impl Row {
         self.wrapped = false;
         let blank = Cell::blank(self.intern(style));
         if blank == Cell::BLANK {
-            // Cells past the written mark are blank already.
+            // Cells past the written mark are blank already, and so is a row
+            // that has never been written. One that has keeps its cells: it
+            // is about to be written again.
             let written = self.written();
             self.cells[..written].fill(blank);
             self.written = 0;
         } else {
+            self.allocate();
             self.cells.fill(blank);
-            self.written = u16::try_from(self.cells.len()).expect("columns fit in u16");
+            self.written = self.width;
         }
     }
 
@@ -254,6 +305,10 @@ impl Row {
         }
         let count = count.min(width - col);
         let blank = Cell::blank(self.intern(style));
+        if blank == Cell::BLANK && !self.is_allocated() {
+            return;
+        }
+        self.allocate();
 
         // Inserting between the halves of a wide character splits it.
         if self.cells[col].is_wide_spacer() {
@@ -288,6 +343,10 @@ impl Row {
         }
         let count = count.min(width - col);
         let blank = Cell::blank(self.intern(style));
+        if blank == Cell::BLANK && !self.is_allocated() {
+            return;
+        }
+        self.allocate();
 
         // Deleting a spacer leaves its wide character half-drawn.
         if self.cells[col].is_wide_spacer() {
@@ -460,25 +519,40 @@ impl Row {
         self.extras.get_or_insert_default()
     }
 
+    /// Roughly the heap memory the row holds: its cells, palette and
+    /// extras, but not what the extras hold in turn.
+    #[cfg(test)]
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.cells.capacity() * size_of::<Cell>()
+            + self.palette.capacity() * size_of::<Style>()
+            + self.extras.as_ref().map_or(0, |_| size_of::<Extras>())
+    }
+
     /// Panics if any of the row's invariants are broken.
     #[cfg(test)]
     pub(crate) fn assert_invariants(&self) {
         assert!(
-            self.cells[self.written()..]
+            self.is_allocated() || self.cells.is_empty(),
+            "a row has cells but not one per column"
+        );
+        assert!(
+            self.cells()[self.written()..]
                 .iter()
                 .all(|&cell| cell == Cell::BLANK),
             "a cell after the written mark isn't blank"
         );
-        for (col, cell) in self.cells.iter().enumerate() {
+        for (col, cell) in self.cells().iter().enumerate() {
             if cell.is_wide() {
                 assert!(
-                    self.cells.get(col + 1).is_some_and(|c| c.is_wide_spacer()),
+                    self.cells()
+                        .get(col + 1)
+                        .is_some_and(|c| c.is_wide_spacer()),
                     "wide cell at {col} is not followed by a spacer"
                 );
             }
             if cell.is_wide_spacer() {
                 assert!(
-                    col > 0 && self.cells[col - 1].is_wide(),
+                    col > 0 && self.cells()[col - 1].is_wide(),
                     "spacer at {col} does not follow a wide cell"
                 );
             }
@@ -684,6 +758,46 @@ mod tests {
         }
         assert!(row.extras.as_ref().is_some_and(|e| e.lookup.is_built()));
         assert_eq!(*row.style(row.cells()[255 % 40]), style(255));
+    }
+
+    #[test]
+    fn a_row_allocates_its_cells_only_once_written() {
+        let mut row = Row::new(80);
+        assert_eq!(row.heap_bytes(), 0);
+        assert_eq!(row.cells().len(), 80);
+        // Blanking what's blank already changes nothing.
+        row.fill(0..80, &Style::DEFAULT);
+        row.insert_blanks(3, 2, &Style::DEFAULT);
+        row.delete_cells(3, 2, &Style::DEFAULT);
+        row.reset(&Style::DEFAULT);
+        assert_eq!(row.heap_bytes(), 0);
+        row.assert_invariants();
+
+        row.write(5, 'x', false, &Style::DEFAULT);
+        assert_eq!(row.heap_bytes(), 80 * size_of::<Cell>());
+        assert_eq!(row.text(), "     x");
+        row.assert_invariants();
+    }
+
+    #[test]
+    fn blanking_in_a_colour_allocates() {
+        let mut row = Row::new(8);
+        row.fill(2..4, &red());
+        assert_eq!(*row.style(row.cells()[3]), red());
+        assert_eq!(*row.style(row.cells()[4]), Style::DEFAULT);
+        row.assert_invariants();
+
+        let mut row = Row::new(8);
+        row.reset(&red());
+        assert!(row.cells().iter().all(|&cell| *row.style(cell) == red()));
+        row.assert_invariants();
+    }
+
+    #[test]
+    fn rows_wider_than_any_terminal_allocate_up_front() {
+        let row = Row::new(usize::from(Size::MAX) + 1);
+        assert_eq!(row.cells().len(), usize::from(Size::MAX) + 1);
+        row.assert_invariants();
     }
 
     #[test]

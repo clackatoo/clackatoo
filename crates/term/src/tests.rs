@@ -990,6 +990,19 @@ mod snapshots {
 }
 
 #[test]
+fn only_the_rows_written_to_allocate_their_cells() {
+    let row = size_of::<crate::Row>();
+    let cells = 120 * size_of::<crate::Cell>();
+    let t = after(120, 40, "\x1b[2J\x1b[K$ ls\r\n");
+    let heap = t.grid().screen_heap_bytes();
+    assert!(heap < 40 * row + cells + 256, "{heap} bytes");
+
+    // Erasing in a colour writes that colour into the rows.
+    let t = after(120, 40, "\x1b[41m\x1b[2J");
+    assert!(t.grid().screen_heap_bytes() >= 40 * (row + cells));
+}
+
+#[test]
 fn clearing_history_is_reported_once_and_only_when_there_was_some() {
     let mut t = terminal(10, 2);
     t.advance(b"\x1b[3J");

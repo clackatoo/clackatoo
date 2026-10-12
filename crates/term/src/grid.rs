@@ -379,6 +379,13 @@ impl Grid {
         self.scrollback.compact();
     }
 
+    /// Roughly the heap memory the screen's rows hold.
+    #[cfg(test)]
+    pub(crate) fn screen_heap_bytes(&self) -> usize {
+        self.rows.capacity() * size_of::<Row>()
+            + self.rows.iter().map(Row::heap_bytes).sum::<usize>()
+    }
+
     #[cfg(test)]
     pub(crate) fn assert_scrollback_invariants(&self) {
         self.scrollback.assert_invariants();
@@ -542,6 +549,14 @@ mod tests {
             grid.scroll_down(1..4, 2, &Style::DEFAULT);
             assert_eq!(screen(&grid), ["b", "", "", "c"], "offset {offset}");
         }
+    }
+
+    #[test]
+    fn a_new_screen_allocates_no_cells() {
+        let grid = Grid::new(120, 40, 100, Compaction::default());
+        // The rows themselves, and nothing for their cells: a few KiB
+        // rather than the 40 KiB of cells.
+        assert_eq!(grid.screen_heap_bytes(), 40 * size_of::<Row>());
     }
 
     #[test]
