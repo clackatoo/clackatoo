@@ -55,8 +55,10 @@ use crate::upgrade::Upgrade;
 use crate::workspaces::WorkspaceState;
 
 mod buffers;
+mod language;
 
 use buffers::BufferSlot;
+use language::{Pipe, ServerId, Servers};
 
 const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);
@@ -92,6 +94,8 @@ enum Source {
     AgentInput,
     /// The agent's pidfd.
     AgentExit,
+    /// One of a language server's pipes.
+    Server(ServerId, Pipe),
     Client(Client),
     Carrier(Carrier),
 }
@@ -372,6 +376,8 @@ pub struct Daemon {
     /// The thread parsing buffers, once one is in a language there's a
     /// pack for.
     syntax: Option<Syntax>,
+    /// The language servers buffers are open in.
+    servers: Servers,
     /// The agent chats talk to, while any chat needs it.
     agent: Option<AgentSlot>,
     /// What the agent sent last, for the chats to act on.
@@ -466,6 +472,7 @@ impl Daemon {
             next_buffer: 1,
             languages: config.languages.clone().map(Languages::new),
             syntax: None,
+            servers: Servers::default(),
             agent: None,
             incoming: Vec::new(),
             quic: None,
@@ -573,8 +580,10 @@ impl Daemon {
                 Hosted::Chat(chat) => chats.push(chat.hand_over()),
             }
         }
-        // The agent stops, and the next build reaps it.
+        // The agent and language servers stop, and the next build reaps
+        // them.
         self.stop_agent();
+        self.stop_servers();
         let orphan_tokens: Vec<usize> = (self.sources.iter())
             .filter(|(_, source)| matches!(source, Source::Orphan(_)))
             .map(|(key, _)| key)
@@ -647,7 +656,8 @@ impl Daemon {
             // right after anything else that's ready. Otherwise wait for the
             // next compaction or QUIC timer, if there is one.
             let agent_unread = self.agent.as_ref().is_some_and(|agent| agent.unread);
-            let timeout = if self.unread.is_empty() && !agent_unread {
+            let servers_unread = self.servers_unread();
+            let timeout = if self.unread.is_empty() && !agent_unread && !servers_unread {
                 let compaction = self.compactions.values().min().copied();
                 let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
                 let next = compaction.into_iter().chain(quic).min();
@@ -669,6 +679,9 @@ impl Daemon {
             }
             if agent_unread {
                 self.read_agent();
+            }
+            if servers_unread {
+                self.read_servers_unread();
             }
             self.take_highlights();
             self.compact_scrollbacks();
@@ -711,6 +724,15 @@ impl Daemon {
                     self.read_agent();
                     self.agent_gone();
                 }
+                Some(&Source::Server(id, pipe)) => match pipe {
+                    Pipe::Output => self.read_server(id),
+                    Pipe::Errors => self.read_server_errors(id),
+                    Pipe::Input => self.flush_server(id),
+                    Pipe::Exit => {
+                        self.read_server(id);
+                        self.server_gone(id);
+                    }
+                },
                 Some(Source::Client(_)) => self.serve_client(token),
                 Some(Source::Carrier(_)) => self.serve_carrier(token, event),
                 None => {}

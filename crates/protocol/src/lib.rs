@@ -58,7 +58,7 @@ pub use chat::{
     Question, Setting, SettingChoice, SettingKind, Tool, ToolContent, ToolKind, ToolStatus, Turn,
     TurnEnd, Usage,
 };
-pub use clackatoo_text::{Edit, Kind, Op, Span};
+pub use clackatoo_text::{Diagnostic, Edit, Kind, Op, Severity, Span};
 pub use view::{
     CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, Node, NodeId, Patch, Run,
     View, ViewUpdate,
@@ -70,7 +70,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

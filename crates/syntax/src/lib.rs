@@ -21,9 +21,11 @@ mod highlight;
 pub mod install;
 mod known;
 pub mod pack;
+mod server;
 mod worker;
 
 pub use install::{InstallError, Known, install, known};
 pub use known::KNOWN;
 pub use pack::{Languages, Pack};
+pub use server::Server;
 pub use worker::{Highlighted, Key, Syntax};

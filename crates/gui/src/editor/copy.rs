@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 
 use clackatoo_protocol::{BufferId, BufferUpdate, Change, ClientMessage, Edit};
-use clackatoo_text::{Highlights, Rope, Span, compose, transform};
+use clackatoo_text::{Diagnostic, Diagnostics, Highlights, Rope, Span, compose, transform};
 
 /// A change waiting for the daemon's answer, or to be sent.
 #[derive(Debug)]
@@ -63,6 +63,8 @@ pub(crate) struct BufferCopy {
     made: Vec<Edit>,
     /// What each piece of the text is, as its grammar reads it.
     highlights: Highlights,
+    /// What its language server says is wrong with it.
+    diagnostics: Diagnostics,
 }
 
 impl BufferCopy {
@@ -80,6 +82,7 @@ impl BufferCopy {
             outbox: Vec::new(),
             made: Vec::new(),
             highlights: Highlights::new(),
+            diagnostics: Diagnostics::new(),
         }
     }
 
@@ -89,6 +92,10 @@ impl BufferCopy {
 
     pub(crate) fn highlights(&self) -> &Highlights {
         &self.highlights
+    }
+
+    pub(crate) fn diagnostics(&self) -> &Diagnostics {
+        &self.diagnostics
     }
 
     /// The file's name, for titles.
@@ -116,6 +123,7 @@ impl BufferCopy {
             return false;
         }
         self.highlights.map(&edit);
+        self.diagnostics.map(&edit);
         self.made.push(edit.clone());
         // An edit joining the last step joins the last edit, if that's
         // still to be sent.
@@ -153,6 +161,7 @@ impl BufferCopy {
                 self.waiting.clear();
                 self.sent = None;
                 self.highlights.clear();
+                self.diagnostics = Diagnostics::new();
                 Heard::Replaced
             }
             BufferUpdate::Acked { version, seq } => {
@@ -183,6 +192,7 @@ impl BufferCopy {
                     return Heard::Nothing;
                 }
                 self.highlights.map(&edit);
+                self.diagnostics.map(&edit);
                 self.version = version;
                 self.send_next();
                 if reversal {
@@ -212,6 +222,29 @@ impl BufferCopy {
             } => {
                 self.recolour(version, start, end, spans);
                 Heard::Nothing
+            }
+            BufferUpdate::Diagnostics {
+                version,
+                diagnostics,
+            } => {
+                self.diagnose(version, diagnostics);
+                Heard::Nothing
+            }
+        }
+    }
+
+    /// Takes the diagnostics for the daemon's text at `version`, moving
+    /// them past the window's edits waiting.
+    fn diagnose(&mut self, version: u64, diagnostics: Vec<Diagnostic>) {
+        // None, as when the server stops, is none whatever the version.
+        if version != self.version && !diagnostics.is_empty() {
+            log::debug!("buffer {}: diagnostics for version {version}", self.id);
+            return;
+        }
+        self.diagnostics = Diagnostics::of(diagnostics);
+        for waiting in &self.waiting {
+            if let Waiting::Edit { edit, .. } = waiting {
+                self.diagnostics.map(edit);
             }
         }
     }

@@ -18,12 +18,16 @@
 //! # ...or with one of these names.
 //! filenames = []
 //! ```
+//!
+//! It can also name the language's server, as [`Server`] says.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
+
+use crate::server::Server;
 
 /// One language, as its pack says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +42,8 @@ pub struct Pack {
     pub extensions: Vec<String>,
     /// The names of files it's for, such as `Makefile`.
     pub filenames: Vec<String>,
+    /// Its language server, if it has one: see [`Server`].
+    pub server: Option<Server>,
 }
 
 /// Why a pack can't be read.
@@ -63,31 +69,36 @@ impl Pack {
     pub fn read(dir: &Path) -> Result<Self, PackError> {
         let text = fs::read_to_string(dir.join("language.toml"))?;
         let document = text.parse::<toml_edit::DocumentMut>()?;
-        let strings = |key: &str| -> Result<Vec<String>, PackError> {
+        // A list of strings, if it's there.
+        let strings = |key: &str| -> Result<Option<Vec<String>>, PackError> {
             let Some(item) = document.get(key) else {
-                return Ok(Vec::new());
+                return Ok(None);
             };
-            let array = item
-                .as_array()
-                .ok_or(PackError::Invalid("extensions and filenames are lists"))?;
+            let array = item.as_array().ok_or(PackError::Invalid(
+                "extensions, filenames, server and roots are lists",
+            ))?;
             (array.iter())
                 .map(|value| {
-                    (value.as_str().map(str::to_owned))
-                        .ok_or(PackError::Invalid("extensions and filenames are strings"))
+                    (value.as_str().map(str::to_owned)).ok_or(PackError::Invalid(
+                        "extensions, filenames, server and roots are lists of strings",
+                    ))
                 })
-                .collect()
+                .collect::<Result<_, _>>()
+                .map(Some)
         };
         let grammar = (document.get("grammar").and_then(toml_edit::Item::as_str))
             .ok_or(PackError::Invalid("no grammar name"))?
             .to_owned();
+        let name = (dir.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         Ok(Self {
-            name: (dir.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            server: Server::of(&name, strings("server")?, strings("roots")?),
+            name,
             dir: dir.to_owned(),
             grammar,
-            extensions: strings("extensions")?,
-            filenames: strings("filenames")?,
+            extensions: strings("extensions")?.unwrap_or_default(),
+            filenames: strings("filenames")?.unwrap_or_default(),
         })
     }
 

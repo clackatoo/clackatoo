@@ -83,10 +83,14 @@ impl Drop for TestDaemon {
     }
 }
 
-/// The agent for tests, which `cargo test` builds with them: see
-/// `examples/fake_agent.rs`. A test build names it with a hash, so it's
-/// the newest one built.
+/// The agent for tests: see `examples/fake_agent.rs`.
 fn fake_agent() -> PathBuf {
+    example("fake_agent")
+}
+
+/// The example called `name`, which `cargo test` builds with the tests. A
+/// test build names it with a hash, so it's the newest one built.
+fn example(name: &str) -> PathBuf {
     let test = std::env::current_exe().expect("the test's path");
     let examples = test
         .parent()
@@ -98,13 +102,13 @@ fn fake_agent() -> PathBuf {
         .flatten()
         .flatten()
         .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("fake_agent") && !name.ends_with(".d")
+            let file = entry.file_name();
+            let file = file.to_string_lossy();
+            file.starts_with(name) && !file.ends_with(".d")
         })
         .max_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok())
         .map_or_else(
-            || panic!("no fake agent in {}: run cargo test", examples.display()),
+            || panic!("no {name} in {}: run cargo test", examples.display()),
             |entry| entry.path(),
         )
 }
@@ -1595,6 +1599,216 @@ fn next_highlights(client: &mut Client) -> (u64, usize, usize, Vec<Span>) {
         } = next_buffer_update(client)
         {
             return (version, start, end, spans);
+        }
+    }
+}
+
+/// The next diagnostics for a buffer, skipping other updates: their
+/// version, and where each is.
+fn next_diagnostics(client: &mut Client) -> (u64, Vec<(usize, usize)>) {
+    loop {
+        if let BufferUpdate::Diagnostics {
+            version,
+            diagnostics,
+        } = next_buffer_update(client)
+        {
+            let places = (diagnostics.iter())
+                .map(|diagnostic| (diagnostic.start, diagnostic.end))
+                .collect();
+            return (version, places);
+        }
+    }
+}
+
+/// A daemon whose files ending `.fk` are in a language whose server is
+/// `examples/fake_language_server.rs`, run with the arguments `args` makes
+/// from the daemon's directory, for projects marked by a file `project`.
+fn with_fake_language_server(args: impl FnOnce(&Path) -> Vec<String>) -> TestDaemon {
+    TestDaemon::start_with(|dir, config| {
+        let pack = dir.join("languages/fake");
+        std::fs::create_dir_all(&pack).unwrap();
+        let server: Vec<String> =
+            std::iter::once(example("fake_language_server").display().to_string())
+                .chain(args(dir))
+                .map(|arg| format!("{arg:?}"))
+                .collect();
+        std::fs::write(
+            pack.join("language.toml"),
+            format!(
+                "grammar = \"fake\"\nextensions = [\"fk\"]\nserver = [{}]\nroots = [\"project\"]\n",
+                server.join(", ")
+            ),
+        )
+        .unwrap();
+        config.languages = Some(dir.join("languages"));
+    })
+}
+
+#[test]
+fn a_language_server_comes_back_after_stopping_but_not_forever() {
+    let daemon = with_fake_language_server(|dir| {
+        vec![
+            "--crash-once".to_owned(),
+            dir.join("crashed").display().to_string(),
+        ]
+    });
+    let dir = daemon.dir.path();
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    std::fs::write(dir.join("app/a.fk"), "bad\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+
+    // Closing and opening a file again, many times, starts it each time:
+    // stopping it on purpose doesn't count.
+    for _ in 0..3 {
+        let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+        let buffer = buffer_in(&mut client, pane);
+        attach_buffer(&mut client, buffer);
+        assert_eq!(next_diagnostics(&mut client).1, vec![(0, 3)]);
+        client.close_pane(pane).unwrap();
+    }
+
+    // It crashes on an edit: the window hears there's nothing wrong for
+    // now, then it's started again for the file shown, which it hears
+    // about afresh.
+    let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    assert_eq!(next_diagnostics(&mut client).1, vec![(0, 3)]);
+    send_change(&mut client, buffer, 0, insert(4, 0, "crash ", 0));
+    assert_eq!(next_diagnostics(&mut client).1, vec![]);
+    assert_eq!(next_diagnostics(&mut client), (1, vec![(6, 9)]));
+}
+
+#[test]
+fn a_language_server_says_whats_wrong_as_a_buffer_changes() {
+    // Hearing just what changed, with columns counted in bytes, as
+    // rust-analyzer does; the whole text after each edit; and columns
+    // counted in UTF-16, which "é" tells apart.
+    for flag in ["--incremental", "--full", "--utf16"] {
+        let daemon = with_fake_language_server(|dir| {
+            vec![
+                flag.to_owned(),
+                "--log".to_owned(),
+                dir.join("server.log").display().to_string(),
+            ]
+        });
+        let dir = daemon.dir.path();
+        std::fs::create_dir(dir.join("app")).unwrap();
+        std::fs::write(dir.join("app/project"), "").unwrap();
+        std::fs::write(dir.join("app/a.fk"), "é bad\nok\n").unwrap();
+        let mut client = daemon.client();
+        client.watch_workspaces().unwrap();
+        let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+        let buffer = buffer_in(&mut client, pane);
+        attach_buffer(&mut client, buffer);
+        assert_eq!(next_diagnostics(&mut client), (0, vec![(3, 6)]), "{flag}");
+
+        // "bad é bad\nok\n"
+        send_change(&mut client, buffer, 0, insert(10, 0, "bad ", 0));
+        assert_eq!(next_diagnostics(&mut client), (1, vec![(0, 3), (7, 10)]));
+
+        // Two changes in one edit, the first adding a line, which moves
+        // the second's line: "x\nbad é bad\nbad\n".
+        let mut edit = Edit::new();
+        edit.insert("x\n")
+            .retain(11)
+            .insert("bad")
+            .delete("ok")
+            .retain(1);
+        let change = Change::Edit {
+            edit,
+            base: 1,
+            step: true,
+        };
+        send_change(&mut client, buffer, 1, change);
+        assert_eq!(
+            next_diagnostics(&mut client),
+            (2, vec![(2, 5), (9, 12), (13, 16)]),
+            "{flag}"
+        );
+
+        // Saving tells it, and closing the last buffer stops it.
+        let saved = client.request(&Request::Save {
+            buffer,
+            force: false,
+        });
+        assert!(matches!(saved, Ok(Response::Done)), "{saved:?}");
+        client.close_pane(pane).unwrap();
+        let log = dir.join("server.log");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let heard = loop {
+            let heard = std::fs::read_to_string(&log).unwrap_or_default();
+            if heard.contains("exit") || Instant::now() > deadline {
+                break heard;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let heard: Vec<&str> = heard.lines().collect();
+        assert_eq!(
+            heard,
+            [
+                "initialized",
+                "textDocument/didOpen",
+                "textDocument/didChange",
+                "textDocument/didChange",
+                "textDocument/didSave",
+                "exit",
+            ]
+        );
+    }
+}
+
+/// rust-analyzer, as installed, on a crate with a mistake in it.
+#[test]
+#[ignore = "needs rust-analyzer and cargo, and takes seconds: run with --ignored"]
+fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let pack = dir.join("languages/rust");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(
+            pack.join("language.toml"),
+            "grammar = \"rust\"\nextensions = [\"rs\"]\n",
+        )
+        .unwrap();
+        config.languages = Some(dir.join("languages"));
+    });
+    let dir = daemon.dir.path();
+    std::fs::create_dir_all(dir.join("krate/src")).unwrap();
+    std::fs::write(
+        dir.join("krate/Cargo.toml"),
+        "[package]\nname = \"krate\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    let text = "pub fn f() -> u32 {\n    \"not a number\"\n}\n";
+    std::fs::write(dir.join("krate/src/lib.rs"), text).unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "krate/src/lib.rs"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    client
+        .set_read_timeout(Some(Duration::from_mins(2)))
+        .unwrap();
+    let wrong = text.find('"').unwrap();
+    let deadline = Instant::now() + Duration::from_mins(2);
+    loop {
+        assert!(Instant::now() < deadline, "rust-analyzer said nothing");
+        let Ok(Event::Buffer {
+            update: BufferUpdate::Diagnostics { diagnostics, .. },
+            ..
+        }) = client.next_event()
+        else {
+            continue;
+        };
+        if let Some(found) = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.start == wrong)
+        {
+            assert_eq!(found.end, wrong + "\"not a number\"".len());
+            assert_eq!(found.severity, clackatoo_protocol::Severity::Error);
+            return;
         }
     }
 }

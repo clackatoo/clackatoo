@@ -19,10 +19,14 @@
 //! each edit, off the event loop, and its [`BufferUpdate::Highlights`] sent
 //! as each parse ends: all of them first, then what each parse changed.
 //! The window moves the highlights it has along with each edit until then.
+//!
+//! A buffer whose language has a language server is kept open in it, and
+//! its [`BufferUpdate::Diagnostics`] sent whenever the server says what's
+//! wrong; the window moves them along with each edit too.
 
 use std::fmt;
 
-use clackatoo_text::{Edit, Span};
+use clackatoo_text::{Diagnostic, Edit, Span};
 use serde::{Deserialize, Serialize};
 
 use crate::TerminalId;
@@ -136,5 +140,14 @@ pub enum BufferUpdate {
         end: usize,
         /// The spans there, in order.
         spans: Vec<Span>,
+    },
+    /// What the buffer's language server says about the text at `version`:
+    /// every diagnostic, in place of those before. Sent after the edit
+    /// that made `version`, and after a snapshot.
+    Diagnostics {
+        /// The version of the text they're for.
+        version: u64,
+        /// The diagnostics, in order of where they start.
+        diagnostics: Vec<Diagnostic>,
     },
 }

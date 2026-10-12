@@ -963,6 +963,18 @@ fn renders_an_editor_pane() {
             span(22, 37, Kind::String),
         ],
     });
+    // A language server's error, under "hello".
+    copy.update(BufferUpdate::Diagnostics {
+        version: 0,
+        diagnostics: vec![clackatoo_protocol::Diagnostic {
+            start: 23,
+            end: 28,
+            severity: clackatoo_protocol::Severity::Error,
+            message: "unknown greeting".into(),
+            source: None,
+            code: None,
+        }],
+    });
     let (cols, rows) = (32u16, 5u16);
     let options = crate::options::Options {
         colorcolumn: vec![20],

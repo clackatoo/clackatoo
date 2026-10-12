@@ -298,6 +298,52 @@ struct Rect {
 /// A clip box that cuts nothing off.
 const NO_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
 
+/// Draws an underline of `shape` under `width` pixels from `left`, its top
+/// at `top`, with lines `stroke` thick, by giving `push` each rectangle's
+/// origin and size. Dots, dashes and waves are placed by where they are in
+/// the window, not in the cell, so they run on unbroken from cell to cell.
+fn underline(
+    shape: Underline,
+    [left, top]: [f32; 2],
+    width: f32,
+    stroke: f32,
+    mut push: impl FnMut([f32; 2], [f32; 2]),
+) {
+    let right = left + width;
+    // Repeats `size` wide every `every` pixels, from the first whole one.
+    let mut repeat = |size: f32, every: f32| {
+        let mut x = (left / every).ceil() * every;
+        while x < right {
+            push([x, top], [size.min(right - x), stroke]);
+            x += every;
+        }
+    };
+    match shape {
+        Underline::None => {}
+        Underline::Single => push([left, top], [width, stroke]),
+        Underline::Double => {
+            push([left, top], [width, stroke]);
+            push([left, top + 2.0 * stroke], [width, stroke]);
+        }
+        Underline::Dotted => repeat(stroke, 2.0 * stroke),
+        Underline::Dashed => repeat(3.0 * stroke, 5.0 * stroke),
+        Underline::Curly => {
+            // A sine wave, a pixel column at a time, each column reaching
+            // from where the wave is to where it goes next, so steep parts
+            // have no gaps.
+            let height = stroke.max(1.0);
+            let period = 6.0 * height;
+            let wave = |x: f32| top + height * (1.0 - (std::f32::consts::TAU * x / period).sin());
+            let mut x = left.floor();
+            while x < right {
+                let (here, next) = (wave(x), wave(x + 1.0));
+                push([x, here.min(next)], [1.0, (here - next).abs() + stroke]);
+                x += 1.0;
+            }
+        }
+    }
+}
+
 /// A clip box from a left, top, width and height.
 fn clip_box([left, top, width, height]: [f32; 4]) -> [f32; 4] {
     [left, top, left + width, top + height]
@@ -768,13 +814,14 @@ impl Renderer {
                     colors.foreground,
                 );
                 let width = cells * cell_width;
-                if style.underline != Underline::None {
-                    self.overlays.push(Rect::solid(
-                        [left, baseline + cell.underline_offset],
-                        [width, cell.stroke],
-                        colors.underline,
-                    ));
-                }
+                let overlays = &mut self.overlays;
+                underline(
+                    style.underline,
+                    [left, baseline + cell.underline_offset],
+                    width,
+                    cell.stroke,
+                    |origin, size| overlays.push(Rect::solid(origin, size, colors.underline)),
+                );
                 if style.attributes.contains(Attributes::STRIKETHROUGH) {
                     self.overlays.push(Rect::solid(
                         [left, baseline - cell.strikeout_offset - cell.stroke / 2.0],
@@ -1144,5 +1191,47 @@ impl InstanceBuffer {
         }
         let buffer = self.buffer.as_ref().expect("the buffer was just made");
         queue.write_buffer(buffer, 0, bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn drawn(shape: Underline, left: f32, width: f32) -> Vec<([f32; 2], [f32; 2])> {
+        let mut rects = Vec::new();
+        underline(shape, [left, 10.0], width, 2.0, |origin, size| {
+            rects.push((origin, size));
+        });
+        rects
+    }
+
+    #[test]
+    fn underlines_take_their_shapes() {
+        assert_eq!(drawn(Underline::None, 0.0, 20.0), []);
+        assert_eq!(
+            drawn(Underline::Single, 0.0, 20.0),
+            [([0.0, 10.0], [20.0, 2.0])]
+        );
+        assert_eq!(drawn(Underline::Double, 0.0, 20.0).len(), 2);
+        // Dots every 4 pixels, placed by the window, so the next cell's
+        // carry on where these stop.
+        let dots: Vec<f32> = (drawn(Underline::Dotted, 10.0, 10.0).iter())
+            .map(|(origin, _)| origin[0])
+            .collect();
+        assert_eq!(dots, [12.0, 16.0]);
+        // A wave a pixel column at a time, between the top and twice the
+        // stroke below it, and with no gaps between columns.
+        let wave = drawn(Underline::Curly, 0.0, 24.0);
+        assert_eq!(wave.len(), 24);
+        for pair in wave.windows(2) {
+            let ((a, a_size), (b, b_size)) = (pair[0], pair[1]);
+            assert!(
+                a[1] <= b[1] + b_size[1] && b[1] <= a[1] + a_size[1],
+                "{pair:?}"
+            );
+        }
+        let lowest = wave.iter().map(|(origin, size)| origin[1] + size[1]);
+        assert!(lowest.fold(0.0, f32::max) <= 10.0 + 4.0 + 2.0);
     }
 }

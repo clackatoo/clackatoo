@@ -172,7 +172,7 @@ impl Peer {
                 Ok(n) => {
                     total += n;
                     self.incoming.extend_from_slice(&buffer[..n]);
-                    self.unframe(messages);
+                    self.unframe(messages)?;
                     if total >= budget {
                         return Ok(true);
                     }
@@ -185,21 +185,39 @@ impl Peer {
     }
 
     /// Takes the whole messages read so far, leaving the rest.
-    fn unframe(&mut self, messages: &mut Vec<Message>) {
+    /// An error if the stream is broken past finding where the next
+    /// message starts, as a header with no length leaves it.
+    fn unframe(&mut self, messages: &mut Vec<Message>) -> io::Result<()> {
         let mut start = 0;
-        while let Some((body, end)) = next_body(self.framing, &self.incoming[start..]) {
-            let body = &self.incoming[start + body.start..start + body.end];
-            messages.extend(parse(&self.name, body));
-            start += end;
-        }
+        let broken = loop {
+            match next_body(self.framing, &self.incoming[start..]) {
+                Ok(Some((body, end))) => {
+                    let body = &self.incoming[start + body.start..start + body.end];
+                    messages.extend(parse(&self.name, body));
+                    start += end;
+                }
+                Ok(None) => break None,
+                Err(broken) => break Some(broken),
+            }
+        };
         self.incoming.drain(..start);
+        if let Some(broken) = broken {
+            log::warn!("{}: {broken}, so no more can be read", self.name);
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         if self.incoming.len() > MAX_MESSAGE {
+            if self.framing == Framing::Headers {
+                log::warn!("{}: a header never ended", self.name);
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            // The next line break starts the next message.
             log::warn!(
                 "{}: dropping a message longer than {MAX_MESSAGE} bytes",
                 self.name
             );
             self.incoming.clear();
         }
+        Ok(())
     }
 
     /// Reads what the program wrote to stderr, and logs it at debug level.
@@ -248,17 +266,23 @@ impl Peer {
     }
 }
 
-/// Where the first whole message in `bytes` is, and where what follows it
-/// starts, or `None` if there's no whole message yet. A broken header is
-/// skipped, as an empty message.
-fn next_body(framing: Framing, bytes: &[u8]) -> Option<(std::ops::Range<usize>, usize)> {
+/// The bytes of a message, and where what follows it starts.
+type Framed = (std::ops::Range<usize>, usize);
+
+/// Where the first whole message in `bytes` is, or `None` if there's no
+/// whole message yet, or what's wrong if a header has no length, or one
+/// too long, to tell where the message ends.
+fn next_body(framing: Framing, bytes: &[u8]) -> Result<Option<Framed>, &'static str> {
     match framing {
-        Framing::Lines => {
-            let end = bytes.iter().position(|&byte| byte == b'\n')?;
-            Some((0..end, end + 1))
-        }
+        Framing::Lines => Ok(bytes
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map(|end| (0..end, end + 1))),
         Framing::Headers => {
-            let headers_end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
+            let Some(headers_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                return Ok(None);
+            };
             let headers = String::from_utf8_lossy(&bytes[..headers_end]);
             let body = headers_end + 4;
             let length = headers.lines().find_map(|line| {
@@ -267,12 +291,14 @@ fn next_body(framing: Framing, bytes: &[u8]) -> Option<(std::ops::Range<usize>, 
                     .eq_ignore_ascii_case("content-length")
                     .then(|| value.trim().parse::<usize>().ok())?
             });
-            let Some(length) = length else {
-                // No length to go by: what's read so far is lost.
-                return Some((body..body, body));
-            };
-            let end = body.checked_add(length)?;
-            (bytes.len() >= end).then_some((body..end, end))
+            match length {
+                None => Err("a message came with no length"),
+                Some(length) if length > MAX_MESSAGE => Err("a message was too long"),
+                Some(length) => {
+                    let end = body + length;
+                    Ok((bytes.len() >= end).then_some((body..end, end)))
+                }
+            }
         }
     }
 }
@@ -295,7 +321,7 @@ mod tests {
     fn bodies(framing: Framing, mut bytes: &[u8]) -> (Vec<String>, usize) {
         let mut found = Vec::new();
         let mut used = 0;
-        while let Some((body, end)) = next_body(framing, bytes) {
+        while let Ok(Some((body, end))) = next_body(framing, bytes) {
             found.push(String::from_utf8_lossy(&bytes[body]).into_owned());
             bytes = &bytes[end..];
             used += end;
@@ -325,8 +351,10 @@ mod tests {
             bodies(Framing::Headers, b"Content-Length: 7\r\n").0.len(),
             0
         );
-        // A header with no length is passed over.
-        let (found, _) = bodies(Framing::Headers, b"X: 1\r\n\r\nContent-Length: 2\r\n\r\n{}");
-        assert_eq!(found, ["", "{}"]);
+        // A header with no length, or one too long, leaves no telling
+        // where the next message starts.
+        assert!(next_body(Framing::Headers, b"X: 1\r\n\r\n{}").is_err());
+        let huge = format!("Content-Length: {}\r\n\r\n", MAX_MESSAGE + 1);
+        assert!(next_body(Framing::Headers, huge.as_bytes()).is_err());
     }
 }

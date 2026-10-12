@@ -14,7 +14,8 @@
 //! own without undoing anyone else's.
 //!
 //! [`Highlights`] are what each piece of the text is, as its language's
-//! grammar reads it, for colouring it; they move along with edits.
+//! grammar reads it, for colouring it; they move along with edits, as
+//! [`Diagnostics`] do: what a language server says is wrong with it.
 //!
 //! Places in a text are byte offsets into its UTF-8, as tree-sitter's are.
 //!
@@ -24,10 +25,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod diagnostics;
 mod edit;
 mod highlights;
 mod history;
 
+pub use diagnostics::{Diagnostic, Diagnostics, Severity};
 pub use edit::{Bias, Edit, EditError, Op, compose, transform};
 pub use highlights::{Highlights, Kind, Span};
 pub use history::{History, HistoryError, HistorySnapshot, Steps};

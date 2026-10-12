@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{BufferId, Edit, Size};
 use clackatoo_term::{Row, RowBuilder, Style};
-use clackatoo_text::Bias;
+use clackatoo_text::{Bias, Diagnostic, Severity};
 use winit::keyboard::{Key, NamedKey};
 
 pub(crate) use copy::{BufferCopy, Heard};
@@ -344,7 +344,38 @@ impl Editor {
         }
         let modified = if copy.modified() { " [+]" } else { "" };
         let at = self.cursor.at;
-        format!("{}{modified}  {}:{}", copy.name(), at.line + 1, at.col + 1)
+        let label = format!("{}{modified}  {}:{}", copy.name(), at.line + 1, at.col + 1);
+        match self.diagnostic_here(copy) {
+            Some(diagnostic) => format!("{label}  {}", describe(diagnostic)),
+            None => label,
+        }
+    }
+
+    /// The diagnostic the bar tells of: the one under the cursor, or else
+    /// the one on its line that matters most.
+    fn diagnostic_here<'a>(&self, copy: &'a BufferCopy) -> Option<&'a Diagnostic> {
+        if copy.diagnostics().all().is_empty() {
+            return None;
+        }
+        let text = self.text(copy);
+        let line = self.cursor.at.line;
+        let (start, end) = (text.line_start(line), text.line_end(line));
+        let at = text.byte_at(self.cursor.at);
+        let on_line = copy.diagnostics().within(start, end);
+        let mut under = None;
+        let mut most: Option<&Diagnostic> = None;
+        for diagnostic in on_line {
+            if under.is_none()
+                && diagnostic.start <= at
+                && at < diagnostic.end.max(diagnostic.start + 1)
+            {
+                under = Some(diagnostic);
+            }
+            if most.is_none_or(|most| diagnostic.severity < most.severity) {
+                most = Some(diagnostic);
+            }
+        }
+        under.or(most)
     }
 
     // --- Keys ---------------------------------------------------------------
@@ -1608,7 +1639,16 @@ impl Editor {
                     let laid = Laid::new(text.line_text(line), self.indent.tabstop);
                     let (start, end) = (text.line_start(line), text.line_end(line));
                     let spans = copy.highlights().within(start, end);
-                    laid.show(&mut builder, self.left, self.text_width(), spans, start);
+                    let diagnostics: Vec<&Diagnostic> =
+                        copy.diagnostics().within(start, end).collect();
+                    laid.show(
+                        &mut builder,
+                        self.left,
+                        self.text_width(),
+                        spans,
+                        &diagnostics,
+                        start,
+                    );
                 } else if copy.loaded() {
                     builder.push("~", &Style::DEFAULT, true);
                 }
@@ -1806,6 +1846,29 @@ fn indent_before(text: &Text<'_>, byte: usize) -> usize {
     let start = text.line_start(line);
     let indent = start + indent_of(&text.line_text(line)).len();
     if byte > indent { indent } else { start }
+}
+
+/// A diagnostic as the bar tells of it: how much it matters, and the
+/// first line of what it says, with its name and who says so, as
+/// `error: mismatched types [E0308 rustc]`.
+fn describe(diagnostic: &Diagnostic) -> String {
+    let severity = match diagnostic.severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Info => "info",
+        Severity::Hint => "hint",
+    };
+    let message = diagnostic.message.lines().next().unwrap_or_default();
+    let by: Vec<&str> = [&diagnostic.code, &diagnostic.source]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    if by.is_empty() {
+        format!("{severity}: {message}")
+    } else {
+        format!("{severity}: {message} [{}]", by.join(" "))
+    }
 }
 
 /// The blanks a line starts with.

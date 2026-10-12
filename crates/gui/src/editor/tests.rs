@@ -637,3 +637,63 @@ fn search_matches_case_as_ignorecase_and_smartcase_say() {
         Some("TWO isn't in the file")
     );
 }
+
+#[test]
+fn diagnostics_are_underlined_told_of_in_the_bar_and_move_with_typing() {
+    use clackatoo_protocol::{BufferUpdate, Diagnostic, Severity};
+    use clackatoo_term::Underline;
+
+    let mut setup = Setup::new("let x = y;\nok\n");
+    let diagnostic = |start, end, severity, message: &str| Diagnostic {
+        start,
+        end,
+        severity,
+        message: message.to_owned(),
+        source: Some("rustc".into()),
+        code: Some("E0425".into()),
+    };
+    setup.copy.update(BufferUpdate::Diagnostics {
+        version: 0,
+        diagnostics: vec![
+            diagnostic(8, 9, Severity::Error, "cannot find value `y`\nmore"),
+            diagnostic(4, 5, Severity::Warning, "unused variable"),
+        ],
+    });
+    setup.editor.settle(&setup.copy);
+    let (rows, _) = setup.editor.scene();
+    // After the four cells of line numbers.
+    let cell = |row: &clackatoo_term::Row, col: usize| *row.style(row.cells()[4 + col]);
+    assert_eq!(cell(rows[0], 8).underline, Underline::Curly);
+    assert_eq!(
+        cell(rows[0], 8).underline_color,
+        crate::colors::diagnostic(Severity::Error)
+    );
+    assert_eq!(
+        cell(rows[0], 4).underline_color,
+        crate::colors::diagnostic(Severity::Warning)
+    );
+    assert_eq!(cell(rows[0], 0).underline, Underline::None);
+    // The bar tells of the one that matters most on the cursor's line,
+    // or else the one under the cursor.
+    let label = setup.editor.label(&setup.copy);
+    assert!(
+        label.ends_with("error: cannot find value `y` [E0425 rustc]"),
+        "{label}"
+    );
+    setup.keys("4l");
+    let label = setup.editor.label(&setup.copy);
+    assert!(
+        label.ends_with("warning: unused variable [E0425 rustc]"),
+        "{label}"
+    );
+    setup.keys("j");
+    assert!(!setup.editor.label(&setup.copy).contains("error"));
+
+    // Typing before them moves them along.
+    setup.keys("ggImut <Esc>");
+    setup.editor.settle(&setup.copy);
+    let (rows, _) = setup.editor.scene();
+    assert_eq!(cell(rows[0], 12).underline, Underline::Curly, "y, moved");
+    assert_eq!(cell(rows[0], 8).underline, Underline::Curly, "x, moved");
+    assert_eq!(cell(rows[0], 4).underline, Underline::None);
+}

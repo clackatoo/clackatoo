@@ -19,6 +19,7 @@ pub mod client;
 mod handover;
 mod hosted;
 pub mod launch;
+mod lsp;
 mod memory;
 mod pty;
 mod quic;

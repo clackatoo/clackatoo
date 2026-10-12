@@ -13,6 +13,7 @@ use clackatoo_syntax::{Highlighted, Syntax};
 use clackatoo_text::Highlights;
 use mio::Token;
 
+use super::language::Opened;
 use super::{Daemon, Source};
 use crate::buffer::{Buffer, Made};
 
@@ -26,6 +27,8 @@ pub(super) struct BufferSlot {
     highlights: Highlights,
     /// Whether it's being parsed: its language has a pack.
     parsed: bool,
+    /// How its language server knows it, while it's open in one.
+    pub(super) server: Option<Opened>,
 }
 
 impl BufferSlot {
@@ -35,6 +38,7 @@ impl BufferSlot {
             viewers: Vec::new(),
             highlights: Highlights::new(),
             parsed: false,
+            server: None,
         }
     }
 }
@@ -66,6 +70,7 @@ impl Daemon {
         log::info!("buffer {id}: {}", buffer.path().display());
         self.buffers.insert(id, BufferSlot::new(buffer));
         self.parse_buffer(id);
+        self.open_in_server(id);
         Ok(id)
     }
 
@@ -79,26 +84,36 @@ impl Daemon {
             // Its language may have been installed since it was opened.
             self.parse_buffer(id);
         }
+        // Its server may have stopped, or it came through an upgrade,
+        // which servers don't.
+        self.open_in_server(id);
         self.send_snapshot(token, id);
         Ok(())
     }
 
     /// Sends the client at `token` all of buffer `id`: its text, then its
-    /// highlights.
+    /// highlights and diagnostics.
     fn send_snapshot(&mut self, token: Token, id: BufferId) {
         let Some(slot) = self.buffers.get(&id) else {
             return;
         };
+        let version = slot.buffer.version();
         let snapshot = BufferUpdate::Snapshot(slot.buffer.snapshot());
         let highlights = (!slot.highlights.spans().is_empty()).then(|| BufferUpdate::Highlights {
-            version: slot.buffer.version(),
+            version,
             start: 0,
             end: slot.buffer.text().len_bytes(),
             spans: slot.highlights.spans().to_vec(),
         });
+        let diagnostics = (slot.server.as_ref())
+            .filter(|opened| !opened.diagnostics.all().is_empty())
+            .map(|opened| BufferUpdate::Diagnostics {
+                version,
+                diagnostics: opened.diagnostics.all().to_vec(),
+            });
         self.tell(token, id, snapshot);
-        if let Some(highlights) = highlights {
-            self.tell(token, id, highlights);
+        for update in highlights.into_iter().chain(diagnostics) {
+            self.tell(token, id, update);
         }
     }
 
@@ -168,6 +183,7 @@ impl Daemon {
             self.tell_viewers(id, None, &BufferUpdate::Modified(modified));
         }
         log::info!("buffer {id} saved");
+        self.saved_in_server(id);
         Ok(Response::Done)
     }
 
@@ -215,6 +231,7 @@ impl Daemon {
             {
                 syntax.close(key(buffer));
             }
+            self.closed_in_server(slot.buffer.path(), slot.server);
         }
     }
 
@@ -252,9 +269,10 @@ impl Daemon {
         slot.parsed = true;
     }
 
-    /// Moves buffer `id`'s highlights along with `edit`, which made
-    /// `version`, and has the buffer parsed again.
+    /// Tells buffer `id`'s server about `edit`, which made `version`, and
+    /// moves its highlights along with it, having it parsed again.
     fn edited(&mut self, id: BufferId, version: u64, edit: &Edit) {
+        self.edited_in_server(id, version, edit);
         let Some(slot) = self.buffers.get_mut(&id) else {
             return;
         };
@@ -311,7 +329,12 @@ impl Daemon {
 
     /// Sends `update` about buffer `id` to every client following it, but
     /// `except`.
-    fn tell_viewers(&mut self, id: BufferId, except: Option<Token>, update: &BufferUpdate) {
+    pub(super) fn tell_viewers(
+        &mut self,
+        id: BufferId,
+        except: Option<Token>,
+        update: &BufferUpdate,
+    ) {
         let Some(slot) = self.buffers.get(&id) else {
             return;
         };

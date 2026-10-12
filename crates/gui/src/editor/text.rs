@@ -11,8 +11,8 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
 
-use clackatoo_term::{Row, RowBuilder, Style};
-use clackatoo_text::{Rope, Span};
+use clackatoo_term::{Row, RowBuilder, Style, Underline};
+use clackatoo_text::{Diagnostic, Rope, Span};
 
 use crate::colors;
 use crate::motion::{Lines, Point};
@@ -107,17 +107,42 @@ impl Laid {
     }
 
     /// Appends the line to `builder` as drawn in `width` cells from cell
-    /// `left`, coloured as `spans` say. The line starts at byte `start` of
-    /// the text they're for.
+    /// `left`, coloured as `spans` say, with a wavy line under what
+    /// `diagnostics` are about. The line starts at byte `start` of the
+    /// text they're for.
     pub(crate) fn show(
         &self,
         builder: &mut RowBuilder,
         left: usize,
         width: usize,
         spans: &[Span],
+        diagnostics: &[&Diagnostic],
         start: usize,
     ) {
         let mut spans = spans.iter().peekable();
+        // The most a diagnostic about bytes `from` to `to` of the line
+        // matters, if one is. One about no text marks the character where
+        // it is, or the last, at the line's end.
+        let marked = |from: usize, to: usize| {
+            let (from, to) = (start + from, start + to);
+            let line_end = start + self.text.len();
+            (diagnostics.iter())
+                .filter(|diagnostic| {
+                    let (first, last) = (diagnostic.start, diagnostic.end);
+                    (first < to && last > from)
+                        || (first == last && first >= from && (first < to || to == line_end))
+                })
+                .map(|diagnostic| diagnostic.severity)
+                .min()
+        };
+        let underlined = |style: Style, from: usize, to: usize| match marked(from, to) {
+            Some(severity) => Style {
+                underline: Underline::Curly,
+                underline_color: colors::diagnostic(severity),
+                ..style
+            },
+            None => style,
+        };
         for (index, &(cell, byte)) in self.starts.iter().enumerate() {
             let (next_cell, next_byte) =
                 (self.starts.get(index + 1).copied()).unwrap_or((self.cells, self.text.len()));
@@ -138,8 +163,20 @@ impl Laid {
                 Some(span) if span.start <= start + byte => colors::syntax(span.kind),
                 _ => Style::DEFAULT,
             };
+            let style = if diagnostics.is_empty() {
+                style
+            } else {
+                underlined(style, byte, next_byte)
+            };
             match piece.chars().next() {
-                Some('\t') => builder.push(&" ".repeat(next_cell - cell), &Style::DEFAULT, true),
+                Some('\t') => builder.push(
+                    &" ".repeat(next_cell - cell),
+                    &Style {
+                        fg: Style::DEFAULT.fg,
+                        ..style
+                    },
+                    true,
+                ),
                 Some(ch) if ch.is_control() => push(builder, ch),
                 _ => builder.push(piece, &style, false),
             }
@@ -365,7 +402,7 @@ mod tests {
     /// `laid` as drawn in a row of `width` cells of its own.
     fn shown(laid: &Laid, left: usize, width: usize, spans: &[Span], start: usize) -> Row {
         let mut builder = RowBuilder::new(width);
-        laid.show(&mut builder, left, width, spans, start);
+        laid.show(&mut builder, left, width, spans, &[], start);
         builder.finish(false)
     }
 

@@ -1,6 +1,6 @@
 //! Turning a cell's style into the colours it's drawn in.
 
-use clackatoo_protocol::{Attributes, Color, Kind, Style};
+use clackatoo_protocol::{Attributes, Color, Kind, Severity, Style};
 
 /// A colour as red, green, blue and alpha, each from 0 to 1, in sRGB.
 pub(crate) type Rgba = [f32; 4];
@@ -157,6 +157,19 @@ pub(crate) const fn syntax(kind: Kind) -> Style {
         fg,
         ..Style::DEFAULT
     }
+}
+
+/// The colour of the wavy line under text a diagnostic of `severity` is
+/// about: the palette's red, yellow, blue and cyan, so it follows the
+/// theme, as the syntax colours do.
+#[must_use]
+pub(crate) const fn diagnostic(severity: Severity) -> Color {
+    Color::Indexed(match severity {
+        Severity::Error => 1,
+        Severity::Warning => 3,
+        Severity::Info => 4,
+        Severity::Hint => 6,
+    })
 }
 
 /// How an editor's line numbers are drawn: faint, but the cursor's line in
