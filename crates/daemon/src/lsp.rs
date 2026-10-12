@@ -20,7 +20,7 @@ use std::io;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 
-use clackatoo_protocol::Query;
+use clackatoo_protocol::{Query, ServerFeatures, Trigger};
 use clackatoo_text::{Edit, Rope, Severity};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -87,6 +87,9 @@ pub(crate) enum Incoming {
     /// while the server worked on it, as rust-analyzer says while it's
     /// still reading the project: asking again may be answered.
     Outdated { id: u64 },
+    /// It has answered `initialize`, and so can be asked things, and what
+    /// it does as you type is known.
+    Ready,
 }
 
 /// The error a server answers a request with when what it was working on
@@ -115,7 +118,7 @@ pub(crate) struct LanguageServer {
 
 /// What a server does, beyond keeping files open and saying what's wrong
 /// with them.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 #[allow(clippy::struct_excessive_bools, reason = "each is offered or not")]
 struct Offers {
     /// Wants to hear when a buffer is saved.
@@ -126,6 +129,14 @@ struct Offers {
     rename: bool,
     /// Formats whole files.
     format: bool,
+    /// Completes what's typed, and these characters ask it to.
+    completion: Option<Vec<char>>,
+    /// Says more about a completion item when asked.
+    resolve: bool,
+    /// Helps with a call's arguments, and these characters ask it to...
+    signature: Option<Vec<char>>,
+    /// ...and these ask again, while it's helping.
+    signature_again: Vec<char>,
 }
 
 impl LanguageServer {
@@ -144,6 +155,28 @@ impl LanguageServer {
             sync: Sync::Full,
             offers: Offers::default(),
         };
+        // Completions: snippets are taken, made plain text by the window;
+        // documentation is asked for item by item, as it's shown; the
+        // edits an item needs elsewhere, such as an import, come with the
+        // list, so accepting one waits for nothing.
+        let completion = json!({
+            "completionItem": {
+                "snippetSupport": true,
+                "insertReplaceSupport": true,
+                "documentationFormat": ["markdown", "plaintext"],
+                "resolveSupport": { "properties": ["documentation", "detail"] },
+                "preselectSupport": true,
+            },
+            "contextSupport": true,
+        });
+        let signature = json!({
+            "signatureInformation": {
+                "documentationFormat": ["markdown", "plaintext"],
+                "parameterInformation": { "labelOffsetSupport": true },
+                "activeParameterSupport": true,
+            },
+            "contextSupport": true,
+        });
         let root_uri = uri(root);
         let name = root.file_name().map_or_else(
             || root.display().to_string(),
@@ -164,6 +197,8 @@ impl LanguageServer {
                         "publishDiagnostics": { "versionSupport": true },
                         "hover": { "contentFormat": ["markdown", "plaintext"] },
                         "rename": { "prepareSupport": false },
+                        "completion": completion,
+                        "signatureHelp": signature,
                     },
                     "workspace": {
                         "workspaceFolders": true,
@@ -276,12 +311,34 @@ impl LanguageServer {
     }
 
     /// Whether it can answer `query`. Places are asked for whatever it
-    /// says, as servers answer what they can't with nothing.
+    /// says, as servers answer what they can't with nothing. A completion
+    /// item is resolved by any server that completes, as the daemon
+    /// answers for one that can't from what the item said.
     pub(crate) fn answers(&self, query: Query) -> bool {
         match query {
             Query::Hover => self.offers.hover,
             Query::Format { .. } => self.offers.format,
-            _ => true,
+            Query::Completion(_) | Query::Resolve { .. } => self.offers.completion.is_some(),
+            Query::SignatureHelp { .. } => self.offers.signature.is_some(),
+            Query::Definition
+            | Query::Declaration
+            | Query::TypeDefinition
+            | Query::Implementation
+            | Query::References => true,
+        }
+    }
+
+    /// Whether it says more about a completion item when asked.
+    pub(crate) fn resolves(&self) -> bool {
+        self.offers.resolve
+    }
+
+    /// What it does as you type, for the windows.
+    pub(crate) fn features(&self) -> ServerFeatures {
+        ServerFeatures {
+            completion: self.offers.completion.clone(),
+            signature: self.offers.signature.clone(),
+            signature_again: self.offers.signature_again.clone(),
         }
     }
 
@@ -303,11 +360,18 @@ impl LanguageServer {
             Query::References => "textDocument/references",
             Query::Hover => "textDocument/hover",
             Query::Format { .. } => "textDocument/formatting",
+            Query::Completion(_) => "textDocument/completion",
+            Query::SignatureHelp { .. } => "textDocument/signatureHelp",
+            Query::Resolve { .. } => unreachable!("resolved with the item, by resolve"),
         };
         let mut params = json!({
             "textDocument": { "uri": uri(path) },
             "position": position(text, at, self.encoding),
         });
+        let character = |trigger| match trigger {
+            Trigger::Character(ch) => Some(ch.to_string()),
+            Trigger::Invoked | Trigger::Again => None,
+        };
         match query {
             Query::References => params["context"] = json!({ "includeDeclaration": true }),
             Query::Format { tab_size, spaces } => {
@@ -316,9 +380,38 @@ impl LanguageServer {
                     "options": { "tabSize": tab_size, "insertSpaces": spaces },
                 });
             }
+            Query::Completion(trigger) => {
+                let kind = match trigger {
+                    Trigger::Invoked => 1,
+                    Trigger::Character(_) => 2,
+                    Trigger::Again => 3,
+                };
+                params["context"] = json!({ "triggerKind": kind });
+                if let Some(ch) = character(trigger) {
+                    params["context"]["triggerCharacter"] = json!(ch);
+                }
+            }
+            Query::SignatureHelp { trigger, retrigger } => {
+                let kind = match trigger {
+                    Trigger::Invoked => 1,
+                    Trigger::Character(_) => 2,
+                    Trigger::Again => 3,
+                };
+                params["context"] = json!({ "triggerKind": kind, "isRetrigger": retrigger });
+                if let Some(ch) = character(trigger) {
+                    params["context"]["triggerCharacter"] = json!(ch);
+                }
+            }
             _ => {}
         }
         self.request(method, &params)
+    }
+
+    /// Asks the server, which [`resolves`](Self::resolves), more about
+    /// `item`, a completion item as it sent it. Returns the request's
+    /// number, as [`ask`](Self::ask) does.
+    pub(crate) fn resolve(&mut self, item: &Value) -> u64 {
+        self.request("completionItem/resolve", item)
     }
 
     /// Asks the server, which is [`ready`](Self::ready), to rename what's
@@ -430,6 +523,7 @@ impl LanguageServer {
                     return;
                 }
                 self.initialize = None;
+                incoming.push(Incoming::Ready);
                 if let (Some(result), None) = (&message.result, &message.error) {
                     self.initialized(result);
                 } else {
@@ -466,11 +560,28 @@ impl LanguageServer {
             Value::Object(_) => true,
             _ => false,
         };
+        // The last character of each, as one such as `::` is asked by
+        // its second.
+        let characters = |list: &Value| -> Vec<char> {
+            let list = list.as_array().map_or(&[][..], Vec::as_slice);
+            let mut characters: Vec<char> = (list.iter())
+                .filter_map(|trigger| trigger.as_str()?.chars().last())
+                .collect();
+            characters.dedup();
+            characters
+        };
+        let completion = &capabilities["completionProvider"];
+        let signature = &capabilities["signatureHelpProvider"];
         self.offers = Offers {
             save: offered(&sync["save"]),
             hover: offered(&capabilities["hoverProvider"]),
             rename: offered(&capabilities["renameProvider"]),
             format: offered(&capabilities["documentFormattingProvider"]),
+            completion: (completion.is_object())
+                .then(|| characters(&completion["triggerCharacters"])),
+            resolve: completion["resolveProvider"].as_bool() == Some(true),
+            signature: (signature.is_object()).then(|| characters(&signature["triggerCharacters"])),
+            signature_again: characters(&signature["retriggerCharacters"]),
         };
         self.ready = true;
         self.peer
@@ -667,6 +778,185 @@ pub(crate) fn workspace_edit(answer: &Value) -> Result<Vec<FileEdits>, String> {
     }
     files.retain(|file| !file.edits.is_empty());
     Ok(files)
+}
+
+/// A completion item as a server sends it, with places in lines and
+/// columns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Completion {
+    pub(crate) label: String,
+    /// What it is, as LSP numbers kinds, or 0.
+    pub(crate) kind: u8,
+    pub(crate) detail: String,
+    pub(crate) filter: Option<String>,
+    pub(crate) sort: Option<String>,
+    pub(crate) preselect: bool,
+    /// Where its text starts, if it says: its `textEdit`'s start, or for
+    /// one with a range to insert over and one to replace, the first's.
+    pub(crate) start: Option<Position>,
+    pub(crate) text: String,
+    /// Whether `text` is a snippet.
+    pub(crate) snippet: bool,
+    /// Its `additionalTextEdits`.
+    pub(crate) more: Vec<TextEdit>,
+}
+
+/// The items of a `textDocument/completion` answer, as sent, and whether
+/// it says they aren't all there are: it's a `CompletionList`, a list of
+/// items, or nothing.
+pub(crate) fn completion_items(answer: Value) -> (Vec<Value>, bool) {
+    match answer {
+        Value::Array(items) => (items, false),
+        Value::Object(mut list) => {
+            let incomplete = list.get("isIncomplete").and_then(Value::as_bool) == Some(true);
+            let items = match list.remove("items") {
+                Some(Value::Array(items)) => items,
+                _ => Vec::new(),
+            };
+            (items, incomplete)
+        }
+        _ => (Vec::new(), false),
+    }
+}
+
+/// A completion item, as sent, read; or `None` if it makes no sense.
+pub(crate) fn completion(item: &Value) -> Option<Completion> {
+    let label = item.get("label")?.as_str()?.to_owned();
+    let string = |key: &str| item.get(key).and_then(Value::as_str).map(str::to_owned);
+    let (start, text) = match item.get("textEdit").filter(|edit| edit.is_object()) {
+        Some(edit) => {
+            let range = edit.get("range").or_else(|| edit.get("insert"))?;
+            let start = serde_json::from_value(range.get("start")?.clone()).ok()?;
+            (Some(start), edit.get("newText")?.as_str()?.to_owned())
+        }
+        None => (None, string("insertText").unwrap_or_else(|| label.clone())),
+    };
+    let more = text_edits(item.get("additionalTextEdits").unwrap_or(&Value::Null)).ok()?;
+    Some(Completion {
+        kind: (item.get("kind").and_then(Value::as_u64))
+            .and_then(|kind| u8::try_from(kind).ok())
+            .unwrap_or(0),
+        detail: string("detail").unwrap_or_default(),
+        filter: string("filterText"),
+        sort: string("sortText"),
+        preselect: item.get("preselect").and_then(Value::as_bool) == Some(true),
+        start,
+        text,
+        snippet: item.get("insertTextFormat").and_then(Value::as_u64) == Some(2),
+        more,
+        label,
+    })
+}
+
+/// A completion item's documentation, as sent, and whether it's markdown,
+/// or `None` if it has none.
+pub(crate) fn documentation(item: &Value) -> Option<(String, bool)> {
+    let documentation = match item.get("documentation")? {
+        Value::String(text) => (text.clone(), false),
+        Value::Object(markup) => (
+            markup.get("value")?.as_str()?.to_owned(),
+            markup.get("kind").and_then(Value::as_str) == Some("markdown"),
+        ),
+        _ => return None,
+    };
+    (!documentation.0.trim().is_empty()).then_some(documentation)
+}
+
+/// The signature a `textDocument/signatureHelp` answer says is active.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Signature {
+    pub(crate) label: String,
+    /// The bytes of `label` that are the active parameter, if it says.
+    pub(crate) parameter: Option<(usize, usize)>,
+    /// Which signature it is, from 0, of how many.
+    pub(crate) index: usize,
+    pub(crate) count: usize,
+}
+
+/// The active signature in a `textDocument/signatureHelp` answer, its
+/// parameter's offsets counted in `encoding`, or `None` if it gives none.
+pub(crate) fn signature(answer: &Value, encoding: Encoding) -> Option<Signature> {
+    let signatures = answer.get("signatures")?.as_array()?;
+    let index = (answer.get("activeSignature").and_then(Value::as_u64))
+        .and_then(|index| usize::try_from(index).ok())
+        .filter(|&index| index < signatures.len())
+        .unwrap_or(0);
+    let signature = signatures.get(index)?;
+    let label = signature.get("label")?.as_str()?.to_owned();
+    // A signature's own active parameter, if it says, or the answer's.
+    let active = (signature.get("activeParameter"))
+        .or_else(|| answer.get("activeParameter"))
+        .and_then(Value::as_u64)
+        .and_then(|active| usize::try_from(active).ok());
+    let parameters =
+        (signature.get("parameters").and_then(Value::as_array)).map_or(&[][..], Vec::as_slice);
+    // Each parameter given by its text is looked for after the one before,
+    // so `b` isn't found in `ab`.
+    let mut from = label.find('(').map_or(0, |bracket| bracket + 1);
+    let mut parameter = None;
+    for (index, given) in parameters
+        .iter()
+        .enumerate()
+        .take(active.map_or(0, |active| active + 1))
+    {
+        let found =
+            (given.get("label")).and_then(|given| parameter_in(&label, given, from, encoding));
+        if let Some((_, end)) = found {
+            from = end;
+        }
+        if Some(index) == active {
+            parameter = found;
+        }
+    }
+    Some(Signature {
+        label,
+        parameter,
+        index,
+        count: signatures.len(),
+    })
+}
+
+/// The bytes of `label` a parameter's label names: its text, the first
+/// from byte `from`, or its start and end, counted in `encoding`.
+fn parameter_in(
+    label: &str,
+    parameter: &Value,
+    from: usize,
+    encoding: Encoding,
+) -> Option<(usize, usize)> {
+    match parameter {
+        Value::String(name) if !name.is_empty() => {
+            let start = from + label.get(from..)?.find(name.as_str())?;
+            Some((start, start + name.len()))
+        }
+        Value::Array(offsets) => {
+            let at = |index: usize| {
+                let units = usize::try_from(offsets.get(index)?.as_u64()?).ok()?;
+                byte_of(label, units, encoding)
+            };
+            let (start, end) = (at(0)?, at(1)?);
+            (start <= end).then_some((start, end))
+        }
+        _ => None,
+    }
+}
+
+/// The byte `units` into `text`, counted in `encoding`, if that's the
+/// start of a character or the end.
+fn byte_of(text: &str, units: usize, encoding: Encoding) -> Option<usize> {
+    match encoding {
+        Encoding::Utf8 => (units <= text.len() && text.is_char_boundary(units)).then_some(units),
+        Encoding::Utf16 => {
+            let mut counted = 0;
+            for (at, ch) in text.char_indices() {
+                if counted >= units {
+                    return (counted == units).then_some(at);
+                }
+                counted += ch.len_utf16();
+            }
+            (counted == units).then_some(text.len())
+        }
+    }
 }
 
 /// The diagnostics in a `publishDiagnostics` notification.
@@ -920,6 +1210,100 @@ mod tests {
         ]});
         assert!(workspace_edit(&making).is_err());
         assert_eq!(workspace_edit(&json!({})), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn completion_items_come_in_every_shape_lsp_has() {
+        let pos = |line: u32, character: u32| json!({ "line": line, "character": character });
+        let range = json!({ "start": pos(0, 1), "end": pos(0, 3) });
+        // A list, or items alone, or nothing.
+        let item = json!({ "label": "one", "textEdit": { "range": range, "newText": "one()" } });
+        let (items, incomplete) =
+            completion_items(json!({ "isIncomplete": true, "items": [item.clone()] }));
+        assert!(incomplete && items.len() == 1);
+        assert_eq!(completion_items(json!([item.clone()])).0.len(), 1);
+        assert!(completion_items(Value::Null).0.is_empty());
+        let read = completion(&item).unwrap();
+        assert_eq!((read.start, read.text.as_str()), (Some(at(0, 1)), "one()"));
+        // One to insert over or replace, inserting over; text alone; and a
+        // snippet, with an edit elsewhere.
+        let both = json!({ "label": "two", "textEdit": {
+            "insert": { "start": pos(0, 2), "end": pos(0, 3) },
+            "replace": { "start": pos(0, 0), "end": pos(0, 5) },
+            "newText": "two",
+        }});
+        assert_eq!(completion(&both).unwrap().start, Some(at(0, 2)));
+        let plain = completion(&json!({ "label": "three", "kind": 14 })).unwrap();
+        assert_eq!(
+            (plain.start, plain.text.as_str(), plain.kind),
+            (None, "three", 14)
+        );
+        let snippet = completion(&json!({
+            "label": "four",
+            "insertText": "four($1)",
+            "insertTextFormat": 2,
+            "additionalTextEdits": [{ "range": range, "newText": "use four;" }],
+        }))
+        .unwrap();
+        assert!(snippet.snippet && snippet.more.len() == 1);
+        assert_eq!(completion(&json!({ "kind": 1 })), None, "no label");
+        assert_eq!(
+            documentation(&json!({ "documentation": { "kind": "markdown", "value": "*x*" } })),
+            Some(("*x*".to_owned(), true))
+        );
+        assert_eq!(documentation(&json!({ "documentation": " " })), None);
+    }
+
+    #[test]
+    fn a_signatures_parameter_is_found_by_its_text_or_offsets() {
+        let help = |label: Value, active: u32| {
+            json!({
+                "signatures": [
+                    { "label": "fn other()" },
+                    { "label": "fn é(a: u8, aa: u8)", "parameters": [{ "label": "a: u8" }, { "label": label }] },
+                ],
+                "activeSignature": 1,
+                "activeParameter": active,
+            })
+        };
+        let found = |answer: &Value, encoding| signature(answer, encoding).unwrap().parameter;
+        let label = "fn é(a: u8, aa: u8)";
+        let aa = label.find("aa").unwrap();
+        // By its text, after the bracket, though "é" comes first.
+        assert_eq!(
+            found(&help(json!("aa: u8"), 1), Encoding::Utf8),
+            Some((aa, aa + 6))
+        );
+        assert_eq!(
+            found(&help(json!("a: u8"), 0), Encoding::Utf8),
+            Some((aa - 7, aa - 2))
+        );
+        // By offsets, in UTF-16 units, or bytes.
+        assert_eq!(
+            found(&help(json!([aa - 1, aa + 5]), 1), Encoding::Utf16),
+            Some((aa, aa + 6))
+        );
+        assert_eq!(
+            found(&help(json!([aa, aa + 6]), 1), Encoding::Utf8),
+            Some((aa, aa + 6))
+        );
+        // Inside "é", or past the end, it's none.
+        assert_eq!(found(&help(json!([4, 6]), 1), Encoding::Utf8), None);
+        assert_eq!(found(&help(json!([0, 99]), 1), Encoding::Utf8), None);
+        // By its text, after the one before: `b`, not the `b` in `ab`.
+        let after = json!({
+            "signatures": [{ "label": "fn f(ab: u8, b: u8)", "parameters": [
+                { "label": "ab: u8" }, { "label": "b: u8" },
+            ]}],
+            "activeParameter": 1,
+        });
+        assert_eq!(found(&after, Encoding::Utf8), Some((13, 18)));
+        let read = signature(&help(json!("x"), 9), Encoding::Utf8).unwrap();
+        assert_eq!((read.index, read.count, read.parameter), (1, 2, None));
+        assert_eq!(
+            signature(&json!({ "signatures": [] }), Encoding::Utf8),
+            None
+        );
     }
 
     #[test]

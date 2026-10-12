@@ -1,15 +1,18 @@
 //! An editor driven by keys, with its buffer's copy talking to a daemon as
 //! the real one does.
 
+use std::time::{Duration, Instant};
+
 use clackatoo_protocol::{
-    Answer, BufferId, BufferUpdate, ClientMessage, FileLocation, Query, Size,
+    Answer, BufferId, BufferUpdate, ClientMessage, CompletionItem, FileLocation, Query,
+    ServerFeatures, Size, TextChange, Trigger,
 };
 use clackatoo_text::Sign;
 
 use super::copy::tests::Daemon;
 use super::keys::Stroke;
 use super::{BufferCopy, Editor, HunkAction, Mode, Register};
-use crate::options::Options;
+use crate::options::{CompleteAccept, Options};
 use crate::pane::Selection;
 use crate::render::{HighlightKind, Ink};
 
@@ -106,8 +109,8 @@ impl Setup {
                 }
                 let (answer, _) = self.daemon.take(message);
                 self.editor.hold(&self.copy);
-                let heard = self.copy.update(answer);
-                self.editor.heard(&heard, true, &self.copy);
+                let mut heard = self.copy.update(answer);
+                self.editor.heard(&mut heard, true, &mut self.copy);
             }
         }
     }
@@ -131,14 +134,16 @@ impl Setup {
         self.serve();
     }
 
-    /// Gives the editor the language server's answer to query `id`.
+    /// Gives the editor the language server's answer to query `id`, about
+    /// the daemon's text as it is now.
     fn answer(&mut self, id: u64, answer: Answer) {
-        let heard = (self.copy).update(BufferUpdate::Answer {
+        let mut heard = (self.copy).update(BufferUpdate::Answer {
             id,
-            version: 0,
+            version: self.daemon.version(),
             answer,
         });
-        self.editor.heard(&heard, true, &self.copy);
+        self.editor.heard(&mut heard, true, &mut self.copy);
+        self.serve();
     }
 
     fn text(&self) -> String {
@@ -170,7 +175,11 @@ fn strokes(keys: &str) -> Vec<Stroke> {
                 "BS" => Stroke::Backspace,
                 "Tab" => Stroke::Tab,
                 "Right" => Stroke::Right,
+                "Left" => Stroke::Left,
+                "Up" => Stroke::Up,
+                "Down" => Stroke::Down,
                 "lt" => Stroke::char('<'),
+                "C-Space" => Stroke::ctrl(' '),
                 _ => match name.strip_prefix("C-") {
                     Some(key) => Stroke::ctrl(key.chars().next().unwrap()),
                     None => panic!("no key <{name}>"),
@@ -353,8 +362,8 @@ fn an_agents_edit_moves_the_cursor_with_the_text() {
     assert_eq!(setup.cursor(), (0, 6));
     let update = setup.daemon.agent(0, "// a\n");
     setup.editor.hold(&setup.copy);
-    let heard = setup.copy.update(update);
-    setup.editor.heard(&heard, false, &setup.copy);
+    let mut heard = setup.copy.update(update);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
     assert_eq!(setup.text(), "// a\nhello world");
     assert_eq!(setup.cursor(), (1, 6));
     // Undo takes back yours, not theirs.
@@ -1348,4 +1357,502 @@ fn a_hunk_is_staged_by_the_daemon_and_the_bar_says_so() {
     assert_eq!(setup.editor.status.as_deref(), Some("first"));
     setup.answer(second, Answer::Staged);
     assert_eq!(setup.editor.status.as_deref(), Some("hunk staged"));
+}
+
+impl Setup {
+    /// Tells the editor its language server completes, asked by `.`, and
+    /// helps with calls, asked by `(` and `,`, and again by `)`.
+    fn server(&mut self) {
+        self.copy.update(BufferUpdate::Features(ServerFeatures {
+            completion: Some(vec!['.']),
+            signature: Some(vec!['(', ',']),
+            signature_again: vec![')'],
+        }));
+    }
+
+    /// Lets time pass, so what's due to be asked is.
+    fn tick(&mut self) {
+        let later = Instant::now() + Duration::from_secs(5);
+        self.editor.tick(later, &mut self.copy);
+        self.serve();
+    }
+
+    /// The last query sent, with its number and place.
+    fn last_query(&self) -> (u64, usize, Query) {
+        *self.queries.last().expect("a query")
+    }
+
+    /// The last completion query sent, with its number and place.
+    fn last_completion(&self) -> (u64, usize, Query) {
+        *(self.queries.iter().rev())
+            .find(|query| matches!(query.2, Query::Completion(_)))
+            .expect("a completion query")
+    }
+
+    /// The labels the completion menu shows, if it's shown.
+    fn menu(&mut self) -> Option<Vec<String>> {
+        self.editor.settle(&self.copy);
+        let view = self.editor.completion.as_ref()?.menu()?;
+        let labels = (view.lines.iter())
+            .map(|line| line.text().split_whitespace().nth(1).unwrap().to_owned())
+            .collect();
+        Some(labels)
+    }
+}
+
+/// An item to complete with, `label`, replacing the word from `start`.
+fn item(label: &str, start: usize) -> CompletionItem {
+    CompletionItem {
+        label: label.to_owned(),
+        kind: 6,
+        detail: String::new(),
+        filter: None,
+        sort: None,
+        preselect: false,
+        start: Some(start),
+        text: label.to_owned(),
+        snippet: false,
+        more: Vec::new(),
+    }
+}
+
+fn completions(items: Vec<CompletionItem>, incomplete: bool) -> Answer {
+    Answer::Completions { items, incomplete }
+}
+
+#[test]
+fn typing_a_word_asks_what_could_finish_it_once_typing_pauses() {
+    let mut setup = Setup::new("alpha\n");
+    setup.server();
+    // With room for the documentation beside the menu.
+    setup.editor.resize(Size::new(80, 10).unwrap());
+    setup.keys("oal");
+    assert!(setup.queries.is_empty(), "not while typing");
+    setup.tick();
+    let (asked, at, query) = setup.last_query();
+    assert_eq!((at, query), (8, Query::Completion(Trigger::Invoked)));
+    let items = vec![item("alpha", 6), item("almost", 6), item("beta", 6)];
+    setup.answer(asked, completions(items, false));
+    assert_eq!(setup.menu().unwrap(), ["almost", "alpha"]);
+    // The first is picked, and its documentation asked for once picking
+    // pauses.
+    let resolve = |item| Query::Resolve { list: asked, item };
+    assert!(matches!(setup.last_query().2, Query::Completion(_)));
+    setup.tick();
+    assert_eq!(setup.last_query().2, resolve(1));
+
+    // Moving to the next asks for its; it's shown beside the menu. Moving
+    // on quickly asks only about where it stops.
+    let before = setup.queries.len();
+    setup.keys("<C-n><C-n><C-n>");
+    setup.tick();
+    assert_eq!(setup.queries.len(), before + 1);
+    let (resolving, _, query) = setup.last_query();
+    assert_eq!(query, resolve(0));
+    let documented = Answer::Resolved {
+        detail: Some("fn alpha()".into()),
+        documentation: Some(("Nearly **there**.".into(), true)),
+    };
+    setup.answer(resolving, documented);
+    setup.editor.settle(&setup.copy);
+    let panels = setup.editor.panels();
+    assert_eq!(panels.len(), 2, "the menu and its documentation");
+    let docs: Vec<String> = panels[1]
+        .lines
+        .iter()
+        .map(super::panel::Line::text)
+        .collect();
+    assert_eq!(docs, ["fn alpha()", "", "Nearly there."]);
+
+    // More typed narrows it down, without asking the server again for
+    // completions, though it is for the documentation of what's picked
+    // now.
+    setup.keys("m");
+    assert_eq!(setup.menu().unwrap(), ["almost"]);
+    setup.tick();
+    assert_eq!(setup.last_query().2, resolve(1));
+    let asked_so_far = setup.queries.len();
+    setup.tick();
+    assert_eq!(setup.queries.len(), asked_so_far);
+
+    // Ctrl+Y puts it in, as one undo step with what was typed.
+    setup.keys("<C-y>");
+    assert_eq!(setup.text(), "alpha\nalmost\n");
+    assert_eq!(setup.cursor(), (1, 6));
+    assert_eq!(setup.menu(), None);
+    setup.keys("<Esc>u");
+    assert_eq!(setup.text(), "alpha\n");
+}
+
+#[test]
+fn accepting_makes_an_import_with_it_in_one_undo_step_and_dot_types_it_again() {
+    let text = "fn main() {\n    \n}\n";
+    let mut setup = Setup::new(text);
+    setup.server();
+    setup.keys("jAImp");
+    setup.tick();
+    let mut imported = item("Imported", "fn main() {\n    ".len());
+    imported.more = vec![TextChange {
+        start: 0,
+        end: 0,
+        text: "use elsewhere::Imported;\n".into(),
+    }];
+    setup.answer(setup.last_query().0, completions(vec![imported], false));
+    setup.keys("<C-y>");
+    assert_eq!(
+        setup.text(),
+        "use elsewhere::Imported;\nfn main() {\n    Imported\n}\n"
+    );
+    assert_eq!(setup.cursor(), (2, 12));
+    setup.keys("<Esc>u");
+    assert_eq!(setup.text(), text);
+
+    // `.` types what was put in, in place of what was typed.
+    let mut setup = Setup::new("\n\n");
+    setup.server();
+    setup.keys("ial");
+    setup.tick();
+    let mut call = item("call", 0);
+    call.text = "call(${1:a})$0".into();
+    call.snippet = true;
+    setup.answer(setup.last_query().0, completions(vec![call], false));
+    setup.keys("<C-y>");
+    assert_eq!(setup.text(), "call(a)\n\n");
+    assert_eq!(setup.cursor(), (0, 5), "at the first place to type");
+    setup.keys("<Esc>j.");
+    assert_eq!(setup.text(), "call(a)\ncall(a)\n");
+}
+
+#[test]
+fn a_character_the_server_names_asks_at_once_and_more_is_asked_for_when_not_all() {
+    let mut setup = Setup::new("x\n");
+    setup.server();
+    setup.keys("A.");
+    let (first, at, query) = setup.last_query();
+    assert_eq!((at, query), (2, Query::Completion(Trigger::Character('.'))));
+    setup.answer(
+        first,
+        completions(vec![item("len", 2), item("last", 2)], true),
+    );
+    assert_eq!(setup.menu().unwrap(), ["last", "len"]);
+    // Not all there is: typing asks again, once it pauses, keeping the
+    // menu meanwhile.
+    setup.keys("l");
+    setup.tick();
+    let (again, at, query) = setup.last_completion();
+    assert_eq!((at, query), (3, Query::Completion(Trigger::Again)));
+    assert_eq!(setup.menu().unwrap(), ["last", "len"]);
+    // An answer to an older query is dropped.
+    setup.answer(first, completions(vec![item("lost", 2)], false));
+    assert_eq!(setup.menu().unwrap(), ["last", "len"]);
+    setup.answer(again, completions(vec![item("last", 2)], false));
+    assert_eq!(setup.menu().unwrap(), ["last"]);
+
+    // Off, typing asks nothing, but Ctrl+Space still does; nothing to
+    // complete is said, when asked for.
+    setup.set(|options| options.completion = false);
+    let before = setup.queries.len();
+    setup.keys("<Esc>o.ab");
+    setup.tick();
+    assert!(
+        (setup.queries[before..].iter()).all(|query| !matches!(query.2, Query::Completion(_))),
+        "{:?}",
+        &setup.queries[before..]
+    );
+    let before = setup.queries.len();
+    setup.keys("<C-Space>");
+    assert_eq!(setup.queries.len(), before + 1);
+    setup.answer(setup.last_query().0, Answer::Nothing);
+    assert_eq!(setup.editor.status.as_deref(), Some("no completions"));
+}
+
+#[test]
+fn the_menu_closes_on_ctrl_e_esc_and_moving_away() {
+    let mut setup = Setup::new("alpha\n");
+    setup.server();
+    let open = |setup: &mut Setup| {
+        setup.keys("<C-n>");
+        let (asked, at, query) = setup.last_query();
+        assert_eq!(query, Query::Completion(Trigger::Invoked));
+        let start = setup.copy.text().to_string()[..at]
+            .rfind('\n')
+            .map_or(0, |at| at + 1);
+        setup.answer(asked, completions(vec![item("alpha", start)], false));
+        assert!(setup.menu().is_some());
+    };
+    setup.keys("oal");
+    open(&mut setup);
+    setup.keys("<C-e>");
+    assert_eq!(setup.menu(), None);
+    assert_eq!(setup.editor.mode, Mode::Insert);
+    open(&mut setup);
+    setup.keys("<Left>");
+    assert_eq!(setup.menu(), None);
+    open(&mut setup);
+    setup.keys("<Esc>");
+    assert_eq!(setup.menu(), None);
+    assert_eq!(setup.editor.mode, Mode::Normal);
+
+    // An answer once the cursor has left the word isn't shown.
+    setup.keys("A<C-n>");
+    let asked = setup.last_query().0;
+    setup.keys(" ");
+    setup.answer(asked, completions(vec![item("alpha", 6)], false));
+    assert_eq!(setup.menu(), None);
+    assert_eq!(setup.text(), "alpha\nal \n");
+}
+
+#[test]
+fn enter_and_tab_accept_as_the_options_say() {
+    let ready = |change: fn(&mut Options)| {
+        let mut setup = Setup::new("alpha\n");
+        setup.server();
+        setup.set(change);
+        setup.keys("oal");
+        setup.tick();
+        let items = vec![item("alpha", 6), item("almost", 6)];
+        setup.answer(setup.last_query().0, completions(items, false));
+        setup
+    };
+    // By default, Enter accepts only an item moved to.
+    let mut setup = ready(|_| {});
+    setup.keys("<CR>");
+    assert_eq!(setup.text(), "alpha\nal\n\n");
+    let mut setup = ready(|_| {});
+    setup.keys("<C-n><CR>");
+    assert_eq!(setup.text(), "alpha\nalpha\n");
+    let mut setup = ready(|options| options.completeaccept = CompleteAccept::Enter);
+    setup.keys("<CR>");
+    assert_eq!(setup.text(), "alpha\nalmost\n");
+    let mut setup = ready(|options| options.completeaccept = CompleteAccept::CtrlY);
+    setup.keys("<Down><CR>");
+    assert_eq!(setup.text(), "alpha\nal\n\n");
+    // Tab indents, unless it's told to accept.
+    let mut setup = ready(|_| {});
+    setup.keys("<Tab>");
+    assert_eq!(setup.text(), "alpha\nal  \n");
+    let mut setup = ready(|options| options.completetab = true);
+    setup.keys("<Down><Up><Tab>");
+    assert_eq!(setup.text(), "alpha\nalmost\n");
+}
+
+#[test]
+fn an_item_lands_where_it_should_past_others_edits() {
+    let mut setup = Setup::new("alpha\n");
+    setup.server();
+    setup.keys("oal");
+    setup.tick();
+    let asked = setup.last_query().0;
+    // An agent types at the file's start before the server answers, about
+    // the text with that in.
+    let agents = setup.daemon.agent(0, "zz ");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(agents);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    setup.answer(
+        asked,
+        completions(vec![item("almost", "zz alpha\n".len())], false),
+    );
+    // And again after it has.
+    let agents = setup.daemon.agent(0, "y");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(agents);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    setup.keys("<C-y>");
+    assert_eq!(setup.text(), "yzz alpha\nalmost\n");
+}
+
+#[test]
+fn a_pick_isnt_lost_to_a_list_asked_for_again() {
+    let mut setup = Setup::new("x\n");
+    setup.server();
+    setup.keys("A.");
+    let first = setup.last_completion().0;
+    let items = || vec![item("len", 2), item("last", 2), item("lent", 2)];
+    setup.answer(first, completions(items(), true));
+    // Asked again as `l` is typed, as rust-analyzer always needs; Ctrl+N
+    // before that goes keeps the pick, and Enter accepts it.
+    setup.keys("l<C-n>");
+    let asked = setup.queries.len();
+    setup.tick();
+    assert!(
+        (setup.queries[asked..].iter()).all(|query| !matches!(query.2, Query::Completion(_))),
+        "not asked again once picked"
+    );
+    // One already on its way is dropped.
+    setup.keys("<C-e><C-Space>");
+    let invoked = setup.last_completion().0;
+    setup.answer(invoked, completions(items(), true));
+    setup.keys("e");
+    setup.tick();
+    let again = setup.last_completion().0;
+    setup.keys("<C-n>");
+    let picked = setup.menu().unwrap();
+    setup.answer(
+        again,
+        completions(vec![item("lent", 2), item("len", 2)], true),
+    );
+    assert_eq!(setup.menu().unwrap(), picked);
+    // A list asked for anew keeps the item picked in the one it replaces.
+    setup.keys("<C-Space>");
+    let anew = setup.last_completion().0;
+    setup.answer(
+        anew,
+        completions(vec![item("lent", 2), item("len", 2)], false),
+    );
+    setup.keys("<CR>");
+    assert_eq!(setup.text(), "x.lent\n");
+}
+
+#[test]
+fn dot_types_a_snippet_again_in_one_undo_step() {
+    let mut setup = Setup::new("x\n\ny\n");
+    setup.server();
+    setup.keys("jibl");
+    setup.tick();
+    let mut block = item("block", 2);
+    block.text = "if {\n\t$0\n}".into();
+    block.snippet = true;
+    setup.answer(setup.last_completion().0, completions(vec![block], false));
+    setup.keys("<C-y>");
+    assert_eq!(setup.text(), "x\nif {\n\t\n}\ny\n");
+    assert_eq!(setup.cursor(), (2, 4), "inside, past the tab");
+    setup.keys("<Esc>jj0.");
+    assert_eq!(setup.text(), "x\nif {\n\t\n}\nif {\n\t\n}y\n");
+    setup.keys("u");
+    assert_eq!(setup.text(), "x\nif {\n\t\n}\ny\n", "one step");
+}
+
+#[test]
+fn a_word_shorter_than_it_was_asked_for_is_asked_for_again() {
+    let mut setup = Setup::new("\n");
+    setup.server();
+    setup.keys("ipri");
+    setup.tick();
+    let items = vec![item("print", 0), item("private", 0)];
+    setup.answer(setup.last_completion().0, completions(items, false));
+    assert_eq!(setup.menu().unwrap(), ["print", "private"]);
+    // Back to `p`, which the server may have more for.
+    setup.keys("<BS><BS>");
+    assert_eq!(setup.menu(), None);
+    setup.tick();
+    let (asked, at, query) = setup.last_completion();
+    assert_eq!((at, query), (1, Query::Completion(Trigger::Invoked)));
+    setup.answer(asked, completions(vec![item("print", 0)], false));
+    // Typed past all it gave: closed, and the next key asks again.
+    setup.keys("u");
+    assert_eq!(setup.menu(), None);
+    let before = setup.queries.len();
+    setup.keys("s");
+    setup.tick();
+    assert_eq!(setup.queries.len(), before + 1);
+    assert_eq!(setup.last_completion().1, 3);
+}
+
+#[test]
+fn an_item_whose_edits_dont_fit_keeps_the_menu_and_says_so() {
+    let mut setup = Setup::new("abc\n");
+    setup.server();
+    setup.keys("A x");
+    setup.tick();
+    let mut broken = item("xyz", 4);
+    broken.more = vec![
+        TextChange {
+            start: 0,
+            end: 2,
+            text: "1".into(),
+        },
+        TextChange {
+            start: 1,
+            end: 3,
+            text: "2".into(),
+        },
+    ];
+    setup.answer(setup.last_completion().0, completions(vec![broken], false));
+    setup.keys("<C-y>");
+    assert_eq!(setup.text(), "abc x\n");
+    assert!(setup.menu().is_some());
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("the language server's edits for it don't fit")
+    );
+}
+
+#[test]
+fn a_calls_signature_shows_over_the_cursor_as_its_arguments_are_typed() {
+    let mut setup = Setup::new("\n\n\n");
+    setup.server();
+    setup.keys("jjif(");
+    let (asked, at, query) = setup.last_query();
+    let help = |trigger, retrigger| Query::SignatureHelp { trigger, retrigger };
+    assert_eq!((at, query), (4, help(Trigger::Character('('), false)));
+    let label = "fn f(a: u32, b: u32)";
+    let signature = |parameter: &str| Answer::Signature {
+        label: label.into(),
+        parameter: label
+            .find(parameter)
+            .map(|start| (start, start + parameter.len())),
+        index: 0,
+        count: 1,
+    };
+    setup.answer(asked, signature("a: u32"));
+    let bold = |setup: &mut Setup| -> Option<String> {
+        setup.editor.settle(&setup.copy);
+        let panel = setup.editor.signature.as_ref()?.view()?;
+        assert_eq!(panel.placed.top, 0, "over the cursor's line");
+        let runs = panel.lines.iter().flat_map(|line| &line.runs);
+        (runs.filter(|run| run.ink == Ink::Bold))
+            .map(|run| run.text.clone())
+            .next()
+    };
+    assert_eq!(bold(&mut setup).as_deref(), Some("a: u32"));
+    // A comma asks again, and the next argument's in bold.
+    setup.keys("1,");
+    let (asked, _, query) = setup.last_query();
+    assert_eq!(query, help(Trigger::Character(','), true));
+    setup.answer(asked, signature("b: u32"));
+    assert_eq!(bold(&mut setup).as_deref(), Some("b: u32"));
+
+    // A word typed meanwhile asks what could finish it, and about the
+    // call again, once typing pauses: the menu goes under the cursor, the
+    // signature over it.
+    setup.keys("x");
+    setup.tick();
+    let asked: Vec<Query> = setup
+        .queries
+        .iter()
+        .rev()
+        .take(2)
+        .map(|query| query.2)
+        .collect();
+    assert!(
+        asked.contains(&Query::Completion(Trigger::Invoked)),
+        "{asked:?}"
+    );
+    assert!(asked.contains(&help(Trigger::Again, true)), "{asked:?}");
+    let completing = (setup.queries.iter().rev())
+        .find(|query| query.2 == Query::Completion(Trigger::Invoked))
+        .unwrap()
+        .0;
+    setup.answer(
+        completing,
+        completions(vec![item("xs", "\n\nf(1,".len())], false),
+    );
+    setup.editor.settle(&setup.copy);
+    let menu = setup.editor.completion.as_ref().unwrap().placed().unwrap();
+    assert!(menu.top > 2, "under the cursor's line");
+    assert_eq!(bold(&mut setup).as_deref(), Some("b: u32"));
+
+    // Out of the call, the server says there's none, and it closes.
+    setup.keys("<C-e>)");
+    let (asked, _, query) = setup.last_query();
+    assert_eq!(query, help(Trigger::Character(')'), true));
+    setup.answer(asked, Answer::Nothing);
+    assert_eq!(bold(&mut setup), None);
+    // Leaving insert mode closes it.
+    setup.keys("f(");
+    setup.answer(setup.last_query().0, signature("a: u32"));
+    assert!(bold(&mut setup).is_some());
+    setup.keys("<Esc>");
+    assert!(setup.editor.signature.is_none());
 }

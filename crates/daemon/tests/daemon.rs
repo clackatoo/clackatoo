@@ -10,11 +10,11 @@ use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode,
-    ChatState, ClientMessage, Diff, Done, Edit, Error, Event, FileLocation, Found, FoundBuffer,
-    FoundLine, Item, Kind, Location, NewAgent, NewTerminal, OpenFile, Outcome, PROTOCOL_VERSION,
-    PaneId, PaneTerminal, Patch, Query, Request, Response, Search, ServerMessage, Side, Size, Span,
-    TerminalId, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, View, ViewUpdate,
-    Workspaces,
+    ChatState, ClientMessage, CompletionItem, Diff, Done, Edit, Error, Event, FileLocation, Found,
+    FoundBuffer, FoundLine, Item, Kind, Location, NewAgent, NewTerminal, OpenFile, Outcome,
+    PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Query, Request, Response, Search,
+    ServerFeatures, ServerMessage, Side, Size, Span, TerminalId, TerminalStatus, TextChange, Tool,
+    ToolContent, ToolKind, ToolStatus, Trigger, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -1938,7 +1938,9 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
         "[package]\nname = \"krate\"\nedition = \"2024\"\n",
     )
     .unwrap();
-    let text = "pub fn f() -> u32 {\n    \"not a number\"\n}\npub fn g() -> u32 {\n    f()\n}\n";
+    let text = "pub fn f() -> u32 {\n    \"not a number\"\n}\npub fn g() -> u32 {\n    f()\n}\n\
+                pub fn h(a: u32, b: u32) -> u32 {\n    a + b\n}\n\
+                pub fn k(value: u32) -> u32 {\n    h(1, val)\n}\n";
     std::fs::write(dir.join("krate/src/lib.rs"), text).unwrap();
     let mut client = daemon.client();
     client.watch_workspaces().unwrap();
@@ -1990,6 +1992,7 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
         panic!("{answer:?}");
     };
     assert!(markdown && said.contains("pub fn f() -> u32"), "{said}");
+    rust_analyzer_completes_and_helps(&mut client, buffer, text);
     rust_analyzer_finds_renames_and_formats(&mut client, buffer, text);
 }
 
@@ -2054,9 +2057,42 @@ fn rust_analyzer_finds_renames_and_formats(client: &mut Client, buffer: BufferId
     );
 }
 
+/// What rust-analyzer could type for `val` in `text`'s `k`, and which of
+/// h's arguments that is.
+fn rust_analyzer_completes_and_helps(client: &mut Client, buffer: BufferId, text: &str) {
+    // What could be typed for `val`, in k: its argument, replacing what's
+    // typed.
+    let typed = text.rfind("val)").unwrap();
+    let query = Query::Completion(Trigger::Invoked);
+    client.query(buffer, 7, (0, typed + 3), query).unwrap();
+    let (_, answer) = next_answer(client);
+    let (items, _) = completions(answer);
+    let value = items.iter().find(|item| item.label == "value");
+    assert_eq!(value.and_then(|item| item.start), Some(typed), "{items:?}");
+
+    // And which argument of h it's at.
+    let query = Query::SignatureHelp {
+        trigger: Trigger::Invoked,
+        retrigger: false,
+    };
+    client.query(buffer, 8, (0, typed + 3), query).unwrap();
+    let (_, answer) = next_answer(client);
+    let Answer::Signature {
+        label,
+        parameter: Some((start, end)),
+        ..
+    } = answer
+    else {
+        panic!("{answer:?}");
+    };
+    assert!(label.contains("fn h(a: u32, b: u32) -> u32"), "{label}");
+    assert_eq!(&label[start..end], "b: u32");
+}
+
 /// A project for the fake language server: `app/`, marked as one, with
 /// `files` in it, and `app/a.fk` open and attached to. Returns once the
-/// server has said what's wrong with it, and so is ready.
+/// server has said what's wrong with it, and so is ready: `a.fk` must have
+/// a `bad` in it, as a report of nothing wrong may come before attaching.
 fn fake_project(daemon: &TestDaemon, files: &[(&str, &str)]) -> (Client, BufferId) {
     let dir = daemon.dir.path();
     std::fs::create_dir(dir.join("app")).unwrap();
@@ -2073,14 +2109,17 @@ fn fake_project(daemon: &TestDaemon, files: &[(&str, &str)]) -> (Client, BufferI
     (client, buffer)
 }
 
-/// The updates about a buffer up to the next answer, but diagnostics and
-/// highlights, which come whenever they come, and the answer.
+/// The updates about a buffer up to the next answer, but diagnostics,
+/// highlights and what its server does, which come whenever they come,
+/// and the answer.
 fn updates_to_answer(client: &mut Client) -> (Vec<BufferUpdate>, (u64, Answer)) {
     let mut updates = Vec::new();
     loop {
         match next_buffer_update(client) {
             BufferUpdate::Answer { id, answer, .. } => return (updates, (id, answer)),
-            BufferUpdate::Diagnostics { .. } | BufferUpdate::Highlights { .. } => {}
+            BufferUpdate::Diagnostics { .. }
+            | BufferUpdate::Highlights { .. }
+            | BufferUpdate::Features(_) => {}
             update => updates.push(update),
         }
     }
@@ -2150,6 +2189,123 @@ fn a_language_server_is_never_asked_what_it_cant_do() {
         next_answer(&mut client),
         (3, failed("its language server doesn't format files"))
     );
+    let completion = Query::Completion(Trigger::Invoked);
+    client.query(buffer, 4, (0, 0), completion).unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (
+            4,
+            failed("its language server doesn't complete what's typed")
+        )
+    );
+    let signature = Query::SignatureHelp {
+        trigger: Trigger::Invoked,
+        retrigger: false,
+    };
+    client.query(buffer, 5, (0, 0), signature).unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (5, failed("its language server doesn't help with calls"))
+    );
+}
+
+/// The completion items in `answer`, or a panic.
+fn completions(answer: Answer) -> (Vec<CompletionItem>, bool) {
+    match answer {
+        Answer::Completions { items, incomplete } => (items, incomplete),
+        other => panic!("expected completions, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_language_server_completes_what_is_typed_and_resolves_items() {
+    // Counting columns in UTF-16, which "é" tells apart from bytes.
+    let daemon = with_fake_language_server(|_| vec!["--utf16".to_owned()]);
+    let text = "é alpha bad\né al";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    client
+        .query(
+            buffer,
+            1,
+            (0, text.len()),
+            Query::Completion(Trigger::Invoked),
+        )
+        .unwrap();
+    let (id, answer) = next_answer(&mut client);
+    assert_eq!(id, 1);
+    let (items, incomplete) = completions(answer);
+    assert!(!incomplete);
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    assert_eq!(labels, ["alpha", "bad", "é", "Imported", "call"]);
+    let typed = text.rfind("al").unwrap();
+    assert_eq!(
+        items[0],
+        CompletionItem {
+            label: "alpha".into(),
+            kind: 6,
+            detail: "a word".into(),
+            filter: None,
+            sort: None,
+            preselect: false,
+            start: Some(typed),
+            text: "alpha".into(),
+            snippet: false,
+            more: Vec::new(),
+        }
+    );
+    // An import it needs, at the file's top; and a snippet.
+    assert_eq!(
+        items[3].more,
+        [TextChange {
+            start: 0,
+            end: 0,
+            text: "use elsewhere::Imported;\n".into()
+        }]
+    );
+    assert!(items[4].snippet && items[4].text == "call(${1:a}, ${2:b})$0");
+
+    // Its documentation, when resolved; an item of another list, or one
+    // past its end, has none.
+    let resolve = |list, item| Query::Resolve { list, item };
+    client.query(buffer, 2, (0, 0), resolve(1, 0)).unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (
+            2,
+            Answer::Resolved {
+                detail: Some("a word".into()),
+                documentation: Some(("**alpha**, a word in the file".into(), true)),
+            }
+        )
+    );
+    client.query(buffer, 3, (0, 0), resolve(7, 0)).unwrap();
+    assert_eq!(next_answer(&mut client), (3, Answer::Nothing));
+    client.query(buffer, 4, (0, 0), resolve(1, 99)).unwrap();
+    assert_eq!(next_answer(&mut client), (4, Answer::Nothing));
+    // Another window can't resolve this one's.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    other.query(buffer, 5, (0, 0), resolve(1, 0)).unwrap();
+    assert_eq!(next_answer(&mut other), (5, Answer::Nothing));
+}
+
+#[test]
+fn a_server_that_resolves_nothing_has_its_items_documented_by_the_daemon() {
+    let daemon = with_fake_language_server(|_| vec!["--no-resolve".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "alpha bad\na")]);
+    let query = Query::Completion(Trigger::Character('.'));
+    client.query(buffer, 1, (0, 11), query).unwrap();
+    let (items, _) = completions(next_answer(&mut client).1);
+    assert_eq!(items[0].label, "alpha");
+    client
+        .query(buffer, 2, (0, 0), Query::Resolve { list: 1, item: 0 })
+        .unwrap();
+    let (_, answer) = next_answer(&mut client);
+    assert!(
+        matches!(&answer, Answer::Resolved { documentation: Some((text, true)), .. }
+            if text.starts_with("**alpha**")),
+        "{answer:?}"
+    );
 }
 
 #[test]
@@ -2179,6 +2335,140 @@ fn formatting_edits_the_buffer_as_the_user_and_says_whether_it_changed() {
         next_answer(&mut client),
         (2, Answer::Formatted { changed: false })
     );
+}
+
+#[test]
+fn completions_that_arent_all_say_so_and_too_many_are_cut() {
+    let daemon = with_fake_language_server(|_| vec!["--incomplete".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "alpha bad\nal")]);
+    client
+        .query(buffer, 1, (0, 12), Query::Completion(Trigger::Invoked))
+        .unwrap();
+    let (items, incomplete) = completions(next_answer(&mut client).1);
+    assert!(incomplete);
+    let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+    assert_eq!(labels, ["alpha", "Imported", "call"]);
+
+    // Thousands: the server's first, as it sorts them, and not all.
+    let daemon = with_fake_language_server(|_| vec!["--many".to_owned(), "6000".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad z")]);
+    client
+        .query(buffer, 1, (0, 5), Query::Completion(Trigger::Invoked))
+        .unwrap();
+    let (items, incomplete) = completions(next_answer(&mut client).1);
+    assert!(incomplete);
+    assert_eq!(items.len(), 5000);
+    assert_eq!(items[0].label, "bad");
+    assert_eq!(items[4999].label, "made04998");
+    assert!(
+        items.iter().all(|item| item.label != "Imported"),
+        "sorted last by its sort text, and left out"
+    );
+}
+
+#[test]
+fn completions_land_past_edits_made_while_the_server_worked() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        vec!["--hold-completion".to_owned(), gate]
+    });
+    let text = "alpha bad\nal";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    client
+        .query(
+            buffer,
+            1,
+            (0, text.len()),
+            Query::Completion(Trigger::Invoked),
+        )
+        .unwrap();
+    // While the server works, another window types at the file's start.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    send_change(&mut other, buffer, 0, insert(text.len(), 0, "zz ", 0));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    std::fs::write(daemon.dir.path().join("gate"), "").unwrap();
+    let (updates, (id, answer)) = updates_to_answer(&mut client);
+    assert_eq!(id, 1);
+    assert!(
+        updates
+            .iter()
+            .any(|update| matches!(update, BufferUpdate::Edited { version: 1, .. })),
+        "the edit comes first"
+    );
+    let (items, _) = completions(answer);
+    assert_eq!(items[0].start, Some("zz alpha bad\n".len()));
+    // An import at the file's top stays at its top.
+    let imported = items.iter().find(|item| item.label == "Imported").unwrap();
+    assert_eq!((imported.more[0].start, imported.more[0].end), (0, 0));
+}
+
+#[test]
+fn a_language_server_helps_with_a_calls_arguments() {
+    // In UTF-16, the parameter's offsets aren't bytes.
+    let daemon = with_fake_language_server(|_| vec!["--utf16".to_owned()]);
+    let text = "fé(1, \nbad";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    let query = Query::SignatureHelp {
+        trigger: Trigger::Character(','),
+        retrigger: false,
+    };
+    client.query(buffer, 1, (0, "fé(1, ".len()), query).unwrap();
+    let label = "fn fé(a: u32, b: u32)";
+    let b = label.find("b: u32").unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (
+            1,
+            Answer::Signature {
+                label: label.into(),
+                parameter: Some((b, b + "b: u32".len())),
+                index: 0,
+                count: 1,
+            }
+        )
+    );
+    // Outside a call, there's none.
+    client.query(buffer, 2, (0, 0), query).unwrap();
+    assert_eq!(next_answer(&mut client), (2, Answer::Nothing));
+}
+
+#[test]
+fn windows_are_told_what_a_server_does_as_you_type() {
+    let daemon = with_fake_language_server(|_| Vec::new());
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    let features = ServerFeatures {
+        completion: Some(vec!['.']),
+        signature: Some(vec!['(', ',']),
+        signature_again: vec![')'],
+    };
+    // A window attaching once it's ready is told after the snapshot.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    loop {
+        if let BufferUpdate::Features(told) = next_buffer_update(&mut other) {
+            assert_eq!(told, features);
+            break;
+        }
+    }
+    // The first window was told when it became ready.
+    attach_buffer(&mut client, buffer);
+    loop {
+        if let BufferUpdate::Features(told) = next_buffer_update(&mut client) {
+            assert_eq!(told, features);
+            break;
+        }
+    }
+    // One that can't, is told so.
+    let daemon = with_fake_language_server(|_| vec!["--bare".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    attach_buffer(&mut client, buffer);
+    loop {
+        if let BufferUpdate::Features(told) = next_buffer_update(&mut client) {
+            assert_eq!(told, ServerFeatures::default());
+            break;
+        }
+    }
 }
 
 #[test]
@@ -2237,7 +2527,9 @@ fn a_rename_edits_open_buffers_as_the_user_and_files_not_open_on_disk() {
         let mut heard = next_buffer_update(&mut other);
         while matches!(
             heard,
-            BufferUpdate::Diagnostics { .. } | BufferUpdate::Highlights { .. }
+            BufferUpdate::Diagnostics { .. }
+                | BufferUpdate::Highlights { .. }
+                | BufferUpdate::Features(_)
         ) {
             heard = next_buffer_update(&mut other);
         }

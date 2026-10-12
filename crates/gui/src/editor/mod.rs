@@ -12,7 +12,15 @@
 //! Several panes can show one buffer, each with its own cursor, mode and
 //! view. Edits made in one, or by anyone else, move the others' cursors
 //! with the text around them.
+//!
+//! In insert mode, the language server is asked what could finish the
+//! word being typed, shown in a menu under the cursor (see [`complete`]),
+//! and about the call whose arguments are being typed, whose signature
+//! shows over it. Typing never waits for either: they're asked when typing
+//! pauses, and their answers are shown when they come, if they're still
+//! about where the cursor is.
 
+mod complete;
 mod copy;
 mod keys;
 mod panel;
@@ -20,11 +28,13 @@ mod text;
 
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{Answer, BufferId, Edit, FileLocation, Query, Size};
+use clackatoo_protocol::{Answer, BufferId, Edit, FileLocation, Query, Size, Trigger};
 use clackatoo_term::{Row, RowBuilder, Style};
 use clackatoo_text::{Bias, Diagnostic, Hunk, Severity};
 use winit::keyboard::{Key, NamedKey};
 
+pub use complete::Ranking;
+use complete::{Completion, Resolved, is_word};
 pub(crate) use copy::{BufferCopy, Heard};
 use keys::{Action, Command, Entry, Operator, Parsed, Stroke, Target, ViewAt};
 use panel::Panel;
@@ -34,7 +44,7 @@ use text::{Laid, Text, tab_end};
 use crate::colors;
 use crate::input::KeyPress;
 use crate::motion::{Class, Cursor, Lines, Motion, Point, Reach, before, class_at};
-use crate::options::{Case, Options};
+use crate::options::{Case, CompleteAccept, Options};
 use crate::pane::{Mode, Selection, enters_normal_mode};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 
@@ -104,7 +114,21 @@ struct Span {
 #[derive(Clone, Debug)]
 struct Change {
     command: Command,
-    typed: Vec<Stroke>,
+    typed: Vec<Typed>,
+}
+
+/// Something typed in insert mode, for `.` to type again.
+#[derive(Clone, Debug)]
+enum Typed {
+    /// A key.
+    Key(Stroke),
+    /// A completion accepted: `replaced` characters before the cursor
+    /// replaced with `text`, and the cursor `offset` bytes into it.
+    Accepted {
+        text: String,
+        offset: usize,
+        replaced: usize,
+    },
 }
 
 /// How an editor numbers its lines, as the options say.
@@ -202,6 +226,50 @@ impl Indent {
             " ".repeat(width)
         }
     }
+}
+
+/// How completion and help with calls behave, as the options say.
+#[derive(Clone, Copy, Debug)]
+struct AsYouType {
+    /// Typing a word, or a character the server says should, asks what
+    /// could be typed (`completion`).
+    auto: bool,
+    /// How long typing a word pauses before it asks (`completedelay`).
+    delay: Duration,
+    /// Which keys accept an item, besides Ctrl+Y (`completeaccept`)...
+    accept: CompleteAccept,
+    /// ...and whether Tab does (`completetab`).
+    tab: bool,
+    /// A call's signature is shown as its arguments are typed
+    /// (`signaturehelp`).
+    signature: bool,
+}
+
+impl AsYouType {
+    fn of(options: &Options) -> Self {
+        Self {
+            auto: options.completion,
+            delay: Duration::from_millis(u64::from(options.completedelay)),
+            accept: options.completeaccept,
+            tab: options.completetab,
+            signature: options.signaturehelp,
+        }
+    }
+}
+
+/// A completion query asked, until it's answered.
+#[derive(Clone, Copy, Debug)]
+struct Requested {
+    id: u64,
+    /// Where the word it's for starts, moved along with every edit.
+    start: usize,
+    /// Whether it was asked for with a key, so an answer of nothing is
+    /// worth saying.
+    explicit: bool,
+    /// Whether it asks again for what the menu shows.
+    again: bool,
+    /// How long the word was, in bytes.
+    len: usize,
 }
 
 /// What's being typed in the bar.
@@ -318,6 +386,27 @@ pub(crate) struct Editor {
     held: Option<(usize, Option<usize>)>,
     /// The lines shown, laid out.
     rows: Vec<Row>,
+    /// How completion and help with calls behave.
+    as_you_type: AsYouType,
+    /// The word before the cursor being completed, once the language
+    /// server has said what could finish it.
+    completion: Option<Completion>,
+    /// The completion query asked last, until it's answered.
+    completing: Option<Requested>,
+    /// A completion query to ask once typing pauses: when, and why.
+    completion_due: Option<(Instant, Trigger)>,
+    /// The signature of the call whose arguments are being typed, shown
+    /// over the cursor.
+    signature: Option<Panel>,
+    /// The number of the signature help query asked last, until it's
+    /// answered.
+    signing: Option<u64>,
+    /// When to ask about the call again, once typing pauses, while its
+    /// signature is shown.
+    signature_due: Option<Instant>,
+    /// When to ask for the picked item's documentation, once picking
+    /// pauses.
+    resolve_due: Option<Instant>,
 }
 
 impl Editor {
@@ -361,6 +450,14 @@ impl Editor {
             flash: None,
             held: None,
             rows: Vec::new(),
+            as_you_type: AsYouType::of(options),
+            completion: None,
+            completing: None,
+            completion_due: None,
+            signature: None,
+            signing: None,
+            signature_due: None,
+            resolve_due: None,
         }
     }
 
@@ -413,6 +510,10 @@ impl Editor {
         self.signs = options.gitsigns;
         self.columns = columns(options);
         self.case = Case::of(options);
+        self.as_you_type = AsYouType::of(options);
+        if !self.as_you_type.signature {
+            self.close_signature();
+        }
         self.follow(copy);
     }
 
@@ -500,6 +601,7 @@ impl Editor {
     /// Puts `text` in at the cursor, as typed in insert mode.
     pub(crate) fn paste(&mut self, text: &str, copy: &mut BufferCopy) {
         self.panel = None;
+        self.close_completion();
         let at = self.insert_byte(copy);
         self.new_step |= self.mode != Mode::Insert;
         self.insert_text(at, text, copy);
@@ -518,9 +620,21 @@ impl Editor {
         {
             return done;
         }
+        if self.mode == Mode::Insert
+            && self.prompt.is_none()
+            && let Some(done) = self.completion_stroke(stroke, copy)
+        {
+            self.follow(copy);
+            return done;
+        }
         let (mode, edits) = (self.mode, copy.edits_made());
+        let at = self.cursor_byte(copy);
         let done = self.read_stroke(stroke, copy, register);
         self.follow(copy);
+        if mode == Mode::Insert {
+            let changed = copy.edits_made() != edits || self.cursor_byte(copy) != at;
+            self.as_you_type(stroke, changed, copy);
+        }
         // Moving the cursor, changing mode, editing or typing in the bar
         // closes the panel.
         if let Some(panel) = &self.panel
@@ -583,7 +697,7 @@ impl Editor {
             if let Some(change) = &mut self.changing
                 && stroke != Stroke::Escape
             {
-                change.typed.push(stroke);
+                change.typed.push(Typed::Key(stroke));
             }
             self.insert_stroke(stroke, copy);
             return Done {
@@ -739,8 +853,8 @@ impl Editor {
         if self.mode == Mode::Insert {
             let times = std::mem::replace(&mut self.insert_times, 1);
             for _ in 0..times {
-                for &stroke in &change.typed {
-                    self.insert_stroke(stroke, copy);
+                for typed in &change.typed {
+                    self.retype(typed, copy);
                 }
             }
             self.leave_insert(copy);
@@ -1286,12 +1400,14 @@ impl Editor {
     /// Leaves insert mode, typing what was typed again if a count asked
     /// for it more than once, as `3ix` types `xxx`.
     fn leave_insert(&mut self, copy: &mut BufferCopy) {
+        self.close_completion();
+        self.close_signature();
         if self.insert_times > 1
             && let Some(change) = self.changing.clone()
         {
             for _ in 1..self.insert_times {
-                for &stroke in &change.typed {
-                    self.insert_stroke(stroke, copy);
+                for typed in &change.typed {
+                    self.retype(typed, copy);
                 }
             }
         }
@@ -1395,6 +1511,29 @@ impl Editor {
         }
     }
 
+    /// Types `typed` again, as `.` and a count do.
+    fn retype(&mut self, typed: &Typed, copy: &mut BufferCopy) {
+        match typed {
+            Typed::Key(stroke) => self.insert_stroke(*stroke, copy),
+            Typed::Accepted {
+                text,
+                offset,
+                replaced,
+            } => {
+                let at = self.insert_byte(copy);
+                let start = {
+                    let rope = copy.text();
+                    let char_at = rope.byte_to_char(at);
+                    rope.char_to_byte(char_at.saturating_sub(*replaced))
+                };
+                let removed = copy.text().byte_slice(start..at).to_string();
+                let edit = Edit::replace(copy.text().len_bytes(), start, &removed, text);
+                self.make(edit, copy);
+                self.cursor = Cursor::new(self.text(copy).point_of(start + offset));
+            }
+        }
+    }
+
     /// The cursor moved in insert mode other than by typing: what's typed
     /// next starts a new undo step, and isn't part of what `.` makes
     /// again, as in Vim.
@@ -1430,8 +1569,436 @@ impl Editor {
 
     /// Makes `edit` to the buffer, as part of the change being made.
     fn make(&mut self, edit: Edit, copy: &mut BufferCopy) {
+        self.edited(&edit);
         copy.edit(edit, self.new_step);
         self.new_step = false;
+    }
+
+    /// Moves the word being completed, and the places its items are at,
+    /// through `edit`, made to the text.
+    fn edited(&mut self, edit: &Edit) {
+        if let Some(completing) = &mut self.completing {
+            completing.start = edit.map(completing.start, Bias::Before);
+        }
+        if let Some(completion) = &mut self.completion {
+            completion.edited(edit);
+        }
+    }
+
+    // --- Completion and help with calls -------------------------------------
+
+    /// The keys completion takes in insert mode: Ctrl+Space asks for it,
+    /// as do Ctrl+N and Ctrl+P when the menu isn't shown; while it is,
+    /// they and the arrows move through it, Ctrl+Y accepts, as Enter and
+    /// Tab can, and Ctrl+E closes it. Esc closes it and goes on to leave
+    /// insert mode. `None` for any other key.
+    fn completion_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy) -> Option<Done> {
+        let showing = self.completion.as_ref().is_some_and(Completion::showing);
+        let moved = self
+            .completion
+            .as_ref()
+            .is_some_and(|completion| completion.moved);
+        let accepts = match stroke {
+            Stroke::Char {
+                ch: 'y',
+                ctrl: true,
+            } => true,
+            Stroke::Enter => match self.as_you_type.accept {
+                CompleteAccept::Enter => true,
+                CompleteAccept::Picked => moved,
+                CompleteAccept::CtrlY => false,
+            },
+            Stroke::Tab => self.as_you_type.tab,
+            _ => false,
+        };
+        match stroke {
+            _ if showing && accepts => self.accept(copy),
+            Stroke::Char {
+                ch: 'n' | 'p',
+                ctrl: true,
+            }
+            | Stroke::Down
+            | Stroke::Up
+                if showing =>
+            {
+                let down = matches!(stroke, Stroke::Down | Stroke::Char { ch: 'n', .. });
+                if let Some(completion) = &mut self.completion {
+                    completion.pick(down);
+                }
+                // A list asked for again mustn't come and lose the pick.
+                self.completion_due = None;
+                if self.completing.is_some_and(|completing| completing.again) {
+                    self.completing = None;
+                }
+                self.document(copy);
+            }
+            Stroke::Char {
+                ch: ' ' | 'n' | 'p',
+                ctrl: true,
+            } => self.ask_completion(Trigger::Invoked, true, copy),
+            Stroke::Char {
+                ch: 'e',
+                ctrl: true,
+            } if self.completion.is_some() || self.completing.is_some() => self.close_completion(),
+            Stroke::Escape => {
+                self.close_completion();
+                return None;
+            }
+            _ => return None,
+        }
+        Some(Done {
+            redraw: true,
+            yanked: None,
+        })
+    }
+
+    /// What a key typed in insert mode asks of the language server, after
+    /// it's done what it does, `changed` if it edited or moved the cursor.
+    /// The word being completed is narrowed down, or the menu closed if the
+    /// cursor has left it. A character the server says should ask, asks at
+    /// once; a word's, once typing pauses. A call's signature is asked
+    /// about as its brackets and commas are typed, and again as the text
+    /// changes while it's shown.
+    fn as_you_type(&mut self, stroke: Stroke, changed: bool, copy: &mut BufferCopy) {
+        if self.mode != Mode::Insert {
+            self.close_completion();
+            self.close_signature();
+            return;
+        }
+        let moved = matches!(
+            stroke,
+            Stroke::Left
+                | Stroke::Right
+                | Stroke::Up
+                | Stroke::Down
+                | Stroke::Home
+                | Stroke::End
+                | Stroke::PageUp
+                | Stroke::PageDown
+        );
+        if moved {
+            self.close_completion();
+        }
+        self.check_completion(copy);
+        let typed = match stroke {
+            Stroke::Char { ch, ctrl: false } => Some(ch),
+            _ => None,
+        };
+        let features = copy.features();
+        let asks = |list: Option<&Vec<char>>, ch| list.is_some_and(|list| list.contains(&ch));
+        let completes = typed.filter(|&ch| asks(features.completion.as_ref(), ch));
+        let signs = typed.filter(|&ch| asks(features.signature.as_ref(), ch));
+        let signs_again = typed.filter(|ch| features.signature_again.contains(ch));
+        let can_sign = features.signature.is_some() && self.as_you_type.signature;
+        // Typing asks only a server that completes.
+        let auto = self.as_you_type.auto && features.completion.is_some();
+        if let Some(ch) = completes.filter(|_| auto) {
+            self.close_completion();
+            self.ask_completion(Trigger::Character(ch), false, copy);
+        } else if typed.is_some_and(is_word) || (changed && !moved) {
+            // Not all there is: asked again. Nothing yet: asked, for a word.
+            if (self.completion.as_ref()).is_some_and(|completion| completion.incomplete) {
+                self.complete_later(Trigger::Again);
+            } else if self.completion.is_none()
+                && self.completing.is_none()
+                && auto
+                && typed.is_some_and(is_word)
+            {
+                self.complete_later(Trigger::Invoked);
+            }
+        }
+        if !can_sign {
+            return;
+        }
+        let shown = self.signature.is_some();
+        if let Some(ch) = signs.or(signs_again.filter(|_| shown)) {
+            self.ask_signature(Trigger::Character(ch), copy);
+        } else if shown && changed {
+            self.signature_due = Some(Instant::now() + self.as_you_type.delay);
+        }
+    }
+
+    /// Asks what could finish the word before the cursor once typing
+    /// pauses, for `trigger`, or at once if the options say not to wait.
+    fn complete_later(&mut self, trigger: Trigger) {
+        let due = Instant::now() + self.as_you_type.delay;
+        // Asking again for what the menu shows can't wait less long than
+        // asking at first.
+        if let Some((_, Trigger::Invoked)) = self.completion_due
+            && trigger == Trigger::Again
+        {
+            return;
+        }
+        self.completion_due = Some((due, trigger));
+    }
+
+    /// Asks the language server what could finish the word before the
+    /// cursor, for `trigger`, saying so if there's nothing when
+    /// `explicit`, as asked for with a key.
+    fn ask_completion(&mut self, trigger: Trigger, explicit: bool, copy: &mut BufferCopy) {
+        self.completion_due = None;
+        let text = self.text(copy);
+        let at = text.byte_at(self.cursor.at);
+        let start = word_start(&text, at);
+        drop(text);
+        // What's shown is for another word.
+        if self
+            .completion
+            .as_ref()
+            .is_some_and(|completion| completion.start != start)
+        {
+            self.completion = None;
+        }
+        let id = copy.ask(Query::Completion(trigger), at);
+        self.completing = Some(Requested {
+            id,
+            start,
+            explicit,
+            again: trigger == Trigger::Again,
+            len: at - start,
+        });
+    }
+
+    /// Asks the language server about the call whose arguments are at the
+    /// cursor, for `trigger`.
+    fn ask_signature(&mut self, trigger: Trigger, copy: &mut BufferCopy) {
+        self.signature_due = None;
+        let at = self.cursor_byte(copy);
+        let retrigger = self.signature.is_some();
+        self.signing = Some(copy.ask(Query::SignatureHelp { trigger, retrigger }, at));
+    }
+
+    /// Whether the cursor is still in the word starting at `start`: after
+    /// it, with only a word's characters between, on its line.
+    fn in_word(&self, start: usize, copy: &BufferCopy) -> Option<String> {
+        let text = self.text(copy);
+        let at = text.byte_at(self.cursor.at);
+        let typed = text.rope().get_byte_slice(start..at)?.to_string();
+        typed.chars().all(is_word).then_some(typed)
+    }
+
+    /// Narrows the menu down to the word typed, or closes it, and forgets
+    /// a completion query asked, if the cursor has left the word.
+    fn check_completion(&mut self, copy: &mut BufferCopy) {
+        if let Some(completing) = self.completing
+            && self.in_word(completing.start, copy).is_none()
+        {
+            self.completing = None;
+        }
+        let Some(completion) = &self.completion else {
+            return;
+        };
+        match self.in_word(completion.start, copy) {
+            // Shorter than when it was asked: the server may have left out
+            // what didn't start with it, so it's asked again.
+            Some(typed) if typed.len() < completion.asked => {
+                self.close_completion();
+                if self.as_you_type.auto
+                    && copy.features().completion.is_some()
+                    && !typed.is_empty()
+                {
+                    self.complete_later(Trigger::Invoked);
+                }
+            }
+            Some(typed) => {
+                let completion = self.completion.as_mut().expect("just found");
+                let picked = completion.picked();
+                completion.narrow(&typed);
+                if !completion.showing() && !completion.incomplete {
+                    // Nothing it gave matches now: typing more asks again.
+                    self.close_completion();
+                } else if completion.picked() != picked {
+                    self.document(copy);
+                }
+            }
+            None => self.close_completion(),
+        }
+    }
+
+    /// Closes the menu, and forgets what was asked for it.
+    fn close_completion(&mut self) {
+        self.completion = None;
+        self.completing = None;
+        self.completion_due = None;
+        self.resolve_due = None;
+    }
+
+    /// Closes the signature, and forgets what was asked for it.
+    fn close_signature(&mut self) {
+        self.signature = None;
+        self.signing = None;
+        self.signature_due = None;
+    }
+
+    /// Shows what's known of the item picked's documentation, and asks the
+    /// server for the rest once picking pauses, as moving through the menu
+    /// quickly would otherwise ask about every item passed.
+    fn document(&mut self, copy: &mut BufferCopy) {
+        self.show_documentation();
+        if self.as_you_type.delay.is_zero() {
+            self.resolve_picked(copy);
+        } else {
+            self.resolve_due = Some(Instant::now() + self.as_you_type.delay);
+        }
+    }
+
+    /// Shows what's known of the item picked's documentation.
+    fn show_documentation(&mut self) {
+        let tabstop = self.indent.tabstop;
+        if let Some(completion) = &mut self.completion {
+            completion.document(tabstop);
+        }
+    }
+
+    /// Asks the server for the item picked's documentation, unless it has
+    /// been asked, or is being.
+    fn resolve_picked(&mut self, copy: &mut BufferCopy) {
+        self.resolve_due = None;
+        let Some(completion) = &mut self.completion else {
+            return;
+        };
+        let Some(index) = completion.picked() else {
+            return;
+        };
+        let asking = completion.resolving.is_some_and(|(_, item)| item == index);
+        if completion.resolved(index).is_none() && !asking {
+            let query = Query::Resolve {
+                list: completion.list,
+                item: index,
+            };
+            completion.resolving = Some((copy.ask(query, 0), index));
+        }
+    }
+
+    /// Accepts the item picked: puts its text in place of the word typed,
+    /// as part of the same undo step, with the edits it needs elsewhere,
+    /// and puts the cursor where its snippet says. `.` types the same text
+    /// again.
+    fn accept(&mut self, copy: &mut BufferCopy) {
+        let Some(completion) = self.completion.take() else {
+            return;
+        };
+        let at = self.insert_byte(copy);
+        let accepted = match completion.accept(copy.text(), at) {
+            Some(Ok(accepted)) => accepted,
+            Some(Err(why)) => {
+                // The menu stays, to pick another.
+                self.completion = Some(completion);
+                self.status = Some(why);
+                return;
+            }
+            None => return,
+        };
+        self.completing = None;
+        self.completion_due = None;
+        self.resolve_due = None;
+        if let Some(change) = &mut self.changing {
+            change.typed.push(Typed::Accepted {
+                text: accepted.text.clone(),
+                offset: accepted.offset,
+                replaced: accepted.replaced,
+            });
+        }
+        self.make(accepted.edit, copy);
+        self.cursor = Cursor::new(self.text(copy).point_of(accepted.cursor));
+        // A call it put in, such as `f(`, is asked about.
+        let before = accepted.text[..accepted.offset].chars().next_back();
+        if let Some(ch) = before
+            && self.as_you_type.signature
+            && (copy.features().signature.as_ref()).is_some_and(|list| list.contains(&ch))
+        {
+            self.ask_signature(Trigger::Character(ch), copy);
+        }
+    }
+
+    /// Takes in the answer to the completion query `requested`.
+    fn completed(&mut self, requested: Requested, answer: Answer, copy: &mut BufferCopy) {
+        let nothing = |editor: &mut Self, why: &str| {
+            if requested.explicit {
+                editor.status = Some(why.to_owned());
+            }
+        };
+        if self.mode != Mode::Insert {
+            return;
+        }
+        match answer {
+            Answer::Completions { items, incomplete } => {
+                let Some(typed) = self.in_word(requested.start, copy) else {
+                    return;
+                };
+                let mut completion =
+                    Completion::new(requested.id, requested.start, items, incomplete);
+                completion.asked = requested.len;
+                completion.narrow(&typed);
+                // What was picked in the list it replaces stays picked.
+                let moved_to = (self.completion.as_ref())
+                    .and_then(Completion::moved_to)
+                    .map(str::to_owned);
+                if let Some(label) = moved_to {
+                    completion.pick_label(&label);
+                }
+                if completion.showing() {
+                    self.completion = Some(completion);
+                    self.document(copy);
+                } else if incomplete {
+                    // Kept, to ask again as more is typed.
+                    self.completion = Some(completion);
+                } else {
+                    self.completion = None;
+                    nothing(self, "no completions");
+                }
+            }
+            Answer::Failed(why) => nothing(self, &why),
+            _ => nothing(self, "no completions"),
+        }
+    }
+
+    /// Asks what's due to be asked of the language server, now typing has
+    /// paused, as of `now`. Returns whether it asked anything.
+    pub(crate) fn tick(&mut self, now: Instant, copy: &mut BufferCopy) -> bool {
+        let mut asked = false;
+        if self.mode != Mode::Insert {
+            self.completion_due = None;
+            self.signature_due = None;
+            return false;
+        }
+        if let Some((due, trigger)) = self.completion_due
+            && due <= now
+        {
+            self.completion_due = None;
+            let at = self.cursor_byte(copy);
+            let worth = match trigger {
+                Trigger::Again => self.completion.is_some(),
+                _ => word_start(&self.text(copy), at) < at,
+            };
+            if worth {
+                self.ask_completion(trigger, false, copy);
+                asked = true;
+            }
+        }
+        if let Some(due) = self.signature_due
+            && due <= now
+        {
+            self.ask_signature(Trigger::Again, copy);
+            asked = true;
+        }
+        if let Some(due) = self.resolve_due
+            && due <= now
+        {
+            self.resolve_picked(copy);
+            asked = true;
+        }
+        asked
+    }
+
+    /// When something's next due to be asked of the language server, if
+    /// anything is.
+    pub(crate) fn wakes(&self) -> Option<Instant> {
+        let completion = self.completion_due.map(|(due, _)| due);
+        (completion.into_iter())
+            .chain(self.signature_due)
+            .chain(self.resolve_due)
+            .min()
     }
 
     // --- Visual mode, search and the view -----------------------------------
@@ -1859,6 +2426,7 @@ impl Editor {
     /// Moves the cursor with the text around it, through `edit`, made
     /// since [`hold`](Self::hold).
     pub(crate) fn follow_edit(&mut self, edit: &Edit, copy: &BufferCopy) {
+        self.edited(edit);
         if let Some((cursor, anchor)) = &mut self.held {
             *cursor = edit.map(*cursor, Bias::Before);
             if let Some(anchor) = anchor {
@@ -1869,8 +2437,9 @@ impl Editor {
     }
 
     /// Takes in what an update from the daemon did: `jump` if this pane
-    /// asked for the undo or redo it made.
-    pub(crate) fn heard(&mut self, heard: &Heard, jump: bool, copy: &BufferCopy) {
+    /// asked for the undo or redo it made. An answer to this pane's
+    /// completion query is taken, leaving nothing for the others.
+    pub(crate) fn heard(&mut self, heard: &mut Heard, jump: bool, copy: &mut BufferCopy) {
         match heard {
             Heard::Replaced => {
                 self.held = None;
@@ -1899,6 +2468,9 @@ impl Editor {
                 }
             }
             Heard::Answer { id, answer } => {
+                let resolving = (self.completion.as_ref())
+                    .and_then(|completion| completion.resolving)
+                    .filter(|(resolving, _)| resolving == id);
                 if let Some((asked, asking)) = self.asked
                     && asked == *id
                 {
@@ -1910,14 +2482,30 @@ impl Editor {
                 } else if let Some(index) = self.staging.iter().position(|staging| staging == id) {
                     self.staging.remove(index);
                     self.staged(answer);
+                } else if let Some(requested) = self.completing
+                    && requested.id == *id
+                {
+                    self.completing = None;
+                    let answer = std::mem::replace(answer, Answer::Nothing);
+                    self.completed(requested, answer, copy);
+                } else if let Some((_, index)) = resolving {
+                    self.resolved(index, answer);
+                } else if self.signing == Some(*id) {
+                    self.signing = None;
+                    self.signed(answer);
                 }
             }
             Heard::Nothing => {}
         }
         // A new text, or the window's own undo, closes the panel, as an
-        // edit typed does.
+        // edit typed does, and the menu.
         if matches!(heard, Heard::Replaced | Heard::Reversed(_)) {
             self.panel = None;
+            self.close_completion();
+        }
+        if self.mode == Mode::Insert {
+            // Others' edits may have taken the word away.
+            self.check_completion(copy);
         }
         if self.mode != Mode::Insert {
             self.normal_cursor(copy);
@@ -1928,6 +2516,45 @@ impl Editor {
         if let Some(panel) = &mut self.panel {
             panel.anchor = self.cursor.at;
         }
+    }
+
+    /// Takes in what the server said of item `index` of the menu,
+    /// resolved, showing it if it's still the one picked.
+    fn resolved(&mut self, index: u32, answer: &Answer) {
+        let Some(completion) = &mut self.completion else {
+            return;
+        };
+        completion.resolving = None;
+        let resolved = match answer {
+            Answer::Resolved {
+                detail,
+                documentation,
+            } => Resolved {
+                detail: detail.clone(),
+                documentation: documentation.clone(),
+            },
+            _ => Resolved::default(),
+        };
+        completion.resolve(index, resolved);
+        if completion.picked() == Some(index) {
+            self.show_documentation();
+        }
+    }
+
+    /// Takes in what the server said of the call whose arguments are being
+    /// typed: its signature is shown, or none if it says there's no call.
+    fn signed(&mut self, answer: &Answer) {
+        self.signature = match answer {
+            Answer::Signature {
+                label,
+                parameter,
+                index,
+                count,
+            } if self.mode == Mode::Insert && self.as_you_type.signature => {
+                Panel::signature(label, *parameter, (*index, *count))
+            }
+            _ => None,
+        };
     }
 
     /// `gd` and the like: asks the language server about where the cursor
@@ -2004,7 +2631,10 @@ impl Editor {
             Answer::Hover { .. }
             | Answer::Renamed { .. }
             | Answer::Formatted { .. }
-            | Answer::Staged => {}
+            | Answer::Staged
+            | Answer::Completions { .. }
+            | Answer::Resolved { .. }
+            | Answer::Signature { .. } => {}
         }
     }
 
@@ -2014,6 +2644,7 @@ impl Editor {
     pub(crate) fn go_to(&mut self, line: u64, col: usize, copy: &BufferCopy) {
         self.status = None;
         self.panel = None;
+        self.close_completion();
         let text = self.text(copy);
         let line = line.min(text.last_line());
         let (start, end) = (text.line_start(line), text.line_end(line));
@@ -2115,7 +2746,12 @@ impl Editor {
         } else {
             (self.top + lines.unsigned_abs()).min(self.lowest_top(last))
         };
+        let at = self.cursor.at;
         self.cursor_into_view(&text);
+        // Moving the cursor away from the word closes the menu.
+        if self.cursor.at != at {
+            self.close_completion();
+        }
     }
 
     /// The furthest down the view scrolls, in a text whose last line is
@@ -2155,6 +2791,7 @@ impl Editor {
     /// click on a line's number goes to the line's start.
     pub(crate) fn click(&mut self, line: usize, col: usize, copy: &BufferCopy) {
         self.panel = None;
+        self.close_completion();
         let text = self.text(copy);
         let line = (self.top + line as u64).min(text.last_line());
         let col = match col.checked_sub(self.gutter) {
@@ -2304,21 +2941,60 @@ impl Editor {
             .and_then(|row| usize::try_from(row).ok())
             .filter(|&row| row < self.height);
         let col = (at.col.checked_sub(self.left)).filter(|&col| col < self.text_width());
+        let cursor = row.zip(col).map(|(row, col)| (row, self.gutter + col));
+        let pane = (self.height, self.width);
         if let Some(panel) = &mut self.panel {
-            let cursor = row.zip(col).map(|(row, col)| (row, self.gutter + col));
-            panel.settle((self.height, self.width), cursor);
+            panel.settle(pane, cursor);
+        }
+        // The menu goes under the cursor, and the signature over it, or
+        // the other way round if the menu has no room under it.
+        let mut menu_under = None;
+        if let Some(completion) = &mut self.completion {
+            let word = text.point_of(completion.start.min(text.rope().len_bytes()));
+            let word = self.gutter + word.col.saturating_sub(self.left);
+            completion.settle(pane, cursor, word);
+            menu_under = (completion.placed())
+                .zip(cursor)
+                .map(|(placed, (row, _))| placed.top > row);
+        }
+        if let Some(signature) = &mut self.signature {
+            let sides = match menu_under {
+                Some(true) => (true, false),
+                Some(false) => (false, true),
+                None => (true, true),
+            };
+            signature.settle_over(pane, cursor, sides);
         }
     }
 
-    /// Closes the panel by the cursor, as the focus leaving does.
+    /// Closes the panel by the cursor, and the completion menu and
+    /// signature, as the focus leaving does.
     pub(crate) fn close_panel(&mut self) {
         self.panel = None;
+        self.close_completion();
+        self.close_signature();
     }
 
     /// The panel by the cursor, if it's shown, as it's to be drawn, in
     /// cells of the pane.
     pub(crate) fn panel(&self) -> Option<PanelView<'_>> {
         self.panel.as_ref()?.view()
+    }
+
+    /// Everything shown over the text by the cursor, as it's to be drawn,
+    /// in cells of the pane, in the order it's drawn: the panel, the
+    /// signature, the completion menu and the documentation beside it.
+    pub(crate) fn panels(&self) -> Vec<PanelView<'_>> {
+        let completion = self.completion.as_ref();
+        [
+            self.panel(),
+            self.signature.as_ref().and_then(Panel::view),
+            completion.and_then(Completion::menu),
+            completion.and_then(Completion::docs),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// The rows to draw, and the cursor.
@@ -2459,6 +3135,7 @@ fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
         Key::Named(NamedKey::PageUp) => Some(Stroke::PageUp),
         Key::Named(NamedKey::PageDown) => Some(Stroke::PageDown),
         Key::Named(NamedKey::Space) if !modifiers.ctrl => Some(Stroke::char(' ')),
+        Key::Named(NamedKey::Space) => Some(Stroke::ctrl(' ')),
         _ => None,
     };
     if let Some(named) = named {
@@ -2601,6 +3278,17 @@ fn word_at(text: &Text<'_>, at: usize) -> (usize, usize) {
         return (at, at);
     }
     (rope.char_to_byte(start), rope.char_to_byte(end))
+}
+
+/// Where the word ending at byte `at` of `text` starts: letters, digits
+/// and `_`, as `w` reads them. `at` if there's none there.
+fn word_start(text: &Text<'_>, at: usize) -> usize {
+    let rope = text.rope();
+    let mut start = rope.byte_to_char(at.min(rope.len_bytes()));
+    while start > 0 && is_word(rope.char(start - 1)) {
+        start -= 1;
+    }
+    rope.char_to_byte(start)
 }
 
 /// The blanks a line starts with.

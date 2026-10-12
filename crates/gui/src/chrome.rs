@@ -1179,6 +1179,18 @@ pub(crate) fn paint_panel<'a>(
                 Paint::Code,
             ));
         }
+        if line.picked {
+            over.push(Fill::rounded(
+                [
+                    rect.x + geometry.edge,
+                    y,
+                    rect.width - 2.0 * geometry.edge,
+                    cell_height,
+                ],
+                Paint::Picked,
+                metrics.padding,
+            ));
+        }
         let mut col = 0;
         for run in &line.runs {
             let x = left + col as f32 * cell_width;

@@ -22,7 +22,9 @@
 //!
 //! A buffer whose language has a language server is kept open in it, and
 //! its [`BufferUpdate::Diagnostics`] sent whenever the server says what's
-//! wrong; the window moves them along with each edit too.
+//! wrong; the window moves them along with each edit too. Once the server
+//! is ready, the window is told what it can do as you type
+//! ([`BufferUpdate::Features`]), so it asks only what the server answers.
 //!
 //! A buffer whose file is in a git work tree is compared with the file's
 //! text in git's index after each pause in edits, and whenever the index
@@ -187,6 +189,24 @@ pub enum BufferUpdate {
         /// The hunks, in order.
         hunks: Vec<Hunk>,
     },
+    /// What the buffer's language server does as you type, sent once it's
+    /// ready, after a snapshot, and with nothing in it once the server
+    /// stops.
+    Features(ServerFeatures),
+}
+
+/// What a buffer's language server does as you type, as it said when it
+/// started.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerFeatures {
+    /// It completes what's typed, if `Some`: and these characters, typed,
+    /// ask it to at once, as `.` does.
+    pub completion: Option<Vec<char>>,
+    /// It helps with a call's arguments, if `Some`: and these characters,
+    /// typed, ask it to, as `(` and `,` do.
+    pub signature: Option<Vec<char>>,
+    /// While it's helping, these ask again too, as `)` does.
+    pub signature_again: Vec<char>,
 }
 
 /// What a client asks a buffer's language server about a place in it.
@@ -214,6 +234,41 @@ pub enum Query {
         /// Whether to indent with spaces rather than tabs.
         spaces: bool,
     },
+    /// What could be typed there, to complete the word before it, as the
+    /// menu in insert mode shows.
+    Completion(Trigger),
+    /// More about item `item` of the completions answered to the query
+    /// numbered `list`: its documentation, which servers send only when
+    /// asked. Answered with [`Answer::Resolved`]. The place isn't looked
+    /// at.
+    Resolve {
+        /// The completion query's number.
+        list: u64,
+        /// The item's index in its answer.
+        item: u32,
+    },
+    /// The call whose arguments are being typed there, and which of them
+    /// it's at.
+    SignatureHelp {
+        /// What asked.
+        trigger: Trigger,
+        /// Whether its help is shown already.
+        retrigger: bool,
+    },
+}
+
+/// Why a language server is asked what could be typed, or about a call,
+/// as LSP says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Trigger {
+    /// Asked for, as Ctrl+Space does, or as a word is typed.
+    Invoked,
+    /// This character was typed, one the server says should ask.
+    Character(char),
+    /// Asked again: for completions, because the last answer said it
+    /// wasn't all of them; for a call, because the text or the cursor
+    /// moved while its help was shown.
+    Again,
 }
 
 /// What a language server answered.
@@ -228,6 +283,37 @@ pub enum Answer {
         text: String,
         /// Whether it's markdown.
         markdown: bool,
+    },
+    /// What could be typed, best first as the server sorts them (see
+    /// [`CompletionItem::sort`]).
+    Completions {
+        /// The items, as many as the daemon passes on.
+        items: Vec<CompletionItem>,
+        /// Whether that's not all of them, so typing more should ask again
+        /// rather than only narrow these down: as when the server says so,
+        /// or the daemon left some out.
+        incomplete: bool,
+    },
+    /// More about a completion item, as [`Query::Resolve`] asks.
+    Resolved {
+        /// What it is, such as its type, if the server says.
+        detail: Option<String>,
+        /// Its documentation, as markdown if the second is true.
+        documentation: Option<(String, bool)>,
+    },
+    /// The call whose arguments are being typed, as [`Query::SignatureHelp`]
+    /// asks.
+    Signature {
+        /// Its signature, as the server writes it, such as
+        /// `fn add(a: u32, b: u32) -> u32`.
+        label: String,
+        /// The bytes of `label` that are the argument being typed, if the
+        /// server says which.
+        parameter: Option<(usize, usize)>,
+        /// Which of the function's signatures this is, from 0...
+        index: usize,
+        /// ...of how many it has, as an overloaded one has several.
+        count: usize,
     },
     /// A [`ClientMessage::Rename`](crate::ClientMessage::Rename) was
     /// made: every edit it took, to buffers open and files not, has been
@@ -256,6 +342,50 @@ pub enum Answer {
     /// the hunk's lines are in git's index, and the buffer's hunks, sent
     /// before this, no longer have it.
     Staged,
+}
+
+/// Something that could be typed, as a language server suggests it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionItem {
+    /// What the menu shows.
+    pub label: String,
+    /// What it is, as LSP numbers kinds (`CompletionItemKind`): 3 is a
+    /// function, 6 a variable, 14 a keyword. 0 if the server doesn't say.
+    pub kind: u8,
+    /// More about it, such as its type, shown dimmed beside it. Empty if
+    /// the server doesn't say.
+    pub detail: String,
+    /// What's matched against the word typed, if not `label`.
+    pub filter: Option<String>,
+    /// What it's sorted by, among those matching as well, if not `label`.
+    pub sort: Option<String>,
+    /// Whether the server would have it picked first.
+    pub preselect: bool,
+    /// Where the text it puts in starts: a byte of the text at the
+    /// answer's version, which a client moves past its own changes as it
+    /// moves diagnostics. What's from there to the cursor is replaced.
+    /// `None` if the server doesn't say, for the word before the cursor.
+    pub start: Option<usize>,
+    /// What it puts in.
+    pub text: String,
+    /// Whether `text` is a snippet, with places to type such as `$1` and
+    /// `${2:name}`, as LSP writes them.
+    pub snippet: bool,
+    /// Edits elsewhere that go with it, such as the import it needs, as
+    /// bytes of the text at the answer's version, in order, apart.
+    pub more: Vec<TextChange>,
+}
+
+/// An edit to a buffer's text: bytes `start` to `end` replaced with
+/// `text`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextChange {
+    /// The first byte replaced.
+    pub start: usize,
+    /// The byte after the last.
+    pub end: usize,
+    /// What goes in their place.
+    pub text: String,
 }
 
 /// A place in a file, on the daemon's machine.

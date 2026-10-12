@@ -127,9 +127,11 @@ impl Daemon {
                 version,
                 diagnostics: opened.diagnostics.all().to_vec(),
             });
+        let features = self.server_features(id).map(BufferUpdate::Features);
         self.tell(token, id, snapshot);
         let hunks = self.hunks_update(id);
-        for update in highlights.into_iter().chain(diagnostics).chain(hunks) {
+        let after = (highlights.into_iter()).chain(diagnostics).chain(hunks);
+        for update in after.chain(features) {
             self.tell(token, id, update);
         }
     }

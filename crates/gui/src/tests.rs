@@ -1176,6 +1176,204 @@ fn report(name: &str, mut times: Vec<f64>) {
 }
 
 #[test]
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+fn an_editors_completion_menu_and_signature_are_drawn_by_its_cursor() {
+    use clackatoo_protocol::{
+        Answer, BufferId, BufferSnapshot, BufferUpdate, ClientMessage, CompletionItem, Query,
+        ServerFeatures,
+    };
+    use winit::keyboard::{Key, KeyLocation};
+
+    use crate::editor::{BufferCopy, Editor, Register};
+    use crate::input::KeyPress;
+
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut copy = BufferCopy::new(BufferId(1));
+    let text = "fn main() {\n    let value = 1;\n    \n}\n".to_owned()
+        + &"// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n".repeat(12);
+    copy.update(BufferUpdate::Snapshot(BufferSnapshot {
+        path: "/a.rs".into(),
+        text,
+        version: 0,
+        modified: false,
+    }));
+    copy.update(BufferUpdate::Features(ServerFeatures {
+        completion: Some(vec!['.']),
+        signature: Some(vec!['(', ',']),
+        signature_again: vec![')'],
+    }));
+    let (cols, rows) = (84u16, 14u16);
+    let mut editor = Editor::new(BufferId(1), &crate::options::Options::default());
+    editor.resize(Size::new(cols, rows).unwrap());
+    let mut register = Register::default();
+    let mut version = 0;
+    // Types `keys`, answering each edit as the daemon would, and returns
+    // the queries sent.
+    let mut type_keys = |editor: &mut Editor, copy: &mut BufferCopy, keys: &str| {
+        for ch in keys.chars() {
+            let key = Key::Character(ch.to_string().into());
+            let text = ch.to_string();
+            let press = KeyPress {
+                key: &key,
+                text: Some(&text),
+                location: KeyLocation::Standard,
+                code: None,
+                modifiers: crate::input::Modifiers::default(),
+            };
+            editor.key(&press, copy, &mut register);
+        }
+        editor.tick(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            copy,
+        );
+        let mut queries = Vec::new();
+        loop {
+            let messages = copy.take_outbox();
+            if messages.is_empty() {
+                return (queries, version);
+            }
+            for message in messages {
+                match message {
+                    ClientMessage::Edit { seq, .. } => {
+                        version += 1;
+                        copy.update(BufferUpdate::Acked { version, seq });
+                    }
+                    ClientMessage::Query { id, query, .. } => queries.push((id, query)),
+                    _ => {}
+                }
+            }
+        }
+    };
+    let answer = |editor: &mut Editor, copy: &mut BufferCopy, id, version, answer| {
+        let mut heard = copy.update(BufferUpdate::Answer {
+            id,
+            version,
+            answer,
+        });
+        editor.heard(&mut heard, true, copy);
+    };
+    type_keys(&mut editor, &mut copy, "jjA");
+    let (queries, now) = type_keys(&mut editor, &mut copy, "add(1, va");
+    let label = "fn add(a: u32, value: u32) -> u32";
+    let start = label.find("value").unwrap();
+    for (id, query) in queries.into_iter().rev() {
+        match query {
+            Query::SignatureHelp { .. } => {
+                let signature = Answer::Signature {
+                    label: label.into(),
+                    parameter: Some((start, start + "value: u32".len())),
+                    index: 0,
+                    count: 2,
+                };
+                answer(&mut editor, &mut copy, id, now, signature);
+            }
+            Query::Completion(_) => {
+                let at = "fn main() {\n    let value = 1;\n    add(1, ".len();
+                let item = |label: &str, kind, detail: &str| CompletionItem {
+                    label: label.into(),
+                    kind,
+                    detail: detail.into(),
+                    filter: None,
+                    sort: None,
+                    preselect: false,
+                    start: Some(at),
+                    text: label.into(),
+                    snippet: false,
+                    more: Vec::new(),
+                };
+                let items = vec![
+                    item("value", 6, "u32"),
+                    item("validate", 3, "fn(&str) -> bool"),
+                    item("Variant", 20, ""),
+                    item("vec!", 15, "macro"),
+                ];
+                let completions = Answer::Completions {
+                    items,
+                    incomplete: false,
+                };
+                answer(&mut editor, &mut copy, id, now, completions);
+            }
+            _ => {}
+        }
+    }
+    // Its documentation, resolved.
+    let (queries, now) = type_keys(&mut editor, &mut copy, "");
+    if let Some(&(id, _)) = queries
+        .iter()
+        .find(|(_, query)| matches!(query, Query::Resolve { .. }))
+    {
+        let resolved = Answer::Resolved {
+            detail: Some("let value: u32".into()),
+            documentation: Some(("The value, **counted** in `u32`s.".into(), true)),
+        };
+        answer(&mut editor, &mut copy, id, now, resolved);
+    }
+    editor.settle(&copy);
+    let views = editor.panels();
+    assert_eq!(
+        views.len(),
+        3,
+        "the signature, the menu and its documentation"
+    );
+    let (signature, menu) = (views[0].placed, views[1].placed);
+    assert!(signature.top < 2 && menu.top > 2, "{signature:?} {menu:?}");
+
+    let mut fonts = fonts(2.0);
+    let metrics = Metrics {
+        cell: [fonts.cell.width as f32, fonts.cell.height as f32],
+        ui_line: fonts.ui.height,
+        padding: 8.0,
+    };
+    let padding = 4;
+    let size = [
+        u32::from(cols) * fonts.cell.width + 2 * padding,
+        u32::from(rows) * fonts.cell.height + 2 * padding,
+    ];
+    let geometry = Geometry::new(size, metrics);
+    let origin = [padding as f32; 2];
+    let (mut over, mut texts) = (Vec::new(), Vec::new());
+    for view in &views {
+        chrome::paint_panel(&geometry, origin, view, &mut over, &mut texts);
+    }
+    let (lines, cursor) = editor.scene();
+    let scene = Scene {
+        origin,
+        size: [
+            (size[0] - 2 * padding) as f32,
+            (size[1] - 2 * padding) as f32,
+        ],
+        rows: &lines,
+        cursor,
+        normal_mode: false,
+        highlights: &[],
+    };
+    let picture = Picture {
+        scenes: &[scene],
+        fills: &[],
+        over: &over,
+        texts: &texts,
+        glyphs: &[],
+        over_glyphs: &[],
+        transparent: false,
+    };
+    let pixels = draw(&gpu, size, &picture, &mut fonts);
+    save("editor-completion", size, &pixels);
+    let at = |line: usize, col: usize| {
+        let x = padding as usize + col * fonts.cell.width as usize + fonts.cell.width as usize / 2;
+        let y =
+            padding as usize + line * fonts.cell.height as usize + fonts.cell.height as usize / 4;
+        let start = (y * size[0] as usize + x) * 4;
+        [pixels[start], pixels[start + 1], pixels[start + 2]]
+    };
+    // The item picked is lit across the menu; the next isn't.
+    let right = menu.left + menu.width;
+    assert_ne!(at(menu.top, right), at(menu.top + 1, right));
+}
+
+#[test]
 #[allow(clippy::cast_precision_loss)]
 fn an_editors_panel_is_drawn_over_its_text() {
     use clackatoo_protocol::{Answer, BufferId, BufferSnapshot, BufferUpdate, ClientMessage};
@@ -1215,7 +1413,7 @@ fn an_editors_panel_is_drawn_over_its_text() {
     let Some(ClientMessage::Query { id, .. }) = copy.take_outbox().pop() else {
         panic!("a query");
     };
-    let heard = copy.update(BufferUpdate::Answer {
+    let mut heard = copy.update(BufferUpdate::Answer {
         id,
         version: 0,
         answer: Answer::Hover {
@@ -1223,7 +1421,7 @@ fn an_editors_panel_is_drawn_over_its_text() {
             markdown: true,
         },
     });
-    editor.heard(&heard, true, &copy);
+    editor.heard(&mut heard, true, &mut copy);
     editor.settle(&copy);
     let view = editor.panel().expect("a panel");
     // By the cursor, right of the signs and line numbers.

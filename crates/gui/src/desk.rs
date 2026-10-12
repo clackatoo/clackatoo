@@ -2492,6 +2492,59 @@ mod tests {
     }
 
     #[test]
+    fn an_editor_asks_its_language_server_once_typing_pauses() {
+        use clackatoo_protocol::{BufferSnapshot, BufferUpdate, Query, ServerFeatures, Trigger};
+
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+        });
+        let mut desk = Desk::default();
+        desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+        answer_all(&mut desk);
+        desk.buffer_changed(
+            buffer,
+            BufferUpdate::Snapshot(BufferSnapshot {
+                path: "/src/a.rs".into(),
+                text: "x\n".into(),
+                version: 0,
+                modified: false,
+            }),
+        );
+        let features = ServerFeatures {
+            completion: Some(vec!['.']),
+            ..ServerFeatures::default()
+        };
+        desk.buffer_changed(buffer, BufferUpdate::Features(features));
+        type_text(&mut desk, "Aab");
+        assert!(desk.editor_wakes().is_some(), "the window wakes to ask");
+        // Not yet: the edits go, answered as the daemon would.
+        let mut version = 0;
+        let mut queries = Vec::new();
+        let mut ticked = false;
+        for _ in 0..10 {
+            for message in desk.take_outbox() {
+                match message {
+                    ClientMessage::Edit { seq, .. } => {
+                        version += 1;
+                        desk.buffer_changed(buffer, BufferUpdate::Acked { version, seq });
+                    }
+                    ClientMessage::Query { query, at, .. } => queries.push((at, query)),
+                    _ => {}
+                }
+            }
+            if !ticked && queries.is_empty() {
+                let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                assert!(desk.tick_editors(later));
+                ticked = true;
+            }
+        }
+        assert_eq!(queries, [(3, Query::Completion(Trigger::Invoked))]);
+        assert_eq!(desk.editor_wakes(), None);
+    }
+
+    #[test]
     fn e_opens_a_file_in_place_of_the_one_shown() {
         let layout = Layout::Pane(LayoutPane {
             id: PaneId(1),

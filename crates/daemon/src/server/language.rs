@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    Answer, BufferId, BufferUpdate, ClientMessage, Edit, FileLocation, Query,
+    Answer, BufferId, BufferUpdate, ClientMessage, CompletionItem, Edit, FileLocation, Query,
+    ServerFeatures, TextChange,
 };
 use clackatoo_text::{Bias, Diagnostic, Diagnostics, Rope};
 use mio::unix::SourceFd;
@@ -81,6 +82,20 @@ pub(super) struct Servers {
     /// Queries to ask again, and when: their servers said the text changed
     /// while they worked.
     again: Vec<(Instant, Again)>,
+    /// The completion items last answered to each client about each
+    /// buffer, as their servers sent them, to resolve one when asked.
+    listed: Vec<Listed>,
+}
+
+/// The completion items answered to a client's completion query, as the
+/// server sent them, in the order passed on.
+#[derive(Debug)]
+struct Listed {
+    token: Token,
+    buffer: BufferId,
+    /// The client's number for the query.
+    id: u64,
+    items: Vec<Value>,
 }
 
 /// A query to ask again.
@@ -175,6 +190,15 @@ const MAX_LOCATIONS: usize = 100;
 /// The most of what a server says is at a place that's passed on, in
 /// bytes: far more than anyone reads in a panel by the cursor.
 const MAX_HOVER: usize = 64 * 1024;
+
+/// The most completion items of one answer passed on: more than anyone
+/// reads, and enough that narrowing them down as more is typed rarely
+/// misses one. Those left out are the server's last, as it sorts them, and
+/// the answer is marked as not all, so typing more asks again.
+const MAX_COMPLETIONS: usize = 5000;
+
+/// The most of a completion item's documentation passed on, in bytes.
+const MAX_DOCUMENTATION: usize = 16 * 1024;
 
 /// A buffer as its language server knows it.
 #[derive(Debug)]
@@ -456,6 +480,7 @@ impl Daemon {
         };
         (self.servers.asked).retain(|asked| !forgotten(asked.token, asked.buffer));
         (self.servers.again).retain(|(_, again)| !forgotten(again.token, again.buffer));
+        (self.servers.listed).retain(|listed| !forgotten(listed.token, listed.buffer));
         self.forget_renames(token, buffer);
     }
 
@@ -568,7 +593,34 @@ impl Daemon {
             } => self.diagnosed(server, &path, version, diagnostics),
             Incoming::Answer { id, result } => self.answered(server, id, result),
             Incoming::Outdated { id } => self.outdated(server, id),
+            Incoming::Ready => self.server_ready(server),
         }
+    }
+
+    /// Server `server` is ready: every client following one of its
+    /// buffers is told what it does as you type.
+    fn server_ready(&mut self, server: ServerId) {
+        let Some(running) = self.servers.slots.get(&server) else {
+            return;
+        };
+        let update = BufferUpdate::Features(running.server.features());
+        let buffers: Vec<BufferId> = (self.buffers.iter())
+            .filter(|(_, slot)| {
+                (slot.server.as_ref()).is_some_and(|opened| opened.server == server)
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        for buffer in buffers {
+            self.tell_viewers(buffer, None, &update);
+        }
+    }
+
+    /// What buffer `id`'s server does as you type, if it's ready, for a
+    /// client attaching to it.
+    pub(super) fn server_features(&self, id: BufferId) -> Option<ServerFeatures> {
+        let opened = self.buffers.get(&id)?.server.as_ref()?;
+        let running = &self.servers.slots.get(&opened.server)?.server;
+        running.ready().then(|| running.features())
     }
 
     /// Answers a client's
@@ -640,10 +692,7 @@ impl Daemon {
             );
         }
         let cant = match &ask {
-            Ask::Query(query) => (!running.server.answers(*query)).then_some(match query {
-                Query::Format { .. } => "its language server doesn't format files",
-                _ => "its language server doesn't say what things are",
-            }),
+            Ask::Query(query) => (!running.server.answers(*query)).then(|| cannot(*query)),
             Ask::Rename(_) => {
                 (!running.server.renames()).then_some("its language server can't rename")
             }
@@ -661,6 +710,20 @@ impl Daemon {
         let at = at.min(text.len_bytes());
         let path = slot.buffer.path();
         let (request, what) = match ask {
+            Ask::Query(query @ Query::Resolve { list, item }) => {
+                let listed = &self.servers.listed;
+                match resolve(&mut running.server, listed, (token, buffer), list, item) {
+                    Ok(request) => (request, Asking::Query(query)),
+                    Err(answer) => {
+                        let update = BufferUpdate::Answer {
+                            id,
+                            version: now,
+                            answer,
+                        };
+                        return self.tell(token, buffer, update);
+                    }
+                }
+            }
             Ask::Query(query) => (
                 running.server.ask(query, path, &text, at),
                 Asking::Query(query),
@@ -796,6 +859,21 @@ impl Daemon {
             (Ok(value), Asking::Query(Query::Format { .. })) => {
                 self.formatted(server, (asked.buffer, asked.version, &asked.text), &value)
             }
+            (Ok(value), Asking::Query(Query::Completion(_))) => {
+                self.completions(server, &asked, value)
+            }
+            (Ok(value), Asking::Query(Query::Resolve { .. })) => resolved(&value),
+            (Ok(value), Asking::Query(Query::SignatureHelp { .. })) => {
+                let encoding = self.server_encoding(server).unwrap_or(lsp::Encoding::Utf16);
+                lsp::signature(&value, encoding).map_or(Answer::Nothing, |signature| {
+                    Answer::Signature {
+                        label: cut(signature.label, MAX_HOVER),
+                        parameter: signature.parameter,
+                        index: signature.index,
+                        count: signature.count,
+                    }
+                })
+            }
             (Ok(value), Asking::Rename { before, .. }) => {
                 let client = (asked.token, asked.buffer, asked.id);
                 match self.make_rename(server, before, &value, client) {
@@ -836,6 +914,77 @@ impl Daemon {
             answer,
         };
         self.tell(asked.token, asked.buffer, update);
+    }
+
+    /// The completion items server `server` answered with, `value`, to
+    /// what `asked` asked: their places moved along with edits made while
+    /// it thought, as many as are passed on. They're kept, as sent, to be
+    /// resolved.
+    fn completions(&mut self, server: ServerId, asked: &Asked, value: Value) -> Answer {
+        let (Some(encoding), Some(slot)) = (
+            self.server_encoding(server),
+            self.buffers.get(&asked.buffer),
+        ) else {
+            return Answer::Failed("its language server has stopped".into());
+        };
+        let Some(edits) = slot.buffer.edits_since(asked.version) else {
+            return Answer::Failed("the file has changed since".into());
+        };
+        let edits: Vec<&Edit> = edits.collect();
+        let len = slot.buffer.text().len_bytes();
+        let now = |position| {
+            let byte = lsp::place(&asked.text, position, encoding);
+            (edits.iter())
+                .fold(byte, |byte, edit| edit.map(byte, Bias::Before))
+                .min(len)
+        };
+        let (raw, mut incomplete) = lsp::completion_items(value);
+        let mut read: Vec<(lsp::Completion, Value)> = (raw.into_iter())
+            .filter_map(|item| Some((lsp::completion(&item)?, item)))
+            .collect();
+        if read.len() > MAX_COMPLETIONS {
+            read.sort_by_cached_key(|(item, _)| {
+                item.sort.clone().unwrap_or_else(|| item.label.clone())
+            });
+            read.truncate(MAX_COMPLETIONS);
+            incomplete = true;
+        }
+        let mut items = Vec::with_capacity(read.len());
+        let mut kept = Vec::with_capacity(read.len());
+        for (item, raw) in read {
+            let more = (item.more.into_iter())
+                .map(|edit| {
+                    let start = now(edit.start);
+                    TextChange {
+                        start,
+                        end: now(edit.end).max(start),
+                        text: edit.text,
+                    }
+                })
+                .collect();
+            items.push(CompletionItem {
+                label: item.label,
+                kind: item.kind,
+                detail: item.detail,
+                filter: item.filter,
+                sort: item.sort,
+                preselect: item.preselect,
+                start: item.start.map(now),
+                text: item.text,
+                snippet: item.snippet,
+                more,
+            });
+            kept.push(raw);
+        }
+        let listed = &mut self.servers.listed;
+        listed.retain(|listed| listed.token != asked.token || listed.buffer != asked.buffer);
+        listed.push(Listed {
+            token: asked.token,
+            buffer: asked.buffer,
+            id: asked.id,
+            items: kept,
+        });
+        Answer::Completions { items, incomplete }
     }
 
     /// `position`, in the file at `path` as server `server` counts it, as a
@@ -1006,6 +1155,13 @@ impl Daemon {
             };
             self.tell(token, buffer, update);
         }
+        // Its completion items can't be resolved now.
+        let buffers = &self.buffers;
+        (self.servers.listed).retain(|listed| {
+            (buffers.get(&listed.buffer))
+                .and_then(|slot| slot.server.as_ref())
+                .is_none_or(|opened| opened.server != id)
+        });
         let cleared: Vec<BufferId> = (self.buffers.iter_mut())
             .filter(|(_, slot)| {
                 slot.server
@@ -1025,6 +1181,8 @@ impl Daemon {
                 diagnostics: Vec::new(),
             };
             self.tell_viewers(buffer, None, &update);
+            let none = BufferUpdate::Features(ServerFeatures::default());
+            self.tell_viewers(buffer, None, &none);
             // Started again for what's shown, if it may be, as attaching
             // would start it.
             if shown {
@@ -1062,6 +1220,52 @@ fn diagnostic(text: &Rope, reported: Reported, encoding: lsp::Encoding) -> Diagn
         message: reported.message,
         source: reported.source,
         code: reported.code,
+    }
+}
+
+/// Asks `server` to resolve item `item` of the completions answered to
+/// the client at `token` about `buffer` for its query numbered `list`,
+/// returning the request's number. Or the answer, if there's no need to
+/// ask: there's no such item, or the server said all it will with it.
+fn resolve(
+    server: &mut LanguageServer,
+    listed: &[Listed],
+    (token, buffer): (Token, BufferId),
+    list: u64,
+    item: u32,
+) -> Result<u64, Answer> {
+    let raw = (listed.iter())
+        .find(|listed| listed.token == token && listed.buffer == buffer)
+        .filter(|listed| listed.id == list)
+        .and_then(|listed| listed.items.get(usize::try_from(item).ok()?))
+        .ok_or(Answer::Nothing)?;
+    if server.resolves() {
+        Ok(server.resolve(raw))
+    } else {
+        Err(resolved(raw))
+    }
+}
+
+/// Why a server that can't answer `query` doesn't.
+fn cannot(query: Query) -> &'static str {
+    match query {
+        Query::Format { .. } => "its language server doesn't format files",
+        Query::Completion(_) | Query::Resolve { .. } => {
+            "its language server doesn't complete what's typed"
+        }
+        Query::SignatureHelp { .. } => "its language server doesn't help with calls",
+        _ => "its language server doesn't say what things are",
+    }
+}
+
+/// What a completion item, as a server sent it or resolved it, says of
+/// itself beyond what's in the list.
+fn resolved(item: &Value) -> Answer {
+    let detail = item.get("detail").and_then(Value::as_str);
+    Answer::Resolved {
+        detail: detail.map(|detail| cut(detail.to_owned(), MAX_DOCUMENTATION)),
+        documentation: lsp::documentation(item)
+            .map(|(text, markdown)| (cut(text, MAX_DOCUMENTATION), markdown)),
     }
 }
 

@@ -32,7 +32,12 @@ wgpu.workspace = true
 winit.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 png.workspace = true
+
+[[bench]]
+name = "completion"
+harness = false
 
 [lints]
 workspace = true

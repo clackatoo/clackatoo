@@ -16,7 +16,9 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use clackatoo_protocol::{Answer, BufferId, BufferUpdate, Change, ClientMessage, Edit, Query};
+use clackatoo_protocol::{
+    Answer, BufferId, BufferUpdate, Change, ClientMessage, Edit, Query, ServerFeatures,
+};
 use clackatoo_text::{
     Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span, compose, transform,
 };
@@ -94,6 +96,8 @@ pub(crate) struct BufferCopy {
     diagnostics: Diagnostics,
     /// What it's added, changed and deleted since its file's text in git.
     hunks: Hunks,
+    /// What its language server does as you type.
+    features: ServerFeatures,
 }
 
 impl BufferCopy {
@@ -113,7 +117,14 @@ impl BufferCopy {
             highlights: Highlights::new(),
             diagnostics: Diagnostics::new(),
             hunks: Hunks::new(),
+            features: ServerFeatures::default(),
         }
+    }
+
+    /// What the buffer's language server does as you type, as far as the
+    /// daemon has said.
+    pub(crate) fn features(&self) -> &ServerFeatures {
+        &self.features
     }
 
     pub(crate) fn text(&self) -> &Rope {
@@ -246,6 +257,8 @@ impl BufferCopy {
                 self.highlights.clear();
                 self.diagnostics = Diagnostics::new();
                 self.hunks = Hunks::new();
+                // Told again after the snapshot, if there's a server.
+                self.features = ServerFeatures::default();
                 Heard::Replaced
             }
             BufferUpdate::Acked { version, seq } => {
@@ -317,6 +330,10 @@ impl BufferCopy {
             }
             // The window asks, not the editor.
             BufferUpdate::Offer { .. } => Heard::Nothing,
+            BufferUpdate::Features(features) => {
+                self.features = features;
+                Heard::Nothing
+            }
             BufferUpdate::Answer {
                 id,
                 version,
@@ -336,20 +353,49 @@ impl BufferCopy {
     /// at `version`, moved past the window's edits waiting, as diagnostics
     /// are.
     fn past_waiting(&self, version: u64, answer: Answer) -> Answer {
+        let waiting = (self.waiting.iter()).filter_map(|waiting| match waiting {
+            Waiting::Edit { edit, .. } => Some(edit),
+            _ => None,
+        });
+        if let Answer::Completions {
+            mut items,
+            incomplete,
+        } = answer
+        {
+            if version != self.version {
+                // Never sent, as answers come in order with edits.
+                log::debug!("buffer {}: completions for version {version}", self.id);
+                return Answer::Failed("the text changed meanwhile".into());
+            }
+            let edits: Vec<&Edit> = waiting.collect();
+            if !edits.is_empty() {
+                let len = self.text.len_bytes();
+                let mapped = |place: usize| {
+                    (edits.iter())
+                        .fold(place, |place, edit| edit.map(place, Bias::Before))
+                        .min(len)
+                };
+                for item in &mut items {
+                    item.start = item.start.map(mapped);
+                    for more in &mut item.more {
+                        more.start = mapped(more.start);
+                        more.end = mapped(more.end).max(more.start);
+                    }
+                }
+            }
+            return Answer::Completions { items, incomplete };
+        }
         let Answer::Locations(mut found) = answer else {
             return answer;
         };
+        let waiting: Vec<&Edit> = waiting.collect();
         for place in &mut found {
             let Some(offset) = place.offset else { continue };
             if version != self.version {
                 log::debug!("buffer {}: an answer for version {version}", self.id);
                 continue;
             }
-            let offset = (self.waiting.iter())
-                .filter_map(|waiting| match waiting {
-                    Waiting::Edit { edit, .. } => Some(edit),
-                    _ => None,
-                })
+            let offset = (waiting.iter())
                 .fold(offset, |offset, edit| edit.map(offset, Bias::Before))
                 .min(self.text.len_bytes());
             let line = self.text.byte_to_line(offset);
@@ -544,6 +590,7 @@ pub(super) mod tests {
             }
         }
 
+        /// The text's version: how many edits have been made to it.
         pub(in crate::editor) fn version(&self) -> u64 {
             self.history.version()
         }
@@ -750,6 +797,58 @@ pub(super) mod tests {
                 answer: Answer::Locations(vec![place(at + 1)])
             }
         );
+    }
+
+    #[test]
+    fn completions_land_past_the_windows_edits_not_answered() {
+        use clackatoo_protocol::{CompletionItem, TextChange};
+        let daemon = Daemon::new("ab\n");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        // Typed in the word, and not answered yet.
+        typed(&mut copy, 1, "X", true);
+        let item = CompletionItem {
+            label: "abc".into(),
+            kind: 0,
+            detail: String::new(),
+            filter: None,
+            sort: None,
+            preselect: false,
+            start: Some(0),
+            text: "abc".into(),
+            snippet: false,
+            more: vec![TextChange {
+                start: 2,
+                end: 3,
+                text: "!".into(),
+            }],
+        };
+        let answer = |version| BufferUpdate::Answer {
+            id: 1,
+            version,
+            answer: Answer::Completions {
+                items: vec![item.clone()],
+                incomplete: false,
+            },
+        };
+        let heard = copy.update(answer(0));
+        let Heard::Answer {
+            answer: Answer::Completions { items, .. },
+            ..
+        } = heard
+        else {
+            unreachable!("{heard:?}");
+        };
+        assert_eq!(items[0].start, Some(0));
+        assert_eq!((items[0].more[0].start, items[0].more[0].end), (3, 4));
+        // For a version the copy isn't made from, they're dropped.
+        assert!(matches!(
+            copy.update(answer(7)),
+            Heard::Answer {
+                answer: Answer::Failed(_),
+                ..
+            }
+        ));
     }
 
     #[test]

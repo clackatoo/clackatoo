@@ -591,6 +591,7 @@ dependencies = [
  "clackatoo-protocol",
  "clackatoo-term",
  "clackatoo-text",
+ "criterion",
  "fontique",
  "log",
  "mlua",

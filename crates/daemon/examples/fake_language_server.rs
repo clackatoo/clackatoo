@@ -30,6 +30,17 @@
 //! | `--rename-alias` | Renames in each file under a second name too, as through `alias/`, a link beside it |
 //! | `--rename-also FILE` | Renames in FILE too, wherever it is |
 //! | `--hold-rename FILE` | Answers a rename only once FILE exists, taking nothing else in meanwhile |
+//! | `--incomplete` | Completes only words starting with what's typed, saying that's not all of them |
+//! | `--no-resolve` | Sends completion items' documentation with them, not when they're resolved |
+//! | `--many N` | Completes with N made-up words as well |
+//! | `--hold-completion FILE` | Answers a completion only once FILE exists, taking nothing else in meanwhile |
+//!
+//! Asked what could be typed, it offers every other word in the file,
+//! each replacing the word before the place, then `Imported`, which needs
+//! an import added at the file's top, and `call`, a snippet. It sends each
+//! word's documentation when the item is resolved. Asked about a call, it
+//! says the function the place is in the brackets of takes `a` and `b`,
+//! and which of them the place is at.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -57,6 +68,13 @@ fn main() {
             .and_then(|at| args.get(at + 1).cloned()),
         hold_rename: (args.iter().position(|arg| arg == "--hold-rename"))
             .and_then(|at| args.get(at + 1).cloned()),
+        incomplete: flag("--incomplete"),
+        no_resolve: flag("--no-resolve"),
+        many: (args.iter().position(|arg| arg == "--many"))
+            .and_then(|at| args.get(at + 1)?.parse().ok())
+            .unwrap_or(0),
+        hold_completion: (args.iter().position(|arg| arg == "--hold-completion"))
+            .and_then(|at| args.get(at + 1).cloned()),
         files: BTreeMap::new(),
         versions: BTreeMap::new(),
     };
@@ -83,6 +101,10 @@ struct Fake {
     rename_alias: bool,
     rename_also: Option<String>,
     hold_rename: Option<String>,
+    incomplete: bool,
+    no_resolve: bool,
+    many: usize,
+    hold_completion: Option<String>,
     /// Each file's text, by URI.
     files: BTreeMap<String, String>,
     /// The version of each file's text, by URI.
@@ -133,23 +155,10 @@ impl Fake {
         }
         match method {
             "initialize" => {
-                let mut capabilities = json!({ "textDocumentSync": {
-                    "openClose": true,
-                    "change": if self.full { 1 } else { 2 },
-                    "save": { "includeText": false },
-                }});
-                if !self.utf16 {
-                    capabilities["positionEncoding"] = json!("utf-8");
-                }
-                if !self.bare {
-                    capabilities["hoverProvider"] = json!(true);
-                    capabilities["renameProvider"] = json!({ "prepareProvider": false });
-                    capabilities["documentFormattingProvider"] = json!(true);
-                }
                 send(&json!({
                     "jsonrpc": "2.0",
                     "id": message["id"],
-                    "result": { "capabilities": capabilities },
+                    "result": { "capabilities": self.capabilities() },
                 }));
                 // Asks something of its client, as servers do.
                 send(&json!({
@@ -195,6 +204,9 @@ impl Fake {
                 self.versions.remove(uri);
             }
             "textDocument/hover" => self.hover(message),
+            "textDocument/completion" | "completionItem/resolve" | "textDocument/signatureHelp" => {
+                self.as_you_type(message);
+            }
             "textDocument/rename" => {
                 if let Some(gate) = &self.hold_rename {
                     while !std::path::Path::new(gate).exists() {
@@ -394,6 +406,164 @@ impl Fake {
         json!({ "documentChanges": changes })
     }
 
+    /// What it says it does, in its answer to `initialize`.
+    fn capabilities(&self) -> Value {
+        let mut capabilities = json!({ "textDocumentSync": {
+            "openClose": true,
+            "change": if self.full { 1 } else { 2 },
+            "save": { "includeText": false },
+        }});
+        if !self.utf16 {
+            capabilities["positionEncoding"] = json!("utf-8");
+        }
+        if !self.bare {
+            capabilities["hoverProvider"] = json!(true);
+            capabilities["renameProvider"] = json!({ "prepareProvider": false });
+            capabilities["documentFormattingProvider"] = json!(true);
+            capabilities["completionProvider"] = json!({
+                "triggerCharacters": ["."],
+                "resolveProvider": !self.no_resolve,
+            });
+            capabilities["signatureHelpProvider"] = json!({
+                "triggerCharacters": ["(", ","],
+                "retriggerCharacters": [")"],
+            });
+        }
+        capabilities
+    }
+
+    /// Answers what's asked as you type: what could be typed, more about
+    /// an item of that, or which argument of a call the place is at.
+    fn as_you_type(&self, message: &Value) {
+        let params = &message["params"];
+        let result = match message["method"].as_str() {
+            Some("textDocument/completion") => {
+                if let Some(gate) = &self.hold_completion {
+                    while !std::path::Path::new(gate).exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+                self.complete(params)
+            }
+            Some("completionItem/resolve") => {
+                let mut item = params.clone();
+                let word = item["data"]["word"].as_str().unwrap_or_default().to_owned();
+                item["documentation"] = documentation(&word);
+                item
+            }
+            _ => self.signature(params),
+        };
+        send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
+    }
+
+    /// What could be typed at the place `params` give: every other word in
+    /// the file, replacing the word before the place, then `Imported` and
+    /// `call`.
+    fn complete(&self, params: &Value) -> Value {
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let text = &self.files[uri];
+        let at = byte(text, &params["position"], self.utf16);
+        let (start, typed) = word_at(text, at);
+        let typed = &typed[..at - start];
+        let range = json!({
+            "start": place(text, start, self.utf16),
+            "end": place(text, at, self.utf16),
+        });
+        let mut words: Vec<String> = text
+            .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+            .filter(|word| !word.is_empty() && *word != typed)
+            .map(str::to_owned)
+            .chain((0..self.many).map(|n| format!("made{n:05}")))
+            .collect();
+        words.sort();
+        words.dedup();
+        if self.incomplete {
+            words.retain(|word| word.starts_with(typed));
+        }
+        let mut items: Vec<Value> = (words.iter())
+            .map(|word| {
+                let mut item = json!({
+                    "label": word,
+                    "kind": 6,
+                    "detail": "a word",
+                    "textEdit": { "range": range, "newText": word },
+                    "data": { "word": word },
+                });
+                if self.no_resolve {
+                    item["documentation"] = documentation(word);
+                }
+                item
+            })
+            .collect();
+        items.push(json!({
+            "label": "Imported",
+            "kind": 7,
+            "detail": "from elsewhere",
+            "sortText": "~1",
+            "textEdit": { "range": range, "newText": "Imported" },
+            "additionalTextEdits": [{
+                "range": { "start": place(text, 0, self.utf16), "end": place(text, 0, self.utf16) },
+                "newText": "use elsewhere::Imported;\n",
+            }],
+        }));
+        items.push(json!({
+            "label": "call",
+            "kind": 3,
+            "sortText": "~2",
+            "insertTextFormat": 2,
+            "textEdit": { "range": range, "newText": "call(${1:a}, ${2:b})$0" },
+        }));
+        json!({ "isIncomplete": self.incomplete, "items": items })
+    }
+
+    /// Which argument of which call the place `params` give is at: the
+    /// function whose open bracket it's after, which takes `a` and `b`.
+    fn signature(&self, params: &Value) -> Value {
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let text = &self.files[uri];
+        let at = byte(text, &params["position"], self.utf16);
+        let mut depth = 0;
+        let mut commas = 0;
+        let mut open = None;
+        for (index, ch) in text[..at].char_indices().rev() {
+            match ch {
+                ')' => depth += 1,
+                '(' if depth == 0 => {
+                    open = Some(index);
+                    break;
+                }
+                '(' => depth -= 1,
+                ',' if depth == 0 => commas += 1,
+                _ => {}
+            }
+        }
+        let Some(open) = open else {
+            return Value::Null;
+        };
+        // The word just before the bracket.
+        let (_, name) = word_at(text, open);
+        let label = format!("fn {name}(a: u32, b: u32)");
+        let offsets = |param: &str| {
+            let start = label.find(param).unwrap();
+            let units = |end: usize| {
+                if self.utf16 {
+                    label[..end].encode_utf16().count()
+                } else {
+                    end
+                }
+            };
+            json!([units(start), units(start + param.len())])
+        };
+        json!({
+            "signatures": [{
+                "label": label,
+                "parameters": [{ "label": offsets("a: u32") }, { "label": offsets("b: u32") }],
+            }],
+            "activeSignature": 0,
+            "activeParameter": commas,
+        })
+    }
+
     /// Says where each `bad` in the file at `uri` is.
     fn publish(&self, uri: &str, version: &Value) {
         let text = &self.files[uri];
@@ -421,6 +591,11 @@ impl Fake {
             "params": { "uri": uri, "version": version, "diagnostics": diagnostics },
         }));
     }
+}
+
+/// The documentation of a word offered to complete.
+fn documentation(word: &str) -> Value {
+    json!({ "kind": "markdown", "value": format!("**{word}**, a word in the file") })
 }
 
 /// Byte `at` of `text` as a line and column.

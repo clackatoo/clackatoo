@@ -8,8 +8,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use clackatoo_protocol::{
-    BufferId, BufferUpdate, ClientMessage, Content, FileLocation, OpenFile, PaneId, PaneTerminal,
-    Request, Size,
+    Answer, BufferId, BufferUpdate, ClientMessage, Content, FileLocation, OpenFile, PaneId,
+    PaneTerminal, Request, Size,
 };
 
 use super::jumps::{FilePlace, Jump};
@@ -288,9 +288,12 @@ impl Desk {
         for pane in &showing {
             editors.panes.get_mut(pane).expect("just found").hold(copy);
         }
-        let heard = copy.update(update);
+        let mut heard = copy.update(update);
+        // Completions, which may be thousands, are no format's answer.
         let answered = match &heard {
-            Heard::Answer { id, answer } => Some((*id, answer.clone())),
+            Heard::Answer { id, answer } if !matches!(answer, Answer::Completions { .. }) => {
+                Some((*id, answer.clone()))
+            }
             _ => None,
         };
         match &heard {
@@ -305,7 +308,7 @@ impl Desk {
         let mut places = None;
         for pane in &showing {
             let editor = editors.panes.get_mut(pane).expect("just found");
-            editor.heard(&heard, Some(*pane) == focused, copy);
+            editor.heard(&mut heard, Some(*pane) == focused, copy);
             left.extend(editor.take_left().map(|byte| (*pane, byte)));
             opening.extend(editor.take_opening().map(|place| (*pane, place)));
             places = places.or_else(|| editor.take_places());
@@ -490,6 +493,24 @@ impl Desk {
                 editor.settle(copy);
             }
         }
+    }
+
+    /// Asks what editors have due to ask their language servers, now
+    /// typing has paused, as of `now`. Returns whether any asked anything.
+    pub(crate) fn tick_editors(&mut self, now: std::time::Instant) -> bool {
+        let editors = &mut self.editors;
+        let mut asked = false;
+        for editor in editors.panes.values_mut() {
+            if let Some(copy) = editors.buffers.get_mut(&editor.buffer()) {
+                asked |= editor.tick(now, copy);
+            }
+        }
+        asked
+    }
+
+    /// When an editor next has something due to ask its language server.
+    pub(crate) fn editor_wakes(&self) -> Option<std::time::Instant> {
+        self.editors.panes.values().filter_map(Editor::wakes).min()
     }
 
     /// The soonest an editor's highlight on text just copied goes.

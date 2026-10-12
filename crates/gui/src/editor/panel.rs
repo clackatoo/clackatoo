@@ -36,6 +36,9 @@ pub(crate) struct Line {
     /// Whether it's a line of a block of code, which has a faint band
     /// behind it, across the panel.
     pub(crate) block: bool,
+    /// Whether it's what's picked, as a completion menu's item is, which
+    /// is lit behind, across the panel.
+    pub(crate) picked: bool,
 }
 
 impl Line {
@@ -130,6 +133,11 @@ impl Panel {
                 blocks.extend(lines.map(|line| Block::Prose(vec![plain(&line)])));
             }
         }
+        Self::of(blocks, anchor)
+    }
+
+    /// A panel showing `blocks`, `None` if they show nothing.
+    fn of(mut blocks: Vec<Block>, anchor: crate::motion::Point) -> Option<Self> {
         // Gaps at either end, as after a last paragraph, show nothing.
         while blocks.last() == Some(&Block::Gap) {
             blocks.pop();
@@ -173,12 +181,77 @@ impl Panel {
         })
     }
 
+    /// A completion item's documentation, as shown beside the menu: what
+    /// it is, `detail`, as code, then `documentation`, as markdown if it
+    /// says so. `None` if there's neither.
+    pub(crate) fn documentation(
+        detail: Option<&str>,
+        documentation: Option<(&str, bool)>,
+        tabstop: usize,
+    ) -> Option<Self> {
+        let mut blocks: Vec<Block> = (detail.into_iter())
+            .flat_map(str::lines)
+            .map(|line| Block::Code(expand_tabs(line, tabstop), Ink::Plain))
+            .collect();
+        if let Some((text, markdown)) = documentation {
+            if !blocks.is_empty() {
+                blocks.push(Block::Gap);
+            }
+            if markdown {
+                blocks.extend(from_markdown(text, tabstop));
+            } else {
+                let lines = text.lines().map(|line| expand_tabs(line, tabstop));
+                blocks.extend(lines.map(|line| Block::Prose(vec![plain(&line)])));
+            }
+        }
+        Self::of(blocks, crate::motion::Point { line: 0, col: 0 })
+    }
+
+    /// A call's signature, `label`, with the argument being typed, at
+    /// bytes `parameter` of it, in bold, and which of the function's
+    /// `count` signatures it is, if it has several.
+    pub(crate) fn signature(
+        label: &str,
+        parameter: Option<(usize, usize)>,
+        (index, count): (usize, usize),
+    ) -> Option<Self> {
+        let parameter =
+            parameter.filter(|&(start, end)| start <= end && label.get(start..end).is_some());
+        let mut runs = match parameter {
+            Some((start, end)) => vec![
+                plain(&label[..start]),
+                Run {
+                    text: label[start..end].to_owned(),
+                    ink: Ink::Bold,
+                    code: false,
+                },
+                plain(&label[end..]),
+            ],
+            None => vec![plain(label)],
+        };
+        if count > 1 {
+            runs.push(Run {
+                text: format!("  {}/{count}", index + 1),
+                ink: Ink::Muted,
+                code: false,
+            });
+        }
+        runs.retain(|run| !run.text.is_empty());
+        let anchor = crate::motion::Point { line: 0, col: 0 };
+        Self::of(vec![Block::Prose(runs)], anchor)
+    }
+
     /// Wraps it for a pane `cols` wide, if that's not what it's wrapped
     /// for. Returns the width of its text.
     fn wrap(&mut self, cols: usize) -> usize {
-        let width = cols.saturating_sub(2).clamp(1, MAX_WIDTH);
-        // As narrow as its longest line, when that's narrower.
-        let width = width.min(self.widest.max(1));
+        self.wrap_to(cols.saturating_sub(2).clamp(1, MAX_WIDTH))
+    }
+
+    /// Wraps it to `width` cells, or as narrow as its longest line, if
+    /// that's narrower, unless that's what it's wrapped to. Returns the
+    /// width of its text.
+    fn wrap_to(&mut self, width: usize) -> usize {
+        let width = width.max(1).min(self.widest.max(1));
         if width != self.wrapped_to {
             self.lines = (self.blocks.iter())
                 .flat_map(|block| block.wrap(width))
@@ -199,6 +272,91 @@ impl Panel {
         if let Some(placed) = self.placed {
             self.scroll = self.scroll.min(self.lines.len() - placed.height);
         }
+    }
+
+    /// Works out where it goes beside `menu`, a completion menu, in a pane
+    /// `rows` by `cols` cells: right of it, if there's room for `least`
+    /// cells of text there, or else left of it, as wide as its text up to
+    /// `most`. It stays on the menu's side of the cursor: level with its
+    /// top if it's `below` the cursor, and as far down as the pane goes,
+    /// or level with its bottom if it's above, and as far up. It isn't
+    /// shown if there's room on neither side.
+    pub(crate) fn settle_beside(
+        &mut self,
+        (rows, cols): (usize, usize),
+        menu: Placed,
+        below: bool,
+        (least, most): (usize, usize),
+    ) {
+        self.placed = None;
+        let menu_end = menu.left + menu.width + 2;
+        let (right, left) = (cols.saturating_sub(menu_end), menu.left);
+        let (room, on_right) = if right >= least + 2 {
+            (right, true)
+        } else if left >= least + 2 {
+            (left, false)
+        } else {
+            return;
+        };
+        let width = self.wrap_to((room - 2).min(most));
+        // The rows the box may take, a row more than its text's.
+        let (from, to) = if below {
+            (menu.top, rows)
+        } else {
+            (0, (menu.top + menu.height + 1).min(rows))
+        };
+        let height = (self.lines.len().min(MAX_HEIGHT)).min(to.saturating_sub(from + 1));
+        if height == 0 {
+            return;
+        }
+        self.placed = Some(Placed {
+            top: if below { from } else { to - height - 1 },
+            left: if on_right {
+                menu_end
+            } else {
+                menu.left - width - 2
+            },
+            width,
+            height,
+        });
+        self.scroll = self.scroll.min(self.lines.len() - height);
+    }
+
+    /// Works out where it goes by the cursor, at `cursor` of a pane `rows`
+    /// by `cols` cells, before it's drawn: over the cursor's line, if
+    /// `over` is free and there's room, or else under it, if `under` is.
+    /// A few lines at most, as a call's signature takes. It isn't shown
+    /// while the cursor's out of view.
+    pub(crate) fn settle_over(
+        &mut self,
+        (rows, cols): (usize, usize),
+        cursor: Option<(usize, usize)>,
+        (over, under): (bool, bool),
+    ) {
+        /// The most lines shown.
+        const MOST: usize = 4;
+        self.placed = None;
+        let Some((line, col)) = cursor else { return };
+        if cols < 3 {
+            return;
+        }
+        let width = self.wrap(cols);
+        let wanted = self.lines.len().min(MOST) + 1;
+        let top = if over && wanted <= line {
+            line - wanted
+        } else if under && wanted < rows.saturating_sub(line) {
+            line + 1
+        } else {
+            return;
+        };
+        let boxed = (width + 2).min(cols);
+        self.placed = Some(Placed {
+            top,
+            left: col.min(cols - boxed),
+            width: boxed - 2,
+            height: wanted - 1,
+        });
+        self.scroll = 0;
     }
 
     /// What it shows, and where, as last settled. `None` if the pane has
@@ -257,6 +415,7 @@ impl Block {
                     return vec![Line {
                         runs: Vec::new(),
                         block: true,
+                        picked: false,
                     }];
                 }
                 let run = [Run {
@@ -282,6 +441,7 @@ impl Block {
                     code: false,
                 }],
                 block: false,
+                picked: false,
             }],
             Self::Gap => vec![Line::default()],
         }
@@ -792,5 +952,30 @@ mod tests {
         // Paging from the end goes back to the top.
         panel.page();
         assert_eq!(shown(&mut panel).first, 0);
+    }
+
+    #[test]
+    fn documentation_beside_the_menu_stays_on_its_side_of_the_cursor() {
+        let text: Vec<String> = (0..30).map(|n| n.to_string()).collect();
+        let mut docs = Panel::documentation(None, Some((&text.join("\n"), false)), 4).unwrap();
+        // A menu under the cursor's row, 4: level with its top, as far
+        // down as the pane goes, never up over the cursor.
+        let under = Placed {
+            top: 5,
+            left: 0,
+            width: 20,
+            height: 3,
+        };
+        docs.settle_beside((12, 80), under, true, (10, 40));
+        let placed = docs.view().unwrap().placed;
+        assert_eq!((placed.top, placed.height, placed.left), (5, 6, 22));
+        // A menu over it, rows 0 to 4: level with its bottom.
+        let over = Placed { top: 0, ..under };
+        docs.settle_beside((12, 80), over, false, (10, 40));
+        let placed = docs.view().unwrap().placed;
+        assert_eq!((placed.top, placed.height), (0, 3));
+        // No room either side.
+        docs.settle_beside((12, 30), under, true, (10, 40));
+        assert!(docs.view().is_none());
     }
 }

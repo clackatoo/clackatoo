@@ -320,6 +320,40 @@ options! {
     /// type text. Off, keys go straight to the pane, in case the input
     /// method gets in the way.
     ime("ime"): bool = true;
+    /// As a word is typed in an editor, or a character its language server
+    /// says should ask, such as `.`, ask the server what could be typed
+    /// and show it in a menu under the cursor. Off, Ctrl+Space, Ctrl+N and
+    /// Ctrl+P still ask.
+    completion("cmp"): bool = true;
+    /// How long typing a word pauses, in milliseconds, before the language
+    /// server is asked what could finish it, so a burst of keys asks once.
+    /// 0 asks at every key.
+    completedelay("cmpd"): u32 (0..=2000) = 40;
+    /// Which keys accept the item picked in the completion menu, besides
+    /// Ctrl+Y, which always does: Enter, once an item has been moved to
+    /// with Ctrl+N, Ctrl+P or the arrows; Enter, always; or Ctrl+Y alone,
+    /// Enter always making a new line.
+    completeaccept("cmpa"): CompleteAccept = CompleteAccept::Picked;
+    /// Tab accepts the item picked in the completion menu too, as in VS
+    /// Code, rather than indenting.
+    completetab("cmpt"): bool = false;
+    /// While a call's arguments are typed in an editor, its signature shows
+    /// over the cursor, with the argument being typed in bold, as the
+    /// language server says.
+    signaturehelp("sig"): bool = true;
+}
+
+choice! {
+    /// Which keys `completeaccept` says accept a completion, besides
+    /// Ctrl+Y.
+    CompleteAccept {
+        /// Enter, once an item has been moved to.
+        Picked = "picked",
+        /// Enter, always.
+        Enter = "enter",
+        /// Neither: Ctrl+Y alone.
+        CtrlY = "ctrl-y",
+    }
 }
 
 choice! {

@@ -27,7 +27,6 @@ use crate::chat::{ChatPaint, Pointer};
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, Status};
 use crate::desk::{Desk, TextTarget};
 use crate::desktop::{Button, ButtonLayout, Desktop};
-use crate::editor::Editor;
 use crate::fonts::{CellMetrics, Fonts};
 use crate::ime::{InputMethod, Preedit};
 use crate::input;
@@ -1176,15 +1175,18 @@ impl App {
         let mut texts = painted.texts;
         texts.extend(painted.over_texts);
         let mut over: Vec<Fill> = Vec::new();
-        // The focused editor's panel by its cursor, under the palette and
-        // menus. Hidden while the palette or the finder is open, as their
-        // text would mix.
+        // The focused editor's panels by its cursor, under the palette and
+        // menus: what's there, a call's signature, and the completion menu
+        // with its documentation. Hidden while the palette or the finder
+        // is open, as their text would mix.
         if chrome.palette.is_none()
             && chrome.finder.is_none()
-            && let Some(view) = desk.editor(shown.pane).and_then(Editor::panel)
+            && let Some(editor) = desk.editor(shown.pane)
             && let Some(&(_, tile)) = (placement.panes.iter()).find(|(id, _)| *id == shown.pane)
         {
-            chrome::paint_panel(geometry, tile.origin, &view, &mut over, &mut texts);
+            for view in editor.panels() {
+                chrome::paint_panel(geometry, tile.origin, &view, &mut over, &mut texts);
+            }
         }
         over.extend(painted.over.into_iter().chain(chat_paint.over));
         over.extend(bar_underline);
@@ -1761,9 +1763,14 @@ impl ApplicationHandler<SessionEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // An editor may have something to ask, now typing has paused.
+        if self.desk.tick_editors(Instant::now()) {
+            self.send_outbox();
+        }
         // While the daemon is out of contact, the top bar counts the
-        // seconds, and a highlight on text just copied goes after a moment;
-        // otherwise, nothing wakes the window but events.
+        // seconds, a highlight on text just copied goes after a moment, and
+        // an editor asks its language server once typing pauses; otherwise,
+        // nothing wakes the window but events.
         let counting = self
             .contact
             .as_ref()
@@ -1773,6 +1780,7 @@ impl ApplicationHandler<SessionEvent> for App {
             .chain(self.desk.flash_ends())
             .chain(self.desk.grep_at())
             .chain(self.desk.format_at())
+            .chain(self.desk.editor_wakes())
             .min();
         let flow = match soonest {
             Some(wake) => ControlFlow::WaitUntil(wake),
