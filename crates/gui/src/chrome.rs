@@ -592,6 +592,16 @@ impl Chrome {
         ));
     }
 
+    /// Where the text typed in the palette starts, its line's top left,
+    /// while something's being typed.
+    pub(crate) fn palette_text(&self) -> Option<[f32; 2]> {
+        let rect = self.palette?;
+        Some([
+            self.palette_text_x,
+            palette_text_y(rect, self.geometry.metrics),
+        ])
+    }
+
     /// The palette, over the tiles, while something's being typed.
     fn paint_palette<'a>(&'a self, painted: &mut Painted<'a>) {
         let metrics = self.geometry.metrics;
@@ -627,10 +637,7 @@ impl Chrome {
                 });
             }
             painted.over_texts.push(Text {
-                origin: [
-                    self.palette_text_x,
-                    rect.y + (line_height - metrics.cell[1]) / 2.0,
-                ],
+                origin: [self.palette_text_x, palette_text_y(rect, metrics)],
                 content: text,
                 ink: Ink::Plain,
                 font: TextFont::Mono,
@@ -694,6 +701,12 @@ impl Chrome {
     }
 }
 
+/// The top of the line of text typed in the palette at `rect`.
+fn palette_text_y(rect: Rect, metrics: Metrics) -> f32 {
+    let line_height = (metrics.cell[1] + 4.0 * metrics.padding).round();
+    rect.y + (line_height - metrics.cell[1]) / 2.0
+}
+
 /// What the bottom bar holds, and where.
 #[derive(Default)]
 struct Bottom {
@@ -718,7 +731,7 @@ fn lay_out_bottom(
     let bottom = geometry.bottom;
     let mono = |text: &str| {
         #[allow(clippy::cast_precision_loss)]
-        let cells = text.chars().count() as f32;
+        let cells = crate::render::mono_width(text) as f32;
         cells * metrics.cell[0]
     };
     let mode = mode.map(|mode| {

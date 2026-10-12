@@ -371,6 +371,13 @@ mod tests {
     }
 
     #[test]
+    fn text_an_input_method_committed_is_sent_whole() {
+        // The window keys a commit as one key with all its text.
+        assert_eq!(press(ch("日本語"), NONE), "日本語".as_bytes());
+        assert_eq!(press(ch("👩\u{200D}💻"), NONE), "👩\u{200D}💻".as_bytes());
+    }
+
+    #[test]
     fn the_keypad_follows_application_keypad_mode() {
         let app = InputModes {
             app_keypad: true,

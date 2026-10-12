@@ -27,12 +27,14 @@ use crate::chat::{ChatPaint, Pointer};
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, Status};
 use crate::desk::{Desk, TextTarget};
 use crate::desktop::{Button, ButtonLayout, Desktop};
-use crate::fonts::Fonts;
-use crate::ime::Preedit;
+use crate::fonts::{CellMetrics, Fonts};
+use crate::ime::{InputMethod, Preedit};
 use crate::input;
 use crate::layout::{Placement, Tile};
 use crate::pane::{Copy, Mode};
-use crate::render::{CursorStyle, Fill, Highlight, PADDING, Picture, Renderer, Scene, SceneCursor};
+use crate::render::{
+    self, CursorStyle, Fill, Highlight, PADDING, Paint, Picture, Renderer, Scene, SceneCursor,
+};
 use crate::screen::Screen;
 use crate::session::{Session, SessionEvent};
 
@@ -306,12 +308,14 @@ pub(crate) struct App {
     contact: Option<Contact>,
     /// Whether a frame has shown a terminal, rather than a notice.
     first_frame_drawn: bool,
-    /// Whether the input method is on: while keys type text.
-    ime_allowed: bool,
+    /// The input method: whether it's on, which it is while keys type
+    /// text, and what it's composing.
+    ime: InputMethod,
     /// Where the input method was last told the cursor is, in pixels.
     ime_area: Option<[f32; 4]>,
-    /// Text the input method is composing.
-    preedit: Option<Preedit>,
+    /// Whether a chat shows what the input method is composing, in its
+    /// box, so the window doesn't.
+    composing_in_chat: bool,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
 }
@@ -346,9 +350,9 @@ impl App {
             notice: Some(Notice::Connecting),
             contact: None,
             first_frame_drawn: false,
-            ime_allowed: false,
+            ime: InputMethod::default(),
             ime_area: None,
-            preedit: None,
+            composing_in_chat: false,
             result: Ok(()),
         }
     }
@@ -459,10 +463,20 @@ impl App {
                 rounded,
             }
         } else {
+            let mut status = self.desk.status();
+            // What the input method is composing shows at the caret, where
+            // it'll go, until it's committed.
+            if let Status::Typing { text, .. } = &mut status
+                && let Some(preedit) = self.ime.preedit()
+                && self.desk.text_goes_to() == Some(TextTarget::Bar)
+                && let Some(caret) = text.rfind(CARET)
+            {
+                text.insert_str(caret, &preedit.text);
+            }
             Contents {
                 workspaces: self.desk.workspace_names(),
                 tabs: self.desk.tab_names(),
-                status: self.desk.status(),
+                status,
                 buttons: &self.buttons,
                 bottom_shown: true,
                 menu: self
@@ -826,29 +840,21 @@ impl App {
         }
     }
 
-    fn ime_event(&mut self, ime: Ime) {
-        match ime {
-            Ime::Enabled => {}
-            // A chat shows what's being composed in its own box.
-            Ime::Preedit(text, cursor) => {
-                let composing = (!text.is_empty()).then_some((text, cursor));
-                self.preedit = None;
-                if !self.desk.compose_in_chat(composing.clone()) {
-                    self.preedit = composing.map(|(text, cursor)| Preedit {
-                        text,
-                        cursor: cursor.map(|(start, _)| start),
-                    });
-                }
-            }
-            Ime::Commit(text) => {
-                self.preedit = None;
-                self.desk.compose_in_chat(None);
-                self.type_text(&text);
-            }
-            Ime::Disabled => {
-                self.preedit = None;
-                self.desk.compose_in_chat(None);
-            }
+    fn ime_event(&mut self, event: Ime) {
+        // A chat shows what's being composed in its own box, cursor and
+        // all.
+        let for_chat = match &event {
+            Ime::Preedit(text, cursor) if !text.is_empty() => Some(Some((text.clone(), *cursor))),
+            Ime::Preedit(..) | Ime::Commit(_) | Ime::Disabled => Some(None),
+            Ime::Enabled => None,
+        };
+        let committed = self.ime.event(event, Instant::now());
+        if let Some(composing) = for_chat {
+            self.composing_in_chat = self.desk.compose_in_chat(composing);
+        }
+        if let Some(text) = committed {
+            self.type_text(&text);
+            self.sync_ime();
         }
         self.request_redraw();
     }
@@ -873,19 +879,32 @@ impl App {
     }
 
     /// Turns the input method on while keys type text, and off otherwise,
-    /// as in normal mode, whose keys are commands. Tells it where the
-    /// cursor is, at `area`, so its choices show beside it.
-    fn update_ime(&mut self, area: Option<[f32; 4]>) {
+    /// as in normal mode, whose keys are commands, or while a notice asks
+    /// for a password. The `ime` option can keep it off. Done after each
+    /// key, not just each frame, so keys typed straight after Esc don't go
+    /// to the input method.
+    fn sync_ime(&mut self) {
         let Some(frame) = &self.frame else { return };
-        let allowed = self.desk.text_goes_to().is_some();
-        if allowed != self.ime_allowed {
+        let wanted =
+            self.notice.is_none() && self.desk.options().ime && self.desk.text_goes_to().is_some();
+        if let Some(allowed) = self.ime.allow(wanted) {
             frame.window.set_ime_allowed(allowed);
-            self.ime_allowed = allowed;
             self.ime_area = None;
             if !allowed {
-                self.preedit = None;
+                self.composing_in_chat = false;
+                self.desk.compose_in_chat(None);
+                self.request_redraw();
             }
         }
+    }
+
+    /// Turns the input method on or off as [`sync_ime`](Self::sync_ime)
+    /// does, and tells it where the cursor is, at `area`, so its choices
+    /// show beside it.
+    fn update_ime(&mut self, area: Option<[f32; 4]>) {
+        self.sync_ime();
+        let Some(frame) = &self.frame else { return };
+        let allowed = self.ime.allowed();
         if let Some([x, y, width, height]) = area.filter(|_| allowed && area != self.ime_area) {
             frame.window.set_ime_cursor_area(
                 PhysicalPosition::new(x, y),
@@ -983,6 +1002,8 @@ impl App {
         };
         let drawn = if self.notice.is_some() {
             self.draw_notice(&chrome);
+            // No input method while a notice asks for a password.
+            self.sync_ime();
             return;
         } else {
             match self.draw_panes(&chrome) {
@@ -1078,13 +1099,18 @@ impl App {
         let drawings = drawings(desk, self.focused, &placement, &layout_panes, shown.pane);
         let focused = drawings.iter().find(|drawing| drawing.focused);
         let cell = geometry.area.cell;
-        let preedit = self
-            .preedit
-            .as_ref()
-            .filter(|_| desk.text_goes_to() == Some(TextTarget::Pane));
+        let target = desk.text_goes_to();
+        let preedit = (self.ime.preedit())
+            .filter(|_| !self.composing_in_chat && target == Some(TextTarget::Pane));
         let (ime_area, composed) =
             focused.map_or((None, None), |drawing| compose(preedit, drawing, cell));
-        let ime_area = ime_area.or(chat_paint.ime);
+        let (bar_area, bar_underline) = match (target, self.frame.as_ref()) {
+            (Some(TextTarget::Bar), Some(frame)) => {
+                compose_in_bar(chrome, self.ime.preedit(), &frame.fonts.cell)
+            }
+            _ => (None, None),
+        };
+        let ime_area = bar_area.or(ime_area).or(chat_paint.ime);
         let composed_rows = composed
             .as_ref()
             .zip(focused)
@@ -1113,6 +1139,7 @@ impl App {
         let mut texts = painted.texts;
         texts.extend(painted.over_texts);
         let mut over: Vec<Fill> = painted.over.into_iter().chain(chat_paint.over).collect();
+        over.extend(bar_underline);
         // Ctrl+B p: each pane's number, over it, to pick it by.
         if desk.numbering_panes() {
             let (fills, numbers) = chrome::paint_pane_numbers(geometry, &placement);
@@ -1311,6 +1338,44 @@ fn compose(
             (row, SceneCursor { col, ..cursor })
         });
     (Some(area), composed)
+}
+
+/// The caret at the end of what's typed in the bottom bar.
+const CARET: char = '▏';
+
+/// While the bottom bar is typed in: where the input method's choices go,
+/// at its caret, or where `preedit`, the text it's composing, starts, and
+/// a line under that text, which the bar's text holds already. The text
+/// is drawn in cells of `cell`'s size.
+#[allow(clippy::cast_precision_loss)]
+fn compose_in_bar(
+    chrome: &Chrome,
+    preedit: Option<&Preedit>,
+    cell: &CellMetrics,
+) -> (Option<[f32; 4]>, Option<Fill>) {
+    let (Some([left, top]), Status::Typing { text, .. }) = (chrome.palette_text(), &chrome.status)
+    else {
+        return (None, None);
+    };
+    let Some(caret) = text.rfind(CARET) else {
+        return (None, None);
+    };
+    let [width, height] = [cell.width as f32, cell.height as f32];
+    let composed = preedit.map_or(0, |preedit| render::mono_width(&preedit.text));
+    let before = render::mono_width(&text[..caret]).saturating_sub(composed);
+    let start = left + before as f32 * width;
+    let underline = (composed > 0).then(|| {
+        Fill::solid(
+            [
+                start,
+                top + cell.baseline + cell.underline_offset,
+                composed as f32 * width,
+                cell.stroke,
+            ],
+            Paint::Ink,
+        )
+    });
+    (Some([start, top, width, height]), underline)
 }
 
 /// One pane, ready to draw.
@@ -1699,9 +1764,13 @@ impl App {
                 event,
                 is_synthetic: false,
                 ..
-            // While the input method composes, keys are its.
-            } if event.state.is_pressed() && self.preedit.is_none() => {
-                self.key_pressed(event_loop, &event);
+            } if event.state.is_pressed() => {
+                // While the input method composes, keys are its, and a key
+                // it committed as well counts once.
+                if self.ime.key(event.text.as_deref(), Instant::now()) {
+                    self.key_pressed(event_loop, &event);
+                    self.sync_ime();
+                }
             }
             WindowEvent::Ime(ime) => self.ime_event(ime),
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
@@ -1723,6 +1792,11 @@ impl App {
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 self.desk.window_focus(focused);
+                if !focused {
+                    self.ime.reset();
+                    self.composing_in_chat = false;
+                    self.desk.compose_in_chat(None);
+                }
                 self.send_outbox();
                 // Another window on the terminals may have resized them:
                 // the focused one decides.
@@ -1866,6 +1940,83 @@ mod tests {
             "The authenticity of host 'desktop' can't be established.\n\
              Are you sure you want to continue connecting (yes/no/[fingerprint])? "
         ));
+    }
+
+    // Whole pixels, worked out exactly.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn text_composed_in_the_bar_is_underlined_where_it_goes() {
+        let metrics = Metrics {
+            cell: [10.0, 20.0],
+            ui_line: 18.0,
+            padding: 8.0,
+        };
+        let cell = CellMetrics {
+            width: 10,
+            height: 20,
+            baseline: 15.0,
+            underline_offset: 2.0,
+            strikeout_offset: 5.0,
+            stroke: 1.0,
+        };
+        let chrome = |text: &str| {
+            let buttons = ButtonLayout::default();
+            Chrome::new(
+                Geometry::new([800, 600], metrics),
+                Contents {
+                    workspaces: Vec::new(),
+                    tabs: Vec::new(),
+                    status: Status::Typing {
+                        label: None,
+                        text: text.into(),
+                        choices: Vec::new(),
+                    },
+                    buttons: &buttons,
+                    bottom_shown: true,
+                    menu: None,
+                    alert: None,
+                    rounded: false,
+                },
+                &mut |_, _| 0.0,
+            )
+        };
+        let preedit = Preedit {
+            text: "日本".into(),
+            cursor: None,
+        };
+        // The window has put the text being composed before the caret.
+        let typing = chrome(":e 日本▏");
+        let [left, top] = typing.palette_text().expect("a palette");
+        let (area, underline) = compose_in_bar(&typing, Some(&preedit), &cell);
+        assert_eq!(area, Some([left + 30.0, top, 10.0, 20.0]), "after `:e `");
+        let underline = underline.expect("an underline");
+        assert_eq!(underline.rect, [left + 30.0, top + 17.0, 40.0, 1.0]);
+        // Nothing composed: the choices go at the caret, with no line.
+        let typing = chrome(":e 日▏");
+        let (area, underline) = compose_in_bar(&typing, None, &cell);
+        assert_eq!(area, Some([left + 50.0, top, 10.0, 20.0]));
+        assert!(underline.is_none());
+        // Nothing typed in the bar.
+        let buttons = ButtonLayout::default();
+        let tabs = Chrome::new(
+            Geometry::new([800, 600], metrics),
+            Contents {
+                workspaces: Vec::new(),
+                tabs: Vec::new(),
+                status: Status::Tabs {
+                    mode: None,
+                    note: None,
+                    panes: 1,
+                },
+                buttons: &buttons,
+                bottom_shown: true,
+                menu: None,
+                alert: None,
+                rounded: false,
+            },
+            &mut |_, _| 0.0,
+        );
+        assert_eq!(compose_in_bar(&tabs, Some(&preedit), &cell), (None, None));
     }
 
     #[test]

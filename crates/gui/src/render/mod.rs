@@ -198,10 +198,21 @@ pub(crate) enum Ink {
 /// Which font text of the window's own is drawn in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TextFont {
-    /// The terminal's, a cell per character, as for commands being typed.
+    /// The terminal's, a cell per character, or two for a wide one, as
+    /// for commands being typed.
     Mono,
     /// The interface font, as for names in the bars.
     Ui,
+}
+
+/// How many cells `ch` takes in text drawn in [`TextFont::Mono`].
+pub(crate) fn mono_cells(ch: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1)
+}
+
+/// How many cells `text` takes in [`TextFont::Mono`].
+pub(crate) fn mono_width(text: &str) -> usize {
+    text.chars().map(mono_cells).sum()
 }
 
 /// What one pane shows, and where.
@@ -930,18 +941,19 @@ impl Renderer {
                 };
                 let baseline = top + cell.baseline;
                 for ch in text.content.chars() {
+                    let width = mono_cells(ch) as f32 * cell_width;
                     if let Some((face, glyph)) = fonts.glyph(ch, variant)
                         && let Some(atlas) = self.glyphs.get(fonts, face, glyph)
                     {
                         self.text_glyphs.push(place(
                             &atlas,
                             [pen_x, baseline],
-                            [cell_width, cell_height],
+                            [width, cell_height],
                             color,
                             cell.baseline,
                         ));
                     }
-                    pen_x += cell_width;
+                    pen_x += width;
                 }
             }
             TextFont::Ui => {

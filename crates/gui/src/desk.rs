@@ -249,6 +249,11 @@ impl Desk {
         }
     }
 
+    /// The options, as config and `:set` have set them.
+    pub(crate) fn options(&self) -> &Options {
+        &self.options
+    }
+
     pub(crate) fn finished(&self) -> bool {
         self.finished
     }

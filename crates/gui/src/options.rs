@@ -308,6 +308,11 @@ options! {
     /// What's done when a file is opened in a language that isn't
     /// installed, or whose language server isn't.
     languageinstall("li"): LanguageInstall = LanguageInstall::Ask;
+    /// Type through the desktop's input method, as Chinese, Japanese and
+    /// Korean are typed, and as an emoji picker sends its emoji, while keys
+    /// type text. Off, keys go straight to the pane, in case the input
+    /// method gets in the way.
+    ime("ime"): bool = true;
 }
 
 choice! {
