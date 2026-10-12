@@ -15,7 +15,7 @@ use clackatoo_term::Cell;
 
 use crate::boxdraw;
 use crate::colors::{Rgba, Theme};
-use crate::fonts::{FaceId, Fonts, Variant};
+use crate::fonts::{FaceId, Fonts, Variant, is_regional_indicator, is_skin_tone};
 use crate::glyphs::{ATLAS_SIZE, AtlasGlyph, GlyphCache};
 use swash::GlyphId;
 
@@ -679,7 +679,7 @@ impl Renderer {
     }
 
     /// Turns the picture into rectangles and glyphs.
-    fn build(&mut self, picture: &Picture<'_>, fonts: &mut Fonts) {
+    pub(crate) fn build(&mut self, picture: &Picture<'_>, fonts: &mut Fonts) {
         self.rects.clear();
         self.overlays.clear();
         self.glyph_instances.clear();
@@ -770,6 +770,9 @@ impl Renderer {
         for (line, row) in scene.rows.iter().take(lines).enumerate() {
             let top = origin_y + line as f32 * cell_height;
             let baseline = top + cell.baseline;
+            // Cells before this column were drawn as one glyph with a cell
+            // to their left, so draw no text of their own.
+            let mut joined_until = 0;
             for (col, &cell_value) in row.cells().iter().enumerate().take(cols) {
                 if cell_value.is_wide_spacer() {
                     continue;
@@ -803,16 +806,32 @@ impl Renderer {
                     style.attributes.contains(Attributes::BOLD),
                     style.attributes.contains(Attributes::ITALIC),
                 );
-                self.push_cell_text(
-                    fonts,
-                    row,
-                    col,
-                    cell_value,
-                    variant,
-                    [left, baseline],
-                    [cells * cell_width, cell_height],
-                    colors.foreground,
-                );
+                if col < joined_until {
+                    // Drawn already, with the cell it joins.
+                } else if cell_value.ch() >= FIRST_JOINING
+                    && let Some(end) = joined_run(row, col, cols)
+                    && self.push_joined_text(
+                        fonts,
+                        row,
+                        col..end,
+                        variant,
+                        [left, baseline],
+                        colors.foreground,
+                    )
+                {
+                    joined_until = end;
+                } else {
+                    self.push_cell_text(
+                        fonts,
+                        row,
+                        col,
+                        cell_value,
+                        variant,
+                        [left, baseline],
+                        [cells * cell_width, cell_height],
+                        colors.foreground,
+                    );
+                }
                 let width = cells * cell_width;
                 let overlays = &mut self.overlays;
                 underline(
@@ -987,19 +1006,8 @@ impl Renderer {
         let mut text = std::mem::take(&mut self.cell_text);
         text.clear();
         row.push_text(col, &mut text);
-        let shaped = &mut self.shaped[variant as usize];
-        if !shaped.contains_key(text.as_str()) {
-            let glyphs = fonts.shape(&text, variant).map(|glyphs| {
-                glyphs
-                    .iter()
-                    .filter_map(|shaped| {
-                        let atlas = self.glyphs.get(fonts, shaped.face, shaped.glyph)?;
-                        Some((atlas, shaped.offset))
-                    })
-                    .collect()
-            });
-            shaped.insert(text.as_str().into(), glyphs);
-        }
+        self.shape(fonts, &text, variant);
+        let shaped = &self.shaped[variant as usize];
         if let Some(glyphs) = shaped.get(text.as_str()).and_then(Option::as_deref) {
             // An emoji fills the cell, so one is drawn: what a sequence
             // joins into, or its first if the font can't join it.
@@ -1039,6 +1047,98 @@ impl Renderer {
         }
         self.cell_text = text;
     }
+
+    /// Shapes `text` in `variant` into `self.shaped`, unless it's there
+    /// already: shaping a text is slow, so each is shaped once, then drawn
+    /// from the cache every frame.
+    fn shape(&mut self, fonts: &mut Fonts, text: &str, variant: Variant) {
+        let shaped = &mut self.shaped[variant as usize];
+        if shaped.contains_key(text) {
+            return;
+        }
+        let glyphs = fonts.shape(text, variant).map(|glyphs| {
+            glyphs
+                .iter()
+                .filter_map(|shaped| {
+                    let atlas = self.glyphs.get(fonts, shaped.face, shaped.glyph)?;
+                    Some((atlas, shaped.offset))
+                })
+                .collect()
+        });
+        shaped.insert(text.into(), glyphs);
+    }
+
+    /// Draws the cells `cols` of `row` as the one emoji they make together,
+    /// from `pen`, two cells wide, as an emoji is, in `color` if it hasn't
+    /// colours of its own, if the font joins them
+    /// into one glyph. Returns whether it did: if not, each cell is drawn
+    /// as its own.
+    fn push_joined_text(
+        &mut self,
+        fonts: &mut Fonts,
+        row: &clackatoo_term::Row,
+        cols: std::ops::Range<usize>,
+        variant: Variant,
+        pen: [f32; 2],
+        color: Rgba,
+    ) -> bool {
+        let mut text = std::mem::take(&mut self.cell_text);
+        text.clear();
+        for col in cols {
+            row.push_text(col, &mut text);
+        }
+        self.shape(fonts, &text, variant);
+        let joined = match self.shaped[variant as usize].get(text.as_str()) {
+            Some(Some(glyphs)) if glyphs.len() == 1 => Some(glyphs[0]),
+            _ => None,
+        };
+        self.cell_text = text;
+        let Some((atlas, offset)) = joined else {
+            return false;
+        };
+        let cell = fonts.cell;
+        #[allow(clippy::cast_precision_loss)]
+        let cell_box = [2.0 * cell.width as f32, cell.height as f32];
+        let pen = [pen[0] + offset[0], pen[1] + offset[1]];
+        self.glyph_instances
+            .push(place(&atlas, pen, cell_box, color, cell.baseline));
+        true
+    }
+}
+
+/// The first character that can start a run of cells drawn as one: ☝,
+/// the first emoji a skin tone goes on. Checked before anything else, so
+/// plain text costs one comparison.
+const FIRST_JOINING: char = '\u{261D}';
+
+/// Where a run of cells from `col` that's drawn as one glyph ends, if the
+/// cell at `col` starts one. The grid gives each character with a width
+/// its own cells, as programs count them, so some emoji are split across
+/// cells: a flag is two regional indicators of a cell each, and a skin
+/// tone is a wide character of its own after the emoji it colours. Drawn
+/// one per cell they'd show as two letters, or as a hand and a swatch.
+///
+/// This is where text is gathered from several cells to be shaped as one,
+/// so ligatures would make their runs here too. Only cells up to `cols`,
+/// those shown, are joined.
+fn joined_run(row: &clackatoo_term::Row, col: usize, cols: usize) -> Option<usize> {
+    let cells = row.cells();
+    let cell = cells[col];
+    if cell.ch() < FIRST_JOINING {
+        return None;
+    }
+    let next = col + if cell.is_wide() { 2 } else { 1 };
+    let next_cell = *cells.get(next).filter(|_| next < cols)?;
+    let next_width = if next_cell.is_wide() { 2 } else { 1 };
+    let joins = if is_regional_indicator(cell.ch()) {
+        // A flag is a pair, counted from the left: the cell to the left
+        // has drawn it if it was the first of a pair. Each indicator
+        // stands alone if anything was added to it.
+        is_regional_indicator(next_cell.ch()) && !cell.has_grapheme() && !next_cell.has_grapheme()
+    } else {
+        is_skin_tone(next_cell.ch()) && !is_skin_tone(cell.ch())
+    };
+    (joins && next + next_width <= cols).then_some(next + next_width)
 }
 
 /// The uniforms, the atlas and its sampler.
@@ -1233,5 +1333,95 @@ mod tests {
         }
         let lowest = wave.iter().map(|(origin, size)| origin[1] + size[1]);
         assert!(lowest.fold(0.0, f32::max) <= 10.0 + 4.0 + 2.0);
+    }
+
+    fn row(text: &str) -> clackatoo_term::Row {
+        let mut builder = clackatoo_term::RowBuilder::new(20);
+        builder.push(text, &clackatoo_term::Style::DEFAULT, false);
+        builder.finish(false)
+    }
+
+    #[test]
+    fn flags_and_skin_tones_are_runs_of_cells() {
+        // Each regional indicator is a cell, and they pair from the left.
+        let flags = row("🇬🇧🇯🇵🇺 a");
+        assert_eq!(flags.text(), "🇬🇧🇯🇵🇺 a");
+        assert_eq!(joined_run(&flags, 0, 20), Some(2));
+        assert_eq!(joined_run(&flags, 2, 20), Some(4));
+        assert_eq!(joined_run(&flags, 4, 20), None, "the odd one out");
+        assert_eq!(joined_run(&flags, 6, 20), None, "plain text");
+        // A skin tone is two cells of its own, after its emoji's two.
+        let tones = row("👍🏽👩🏽\u{200D}💻🏽");
+        assert_eq!(joined_run(&tones, 0, 20), Some(4));
+        // The rest of a sequence joins the tone's cell.
+        assert_eq!(joined_run(&tones, 4, 20), Some(8));
+        assert_eq!(joined_run(&tones, 6, 20), None);
+        assert_eq!(joined_run(&tones, 8, 20), None, "a tone on its own");
+        // Nothing past the cells shown is joined.
+        assert_eq!(joined_run(&flags, 0, 1), None);
+        assert_eq!(joined_run(&tones, 0, 3), None);
+        assert_eq!(joined_run(&tones, 0, 4), Some(4));
+        // An indicator with something added to it stands alone.
+        let marked = row("🇬\u{301}🇧");
+        assert_eq!(joined_run(&marked, 0, 20), None);
+    }
+
+    #[test]
+    fn flags_and_skin_tones_are_drawn_as_one_glyph_shaped_once() {
+        let Some((device, _)) = crate::tests::gpu() else {
+            eprintln!("no GPU available; skipping");
+            return;
+        };
+        let mut fonts = crate::tests::fonts(1.0);
+        if fonts.glyph('👍', Variant::Regular).is_none() {
+            eprintln!("no emoji font; skipping");
+            return;
+        }
+        let row = row("🇬🇧 👍🏽 👩🏽\u{200D}💻 🇬 é");
+        let rows = [&row];
+        let mut renderer = Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let drawn = |renderer: &mut Renderer, fonts: &mut Fonts| {
+            let picture = Picture {
+                scenes: &[Scene {
+                    origin: [0.0; 2],
+                    #[allow(clippy::cast_precision_loss)]
+                    size: [20.0 * fonts.cell.width as f32, fonts.cell.height as f32],
+                    rows: &rows,
+                    cursor: None,
+                    normal_mode: false,
+                    highlights: &[],
+                }],
+                fills: &[],
+                over: &[],
+                texts: &[],
+                glyphs: &[],
+                over_glyphs: &[],
+                transparent: false,
+            };
+            renderer.build(&picture, fonts);
+            (renderer.glyph_instances.iter())
+                .map(|glyph| (glyph.origin[0], glyph.colored))
+                .collect::<Vec<_>>()
+        };
+        let first = drawn(&mut renderer, &mut fonts);
+        // The flag, the hand, the technologist, the lone letter, and é.
+        assert_eq!(first.len(), 5, "{first:?}");
+        assert!(first[..4].iter().all(|&(_, colored)| colored == 1));
+        // Each joined emoji starts at its first cell.
+        #[allow(clippy::cast_precision_loss)]
+        let cell = fonts.cell.width as f32;
+        let starts: Vec<f32> = first.iter().map(|&(x, _)| (x / cell).floor()).collect();
+        assert_eq!(starts[..4], [0.0, 3.0, 8.0, 13.0]);
+        let shaped: Vec<&str> = renderer.shaped[Variant::Regular as usize]
+            .keys()
+            .map(AsRef::as_ref)
+            .collect();
+        for text in ["🇬🇧", "👍🏽", "👩🏽\u{200D}💻"] {
+            assert!(shaped.contains(&text), "{text} in {shaped:?}");
+        }
+        // The next frame draws the same, from the cache.
+        let cached = renderer.shaped[Variant::Regular as usize].len();
+        assert_eq!(drawn(&mut renderer, &mut fonts), first);
+        assert_eq!(renderer.shaped[Variant::Regular as usize].len(), cached);
     }
 }

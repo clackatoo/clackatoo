@@ -24,6 +24,17 @@ const ZWJ: char = '\u{200D}';
 /// ❤️ for ❤.
 const EMOJI_PRESENTATION: char = '\u{FE0F}';
 
+/// One of the 26 letters that make flags in pairs, as 🇬 and 🇧 make 🇬🇧.
+pub(crate) fn is_regional_indicator(ch: char) -> bool {
+    ('\u{1F1E6}'..='\u{1F1FF}').contains(&ch)
+}
+
+/// One of the five skin tones that colour the emoji before them, as 🏽 does
+/// 👍 in 👍🏽.
+pub(crate) fn is_skin_tone(ch: char) -> bool {
+    ('\u{1F3FB}'..='\u{1F3FF}').contains(&ch)
+}
+
 /// What to draw text with.
 #[derive(Clone, Debug)]
 pub struct FontOptions {
@@ -460,14 +471,20 @@ impl Fonts {
         Some((id, self.face(id).glyph(ch)?))
     }
 
-    /// The glyphs `text`, one cell's codepoints, is drawn with, shaped in
-    /// the face its first character is found in: an emoji face for an
-    /// emoji sequence. `None` if that face lacks any of it, as when a mark
-    /// is only in another font.
+    /// The glyphs `text`, one cell's codepoints or a run of cells drawn as
+    /// one, is drawn with, shaped in the face its first character is found
+    /// in: an emoji face for an emoji sequence. `None` if that face lacks
+    /// any of it, as when a mark is only in another font.
     pub(crate) fn shape(&mut self, text: &str, variant: Variant) -> Option<Vec<ShapedGlyph>> {
         let first = text.chars().next()?;
+        // A text font may have the emoji a skin tone colours, as ☝, but
+        // not the tone or the coloured emoji.
         let emoji = text
-            .contains([ZWJ, EMOJI_PRESENTATION])
+            .contains(|ch| {
+                matches!(ch, ZWJ | EMOJI_PRESENTATION)
+                    || is_regional_indicator(ch)
+                    || is_skin_tone(ch)
+            })
             .then(|| self.emoji_face(first))
             .flatten();
         let face = match emoji {

@@ -17,7 +17,7 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// The GPU device every test shares, or `None` on machines without one.
 /// It's made once: tests making and dropping devices of their own at the
 /// same time sometimes hung NVIDIA's Vulkan driver.
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+pub(crate) fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
     static GPU: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue)>> =
         std::sync::OnceLock::new();
     GPU.get_or_init(|| {
@@ -85,7 +85,7 @@ fn screen(cols: u16, rows: u16, output: &str) -> Screen {
     Screen::new(&View::capture(&terminal)).expect("a terminal's view is a grid")
 }
 
-fn fonts(scale: f64) -> Fonts {
+pub(crate) fn fonts(scale: f64) -> Fonts {
     let options = FontOptions {
         family: std::env::var("CLACKATOO_TEST_FONT").ok(),
         size: 12.0,
@@ -176,9 +176,9 @@ fn save(name: &str, size: [u32; 2], pixels: &[u8]) {
 fn renders_text_colours_and_the_cursor() {
     let output = "plain \x1b[1mbold\x1b[0m \x1b[3mitalic\x1b[0m \x1b[4munder\x1b[0m \x1b[9mstruck\x1b[0m\r\n\
         \x1b[31mred \x1b[32mgreen \x1b[34mblue \x1b[38;2;255;128;0mrgb\x1b[0m \x1b[7minverse\x1b[0m\r\n\
-        \x1b[41m red bg \x1b[0m 字符 e\u{301} 😀 👩\u{200D}💻 ❤\u{FE0F} #\u{FE0F}\u{20E3} ok\r\n\
+        \x1b[41m red bg \x1b[0m 字符 e\u{301} 😀 👩\u{200D}💻 ❤\u{FE0F} #\u{FE0F}\u{20E3} 🇬🇧 👍🏽 ok\r\n\
         box: ┌─┐ │ │ └─┘  arrows: → ← ↑ ↓\r\n$ ";
-    let Some((size, pixels)) = render(48, 6, output, 2.0, (false, &[])) else {
+    let Some((size, pixels)) = render(56, 6, output, 2.0, (false, &[])) else {
         eprintln!("no GPU available; skipping");
         return;
     };
@@ -1049,14 +1049,13 @@ fn frame_times() {
         eprintln!("no GPU available; skipping");
         return;
     };
-    let ascii: String = (0..50)
-        .map(|line| {
-            let text: String = (0..160)
-                .map(|col| char::from(b'!' + u8::try_from((line * 7 + col) % 94).unwrap()))
-                .collect();
-            format!("{text}\r\n")
-        })
-        .collect();
+    let mut ascii = String::new();
+    for line in 0..50 {
+        ascii.extend(
+            (0..160).map(|col| char::from(b'!' + u8::try_from((line * 7 + col) % 94).unwrap())),
+        );
+        ascii.push_str("\r\n");
+    }
     let emoji = [
         "😀",
         "👩\u{200D}💻",
@@ -1069,15 +1068,12 @@ fn frame_times() {
         "👩🏽\u{200D}💻",
         "a",
     ];
-    let emoji: String = (0..50)
-        .map(|line| {
-            let text: String = (0..32)
-                .map(|col| emoji[(line + col) % emoji.len()])
-                .collect();
-            format!("{text}\r\n")
-        })
-        .collect();
-    for (name, output) in [("ascii", ascii), ("emoji", emoji)] {
+    let mut emoji_screen = String::new();
+    for line in 0..50 {
+        emoji_screen.extend((0..32).map(|col| emoji[(line + col) % emoji.len()]));
+        emoji_screen.push_str("\r\n");
+    }
+    for (name, output) in [("ascii", ascii), ("emoji", emoji_screen)] {
         let screen = screen(160, 50, &output);
         let mut fonts = fonts(2.0);
         let size = [160 * fonts.cell.width, 50 * fonts.cell.height];
@@ -1129,13 +1125,27 @@ fn frame_times() {
                 .poll(wgpu::PollType::wait_indefinitely())
                 .expect("poll");
         }
-        times.sort_by(f64::total_cmp);
-        #[allow(clippy::cast_precision_loss)]
-        let mean = times.iter().sum::<f64>() / times.len() as f64;
-        eprintln!(
-            "{name}: median {:.0} µs, mean {mean:.0} µs, min {:.0} µs",
-            times[times.len() / 2],
-            times[0],
-        );
+        report(&format!("{name}, frame"), times);
+        // Building the instances alone, the part text drawing changes.
+        let times = (0..2000)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                renderer.build(&picture, &mut fonts);
+                started.elapsed().as_secs_f64() * 1e6
+            })
+            .collect();
+        report(&format!("{name}, build"), times);
     }
+}
+
+/// Prints the median, mean and least of `times`, in microseconds.
+fn report(name: &str, mut times: Vec<f64>) {
+    times.sort_by(f64::total_cmp);
+    #[allow(clippy::cast_precision_loss)]
+    let mean = times.iter().sum::<f64>() / times.len() as f64;
+    eprintln!(
+        "{name}: median {:.1} µs, mean {mean:.1} µs, min {:.1} µs",
+        times[times.len() / 2],
+        times[0],
+    );
 }
