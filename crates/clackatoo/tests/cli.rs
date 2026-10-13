@@ -671,6 +671,10 @@ impl UserShell {
             .env("SHELL", shell)
             .env("HOME", home)
             .env_remove("ZDOTDIR")
+            // Debian's and Ubuntu's /etc/zsh/zshrc run compinit, which
+            // stops at a question when fpath holds a directory others can
+            // write to, as CI machines' /usr/local does.
+            .env("skip_global_compinit", "1")
             .envs(env.iter().copied())
             .spawn()
             .unwrap();
