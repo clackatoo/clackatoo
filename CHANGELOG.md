@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.10 (2026-10-13)
+
+### Features
+
+- **agents:** :Agent opens a start page to start a chat or go on with one (353cd31)
+
 ## 2026.10.9 (2026-10-13)
 
 ### Features
