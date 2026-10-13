@@ -1,0 +1,22 @@
+Third-party licences
+
+clackatoo is built with these crates, each under the licence given, whose
+text follows. clackatoo itself is under MIT OR Apache-2.0: see its
+LICENSE-MIT, LICENSE-APACHE and NOTICE.
+
+{{#each overview}}
+{{{name}}}: {{count}} crate{{#unless (eq count 1)}}s{{/unless}}
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}
