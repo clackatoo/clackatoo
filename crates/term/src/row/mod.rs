@@ -13,6 +13,7 @@ use crate::size::Size;
 use crate::style::Style;
 pub use builder::RowBuilder;
 use graphemes::Graphemes;
+pub use graphemes::MAX_EXTRA;
 use lookup::{LINEAR_SEARCH_MAX, StyleLookup};
 
 /// One line of cells, plus everything those cells refer to.

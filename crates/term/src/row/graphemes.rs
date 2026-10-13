@@ -7,8 +7,9 @@ use std::ops::Range;
 ///
 /// Real graphemes stay far below this (long emoji ZWJ sequences have about
 /// ten). The cap keeps a stream of combining characters from growing one
-/// cell without limit.
-pub(crate) const MAX_EXTRA: usize = 32;
+/// cell without limit. Past it, more are dropped, as anything that lays
+/// text out in cells the way rows do must know.
+pub const MAX_EXTRA: usize = 32;
 
 /// Codepoints stored in the entry itself. Enough for an accent or two, or a
 /// two- or three-part ZWJ emoji; longer graphemes go to the overflow.

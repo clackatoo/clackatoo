@@ -43,7 +43,7 @@ pub use damage::Damage;
 pub use document::{Match, Position};
 pub use grid::Grid;
 pub use links::{Hyperlink, LinkId};
-pub use row::{Row, RowBuilder};
+pub use row::{MAX_EXTRA, Row, RowBuilder};
 pub use scrollback::Compaction;
 pub use size::{InvalidSize, Size};
 pub use snapshot::{BlocksSnapshot, LinksSnapshot, RestoreError, Snapshot};

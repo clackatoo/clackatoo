@@ -17,7 +17,7 @@
 use std::rc::Rc;
 
 use clackatoo_protocol::BufferId;
-use clackatoo_term::{RowBuilder, Style, Underline};
+use clackatoo_term::{MAX_EXTRA, RowBuilder, Style, Underline};
 use clackatoo_text::{Diagnostic, Rope, Span};
 
 use super::kept::{Kept, LineLog};
@@ -31,24 +31,43 @@ pub(crate) fn tab_end(col: usize, tabstop: usize) -> usize {
     (col / tabstop + 1) * tabstop
 }
 
-/// The cells `ch` takes, laid out at cell `col`, as a terminal's row lays
-/// it out ([`RowBuilder`]): none if it's drawn in the cell before, as an
-/// accent is, or after a joiner, or if there's no cell before for it to
-/// be drawn in. `joins` says whether the last character was a joiner, and
-/// is kept up to date.
-fn cells_of(ch: char, col: usize, tabstop: usize, joins: &mut bool) -> usize {
-    let (width, joiner) = match ch {
-        '\t' => (tab_end(col, tabstop) - col, false),
+/// What the characters laid out so far say of the next, as a terminal's
+/// row keeps it ([`RowBuilder`]).
+#[derive(Clone, Copy, Default)]
+struct Joining {
+    /// Whether the last character drawn in the cell before is a joiner, so
+    /// the next is drawn in it too.
+    joins: bool,
+    /// How many characters are drawn in the cell before after its first:
+    /// past [`MAX_EXTRA`], more are dropped.
+    extras: usize,
+}
+
+/// The cells `ch` takes, laid out at cell `col` after what `joining` says,
+/// as a terminal's row lays it out ([`RowBuilder`]): none if it's drawn in
+/// the cell before, as an accent is, or after a joiner, or if it's dropped,
+/// as it is with no cell before, or with that cell full. `joining` is kept
+/// up to date.
+fn cells_of(ch: char, col: usize, tabstop: usize, joining: &mut Joining) -> usize {
+    let width = match ch {
+        '\t' => tab_end(col, tabstop) - col,
         // `^` and a letter, or U+FFFD.
-        '\0'..='\x1f' | '\x7f' => (2, false),
-        ch if ch.is_control() => (1, false),
+        '\0'..='\x1f' | '\x7f' => 2,
+        ch if ch.is_control() => 1,
         ch => match clackatoo_term::char_width(ch) {
-            Some(width) if width > 0 && !*joins => (width, false),
-            // With no cell before, it's dropped, joiner or not.
-            _ => (0, col > 0 && ch == '\u{200d}'),
+            Some(width) if width > 0 && !joining.joins => width,
+            // Dropped, changing nothing: with no width at all, with no cell
+            // before, or with that cell as full as a cell can be.
+            None => return 0,
+            Some(_) if col == 0 || joining.extras >= MAX_EXTRA => return 0,
+            Some(_) => {
+                joining.extras += 1;
+                joining.joins = ch == '\u{200d}';
+                return 0;
+            }
         },
     };
-    *joins = joiner;
+    *joining = Joining::default();
     width
 }
 
@@ -173,11 +192,11 @@ fn lay(
     mut cells: usize,
     mut starts: Starts,
 ) -> Laid {
-    let mut joins = false;
+    let mut joining = Joining::default();
     for (offset, ch) in text[from..].char_indices() {
         let byte = from + offset;
         if byte >= plain
-            && !joins
+            && !joining.joins
             && cells == byte
             && matches!(starts, Starts::Plain(n) if n == byte)
         {
@@ -188,7 +207,7 @@ fn lay(
         }
         #[cfg(test)]
         COUNTED.with(|counted| counted.set(counted.get() + 1));
-        let width = cells_of(ch, cells, tabstop, &mut joins);
+        let width = cells_of(ch, cells, tabstop, &mut joining);
         if width > 0 {
             starts.push(cells, byte, ch == '\t');
             cells += width;
@@ -1035,6 +1054,8 @@ mod tests {
         "e\u{301}",
         "\u{301}",
         "\u{200d}",
+        // As many accents as a cell can hold: any more are dropped.
+        FULL,
         "👩\u{200d}💻",
         "\u{2764}\u{fe0f}",
         "\u{fe0f}",
@@ -1050,6 +1071,9 @@ mod tests {
         "_",
         "-",
     ];
+
+    /// [`MAX_EXTRA`] accents.
+    const FULL: &str = "\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}";
 
     /// Plain ASCII, of the kinds motions look for.
     const PLAIN: &[&str] = &["a", "bc", " ", "(", ")", "\"", "\\", "_", "-"];
@@ -1086,6 +1110,26 @@ mod tests {
         }
         let filled = builder.filled();
         (builder.finish(false), filled)
+    }
+
+    #[test]
+    fn what_a_cell_can_hold_no_more_of_is_dropped_as_a_terminals_row_drops_it() {
+        assert_eq!(FULL.chars().count(), MAX_EXTRA);
+        // A joiner past what the cell holds is dropped, so doesn't join 字.
+        let past = format!("a{FULL}\u{200d}字");
+        // A joiner as the last the cell holds still joins what's after it,
+        // though that's dropped too, as is the accent between.
+        let last = format!("a{}\u{200d}\u{301}x", &FULL[2..]);
+        for (text, cells) in [(past, 3), (last, 1)] {
+            let laid = Laid::new(text.clone(), 4);
+            assert_eq!(laid.cells(), cells, "{text:?}");
+            assert_eq!(as_a_row(&text, 4).1, cells, "{text:?}");
+            // Laid out again from a change after it, as afresh.
+            let (again, _) = laid.again(std::iter::once("y"), text.len(), 0, 4);
+            let typed = format!("{text}y");
+            again.assert_as(&Laid::new(typed.clone(), 4), &typed);
+            assert_eq!(again.cells(), as_a_row(&typed, 4).1, "{typed:?}");
+        }
     }
 
     #[test]
