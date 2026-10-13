@@ -46,6 +46,7 @@ mod board;
 mod browser;
 mod buffer;
 mod chat;
+pub mod corpus;
 mod devices;
 mod files;
 mod find;
@@ -81,6 +82,7 @@ pub use chat::{
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
 };
+pub use corpus::corpus;
 pub use devices::{Device, PairingAsk, PairingState};
 pub use files::{
     Entry, EntryKind, Expect, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
