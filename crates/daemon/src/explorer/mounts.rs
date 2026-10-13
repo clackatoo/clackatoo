@@ -41,7 +41,7 @@ impl Mount {
 
 /// The mount of what's called `name` in the directory `dir`, not
 /// following a link; or of `dir` itself if `name` is empty.
-fn mount(dir: BorrowedFd<'_>, name: &CStr) -> Result<Mount, Errno> {
+pub(super) fn mount(dir: BorrowedFd<'_>, name: &CStr) -> Result<Mount, Errno> {
     let mut flags = AtFlags::SYMLINK_NOFOLLOW;
     if name.is_empty() {
         flags |= AtFlags::EMPTY_PATH;
@@ -173,14 +173,14 @@ fn empty(dir: &OwnedFd, home: Mount, path: &Path) -> Result<(), FileOpError> {
 }
 
 /// Opens the directory called `name` in `dir`, never following a link.
-fn open_dir(dir: BorrowedFd<'_>, name: &CStr) -> Result<OwnedFd, Errno> {
+pub(super) fn open_dir(dir: BorrowedFd<'_>, name: &CStr) -> Result<OwnedFd, Errno> {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     rustix::fs::openat(dir, name, flags, Mode::empty())
 }
 
 /// What's in the directory `dir`, by name and kind, read whole before
 /// anything's done to it.
-fn entries(dir: &OwnedFd) -> Result<Vec<(CString, FileType)>, Errno> {
+pub(super) fn entries(dir: &OwnedFd) -> Result<Vec<(CString, FileType)>, Errno> {
     let mut found = Vec::new();
     for entry in Dir::read_from(dir)? {
         let entry = entry?;

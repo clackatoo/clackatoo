@@ -325,6 +325,14 @@ fn a_move_between_file_systems_that_cant_delete_everything_says_so_and_buffers_f
     );
 }
 
+/// Whether the file at `path` is as `source` says it was while `copying`
+/// copied it, to `copy`, asked through the directory it's in.
+fn unchanged(copying: &Copying, path: &Path, source: &DiskStamp, copy: &Path) -> bool {
+    let dir = File::open(path.parent().unwrap()).unwrap();
+    let name = c_name(path.file_name().unwrap()).unwrap();
+    copying.unchanged(dir.as_fd(), &name, source, copy)
+}
+
 #[test]
 fn a_file_changed_while_it_was_copied_is_kept_where_it_was() {
     let (_held, dir) = temp();
@@ -338,16 +346,16 @@ fn a_file_changed_while_it_was_copied_is_kept_where_it_was() {
         (copied.iter())
             .filter(|item| match &item.kind {
                 Kind::File { source, .. } => {
-                    !copying.unchanged(&item.path, source, &item.copy_in(&to))
+                    !unchanged(copying, &item.path, source, &item.copy_in(&to))
                 }
                 _ => false,
             })
             .map(|item| item.path.clone())
             .collect()
     };
-    assert_eq!(kept(&copied, &copying), [from.join("a.txt")]);
+    assert_eq!(kept(&copied.items, &copying), [from.join("a.txt")]);
     // Its copy is as it was made, which a buffer moved to it is told.
-    let copy = copied.iter().find_map(|item| match &item.kind {
+    let copy = copied.items.iter().find_map(|item| match &item.kind {
         Kind::File { copy, .. } if item.rel == Path::new("sub/b.txt") => Some(*copy),
         _ => None,
     });
@@ -363,15 +371,14 @@ fn a_file_changed_too_soon_for_its_time_to_tell_is_told_by_its_bytes() {
     let to = dir.join("to");
     let copying = Copying::now();
     let copied = copy_in_place(&from, &to, false).unwrap();
-    let source = copied
-        .iter()
+    let source = (copied.items.iter())
         .find_map(|item| match &item.kind {
             Kind::File { source, .. } if item.rel == Path::new("a.txt") => Some(*source),
             _ => None,
         })
         .unwrap();
     let a = from.join("a.txt");
-    assert!(copying.unchanged(&a, &source, &to.join("a.txt")));
+    assert!(unchanged(&copying, &a, &source, &to.join("a.txt")));
     // The same length, written back to the same time.
     let written = fs::metadata(&a).unwrap();
     fs::write(&a, "z").unwrap();
@@ -391,7 +398,7 @@ fn a_file_changed_too_soon_for_its_time_to_tell_is_told_by_its_bytes() {
         Some(source),
         "its time can't tell"
     );
-    assert!(!copying.unchanged(&a, &source, &to.join("a.txt")));
+    assert!(!unchanged(&copying, &a, &source, &to.join("a.txt")));
 }
 
 #[test]
@@ -524,6 +531,93 @@ fn a_file_just_written_moves_between_file_systems_whole() {
         fs::read_to_string(dir.join("moved.txt")).unwrap(),
         "just now"
     );
+}
+
+/// Moves `from` to `to` as between file systems, doing `between` after
+/// the copy, before the delete. Returns why it says it went wrong.
+fn move_across_swapping(from: &Path, to: &Path, between: impl FnOnce()) -> String {
+    let mut changed = Changed::default();
+    let outcome = move_across_and(from, to, false, &[], &mut changed, between);
+    outcome.unwrap_err().to_string()
+}
+
+#[test]
+fn a_folder_swapped_for_a_link_after_the_copy_is_never_reached_through() {
+    let (_held, dir) = temp();
+    let elsewhere = dir.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    // A folder inside what's moved: what's in it, now elsewhere, stays.
+    let from = tree(&dir);
+    let said = move_across_swapping(&from, &dir.join("to"), || {
+        fs::rename(from.join("sub"), elsewhere.join("sub")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("sub"), from.join("sub")).unwrap();
+    });
+    assert!(said.contains("is in both places"), "{said}");
+    assert!(
+        said.contains("sub isn't the folder that was copied"),
+        "{said}"
+    );
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("sub/b.txt")).unwrap(),
+        "b",
+        "never deleted through the link"
+    );
+    assert_eq!(names(&from), ["sub"], "the rest went, the link stays");
+    assert_eq!(fs::read_to_string(dir.join("to/sub/b.txt")).unwrap(), "b");
+    // What's moved itself: nothing in it, now elsewhere, goes.
+    let from = dir.join("from");
+    fs::remove_file(from.join("sub")).unwrap();
+    fs::remove_dir(&from).unwrap();
+    let from = tree(&dir);
+    let said = move_across_swapping(&from, &dir.join("again"), || {
+        fs::rename(&from, elsewhere.join("from")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("from"), &from).unwrap();
+    });
+    assert!(
+        said.contains("from isn't the folder that was copied"),
+        "{said}"
+    );
+    assert_eq!(names(&elsewhere.join("from")), ["a.txt", "link", "sub"]);
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("from/sub/b.txt")).unwrap(),
+        "b"
+    );
+    assert!(fs::symlink_metadata(&from).unwrap().is_symlink());
+    assert_eq!(names(&dir.join("again")), ["a.txt", "link", "sub"]);
+}
+
+#[test]
+fn what_is_moved_may_be_in_a_folder_reached_through_a_link() {
+    let (_held, dir) = temp();
+    let real = dir.join("real");
+    fs::create_dir(&real).unwrap();
+    tree(&real);
+    std::os::unix::fs::symlink(&real, dir.join("linked")).unwrap();
+    let mut changed = Changed::default();
+    let from = dir.join("linked/from");
+    move_across(&from, &dir.join("to"), false, &[], &mut changed).unwrap();
+    assert_eq!(names(&real), Vec::<String>::new());
+    assert_eq!(names(&dir.join("to")), ["a.txt", "link", "sub"]);
+}
+
+#[test]
+fn a_folder_swapped_for_another_after_the_copy_is_left_alone() {
+    let (_held, dir) = temp();
+    let from = tree(&dir);
+    let away = dir.join("away");
+    // Another folder, holding the very file copied, under another name.
+    let said = move_across_swapping(&from, &dir.join("to"), || {
+        fs::rename(from.join("sub"), &away).unwrap();
+        fs::create_dir(from.join("sub")).unwrap();
+        fs::hard_link(away.join("b.txt"), from.join("sub/b.txt")).unwrap();
+    });
+    assert!(
+        said.contains("sub isn't the folder that was copied"),
+        "{said}"
+    );
+    assert_eq!(names(&from), ["sub"]);
+    assert_eq!(names(&from.join("sub")), ["b.txt"]);
+    assert_eq!(names(&away), ["b.txt"]);
 }
 
 #[test]
