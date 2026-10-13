@@ -73,7 +73,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.148
       # Not `--all-targets`: that would build the daemon's fake language
       # server as a test harness too.
       - run: cargo nextest run --workspace --locked --profile ci

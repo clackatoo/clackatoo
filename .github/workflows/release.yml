@@ -7,11 +7,15 @@
 # and fontconfig from the system with dlopen, which a static musl program
 # can't do.
 #
-# The checksums of the builds are signed with minisign, with the release
-# key, a repository secret. Every clackatoo carries the key's public half
-# (crates/update/release-key.pub) and installs only what it signed.
-#
 # THIRD-PARTY-LICENSES, made by cargo-about, goes with them.
+#
+# The checksums of the builds are signed with minisign, with the release
+# key, a secret of the `release` environment, which only v* tags may use.
+# Signing is a job of its own, with nothing in it but GitHub's own
+# actions, Ubuntu's minisign and the key: no third-party tools, and no
+# token that can write to the repository. Every clackatoo carries the
+# key's public half (crates/update/release-key.pub) and installs only
+# what it signed. Publishing is the job after.
 #
 # No caches here: a release is built from scratch, so nothing a branch's
 # build left behind can get into it.
@@ -35,12 +39,17 @@ jobs:
         include:
           - arch: x86_64
             runner: ubuntu-24.04
+            # rustup-init 1.29.1, and its SHA-256 from static.rust-lang.org.
+            rustup_init: https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init
+            rustup_init_sha256: dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
             # quay.io/pypa/manylinux_2_28_x86_64, latest on 2026-10-10.
             image: quay.io/pypa/manylinux_2_28_x86_64@sha256:4131ddd7acb9c6c966af02fe7e71edc51e078c2d41f475966697676430bfa2ae
           - arch: aarch64
             # GitHub's own Arm runners, free for public repositories: a
             # native build, no emulation or cross-compiling.
             runner: ubuntu-24.04-arm
+            rustup_init: https://static.rust-lang.org/rustup/archive/1.29.1/aarch64-unknown-linux-gnu/rustup-init
+            rustup_init_sha256: 15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
             # quay.io/pypa/manylinux_2_28_aarch64, latest on 2026-10-10.
             image: quay.io/pypa/manylinux_2_28_aarch64@sha256:abd1230aa9e4058a74b89d27cd14ba18c0db036d7bfe6e6f219a29ea63c24eb6
     runs-on: ${{ matrix.runner }}
@@ -53,9 +62,16 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
+        # rustup-init, checked against the hash pinned above; rustup then
+        # checks the toolchain it downloads.
+        env:
+          RUSTUP_INIT: ${{ matrix.rustup_init }}
+          RUSTUP_INIT_SHA256: ${{ matrix.rustup_init_sha256 }}
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
+          curl --proto '=https' --tlsv1.2 -sSfo "$RUNNER_TEMP/rustup-init" "$RUSTUP_INIT"
+          echo "$RUSTUP_INIT_SHA256  $RUNNER_TEMP/rustup-init" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/rustup-init"
+          "$RUNNER_TEMP/rustup-init" -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Check the tag is the workspace's version
         run: |
@@ -103,8 +119,81 @@ jobs:
           path: dist/clackatoo-${{ matrix.arch }}-linux.gz
           if-no-files-found: error
 
+  licences:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-about@0.9.2
+      - name: Third-party licences
+        # The licences of every crate built in, which their licences ask
+        # to go with the builds. Fails on a licence .config/about.toml
+        # doesn't accept.
+        run: |
+          mkdir dist
+          cargo about generate --locked -c .config/about.toml .config/about.hbs -o dist/THIRD-PARTY-LICENSES
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: THIRD-PARTY-LICENSES
+          path: dist/THIRD-PARTY-LICENSES
+          if-no-files-found: error
+
+  sign:
+    needs: [build, licences]
+    runs-on: ubuntu-24.04
+    # Holds MINISIGN_KEY, and only v* tags may use it.
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: crates/update/release-key.pub
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum clackatoo-*-linux.gz THIRD-PARTY-LICENSES > SHA256SUMS
+          cat SHA256SUMS
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+      - name: Sign
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/release-key"
+          printf '%s\n' "$MINISIGN_KEY" > "$key"
+          # The trusted comment names the release, and clackatoo update
+          # refuses a signature that names another.
+          minisign -S -s "$key" -m dist/SHA256SUMS -t "clackatoo $GITHUB_REF_NAME" < /dev/null
+          rm -f "$key"
+          # Signed with the key every build trusts, or nothing is published.
+          minisign -V -p crates/update/release-key.pub -m dist/SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: |
+            dist/SHA256SUMS
+            dist/SHA256SUMS.minisig
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: sign
     runs-on: ubuntu-24.04
     permissions:
       # To make the release.
@@ -117,40 +206,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Install Rust
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal
-          rustup default "$RUST_VERSION"
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
-        with:
-          tool: cargo-about@0.9.2
-      - name: Third-party licences
-        # The licences of every crate built in, which their licences ask
-        # to go with the builds. Fails on a licence .config/about.toml
-        # doesn't accept.
-        run: cargo about generate --locked -c .config/about.toml .config/about.hbs -o dist/THIRD-PARTY-LICENSES
-      - name: Checksums
+      - name: Check the files are the ones signed
         working-directory: dist
-        run: |
-          sha256sum clackatoo-*-linux.gz THIRD-PARTY-LICENSES > SHA256SUMS
-          cat SHA256SUMS
-      - name: Sign
-        env:
-          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends minisign
-          umask 077
-          key="$RUNNER_TEMP/release-key"
-          printf '%s\n' "$MINISIGN_KEY" > "$key"
-          # minisign reads the key's password, if it has one, from its
-          # input.
-          printf '%s\n' "$MINISIGN_PASSWORD" \
-            | minisign -S -s "$key" -m dist/SHA256SUMS -t "clackatoo $GITHUB_REF_NAME"
-          rm -f "$key"
-          # Signed with the key every build trusts, or nothing is published.
-          minisign -V -p crates/update/release-key.pub -m dist/SHA256SUMS
+        run: sha256sum -c SHA256SUMS
       - name: Release notes
         run: |
           version="${GITHUB_REF_NAME#v}"
