@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026.10.4 (2026-10-13)
+
+### Features
+
+- subagents for every agent: background chats as a card, fan-out, profiles (19e87b6)
+- **explorer:** edit folders as text, oil.nvim's way, and :w to make the changes (6ea0c39)
+- **explorer:** linked worktrees' excludes, and git status for repositories inside another (933dcc8)
+
+### Fixes
+
+- **agents:** subagents never do more than the chat that started them, and nothing is closed that anyone still needs (e57a7bf)
+- **explorer:** the editable listing's review: planning always ends, steps expect what was listed, git's fsmonitor and diff helpers are off (b5a6d2b)
+
 ## 2026.10.3 (2026-10-13)
 
 ### Features
