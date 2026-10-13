@@ -290,6 +290,11 @@ fn move_across_and(
     changed: &mut Changed,
     between: impl FnOnce(),
 ) -> Result<(), FileOpError> {
+    // A mount point, or a folder bound from elsewhere, is never emptied, nor
+    // what's mounted in a folder: the kernel says another file system
+    // before it says busy, so they get this far.
+    not_a_mount(from)?;
+    no_mounts_in(from)?;
     no_specials_in(from)?;
     let copying = Copying::now();
     let copied = copy_in_place(from, to, replacing)?;
@@ -308,7 +313,9 @@ fn move_across_and(
             continue;
         }
         let stamps = copied.items.iter().find_map(|item| match &item.kind {
-            Kind::File { source, copy } if real(&item.path) == open.path => Some((*source, *copy)),
+            Kind::File { source, copy, .. } if real(&item.path) == open.path => {
+                Some((*source, *copy))
+            }
             _ => None,
         });
         // The file the buffer read, unchanged since, copied to a file
@@ -501,7 +508,8 @@ impl CopiedTree {
     /// the one above it without following links, from the directory held
     /// since the copy began, and checked to be the directory copied: by
     /// where it is on disk, and that no other file system is mounted
-    /// there. Only the directories down to where the walk is are held
+    /// there, nor at the top, against the directory it's in. Only the
+    /// directories down to where the walk is are held
     /// open, rather than each one the copy opened, so a wide tree never
     /// holds a descriptor for each of its directories.
     ///
@@ -510,6 +518,17 @@ impl CopiedTree {
     /// meanwhile is only unlinked from that directory, and a directory
     /// that isn't empty isn't removed.
     fn delete(&self, copying: &Copying, to: &Path) -> Vec<String> {
+        self.delete_within(mount(self.above.as_fd(), c""), copying, to)
+    }
+
+    /// As [`delete`](Self::delete), reaching nothing that isn't on the
+    /// mount `home`, which the directory what was copied is in is on.
+    fn delete_within(
+        &self,
+        home: Result<Mount, Errno>,
+        copying: &Copying,
+        to: &Path,
+    ) -> Vec<String> {
         let places: std::collections::HashMap<&Path, Place> = (self.items.iter())
             .filter_map(|item| match item.kind {
                 Kind::Dir(place) => Some((item.rel.as_path(), place)),
@@ -520,7 +539,7 @@ impl CopiedTree {
             tree: self,
             places,
             open: Vec::new(),
-            home: None,
+            home,
         };
         let mut kept = Vec::new();
         for item in self.items.iter().rev() {
@@ -552,8 +571,9 @@ struct Walk<'a> {
     /// The directories open, each in the one before it, by where each is
     /// in what was copied.
     open: Vec<(PathBuf, OwnedFd)>,
-    /// The mount the top of what was copied is on, once it's opened.
-    home: Option<Mount>,
+    /// The mount the directory what was copied is in is on, which every
+    /// directory reached must be on too, the top included.
+    home: Result<Mount, Errno>,
 }
 
 impl Walk<'_> {
@@ -599,16 +619,11 @@ impl Walk<'_> {
             if copied != Some(Place::of(&rustix::fs::fstat(&opened)?)) {
                 return Err(not_copied());
             }
-            let here = mount(opened.as_fd(), c"")?;
-            match self.home {
-                None => self.home = Some(here),
-                Some(home) if home.crossed_by(here) => {
-                    return Err(io::Error::other(format!(
-                        "another file system is mounted at {}",
-                        named.display()
-                    )));
-                }
-                Some(_) => {}
+            if self.home?.crossed_by(mount(opened.as_fd(), c"")?) {
+                return Err(io::Error::other(format!(
+                    "another file system is mounted at {}",
+                    named.display()
+                )));
             }
             self.open.push((next, opened));
         }
@@ -637,7 +652,9 @@ fn delete_one(
             }
             Ok(rustix::fs::unlinkat(dir, name, AtFlags::REMOVEDIR)?)
         }
-        Kind::File { source, .. } if copying.unchanged(dir, name, source, &item.copy_in(to)) => {
+        Kind::File { source, ctime, .. }
+            if copying.unchanged(dir, name, (source, *ctime), &item.copy_in(to)) =>
+        {
             Ok(rustix::fs::unlinkat(dir, name, AtFlags::empty())?)
         }
         Kind::Link(target) if read_link(dir, name).ok().as_ref() == Some(target) => {
@@ -677,9 +694,28 @@ enum Kind {
     /// made.
     File {
         source: DiskStamp,
+        ctime: Ctime,
         copy: DiskStamp,
     },
     Link(PathBuf),
+}
+
+/// When a file's inode last changed: what a writer that puts the file's
+/// time back after writing it, as `rsync -t`, `touch -r` and tar do,
+/// can't put back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ctime {
+    seconds: i64,
+    nanoseconds: i64,
+}
+
+impl Ctime {
+    fn of(meta: &fs::Metadata) -> Self {
+        Self {
+            seconds: meta.ctime(),
+            nanoseconds: meta.ctime_nsec(),
+        }
+    }
 }
 
 /// Where a directory is on disk, which tells it from any other, even one
@@ -763,13 +799,14 @@ fn copy_tree(
                     from.path.display()
                 )));
             }
-            let before = DiskStamp::of(&meta);
+            let before = (DiskStamp::of(&meta), Ctime::of(&meta));
             let mut copy = OpenOptions::new().write(true).create_new(true).open(to)?;
             *made |= top;
             io::copy(&mut source, &mut copy)?;
             copy.set_permissions(meta.permissions())?;
             // Read while it was being written: what was copied may be neither.
-            if DiskStamp::of(&source.metadata()?) != before {
+            let after = source.metadata()?;
+            if (DiskStamp::of(&after), Ctime::of(&after)) != before {
                 return Err(io::Error::other(format!(
                     "{} changed while it was copied",
                     from.path.display()
@@ -779,7 +816,8 @@ fn copy_tree(
                 path: from.path.to_owned(),
                 rel: rel.to_owned(),
                 kind: Kind::File {
-                    source: before,
+                    source: before.0,
+                    ctime: before.1,
                     copy: DiskStamp::of(&copy.metadata()?),
                 },
             });
@@ -820,28 +858,36 @@ impl Copying {
     }
 
     /// Whether the file called `name` in the directory `dir` is still as
-    /// `source` says it was while it was copied, to `copy`: by its stamp,
-    /// and, if it was written too close to the copy for its time to tell,
-    /// by its bytes too. A link is never followed to it.
-    fn unchanged(&self, dir: BorrowedFd<'_>, name: &CStr, source: &DiskStamp, copy: &Path) -> bool {
-        let stamp = |flags: OFlags| -> io::Result<(File, DiskStamp)> {
+    /// `source` and `ctime` say it was while it was copied, to `copy`: by
+    /// its stamp and when its inode last changed, and, if it was written
+    /// too close to the copy for its time to tell, by its bytes too. A
+    /// link is never followed to it.
+    fn unchanged(
+        &self,
+        dir: BorrowedFd<'_>,
+        name: &CStr,
+        (source, ctime): (&DiskStamp, Ctime),
+        copy: &Path,
+    ) -> bool {
+        let stamp = |flags: OFlags| -> io::Result<(File, (DiskStamp, Ctime))> {
             let flags = flags | OFlags::NOFOLLOW | OFlags::CLOEXEC;
             let file = File::from(rustix::fs::openat(dir, name, flags, Mode::empty())?);
             let meta = file.metadata()?;
             if !meta.is_file() {
                 return Err(io::Error::other("not a file"));
             }
-            Ok((file, DiskStamp::of(&meta)))
+            Ok((file, (DiskStamp::of(&meta), Ctime::of(&meta))))
         };
+        let as_copied = (*source, ctime);
         // Only looked at, not opened to read, which a device may notice.
-        if !stamp(OFlags::PATH).is_ok_and(|(_, now)| now == *source) {
+        if !stamp(OFlags::PATH).is_ok_and(|(_, now)| now == as_copied) {
             return false;
         }
         if source.written() + RACY < self.started {
             return true;
         }
         match stamp(OFlags::RDONLY | OFlags::NONBLOCK) {
-            Ok((file, now)) if now == *source => same_bytes(file, copy).unwrap_or(false),
+            Ok((file, now)) if now == as_copied => same_bytes(file, copy).unwrap_or(false),
             _ => false,
         }
     }

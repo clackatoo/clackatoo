@@ -325,12 +325,28 @@ fn a_move_between_file_systems_that_cant_delete_everything_says_so_and_buffers_f
     );
 }
 
-/// Whether the file at `path` is as `source` says it was while `copying`
-/// copied it, to `copy`, asked through the directory it's in.
-fn unchanged(copying: &Copying, path: &Path, source: &DiskStamp, copy: &Path) -> bool {
+/// Whether the file at `path` is as `source` and `ctime` say it was while
+/// `copying` copied it, to `copy`, asked through the directory it's in.
+fn unchanged(copying: &Copying, path: &Path, source: (&DiskStamp, Ctime), copy: &Path) -> bool {
     let dir = File::open(path.parent().unwrap()).unwrap();
     let name = c_name(path.file_name().unwrap()).unwrap();
     copying.unchanged(dir.as_fd(), &name, source, copy)
+}
+
+/// Sets the time the file at `path` was written to `meta`'s, as `touch -r`
+/// does.
+fn put_time_back(path: &Path, meta: &fs::Metadata) {
+    let times = rustix::fs::Timestamps {
+        last_access: rustix::fs::Timespec {
+            tv_sec: meta.atime(),
+            tv_nsec: meta.atime_nsec(),
+        },
+        last_modification: rustix::fs::Timespec {
+            tv_sec: meta.mtime(),
+            tv_nsec: meta.mtime_nsec(),
+        },
+    };
+    rustix::fs::utimensat(CWD, path, &times, rustix::fs::AtFlags::empty()).unwrap();
 }
 
 #[test]
@@ -345,8 +361,8 @@ fn a_file_changed_while_it_was_copied_is_kept_where_it_was() {
     let kept = |copied: &[Copied], copying: &Copying| -> Vec<PathBuf> {
         (copied.iter())
             .filter(|item| match &item.kind {
-                Kind::File { source, .. } => {
-                    !unchanged(copying, &item.path, source, &item.copy_in(&to))
+                Kind::File { source, ctime, .. } => {
+                    !unchanged(copying, &item.path, (source, *ctime), &item.copy_in(&to))
                 }
                 _ => false,
             })
@@ -371,34 +387,61 @@ fn a_file_changed_too_soon_for_its_time_to_tell_is_told_by_its_bytes() {
     let to = dir.join("to");
     let copying = Copying::now();
     let copied = copy_in_place(&from, &to, false).unwrap();
-    let source = (copied.items.iter())
+    let (source, ctime) = (copied.items.iter())
         .find_map(|item| match &item.kind {
-            Kind::File { source, .. } if item.rel == Path::new("a.txt") => Some(*source),
+            Kind::File { source, ctime, .. } if item.rel == Path::new("a.txt") => {
+                Some((*source, *ctime))
+            }
             _ => None,
         })
         .unwrap();
     let a = from.join("a.txt");
-    assert!(unchanged(&copying, &a, &source, &to.join("a.txt")));
+    let copy = to.join("a.txt");
+    assert!(unchanged(&copying, &a, (&source, ctime), &copy));
     // The same length, written back to the same time.
     let written = fs::metadata(&a).unwrap();
     fs::write(&a, "z").unwrap();
-    let times = rustix::fs::Timestamps {
-        last_access: rustix::fs::Timespec {
-            tv_sec: written.atime(),
-            tv_nsec: written.atime_nsec(),
-        },
-        last_modification: rustix::fs::Timespec {
-            tv_sec: written.mtime(),
-            tv_nsec: written.mtime_nsec(),
-        },
-    };
-    rustix::fs::utimensat(CWD, &a, &times, rustix::fs::AtFlags::empty()).unwrap();
+    put_time_back(&a, &written);
     assert_eq!(
         DiskStamp::now(&a).unwrap(),
         Some(source),
         "its time can't tell"
     );
-    assert!(!unchanged(&copying, &a, &source, &to.join("a.txt")));
+    assert!(!unchanged(&copying, &a, (&source, ctime), &copy));
+    // Nor, on a file system whose clock ticks too seldom, when its inode
+    // changed: its bytes still tell.
+    let ctime = Ctime::of(&fs::metadata(&a).unwrap());
+    assert!(!unchanged(&copying, &a, (&source, ctime), &copy));
+}
+
+/// A file written long ago, written again after it was copied and given
+/// its old time back, as `rsync -t` or `touch -r` would, is told by when
+/// its inode changed, which can't be given back.
+#[test]
+fn a_file_given_its_old_time_back_after_the_copy_is_kept() {
+    let (_held, dir) = temp();
+    let from = tree(&dir);
+    let a = from.join("a.txt");
+    let mut old = fs::metadata(&a).unwrap();
+    let long_ago = rustix::fs::Timespec {
+        tv_sec: old.mtime() - 3600,
+        tv_nsec: 0,
+    };
+    let times = rustix::fs::Timestamps {
+        last_access: long_ago,
+        last_modification: long_ago,
+    };
+    rustix::fs::utimensat(CWD, &a, &times, rustix::fs::AtFlags::empty()).unwrap();
+    old = fs::metadata(&a).unwrap();
+    let said = move_across_swapping(&from, &dir.join("to"), || {
+        // Past the coarsest clock a file system keeps inode times by.
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&a, "b").unwrap();
+        put_time_back(&a, &old);
+    });
+    assert!(said.contains("it changed while it was copied"), "{said}");
+    assert_eq!(fs::read_to_string(&a).unwrap(), "b", "kept");
+    assert_eq!(fs::read_to_string(dir.join("to/a.txt")).unwrap(), "a");
 }
 
 #[test]
@@ -584,6 +627,32 @@ fn a_folder_swapped_for_a_link_after_the_copy_is_never_reached_through() {
     );
     assert!(fs::symlink_metadata(&from).unwrap().is_symlink());
     assert_eq!(names(&dir.join("again")), ["a.txt", "link", "sub"]);
+}
+
+#[test]
+fn a_move_between_file_systems_never_empties_a_mount_point_nor_reaches_off_its_mount() {
+    let (_held, dir) = temp();
+    // The kernel says another file system before it says busy: a mount
+    // point gets as far as a move between file systems, which refuses it
+    // before anything's copied.
+    let to = dir.join("proc");
+    let mut changed = Changed::default();
+    let refused = move_across(Path::new("/proc"), &to, false, &[], &mut changed);
+    let said = refused.unwrap_err().to_string();
+    assert!(said.contains("mounted at /proc"), "{said}");
+    assert!(fs::symlink_metadata(&to).is_err(), "nothing copied");
+    // What was copied, on another mount than the folder it's in, as a
+    // mount point made since would be: nothing in it is deleted.
+    let from = tree(&dir);
+    let copy = dir.join("copy");
+    let copying = Copying::now();
+    let copied = copy_in_place(&from, &copy, false).unwrap();
+    let home = mount(copied.above.as_fd(), c"").unwrap().another();
+    let kept = copied.delete_within(Ok(home), &copying, &copy);
+    let mounted = |why: &String| why.contains("another file system is mounted at from");
+    assert!(kept.iter().any(mounted), "{kept:?}");
+    assert_eq!(names(&from), ["a.txt", "link", "sub"]);
+    assert_eq!(names(&from.join("sub")), ["b.txt"]);
 }
 
 #[test]

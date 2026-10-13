@@ -37,6 +37,16 @@ impl Mount {
     pub(super) fn crossed_by(self, inside: Self) -> bool {
         inside.root || inside.id != self.id
     }
+
+    /// For tests: a mount other than this one, for what's on this one to
+    /// seem mounted on it.
+    #[cfg(test)]
+    pub(super) fn another(self) -> Self {
+        Self {
+            id: self.id.wrapping_add(1),
+            root: false,
+        }
+    }
 }
 
 /// The mount of what's called `name` in the directory `dir`, not
