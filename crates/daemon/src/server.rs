@@ -91,6 +91,10 @@ const READ_BUFFER_LEN: usize = 64 * 1024;
 /// freezing everything else.
 const OUTPUT_BUDGET: usize = 1024 * 1024;
 
+/// The most a client on another machine may have waiting to be sent, past
+/// what its streams have taken, before it's dropped.
+const MOST_UNSENT: usize = 8 * 1024 * 1024;
+
 /// How long a terminal's output must pause before its scrollback is
 /// compacted: long enough that a flood never stops for it, short enough
 /// that the memory comes back soon after.
@@ -1982,6 +1986,17 @@ impl Daemon {
                 return;
             }
         };
+        // A client on another machine that has stopped reading, as one gone
+        // without a word has, would hold ever more: it starts again on a
+        // new connection, from a snapshot.
+        if matches!(client.link, Link::Quic(_)) && client.outgoing.len() > MOST_UNSENT {
+            log::warn!(
+                "dropping a client on another machine {} B behind",
+                client.outgoing.len()
+            );
+            self.drop_client_saying(token, "the window fell too far behind");
+            return;
+        }
         let flushed = client.outgoing.is_empty();
         // Writes to the clipboard wait for a client to catch up.
         if flushed && client.clipboard.any() {
@@ -2004,6 +2019,12 @@ impl Daemon {
     /// Forgets a client. Dropping its stream closes the socket, which also
     /// removes it from epoll.
     fn drop_client(&mut self, token: Token) {
+        self.drop_client_saying(token, "");
+    }
+
+    /// Forgets a client, as [`drop_client`](Self::drop_client) does,
+    /// telling one over QUIC `why`.
+    fn drop_client_saying(&mut self, token: Token, why: &str) {
         if let Some(Source::Client(client)) = self.sources.try_remove(token.0) {
             self.forget_viewer(token, &client);
             self.forget_clipboard_asks(token, None);
@@ -2020,7 +2041,7 @@ impl Daemon {
             if let Link::Quic(handle) = client.link
                 && let Some(quic) = self.quic.as_mut()
             {
-                quic.close(handle, Instant::now(), "");
+                quic.close(handle, Instant::now(), why);
             }
         }
     }
@@ -2250,6 +2271,13 @@ impl Daemon {
                     QuicEvent::Readable(token) => self.serve_client(token),
                     QuicEvent::Writable(token) => self.flush_client(token),
                     QuicEvent::Closed(token) => self.drop_client(token),
+                    // Gone quiet, it may be gone: programs' questions about
+                    // the clipboard go to someone who can answer.
+                    QuicEvent::Silent(token) => {
+                        for slot in self.terminals.values_mut() {
+                            slot.typist.take_if(|typist| *typist == token);
+                        }
+                    }
                 }
             }
         }

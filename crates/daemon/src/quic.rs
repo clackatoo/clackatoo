@@ -47,13 +47,13 @@ pub(crate) use server::{QuicEvent, QuicServer, Received};
 const SERVER_NAME: &str = "clackatoo";
 
 /// How long a connection may go without hearing from the other end before
-/// it ends: long enough to ride out a network that goes away for a while,
-/// a laptop changing networks, or a short sleep, and pick up where it left
-/// off, as mosh does. The client's keep-alives stop an idle terminal
-/// reaching it. A client that's gone for good, without a word, costs the
-/// daemon little meanwhile: its views wait for acknowledgements that never
-/// come, so nothing is sent.
-const IDLE_TIMEOUT: Duration = Duration::from_hours(1);
+/// it ends, on either side. Keep-alives every [`KEEP_ALIVE`] stop a link
+/// that's merely idle reaching it, and an outage shorter than it is ridden
+/// out without a reconnect. Past it, a client gone without a word stops
+/// costing the daemon anything, and a window connects again, from fresh
+/// snapshots: what it typed into editors meanwhile isn't lost (see
+/// [`BufferSnapshot::applied`](clackatoo_protocol::BufferSnapshot)).
+const IDLE_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// How often a client lets the daemon know it's there when nothing else is
 /// sent: often enough to keep a home router's mapping for UDP open, which

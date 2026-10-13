@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use clackatoo_protocol::frame::FrameDecoder;
@@ -33,7 +33,14 @@ pub(crate) enum QuicEvent {
     Writable(Token),
     /// The client's connection closed.
     Closed(Token),
+    /// Nothing has been heard from the client for a while: it may be
+    /// gone, so it shouldn't be asked anything that waits on it.
+    Silent(Token),
 }
+
+/// How long a client may go unheard before it counts as
+/// [`Silent`](QuicEvent::Silent): twice the keep-alive's interval.
+const CLIENT_SILENT: Duration = Duration::from_secs(20);
 
 /// What reading a client's stream found.
 #[derive(Debug, PartialEq, Eq)]
@@ -59,6 +66,9 @@ pub(crate) struct QuicServer {
     touched: Vec<ConnectionHandle>,
     /// Packets the endpoint answered without a connection, waiting to go.
     answers: Vec<(SocketAddr, Vec<u8>)>,
+    /// The clients that have gone [`Silent`](QuicEvent::Silent) since the
+    /// last events.
+    silenced: Vec<Token>,
     buffer: Vec<u8>,
 }
 
@@ -76,6 +86,16 @@ struct Remote {
     stats_due: Instant,
     /// Whether its path over UDP is losing packets.
     loss: Loss,
+    /// The address QUIC has checked the client is at: the carrier it
+    /// started on, and then wherever a path validation was answered
+    /// from. Nothing goes twice anywhere else, as QUIC limits what it
+    /// sends to an address it hasn't checked, and so must we.
+    validated: Option<SocketAddr>,
+    /// When the client was last heard from.
+    heard: Instant,
+    /// Whether it has been said to be [`Silent`](QuicEvent::Silent),
+    /// since last heard.
+    silent: bool,
 }
 
 /// Setting up the endpoint failed.
@@ -116,6 +136,7 @@ impl QuicServer {
             probe_key,
             touched: Vec::new(),
             answers: Vec::new(),
+            silenced: Vec::new(),
             buffer: Vec::new(),
         })
     }
@@ -146,7 +167,15 @@ impl QuicServer {
         match event {
             Some(DatagramEvent::ConnectionEvent(handle, event)) => {
                 if let Some(remote) = self.connections.get_mut(&handle) {
+                    let answered = remote.connection.stats().frame_rx.path_response;
                     remote.connection.handle_event(event);
+                    if remote.connection.stats().frame_rx.path_response > answered
+                        && remote.connection.remote_address() == from
+                    {
+                        remote.validated = Some(from);
+                    }
+                    remote.heard = now;
+                    remote.silent = false;
                     self.touched.push(handle);
                 }
             }
@@ -169,6 +198,9 @@ impl QuicServer {
                                 address: from,
                                 stats_due: now + STATS_EVERY,
                                 loss: Loss::new(now),
+                                validated: Some(from),
+                                heard: now,
+                                silent: false,
                             },
                         );
                         self.touched.push(handle);
@@ -199,7 +231,10 @@ impl QuicServer {
         self.connections
             .values_mut()
             .flat_map(|remote| {
-                (remote.connection.poll_timeout().into_iter()).chain([remote.stats_due])
+                let silent = (!remote.silent).then_some(remote.heard + CLIENT_SILENT);
+                (remote.connection.poll_timeout().into_iter())
+                    .chain([remote.stats_due])
+                    .chain(silent)
             })
             .min()
     }
@@ -215,6 +250,14 @@ impl QuicServer {
                 remote.connection.handle_timeout(now);
                 self.touched.push(handle);
             }
+            if !remote.silent && now >= remote.heard + CLIENT_SILENT {
+                remote.silent = true;
+                log::info!(
+                    "QUIC connection {} has been silent for {CLIENT_SILENT:?}",
+                    handle.0
+                );
+                self.silenced.extend(remote.client);
+            }
             if now >= remote.stats_due {
                 remote.stats_due = now + STATS_EVERY;
                 log::info!(
@@ -229,6 +272,7 @@ impl QuicServer {
 
     /// Collects what the event loop must act on, since the last call.
     pub(crate) fn events(&mut self, events: &mut Vec<QuicEvent>) {
+        events.extend(self.silenced.drain(..).map(QuicEvent::Silent));
         self.touched.sort_unstable();
         self.touched.dedup();
         for handle in std::mem::take(&mut self.touched) {
@@ -405,6 +449,7 @@ impl QuicServer {
                 send(transmit.destination, packet);
                 // A carrier loses nothing.
                 if carrier_id(transmit.destination).is_none()
+                    && remote.validated == Some(transmit.destination)
                     && remote.loss.twice(packet.len(), now)
                 {
                     send(transmit.destination, packet);
@@ -453,8 +498,6 @@ impl Remote {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use quinn_proto::ClientConfig;
 
     use super::super::{CarrierId, carrier_address, client};
@@ -568,6 +611,52 @@ mod tests {
         let remote = &pair.server.connections[&handle];
         assert_eq!(remote.connection.remote_address(), new);
         assert!(!pair.events.contains(&QuicEvent::Closed(Token(7))));
+    }
+
+    #[test]
+    fn a_client_unheard_for_a_while_is_silent_and_after_longer_gone() {
+        let start = Instant::now();
+        let mut pair = Pair::connect(start);
+        let (&handle, _) = pair.server.connections.iter().next().unwrap();
+        pair.server.set_client(handle, Token(7));
+        pair.server.handle_timeouts(start + CLIENT_SILENT / 2);
+        pair.server.events(&mut pair.events);
+        assert!(!pair.events.contains(&QuicEvent::Silent(Token(7))));
+        pair.server.handle_timeouts(start + CLIENT_SILENT);
+        pair.server.events(&mut pair.events);
+        assert!(pair.events.contains(&QuicEvent::Silent(Token(7))), "once");
+        // Gone for good after the idle timeout, not an hour.
+        let gone = start + super::super::IDLE_TIMEOUT + Duration::from_secs(5);
+        pair.server.handle_timeouts(gone);
+        pair.server.events(&mut pair.events);
+        assert!(pair.events.contains(&QuicEvent::Closed(Token(7))));
+    }
+
+    #[test]
+    fn small_packets_go_twice_only_where_the_client_answered_a_path_check() {
+        let start = Instant::now();
+        let mut pair = Pair::connect(start);
+        let (&handle, _) = pair.server.connections.iter().next().unwrap();
+        assert_eq!(
+            pair.server.connections[&handle].validated,
+            Some(pair.carrier)
+        );
+        // It moves: the new address is checked before anything goes twice.
+        let moved: SocketAddr = "192.0.2.7:4000".parse().unwrap();
+        pair.carrier = moved;
+        pair.connection.ping();
+        let mut buffer = Vec::new();
+        let transmit = pair
+            .connection
+            .poll_transmit(start, 1, &mut buffer)
+            .unwrap();
+        pair.server.receive(start, moved, &buffer[..transmit.size]);
+        pair.server.events(&mut pair.events);
+        let remote = &pair.server.connections[&handle];
+        assert_eq!(remote.connection.remote_address(), moved);
+        assert_ne!(remote.validated, Some(moved), "not until it answers");
+        pair.pump(start + Duration::from_millis(10));
+        assert_eq!(pair.server.connections[&handle].validated, Some(moved));
     }
 
     #[test]

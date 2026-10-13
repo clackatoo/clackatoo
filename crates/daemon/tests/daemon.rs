@@ -1186,6 +1186,45 @@ fn quic_clients_come_and_go() {
 }
 
 #[test]
+fn a_client_on_another_machine_that_stops_reading_is_dropped_before_it_holds_too_much() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(
+        dir.join("notes.txt"),
+        "x
+",
+    )
+    .unwrap();
+    let mut local = daemon.client();
+    let buffer = open_attached(&mut local, dir, "notes.txt");
+    let mut far = daemon.quic_client();
+    attach_buffer(&mut far, buffer);
+    // The far client reads no more; a window here edits, 12 MB in all.
+    let chunk = "y".repeat(64 * 1024);
+    let (mut len, mut version) = (2, 0);
+    for seq in 0..192 {
+        send_change(&mut local, buffer, seq, insert(len, 0, &chunk, version));
+        version = loop {
+            if let BufferUpdate::Acked { version, .. } = next_buffer_update(&mut local) {
+                break version;
+            }
+        };
+        len += chunk.len();
+    }
+    // It hears what was on its way, and then why it was dropped.
+    far.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let why = loop {
+        match far.next_event() {
+            Ok(_) => {}
+            Err(ClientError::Lost(why)) => break why,
+            Err(err) => panic!("{err}"),
+        }
+    };
+    assert_eq!(why, "the window fell too far behind");
+    local.list_terminals().expect("the daemon carries on");
+}
+
+#[test]
 fn only_the_socket_can_carry_quic() {
     let daemon = TestDaemon::start();
     let mut client = daemon.quic_client();
