@@ -336,6 +336,7 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
                 options::Value::Number(value) => Value::Integer(value.into()),
                 options::Value::List(numbers) => Value::Table(lua.create_sequence_from(numbers)?),
                 options::Value::Choice(word) => Value::String(lua.create_string(word)?),
+                options::Value::Text(text) => Value::String(lua.create_string(text)?),
             })
         })?,
     )?;
@@ -358,7 +359,8 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
 
 /// `value`, from Lua, as a value for `option`: true or false, or a whole
 /// number. A list takes a table of numbers, a string as `:set` takes one
-/// (`"80,120"`), or one number alone; a choice, one of its words.
+/// (`"80,120"`), or one number alone; a choice, one of its words; text, a
+/// string.
 fn option_value(option: &options::Info, value: &Value) -> Result<options::Value, String> {
     // Luau passes a whole number as an integer; anything else, such as
     // 2.5, isn't one.
@@ -367,9 +369,9 @@ fn option_value(option: &options::Info, value: &Value) -> Result<options::Value,
         _ => None,
     };
     let list = matches!(option.kind, options::Kind::List { .. });
-    let choice = matches!(option.kind, options::Kind::Choice(_));
+    let named = matches!(option.kind, options::Kind::Choice(_) | options::Kind::Text);
     let value = match value {
-        Value::String(text) if choice => return option.parse(&text.to_string_lossy()),
+        Value::String(text) if named => return option.parse(&text.to_string_lossy()),
         Value::Boolean(value) => Some(options::Value::Bool(*value)),
         Value::Integer(_) if list => number(value).map(|number| options::Value::List(vec![number])),
         Value::Integer(_) => number(value).map(options::Value::Number),

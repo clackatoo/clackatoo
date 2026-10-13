@@ -16,6 +16,8 @@ use crate::options::{CompleteAccept, Options};
 use crate::pane::Selection;
 use crate::render::{HighlightKind, Ink};
 
+mod wrapped;
+
 struct Setup {
     editor: Editor,
     copy: BufferCopy,
@@ -64,7 +66,7 @@ impl Setup {
     /// The first line shown, and the cursor's line and column.
     fn view(&self) -> (u64, u64, usize) {
         let (line, col) = self.cursor();
-        (self.editor.top, line, col)
+        (self.editor.top.line, line, col)
     }
 
     /// The highlights of `kind`, as lines and columns.
@@ -678,7 +680,10 @@ fn cursorline_and_colorcolumn_mark_the_view() {
 
     // A column moves with the view, as it scrolls sideways.
     let mut setup = Setup::new(&"a".repeat(60));
-    setup.set(|options| options.colorcolumn = vec![30]);
+    setup.set(|options| {
+        options.colorcolumn = vec![30];
+        options.wrap = false;
+    });
     setup.keys("$");
     assert_eq!(setup.editor.left, 24);
     assert_eq!(setup.highlighted(HighlightKind::ColorColumn), [(0, 9..10)]);

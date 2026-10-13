@@ -546,6 +546,8 @@ mod tests {
             client.opt.nu = false
             client.opt.numberwidth = client.opt.numberwidth + 1
             if client.opt.number == false then client.opt.rnu = false end
+            client.opt.sbr = "↪ "
+            client.opt.showbreak = client.opt.showbreak .. ">"
             client.keys.map("n", "k", function()
                 client.opt.number = client.opt.numberwidth == 9
             end)
@@ -562,6 +564,8 @@ mod tests {
                 set("number", Value::Bool(false)),
                 set("numberwidth", Value::Number(5)),
                 set("relativenumber", Value::Bool(false)),
+                set("showbreak", Value::Text("↪ ".into())),
+                set("showbreak", Value::Text("↪ >".into())),
             ]
         );
         // What the window sets, Lua reads.
@@ -572,10 +576,14 @@ mod tests {
         assert_eq!(bound(&mut lua, 1, 1).1, [set("number", Value::Bool(true))]);
         for (config, wanted) in [
             (
-                "client.opt.wrap = true",
-                "init.lua:1: there's no option called `wrap`",
+                "client.opt.spell = true",
+                "init.lua:1: there's no option called `spell`",
             ),
             ("client.opt.nu = 1", "init.lua:1: number is true or false"),
+            (
+                "client.opt.sbr = 1",
+                "init.lua:1: showbreak is text, without control characters",
+            ),
             (
                 "client.opt.nuw = 2.5",
                 "init.lua:1: numberwidth is a whole number from 1 to 20",

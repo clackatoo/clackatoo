@@ -1097,6 +1097,145 @@ fn renders_an_editor_pane() {
     assert_eq!(at(3, column), background, "no column past the end");
 }
 
+#[test]
+// It shows everything an editor draws on a line that wraps.
+#[allow(clippy::too_many_lines)]
+fn renders_an_editor_pane_with_a_wrapped_line() {
+    use clackatoo_protocol::{BufferId, BufferSnapshot, BufferUpdate};
+    use clackatoo_term::Underline;
+    use clackatoo_text::Sign;
+
+    use crate::editor::{BufferCopy, Editor};
+
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let text = "fn main() {\n    let greeting = \"hello there, wide world\";\n}\n";
+    let mut copy = BufferCopy::new(BufferId(1));
+    copy.update(BufferUpdate::Snapshot(BufferSnapshot {
+        path: "/src/main.rs".into(),
+        text: text.into(),
+        version: 0,
+        modified: false,
+    }));
+    // A language server's warning, under "world", on the row the line
+    // goes on over.
+    let world = text.find("world").unwrap();
+    copy.update(BufferUpdate::Diagnostics {
+        version: 0,
+        diagnostics: vec![clackatoo_protocol::Diagnostic {
+            start: world,
+            end: world + 5,
+            severity: clackatoo_protocol::Severity::Warning,
+            message: "too big".into(),
+            source: None,
+            code: None,
+        }],
+    });
+    // The second line changed since git's index.
+    let hunks = vec![clackatoo_protocol::Hunk {
+        start: 12,
+        end: text.find('}').unwrap() - 1,
+        base: "    let greeting = 1;\n".into(),
+    }];
+    copy.update(BufferUpdate::Hunks { version: 0, hunks });
+    let (cols, rows) = (30u16, 6u16);
+    let options = crate::options::Options {
+        colorcolumn: vec![10],
+        showbreak: "↪".into(),
+        ..crate::options::Options::default()
+    };
+    let mut editor = Editor::new(BufferId(1), &options);
+    editor.resize(Size::new(cols, rows).unwrap());
+    editor.go_to(1, 0, &copy);
+    editor.settle(&copy);
+    let (lines, cursor) = editor.scene();
+    let mut fonts = fonts(2.0);
+    let padding = 4;
+    let size = [
+        u32::from(cols) * fonts.cell.width + 2 * padding,
+        u32::from(rows) * fonts.cell.height + 2 * padding,
+    ];
+    #[allow(clippy::cast_precision_loss)]
+    let scene = Scene {
+        origin: [padding as f32; 2],
+        size: [
+            (size[0] - 2 * padding) as f32,
+            (size[1] - 2 * padding) as f32,
+        ],
+        rows: &lines,
+        cursor,
+        normal_mode: true,
+        highlights: &editor.highlights(),
+    };
+    let picture = Picture {
+        scenes: &[scene],
+        fills: &[],
+        over: &[],
+        texts: &[],
+        glyphs: &[],
+        over_glyphs: &[],
+        transparent: false,
+    };
+    let pixels = draw(&gpu, size, &picture, &mut fonts);
+    save("editor-wrapped", size, &pixels);
+    // 25 cells for text, right of the sign and the numbers. The line goes
+    // on over two more rows, indented as it is, after `showbreak`, with
+    // no sign or number, and what's wrong written after its last.
+    let texts: Vec<String> = lines.iter().map(|row| row.text()).collect();
+    assert_eq!(
+        texts,
+        [
+            "   1 fn main() {",
+            "▎  2     let greeting =",
+            "         ↪\"hello there, wide",
+            "         ↪world\";  ■ too big",
+            "   1 }",
+            "~",
+        ]
+    );
+    let style = |row: usize, col: usize| *lines[row].style(lines[row].cells()[col]);
+    assert_eq!(style(1, 0).fg, crate::colors::sign(Sign::Changed).1.fg);
+    let warning = crate::colors::diagnostic(clackatoo_protocol::Severity::Warning);
+    assert_eq!(style(3, 10).underline, Underline::Curly, "world");
+    assert_eq!(style(3, 10).underline_color, warning);
+    assert_eq!(style(2, 10).underline, Underline::None);
+    assert_eq!(cursor.map(|cursor| (cursor.line, cursor.col)), Some((1, 5)));
+    let background = &pixels[..4];
+    // The middle of the cell at `line` and `col`.
+    let at = |line: u32, col: u32| {
+        let x = padding + col * fonts.cell.width + fonts.cell.width / 2;
+        let y = padding + line * fonts.cell.height + fonts.cell.height / 2;
+        let start = ((y * size[0] + x) * 4) as usize;
+        &pixels[start..start + 4]
+    };
+    // The sign, a thin bar down its cell's left edge, on the first row
+    // only.
+    let sign = |line: u32| {
+        let x = padding + fonts.cell.width / 8;
+        let y = padding + line * fonts.cell.height + fonts.cell.height / 2;
+        let start = ((y * size[0] + x) * 4) as usize;
+        &pixels[start..start + 4]
+    };
+    assert_ne!(sign(1), background, "the sign");
+    assert_eq!(sign(2), background, "no sign on the rows after");
+    // The cursor's line is lit on all its rows, and no other.
+    for line in 1..=3 {
+        assert_ne!(at(line, 28), background, "the cursor's line, row {line}");
+    }
+    assert_eq!(at(4, 28), background);
+    // Column 10 is marked on each line's first row, where it is in the
+    // line, and not on the rows after, which start further along.
+    let column = 5 + 9;
+    assert_ne!(at(4, column), background, "the column");
+    let marked: Vec<usize> = (editor.highlights().into_iter())
+        .filter(|highlight| highlight.kind == HighlightKind::ColorColumn)
+        .map(|highlight| highlight.line)
+        .collect();
+    assert_eq!(marked, [0, 1, 4]);
+}
+
 /// How long building and sending a frame takes, on the CPU, for a screen
 /// of plain text and one of emoji, joined and not. A measurement, not a
 /// check: run it by hand with `cargo test -p clackatoo-gui --release

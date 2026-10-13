@@ -26,7 +26,8 @@ static PLANES: [OnceLock<Box<[u8]>>; 2] = [OnceLock::new(), OnceLock::new()];
 /// This is `unicode-width`'s answer, except that it is never more than 2.
 /// `unicode-width` gives U+17D8 KHMER SIGN BEYYAL a width of 3, which a
 /// grid of one- and two-column cells can't show; it is drawn wide instead.
-pub(crate) fn of(ch: char) -> Option<usize> {
+#[must_use]
+pub fn of(ch: char) -> Option<usize> {
     let code = u32::from(ch) as usize;
     let Some(table) = PLANES.get(code / PLANE_LEN) else {
         return clamped(ch);

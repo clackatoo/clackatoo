@@ -47,3 +47,4 @@ pub use size::{InvalidSize, Size};
 pub use snapshot::{BlocksSnapshot, LinksSnapshot, RestoreError, Snapshot};
 pub use style::{Attributes, Color, Style, Underline};
 pub use terminal::{Config, Cursor, CursorShape, InputModes, Terminal};
+pub use width::of as char_width;

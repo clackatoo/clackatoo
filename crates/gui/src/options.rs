@@ -18,6 +18,8 @@ pub(crate) enum Value {
     List(List),
     /// One of the words an option of [`Kind::Choice`] can be.
     Choice(&'static str),
+    /// Text, as an option of [`Kind::Text`] holds.
+    Text(String),
 }
 
 /// Whole numbers, as an option holds several: `colorcolumn`'s columns.
@@ -40,6 +42,8 @@ pub(crate) enum Kind {
     },
     /// One of these words.
     Choice(&'static [&'static str]),
+    /// Any text without control characters, such as `showbreak`'s.
+    Text,
 }
 
 /// An option, as config and `:set` know it.
@@ -65,12 +69,14 @@ impl Info {
                 Ok(())
             }
             (Kind::Choice(words), Value::Choice(word)) if words.contains(word) => Ok(()),
+            (Kind::Text, Value::Text(text)) if !text.chars().any(char::is_control) => Ok(()),
             _ => Err(self.wants()),
         }
     }
 
     /// Reads `text` as a value for this option, as `:set` gives one after
-    /// `=`: a number, or for a list, numbers with commas between them.
+    /// `=`: a number, or for a list, numbers with commas between them, or
+    /// for text, the text.
     pub(crate) fn parse(&self, text: &str) -> Result<Value, String> {
         let number = |text: &str| text.parse::<u32>().map_err(|_| self.wants());
         let value = match self.kind {
@@ -83,6 +89,7 @@ impl Info {
             Kind::Choice(words) => Value::Choice(
                 (words.iter().find(|&&word| word == text)).ok_or_else(|| self.wants())?,
             ),
+            Kind::Text => Value::Text(text.to_owned()),
         };
         self.check(&value)?;
         Ok(value)
@@ -106,6 +113,7 @@ impl Info {
                     format!("{} is {} or {last}", self.name, first.join(", "))
                 }
             },
+            Kind::Text => format!("{} is text, without control characters", self.name),
         }
     }
 }
@@ -155,6 +163,19 @@ impl Held for List {
     }
 }
 
+impl Held for String {
+    fn value(&self) -> Value {
+        Value::Text(self.clone())
+    }
+
+    fn from_value(value: Value) -> Option<Self> {
+        match value {
+            Value::Text(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
 /// An option's type that's one of a few words, declared by [`choice!`].
 trait Choice: Held {
     /// The words, in the order they're listed.
@@ -193,10 +214,13 @@ macro_rules! choice {
 }
 
 /// The [`Kind`] of an option of type `bool`, or `u32` or [`List`] with
-/// its range, or a [`Choice`].
+/// its range, `String`, or a [`Choice`].
 macro_rules! kind {
     (bool) => {
         Kind::Bool
+    };
+    (String) => {
+        Kind::Text
     };
     (u32 $min:literal ..= $max:literal) => {
         Kind::Number {
@@ -298,6 +322,20 @@ options! {
     /// around it shows as it moves. Half the pane or more keeps the
     /// cursor's line in the middle.
     scrolloff("so"): u32 (0..=9999) = 5;
+    /// A line too long for the pane goes on over as many rows as it needs,
+    /// rather than off the pane's right edge. `j` and `k` still move by
+    /// line, and `gj` and `gk` by row.
+    wrap("wrap"): bool = true;
+    /// With `wrap`, a line is broken between words, after a blank or one
+    /// of `!@*-+;:,./?`, rather than at the last cell that fits.
+    linebreak("lbr"): bool = true;
+    /// With `wrap`, the rows a line goes on over start as far in as the
+    /// line is indented, so the code's shape still shows. At least 20
+    /// cells are kept for the text.
+    breakindent("bri"): bool = true;
+    /// With `wrap`, drawn at the start of the rows a line goes on over,
+    /// after their indent: `↪ `, say. In `:set`, a space is written `\ `.
+    showbreak("sbr"): String = String::new();
     /// How wide a tab is drawn: to the next column that's a multiple of it.
     tabstop("ts"): u32 (1..=32) = 4;
     /// The columns `>>`, `<<` and Tab indent by. 0 means `tabstop`'s, so
@@ -429,6 +467,12 @@ impl Options {
                 format!("{}={}", info.name, numbers.join(","))
             }
             Value::Choice(word) => format!("{}={word}", info.name),
+            Value::Text(text) => {
+                let text = (text.replace('\\', "\\\\"))
+                    .replace(' ', "\\ ")
+                    .replace('\t', "\\\t");
+                format!("{}={text}", info.name)
+            }
         }
     }
 }
@@ -481,13 +525,47 @@ pub(crate) enum Setting {
 
 /// What the words after `:set` ask for, as Vim reads them: `number`,
 /// `nonumber`, `number!` or `invnumber`, `number?`, `numberwidth=5`,
-/// `colorcolumn=80,120`, and `colorcolumn=` for none.
+/// `colorcolumn=80,120`, `colorcolumn=` for none, and `showbreak=>\ ` for
+/// text with a space.
 pub(crate) fn parse_set(words: &str) -> Result<Vec<Setting>, String> {
-    words.split_whitespace().map(parse_setting).collect()
+    split_words(words)
+        .iter()
+        .map(|word| parse_setting(word))
+        .collect()
+}
+
+/// `text` split at spaces and tabs, as Vim splits `:set`'s words: one
+/// after a backslash is part of the word, and `\\` is one backslash.
+fn split_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.next() {
+                Some(next @ (' ' | '\t' | '\\')) => word.push(next),
+                Some(next) => word.extend(['\\', next]),
+                None => word.push('\\'),
+            },
+            ' ' | '\t' => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            ch => word.push(ch),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
 }
 
 fn parse_setting(word: &str) -> Result<Setting, String> {
-    if ["+=", "-=", "^="].iter().any(|sign| word.contains(sign)) {
+    // Only before the `=`: text set after it can have them, as `sbr=-=>`.
+    if let Some((name, _)) = word.split_once('=')
+        && name.ends_with(['+', '-', '^'])
+    {
         return Err(format!(
             "can't read {word}: an option is set with =, and +=, -= and ^= aren't supported yet"
         ));
@@ -537,9 +615,9 @@ mod tests {
     fn options_are_found_by_name_or_short_name() {
         assert_eq!(info("nu").name, "number");
         assert_eq!(info("relativenumber").short, "rnu");
-        let err = find("wrap").unwrap_err();
+        let err = find("spell").unwrap_err();
         assert!(
-            err.contains("`wrap`") && err.contains("number, relativenumber"),
+            err.contains("`spell`") && err.contains("number, relativenumber"),
             "{err}"
         );
     }
@@ -598,6 +676,45 @@ mod tests {
     }
 
     #[test]
+    fn text_is_any_but_control_characters_and_set_escapes_its_blanks() {
+        let mut options = Options::default();
+        let sbr = info("sbr");
+        assert_eq!(options.show(sbr), "showbreak=");
+        assert_eq!(options.set(sbr, Value::Text("↪ ".into())), Ok(true));
+        assert_eq!(options.showbreak, "↪ ");
+        assert_eq!(options.show(sbr), "showbreak=↪\\ ");
+        assert_eq!(
+            options.set(sbr, Value::Text("a\tb".into())),
+            Err("showbreak is text, without control characters".into())
+        );
+        assert_eq!(
+            parse_set("sbr=>\\ \\\\ nowrap sbr= sbr=a\\b"),
+            Ok(vec![
+                Setting::To(sbr, Value::Text("> \\".into())),
+                Setting::To(info("wrap"), Value::Bool(false)),
+                Setting::To(sbr, Value::Text(String::new())),
+                Setting::To(sbr, Value::Text("a\\b".into())),
+            ])
+        );
+        assert!(
+            parse_set("sbr!")
+                .unwrap_err()
+                .contains("can't be turned over")
+        );
+        // += and its kin are refused only before the =, and only spaces and
+        // tabs split words.
+        assert_eq!(
+            parse_set("sbr=-=> sbr=a\u{a0}b"),
+            Ok(vec![
+                Setting::To(sbr, Value::Text("-=>".into())),
+                Setting::To(sbr, Value::Text("a\u{a0}b".into())),
+            ])
+        );
+        let err = parse_set("sbr+=x").unwrap_err();
+        assert!(err.contains("aren't supported"), "{err}");
+    }
+
+    #[test]
     fn set_reads_as_vims_does() {
         let (nu, rnu, nuw, cc) = (info("nu"), info("rnu"), info("nuw"), info("cc"));
         assert_eq!(
@@ -624,7 +741,7 @@ mod tests {
             ("cc!", "can't be turned over"),
             ("nocc", "no option called `nocc`"),
             ("cc=80,x", "with commas between them"),
-            ("nowrap", "no option called `nowrap`"),
+            ("nospell", "no option called `nospell`"),
             ("nuw+=1", "+=, -= and ^= aren't supported"),
         ] {
             let err = parse_set(words).unwrap_err();

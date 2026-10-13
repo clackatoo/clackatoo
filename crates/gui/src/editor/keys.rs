@@ -734,6 +734,11 @@ impl Reader<'_> {
                     };
                     return Some(match next.plain() {
                         Some('g') => Read::Yes(Action::Move(Motion::First)),
+                        // By screen rows, where lines wrap.
+                        Some('j') => Read::Yes(Action::Move(Motion::RowDown(1))),
+                        Some('k') => Read::Yes(Action::Move(Motion::RowUp(1))),
+                        Some('0') => Read::Yes(Action::Move(Motion::RowStart)),
+                        Some('$') => Read::Yes(Action::Move(Motion::RowEnd)),
                         Some('d') => ask(Query::Definition),
                         Some('D') => ask(Query::Declaration),
                         Some('y') => ask(Query::TypeDefinition),
@@ -865,6 +870,18 @@ mod tests {
         assert_eq!(read("g"), Parsed::Incomplete);
         assert_eq!(read("gg"), command(None, Action::Move(Motion::First)));
         assert_eq!(read("gq"), Parsed::Nothing);
+        assert_eq!(
+            read("3gj"),
+            command(Some(3), Action::Move(Motion::RowDown(1)))
+        );
+        assert_eq!(read("g$"), command(None, Action::Move(Motion::RowEnd)));
+        assert_eq!(
+            read("dgk"),
+            command(
+                None,
+                Action::Operate(Operator::Delete, Target::Motion(Motion::RowUp(1)))
+            )
+        );
         let find = Motion::Find {
             ch: '(',
             forward: false,

@@ -5,6 +5,8 @@
 //! line keeps its number as output scrolls it into history, so a cursor on
 //! a line stays on it. Motions follow Vim's.
 
+use std::rc::Rc;
+
 use clackatoo_term::Row;
 
 /// A position in the document.
@@ -32,6 +34,128 @@ pub(crate) trait Lines {
     /// line can't tell blanks typed from none, so it's empty if blank.
     fn empty(&self, line: u64) -> bool {
         text_end(self.row(line).as_deref()) == 0
+    }
+
+    /// The screen rows line `line` is drawn on, in order: one, unless it
+    /// wraps, as an editor's long lines do with `wrap`.
+    fn screen_rows(&self, _line: u64) -> Rc<[ScreenRow]> {
+        Rc::new([ScreenRow::WHOLE])
+    }
+
+    /// Where line `line`'s row stops, if the line goes on past it: an
+    /// editor's line longer than a row can hold. Motions that read the row
+    /// can't see past it.
+    fn overflows(&self, _line: u64) -> Option<usize> {
+        None
+    }
+
+    /// The column of line `line`'s last character, as `$` goes to, or 0 for
+    /// a blank line.
+    fn last_cell(&self, line: u64) -> usize {
+        last_char(self.row(line).as_deref())
+    }
+
+    /// The cells a screen row has, where lines wrap: `None` where they
+    /// don't.
+    fn row_width(&self) -> Option<usize> {
+        None
+    }
+}
+
+/// One of the screen rows a line is drawn on, when it wraps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScreenRow {
+    /// The line's first cell on it.
+    pub(crate) start: usize,
+    /// The cells drawn before its text: on a row the line goes on over,
+    /// its indent and `showbreak`.
+    pub(crate) indent: usize,
+}
+
+impl ScreenRow {
+    /// A line's only row, when it doesn't wrap.
+    pub(crate) const WHOLE: Self = Self {
+        start: 0,
+        indent: 0,
+    };
+}
+
+/// A screen row of the document: line `line`'s `row`th, from 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct RowAt {
+    pub(crate) line: u64,
+    pub(crate) row: usize,
+}
+
+/// Which of `rows` cell `col` of their line is on.
+pub(crate) fn row_index(rows: &[ScreenRow], col: usize) -> usize {
+    rows.partition_point(|row| row.start <= col)
+        .saturating_sub(1)
+}
+
+/// The screen row `at` is on, in `lines`.
+pub(crate) fn row_at(at: Point, lines: &impl Lines) -> RowAt {
+    RowAt {
+        line: at.line,
+        row: row_index(&lines.screen_rows(at.line), at.col),
+    }
+}
+
+/// Line `line`'s last screen row, in `lines`.
+pub(crate) fn last_row(lines: &impl Lines, line: u64) -> RowAt {
+    RowAt {
+        line,
+        row: lines.screen_rows(line).len() - 1,
+    }
+}
+
+/// The screen row `n` rows down from `from`, or line `end`'s last if
+/// that's sooner. Lays out only the lines it passes.
+pub(crate) fn rows_down(from: RowAt, mut n: u64, end: u64, lines: &impl Lines) -> RowAt {
+    let mut at = from;
+    loop {
+        let count = lines.screen_rows(at.line).len();
+        let left = (count - 1).saturating_sub(at.row) as u64;
+        if n <= left {
+            return RowAt {
+                line: at.line,
+                row: at.row + usize::try_from(n).unwrap_or(usize::MAX),
+            };
+        }
+        if at.line >= end {
+            return RowAt {
+                line: at.line,
+                row: count - 1,
+            };
+        }
+        n -= left + 1;
+        at = RowAt {
+            line: at.line + 1,
+            row: 0,
+        };
+    }
+}
+
+/// The screen row `n` rows up from `from`, or line `first`'s first if
+/// that's sooner. Lays out only the lines it passes.
+pub(crate) fn rows_up(from: RowAt, mut n: u64, first: u64, lines: &impl Lines) -> RowAt {
+    let mut at = from;
+    loop {
+        if n <= at.row as u64 {
+            return RowAt {
+                line: at.line,
+                row: at.row - usize::try_from(n).unwrap_or(0),
+            };
+        }
+        if at.line <= first {
+            return RowAt {
+                line: at.line,
+                row: 0,
+            };
+        }
+        n -= at.row as u64 + 1;
+        at.line -= 1;
+        at.row = lines.screen_rows(at.line).len() - 1;
     }
 }
 
@@ -80,6 +204,14 @@ pub(crate) enum Motion {
     Paragraph {
         forward: bool,
     },
+    /// `gk`: up by screen rows, where lines wrap, rather than by lines.
+    RowUp(u64),
+    /// `gj`: down by screen rows.
+    RowDown(u64),
+    /// `g0`: the screen row's first character.
+    RowStart,
+    /// `g$`: the screen row's last character.
+    RowEnd,
 }
 
 /// What an operator such as `y` takes when given a motion, as in Vim.
@@ -116,7 +248,11 @@ impl Motion {
             | Self::WordBack
             | Self::BigWordStart
             | Self::BigWordBack
-            | Self::Paragraph { .. } => Reach::Exclusive,
+            | Self::Paragraph { .. }
+            // As in Vim, moving by rows isn't by lines.
+            | Self::RowUp(_)
+            | Self::RowDown(_)
+            | Self::RowStart => Reach::Exclusive,
             Self::Find { forward, .. } => {
                 if forward {
                     Reach::Inclusive
@@ -124,7 +260,9 @@ impl Motion {
                     Reach::Exclusive
                 }
             }
-            Self::LineEnd | Self::WordEnd | Self::BigWordEnd | Self::Match => Reach::Inclusive,
+            Self::LineEnd | Self::WordEnd | Self::BigWordEnd | Self::Match | Self::RowEnd => {
+                Reach::Inclusive
+            }
             Self::Up(_) | Self::Down(_) | Self::First | Self::Last => Reach::Lines,
         }
     }
@@ -159,6 +297,11 @@ impl Cursor {
         Self { at, want }
     }
 
+    /// The column moving up and down aims for: `usize::MAX` after `$`.
+    pub(crate) fn want(&self) -> usize {
+        self.want
+    }
+
     /// Moves by `motion`, staying within `lines`.
     pub(crate) fn apply(&mut self, motion: Motion, lines: &impl Lines) {
         let (first, last) = lines.bounds();
@@ -184,7 +327,7 @@ impl Cursor {
                 self.want = 0;
             }
             Motion::LineEnd => {
-                self.at.col = last_char(lines.row(at.line).as_deref());
+                self.at.col = lines.last_cell(at.line);
                 self.want = usize::MAX;
             }
             Motion::FirstNonBlank => {
@@ -233,21 +376,61 @@ impl Cursor {
                 // With no empty line after it, `}` goes to the end of the
                 // last line, as Vim's does.
                 let col = if forward && !lines.empty(line) {
-                    last_char(lines.row(line).as_deref())
+                    lines.last_cell(line)
                 } else {
                     0
                 };
                 self.at = Point { line, col };
                 self.want = col;
             }
+            Motion::RowUp(n) => self.go_to_row(rows_up(row_at(at, lines), n, first, lines), lines),
+            Motion::RowDown(n) => {
+                self.go_to_row(rows_down(row_at(at, lines), n, last, lines), lines);
+            }
+            Motion::RowStart | Motion::RowEnd => {
+                let rows = lines.screen_rows(at.line);
+                let index = row_index(&rows, at.col);
+                let col = match motion {
+                    Motion::RowStart => rows[index].start,
+                    _ => usize::MAX,
+                };
+                self.at.col = on_row(lines, at.line, &rows, index, col);
+                self.want = self.at.col;
+            }
         }
+    }
+
+    /// Moves to screen row `to`, as `gj` and `gk` do: as far from its left
+    /// edge as the wanted column is from the left edge of the row it's on,
+    /// so passing a short row doesn't lose it, but no further than a row
+    /// is wide, as Vim keeps it. `$` keeps to rows' ends.
+    pub(crate) fn go_to_row(&mut self, to: RowAt, lines: &impl Lines) {
+        let here = lines.screen_rows(self.at.line);
+        let here = here[row_index(&here, self.at.col)];
+        let rows = lines.screen_rows(to.line);
+        let index = to.row.min(rows.len() - 1);
+        let col = if self.want == usize::MAX {
+            usize::MAX
+        } else {
+            let offset = here.indent + self.want.saturating_sub(here.start);
+            let offset = match lines.row_width() {
+                Some(width) => offset.min(width.saturating_sub(1)),
+                None => offset,
+            };
+            rows[index].start + offset.saturating_sub(rows[index].indent)
+        };
+        self.at = Point {
+            line: to.line,
+            col: on_row(lines, to.line, &rows, index, col),
+        };
+        self.want = col;
     }
 
     /// Moves to `line`, aiming for the wanted column.
     fn go_to_line(&mut self, line: u64, lines: &impl Lines) {
         let row = lines.row(line);
         let row = row.as_deref();
-        let col = self.want.min(last_char(row));
+        let col = self.want.min(lines.last_cell(line));
         self.at = Point {
             line,
             col: start_of_cell(row, col),
@@ -540,8 +723,19 @@ pub(crate) fn text_end(row: Option<&Row>) -> usize {
 }
 
 /// The column of the line's last character, or 0 for a blank line.
-fn last_char(row: Option<&Row>) -> usize {
+pub(crate) fn last_char(row: Option<&Row>) -> usize {
     start_of_cell(row, text_end(row).saturating_sub(1))
+}
+
+/// The character nearest `col` on screen row `index` of line `line` of
+/// `lines`, which is drawn on `rows`.
+fn on_row(lines: &impl Lines, line: u64, rows: &[ScreenRow], index: usize, col: usize) -> usize {
+    let start = rows[index].start;
+    let col = match rows.get(index + 1) {
+        Some(next) => col.clamp(start, next.start.saturating_sub(1).max(start)),
+        None => col.min(lines.last_cell(line).max(start)),
+    };
+    start_of_cell(lines.row(line).as_deref(), col)
 }
 
 /// The cell after the one at `col`, stepping over a wide character's
@@ -569,7 +763,7 @@ fn find(row: Option<&Row>, col: usize, ch: char, forward: bool, till: bool) -> O
     let found = if forward {
         (col + 1..cells.len()).find(|&at| cells[at].ch() == ch && !cells[at].is_wide_spacer())?
     } else {
-        (0..col)
+        (0..col.min(cells.len()))
             .rev()
             .find(|&at| cells[at].ch() == ch && !cells[at].is_wide_spacer())?
     };

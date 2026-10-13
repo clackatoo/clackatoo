@@ -41,6 +41,7 @@ mod panel;
 mod pieces;
 mod registers;
 mod text;
+mod wrap;
 
 use std::time::{Duration, Instant};
 
@@ -63,11 +64,15 @@ pub(crate) use panel::PanelView;
 pub(crate) use pieces::GiveUp;
 use registers::Wrote;
 pub(crate) use registers::{Register, Registers};
-use text::{Laid, Text, tab_end};
+use text::{Kept, Text, tab_end};
+use wrap::{Shown, Top, Wrapping};
 
 use crate::colors;
 use crate::input::KeyPress;
-use crate::motion::{Class, Cursor, Lines, Motion, Point, Reach, before, class_at};
+use crate::motion::{
+    Class, Cursor, Lines, Motion, Point, Reach, RowAt, before, class_at, last_row, row_at,
+    rows_down, rows_up,
+};
 use crate::objects::Object;
 use crate::options::{Case, CompleteAccept, Options};
 use crate::pane::{Mode, Selection, enters_normal_mode};
@@ -359,9 +364,16 @@ pub(crate) struct Editor {
     cursor: Cursor,
     /// Where a visual selection started.
     anchor: Option<Point>,
-    /// The first line and column shown.
-    top: u64,
+    /// Where the view starts, and when lines don't wrap, the first column
+    /// shown.
+    top: Top,
     left: usize,
+    /// The pane has been resized since the view last followed the cursor,
+    /// which the next settle does, as rows may have wrapped afresh.
+    resized: bool,
+    /// Lines laid out, and the rows they wrap onto, kept from frame to
+    /// frame while the text stays as it is.
+    kept: Kept,
     height: usize,
     width: usize,
     /// How lines are numbered.
@@ -382,10 +394,15 @@ pub(crate) struct Editor {
     signs: bool,
     /// The columns marked down the pane, counting from 0 (`colorcolumn`).
     columns: Vec<usize>,
+    /// How long lines wrap.
+    wrapping: Wrapping,
     /// How searches treat case.
     case: Case,
-    /// How many of the rows shown are the file's lines, not past its end.
-    filled: usize,
+    /// The rows shown that are the file's, not past its end, as laid out
+    /// last.
+    shown: Vec<Shown>,
+    /// Where the cursor was drawn, in cells of the pane, as laid out last.
+    cursor_cell: Option<(usize, usize)>,
     /// The keys of a command being typed in normal or visual mode.
     typed: Vec<Stroke>,
     /// Whether the next edit starts an undo step: it's the first of a
@@ -494,8 +511,10 @@ impl Editor {
             mode: Mode::Normal,
             cursor: Cursor::new(Point { line: 0, col: 0 }),
             anchor: None,
-            top: 0,
+            top: Top { line: 0, cell: 0 },
             left: 0,
+            resized: false,
+            kept: Kept::default(),
             height: 1,
             width: 1,
             numbers: Numbers::of(options),
@@ -506,8 +525,10 @@ impl Editor {
             virtual_text: options.virtualtext,
             signs: options.gitsigns,
             columns: columns(options),
+            wrapping: Wrapping::of(options),
             case: Case::of(options),
-            filled: 0,
+            shown: Vec::new(),
+            cursor_cell: None,
             typed: Vec::new(),
             new_step: true,
             changing: None,
@@ -567,8 +588,10 @@ impl Editor {
     }
 
     pub(crate) fn resize(&mut self, size: Size) {
-        self.height = usize::from(size.rows());
-        self.width = usize::from(size.cols());
+        let (height, width) = (usize::from(size.rows()), usize::from(size.cols()));
+        self.resized |= (height, width) != (self.height, self.width);
+        self.height = height;
+        self.width = width;
         if self.width < self.gutter + LEAST_TEXT {
             // Until the next settle works out the numbers afresh.
             self.gutter = 0;
@@ -599,6 +622,12 @@ impl Editor {
         self.virtual_text = options.virtualtext;
         self.signs = options.gitsigns;
         self.columns = columns(options);
+        let wrapping = Wrapping::of(options);
+        if wrapping.on != self.wrapping.on {
+            self.top.cell = 0;
+            self.left = 0;
+        }
+        self.wrapping = wrapping;
         self.case = Case::of(options);
         self.as_you_type = AsYouType::of(options);
         if !self.as_you_type.signature {
@@ -607,9 +636,13 @@ impl Editor {
         self.follow(copy);
     }
 
-    /// The buffer's text, laid out as the options say.
+    /// The buffer's text, laid out as the options say, wrapped at the
+    /// pane's width right of the gutter.
     fn text<'c>(&self, copy: &'c BufferCopy) -> Text<'c> {
+        let typing = (self.mode == Mode::Insert).then_some(self.cursor.at);
         Text::new(copy.text(), self.indent.tabstop)
+            .wrapping(self.wrapping.at(self.text_width().max(1)), typing)
+            .keeping(&self.kept, self.buffer, copy.revision())
     }
 
     /// Enters normal mode, as moving the focus here from a pane in normal
@@ -1055,6 +1088,7 @@ impl Editor {
         match command.action {
             Action::Move(motion) => {
                 let motion = self.remember_find(motion);
+                let motion = self.by_rows(motion);
                 self.cursor = self.moved(copy, motion, times);
                 if self.cursor.at == from && can_fail(motion) {
                     self.fail();
@@ -1089,7 +1123,7 @@ impl Editor {
             Action::Page(direction) => {
                 self.page(i64::from(direction), self.height.saturating_sub(2), copy);
             }
-            Action::View(at) => self.view_at(at),
+            Action::View(at) => self.view_at(at, copy),
             Action::Diagnostic { backward } => self.next_diagnostic(backward, times, copy),
             Action::Hunk { backward } => self.next_hunk(backward, times, copy),
             Action::Ask(_)
@@ -1144,7 +1178,7 @@ impl Editor {
             return self.select_piece(construct, inner, times, copy);
         }
         let text = self.text(copy);
-        if let Some((start, last)) = object.find(&text, self.cursor.at, inner) {
+        if let Some((start, last)) = text.object(object, self.cursor.at, inner) {
             self.mode = Mode::Visual(Selection::Characters);
             self.anchor = Some(start);
             self.cursor = Cursor::new(last);
@@ -1240,33 +1274,101 @@ impl Editor {
         motion
     }
 
+    /// `motion` as it goes here: where lines don't wrap, `gj` and `gk` are
+    /// `j` and `k`, as in Vim, taking whole lines with an operator.
+    fn by_rows(&self, motion: Motion) -> Motion {
+        match motion {
+            Motion::RowUp(rows) if !self.wrapping.on => Motion::Up(rows),
+            Motion::RowDown(rows) if !self.wrapping.on => Motion::Down(rows),
+            motion => motion,
+        }
+    }
+
     /// The cursor moved by `motion`, `times` times.
     fn moved(&self, copy: &BufferCopy, motion: Motion, times: usize) -> Cursor {
+        self.moved_seeing(copy, motion, times)
+            .unwrap_or(self.cursor)
+    }
+
+    /// The cursor moved by `motion`, `times` times, or `None` if it reads the
+    /// rows, and might not have seen where it should go, past the end of a
+    /// long line's row.
+    fn moved_seeing(&self, copy: &BufferCopy, motion: Motion, times: usize) -> Option<Cursor> {
         let text = self.text(copy);
         let mut cursor = self.cursor;
         match motion {
             Motion::Up(_) => cursor.apply(Motion::Up(times as u64), &text),
             Motion::Down(_) => cursor.apply(Motion::Down(times as u64), &text),
-            // A tab is several cells, but one character to step over.
-            Motion::Left | Motion::Right => {
-                for _ in 0..times {
-                    let from = text.byte_at(cursor.at);
-                    loop {
-                        let before = cursor.at;
-                        cursor.apply(motion, &text);
-                        if cursor.at == before || text.byte_at(cursor.at) != from {
-                            break;
-                        }
+            Motion::RowUp(_) | Motion::RowDown(_) => {
+                let times = times as u64;
+                let up = matches!(motion, Motion::RowUp(_));
+                let rows = if up {
+                    Motion::RowUp(times)
+                } else {
+                    Motion::RowDown(times)
+                };
+                cursor.apply(rows, &text);
+                wrap::onto_row(&mut cursor, &text, up);
+            }
+            // Where lines don't wrap, the first and last columns in view,
+            // as in Vim.
+            Motion::RowStart | Motion::RowEnd if !text.wraps() => {
+                if let Some(laid) = text.laid(cursor.at.line).filter(|laid| laid.cells() > 0) {
+                    let last = laid.cells() - 1;
+                    let col = match motion {
+                        Motion::RowStart => self.left.min(last),
+                        _ => (self.left + self.text_width().max(1) - 1).min(last),
+                    };
+                    let byte = laid.byte_at(col);
+                    let mut col = laid.col_of(byte);
+                    // Begun left of the view: the character after it.
+                    let next = laid.char_end(byte);
+                    if col < self.left && next < laid.text().len() {
+                        col = laid.col_of(next);
                     }
+                    cursor = Cursor::new(Point {
+                        line: cursor.at.line,
+                        col,
+                    });
                 }
             }
+            // A character at a time, however many cells it takes, as a tab
+            // does, and on a line longer than a row holds, past the row.
+            Motion::Left | Motion::Right => {
+                let line = cursor.at.line;
+                let Some(laid) = text.laid(line) else {
+                    return Some(cursor);
+                };
+                for _ in 0..times {
+                    let byte = laid.byte_at(cursor.at.col);
+                    let to = if motion == Motion::Left {
+                        laid.col_before(laid.col_of(byte))
+                    } else {
+                        let next = laid.char_end(byte);
+                        (next < laid.text().len())
+                            .then(|| laid.col_of(next))
+                            .filter(|&next| next <= text.last_cell(line))
+                    };
+                    let Some(col) = to else {
+                        break;
+                    };
+                    cursor = Cursor::new(Point { line, col });
+                }
+            }
+            // What reads the Vim engine's rows can't see past the end of a
+            // long line's: it goes nowhere, rather than somewhere wrong.
+            _ if reads_row(motion) && text.past_row(cursor.at) => return None,
             _ => {
                 for _ in 0..times {
                     cursor.apply(motion, &text);
                 }
+                let (start, end) = (cursor.at.min(self.cursor.at), cursor.at.max(self.cursor.at));
+                if reads_row(motion) && text.past_rows(start, end) {
+                    return None;
+                }
             }
         }
-        cursor
+        Some(cursor)
     }
 
     // --- Operators ----------------------------------------------------------
@@ -1548,7 +1650,7 @@ impl Editor {
                 })
             }
             Target::Object { object, inner } => {
-                let Some((start, last)) = object.find(&text, at, inner) else {
+                let Some((start, last)) = text.object(object, at, inner) else {
                     self.status = Some(match object {
                         Object::Block => "a file has no shell blocks".into(),
                         _ => "nothing there".into(),
@@ -1559,6 +1661,7 @@ impl Editor {
             }
             Target::Motion(motion) => {
                 let motion = self.remember_find(motion);
+                let motion = self.by_rows(motion);
                 // `cw` changes to the end of the word, not the next.
                 let word = matches!(motion, Motion::WordStart | Motion::BigWordStart);
                 let big = motion == Motion::BigWordStart;
@@ -1588,9 +1691,12 @@ impl Editor {
                             cursor.apply(end, &text);
                         }
                     }
-                    return Some(chars(at, cursor.at));
+                    // Not past the end of a long line's row, which it
+                    // can't see.
+                    let seen = !text.past_row(at) && !text.past_rows(at, cursor.at);
+                    return seen.then(|| chars(at, cursor.at));
                 }
-                let moved = self.moved(copy, motion, times);
+                let moved = self.moved_seeing(copy, motion, times)?;
                 // `dj` on the last line has no line to take with it.
                 if matches!(motion, Motion::Up(_) | Motion::Down(_)) && moved.at.line == at.line {
                     return None;
@@ -1600,12 +1706,23 @@ impl Editor {
                 } else {
                     (at, moved.at)
                 };
-                match motion.reach_from(at, moved.at, &text)? {
+                match self.reach(motion, at, moved.at, &text)? {
                     Reach::Lines => Some(lines(start.line, end.line)),
                     Reach::Inclusive => Some(chars(start, end)),
                     Reach::Exclusive => exclusive(&text, start, end, word),
                 }
             }
+        }
+    }
+
+    /// What an operator takes with `motion` from `from` to `to`, as
+    /// [`Motion::reach_from`] says, but after `$`, `gj` and `gk` take the
+    /// character they go to, as in Vim.
+    fn reach(&self, motion: Motion, from: Point, to: Point, text: &Text<'_>) -> Option<Reach> {
+        let rows = matches!(motion, Motion::RowUp(_) | Motion::RowDown(_));
+        match motion.reach_from(from, to, text)? {
+            Reach::Exclusive if rows && self.cursor.want() == usize::MAX => Some(Reach::Inclusive),
+            reach => Some(reach),
         }
     }
 
@@ -2934,30 +3051,51 @@ impl Editor {
         });
     }
 
-    /// Ctrl+D and the like: `lines` lines down, or up if `direction` is
-    /// negative, moving the view and the cursor together.
-    fn page(&mut self, direction: i64, lines: usize, copy: &BufferCopy) {
-        let lines = lines.max(1) as u64;
+    /// Ctrl+D and the like: `rows` screen rows down, or up if `direction`
+    /// is negative, moving the view and the cursor together.
+    fn page(&mut self, direction: i64, rows: usize, copy: &BufferCopy) {
+        let rows = rows.max(1) as u64;
         let text = self.text(copy);
-        let last = text.last_line();
-        if direction > 0 {
-            self.top = (self.top + lines).min(self.lowest_top(last));
-            self.cursor.apply(Motion::Down(lines), &text);
+        self.clamp_top(&text);
+        let top = self.top.row(&text);
+        let up = direction < 0;
+        let top = if up {
+            self.cursor.apply(Motion::RowUp(rows), &text);
+            rows_up(top, rows, 0, &text)
         } else {
-            self.top = self.top.saturating_sub(lines);
-            self.cursor.apply(Motion::Up(lines), &text);
-        }
+            self.cursor.apply(Motion::RowDown(rows), &text);
+            rows_down(top, rows, text.last_line(), &text).min(self.lowest_top(&text))
+        };
+        wrap::onto_row(&mut self.cursor, &text, up);
+        self.top = Top::of(top, &text);
         self.cursor_into_view(&text);
     }
 
-    fn view_at(&mut self, at: ViewAt) {
-        let line = self.cursor.at.line;
-        let height = self.height.max(1) as u64;
-        self.top = match at {
-            ViewAt::Top => line,
-            ViewAt::Middle => line.saturating_sub(height / 2),
-            ViewAt::Bottom => line.saturating_sub(height - 1),
+    /// `zt`, `zz` and `zb`: the cursor's line at the view's top, middle or
+    /// bottom. At the top or bottom it's shown whole, as in Vim, unless
+    /// it's too long to be with the cursor in view.
+    fn view_at(&mut self, at: ViewAt, copy: &BufferCopy) {
+        let text = self.text(copy);
+        let height = self.height.max(1);
+        let cursor = row_at(self.cursor.at, &text);
+        let top = match at {
+            ViewAt::Top if cursor.row < height => RowAt {
+                line: cursor.line,
+                row: 0,
+            },
+            ViewAt::Top => cursor,
+            ViewAt::Middle => rows_up(cursor, (height / 2) as u64, 0, &text),
+            ViewAt::Bottom => {
+                let last = last_row(&text, cursor.line);
+                let bottom = if last.row - cursor.row < height {
+                    last
+                } else {
+                    cursor
+                };
+                rows_up(bottom, height as u64 - 1, 0, &text)
+            }
         };
+        self.top = Top::of(top, &text);
     }
 
     // --- Following the text and the cursor ----------------------------------
@@ -3384,33 +3522,60 @@ impl Editor {
         self.anchor = anchor.map(|anchor| text.point_of(anchor));
     }
 
-    /// The lines kept in view above and below the cursor: `scrolloff`, but
-    /// no more than will fit, so a big one keeps the cursor in the middle.
+    /// The screen rows kept in view above and below the cursor:
+    /// `scrolloff`, but no more than will fit, so a big one keeps the
+    /// cursor in the middle.
     fn margin(&self) -> u64 {
         let height = self.height.max(1) as u64;
         (self.scrolloff as u64).min((height - 1) / 2)
     }
 
-    /// Scrolls the view to keep the cursor in it, with `scrolloff` lines
-    /// above and below it, short of the file's ends.
+    /// The last line the view can show: the line after the last line
+    /// break while the cursor's on it, typing, or else the last.
+    fn view_end(&self, text: &Text<'_>) -> u64 {
+        if self.cursor.at.line >= text.lines() {
+            text.lines()
+        } else {
+            text.last_line()
+        }
+    }
+
+    /// Keeps the view's top on a line there is, after edits have changed
+    /// the lines.
+    fn clamp_top(&mut self, text: &Text<'_>) {
+        let end = self.view_end(text);
+        if self.top.line > end {
+            self.top = Top { line: end, cell: 0 };
+        }
+    }
+
+    /// Scrolls the view to keep the cursor in it, with `scrolloff` screen
+    /// rows above and below it, short of the file's ends.
     fn follow(&mut self, copy: &BufferCopy) {
-        let height = self.height.max(1) as u64;
-        let line = self.cursor.at.line;
-        let margin = self.margin();
+        self.resized = false;
+        // The gutter first: the rows' width depends on it.
+        self.gutter = self.gutter_for(self.text(copy).lines());
         let text = self.text(copy);
-        let last = text.last_line();
-        if line < self.top + margin {
-            self.top = line.saturating_sub(margin);
+        self.clamp_top(&text);
+        let top = self.top.row(&text);
+        let height = self.height.max(1) as u64;
+        let margin = self.margin();
+        let end = self.view_end(&text);
+        let cursor = row_at(self.cursor.at, &text);
+        if cursor < rows_down(top, margin, end, &text) {
+            self.top = Top::of(rows_up(cursor, margin, 0, &text), &text);
         } else {
             // Not so far as to show past the file's end, unless the cursor
             // is on the line after it, being typed on.
-            let below = (line + margin).min(last.max(line));
-            if below >= self.top + height {
-                self.top = below + 1 - height;
+            let below = rows_down(cursor, margin, end, &text);
+            if below > rows_down(top, height - 1, end, &text) {
+                self.top = Top::of(rows_up(below, height - 1, 0, &text), &text);
             }
         }
-        self.top = self.top.min(last);
-        self.gutter = self.gutter_for(text.lines());
+        if text.wraps() {
+            self.left = 0;
+            return;
+        }
         let col = self.cursor.at.col;
         let width = self.text_width().max(1);
         if col < self.left {
@@ -3420,16 +3585,20 @@ impl Editor {
         }
     }
 
-    /// Scrolls the view by `lines`, up if negative, as the mouse wheel does,
-    /// keeping the cursor in it.
-    pub(crate) fn wheel(&mut self, lines: i64, copy: &BufferCopy) {
+    /// Scrolls the view by `rows` screen rows, up if negative, as the mouse
+    /// wheel does, keeping the cursor in it.
+    pub(crate) fn wheel(&mut self, rows: i64, copy: &BufferCopy) {
         let text = self.text(copy);
-        let last = text.last_line();
-        self.top = if lines > 0 {
-            self.top.saturating_sub(lines.unsigned_abs())
+        self.clamp_top(&text);
+        let top = self.top.row(&text);
+        let count = rows.unsigned_abs();
+        let top = if rows > 0 {
+            rows_up(top, count, 0, &text)
         } else {
-            (self.top + lines.unsigned_abs()).min(self.lowest_top(last))
+            let down = rows_down(top, count, text.last_line(), &text);
+            down.min(self.lowest_top(&text))
         };
+        self.top = Top::of(top, &text);
         let at = self.cursor.at;
         self.cursor_into_view(&text);
         // Moving the cursor away from the word closes the menu, as it
@@ -3440,51 +3609,74 @@ impl Editor {
         }
     }
 
-    /// The furthest down the view scrolls, in a text whose last line is
-    /// `last`: as far as leaves `scrolloff` lines above the last, which the
-    /// cursor can then sit on without the view jumping back to show them.
-    fn lowest_top(&self, last: u64) -> u64 {
-        last.saturating_sub(self.margin())
+    /// The furthest down the view scrolls: as far as leaves `scrolloff`
+    /// rows above the last line's last, which the cursor can then sit on
+    /// without the view jumping back to show them.
+    fn lowest_top(&self, text: &Text<'_>) -> RowAt {
+        rows_up(last_row(text, text.last_line()), self.margin(), 0, text)
     }
 
-    /// Moves the cursor into the view where it is, `scrolloff` lines from
+    /// Moves the cursor into the view where it is, `scrolloff` rows from
     /// its top and bottom unless that's the file's start or end, as
     /// scrolling the view does. So the next key doesn't scroll it back.
+    /// The column it wants to be in stays as it was.
     fn cursor_into_view(&mut self, text: &Text<'_>) {
         let last = text.last_line();
         let margin = self.margin();
-        let bottom = self.top + self.height.max(1) as u64 - 1;
-        let highest = if self.top == 0 { 0 } else { self.top + margin };
-        let lowest = if bottom >= last {
-            last
+        let top = self.top.row(text);
+        let bottom = rows_down(top, self.height.max(1) as u64 - 1, last, text);
+        let end = last_row(text, last);
+        let highest = if top.line == 0 && top.row == 0 {
+            top
         } else {
-            bottom - margin
+            rows_down(top, margin, last, text)
+        };
+        let lowest = if bottom >= end {
+            end
+        } else {
+            rows_up(bottom, margin, 0, text)
         };
         // Past the end, with only a few lines in view, the last.
-        let line = self.cursor.at.line.max(highest).min(lowest);
-        if line != self.cursor.at.line {
-            let mut cursor = self.cursor;
-            if line > cursor.at.line {
-                cursor.apply(Motion::Down(line - cursor.at.line), text);
-            } else {
-                cursor.apply(Motion::Up(cursor.at.line - line), text);
-            }
-            self.cursor = cursor;
+        let at = row_at(self.cursor.at, text);
+        let to = at.max(highest).min(lowest);
+        if to != at {
+            let want = self.cursor.want();
+            self.cursor.go_to_row(to, text);
+            wrap::onto_row(&mut self.cursor, text, to < at);
+            self.cursor = Cursor::wanting(self.cursor.at, want);
         }
     }
 
     /// Puts the cursor at `line` and `col` of the pane, as a click does. A
-    /// click on a line's number goes to the line's start.
+    /// click on a line's number goes to the line's start, and beside a row
+    /// the line goes on over, to the row's.
     pub(crate) fn click(&mut self, line: usize, col: usize, copy: &BufferCopy) {
         self.panel = None;
         self.actions = None;
         self.close_completion();
+        self.gutter = self.gutter_for(self.text(copy).lines());
         let text = self.text(copy);
-        let line = (self.top + line as u64).min(text.last_line());
-        let col = match col.checked_sub(self.gutter) {
-            Some(col) => self.left + col,
-            None => 0,
+        self.clamp_top(&text);
+        let shown = wrap::view(
+            &text,
+            self.top.row(&text),
+            self.height.max(1),
+            self.view_end(&text),
+            self.left,
+        );
+        let Some(&row) = shown.get(line).or(shown.last()) else {
+            return;
         };
+        let col = match col.checked_sub(self.gutter) {
+            // Past the row's end, its last character.
+            Some(col) => {
+                let cell = row.start + col.saturating_sub(row.indent);
+                cell.min(row.end().saturating_sub(1)).max(row.start)
+            }
+            None if row.row == 0 => 0,
+            None => row.start,
+        };
+        let line = row.line.min(text.last_line());
         self.cursor = Cursor::new(Point { line, col });
         drop(text);
         if self.mode == Mode::Insert {
@@ -3545,90 +3737,93 @@ impl Editor {
         self.width.saturating_sub(self.gutter)
     }
 
-    /// Lays out the lines shown, for [`scene`](Self::scene).
+    /// Lays out the rows shown, for [`scene`](Self::scene).
     pub(crate) fn settle(&mut self, copy: &BufferCopy) {
+        // The rows may have wrapped afresh, putting the cursor out of view.
+        if self.resized {
+            self.follow(copy);
+        }
+        self.gutter = self.gutter_for(self.text(copy).lines());
         let text = self.text(copy);
-        let lines = text.lines();
-        self.gutter = self.gutter_for(lines);
-        let cursor = self.cursor.at.line;
-        let end = if cursor == lines { lines + 1 } else { lines };
-        self.filled = usize::try_from(end.saturating_sub(self.top))
-            .map_or(self.height, |filled| filled.min(self.height));
-        self.rows = (0..self.height as u64)
-            .map(|offset| {
-                let line = self.top + offset;
-                let mut builder = RowBuilder::new(self.width);
-                // The line after the last line break, while typed on.
-                let typing_after = line == lines && cursor == lines;
-                if line < lines || typing_after {
-                    let (start, end) = (text.line_start(line), text.line_end(line));
-                    let diagnostics: Vec<&Diagnostic> =
-                        copy.diagnostics().within(start, end).collect();
-                    // The worst said of this line, where it starts, which
-                    // its number and the text after it tell of.
-                    let worst = (diagnostics.iter())
-                        .filter(|diagnostic| diagnostic.start >= start)
-                        .min_by_key(|diagnostic| diagnostic.severity);
-                    if self.gutter > 0 && self.signs {
-                        let at = usize::try_from(line).unwrap_or(usize::MAX);
-                        match copy.hunks().sign(text.rope(), at) {
-                            Some(sign) => {
-                                let (sign, style) = colors::sign(sign);
-                                builder.push(sign, &style, true);
-                            }
-                            None => builder.push(" ", &Style::DEFAULT, true),
-                        }
-                    }
-                    let numbers = self.gutter.saturating_sub(self.sign_cells());
-                    if numbers > 0 {
-                        let number = self.numbers.label(line, cursor);
-                        let number = format!("{number:>0$} ", numbers - 1);
-                        let style = match worst {
-                            Some(diagnostic) if line != cursor => Style {
-                                fg: colors::diagnostic(diagnostic.severity),
-                                ..Style::DEFAULT
-                            },
-                            _ => colors::line_number(line == cursor),
-                        };
-                        builder.push(&number, &style, true);
-                    }
-                    let laid = Laid::new(text.line_text(line), self.indent.tabstop);
-                    let spans = copy.highlights().within(start, end);
-                    laid.show(
-                        &mut builder,
-                        self.left,
-                        self.text_width(),
-                        spans,
-                        &diagnostics,
-                        start,
-                    );
-                    if let Some(diagnostic) = worst.filter(|_| self.virtual_text) {
-                        // Two cells after the line's end, as much as fits:
-                        // nothing, past the pane's edge.
-                        let room = self.width.saturating_sub(builder.filled());
-                        let gap = (self.gutter + laid.cells().saturating_sub(self.left) + 2)
-                            .saturating_sub(builder.filled());
-                        if gap < room {
-                            builder.push(&" ".repeat(gap), &Style::DEFAULT, true);
-                            let style = colors::virtual_text(diagnostic.severity);
-                            let message = diagnostic.message.lines().next().unwrap_or_default();
-                            builder.push("■ ", &style, true);
-                            builder.push(message, &style, true);
-                        }
-                    }
-                } else if copy.loaded() {
-                    builder.push("~", &Style::DEFAULT, true);
+        self.clamp_top(&text);
+        let width = self.text_width();
+        self.shown = wrap::view(
+            &text,
+            self.top.row(&text),
+            self.height,
+            self.view_end(&text),
+            self.left,
+        );
+        let mut rows = Vec::with_capacity(self.height);
+        // What's wrong with the line being drawn, and the worst said of it
+        // where it starts, which its number and the text after it tell of:
+        // kept for its rows after the first.
+        let mut wrong: (Option<u64>, Vec<&Diagnostic>, Option<&Diagnostic>) =
+            (None, Vec::new(), None);
+        for shown in &self.shown {
+            let line = shown.line;
+            let mut builder = RowBuilder::new(self.width);
+            let (start, end) = (text.line_start(line), text.line_end(line));
+            if wrong.0 != Some(line) {
+                let diagnostics: Vec<&Diagnostic> = copy.diagnostics().within(start, end).collect();
+                let worst = (diagnostics.iter().copied())
+                    .filter(|diagnostic| diagnostic.start >= start)
+                    .min_by_key(|diagnostic| diagnostic.severity);
+                wrong = (Some(line), diagnostics, worst);
+            }
+            let (_, diagnostics, worst) = &wrong;
+            if shown.row > 0 {
+                // A row the line goes on over: no sign or number, as in Vim.
+                builder.push(&" ".repeat(self.gutter), &Style::DEFAULT, true);
+                self.wrapping.draw_indent(&mut builder, shown.indent);
+            } else {
+                self.draw_gutter(&mut builder, line, *worst, &text, copy);
+            }
+            // The line after the last line break, while typed on, is empty.
+            let Some(laid) = text.laid(line) else {
+                rows.push(builder.finish(false));
+                continue;
+            };
+            let room = width.saturating_sub(shown.indent);
+            let cells = shown
+                .next
+                .map_or(room, |next| (next - shown.start).min(room));
+            let spans = copy.highlights().within(start, end);
+            laid.show(&mut builder, shown.start, cells, spans, diagnostics, start);
+            if let Some(diagnostic) = worst.filter(|_| self.virtual_text && shown.next.is_none()) {
+                // Two cells after the line's end, as much as fits:
+                // nothing, past the pane's edge.
+                let room = self.width.saturating_sub(builder.filled());
+                let text_end = laid.cells().saturating_sub(shown.start);
+                let gap =
+                    (self.gutter + shown.indent + text_end + 2).saturating_sub(builder.filled());
+                if gap < room {
+                    builder.push(&" ".repeat(gap), &Style::DEFAULT, true);
+                    let style = colors::virtual_text(diagnostic.severity);
+                    let message = diagnostic.message.lines().next().unwrap_or_default();
+                    builder.push("■ ", &style, true);
+                    builder.push(message, &style, true);
                 }
-                builder.finish(false)
-            })
-            .collect();
+            }
+            rows.push(builder.finish(false));
+        }
+        while rows.len() < self.height {
+            let mut builder = RowBuilder::new(self.width);
+            if copy.loaded() {
+                builder.push("~", &Style::DEFAULT, true);
+            }
+            rows.push(builder.finish(false));
+        }
+        self.rows = rows;
+        self.place_panels(&text);
+    }
+
+    /// Places the cursor, and the panels and menus by it, on the rows just
+    /// laid out.
+    fn place_panels(&mut self, text: &Text<'_>) {
         // By the cursor, if it's in view.
-        let at = self.cursor.at;
-        let row = (at.line.checked_sub(self.top))
-            .and_then(|row| usize::try_from(row).ok())
-            .filter(|&row| row < self.height);
-        let col = (at.col.checked_sub(self.left)).filter(|&col| col < self.text_width());
-        let cursor = row.zip(col).map(|(row, col)| (row, self.gutter + col));
+        let cursor = self.screen_cell(self.cursor.at);
+        self.cursor_cell = cursor;
         let pane = (self.height, self.width);
         if let Some(panel) = &mut self.panel {
             panel.settle(pane, cursor);
@@ -3637,15 +3832,23 @@ impl Editor {
             menu.settle(pane, cursor);
         }
         // The menu goes under the cursor, and the signature over it, or
-        // the other way round if the menu has no room under it.
+        // the other way round if the menu has no room under it. It lines
+        // up with the word, if the word starts on the cursor's row.
         let mut menu_under = None;
-        if let Some(completion) = &mut self.completion {
-            let word = text.point_of(completion.start.min(text.rope().len_bytes()));
-            let word = self.gutter + word.col.saturating_sub(self.left);
-            completion.settle(pane, cursor, word);
-            menu_under = (completion.placed())
-                .zip(cursor)
-                .map(|(placed, (row, _))| placed.top > row);
+        if let Some((row, _)) = cursor
+            && let Some(start) = self.completion.as_ref().map(|completion| completion.start)
+        {
+            let word = text.point_of(start.min(text.rope().len_bytes()));
+            let word = match self.screen_cell(word) {
+                Some((word_row, word)) if word_row == row => word,
+                _ => self.gutter + self.shown[row].indent,
+            };
+            if let Some(completion) = &mut self.completion {
+                completion.settle(pane, cursor, word);
+                menu_under = completion.placed().map(|placed| placed.top > row);
+            }
+        } else if let Some(completion) = &mut self.completion {
+            completion.settle(pane, cursor, self.gutter);
         }
         if let Some(signature) = &mut self.signature {
             let sides = match menu_under {
@@ -3655,6 +3858,51 @@ impl Editor {
             };
             signature.settle_over(pane, cursor, sides);
         }
+    }
+
+    /// Draws line `line`'s sign and number, on its first row, coloured as
+    /// the `worst` said of it says.
+    fn draw_gutter(
+        &self,
+        builder: &mut RowBuilder,
+        line: u64,
+        worst: Option<&Diagnostic>,
+        text: &Text<'_>,
+        copy: &BufferCopy,
+    ) {
+        let cursor = self.cursor.at.line;
+        if self.gutter > 0 && self.signs {
+            let at = usize::try_from(line).unwrap_or(usize::MAX);
+            match copy.hunks().sign(text.rope(), at) {
+                Some(sign) => {
+                    let (sign, style) = colors::sign(sign);
+                    builder.push(sign, &style, true);
+                }
+                None => builder.push(" ", &Style::DEFAULT, true),
+            }
+        }
+        let numbers = self.gutter.saturating_sub(self.sign_cells());
+        if numbers > 0 {
+            let number = self.numbers.label(line, cursor);
+            let number = format!("{number:>0$} ", numbers - 1);
+            let style = match worst {
+                Some(diagnostic) if line != cursor => Style {
+                    fg: colors::diagnostic(diagnostic.severity),
+                    ..Style::DEFAULT
+                },
+                _ => colors::line_number(line == cursor),
+            };
+            builder.push(&number, &style, true);
+        }
+    }
+
+    /// Where the character at `at` was drawn, as its row and column in the
+    /// pane, if it's in view, as laid out last.
+    fn screen_cell(&self, at: Point) -> Option<(usize, usize)> {
+        let width = self.text_width();
+        (self.shown.iter().enumerate())
+            .filter(|(_, shown)| shown.line == at.line)
+            .find_map(|(row, shown)| Some((row, self.gutter + shown.col_of(at.col, width)?)))
     }
 
     /// Closes the panel by the cursor, and the completion menu and
@@ -3700,14 +3948,9 @@ impl Editor {
     /// The rows to draw, and the cursor.
     pub(crate) fn scene(&self) -> (Vec<&Row>, Option<SceneCursor>) {
         let rows = self.rows.iter().collect();
-        let at = self.cursor.at;
-        let shown = at.line >= self.top
-            && at.line < self.top + self.height as u64
-            && at.col >= self.left
-            && at.col < self.left + self.text_width();
-        let cursor = shown.then(|| SceneCursor {
-            line: usize::try_from(at.line - self.top).unwrap_or(0),
-            col: self.gutter + at.col - self.left,
+        let cursor = self.cursor_cell.map(|(line, col)| SceneCursor {
+            line,
+            col,
             style: if self.mode == Mode::Insert {
                 CursorStyle::Bar
             } else {
@@ -3727,28 +3970,31 @@ impl Editor {
     /// text just copied.
     pub(crate) fn highlights(&self) -> Vec<Highlight> {
         let mut highlights = Vec::new();
-        if self.cursorline
-            && let Some(line) = (self.cursor.at.line.checked_sub(self.top))
-                .and_then(|line| usize::try_from(line).ok())
-                .filter(|&line| line < self.height)
-        {
-            highlights.push(Highlight {
-                line,
-                cols: self.gutter..self.width,
-                kind: HighlightKind::CursorLine,
-            });
-        }
-        // Down the file's lines, not the rows past its end, as in Vim.
-        for &column in &self.columns {
-            if let Some(col) =
-                (column.checked_sub(self.left)).filter(|&col| col < self.text_width())
+        let width = self.text_width();
+        // Every row of the cursor's line, as Vim's `cursorlineopt` has it.
+        if self.cursorline {
+            for (line, _) in (self.shown.iter().enumerate())
+                .filter(|(_, shown)| shown.line == self.cursor.at.line)
             {
-                let col = self.gutter + col;
-                highlights.extend((0..self.filled).map(|line| Highlight {
+                highlights.push(Highlight {
                     line,
-                    cols: col..col + 1,
-                    kind: HighlightKind::ColorColumn,
-                }));
+                    cols: self.gutter..self.width,
+                    kind: HighlightKind::CursorLine,
+                });
+            }
+        }
+        // Down the file's rows, not those past its end, as in Vim. Where
+        // lines wrap, it marks the cell that column of the line is in.
+        for &column in &self.columns {
+            for (line, shown) in self.shown.iter().enumerate() {
+                if let Some(col) = shown.col_of(column, width) {
+                    let col = self.gutter + col;
+                    highlights.push(Highlight {
+                        line,
+                        cols: col..col + 1,
+                        kind: HighlightKind::ColorColumn,
+                    });
+                }
             }
         }
         if let (Some(anchor), Mode::Visual(kind)) = (self.anchor, self.mode) {
@@ -3776,6 +4022,8 @@ impl Editor {
         highlights
     }
 
+    /// Highlights from `start` to `last`, as `why` says, on the rows shown.
+    /// Where it goes on past a row's end, it's lit to the pane's edge.
     fn highlight(
         &self,
         start: Point,
@@ -3784,8 +4032,12 @@ impl Editor {
         why: HighlightKind,
         into: &mut Vec<Highlight>,
     ) {
-        let bottom = self.top + self.height as u64;
-        for line in start.line.max(self.top)..=last.line.min(bottom.saturating_sub(1)) {
+        let width = self.text_width();
+        for (row, shown) in self.shown.iter().enumerate() {
+            let line = shown.line;
+            if line < start.line || line > last.line {
+                continue;
+            }
             let (from, to) = match kind {
                 Selection::Lines => (0, usize::MAX),
                 Selection::Characters => (
@@ -3797,12 +4049,20 @@ impl Editor {
                     },
                 ),
             };
-            let from = from.saturating_sub(self.left);
-            let to = to.saturating_sub(self.left).min(self.text_width());
-            if from < to {
+            let from = from.max(shown.start);
+            if from >= to.min(shown.end()) {
+                continue;
+            }
+            let first = shown.indent + (from - shown.start);
+            let end = if to > shown.end() {
+                width
+            } else {
+                (shown.indent.saturating_add(to - shown.start)).min(width)
+            };
+            if first < end {
                 into.push(Highlight {
-                    line: usize::try_from(line - self.top).unwrap_or(0),
-                    cols: self.gutter + from..self.gutter + to,
+                    line: row,
+                    cols: self.gutter + first..self.gutter + end,
                     kind: why,
                 });
             }
@@ -3864,13 +4124,36 @@ fn previous(mark: char) -> char {
     if mark == '`' { '\'' } else { mark }
 }
 
+/// Whether `motion` reads the Vim engine's row of a line, character by
+/// character, so can't see past the end of a long line's (see
+/// [`Lines::overflows`]): word motions, `f` and its kin, and `%`.
+fn reads_row(motion: Motion) -> bool {
+    matches!(
+        motion,
+        Motion::WordStart
+            | Motion::WordBack
+            | Motion::WordEnd
+            | Motion::BigWordStart
+            | Motion::BigWordBack
+            | Motion::BigWordEnd
+            | Motion::Find { .. }
+            | Motion::Match
+    )
+}
+
 /// Whether `motion` fails when it doesn't move the cursor, which stops a
 /// macro being typed, as in Vim: all but those that go to a place on the
-/// line, or in the file, whatever's there.
+/// line or its screen row, or in the file, whatever's there.
 fn can_fail(motion: Motion) -> bool {
     !matches!(
         motion,
-        Motion::LineStart | Motion::LineEnd | Motion::FirstNonBlank | Motion::First | Motion::Last
+        Motion::LineStart
+            | Motion::LineEnd
+            | Motion::FirstNonBlank
+            | Motion::First
+            | Motion::Last
+            | Motion::RowStart
+            | Motion::RowEnd
     )
 }
 

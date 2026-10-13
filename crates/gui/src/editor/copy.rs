@@ -83,6 +83,9 @@ pub(crate) struct BufferCopy {
     text: Rope,
     /// The daemon's version the copy is made from.
     version: u64,
+    /// How many times the text has changed, here or by the daemon, so what's
+    /// worked out from it can be kept until it does again.
+    revision: u64,
     modified: bool,
     /// Whether a snapshot has arrived.
     loaded: bool,
@@ -112,6 +115,7 @@ impl BufferCopy {
             path: String::new(),
             text: Rope::new(),
             version: 0,
+            revision: 0,
             modified: false,
             loaded: false,
             waiting: VecDeque::new(),
@@ -134,6 +138,12 @@ impl BufferCopy {
 
     pub(crate) fn text(&self) -> &Rope {
         &self.text
+    }
+
+    /// How many times the text has changed: the same number, the same
+    /// text.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub(crate) fn highlights(&self) -> &Highlights {
@@ -174,6 +184,20 @@ impl BufferCopy {
         self.loaded
     }
 
+    /// Makes `edit` to the text, moving what moves with it. Returns whether
+    /// it could be made, logging, as `whose` edit, one that doesn't fit.
+    fn apply(&mut self, edit: &Edit, whose: &str) -> bool {
+        if let Err(err) = edit.apply(&mut self.text) {
+            log::error!("buffer {}: {whose} edit didn't fit: {err}", self.id);
+            return false;
+        }
+        self.revision += 1;
+        self.highlights.map(edit);
+        self.diagnostics.map(edit);
+        self.hunks.map(edit);
+        true
+    }
+
     /// Makes `edit` to the copy and sends it. It starts a new undo step if
     /// `step`, or joins the last. Returns whether it could be made: an edit
     /// that doesn't fit the text is a mistake, and dropped.
@@ -181,13 +205,9 @@ impl BufferCopy {
         if edit.is_noop() {
             return true;
         }
-        if let Err(err) = edit.apply(&mut self.text) {
-            log::error!("buffer {}: an edit didn't fit: {err}", self.id);
+        if !self.apply(&edit, "an") {
             return false;
         }
-        self.highlights.map(&edit);
-        self.diagnostics.map(&edit);
-        self.hunks.map(&edit);
         self.made.push(edit.clone());
         // An edit joining the last step joins the last edit, if that's
         // still to be sent, unless that's grown long, as a macro's many
@@ -257,6 +277,7 @@ impl BufferCopy {
             BufferUpdate::Snapshot(snapshot) => {
                 self.path = snapshot.path;
                 self.text = Rope::from_str(&snapshot.text);
+                self.revision += 1;
                 self.version = snapshot.version;
                 self.modified = snapshot.modified;
                 self.loaded = true;
@@ -292,13 +313,9 @@ impl BufferCopy {
                 let Some(edit) = self.bring_past_waiting(edit) else {
                     return Heard::Nothing;
                 };
-                if let Err(err) = edit.apply(&mut self.text) {
-                    log::error!("buffer {}: the daemon's edit didn't fit: {err}", self.id);
+                if !self.apply(&edit, "the daemon's") {
                     return Heard::Nothing;
                 }
-                self.highlights.map(&edit);
-                self.diagnostics.map(&edit);
-                self.hunks.map(&edit);
                 self.version = version;
                 self.send_next();
                 if reversal {
