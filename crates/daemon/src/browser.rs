@@ -1427,6 +1427,20 @@ fn locate(config: &BrowserConfig) -> Result<(PathBuf, PathBuf), String> {
              CLACKATOO_BROWSER to one's path",
         )?
     };
+    // A snap reaches the home folder the system has for the user, not
+    // `$HOME`: with another, a profile under `$HOME` it can't reach makes
+    // it fall back on the user's own.
+    if snap.is_some()
+        && let Some(real) = passwd_home()
+        && real != config.home
+    {
+        return Err(format!(
+            "{} is a snap, which uses {} as home, not {}, so it isn't started",
+            program.display(),
+            real.display(),
+            config.home.display()
+        ));
+    }
     let profile = match (&config.profile, &snap) {
         (Some(profile), None) => profile.clone(),
         (Some(profile), Some(snap)) => {
@@ -1452,6 +1466,17 @@ fn locate(config: &BrowserConfig) -> Result<(PathBuf, PathBuf), String> {
         )?,
     };
     Ok((program, profile))
+}
+
+/// The home folder `/etc/passwd` has for this user, if it has them: the
+/// one snapd gives a snap, whatever `$HOME` says.
+fn passwd_home() -> Option<PathBuf> {
+    let uid = rustix::process::getuid().as_raw().to_string();
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        (fields.len() >= 7 && fields[2] == uid).then(|| PathBuf::from(fields[5]))
+    })
 }
 
 /// The snap `program` runs, if it's one, by name, or why that can't be
@@ -1643,28 +1668,45 @@ mod tests {
         }
 
         // A snap's profile is in its own folder, or it isn't started.
+        let home = passwd_home().unwrap_or_else(|| PathBuf::from("/home/me"));
         let snap = |profile: Option<&str>| {
             locate(&BrowserConfig {
                 program: Some(wrapper.clone()),
                 profile: profile.map(PathBuf::from),
                 data: Some(PathBuf::from("/data/clackatoo/browser")),
-                home: PathBuf::from("/home/me"),
+                home: home.clone(),
                 idle: Duration::ZERO,
             })
         };
         assert_eq!(
             snap(None).unwrap().1,
-            Path::new("/home/me/snap/chromium/common/clackatoo-browser")
+            home.join("snap/chromium/common/clackatoo-browser")
         );
-        assert!(snap(Some("/home/me/snap/chromium/common/mine")).is_ok());
+        let at = |path: &str| home.join(path).display().to_string();
+        assert!(snap(Some(&at("snap/chromium/common/mine"))).is_ok());
         for elsewhere in [
-            "/home/me/.local/share/clackatoo/browser",
-            "/home/me/snap/firefox/common/x",
-            "/home/me/snap/chromium/../../.config/chromium",
+            at(".local/share/clackatoo/browser"),
+            at("snap/firefox/common/x"),
+            at("snap/chromium/../../.config/chromium"),
         ] {
             assert!(
-                snap(Some(elsewhere)).unwrap_err().contains("is a snap"),
+                snap(Some(&elsewhere)).unwrap_err().contains("is a snap"),
                 "{elsewhere}"
+            );
+        }
+        // With `$HOME` not the home the system has, a snap would reach
+        // neither: it isn't started.
+        if passwd_home().is_some() {
+            let elsewhere = locate(&BrowserConfig {
+                program: Some(wrapper.clone()),
+                profile: None,
+                data: None,
+                home: PathBuf::from("/nowhere/home"),
+                idle: Duration::ZERO,
+            });
+            assert!(
+                elsewhere.unwrap_err().contains("uses"),
+                "a home not the system's"
             );
         }
     }

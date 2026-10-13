@@ -10232,6 +10232,7 @@ fn start_browsing_chat(client: &mut Client) -> TerminalId {
 }
 
 #[test]
+#[ignore = "starts the installed Chromium: run with --ignored"]
 #[allow(clippy::too_many_lines, reason = "one story, step by step")]
 fn an_agent_drives_a_page_the_user_watches_once_they_allow_it() {
     use clackatoo_protocol::BrowserUpdate;
@@ -10746,6 +10747,7 @@ fn turning_the_browser_off_takes_back_its_question() {
 }
 
 #[test]
+#[ignore = "starts the installed Chromium: run with --ignored"]
 fn a_page_that_offers_a_download_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let Some(browser) = test_browser(dir.path()) else {
@@ -10971,6 +10973,7 @@ fn a_real_agent_reads_a_page_in_the_browser_once_allowed() {
 }
 
 #[test]
+#[ignore = "starts the installed Chromium: run with --ignored"]
 fn the_daemon_stops_without_waiting_for_a_page_to_load() {
     let dir = tempfile::tempdir().unwrap();
     let Some(browser) = test_browser(dir.path()) else {
