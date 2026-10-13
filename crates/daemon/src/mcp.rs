@@ -93,6 +93,22 @@ pub(crate) const INSTRUCTIONS: &str = "clackatoo is the terminal and editor the 
     named by numbers too, as list_chats gives them: you can message \
     them, read them, start new ones and wait for their answers.";
 
+/// What the agent is told, after [`INSTRUCTIONS`], about handing work on,
+/// when it may have a subagent tool of its own, as Claude Code's Task
+/// tool is.
+pub(crate) const DELEGATING: &str = "To hand work on: a subagent tool of \
+    your own, if you have one, such as Claude Code's Task tool, suits \
+    quick, throwaway research within this turn. start_chat suits work \
+    the user may want to watch or steer, work that should outlive this \
+    turn, work that needs another agent, and work that edits files the \
+    user will review.";
+
+/// What the agent is told instead of [`DELEGATING`] when the user has
+/// taken Claude Code's Task tool away.
+pub(crate) const DELEGATING_WITHOUT_TASK: &str = "To hand work on, use \
+    start_chat: the user can watch and steer the chat it starts, which \
+    can outlive this turn.";
+
 /// A tool the agent called, with what it asked, for the server to carry
 /// out.
 #[derive(Debug, PartialEq)]

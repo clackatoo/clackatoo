@@ -1941,6 +1941,7 @@ fn new_pane(kind: Kind, agent: Option<String>, size: Size, options: &Options) ->
             cwd: None,
             agent: agent.or_else(|| Some(options.agent.clone()).filter(|name| !name.is_empty())),
             tools: options.agenttools.asked(),
+            task: options.claudetask,
         }),
     }
 }
@@ -6706,5 +6707,18 @@ mod tests {
         type_keys(&mut desk, "q");
         assert_eq!(desk.recording(), None);
         assert!(!answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));
+    }
+
+    #[test]
+    fn a_new_chat_keeps_claude_codes_task_tool_as_claudetask_says() {
+        let size = Size::new(80, 24).unwrap();
+        let task = |options: &Options| match new_pane(Kind::Agent, None, size, options) {
+            PaneTerminal::Agent(new) => new.task,
+            other => panic!("{other:?}"),
+        };
+        let mut options = Options::default();
+        assert!(task(&options));
+        options.claudetask = false;
+        assert!(!task(&options));
     }
 }

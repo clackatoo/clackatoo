@@ -32,6 +32,10 @@ When an agent changes a file you have open, the change lands in the editor as th
 
 Under each turn that changed files, the chat says how many, with Undo. In the chat's normal mode, `u` undoes what the last turn changed in files, keeping what you or later turns changed since, and Ctrl+R makes it again. `:AgentUndo 3` and `:AgentRedo 3` name a turn.
 
+## Handing work on
+
+An agent can hand work to another chat with clackatoo's `start_chat`: it opens beside its own, where you can watch it, steer it, and review what it changes, and it carries on after the turn that started it. Claude Code also has a Task tool of its own, for quick research inside one turn, whose helpers you don't see. Each agent is told which suits what. `:set noclaudetask` takes the Task tool away from new chats, so Claude hands everything on in chats you can see.
+
 ## Try a chat
 
 Only if you'd like to, and are happy for it to use your agent: press Ctrl+B and then `a` to open a chat beside the practice file. The first chat starts the agent, which takes a second or two, and may first ask to install the agent's adapter. Otherwise, press `]s`.

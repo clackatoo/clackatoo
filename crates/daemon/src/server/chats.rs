@@ -87,7 +87,7 @@ impl Daemon {
             .unwrap_or_else(|| self.config.home.to_string_lossy().into_owned());
         let name = request.agent.as_deref().unwrap_or(agents::DEFAULT);
         let spec = self.agent_spec(name);
-        let chat = HostedChat::new(id, request.size, cwd, &spec, request.tools);
+        let chat = HostedChat::new(id, request.size, cwd, &spec, request.tools, request.task);
         log::info!("chat {id} started, with {name}");
         self.add_chat(chat);
         self.connect(id);
@@ -156,13 +156,15 @@ impl Daemon {
             return;
         };
         let Some(chat) = self.chat(id) else { return };
-        let (cwd, session) = (
+        let (cwd, session, task) = (
             chat.working_directory().to_owned(),
             chat.session().map(str::to_owned),
+            chat.task(),
         );
         let tools = self.tools_server(id);
         if let Some(slot) = self.agents.running.get_mut(&agent) {
-            slot.agent.open_session(id, &cwd, session.as_deref(), tools);
+            slot.agent
+                .open_session(id, &cwd, session.as_deref(), tools, task);
         }
         self.flush_agent(agent);
     }

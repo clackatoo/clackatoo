@@ -14,6 +14,7 @@
 //! | `write PATH`, a line's end, then text | Writes the text to the file through the daemon, in a tool call, and says `wrote` |
 //! | `disk PATH`, a line's end, then text | Writes the text to the file itself, as Claude Code's tools do, then says so as its adapter does: the tool call finished, then what it changed, the file's old and new text, in an update of its own; and `done` |
 //! | `tools` | The MCP servers it was given, as JSON |
+//! | `meta` | The `_meta` its session was opened with, as JSON |
 //! | `mcp NAME ARGS`, a line each | Calls each of clackatoo's tools `NAME` with the JSON `ARGS`, in turn, and says what each answered |
 //! | `edit PATH`, a line's end, then text | As `disk`, but asks permission first, as Claude Code does in Manual mode, and writes the file only once it's allowed |
 //! | `disk-spaces PATH`, a line's end, then text | As `disk`, but says the change as Claude Code's adapter says one to a tab-indented file: each line's leading tabs as two spaces, as the tool finishes |
@@ -76,6 +77,7 @@ fn main() {
         sessions: BTreeMap::new(),
         settings: BTreeMap::new(),
         tools: BTreeMap::new(),
+        meta: BTreeMap::new(),
         waiting: None,
         waits: Vec::new(),
         asked: None,
@@ -101,6 +103,8 @@ struct Fake {
     settings: BTreeMap<String, (String, String)>,
     /// The MCP servers each session was given.
     tools: BTreeMap<String, Value>,
+    /// The `_meta` each session was last opened with.
+    meta: BTreeMap<String, Value>,
     /// A message waiting to be answered: its request's ID and session.
     waiting: Option<(Value, String)>,
     /// Messages answered only once cancelled, one a session: each
@@ -250,6 +254,7 @@ impl Fake {
                     .insert(session.clone(), params["cwd"].as_str().unwrap().to_owned());
                 self.tools
                     .insert(session.clone(), params["mcpServers"].clone());
+                self.meta.insert(session.clone(), params["_meta"].clone());
                 let settings = self.starting_settings();
                 let options = self.options(&settings);
                 self.settings.insert(session.clone(), settings);
@@ -264,6 +269,7 @@ impl Fake {
                     .insert(session.clone(), params["cwd"].as_str().unwrap().to_owned());
                 self.tools
                     .insert(session.clone(), params["mcpServers"].clone());
+                self.meta.insert(session.clone(), params["_meta"].clone());
                 let settings = self.starting_settings();
                 let options = self.options(&settings);
                 self.settings.insert(session, settings);
@@ -496,6 +502,11 @@ impl Fake {
             "tools" => {
                 let tools = self.tools.get(&session).cloned().unwrap_or_default();
                 say(&session, &format!("{tools}\n"));
+                done(&id, "end_turn");
+            }
+            "meta" => {
+                let meta = self.meta.get(&session).cloned().unwrap_or_default();
+                say(&session, &format!("{meta}\n"));
                 done(&id, "end_turn");
             }
             calls if calls.starts_with("mcp ") => self.call_tools(id, session, calls),

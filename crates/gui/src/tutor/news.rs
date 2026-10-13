@@ -119,6 +119,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "clackatoo in your app launcher: `clackatoo desktop install`",
     },
+    News {
+        id: "claude-task",
+        date: "2026-10-13",
+        lesson: "agents",
+        what: ":set noclaudetask takes away Claude Code's hidden Task helpers, so it hands work on in chats you can watch",
+    },
 ];
 
 impl News {

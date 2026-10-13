@@ -84,6 +84,13 @@ const TOOLS_VALUES: [(AgentTools, &str, &str, &str); 3] = [
     ),
 ];
 
+/// The ID a chat keeps, with the values chosen, whether its agent keeps
+/// Claude Code's own Task tool, so that it lasts through upgrades and
+/// the session is opened again the same way. It's chosen when the chat
+/// starts, and never shown or sent to the agent as a setting: Claude
+/// Code reads it only as a session opens.
+const TASK_SETTING: &str = "clackatoo.task";
+
 /// The most questions a chat keeps waiting. Past it, a tool's question is
 /// refused rather than queued.
 pub(crate) const MAX_QUESTIONS: usize = 16;
@@ -285,13 +292,14 @@ impl HostedChat {
     /// A chat with `agent`, in `cwd`, not yet with a session: the server
     /// is to get it one. It's named after the agent until the agent names
     /// the conversation. Its agent may do what `tools` says with
-    /// clackatoo's tools.
+    /// clackatoo's tools, and keeps Claude Code's Task tool if `task`.
     pub(crate) fn new(
         id: TerminalId,
         size: Size,
         cwd: String,
         agent: &AgentSpec,
         tools: AgentTools,
+        task: bool,
     ) -> Self {
         Self {
             id,
@@ -309,7 +317,13 @@ impl HostedChat {
             },
             asking: VecDeque::new(),
             next_question: 0,
-            chosen: vec![(TOOLS_SETTING.to_owned(), tools_value(tools).to_owned())],
+            chosen: vec![
+                (TOOLS_SETTING.to_owned(), tools_value(tools).to_owned()),
+                (
+                    TASK_SETTING.to_owned(),
+                    if task { "on" } else { "off" }.to_owned(),
+                ),
+            ],
             starting_mode: agent.starting_mode.clone(),
             journal: Journal::default(),
             diffs: Vec::new(),
@@ -356,7 +370,14 @@ impl HostedChat {
     /// its name is now.
     pub(crate) fn resume(chat: handover::Chat, agent: &AgentSpec) -> Self {
         let size = Size::new(chat.cols, chat.rows).unwrap_or(Size::new(80, 24).expect("valid"));
-        let mut resumed = Self::new(TerminalId(chat.id), size, chat.cwd, agent, AgentTools::Ask);
+        let mut resumed = Self::new(
+            TerminalId(chat.id),
+            size,
+            chat.cwd,
+            agent,
+            AgentTools::Ask,
+            true,
+        );
         resumed.link = Link::Closed;
         resumed.title = chat.title;
         resumed.session = chat.session;
@@ -412,6 +433,12 @@ impl HostedChat {
             Some("allow") => AgentTools::Allow,
             _ => AgentTools::Ask,
         }
+    }
+
+    /// Whether its agent keeps Claude Code's own Task tool. A chat from
+    /// before it could be taken away keeps it.
+    pub(crate) fn task(&self) -> bool {
+        !(self.chosen.iter()).any(|(id, value)| id == TASK_SETTING && value == "off")
     }
 
     /// Lets its agent do what `tools` says with clackatoo's tools, from
@@ -755,7 +782,7 @@ impl HostedChat {
         }
         let mut actions = Vec::new();
         for (setting, value) in self.chosen.clone() {
-            if setting == TOOLS_SETTING {
+            if setting == TOOLS_SETTING || setting == TASK_SETTING {
                 continue;
             }
             let differs = (self.node.settings.iter())
@@ -2014,6 +2041,7 @@ mod tests {
             "/tmp".to_owned(),
             &agent,
             AgentTools::Ask,
+            true,
         )
     }
 
@@ -2611,6 +2639,44 @@ mod tests {
             Some(&Outcome::Failed("cut off by an upgrade".into()))
         );
         assert_eq!(resumed.node.state, ChatState::Ready);
+    }
+
+    #[test]
+    fn a_chat_without_claude_codes_task_tool_stays_without_it() {
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let size = Size::new(40, 12).unwrap();
+        let tools = AgentTools::Ask;
+        let mut chat = HostedChat::new(TerminalId(1), size, "/".into(), &agent, tools, false);
+        assert!(!chat.task());
+        // It's never shown, and never sent to the agent as a setting.
+        let actions = connect(&mut chat, "s");
+        assert!(
+            !(chat.node.settings.iter()).any(|setting| setting.id == TASK_SETTING),
+            "{:?}",
+            chat.node.settings
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, Action::Set { .. })),
+            "{actions:?}"
+        );
+        // Nor can a window change it once the session is open.
+        chat.act(ChatAction::Set {
+            setting: TASK_SETTING.into(),
+            value: "on".into(),
+        });
+        assert!(!chat.task());
+        // It lasts through an upgrade, so the session opens again without it.
+        let resumed = HostedChat::resume(chat.hand_over(), &agent);
+        assert!(!resumed.task());
+        // A chat from before it could be taken away keeps it.
+        let mut handed = resumed.hand_over();
+        handed.chosen.retain(|(id, _)| id != TASK_SETTING);
+        assert!(HostedChat::resume(handed, &agent).task());
+        assert!(chat_with("claude").task());
     }
 
     /// A message from chat `from`, `hops` along a chain.

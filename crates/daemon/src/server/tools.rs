@@ -227,12 +227,20 @@ impl Daemon {
     }
 
     /// What the chat `chat`'s agent is told about its tools when it
-    /// connects: what they're for, which chat it is, and the boards it
-    /// shares with other agents.
+    /// connects: what they're for, when to hand work to another chat,
+    /// which chat it is, and the boards it shares with other agents.
     fn tools_instructions(&self, chat: TerminalId) -> String {
+        let task = self
+            .chat_ref(chat)
+            .is_none_or(crate::chat::HostedChat::task);
         format!(
-            "{} This chat is chat {chat}: other agents name it by that number.{}",
+            "{} {} This chat is chat {chat}: other agents name it by that number.{}",
             mcp::INSTRUCTIONS,
+            if task {
+                mcp::DELEGATING
+            } else {
+                mcp::DELEGATING_WITHOUT_TASK
+            },
             self.boards_told(chat)
         )
     }

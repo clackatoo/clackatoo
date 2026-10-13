@@ -120,7 +120,7 @@ fn reach(tools: AgentTools) -> u8 {
 
 impl Daemon {
     /// The chat `id`, to read.
-    fn chat_ref(&self, id: TerminalId) -> Option<&HostedChat> {
+    pub(super) fn chat_ref(&self, id: TerminalId) -> Option<&HostedChat> {
         self.terminals.get(&id)?.terminal.chat_ref()
     }
 
@@ -526,12 +526,15 @@ impl Daemon {
             .then(|| own.mode().map(str::to_owned))
             .flatten();
         let root = own.relations().root.unwrap_or(chat);
-        let (depth, size, tools) = (own.relations().depth, own.size(), own.tools());
+        let (depth, size, tools, task) =
+            (own.relations().depth, own.size(), own.tools(), own.task());
+        // It may do what the chat that starts it may.
         let new = PaneTerminal::Agent(NewAgent {
             size,
             cwd: Some(dir.to_string_lossy().into_owned()),
             agent: Some(name.clone()),
             tools,
+            task,
         });
         let pane = self.place_beside(chat, new)?;
         let Ok(Content::Terminal(started)) = self.workspaces.check_pane(pane) else {
@@ -852,7 +855,14 @@ mod tests {
     fn idle_chat(daemon: &mut Daemon, id: u32) -> TerminalId {
         let agent = crate::AgentConfig::default().find("claude").unwrap();
         let size = Size::new(40, 10).unwrap();
-        let mut chat = HostedChat::new(TerminalId(id), size, "/".into(), &agent, AgentTools::Ask);
+        let mut chat = HostedChat::new(
+            TerminalId(id),
+            size,
+            "/".into(),
+            &agent,
+            AgentTools::Ask,
+            true,
+        );
         chat.connected(Opened {
             session: format!("s{id}"),
             settings: None,

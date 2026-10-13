@@ -1420,6 +1420,7 @@ fn new_chat_with(agent: Option<&str>) -> PaneTerminal {
         cwd: None,
         agent: agent.map(str::to_owned),
         tools: AgentTools::Ask,
+        task: true,
     })
 }
 
@@ -7079,13 +7080,23 @@ impl TestDaemon {
 /// Starts a workspace with a chat whose agent may use its tools as
 /// `tools` says, and waits for it to be ready.
 fn start_tooled_chat(client: &mut Client, tools: AgentTools) -> TerminalId {
-    let chat = PaneTerminal::Agent(NewAgent {
-        size: Size::new(40, 10).unwrap(),
-        cwd: None,
-        agent: None,
-        tools,
-    });
-    let pane = client.new_workspace(None, chat).unwrap();
+    start_new_chat(
+        client,
+        NewAgent {
+            size: Size::new(40, 10).unwrap(),
+            cwd: None,
+            agent: None,
+            tools,
+            task: true,
+        },
+    )
+}
+
+/// Starts a workspace with the chat `chat`, and waits for it to be ready.
+fn start_new_chat(client: &mut Client, chat: NewAgent) -> TerminalId {
+    let pane = client
+        .new_workspace(None, PaneTerminal::Agent(chat))
+        .unwrap();
     let workspaces = client.watch_workspaces().unwrap();
     let (_, _, pane) = workspaces.find_pane(pane).unwrap();
     let chat = pane.content.terminal().unwrap();
@@ -7129,6 +7140,53 @@ fn an_agent_is_given_tools_for_its_own_chat_unless_they_are_off() {
     // Nor can anything ask to serve them.
     let refused = mcp_relay(&daemon, off);
     assert!(refused.contains("has none"), "{refused}");
+}
+
+/// The `_meta` the agent's session in `chat` was last opened with.
+fn session_meta(client: &mut Client, chat: TerminalId) -> serde_json::Value {
+    serde_json::from_str(&last_words(&ask(client, chat, "meta"))).unwrap()
+}
+
+#[test]
+fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let new = |tools, task| NewAgent {
+        size: Size::new(40, 10).unwrap(),
+        cwd: None,
+        agent: None,
+        tools,
+        task,
+    };
+    let allowed = serde_json::json!(["mcp__clackatoo"]);
+    let disallowed = serde_json::json!(["Agent", "Task"]);
+
+    let with = start_new_chat(&mut client, new(AgentTools::Ask, true));
+    let meta = session_meta(&mut client, with);
+    assert_eq!(
+        meta,
+        serde_json::json!({ "claudeCode": { "options": { "allowedTools": allowed } } })
+    );
+
+    let without = start_new_chat(&mut client, new(AgentTools::Ask, false));
+    let meta = session_meta(&mut client, without);
+    assert_eq!(meta["claudeCode"]["options"]["allowedTools"], allowed);
+    assert_eq!(meta["claudeCode"]["options"]["disallowedTools"], disallowed);
+
+    // With clackatoo's tools off too, it's still taken away.
+    let bare = start_new_chat(&mut client, new(AgentTools::Off, false));
+    assert_eq!(
+        session_meta(&mut client, bare),
+        serde_json::json!({ "claudeCode": { "options": { "disallowedTools": disallowed } } })
+    );
+    let plain = start_new_chat(&mut client, new(AgentTools::Off, true));
+    assert_eq!(session_meta(&mut client, plain), serde_json::Value::Null);
+
+    // The session opened again, as after the agent stops, is opened the
+    // same way.
+    ask(&mut client, without, "exit");
+    let meta = session_meta(&mut client, without);
+    assert_eq!(meta["claudeCode"]["options"]["disallowedTools"], disallowed);
 }
 
 /// Runs the fake agent's relay for `chat`'s tools, as `clackatoo mcp`,
@@ -7566,18 +7624,16 @@ fn a_real_agent_runs_a_command_in_a_terminal_through_its_tools() {
 
 /// As [`start_tooled_chat`], with the chat working in `cwd`.
 fn start_tooled_chat_in(client: &mut Client, tools: AgentTools, cwd: &Path) -> TerminalId {
-    let chat = PaneTerminal::Agent(NewAgent {
-        size: Size::new(40, 10).unwrap(),
-        cwd: Some(cwd.display().to_string()),
-        agent: None,
-        tools,
-    });
-    let pane = client.new_workspace(None, chat).unwrap();
-    let workspaces = client.watch_workspaces().unwrap();
-    let (_, _, pane) = workspaces.find_pane(pane).unwrap();
-    let chat = pane.content.terminal().unwrap();
-    wait_for_chat(client, chat, |node| node.state == ChatState::Ready);
-    chat
+    start_new_chat(
+        client,
+        NewAgent {
+            size: Size::new(40, 10).unwrap(),
+            cwd: Some(cwd.display().to_string()),
+            agent: None,
+            tools,
+            task: true,
+        },
+    )
 }
 
 /// A daemon whose agents get clackatoo's tools, and whose shell is called
@@ -8573,7 +8629,6 @@ fn a_board_pane_shows_the_board_live_and_posts_as_the_user() {
 
 #[test]
 fn an_agent_is_told_its_chat_and_the_boards_when_it_connects() {
-    use std::io::BufRead;
     let boards = tempfile::tempdir().unwrap();
     let daemon = TestDaemon::with_boards(boards.path());
     let mut client = daemon.client();
@@ -8583,6 +8638,20 @@ fn an_agent_is_told_its_chat_and_the_boards_when_it_connects() {
         chat,
         &[r#"board_create {"name":"plan","purpose":"who does what"}"#],
     );
+    let told = told_on_connecting(&daemon, chat);
+    assert!(
+        told.contains(&format!("This chat is chat {chat}")),
+        "{told}"
+    );
+    // By name alone: what an agent wrote is never among the instructions.
+    assert!(told.contains("Boards now: \"plan\"."), "{told}");
+    assert!(!told.contains("who does what"), "{told}");
+}
+
+/// What the agent of `chat` is told about its tools when it connects to
+/// them, through the fake agent's relay.
+fn told_on_connecting(daemon: &TestDaemon, chat: TerminalId) -> String {
+    use std::io::BufRead;
     let mut relay = std::process::Command::new(fake_agent())
         .args(["mcp", "--chat", &chat.0.to_string(), "--socket"])
         .arg(daemon.socket())
@@ -8597,16 +8666,46 @@ fn an_agent_is_told_its_chat_and_the_boards_when_it_connects() {
     let mut line = String::new();
     output.read_line(&mut line).unwrap();
     let answer: serde_json::Value = serde_json::from_str(&line).unwrap();
-    let told = answer["result"]["instructions"].as_str().unwrap();
-    assert!(
-        told.contains(&format!("This chat is chat {chat}")),
-        "{told}"
-    );
-    // By name alone: what an agent wrote is never among the instructions.
-    assert!(told.contains("Boards now: \"plan\"."), "{told}");
-    assert!(!told.contains("who does what"), "{told}");
     drop(input);
     assert!(relay.wait().unwrap().success());
+    answer["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn an_agent_is_told_when_to_hand_work_to_another_chat() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let with = start_tooled_chat(&mut client, AgentTools::Ask);
+    let told = told_on_connecting(&daemon, with);
+    assert!(
+        told.contains("Claude Code's Task tool, suits quick, throwaway research within this turn"),
+        "{told}"
+    );
+    for reason in [
+        "the user may want to watch or steer",
+        "should outlive this turn",
+        "needs another agent",
+        "edits files the user will review",
+    ] {
+        assert!(told.contains(reason), "{reason}: {told}");
+    }
+    // Without the Task tool, it isn't told of it.
+    let without = start_new_chat(
+        &mut client,
+        NewAgent {
+            size: Size::new(40, 10).unwrap(),
+            cwd: None,
+            agent: None,
+            tools: AgentTools::Ask,
+            task: false,
+        },
+    );
+    let told = told_on_connecting(&daemon, without);
+    assert!(!told.contains("Task"), "{told}");
+    assert!(told.contains("To hand work on, use start_chat"), "{told}");
 }
 
 #[test]

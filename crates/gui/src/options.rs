@@ -433,6 +433,12 @@ options! {
     /// terminals without asking, but asks the rest; `off` gives it no
     /// tools. The chat's Tools setting changes it later.
     agenttools("agt"): AgentTools = AgentTools::Ask;
+    /// A new chat with Claude Code keeps Claude Code's own Task tool,
+    /// which runs helpers you don't see, for quick research inside one
+    /// turn. Off, Claude hands work on only with clackatoo's
+    /// `start_chat`, in chats beside it that you can watch and steer.
+    /// Other agents have no Task tool.
+    claudetask("ct"): bool = true;
     /// Look for a new release of clackatoo, at most once a day, a while
     /// after the window opens, and say in the bar when one is out. It's
     /// never installed until `:update` or `clackatoo update` asks.

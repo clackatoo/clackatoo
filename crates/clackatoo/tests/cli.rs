@@ -471,6 +471,7 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
                 cwd: None,
                 agent: None,
                 tools: clackatoo_protocol::AgentTools::Ask,
+                task: true,
             }),
         )
         .unwrap();
@@ -522,6 +523,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
         cwd: None,
         agent: None,
         tools: AgentTools::Ask,
+        task: true,
     });
     client.new_workspace(None, chat).unwrap();
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];

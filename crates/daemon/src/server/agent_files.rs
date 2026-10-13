@@ -890,7 +890,7 @@ pub(super) mod tests {
         let agent = crate::AgentConfig::default().find("claude").unwrap();
         let cwd = dir.display().to_string();
         let tools = clackatoo_protocol::AgentTools::Ask;
-        let mut chat = HostedChat::new(id, Size::new(40, 10).unwrap(), cwd, &agent, tools);
+        let mut chat = HostedChat::new(id, Size::new(40, 10).unwrap(), cwd, &agent, tools, true);
         chat.connected(Opened {
             session: "s1".into(),
             settings: None,

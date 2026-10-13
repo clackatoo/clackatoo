@@ -178,15 +178,17 @@ impl Agent {
 
     /// Asks for a session for the chat in `terminal`, working in `cwd`:
     /// `session`, which it had before, or else a new one. `tools` is the
-    /// MCP server that gives it clackatoo's tools, if it gets them.
+    /// MCP server that gives it clackatoo's tools, if it gets them, and
+    /// `task` whether Claude Code keeps its own Task tool.
     pub(crate) fn open_session(
         &mut self,
         terminal: TerminalId,
         cwd: &str,
         session: Option<&str>,
         tools: Option<Value>,
+        task: bool,
     ) {
-        let mut params = session_params(cwd, tools);
+        let mut params = session_params(cwd, tools, task);
         let method = match session {
             Some(session) => {
                 params["sessionId"] = session.into();
@@ -502,13 +504,22 @@ impl Agent {
 /// What a session is opened with: its working directory, and clackatoo's
 /// tools, if it gets them. Claude Code is told it may use them without
 /// asking it: those that need the user's say ask in the chat themselves.
-fn session_params(cwd: &str, tools: Option<Value>) -> Value {
-    let allowed = tools
-        .is_some()
-        .then(|| format!("mcp__{}", mcp::SERVER_NAME));
+/// Without `task`, Claude Code is told not to use its Task tool, under
+/// both its names: `Agent`, as Claude Code calls it now, and `Task`, as
+/// it was called before, which Claude Code still reads as `Agent`.
+/// Other agents ignore what's said to Claude Code.
+fn session_params(cwd: &str, tools: Option<Value>, task: bool) -> Value {
+    let mut options = serde_json::Map::new();
+    if tools.is_some() {
+        let allowed = format!("mcp__{}", mcp::SERVER_NAME);
+        options.insert("allowedTools".to_owned(), json!([allowed]));
+    }
+    if !task {
+        options.insert("disallowedTools".to_owned(), json!(["Agent", "Task"]));
+    }
     let mut params = json!({ "cwd": cwd, "mcpServers": Vec::from_iter(tools) });
-    if let Some(allowed) = allowed {
-        params["_meta"] = json!({ "claudeCode": { "options": { "allowedTools": [allowed] } } });
+    if !options.is_empty() {
+        params["_meta"] = json!({ "claudeCode": { "options": options } });
     }
     params
 }

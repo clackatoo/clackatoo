@@ -87,7 +87,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 59;
+pub const PROTOCOL_VERSION: u32 = 60;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -713,6 +713,11 @@ pub struct NewAgent {
     /// What the agent may do in the workspace through clackatoo's own
     /// tools.
     pub tools: AgentTools,
+    /// Whether a Claude Code session keeps its own Task tool, which runs
+    /// subagents the user doesn't see inside one turn. Without it, the
+    /// agent hands work on with clackatoo's `start_chat`, in chats the
+    /// user can watch. Other agents have no such tool, and ignore it.
+    pub task: bool,
 }
 
 /// What an agent may do through the tools clackatoo gives it, which show
