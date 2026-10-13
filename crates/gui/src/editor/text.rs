@@ -718,7 +718,10 @@ impl<'a> Text<'a> {
             return None;
         }
         let bytes = || (self.line_start(line), self.line_end(line));
-        Some(self.kept.laid(line, self.rope, bytes, self.tabstop, self.hide))
+        Some(
+            self.kept
+                .laid(line, self.rope, bytes, self.tabstop, self.hide),
+        )
     }
 
     /// The text of line `line`, without its line break.
