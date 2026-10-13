@@ -145,7 +145,7 @@ impl Perform for Emulator {
         }
     }
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         match params {
             // OSC 0 sets the icon name and title, OSC 2 just the title. With
             // no icons to name, both set the title.
@@ -155,6 +155,11 @@ impl Perform for Emulator {
             [b"7", url @ ..] => self.set_cwd(&url.join(&b';')),
             // A URI may hold `;`, which the parser split it at.
             [b"8", params, uri @ ..] => self.set_link(params, &uri.join(&b';')),
+            [b"52", selection, data @ ..] => {
+                if let Some(answer) = self.clipboard.osc52(selection, data, bell_terminated) {
+                    self.reply(&answer);
+                }
+            }
             [b"133", kind, options @ ..] => self.shell_mark(kind, options),
             _ => log::trace!(
                 "unhandled OSC {:?}",

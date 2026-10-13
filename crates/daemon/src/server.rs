@@ -55,6 +55,7 @@ use crate::upgrade::Upgrade;
 use crate::workspaces::WorkspaceState;
 
 mod buffers;
+mod clipboard;
 mod finder;
 mod language;
 mod offers;
@@ -211,6 +212,12 @@ struct Slot {
     wants_writable: bool,
     /// The clients following this terminal's view.
     viewers: Vec<Token>,
+    /// The client that last typed into the terminal, which acts for it on
+    /// the clipboard.
+    typist: Option<Token>,
+    /// What the program asked about the clipboard, while the client
+    /// asked hasn't answered.
+    clipboard: Option<clipboard::Asked>,
 }
 
 /// A connected client.
@@ -239,6 +246,9 @@ struct Client {
     /// a new stream could deliver a fresh snapshot ahead of the old
     /// stream's last patch.
     streams: BTreeMap<TerminalId, ViewStream>,
+    /// What programs put on the clipboard for the client, waiting for it
+    /// to catch up.
+    clipboard: clipboard::Unsent,
 }
 
 /// A stream a QUIC client is sent one terminal's view updates on.
@@ -262,6 +272,7 @@ impl Client {
             watching_workspaces: false,
             carrying: false,
             streams: BTreeMap::new(),
+            clipboard: clipboard::Unsent::default(),
         }
     }
 }
@@ -416,6 +427,15 @@ pub struct Daemon {
     /// Questions about buffers' pieces of code, on their way to the
     /// thread parsing buffers.
     piece_questions: pieces::PieceQuestions,
+    /// How many questions about the clipboard programs have asked, which
+    /// numbers them.
+    clipboard_asks: u64,
+    /// When each question about the clipboard runs out of time: the
+    /// terminal, and the question's number.
+    clipboard_due: Vec<(Instant, TerminalId, u64)>,
+    /// A client may have writes to the clipboard waiting that it can be
+    /// sent.
+    clipboard_unsent: bool,
     /// The agent chats talk to, while any chat needs it.
     agent: Option<AgentSlot>,
     /// What the agent sent last, for the chats to act on.
@@ -524,6 +544,9 @@ impl Daemon {
             finds,
             signs: Signs::default(),
             piece_questions: pieces::PieceQuestions::default(),
+            clipboard_asks: 0,
+            clipboard_due: Vec::new(),
+            clipboard_unsent: false,
             agent: None,
             incoming: Vec::new(),
             quic: None,
@@ -625,6 +648,7 @@ impl Daemon {
         let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
         let mut terminals = Vec::new();
         let mut chats = Vec::new();
+        self.abandon_clipboard_asks();
         for slot in std::mem::take(&mut self.terminals).into_values() {
             match slot.terminal {
                 Hosted::Pty(terminal) => terminals.push(terminal.hand_over(&mut fds)),
@@ -716,7 +740,10 @@ impl Daemon {
                 let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
                 let idle = self.next_idle_stop();
                 let retry = self.next_retry();
-                let next = (compaction.into_iter().chain(quic).chain(idle).chain(retry)).min();
+                let clipboard = self.next_clipboard_timeout();
+                let next = (compaction.into_iter().chain(quic).chain(idle).chain(retry))
+                    .chain(clipboard)
+                    .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
                 Some(Duration::ZERO)
@@ -747,6 +774,8 @@ impl Daemon {
             self.take_found();
             self.stop_idle_servers();
             self.compact_scrollbacks();
+            self.time_out_clipboard_asks();
+            self.send_clipboard_writes();
             self.send_view_updates();
             self.transmit_quic();
         }
@@ -826,6 +855,7 @@ impl Daemon {
         }
         // Replies to the program's queries may have queued input.
         self.update_pty_interest(id);
+        self.serve_clipboard(id);
         self.schedule_compaction(id);
         self.collect_damage(id);
     }
@@ -1057,6 +1087,8 @@ impl Daemon {
                         exit,
                         wants_writable: false,
                         viewers: Vec::new(),
+                        typist: None,
+                        clipboard: None,
                     },
                 );
                 // Input left over from before an upgrade.
@@ -1303,6 +1335,8 @@ impl Daemon {
                 exit: None,
                 wants_writable: false,
                 viewers: Vec::new(),
+                typist: None,
+                clipboard: None,
             },
         );
     }
@@ -1657,7 +1691,8 @@ impl Daemon {
                 | ClientMessage::Rename { .. }
                 | ClientMessage::Find { .. }
                 | ClientMessage::StopFinding { .. }
-                | ClientMessage::Stage { .. }) => {
+                | ClientMessage::Stage { .. }
+                | ClientMessage::Clipboard { .. }) => {
                     self.serve_unanswered(token, message);
                     continue;
                 }
@@ -1686,7 +1721,8 @@ impl Daemon {
 
     /// Acts on a message from the client at `token` that isn't answered as
     /// a request is: a change to a buffer, a question or a rename for its
-    /// language server, or a search, all answered in events of their own.
+    /// language server, or a search, all answered in events of their own,
+    /// or what's on its clipboard, for a program that asked.
     fn serve_unanswered(&mut self, token: Token, message: ClientMessage) {
         match message {
             ClientMessage::Edit {
@@ -1712,6 +1748,9 @@ impl Daemon {
                 version,
                 at,
             } => self.serve_stage(token, buffer, (id, version, at)),
+            ClientMessage::Clipboard { terminal, id, text } => {
+                self.clipboard_answered(token, terminal, id, text.as_deref());
+            }
             other => log::error!("{other:?} is answered"),
         }
     }
@@ -1800,9 +1839,9 @@ impl Daemon {
             Request::NewTerminal(request) => {
                 self.new_terminal(&request).map(Response::TerminalCreated)
             }
-            Request::SendInput { terminal, bytes } => {
-                self.send_input(terminal, &bytes).map(|()| Response::Done)
-            }
+            Request::SendInput { terminal, bytes } => self
+                .send_input(token, terminal, &bytes)
+                .map(|()| Response::Done),
             Request::Capture { terminal } => self
                 .terminals
                 .get(&terminal)
@@ -1983,9 +2022,11 @@ impl Daemon {
         if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
             client.views.remove(&id);
         }
+        self.forget_clipboard_asks(token, Some(id));
     }
 
-    fn send_input(&mut self, id: TerminalId, bytes: &[u8]) -> Result<(), Error> {
+    /// Writes `bytes` to terminal `id`, as typed by the client at `token`.
+    fn send_input(&mut self, token: Token, id: TerminalId, bytes: &[u8]) -> Result<(), Error> {
         let slot = self
             .terminals
             .get_mut(&id)
@@ -1993,6 +2034,7 @@ impl Daemon {
         match &mut slot.terminal {
             Hosted::Pty(terminal) => {
                 terminal.send_input(bytes)?;
+                slot.typist = Some(token);
                 self.update_pty_interest(id);
             }
             Hosted::Chat(_) => return Err(Error::IsAChat(id)),
@@ -2054,6 +2096,10 @@ impl Daemon {
             }
         };
         let flushed = client.outgoing.is_empty();
+        // Writes to the clipboard wait for a client to catch up.
+        if flushed && client.clipboard.any() {
+            self.clipboard_unsent = true;
+        }
         // Over QUIC, closing the connection discards what's still to send,
         // so a client dropped for breaking the protocol may not hear why.
         if flushed && client.finished {
@@ -2073,6 +2119,10 @@ impl Daemon {
     fn drop_client(&mut self, token: Token) {
         if let Some(Source::Client(client)) = self.sources.try_remove(token.0) {
             self.forget_viewer(token, &client);
+            self.forget_clipboard_asks(token, None);
+            for slot in self.terminals.values_mut() {
+                slot.typist.take_if(|typist| *typist == token);
+            }
             self.forget_queries(token, None);
             self.installs.forget(token);
             self.forget_finds(token);

@@ -24,6 +24,9 @@ agent-client-protocol-schema = { version = "1.10", default-features = false }
 anyhow = "1.0"
 # Text only: images would pull in an image codec.
 arboard = { version = "3.6", default-features = false }
+# Decodes and encodes the clipboard text programs send with OSC 52. The
+# version the ACP types already build.
+base64 = "0.23"
 bitflags = "2.13"
 # The buffers quinn-proto takes packets in.
 bytes = "1.10"

@@ -1955,6 +1955,24 @@ impl App {
         }
     }
 
+    /// Hands the desk what a program in a terminal asked of the clipboard
+    /// (OSC 52).
+    fn clipboard_event(&mut self, event: Event) {
+        match event {
+            Event::Clipboard {
+                terminal,
+                selection,
+                text,
+            } => self.desk.program_copied(terminal, selection, text),
+            Event::ClipboardAsked {
+                terminal,
+                id,
+                selection,
+            } => self.desk.program_asked_clipboard(terminal, id, selection),
+            _ => {}
+        }
+    }
+
     fn handle_session_event(&mut self, event: SessionEvent) {
         match event {
             SessionEvent::Connected {
@@ -2006,6 +2024,9 @@ impl App {
                     self.request_redraw();
                 }
             }
+            SessionEvent::Message(ServerMessage::Event(
+                event @ (Event::Clipboard { .. } | Event::ClipboardAsked { .. }),
+            )) => self.clipboard_event(event),
             SessionEvent::Message(ServerMessage::Event(Event::Workspaces(workspaces))) => {
                 self.desk.workspaces_changed(workspaces);
                 self.update_title();

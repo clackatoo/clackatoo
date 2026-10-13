@@ -97,6 +97,7 @@ enum Asked {
 }
 
 mod bindings;
+mod clipboard;
 mod editors;
 mod finding;
 mod formatting;
@@ -1781,6 +1782,7 @@ mod tests {
                 | ClientMessage::Find { .. }
                 | ClientMessage::StopFinding { .. }
                 | ClientMessage::Stage { .. }
+                | ClientMessage::Clipboard { .. }
                 | ClientMessage::Hello { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })

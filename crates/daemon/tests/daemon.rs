@@ -1,5 +1,6 @@
 //! End-to-end tests: a real daemon, real PTYs, real programs.
 
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -13,8 +14,9 @@ use clackatoo_protocol::{
     ChatState, ClientMessage, CompletionItem, Construct, Diff, Done, Edit, Error, Event,
     FileLocation, Found, FoundBuffer, FoundLine, Item, Kind, Location, NewAgent, NewTerminal,
     OpenFile, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Query, Request,
-    Response, Search, ServerFeatures, ServerMessage, Side, Size, Span, TerminalId, TerminalStatus,
-    TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, View, ViewUpdate, Workspaces,
+    Response, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span, TerminalId,
+    TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, View, ViewUpdate,
+    Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -675,6 +677,220 @@ fn text_and_search_cover_history_and_screen() {
             cells: 6,
         }))
     );
+}
+
+// --- The clipboard ---------------------------------------------------------
+
+/// The next event that isn't a view update, drawing the view updates on
+/// the way, failing after a few seconds.
+fn next_other_event(client: &mut Client) -> Event {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    loop {
+        match client.next_event().expect("an event") {
+            Event::View { terminal, .. } => client.frame_done(terminal).unwrap(),
+            other => return other,
+        }
+    }
+}
+
+/// Asserts no event but view updates arrives for a little while.
+fn assert_no_other_event(client: &mut Client) {
+    client
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    loop {
+        match client.next_event() {
+            Ok(Event::View { terminal, .. }) => client.frame_done(terminal).unwrap(),
+            Err(ClientError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => return,
+            other => panic!("expected nothing but view updates, got {other:?}"),
+        }
+    }
+}
+
+/// A terminal 80 columns wide running `script` with `sh`, which `count`
+/// clients attach to, in order, and is sent Enter by the one numbered
+/// `typist` once they have.
+fn followed(
+    daemon: &TestDaemon,
+    script: &str,
+    count: usize,
+    typist: usize,
+) -> (TerminalId, Vec<Client>) {
+    let mut clients: Vec<Client> = (0..count).map(|_| daemon.client()).collect();
+    let terminal = clients[0]
+        .new_terminal(NewTerminal {
+            size: Size::new(80, 10).unwrap(),
+            command: Some(vec!["sh".into(), "-c".into(), format!("read go; {script}")]),
+            cwd: None,
+            record_to: None,
+        })
+        .expect("new terminal");
+    for client in &mut clients {
+        client.attach(terminal).unwrap();
+    }
+    clients[typist].send_input(terminal, b"\r").unwrap();
+    (terminal, clients)
+}
+
+/// Shows what the program is told when it asks what's on the clipboard,
+/// as bytes in hex.
+const SHOW_ANSWER: &str =
+    r"stty raw -echo; printf '\033]52;c;?\007'; head -c 12 | od -An -tx1; sleep 5";
+
+/// The hex `od` shows `bytes` as, without its spacing.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut hex, byte| {
+        write!(hex, "{byte:02x}").unwrap();
+        hex
+    })
+}
+
+/// Waits until terminal `terminal`'s screen shows `bytes` in hex, as
+/// `SHOW_ANSWER` prints what the program was told.
+fn wait_for_answer(client: &mut Client, terminal: TerminalId, bytes: &[u8]) {
+    let want = hex(bytes);
+    wait_for_screen(client, terminal, |text| {
+        text.split_whitespace().collect::<String>().contains(&want)
+    });
+}
+
+/// What the program prints to copy "hello" to the clipboard and "world"
+/// to the primary selection.
+const COPY: &str = r"printf '\033]52;c;aGVsbG8=\007\033]52;p;d29ybGQ=\033\\'; sleep 5";
+
+/// Asserts the next events `client` gets, but view updates, are what
+/// [`COPY`] copies.
+fn assert_copied(client: &mut Client, terminal: TerminalId) {
+    for (selection, text) in [
+        (Selection::Clipboard, "hello"),
+        (Selection::Primary, "world"),
+    ] {
+        assert_eq!(
+            next_other_event(client),
+            Event::Clipboard {
+                terminal,
+                selection,
+                text: text.into(),
+            }
+        );
+    }
+}
+
+#[test]
+fn text_a_program_puts_on_the_clipboard_goes_to_the_window_that_typed_into_it() {
+    let daemon = TestDaemon::start();
+    // The first client types, though the second followed the terminal
+    // since.
+    let (terminal, mut clients) = followed(&daemon, COPY, 2, 0);
+    assert_copied(&mut clients[0], terminal);
+    assert_no_other_event(&mut clients[1]);
+}
+
+#[test]
+fn with_no_window_that_typed_the_clipboard_goes_to_the_one_that_followed_last() {
+    let daemon = TestDaemon::start();
+    let mut clients = vec![daemon.client(), daemon.client()];
+    let terminal = spawn(&mut clients[0], &["sh", "-c", &format!("read go; {COPY}")]);
+    for client in &mut clients {
+        client.attach(terminal).unwrap();
+    }
+    // Typed by a client that doesn't follow the terminal, as a script's.
+    let mut script = daemon.client();
+    script.send_input(terminal, b"\r").unwrap();
+    assert_copied(&mut clients[1], terminal);
+    assert_no_other_event(&mut clients[0]);
+}
+
+#[test]
+fn a_program_asking_whats_on_the_clipboard_is_told_what_the_window_says() {
+    let daemon = TestDaemon::start();
+    let (terminal, mut clients) = followed(&daemon, SHOW_ANSWER, 2, 1);
+    let Event::ClipboardAsked {
+        terminal: from,
+        id,
+        selection,
+    } = next_other_event(&mut clients[1])
+    else {
+        panic!("expected the clipboard asked about");
+    };
+    assert_eq!((from, selection), (terminal, Selection::Clipboard));
+    assert_no_other_event(&mut clients[0]);
+    // A client not asked, and a wrong number, are ignored.
+    clients[0]
+        .answer_clipboard(terminal, id, Some("not asked".into()))
+        .unwrap();
+    clients[1]
+        .answer_clipboard(terminal, id + 1, Some("wrong".into()))
+        .unwrap();
+    clients[1]
+        .answer_clipboard(terminal, id, Some("hi".into()))
+        .unwrap();
+    wait_for_answer(&mut clients[1], terminal, b"\x1b]52;c;aGk=\x07");
+}
+
+#[test]
+fn a_program_is_told_the_clipboard_is_empty_when_no_window_will_say() {
+    let daemon = TestDaemon::start();
+    let empty = b"\x1b]52;c;\x07";
+    let script = SHOW_ANSWER.replace("head -c 12", "head -c 8");
+
+    // The window asked refuses, hangs up, stops following, or never
+    // answers.
+    for how in ["refuses", "hangs up", "stops following", "never answers"] {
+        let (terminal, mut clients) = followed(&daemon, &script, 1, 0);
+        let mut client = clients.pop().unwrap();
+        let Event::ClipboardAsked { id, .. } = next_other_event(&mut client) else {
+            panic!("{how}: expected the clipboard asked about");
+        };
+        let asked = Instant::now();
+        match how {
+            "refuses" => client.answer_clipboard(terminal, id, None).unwrap(),
+            "hangs up" => {
+                drop(client);
+                client = daemon.client();
+            }
+            "stops following" => client.detach(terminal).unwrap(),
+            _ => {}
+        }
+        wait_for_answer(&mut client, terminal, empty);
+        if how == "never answers" {
+            assert!(asked.elapsed() >= Duration::from_millis(1900), "{how}");
+        }
+    }
+
+    // No client follows the terminal at all.
+    let mut client = daemon.client();
+    let terminal = spawn(&mut client, &["sh", "-c", &script]);
+    wait_for_answer(&mut client, terminal, empty);
+}
+
+#[test]
+fn a_window_slow_to_take_what_programs_copy_is_sent_only_the_latest() {
+    let daemon = TestDaemon::start();
+    // Forty copies of 100 kB each, then one more, and then it says it's
+    // done.
+    let script = r#"for i in $(seq 1 40); do printf '\033]52;c;%s\007' "$(head -c 100000 /dev/zero | tr '\0' $((i % 10)) | base64 -w0)"; done; printf '\033]52;c;bGFzdA==\007'; echo done; sleep 5"#;
+    let (terminal, mut clients) = followed(&daemon, script, 1, 0);
+    let mut slow = clients.pop().unwrap();
+    // The window reads nothing until the program is done.
+    let mut watcher = daemon.client();
+    wait_for_screen_for(&mut watcher, terminal, Duration::from_secs(20), |text| {
+        text.contains("done")
+    });
+    let mut copies = 0;
+    loop {
+        let Event::Clipboard { text, .. } = next_other_event(&mut slow) else {
+            panic!("expected only copies");
+        };
+        copies += 1;
+        if text == "last" {
+            break;
+        }
+        assert_eq!(text.len(), 100_000);
+    }
+    assert!(copies < 10, "{copies} of 41 copies were sent");
 }
 
 // --- Workspaces ----------------------------------------------------------
@@ -1578,7 +1794,11 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
         match client.next_event().expect("a buffer update") {
             Event::Buffer { update, .. } => return update,
             Event::Workspaces(_) => {}
-            other @ (Event::View { .. } | Event::Installed { .. } | Event::Found { .. }) => {
+            other @ (Event::View { .. }
+            | Event::Installed { .. }
+            | Event::Found { .. }
+            | Event::Clipboard { .. }
+            | Event::ClipboardAsked { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }

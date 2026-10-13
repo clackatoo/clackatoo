@@ -402,6 +402,12 @@ options! {
     /// primary selection, which a middle click pastes; or neither, the
     /// registers being the window's own but for `"+` and `"*`.
     clipboard("cb"): Clipboard = Clipboard::UnnamedPlus;
+    /// What programs in terminals may do with the clipboard, through OSC
+    /// 52, as Neovim and tmux do, even over ssh: put text on it (`copy`),
+    /// read what's there (`paste`), both, or neither. Reading is off
+    /// unless asked for, since the clipboard may hold a password, and
+    /// whatever runs in a terminal would get it.
+    osc52("osc52"): Osc52 = Osc52::Copy;
 }
 
 choice! {
@@ -437,6 +443,32 @@ choice! {
         Enter = "enter",
         /// Neither: Ctrl+Y alone.
         CtrlY = "ctrl-y",
+    }
+}
+
+choice! {
+    /// What `osc52` lets programs in terminals do with the clipboard.
+    Osc52 {
+        /// Put text on it.
+        Copy = "copy",
+        /// Read what's there.
+        Paste = "paste",
+        /// Both.
+        CopyPaste = "copy-paste",
+        /// Neither.
+        Off = "off",
+    }
+}
+
+impl Osc52 {
+    /// Whether programs may put text on the clipboard.
+    pub(crate) fn copies(self) -> bool {
+        matches!(self, Self::Copy | Self::CopyPaste)
+    }
+
+    /// Whether programs may read what's on the clipboard.
+    pub(crate) fn pastes(self) -> bool {
+        matches!(self, Self::Paste | Self::CopyPaste)
     }
 }
 

@@ -783,6 +783,17 @@ impl Desk {
         self.editors.shared.registers.heard_system(from, text);
     }
 
+    /// What `"+` or `"*` hold: what was last put on the clipboard, or the
+    /// primary selection, here or, as the window last heard, elsewhere.
+    pub(super) fn held_on(&self, on: Copy) -> &str {
+        let name = match on {
+            Copy::Clipboard => '+',
+            Copy::Primary => '*',
+        };
+        let held = self.editors.shared.registers.get(Some(name));
+        held.map_or("", |register| register.text.as_str())
+    }
+
     /// `:registers`: lists what the registers hold, in a panel by the
     /// focused editor's cursor.
     pub(super) fn show_registers(&mut self) {

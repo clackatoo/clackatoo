@@ -37,10 +37,15 @@ const MAX_INTERMEDIATES: usize = 2;
 const MAX_OSC_PARAMS: usize = 16;
 
 /// The most bytes of one OSC string that are kept; the rest are dropped.
-/// Generous, so that OSC 52 clipboard writes of large selections still fit,
-/// but bounded, so a stream that never ends its string can't use unbounded
-/// memory.
-pub(crate) const MAX_OSC_LEN: usize = 1 << 20;
+/// Generous, so that an OSC 52 clipboard write of the most text allowed
+/// fits whole, base64 and all (see `crate::clipboard`), but bounded, so a
+/// stream that never ends its string can't use unbounded memory.
+pub(crate) const MAX_OSC_LEN: usize = 3 << 19;
+
+/// The most room the OSC string's buffer keeps between strings. A big
+/// clipboard write grows it; it's given back after, rather than held for
+/// the terminal's life.
+const OSC_KEPT_CAPACITY: usize = 64 * 1024;
 
 /// U+FFFD REPLACEMENT CHARACTER, shown for invalid UTF-8.
 const REPLACEMENT: &str = "\u{FFFD}";
@@ -674,6 +679,9 @@ impl Parser {
         }
         performer.osc_dispatch(&parts[..self.osc_parts], bell_terminated);
         self.osc.clear();
+        if self.osc.capacity() > OSC_KEPT_CAPACITY {
+            self.osc = Vec::new();
+        }
         self.osc_parts = 0;
     }
 

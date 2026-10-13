@@ -383,6 +383,21 @@ impl Client {
         self.send(&ClientMessage::StopFinding { id })
     }
 
+    /// Answers [`Event::ClipboardAsked`] numbered `id`, from `terminal`'s
+    /// program, with what's on the clipboard, or `None` to refuse.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn answer_clipboard(
+        &mut self,
+        terminal: TerminalId,
+        id: u64,
+        text: Option<String>,
+    ) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Clipboard { terminal, id, text })
+    }
+
     /// Limits how long [`next_event`](Self::next_event) and requests wait.
     /// A wait that runs out fails with an I/O error of kind `WouldBlock`.
     ///

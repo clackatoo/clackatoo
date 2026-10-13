@@ -12,6 +12,7 @@ publish.workspace = true
 bench = false
 
 [dependencies]
+base64.workspace = true
 bitflags.workspace = true
 log.workspace = true
 serde = { workspace = true, optional = true }

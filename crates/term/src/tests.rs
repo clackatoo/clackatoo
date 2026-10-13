@@ -1508,6 +1508,182 @@ mod links {
     }
 }
 
+mod clipboard {
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+
+    use super::*;
+    use crate::parser::MAX_OSC_LEN;
+    use crate::{ClipboardRequest, MAX_CLIPBOARD_TEXT, Selection};
+
+    fn write(selection: Selection, text: &str) -> ClipboardRequest {
+        ClipboardRequest::Write {
+            selection,
+            text: text.to_owned(),
+        }
+    }
+
+    /// What a terminal fed `input` was asked of the clipboard.
+    fn asked(input: &[u8]) -> Vec<ClipboardRequest> {
+        let mut t = terminal(10, 2);
+        t.advance(input);
+        t.take_clipboard()
+    }
+
+    /// `OSC 52` with `selection` and `text` encoded, ended with BEL.
+    fn osc52(selection: &str, text: &str) -> Vec<u8> {
+        format!("\x1b]52;{selection};{}\x07", STANDARD.encode(text)).into_bytes()
+    }
+
+    #[test]
+    fn writes_ended_with_bel_or_st_reach_the_clipboard() {
+        assert_eq!(
+            asked(b"\x1b]52;c;aGVsbG8=\x07"),
+            [write(Selection::Clipboard, "hello")]
+        );
+        assert_eq!(
+            asked(b"\x1b]52;c;aGVsbG8=\x1b\\"),
+            [write(Selection::Clipboard, "hello")]
+        );
+        // Taking them empties the queue.
+        let mut t = terminal(10, 2);
+        t.advance(&osc52("c", "x"));
+        assert_eq!(t.take_clipboard().len(), 1);
+        assert!(t.take_clipboard().is_empty());
+    }
+
+    #[test]
+    fn a_write_split_anywhere_is_read_whole() {
+        let input = osc52("c", "split → anywhere");
+        for at in 0..=input.len() {
+            let mut t = terminal(10, 2);
+            t.advance(&input[..at]);
+            t.advance(&input[at..]);
+            assert_eq!(
+                t.take_clipboard(),
+                [write(Selection::Clipboard, "split → anywhere")],
+                "split at {at}"
+            );
+            assert_eq!(t.screen_text(), "", "split at {at}");
+        }
+    }
+
+    #[test]
+    fn the_selection_parameter_names_the_clipboards() {
+        assert_eq!(asked(&osc52("p", "a")), [write(Selection::Primary, "a")]);
+        assert_eq!(asked(&osc52("s", "a")), [write(Selection::Primary, "a")]);
+        assert_eq!(asked(&osc52("", "a")), [write(Selection::Clipboard, "a")]);
+        assert_eq!(
+            asked(&osc52("pc", "a")),
+            [
+                write(Selection::Primary, "a"),
+                write(Selection::Clipboard, "a")
+            ]
+        );
+        assert_eq!(
+            asked(&osc52("cc0", "a")),
+            [write(Selection::Clipboard, "a")]
+        );
+        assert!(asked(&osc52("0", "a")).is_empty(), "cut buffers only");
+        assert!(asked(&osc52(&"c".repeat(17), "a")).is_empty());
+    }
+
+    #[test]
+    fn what_isnt_base64_text_is_ignored() {
+        assert!(asked(b"\x1b]52;c;not base64!\x07").is_empty());
+        assert!(asked(b"\x1b]52;c;aGVs;bG8=\x07").is_empty(), "split at ;");
+        assert!(asked(b"\x1b]52;c;\x07").is_empty(), "nothing to copy");
+        assert!(asked(b"\x1b]52;c\x07").is_empty(), "no data");
+        // Padding is optional, and bytes that aren't UTF-8 are replaced.
+        let unpadded = format!("\x1b]52;c;{}\x07", STANDARD_NO_PAD.encode("hi"));
+        assert_eq!(
+            asked(unpadded.as_bytes()),
+            [write(Selection::Clipboard, "hi")]
+        );
+        let latin1 = format!("\x1b]52;c;{}\x07", STANDARD.encode(b"caf\xe9"));
+        assert_eq!(
+            asked(latin1.as_bytes()),
+            [write(Selection::Clipboard, "caf\u{FFFD}")]
+        );
+    }
+
+    #[test]
+    fn writes_are_capped_and_never_cut_short() {
+        let most = "x".repeat(MAX_CLIPBOARD_TEXT);
+        let written = asked(&osc52("c", &most));
+        assert_eq!(written, [write(Selection::Clipboard, &most)]);
+
+        let too_much = "x".repeat(MAX_CLIPBOARD_TEXT + 1);
+        assert!(asked(&osc52("c", &too_much)).is_empty());
+
+        // So long the parser drops its end: never the start of it.
+        let cut = "x".repeat(MAX_OSC_LEN);
+        assert!(osc52("c", &cut).len() > MAX_OSC_LEN);
+        assert!(asked(&osc52("c", &cut)).is_empty());
+    }
+
+    #[test]
+    fn only_the_last_write_to_each_clipboard_waits() {
+        let mut input = osc52("c", "one");
+        input.extend(osc52("p", "two"));
+        input.extend(osc52("c", "three"));
+        assert_eq!(
+            asked(&input),
+            [
+                write(Selection::Primary, "two"),
+                write(Selection::Clipboard, "three")
+            ]
+        );
+    }
+
+    /// The reads `requests` hold.
+    fn reads(requests: &[ClipboardRequest]) -> Vec<crate::ClipboardRead> {
+        (requests.iter())
+            .filter_map(|request| match request {
+                ClipboardRequest::Read(read) => Some(*read),
+                ClipboardRequest::Write { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_read_is_answered_as_it_was_asked() {
+        let requests = asked(b"\x1b]52;c;?\x07\x1b]52;p;?\x1b\\");
+        let [bell, st] = reads(&requests)[..] else {
+            panic!("{requests:?}");
+        };
+        assert_eq!(
+            (bell.selection, st.selection),
+            (Selection::Clipboard, Selection::Primary)
+        );
+        assert_eq!(bell.answer(Some("hello")), b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(st.answer(Some("hello")), b"\x1b]52;p;aGVsbG8=\x1b\\");
+        // Refused, or too much: an empty answer, which programs waiting
+        // take as an empty clipboard.
+        assert_eq!(bell.answer(None), b"\x1b]52;c;\x07");
+        let too_much = "x".repeat(MAX_CLIPBOARD_TEXT + 1);
+        assert_eq!(bell.answer(Some(&too_much)), b"\x1b]52;c;\x07");
+        // The first clipboard named is the one read.
+        let requests = asked(b"\x1b]52;pc;?\x07");
+        assert_eq!(reads(&requests)[0].selection, Selection::Primary);
+    }
+
+    #[test]
+    fn reads_past_a_few_waiting_are_answered_at_once_with_nothing() {
+        let mut t = terminal(10, 2);
+        t.advance(&b"\x1b]52;c;?\x07".repeat(6));
+        assert_eq!(reads(&t.take_clipboard()).len(), 4);
+        assert_eq!(t.take_replies(), b"\x1b]52;c;\x07".repeat(2));
+    }
+
+    #[test]
+    fn a_reset_keeps_what_was_asked_before_it() {
+        let mut input = osc52("c", "kept");
+        input.extend(b"\x1bc");
+        assert_eq!(asked(&input), [write(Selection::Clipboard, "kept")]);
+    }
+}
+
 mod snapshots {
     use super::*;
 

@@ -14,6 +14,7 @@
 mod blocks;
 mod cell;
 mod charset;
+mod clipboard;
 mod damage;
 mod dispatch;
 mod document;
@@ -37,6 +38,7 @@ mod tests;
 
 pub use blocks::{Block, Which};
 pub use cell::{Cell, CellFlags};
+pub use clipboard::{ClipboardRead, ClipboardRequest, MAX_CLIPBOARD_TEXT, Selection};
 pub use damage::Damage;
 pub use document::{Match, Position};
 pub use grid::Grid;

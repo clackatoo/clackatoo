@@ -8,6 +8,7 @@ use bitflags::bitflags;
 
 use crate::blocks::{self, Blocks, Mark};
 use crate::charset::Charsets;
+use crate::clipboard::{self, ClipboardRequest};
 use crate::damage::Damage;
 use crate::grid::Grid;
 use crate::links::{self, Hyperlink, LinkId, Links, local_file_uri};
@@ -116,6 +117,14 @@ impl Terminal {
     /// the program, which may be waiting for them.
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.emulator.replies)
+    }
+
+    /// Takes what the program asked of the clipboard (OSC 52) since the
+    /// last call, oldest first. Each [`ClipboardRequest::Read`] must be
+    /// answered, with [`ClipboardRead::answer`](crate::ClipboardRead::answer) written back to the
+    /// program, which may be waiting for it.
+    pub fn take_clipboard(&mut self) -> Vec<ClipboardRequest> {
+        self.emulator.clipboard.take()
     }
 
     /// The terminal's size.
@@ -696,6 +705,8 @@ pub(crate) struct Emulator {
     /// The cursor shape the program asked for.
     cursor_shape: CursorShape,
     pub(crate) replies: Vec<u8>,
+    /// What the program asked of the clipboard, waiting to be taken.
+    pub(crate) clipboard: clipboard::Requests,
     /// The last character printed, for REP (repeat).
     last_printed: Option<char>,
     /// History was cleared since [`Terminal::take_history_cleared`] last
@@ -735,6 +746,7 @@ impl Emulator {
             links: Links::default(),
             cursor_shape: CursorShape::Default,
             replies: Vec::new(),
+            clipboard: clipboard::Requests::default(),
             last_printed: None,
             history_cleared: false,
             #[cfg(test)]
@@ -1461,11 +1473,14 @@ impl Emulator {
 
     /// RIS: full reset to the power-on state, including scrollback.
     pub(crate) fn full_reset(&mut self) {
+        // What the program asked before the reset is still to be done.
         let replies = std::mem::take(&mut self.replies);
+        let clipboard = std::mem::take(&mut self.clipboard);
         let generation = self.primary.history_generation();
         let (_, next_link) = self.links.parts();
         *self = Self::new(self.size, &self.config);
         self.replies = replies;
+        self.clipboard = clipboard;
         // Link IDs are never reused (see crate::links).
         self.links = Links::from_parts([], next_link);
         // History is numbered from 0 again.

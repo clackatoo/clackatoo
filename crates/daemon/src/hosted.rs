@@ -9,7 +9,7 @@ use std::path::Path;
 use clackatoo_protocol::{
     Error, NewTerminal, Size, TerminalId, TerminalInfo, TerminalStatus, View,
 };
-use clackatoo_term::{Damage, Terminal, recording};
+use clackatoo_term::{ClipboardRead, ClipboardRequest, Damage, Terminal, recording};
 
 use crate::DaemonConfig;
 use crate::handover::{self, Fds, HandoverError};
@@ -221,6 +221,23 @@ impl HostedTerminal {
 
     pub(crate) fn compact_scrollback(&mut self) {
         self.emulator.compact_scrollback();
+    }
+
+    /// Takes what the program has asked of the clipboard since the last
+    /// call.
+    pub(crate) fn take_clipboard(&mut self) -> Vec<ClipboardRequest> {
+        self.emulator.take_clipboard()
+    }
+
+    /// Tells the program what's on the clipboard it asked about, or that
+    /// there's nothing, with `None`.
+    pub(crate) fn answer_clipboard(&mut self, read: ClipboardRead, text: Option<&str>) {
+        if self.pty.is_none() {
+            return;
+        }
+        // An answer is due whatever's queued, as replies to queries are.
+        self.input.extend_from_slice(&read.answer(text));
+        self.flush_input();
     }
 
     /// Reads and processes the program's output until the PTY has nothing

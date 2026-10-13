@@ -48,8 +48,8 @@ mod workspace;
 use std::fmt;
 
 pub use clackatoo_term::{
-    Attributes, Block, Color, CursorShape, InputModes, LinkId, Match, Position, Size, Style,
-    Underline, Which,
+    Attributes, Block, Color, CursorShape, InputModes, LinkId, MAX_CLIPBOARD_TEXT, Match, Position,
+    Selection, Size, Style, Underline, Which,
 };
 use serde::{Deserialize, Serialize};
 
@@ -77,7 +77,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 41;
+pub const PROTOCOL_VERSION: u32 = 43;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -199,6 +199,16 @@ pub enum ClientMessage {
         /// A place on the hunk's lines, in bytes.
         at: usize,
     },
+    /// Answers [`Event::ClipboardAsked`]: what's on the clipboard asked
+    /// about, or `None` if the client won't say, or can't. Not answered.
+    Clipboard {
+        /// The terminal whose program asked.
+        terminal: TerminalId,
+        /// The ask's number.
+        id: u64,
+        /// What's on the clipboard.
+        text: Option<String>,
+    },
 }
 
 /// Everything the daemon sends.
@@ -257,6 +267,32 @@ pub enum Event {
         id: u64,
         /// What it found.
         found: Found,
+    },
+    /// The program in a terminal the client follows put text on a
+    /// clipboard, with OSC 52, as Neovim and tmux can. Sent to one client
+    /// following the terminal: the one that last typed into it, else the
+    /// one that started following it last. A write may be dropped for a
+    /// newer one to the same clipboard while the client is catching up.
+    Clipboard {
+        /// The terminal.
+        terminal: TerminalId,
+        /// Which clipboard.
+        selection: Selection,
+        /// The text, at most [`MAX_CLIPBOARD_TEXT`] bytes.
+        text: String,
+    },
+    /// The program in a terminal the client follows asked what's on a
+    /// clipboard, with OSC 52, and waits to be told. Asked of the client
+    /// [`Clipboard`](Self::Clipboard) would go to: answer with
+    /// [`ClientMessage::Clipboard`], with `None` to refuse, within two
+    /// seconds, after which the program is told there's nothing.
+    ClipboardAsked {
+        /// The terminal.
+        terminal: TerminalId,
+        /// The ask's number, for the answer.
+        id: u64,
+        /// Which clipboard.
+        selection: Selection,
     },
 }
 
