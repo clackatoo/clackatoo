@@ -824,7 +824,11 @@ pub(crate) fn resume_edit(ops: Vec<handover::EditOp>) -> Edit {
             handover::EditOp::Delete(text) => Op::Delete(text),
         })
         .collect::<Vec<_>>()
-        .into()
+        .try_into()
+        // A daemon only ever wrote edits it could make. One too long for
+        // any text stays out of the way as an edit of nothing: anything
+        // brought up to date through it fails, and its window starts again.
+        .unwrap_or_default()
 }
 
 fn hand_over_author(author: Author) -> handover::Author {

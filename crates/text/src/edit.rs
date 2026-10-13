@@ -34,7 +34,7 @@ pub enum Op {
 #[cfg_attr(
     feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
-    serde(from = "Vec<Op>", into = "Vec<Op>")
+    serde(try_from = "Vec<Op>", into = "Vec<Op>")
 )]
 pub struct Edit {
     ops: Vec<Op>,
@@ -59,6 +59,9 @@ pub enum EditError {
     /// The edit would split a character's bytes.
     #[error("the edit splits a character")]
     Boundary,
+    /// The edit's pieces cover more bytes than any text can hold.
+    #[error("the edit is longer than any text")]
+    TooLong,
 }
 
 /// Which side of text inserted at a place the place goes to.
@@ -219,7 +222,8 @@ impl Edit {
                 }
             }
         }
-        new + place.saturating_sub(old)
+        // Past the end, as a place a window sent can be.
+        new.saturating_add(place.saturating_sub(old))
     }
 
     /// Each change it makes, as where it is in the text before the edit,
@@ -356,8 +360,24 @@ impl Edit {
     }
 }
 
-impl From<Vec<Op>> for Edit {
-    fn from(ops: Vec<Op>) -> Self {
+/// Pieces read from elsewhere, such as from a window, put in their
+/// simplest form. Refused if they cover more bytes than any text can hold:
+/// those lengths would wrap round, and the edit could then pass for one
+/// made to a real text.
+impl TryFrom<Vec<Op>> for Edit {
+    type Error = EditError;
+
+    fn try_from(ops: Vec<Op>) -> Result<Self, EditError> {
+        let (mut base, mut target) = (0_usize, 0_usize);
+        for op in &ops {
+            let (before, after) = match op {
+                Op::Retain(len) => (*len, *len),
+                Op::Insert(text) => (0, text.len()),
+                Op::Delete(text) => (text.len(), 0),
+            };
+            base = base.checked_add(before).ok_or(EditError::TooLong)?;
+            target = target.checked_add(after).ok_or(EditError::TooLong)?;
+        }
         let mut edit = Self::new();
         for op in &ops {
             match op {
@@ -366,7 +386,7 @@ impl From<Vec<Op>> for Edit {
                 Op::Delete(text) => edit.delete(text),
             };
         }
-        edit
+        Ok(edit)
     }
 }
 
@@ -585,7 +605,24 @@ mod tests {
             ]
         );
         assert_eq!((edit.base_len(), edit.target_len()), (6, 5));
-        assert_eq!(Edit::from(edit.ops().to_vec()), edit);
+        assert_eq!(Edit::try_from(edit.ops().to_vec()), Ok(edit));
+    }
+
+    #[test]
+    fn pieces_longer_than_any_text_are_refused() {
+        for ops in [
+            vec![
+                Op::Retain(usize::MAX),
+                Op::Insert("x".into()),
+                Op::Retain(3),
+            ],
+            vec![Op::Delete("ab".into()), Op::Retain(usize::MAX - 1)],
+            vec![Op::Insert("ab".into()), Op::Retain(usize::MAX - 1)],
+        ] {
+            assert_eq!(Edit::try_from(ops), Err(EditError::TooLong));
+        }
+        let longest = Edit::try_from(vec![Op::Retain(usize::MAX)]).unwrap();
+        assert_eq!(longest.base_len(), usize::MAX);
     }
 
     #[test]
@@ -645,6 +682,11 @@ mod tests {
         typed.retain(3).insert("!");
         assert_eq!(typed.map(3, Bias::After), 4, "the cursor of the typist");
         assert_eq!(typed.map(3, Bias::Before), 3);
+        assert_eq!(
+            typed.map(usize::MAX, Bias::After),
+            usize::MAX,
+            "past the end"
+        );
     }
 
     #[test]

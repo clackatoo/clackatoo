@@ -255,6 +255,64 @@ mod tests {
     }
 
     #[test]
+    fn edits_longer_than_any_text_are_rejected_when_decoding() {
+        // An edit whose pieces add up past usize::MAX, built by hand
+        // because Edit can't make one. Read as it was, its length wrapped
+        // round to a real text's, and making it panicked.
+        #[derive(Serialize)]
+        enum ForgedChange {
+            Edit {
+                edit: Vec<clackatoo_text::Op>,
+                base: u64,
+                step: bool,
+            },
+        }
+        #[derive(Serialize)]
+        enum Forged {
+            #[allow(dead_code)]
+            Hello,
+            #[allow(dead_code)]
+            Upgrade,
+            #[allow(dead_code)]
+            Request,
+            #[allow(dead_code)]
+            FrameDone,
+            Edit {
+                buffer: u32,
+                seq: u64,
+                change: ForgedChange,
+            },
+        }
+        use clackatoo_text::Op;
+        for edit in [
+            vec![
+                Op::Retain(usize::MAX),
+                Op::Insert("x".into()),
+                Op::Retain(3),
+            ],
+            vec![Op::Delete("ab".into()), Op::Retain(usize::MAX - 1)],
+            vec![Op::Insert("ab".into()), Op::Retain(usize::MAX - 1)],
+        ] {
+            let frame = encode(&Forged::Edit {
+                buffer: 0,
+                seq: 1,
+                change: ForgedChange::Edit {
+                    edit,
+                    base: 0,
+                    step: true,
+                },
+            })
+            .unwrap();
+            let mut decoder = FrameDecoder::new();
+            decoder.push(&frame);
+            assert!(matches!(
+                decoder.decode::<ClientMessage>(),
+                Err(FrameError::Decode(_))
+            ));
+        }
+    }
+
+    #[test]
     fn hello_stays_variant_zero() {
         // Version negotiation depends on this encoding never changing: it is
         // the same in every protocol version so far.
