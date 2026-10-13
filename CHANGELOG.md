@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026.10.7 (2026-10-13)
+
+### Features
+
+- **review:** a chat's review takes in its subagents' changes, open or closed (c3ebfbe)
+- phones control clackatoo through a web app the daemon serves; protocol 69 (7e0efef)
+
+### Fixes
+
+- **review:** which chat holds a closed subagent's card is known again after an upgrade; protocol 68 (0edadfa)
+- **web:** a connection can't stall or swell the daemon, and Tailscale is trusted only through a socket of the user's own (acceebe)
+- **web:** password tries are limited daemon-wide and lock after fifty wrong, and the socket is made where only the user can reach it (b19bbcd)
+
 ## 2026.10.6 (2026-10-13)
 
 ### Features
