@@ -9,7 +9,10 @@
 #
 # HEAD must be a release tag (made by scripts/release, and pushed). The
 # build is `cargo build --release` here, and the daemon is upgraded in
-# place with `clackatoo upgrade`, keeping its terminals.
+# place with `clackatoo upgrade`, keeping its terminals. Then the app
+# launcher's entry is rewritten for the build, as `clackatoo update` does,
+# if clackatoo wrote it (`clackatoo desktop install`); one of your own is
+# left alone.
 #
 # CLACKATOO_REPO names another GitHub repository, for tests.
 
@@ -19,7 +22,7 @@ wait=false
 for arg in "$@"; do
     case "$arg" in
         --wait) wait=true ;;
-        -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "deploy: no option $arg" >&2; exit 2 ;;
     esac
 done
@@ -59,3 +62,6 @@ done
 
 cargo build --release --locked
 target/release/clackatoo upgrade
+# The daemon is on the release by now, so this failing mustn't fail it.
+target/release/clackatoo desktop refresh \
+    || echo "deploy: upgraded to $tag, but the app launcher's entry wasn't rewritten" >&2
