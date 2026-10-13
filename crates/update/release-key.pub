@@ -1,4 +1,2 @@
-There's no release key yet, so this build refuses every update.
-
-Replace this file with the public half of the key releases are signed
-with, as minisign writes it (`minisign -G -p release-key.pub`), and commit it.
+untrusted comment: minisign public key B60AA3EC05C4D6F1
+RWTx1sQF7KMKtpn+w/3hupcC6cdxdWFs4eggGaTWFEXYfB2dFKNXx4/7
