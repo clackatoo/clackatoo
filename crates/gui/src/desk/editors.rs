@@ -338,6 +338,10 @@ impl Desk {
         {
             return self.offered(language, grammar, server);
         }
+        if let BufferUpdate::Notice(notice) = update {
+            self.message = Some(notice);
+            return true;
+        }
         let focused = self.shown.map(|shown| shown.pane);
         let editors = &mut self.editors;
         let Some(copy) = editors.buffers.get_mut(&buffer) else {

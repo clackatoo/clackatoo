@@ -9,13 +9,14 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::ops::Range;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{Author, BufferSnapshot, Edit, Error, Op, TerminalId};
-use clackatoo_text::{History, HistoryError, HistorySnapshot, Rope, Steps};
+use clackatoo_text::{History, HistoryError, HistorySnapshot, Merged, Rope, Steps, merge};
 
 use crate::handover;
 
@@ -90,6 +91,16 @@ pub(crate) enum Restamp {
     /// This: the file was copied from another file system, unchanged since
     /// the buffer read it, and is a new file, or none if it's gone.
     To(Option<DiskStamp>),
+}
+
+/// Why an agent's change to a buffer wasn't made.
+#[derive(Debug)]
+pub(crate) enum Refused {
+    /// It touches lines changed and not saved: these bytes of the text it
+    /// was made to, each run of lines both touch.
+    Conflict(Vec<Range<usize>>),
+    /// The file couldn't be read or written, or has changed meanwhile.
+    Failed(Error),
 }
 
 /// An edit made to a buffer.
@@ -231,6 +242,14 @@ impl Buffer {
     /// file since it was read or last written and not `force`. Returns
     /// whether that changed whether the buffer is modified.
     pub(crate) fn save(&mut self, force: bool) -> Result<Option<bool>, Error> {
+        self.write_out(self.text.clone(), force)?;
+        Ok(self.check_modified())
+    }
+
+    /// Writes `text` to the file, which needn't be the buffer's text,
+    /// unless something else has changed the file since it was read or
+    /// last written and not `force`.
+    fn write_out(&mut self, text: Rope, force: bool) -> Result<(), Error> {
         let failed = |err: io::Error| Error::SaveFailed {
             path: self.path.display().to_string(),
             reason: err.to_string(),
@@ -240,13 +259,156 @@ impl Buffer {
         }
         // A file whose lines end with CRLF is written so again.
         let written = if crlf(&self.path) {
-            Rope::from_str(&self.text.to_string().replace('\n', "\r\n"))
+            Rope::from_str(&text.to_string().replace('\n', "\r\n"))
         } else {
-            self.text.clone()
+            text.clone()
         };
         self.disk = Some(write(&self.path, &written).map_err(failed)?);
-        self.saved = self.text.clone();
-        Ok(self.check_modified())
+        self.saved = text;
+        Ok(())
+    }
+
+    /// The file's text now, with its line ends as the buffer keeps them,
+    /// and what it is, if something has changed it since it was read or
+    /// last written. `None` if it hasn't, or it's gone.
+    pub(crate) fn changed_on_disk(&self) -> Result<Option<(String, DiskStamp)>, Error> {
+        let failed = |err: io::Error| Error::OpenFailed {
+            path: self.path.display().to_string(),
+            reason: err.to_string(),
+        };
+        if DiskStamp::now(&self.path).map_err(failed)? == self.disk {
+            return Ok(None);
+        }
+        match read(&self.path) {
+            Ok((text, disk)) => Ok(Some((lf(text), disk))),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(failed(err)),
+        }
+    }
+
+    /// The text as last read from the file or written to it.
+    pub(crate) fn saved(&self) -> &Rope {
+        &self.saved
+    }
+
+    /// Takes changes an agent wrote to the file itself, as Claude Code's
+    /// tools do, into the buffer. `steps` are the file's text after each,
+    /// in order, from the text saved, each with whether it starts a new
+    /// undo step; the last is the file's text now, `disk`, which `stamp`
+    /// says what it is. Each is made by `author`, merged into the changes
+    /// not saved, and the file's text is then the text saved: a buffer
+    /// that was saved stays so, and one that wasn't is changed only by
+    /// what it was changed by before. Returns the edit each step made.
+    ///
+    /// If any change touches a line changed and not saved, nothing is
+    /// made, and the buffer still knows the file has changed, so it isn't
+    /// written over unless forced.
+    pub(crate) fn take_written(
+        &mut self,
+        steps: &[(String, bool)],
+        (disk, stamp): (&str, DiskStamp),
+        author: Author,
+    ) -> Result<Vec<Option<Made>>, Refused> {
+        let path = self.path.display().to_string();
+        let failed = |reason: String| {
+            Refused::Failed(Error::OpenFailed {
+                path: path.clone(),
+                reason,
+            })
+        };
+        if steps.last().map(|(text, _)| text.as_str()) != Some(disk) {
+            return Err(failed("the changes don't make the file's text".into()));
+        }
+        let saved = self.saved.to_string();
+        let mut now = self.text.to_string();
+        let whole = merge(&saved, disk, &now).map_err(|err| failed(err.to_string()))?;
+        if let Merged::Conflict(lines) = whole {
+            return Err(Refused::Conflict(lines));
+        }
+        // Every step is merged before any is made, so one that can't be
+        // leaves the buffer as it was. Each is merged from the text after
+        // the one before, which only makes sense because the whole change
+        // was found to touch no line changed and not saved, just above.
+        let mut edits = Vec::with_capacity(steps.len());
+        let mut before = saved.as_str();
+        for (text, _) in steps {
+            match merge(before, text, &now).map_err(|err| failed(err.to_string()))? {
+                Merged::Made(edit) => {
+                    now = edit.apply_to(&now).map_err(|err| failed(err.to_string()))?;
+                    edits.push(edit);
+                }
+                Merged::Conflict(lines) => return Err(Refused::Conflict(lines)),
+            }
+            before = text;
+        }
+        let mut made = Vec::with_capacity(steps.len());
+        for (edit, &(_, step)) in edits.into_iter().zip(steps) {
+            if edit.is_noop() {
+                made.push(None);
+                continue;
+            }
+            let version = self.version();
+            let one = self.edit(edit, version, step, author);
+            made.push(Some(one.map_err(|err| failed(err.to_string()))?));
+        }
+        self.saved = Rope::from_str(disk);
+        self.disk = Some(stamp);
+        Ok(made)
+    }
+
+    /// Makes an agent's write of `content` to the file, having read
+    /// `base`: the change from `base` to `content`, made by `author` and
+    /// merged into whatever's changed since. The file gets the change too,
+    /// under any changes not saved: the agent's commands see its write,
+    /// but the user's unsaved work stays unsaved. `None` if it changes
+    /// nothing. `step` starts a new undo step.
+    ///
+    /// Refused, changing nothing, if the change touches a line changed
+    /// since `base`, in the buffer or in the file, or if something else
+    /// has changed the file since it was read or last written.
+    pub(crate) fn write_merged(
+        &mut self,
+        base: &str,
+        content: &str,
+        author: Author,
+        step: bool,
+    ) -> Result<Option<Made>, Refused> {
+        let path = self.path.display().to_string();
+        let failed = |reason: String| {
+            Refused::Failed(Error::SaveFailed {
+                path: path.clone(),
+                reason,
+            })
+        };
+        let saved = self.saved.to_string();
+        let merged = |now: &str| match merge(base, content, now) {
+            Ok(Merged::Made(edit)) => Ok(edit),
+            Ok(Merged::Conflict(lines)) => Err(Refused::Conflict(lines)),
+            Err(err) => Err(failed(err.to_string())),
+        };
+        let (to_file, edit) = match (merged(&saved), merged(&self.text.to_string())) {
+            (Ok(to_file), Ok(edit)) => (to_file, edit),
+            (Err(Refused::Conflict(mut lines)), Err(Refused::Conflict(more))) => {
+                lines.extend(more);
+                lines.sort_by_key(|lines| lines.start);
+                return Err(Refused::Conflict(lines));
+            }
+            (Err(refused), _) | (_, Err(refused)) => return Err(refused),
+        };
+        if !to_file.is_noop() || self.disk.is_none() {
+            let written = to_file
+                .apply_to(&saved)
+                .map_err(|err| failed(err.to_string()))?;
+            self.write_out(Rope::from_str(&written), false)
+                .map_err(Refused::Failed)?;
+        }
+        if edit.is_noop() {
+            return Ok(None);
+        }
+        let version = self.version();
+        self.edit(edit, version, step, author)
+            .map(Some)
+            .map_err(|err| failed(err.to_string()))
     }
 
     /// The edit that throws away the changes that aren't saved, reading the
@@ -706,6 +868,65 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "someone else's");
         buffer.save(true).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "mine!");
+    }
+
+    #[test]
+    fn an_agents_write_wont_write_over_changes_made_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        fs::write(&path, "one\n").unwrap();
+        let mut buffer = Buffer::open(path.clone(), dir.path().to_owned()).unwrap();
+        fs::write(&path, "someone else's\n").unwrap();
+        let agent = Author::Agent(TerminalId(1));
+        assert!(matches!(
+            buffer.write_merged("one\n", "two\n", agent, true),
+            Err(Refused::Failed(Error::ChangedOnDisk(_)))
+        ));
+        assert_eq!(buffer.snapshot().text, "one\n");
+        assert_eq!(buffer.version(), 0);
+        // Taken from disk instead, as though the agent had written it.
+        let (disk, stamp) = buffer.changed_on_disk().unwrap().unwrap();
+        let steps = [(disk.clone(), true)];
+        let made = buffer.take_written(&steps, (&disk, stamp), agent).unwrap();
+        assert_eq!(made[0].as_ref().unwrap().version, 1);
+        assert_eq!(buffer.snapshot().text, "someone else's\n");
+        assert_eq!(buffer.check_modified(), None);
+        // Then it's as it was.
+        assert!(buffer.changed_on_disk().unwrap().is_none());
+    }
+
+    #[test]
+    fn an_agents_change_to_lines_changed_and_not_saved_is_never_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        fs::write(&path, "a\nc\n").unwrap();
+        let mut buffer = Buffer::open(path.clone(), dir.path().to_owned()).unwrap();
+        typed(&mut buffer, 2, "foo bar\n", true);
+        let agent = Author::Agent(TerminalId(1));
+        // It read your unsaved line, and changes it: the file has no such
+        // line, so nothing's written, rather than "a\nzc\n" or the like.
+        let refused = buffer.write_merged("a\nfoo bar\nc\n", "a\nfoo baz\nc\n", agent, true);
+        assert!(
+            matches!(refused, Err(Refused::Conflict(lines)) if lines == std::iter::once(2..10).collect::<Vec<_>>())
+        );
+        assert_eq!(buffer.snapshot().text, "a\nfoo bar\nc\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a\nc\n");
+        // A change to the line after yours merges, and goes on disk alone.
+        let made = buffer.write_merged("a\nc\n", "a\nC\n", agent, true);
+        assert!(made.unwrap().is_some());
+        assert_eq!(buffer.snapshot().text, "a\nfoo bar\nC\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a\nC\n");
+
+        // Written by the agent itself, across your line: the buffer stays
+        // as you have it, and still won't write over the file unless
+        // forced.
+        fs::write(&path, "X\n").unwrap();
+        let (disk, stamp) = buffer.changed_on_disk().unwrap().unwrap();
+        let steps = [(disk.clone(), true)];
+        let refused = buffer.take_written(&steps, (&disk, stamp), agent);
+        assert!(matches!(refused, Err(Refused::Conflict(_))));
+        assert_eq!(buffer.snapshot().text, "a\nfoo bar\nC\n");
+        assert!(matches!(buffer.save(false), Err(Error::ChangedOnDisk(_))));
     }
 
     #[test]

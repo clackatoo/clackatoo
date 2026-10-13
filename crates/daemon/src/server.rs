@@ -54,6 +54,7 @@ use crate::quic::{self, CarrierId, QuicEvent, QuicServer, Received};
 use crate::upgrade::Upgrade;
 use crate::workspaces::WorkspaceState;
 
+mod agent_files;
 mod buffers;
 mod clipboard;
 mod explorers;
@@ -446,6 +447,8 @@ pub struct Daemon {
     agent: Option<AgentSlot>,
     /// What the agent sent last, for the chats to act on.
     incoming: Vec<Incoming>,
+    /// Files as agents read them, and what agents changed in them.
+    agent_files: agent_files::AgentFiles,
     /// The QUIC endpoint, set up when a connection first carries QUIC.
     quic: Option<QuicServer>,
     /// What the QUIC endpoint last asked to be acted on.
@@ -556,6 +559,7 @@ impl Daemon {
             clipboard_unsent: false,
             agent: None,
             incoming: Vec::new(),
+            agent_files: agent_files::AgentFiles::default(),
             quic: None,
             quic_events: Vec::new(),
             carriers_made: 0,
@@ -1151,6 +1155,7 @@ impl Daemon {
             Hosted::Pty(terminal) => terminal,
             Hosted::Chat(chat) => {
                 self.close_chat(id, &chat);
+                self.agent_files.forget(id);
                 if self.workspaces.remove_terminal(id) {
                     self.workspaces_changed();
                 }
@@ -1544,14 +1549,36 @@ impl Daemon {
                 let Some((id, chat)) = self.chat_in(&session) else {
                     return;
                 };
-                chat.update(*update);
+                if let Some(wrote) = chat.update(*update) {
+                    self.take_written(id, &wrote);
+                }
                 id
+            }
+            Incoming::ReadFile {
+                session,
+                request,
+                path,
+                line,
+                limit,
+            } => {
+                self.read_for_agent(&session, &request, &path, (line, limit));
+                return;
+            }
+            Incoming::WriteFile {
+                session,
+                request,
+                path,
+                content,
+            } => {
+                self.write_for_agent(&session, &request, &path, &content);
+                return;
             }
             Incoming::Answered { terminal, result } => {
                 let Some(chat) = self.chat(terminal) else {
                     return;
                 };
                 chat.answered(result);
+                self.settle_turn(terminal);
                 terminal
             }
             Incoming::Permission {

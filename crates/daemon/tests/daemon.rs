@@ -1769,6 +1769,382 @@ fn a_real_agent_answers_and_asks_before_running_commands() {
     assert!(!daemon.dir.path().join("made-by-claude").exists());
 }
 
+// --- Agents' files -------------------------------------------------------
+
+/// The next edit made to a buffer, with who made it, skipping other
+/// updates.
+fn next_edit(client: &mut Client) -> (Author, Edit) {
+    loop {
+        if let BufferUpdate::Edited { author, edit, .. } = next_buffer_update(client) {
+            return (author, edit);
+        }
+    }
+}
+
+/// Sends `change` to `buffer`, and waits for the daemon to take it.
+fn type_in(client: &mut Client, buffer: BufferId, seq: u64, change: Change) {
+    send_change(client, buffer, seq, change);
+    while !matches!(next_buffer_update(client), BufferUpdate::Acked { .. }) {}
+}
+
+/// What the agent said in `chat` once asked `text`.
+fn agent_says(client: &mut Client, chat: TerminalId, text: &str) -> String {
+    last_words(&ask(client, chat, text))
+}
+
+#[test]
+fn an_agents_write_lands_in_a_saved_buffer_as_its_own_and_is_saved() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    let said = agent_says(&mut chatter, chat, &format!("write {path}\none\nTWO\n"));
+    assert_eq!(said, "wrote");
+    let (author, edit) = next_edit(&mut editor);
+    assert_eq!(author, Author::Agent(chat));
+    // Only the word that changed.
+    assert_eq!(edit.changes().collect::<Vec<_>>(), [(4, "two", "TWO")]);
+    // Saved, as it was before, so the agent's commands see it.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\n");
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(
+        (snapshot.text.as_str(), snapshot.modified),
+        ("one\nTWO\n", false)
+    );
+    // And it reads what it wrote.
+    let said = agent_says(&mut chatter, chat, &format!("read {path}"));
+    assert_eq!(said, "read: one\nTWO\n");
+}
+
+#[test]
+fn an_agents_write_merges_with_unsaved_edits_and_leaves_them_unsaved() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    // The agent reads the text as it is, unsaved changes and all.
+    type_in(&mut editor, buffer, 0, insert(14, 0, "> ", 0));
+    let said = agent_says(&mut chatter, chat, &format!("read {path}"));
+    assert_eq!(said, "read: > one\ntwo\nthree\n");
+    // You type on while it works, and it writes what it read, changed.
+    type_in(&mut editor, buffer, 1, insert(16, 15, "!", 1));
+    let write = format!("write {path}\n> one\nTWO\nthree\n");
+    assert_eq!(agent_says(&mut chatter, chat, &write), "wrote");
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(snapshot.text, "> one\nTWO\nthree!\n");
+    assert!(snapshot.modified);
+    // The file gets its change, but not your unsaved ones.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\nthree\n");
+
+    // Your undo takes back yours, not the agent's, and once all yours are
+    // gone the buffer is as saved.
+    let mut text = snapshot.text;
+    for seq in [2, 3] {
+        send_change(&mut editor, buffer, seq, Change::Undo);
+        loop {
+            if let BufferUpdate::Edited {
+                edit,
+                answers: Some(answers),
+                ..
+            } = next_buffer_update(&mut editor)
+            {
+                assert_eq!(answers, seq);
+                text = edit.apply_to(&text).unwrap();
+                break;
+            }
+        }
+    }
+    assert_eq!(text, "one\nTWO\nthree\n");
+    assert!(!attach_buffer(&mut daemon.client(), buffer).modified);
+}
+
+#[test]
+fn an_agents_write_to_a_file_not_open_merges_with_the_file_and_keeps_its_lines() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("a.txt").display().to_string();
+    std::fs::write(&path, "a\r\nb\r\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+
+    let said = agent_says(&mut chatter, chat, &format!("read {path}"));
+    assert_eq!(said, "read: a\nb\n");
+    // Changed meanwhile by something else: the agent's write keeps that.
+    std::fs::write(&path, "a\r\nb\r\nc\r\n").unwrap();
+    let said = agent_says(&mut chatter, chat, &format!("write {path}\nA\nb\n"));
+    assert_eq!(said, "wrote");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\r\nb\r\nc\r\n");
+
+    // A new file, in a new directory.
+    let new = dir.join("new/b.txt");
+    let write = format!("write {}\nhi\n", new.display());
+    assert_eq!(agent_says(&mut chatter, chat, &write), "wrote");
+    assert_eq!(std::fs::read_to_string(&new).unwrap(), "hi\n");
+    // A file that isn't there can't be read.
+    let read = format!("read {}", dir.join("none").display());
+    let said = agent_says(&mut chatter, chat, &read);
+    assert!(
+        said.starts_with("error: ") && said.contains("doesn't exist"),
+        "{said}"
+    );
+    let left: Vec<String> = (std::fs::read_dir(dir).unwrap().flatten())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        left.iter().all(|name| !name.contains(".clackatoo-")),
+        "no temporary file is left behind: {left:?}"
+    );
+}
+
+#[test]
+fn what_an_agent_writes_to_disk_itself_lands_in_the_buffer_open_on_it() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    // As Claude Code's tools write: the buffer was saved, and stays so.
+    let said = agent_says(&mut chatter, chat, &format!("disk {path}\none\nTWO\n"));
+    assert_eq!(said, "done\n");
+    let (author, edit) = next_edit(&mut editor);
+    assert_eq!(author, Author::Agent(chat));
+    assert_eq!(edit.apply_to("one\ntwo\n").unwrap(), "one\nTWO\n");
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(
+        (snapshot.text.as_str(), snapshot.modified),
+        ("one\nTWO\n", false)
+    );
+
+    // With changes not saved, the agent's merges into them, and they stay
+    // unsaved until saved, which nothing on disk now stops.
+    type_in(&mut editor, buffer, 0, insert(8, 0, "> ", snapshot.version));
+    let write = format!("disk {path}\nzero\none\nTWO\n");
+    assert_eq!(agent_says(&mut chatter, chat, &write), "done\n");
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(
+        (snapshot.text.as_str(), snapshot.modified),
+        ("zero\n> one\nTWO\n", true)
+    );
+    let answer = editor
+        .request(&Request::Save {
+            buffer,
+            force: false,
+        })
+        .unwrap();
+    assert_eq!(answer, Response::Done);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "zero\n> one\nTWO\n"
+    );
+}
+
+/// The next thing a buffer's followers are told to say, skipping other
+/// updates.
+fn next_notice(client: &mut Client) -> String {
+    loop {
+        if let BufferUpdate::Notice(notice) = next_buffer_update(client) {
+            return notice;
+        }
+    }
+}
+
+#[test]
+fn an_agents_own_write_across_unsaved_edits_is_left_out_and_said() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+    type_in(&mut editor, buffer, 0, insert(8, 4, "2: ", 0));
+
+    let write = format!("disk {path}\none\nTWO\n");
+    assert_eq!(agent_says(&mut chatter, chat, &write), "done\n");
+    let notice = "agent changed notes.txt where you have unsaved edits: \
+                  `:e!` takes its version, `:w!` keeps yours";
+    assert_eq!(next_notice(&mut editor), notice);
+    let node = wait_for_chat(&mut chatter, chat, |node| node.notice.is_some());
+    assert_eq!(node.notice.as_deref(), Some(notice));
+    // Yours as you left it, and not written over the agent's unless forced.
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(
+        (snapshot.text.as_str(), snapshot.modified),
+        ("one\n2: two\n", true)
+    );
+    let refused = editor
+        .request(&Request::Save {
+            buffer,
+            force: false,
+        })
+        .unwrap();
+    assert!(
+        matches!(refused, Response::Error(Error::ChangedOnDisk(_))),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_file_changed_by_more_than_the_agent_says_is_left_out_and_said() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    // Something else adds a line, then the agent changes one: what the
+    // agent says it changed doesn't make the file, so none of it is
+    // taken as the agent's.
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+    let write = format!("disk {path}\none\nTWO\nthree\n");
+    assert_eq!(agent_says(&mut chatter, chat, &write), "done\n");
+    assert_eq!(
+        next_notice(&mut editor),
+        "notes.txt changed on disk, and not only as agent said: \
+         `:e!` takes the file's version, `:w!` keeps yours"
+    );
+    assert_eq!(
+        attach_buffer(&mut daemon.client(), buffer).text,
+        "one\ntwo\n"
+    );
+}
+
+#[test]
+fn an_agents_write_to_lines_changed_and_not_saved_or_outside_its_project_is_refused() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let notes = dir.join("notes.txt").display().to_string();
+    let other = dir.join("other.txt").display().to_string();
+    std::fs::write(&notes, "one\ntwo\n").unwrap();
+    std::fs::write(&other, "a\nc\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    // Not having read it, a change to the line you're changing.
+    type_in(&mut editor, buffer, 0, insert(8, 4, "2: ", 0));
+    let said = agent_says(&mut chatter, chat, &format!("write {notes}\none\nTWO\n"));
+    assert!(
+        said.starts_with("error: ") && said.contains("unsaved edits on line 2"),
+        "{said}"
+    );
+    assert_eq!(
+        attach_buffer(&mut daemon.client(), buffer).text,
+        "one\n2: two\n"
+    );
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "one\ntwo\n");
+
+    // Having read your unsaved line, a change to it: the file has no such
+    // line to change, so nothing's made of it.
+    let mut other_editor = daemon.client();
+    let other_buffer = open_attached(&mut other_editor, dir, "other.txt");
+    type_in(
+        &mut other_editor,
+        other_buffer,
+        0,
+        insert(4, 2, "foo bar\n", 0),
+    );
+    let said = agent_says(&mut chatter, chat, &format!("read {other}"));
+    assert_eq!(said, "read: a\nfoo bar\nc\n");
+    let said = agent_says(
+        &mut chatter,
+        chat,
+        &format!("write {other}\na\nfoo baz\nc\n"),
+    );
+    assert!(said.contains("unsaved edits on line 2"), "{said}");
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), "a\nc\n");
+    let snapshot = attach_buffer(&mut daemon.client(), other_buffer);
+    assert_eq!(snapshot.text, "a\nfoo bar\nc\n");
+
+    // Outside where the chat works.
+    let said = agent_says(&mut chatter, chat, "read /etc/hostname");
+    assert!(
+        said.starts_with("error: ") && said.contains("outside"),
+        "{said}"
+    );
+    let said = agent_says(&mut chatter, chat, "write /etc/clackatoo-test\nno\n");
+    assert!(
+        said.starts_with("error: ") && said.contains("outside"),
+        "{said}"
+    );
+}
+
+/// Claude Code's Edit tool, on the cheapest model, changing a file open in
+/// a buffer with a change not saved. Run by hand, as
+/// [`a_real_agent_answers_and_asks_before_running_commands`] is.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agents_edit_lands_in_the_buffer_open_on_its_file() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with_agent(|_| {
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect()
+    });
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "alpha\nbeta\n").unwrap();
+    let mut chatter = daemon.client();
+    chatter.new_workspace(None, new_chat()).unwrap();
+    let chat = chatter.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(&mut chatter, chat, minute, |node| {
+        node.state == ChatState::Ready
+    });
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+    type_in(&mut editor, buffer, 0, insert(11, 0, "// mine\n", 0));
+
+    let text =
+        format!("Use your Edit tool to change the word beta to gamma in {path}. Do nothing else.");
+    chatter.chat(chat, ChatAction::Send(text.clone())).unwrap();
+    // It may ask first: yes, this once.
+    loop {
+        let node = wait_for_chat_for(&mut chatter, chat, minute, |node| {
+            last_outcome(node).is_some() || node.question.is_some()
+        });
+        let Some(question) = node.question else {
+            break;
+        };
+        let allow = (question.choices.iter())
+            .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::AllowOnce)
+            .expect("a way to say yes");
+        chatter
+            .chat(chat, ChatAction::Answer(Some(allow.id.clone())))
+            .unwrap();
+        wait_for_chat_for(&mut chatter, chat, minute, |node| node.question.is_none());
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
+    let (author, _) = next_edit(&mut editor);
+    assert_eq!(author, Author::Agent(chat));
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(snapshot.text, "// mine\nalpha\ngamma\n");
+    assert!(snapshot.modified);
+}
+
 // --- Buffers -------------------------------------------------------------
 
 fn open_file(dir: &Path, path: &str) -> PaneTerminal {

@@ -11,6 +11,11 @@
 //! answers to the requests that asked, and turns what the agent sends into
 //! [`Incoming`]s, which the server hands to the chats they're for.
 //!
+//! The daemon is the agent's file system, for agents that ask it to be:
+//! it offers ACP's `fs/read_text_file` and `fs/write_text_file`, which the
+//! server serves from its buffers (see `server/agent_files.rs`). Claude
+//! Code's adapter doesn't use them: its tools write files themselves.
+//!
 //! Its stdout isn't logged: Claude Code's adapter sends the account's
 //! email address there, in a notification of its own.
 
@@ -18,10 +23,12 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
 use std::os::fd::RawFd;
+use std::path::PathBuf;
 
 use agent_client_protocol_schema::v1::{
-    PermissionOption, PromptResponse, RequestPermissionRequest, SessionConfigOption,
-    SessionNotification, SessionUpdate, StopReason, ToolCallUpdate,
+    PermissionOption, PromptResponse, ReadTextFileRequest, RequestPermissionRequest,
+    SessionConfigOption, SessionNotification, SessionUpdate, StopReason, ToolCallUpdate,
+    WriteTextFileRequest,
 };
 use clackatoo_protocol::TerminalId;
 use serde_json::{Value, json};
@@ -31,6 +38,12 @@ use crate::rpc::{Framing, Message, Peer};
 
 /// The ACP version spoken.
 const PROTOCOL_VERSION: u16 = 1;
+
+/// The JSON-RPC error code for a file that isn't there, as ACP has it.
+pub(crate) const NOT_FOUND: i64 = -32002;
+
+/// The JSON-RPC error code for a request that couldn't be carried out.
+pub(crate) const FAILED: i64 = -32603;
 
 /// What a request the daemon sent was for, so its answer can be acted on.
 #[derive(Clone, Copy, Debug)]
@@ -80,6 +93,23 @@ pub(crate) enum Incoming {
         tool: Box<ToolCallUpdate>,
         options: Vec<PermissionOption>,
     },
+    /// The agent asks for the text of a file, from line `line` (counting
+    /// from 1) and at most `limit` lines, and waits for it.
+    ReadFile {
+        session: String,
+        request: Value,
+        path: PathBuf,
+        line: Option<u32>,
+        limit: Option<u32>,
+    },
+    /// The agent asks for a file's text to be `content`, and waits until
+    /// it is.
+    WriteFile {
+        session: String,
+        request: Value,
+        path: PathBuf,
+        content: String,
+    },
 }
 
 /// A session made or opened again.
@@ -119,7 +149,7 @@ impl Agent {
             &json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "clientCapabilities": {
-                    "fs": { "readTextFile": false, "writeTextFile": false },
+                    "fs": { "readTextFile": true, "writeTextFile": true },
                     "terminal": false,
                 },
                 "clientInfo": { "name": "clackatoo", "version": env!("CARGO_PKG_VERSION") },
@@ -191,6 +221,19 @@ impl Agent {
             None => json!({ "outcome": "cancelled" }),
         };
         self.reply(&json!({ "jsonrpc": "2.0", "id": request, "result": { "outcome": outcome } }));
+    }
+
+    /// Answers a [`Incoming::ReadFile`] or [`Incoming::WriteFile`]: with
+    /// its result, or an error code and why.
+    pub(crate) fn answer(&mut self, request: &Value, result: Result<Value, (i64, String)>) {
+        self.reply(&match result {
+            Ok(result) => json!({ "jsonrpc": "2.0", "id": request, "result": result }),
+            Err((code, message)) => json!({
+                "jsonrpc": "2.0",
+                "id": request,
+                "error": { "code": code, "message": message },
+            }),
+        });
     }
 
     fn request(&mut self, pending: Pending, method: &str, params: &Value) {
@@ -267,24 +310,46 @@ impl Agent {
                 }
             }
             (Some(method), Some(id)) => {
-                if method == "session/request_permission"
-                    && let Ok(request) =
-                        serde_json::from_value::<RequestPermissionRequest>(message.params)
-                {
-                    incoming.push(Incoming::Permission {
-                        session: request.session_id.0.to_string(),
-                        request: id,
-                        tool: Box::new(request.tool_call),
-                        options: request.options,
-                    });
-                } else {
-                    // Files and terminals, which the daemon said it doesn't
-                    // offer, or something newer.
-                    self.reply(&json!({
+                let params = message.params;
+                let asked = match method.as_str() {
+                    "session/request_permission" => {
+                        serde_json::from_value::<RequestPermissionRequest>(params)
+                            .ok()
+                            .map(|request| Incoming::Permission {
+                                session: request.session_id.0.to_string(),
+                                request: id.clone(),
+                                tool: Box::new(request.tool_call),
+                                options: request.options,
+                            })
+                    }
+                    "fs/read_text_file" => serde_json::from_value::<ReadTextFileRequest>(params)
+                        .ok()
+                        .map(|request| Incoming::ReadFile {
+                            session: request.session_id.0.to_string(),
+                            request: id.clone(),
+                            path: request.path,
+                            line: request.line,
+                            limit: request.limit,
+                        }),
+                    "fs/write_text_file" => serde_json::from_value::<WriteTextFileRequest>(params)
+                        .ok()
+                        .map(|request| Incoming::WriteFile {
+                            session: request.session_id.0.to_string(),
+                            request: id.clone(),
+                            path: request.path,
+                            content: request.content,
+                        }),
+                    _ => None,
+                };
+                match asked {
+                    Some(asked) => incoming.push(asked),
+                    // Terminals, which the daemon said it doesn't offer, or
+                    // something newer.
+                    None => self.reply(&json!({
                         "jsonrpc": "2.0",
                         "id": id,
                         "error": { "code": -32601, "message": format!("{method} isn't supported") },
-                    }));
+                    })),
                 }
             }
             (None, Some(id)) => {

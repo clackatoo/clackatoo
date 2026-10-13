@@ -11,7 +11,10 @@
 //! authority that puts edits in order.
 //!
 //! [`History`] keeps the edits made, by whom, so each author can undo their
-//! own without undoing anyone else's.
+//! own without undoing anyone else's. [`Edit::between`] finds the edit
+//! that turns one text into another, and [`merge`] makes a change to a
+//! text that has changed meanwhile, as an agent's write to a file is
+//! merged into edits not yet saved, or says where the two meet.
 //!
 //! [`Highlights`] are what each piece of the text is, as its language's
 //! grammar reads it, for colouring it; they move along with edits, as
@@ -38,6 +41,7 @@ mod highlights;
 mod history;
 mod hunks;
 mod indents;
+mod merge;
 mod pieces;
 mod snippet;
 
@@ -47,6 +51,7 @@ pub use highlights::{Highlights, Kind, Span};
 pub use history::{History, HistoryError, HistorySnapshot, Steps};
 pub use hunks::{Difference, Hunk, HunkKind, Hunks, Sign, diff, line_starts};
 pub use indents::{LineIndent, line_start_through};
+pub use merge::{Merged, merge};
 pub use pieces::{Construct, Piece};
 pub use ropey::Rope;
 pub use snippet::{Expanded, Part, Snippet, Stop};

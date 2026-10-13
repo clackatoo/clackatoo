@@ -608,7 +608,7 @@ impl Daemon {
     }
 
     /// The buffer open for the file at `path`, if there's one.
-    fn buffer_of(&self, path: &Path) -> Option<BufferId> {
+    pub(super) fn buffer_of(&self, path: &Path) -> Option<BufferId> {
         (self.buffers.iter())
             .find(|(_, slot)| slot.buffer.path() == path)
             .map(|(&id, _)| id)

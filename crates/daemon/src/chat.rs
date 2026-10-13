@@ -62,6 +62,34 @@ pub(crate) enum Action {
     Set { setting: String, value: String },
 }
 
+/// Files a tool changed on disk itself, as the agent says once it has.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Wrote {
+    /// The turn it's in.
+    pub(crate) turn: usize,
+    /// Its ID.
+    pub(crate) tool: String,
+    /// Where it is among its turn's items, so its changes can be put in
+    /// the order the agent made them.
+    pub(crate) order: usize,
+    /// The files, as the agent names them: absolute, or from the chat's
+    /// working directory.
+    pub(crate) paths: Vec<String>,
+    /// What it says it changed in them, as last said, whole: the changes
+    /// to check the files against.
+    pub(crate) diffs: Vec<RawDiff>,
+}
+
+/// A change a tool says it made to a file: `old` replaced by `new`, as
+/// the agent gives it, with no line cut. `old` is `None` for a file the
+/// tool made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RawDiff {
+    pub(crate) path: String,
+    pub(crate) old: Option<String>,
+    pub(crate) new: String,
+}
+
 /// Whether a chat's session is open in the agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Link {
@@ -96,6 +124,9 @@ pub(crate) struct HostedChat {
     /// The mode a new chat asks for when its session first opens.
     starting_mode: Option<&'static str>,
     journal: Journal,
+    /// What each tool of the turn being answered last said it changed in
+    /// files, by its ID.
+    diffs: Vec<(String, Vec<RawDiff>)>,
 }
 
 /// The changes made to a chat, numbered, for viewers to catch up with.
@@ -147,6 +178,7 @@ impl HostedChat {
             chosen: Vec::new(),
             starting_mode: Some(STARTING_MODE),
             journal: Journal::default(),
+            diffs: Vec::new(),
         }
     }
 
@@ -499,20 +531,31 @@ impl HostedChat {
         }));
     }
 
-    /// Takes a change to the session.
-    pub(crate) fn update(&mut self, update: SessionUpdate) {
+    /// Takes a change to the session. Returns the files a tool that has
+    /// finished says it changed, if the change says so: they're on disk
+    /// already, as Claude Code's tools write them.
+    pub(crate) fn update(&mut self, update: SessionUpdate) -> Option<Wrote> {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => self.write(&chunk.content, false),
             SessionUpdate::AgentThoughtChunk(chunk) => self.write(&chunk.content, true),
-            SessionUpdate::ToolCall(call) => self.set_tool(Tool {
-                id: call.tool_call_id.0.to_string(),
-                title: clean(&call.title),
-                status: tool_status(call.status),
-                kind: tool_kind(call.kind),
-                content: tool_content(&call.content),
-                locations: tool_locations(&call.locations),
-            }),
+            SessionUpdate::ToolCall(call) => {
+                self.note_diffs(&call.tool_call_id.0, &call.content);
+                let tool = Tool {
+                    id: call.tool_call_id.0.to_string(),
+                    title: clean(&call.title),
+                    status: tool_status(call.status),
+                    kind: tool_kind(call.kind),
+                    content: tool_content(&call.content),
+                    locations: tool_locations(&call.locations),
+                };
+                let wrote = self.wrote(&tool);
+                self.set_tool(tool);
+                return wrote;
+            }
             SessionUpdate::ToolCallUpdate(update) => {
+                if let Some(content) = &update.fields.content {
+                    self.note_diffs(&update.tool_call_id.0, content);
+                }
                 let id = update.tool_call_id.0.to_string();
                 let mut tool = self.tool(&id).cloned().unwrap_or(Tool {
                     id,
@@ -539,7 +582,16 @@ impl HostedChat {
                 if let Some(locations) = &update.fields.locations {
                     tool.locations = tool_locations(locations);
                 }
+                // Claude Code's adapter says what a tool wrote once it has
+                // written it, in an update of its own that may come before
+                // or after the one saying it's finished.
+                let fields = &update.fields;
+                let says = fields.status.is_some()
+                    || fields.content.is_some()
+                    || fields.locations.is_some();
+                let wrote = says.then(|| self.wrote(&tool)).flatten();
                 self.set_tool(tool);
+                return wrote;
             }
             SessionUpdate::SessionInfoUpdate(info) => {
                 // Not a change to the turns: viewers pick it up anyway.
@@ -567,6 +619,92 @@ impl HostedChat {
             // the user's own words, already kept.
             _ => {}
         }
+        None
+    }
+
+    /// Notes the changes to files in `content`, which tool `id` shows,
+    /// if it shows any, in place of what it showed before.
+    fn note_diffs(&mut self, id: &str, content: &[ToolCallContent]) {
+        let diffs: Vec<RawDiff> = (content.iter())
+            .filter_map(|content| match content {
+                ToolCallContent::Diff(diff) => Some(RawDiff {
+                    path: diff.path.to_string_lossy().into_owned(),
+                    old: diff.old_text.clone(),
+                    new: diff.new_text.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        if diffs.is_empty() {
+            return;
+        }
+        self.diffs.retain(|(tool, _)| tool != id);
+        self.diffs.push((id.to_owned(), diffs));
+    }
+
+    /// The files `tool` changed, if it's a finished edit that names any.
+    fn wrote(&self, tool: &Tool) -> Option<Wrote> {
+        let diffs = (tool.content.iter()).filter_map(|content| match content {
+            ToolContent::Diff(diff) => Some(&diff.path),
+            ToolContent::Text(_) => None,
+        });
+        let edits = tool.kind == ToolKind::Edit || diffs.clone().next().is_some();
+        if tool.status != ToolStatus::Done || !edits {
+            return None;
+        }
+        let mut paths: Vec<String> = Vec::new();
+        let named = diffs.chain(tool.locations.iter().map(|location| &location.path));
+        for path in named {
+            if !path.is_empty() && !paths.contains(path) {
+                paths.push(path.clone());
+            }
+        }
+        // A tool saying what it wrote after its turn ended still wrote it,
+        // in the last turn.
+        let turn = self.node.turns.len().checked_sub(1)?;
+        let items = &self.node.turns[turn].items;
+        let order = (items.iter())
+            .position(|item| matches!(item, Item::Tool(old) if old.id == tool.id))
+            .unwrap_or(items.len());
+        let diffs = (self.diffs.iter())
+            .find(|(id, _)| *id == tool.id)
+            .map(|(_, diffs)| diffs.clone())
+            .unwrap_or_default();
+        Some(Wrote {
+            turn,
+            tool: tool.id.clone(),
+            order,
+            paths,
+            diffs,
+        })
+        .filter(|wrote| !wrote.paths.is_empty())
+    }
+
+    /// The chat's title, as the agent gives it.
+    pub(crate) fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Says `notice` in the chat, until the next message.
+    pub(crate) fn notify(&mut self, notice: String) {
+        self.set_notice(Some(notice));
+    }
+
+    /// Where the agent is in its work, for what it writes now: the turn
+    /// it's answering, or else the last, and the tool it's running, if one
+    /// is.
+    pub(crate) fn working_on(&self) -> (usize, Option<String>) {
+        let turn = self.node.turns.len().saturating_sub(1);
+        let running = (self
+            .answering_turn()
+            .map(|turn| &self.node.turns[turn].items))
+        .and_then(|items| {
+            items.iter().rev().find_map(|item| match item {
+                Item::Tool(tool) if tool.status == ToolStatus::Running => Some(tool.id.clone()),
+                _ => None,
+            })
+        });
+        (turn, running)
     }
 
     /// A piece of the agent's words, or of its thinking, on the end of the
@@ -671,6 +809,7 @@ impl HostedChat {
     }
 
     fn push_turn(&mut self, turn: Turn) {
+        self.diffs.clear();
         self.node.turns.push(turn);
         self.patch_turn(self.node.turns.len() - 1);
     }
@@ -1062,10 +1201,57 @@ mod tests {
         HostedChat::new(TerminalId(1), Size::new(40, 12).unwrap(), "/tmp".to_owned())
     }
 
-    fn update(chat: &mut HostedChat, json: &str) {
+    fn update(chat: &mut HostedChat, json: &str) -> Option<Wrote> {
         let json = format!(r#"{{"sessionId":"s","update":{json}}}"#);
         let notification: SessionNotification = serde_json::from_str(&json).unwrap();
-        chat.update(notification.update);
+        chat.update(notification.update)
+    }
+
+    #[test]
+    fn a_finished_edit_says_what_it_wrote_and_whatever_is_running_is_known() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "edit it");
+        // Asking first, as Claude Code's adapter does: nothing written yet.
+        let pending = r#"{"sessionUpdate":"tool_call","toolCallId":"e","title":"Edit","kind":"edit",
+                          "status":"pending","locations":[{"path":"/a"}]}"#;
+        assert_eq!(update(&mut chat, pending), None);
+        assert_eq!(chat.working_on(), (0, Some("e".to_owned())));
+        // Finished, then what it wrote, each saying so.
+        let done = r#"{"sessionUpdate":"tool_call_update","toolCallId":"e","status":"completed"}"#;
+        let wrote = |paths: &[&str], diffs: Vec<RawDiff>| Wrote {
+            turn: 0,
+            tool: "e".into(),
+            order: 0,
+            paths: paths.iter().map(|&path| path.to_owned()).collect(),
+            diffs,
+        };
+        assert_eq!(update(&mut chat, done), Some(wrote(&["/a"], Vec::new())));
+        assert_eq!(chat.working_on(), (0, None));
+        let content = r#"{"sessionUpdate":"tool_call_update","toolCallId":"e",
+                          "content":[{"type":"diff","path":"/b","oldText":"x","newText":"y"}],
+                          "locations":[{"path":"/b","line":1},{"path":"/a"}]}"#;
+        // What it says it changed, kept whole, from then on.
+        let diffs = vec![RawDiff {
+            path: "/b".into(),
+            old: Some("x".into()),
+            new: "y".into(),
+        }];
+        let both = wrote(&["/b", "/a"], diffs.clone());
+        assert_eq!(update(&mut chat, content), Some(both));
+        let done_again =
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"e","status":"completed"}"#;
+        assert_eq!(
+            update(&mut chat, done_again),
+            Some(wrote(&["/b", "/a"], diffs))
+        );
+        // An update saying nothing of it says nothing again.
+        let title = r#"{"sessionUpdate":"tool_call_update","toolCallId":"e","title":"Edited"}"#;
+        assert_eq!(update(&mut chat, title), None);
+        // A command that finishes wrote nothing it says.
+        let command = r#"{"sessionUpdate":"tool_call","toolCallId":"c","title":"ls",
+                          "kind":"execute","status":"completed"}"#;
+        assert_eq!(update(&mut chat, command), None);
     }
 
     fn words(chat: &mut HostedChat, text: &str) {

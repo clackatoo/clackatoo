@@ -473,8 +473,8 @@ impl BufferCopy {
                 self.diagnose(version, diagnostics);
                 Heard::Nothing
             }
-            // The window asks, not the editor.
-            BufferUpdate::Offer { .. } => Heard::Nothing,
+            // The window asks and says these, not the editor.
+            BufferUpdate::Offer { .. } | BufferUpdate::Notice(_) => Heard::Nothing,
             BufferUpdate::Features(features) => {
                 self.features = features;
                 Heard::Nothing

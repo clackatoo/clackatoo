@@ -204,6 +204,9 @@ pub enum BufferUpdate {
     /// explorer moving it, or a directory it's in, does. Its text and
     /// history are as they were.
     Moved(String),
+    /// Something the window should say in its bar, such as that an agent
+    /// changed the file where you have changes not saved.
+    Notice(String),
 }
 
 /// What a buffer's language server does as you type, as it said when it

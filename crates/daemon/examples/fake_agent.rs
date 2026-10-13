@@ -9,6 +9,9 @@
 //! | `wait` | Nothing until the message is cancelled |
 //! | `exit` | Exits, as if it crashed |
 //! | `settings` | Its mode and model, as `mode model` |
+//! | `read PATH` | Reads the file through the daemon, and says `read:` and its text |
+//! | `write PATH`, a line's end, then text | Writes the text to the file through the daemon, in a tool call, and says `wrote` |
+//! | `disk PATH`, a line's end, then text | Writes the text to the file itself, as Claude Code's tools do, then says so as its adapter does: the tool call finished, then what it changed, the file's old and new text, in an update of its own; and `done` |
 //! | anything else | `echo:` and the message, in two pieces |
 //!
 //! Each session has a mode (Manual, `default`, or Auto) and a model
@@ -32,6 +35,7 @@ fn main() {
         sessions: BTreeMap::new(),
         settings: BTreeMap::new(),
         waiting: None,
+        asked: None,
     };
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -49,6 +53,9 @@ struct Fake {
     settings: BTreeMap<String, (String, String)>,
     /// A message waiting to be answered: its request's ID and session.
     waiting: Option<(Value, String)>,
+    /// A message waiting on the daemon's answer about a file: its
+    /// request's ID, its session, and the tool call it's in, if any.
+    asked: Option<(Value, String, Option<String>)>,
 }
 
 fn send(message: &Value) {
@@ -155,6 +162,25 @@ impl Fake {
                 let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
                 return self.prompt(id, session, text);
             }
+            // The answer about a file.
+            None if id == "f1" => {
+                if let Some((id, session, tool)) = self.asked.take() {
+                    let answer = match (&message["result"]["content"], &message["error"]) {
+                        (_, Value::Object(error)) => format!("error: {}", error["message"]),
+                        (Value::String(text), _) => format!("read: {text}"),
+                        _ => "wrote".to_owned(),
+                    };
+                    if let Some(tool) = tool {
+                        update(
+                            &session,
+                            &json!({ "sessionUpdate": "tool_call_update",
+                                     "toolCallId": tool, "status": "completed" }),
+                        );
+                    }
+                    say(&session, &answer);
+                    done(&id, "end_turn");
+                }
+            }
             // The answer to the permission asked for.
             None if id == "p1" => {
                 let picked = message["result"]["outcome"]["optionId"]
@@ -177,6 +203,9 @@ impl Fake {
         if !matches!(text, "ask" | "wait" | "exit") {
             let usage = json!({ "sessionUpdate": "usage_update", "used": 1000, "size": 200_000 });
             update(&session, &usage);
+        }
+        if self.file(&id, &session, text) {
+            return true;
         }
         match text {
             "cwd" => {
@@ -249,5 +278,61 @@ impl Fake {
             }
         }
         true
+    }
+
+    /// Answers a message about a file by the script its words choose, if
+    /// they choose one. Returns whether they did.
+    fn file(&mut self, id: &Value, session: &str, text: &str) -> bool {
+        let (command, rest) = text.split_once('\n').unwrap_or((text, ""));
+        if let Some(path) = command.strip_prefix("read ") {
+            send(
+                &json!({ "jsonrpc": "2.0", "id": "f1", "method": "fs/read_text_file",
+                          "params": { "sessionId": session, "path": path } }),
+            );
+            self.asked = Some((id.clone(), session.to_owned(), None));
+            return true;
+        }
+        if let Some(path) = command.strip_prefix("write ") {
+            update(
+                session,
+                &json!({ "sessionUpdate": "tool_call", "toolCallId": "tw",
+                         "title": format!("Write {path}"), "kind": "edit",
+                         "status": "in_progress" }),
+            );
+            send(
+                &json!({ "jsonrpc": "2.0", "id": "f1", "method": "fs/write_text_file",
+                          "params": { "sessionId": session, "path": path, "content": rest } }),
+            );
+            self.asked = Some((id.clone(), session.to_owned(), Some("tw".to_owned())));
+            return true;
+        }
+        if let Some(path) = command.strip_prefix("disk ") {
+            update(
+                session,
+                &json!({ "sessionUpdate": "tool_call", "toolCallId": "td",
+                         "title": format!("Write {path}"), "kind": "edit",
+                         "status": "pending", "locations": [{ "path": path }] }),
+            );
+            let old = std::fs::read_to_string(path).ok();
+            std::fs::write(path, rest).unwrap();
+            // As Claude Code's adapter says it: finished, then what the
+            // tool wrote, in an update of its own.
+            update(
+                session,
+                &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "td",
+                         "status": "completed" }),
+            );
+            update(
+                session,
+                &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "td",
+                         "content": [{ "type": "diff", "path": path,
+                                       "oldText": old, "newText": rest }],
+                         "locations": [{ "path": path, "line": 1 }] }),
+            );
+            say(session, "done\n");
+            done(id, "end_turn");
+            return true;
+        }
+        false
     }
 }

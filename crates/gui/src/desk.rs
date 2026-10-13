@@ -3002,6 +3002,10 @@ mod tests {
         desk.answered(Response::Done);
         assert_eq!(desk.message.as_deref(), Some("notes.txt written"));
         desk.buffer_changed(buffer, BufferUpdate::Modified(false));
+        // What the daemon says of the file goes in the bar.
+        let notice = "agent changed notes.txt where you have unsaved edits";
+        assert!(desk.buffer_changed(buffer, BufferUpdate::Notice(notice.into())));
+        assert_eq!(desk.message.as_deref(), Some(notice));
         command(&mut desk, "q");
         assert_eq!(
             answer_all(&mut desk),

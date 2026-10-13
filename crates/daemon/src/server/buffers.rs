@@ -237,11 +237,17 @@ impl Daemon {
     /// rather than one a window sent: to its server and parser, and to
     /// every window following it, none of which has made it yet.
     pub(super) fn made_for_user(&mut self, id: BufferId, made: Made) {
+        self.made_by(id, made, Author::User);
+    }
+
+    /// Passes on an edit `author` made to buffer `id` in the daemon, as
+    /// [`made_for_user`](Self::made_for_user) does.
+    pub(super) fn made_by(&mut self, id: BufferId, made: Made, author: Author) {
         self.edited(id, made.version, &made.edit);
         let update = BufferUpdate::Edited {
             version: made.version,
             edit: made.edit,
-            author: Author::User,
+            author,
             answers: None,
         };
         self.tell_viewers(id, None, &update);
@@ -471,7 +477,7 @@ impl Daemon {
 
     /// Tells every client following `id` whether it's modified, if that's
     /// changed.
-    fn note_modified(&mut self, id: BufferId) {
+    pub(super) fn note_modified(&mut self, id: BufferId) {
         let Some(slot) = self.buffers.get_mut(&id) else {
             return;
         };
@@ -527,7 +533,7 @@ pub(super) fn key(id: BufferId) -> clackatoo_syntax::Key {
 
 /// `path` made absolute, from `dir` if it's relative, or from `home` if it
 /// starts with `~/`, with its links followed as far as they exist.
-fn resolve(path: &str, dir: &Path, home: &Path) -> PathBuf {
+pub(super) fn resolve(path: &str, dir: &Path, home: &Path) -> PathBuf {
     let path = match path.strip_prefix("~/") {
         Some(rest) => home.join(rest),
         None => dir.join(path),
