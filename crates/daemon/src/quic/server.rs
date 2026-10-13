@@ -401,10 +401,13 @@ impl QuicServer {
                 describe(&remote.connection)
             );
             remote.client = None;
+            // One closed already, or draining, sends nothing more: nothing
+            // to wait for.
+            let was_closed = remote.connection.is_closed();
             remote
                 .connection
                 .close(now, VarInt::from_u32(0), reason.as_bytes().to_vec().into());
-            remote.closing = true;
+            remote.closing = !was_closed;
             self.touched.push(handle);
         }
     }
@@ -460,8 +463,12 @@ impl QuicServer {
                 let packet = &self.buffer[..transmit.size];
                 send(transmit.destination, packet);
                 // Once closed, all a connection sends is the packet saying
-                // so, but for a check of a new path it had waiting.
-                remote.closing = false;
+                // so, but for a check of a new path it had waiting, which
+                // goes to another address: only a packet to the client's
+                // own is the close.
+                if transmit.destination == remote.connection.remote_address() {
+                    remote.closing = false;
+                }
                 // A carrier loses nothing.
                 if carrier_id(transmit.destination).is_none()
                     && remote.validated == Some(transmit.destination)

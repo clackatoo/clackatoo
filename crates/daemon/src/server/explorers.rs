@@ -936,8 +936,12 @@ impl Daemon {
         // changed between the listing and the watch wasn't heard of.
         if rewatch {
             self.watch(dir, None);
+            // Listed again once watched; or if it went before it could
+            // be, so its viewers hear it's gone. Not when there's no room,
+            // which would list it again and again.
+            let gone = || std::fs::symlink_metadata(dir).is_err();
             if let Some(entry) = self.explorers.dirs.get_mut(dir)
-                && entry.watched
+                && (entry.watched || gone())
             {
                 entry.due.get_or_insert(Instant::now());
             }
