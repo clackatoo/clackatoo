@@ -130,7 +130,8 @@ enum Command {
     List(Connection),
     /// Start a terminal and print its ID.
     New(New),
-    /// Edit a file, in a new tab of the workspace last used.
+    /// Edit a file, or browse a folder as its listing, in a new tab of the
+    /// workspace last used.
     Edit(Edit),
     /// Type a command into a terminal and press Enter.
     Run(Run),
@@ -286,7 +287,9 @@ struct New {
 
 #[derive(Debug, Args)]
 struct Edit {
-    /// The file. A relative path is from the current directory.
+    /// The file, or folder. A relative path is from the current directory,
+    /// which is the folder shown if there's none.
+    #[arg(default_value = ".")]
     path: PathBuf,
     #[command(flatten)]
     connection: Connection,

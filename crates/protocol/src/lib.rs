@@ -101,7 +101,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 70;
+pub const PROTOCOL_VERSION: u32 = 71;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -681,15 +681,16 @@ pub enum Request {
         /// The language.
         language: String,
     },
-    /// Shows `file` in `pane`, which shows a file, in place of that file,
-    /// as Vim's `:e` does. The file it showed closes if nothing else shows
-    /// it and it has no changes to save.
+    /// Shows `file` in `pane`, which shows a file or a folder, in place of
+    /// what it shows, as Vim's `:e` does: a folder as its listing
+    /// ([`Content::Folder`]). The file it showed closes if nothing else
+    /// shows it and it has no changes to save.
     OpenHere {
         /// The pane.
         pane: PaneId,
-        /// The file to show: a relative path is from the directory the
-        /// file the pane shows was opened from, as Vim's are from its
-        /// working directory.
+        /// The file or folder to show: a relative path is from the
+        /// directory the file the pane shows was opened from, or the folder
+        /// it shows, as Vim's are from its working directory.
         file: OpenFile,
     },
     /// Starts sending a file explorer: its [`FilesUpdate::Root`], then what

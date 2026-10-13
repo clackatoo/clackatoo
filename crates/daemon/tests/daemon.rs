@@ -5723,6 +5723,99 @@ fn a_pane_shows_another_file_in_place_as_e_does() {
     assert_eq!(refused.unwrap(), Response::Error(Error::NotAFile(terminal)));
 }
 
+/// The explorer of the folder pane `pane` shows, once the workspaces have
+/// it.
+fn folder_in(client: &mut Client, pane: PaneId) -> FilesId {
+    loop {
+        let workspaces = next_workspaces(client);
+        if let Some((_, _, pane)) = workspaces.find_pane(pane) {
+            assert!(pane.content.is_folder(), "{:?}", pane.content);
+            return pane.content.files().expect("an explorer");
+        }
+    }
+}
+
+#[test]
+fn a_folder_opened_as_a_file_shows_its_listing_and_files_show_in_its_place() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("app/a.txt"), "a\n").unwrap();
+    std::fs::write(dir.join("app/src/b.txt"), "b\n").unwrap();
+    let app = dir.join("app").canonicalize().unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    // As `clackatoo edit app` asks, or `:Editor app`.
+    let pane = (client.new_workspace(None, open_file(dir, "app"))).unwrap();
+    let files = folder_in(&mut client, pane);
+    client.request(&Request::AttachFiles { files }).unwrap();
+    assert!(matches!(
+        next_files_update(&mut client),
+        FilesUpdate::Root { path, .. } if Path::new(&path) == app
+    ));
+
+    // The finder from it, and a relative path, are from the folder it
+    // shows, which its root follows.
+    files_action(
+        &mut client,
+        files,
+        FilesAction::Root(app.join("src").display().to_string()),
+    );
+    assert!(matches!(
+        next_files_update(&mut client),
+        FilesUpdate::Root { .. }
+    ));
+    client.find(1, Some(pane), Search::Files).unwrap();
+    let (found_files, _) = found(&mut client, 1);
+    assert_eq!(files_found(&found_files).1, ["b.txt"]);
+    let open_here = |client: &mut Client, path: &str| {
+        client.request(&Request::OpenHere {
+            pane,
+            file: OpenFile {
+                path: path.to_owned(),
+                cwd: None,
+            },
+        })
+    };
+
+    // A file in place of the folder, whose explorer goes with it.
+    assert_eq!(open_here(&mut client, "b.txt").unwrap(), Response::Done);
+    let b = buffer_in(&mut client, pane);
+    assert_eq!(attach_buffer(&mut client, b).text, "b\n");
+    let gone = client.request(&Request::AttachFiles { files }).unwrap();
+    assert_eq!(gone, Response::Error(Error::NoSuchFiles(files)));
+
+    // And a folder in place of the file, as `-` asks, which closes, having
+    // no changes.
+    let up = app.display().to_string();
+    assert_eq!(open_here(&mut client, &up).unwrap(), Response::Done);
+    let again = folder_in(&mut client, pane);
+    assert_ne!(again, files);
+    let closed = client
+        .request(&Request::AttachBuffer {
+            buffer: b,
+            window: 1,
+            resume: None,
+        })
+        .unwrap();
+    assert_eq!(closed, Response::Error(Error::NoSuchBuffer(b)));
+
+    // A folder asked for as one, ending `/`, that's gone since, as a jump
+    // back to it asks, is refused, not made a file of that name.
+    std::fs::create_dir(app.join("gone")).unwrap();
+    std::fs::remove_dir(app.join("gone")).unwrap();
+    let refused = open_here(&mut client, "gone/").unwrap();
+    assert!(
+        matches!(&refused, Response::Error(Error::OpenFailed { reason, .. }) if reason == "it isn't a folder"),
+        "{refused:?}"
+    );
+    assert!(!app.join("gone").exists());
+
+    // A path that isn't there, as before, is a file to make.
+    assert_eq!(open_here(&mut client, "new.txt").unwrap(), Response::Done);
+    assert!(buffer_in(&mut client, pane) != b);
+}
+
 /// A daemon that installs languages and their servers in its directory,
 /// with none installed.
 fn with_installs() -> TestDaemon {

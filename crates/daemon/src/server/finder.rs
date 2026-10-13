@@ -242,7 +242,7 @@ impl Daemon {
                     .and_then(|pack| pack.server.clone());
                 Project::File { path, server }
             }
-            Some(Content::Files(files)) => match self.files_root(files) {
+            Some(Content::Files(files) | Content::Folder(files)) => match self.files_root(files) {
                 Some(root) => Project::Root(root.to_owned()),
                 None => Project::Dir(home.clone()),
             },

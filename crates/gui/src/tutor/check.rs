@@ -9,7 +9,7 @@
 //! | `register R "TEXT"` | Register R holds TEXT, exactly. |
 //! | `copied "TEXT"` | What was last copied to the clipboard has TEXT in it. |
 //! | `mode MODE` | The focused pane is in `normal`, `insert`, `visual` or `visual-line` mode. |
-//! | `pane KIND` | The lesson's tab has a pane of KIND: `terminal`, `editor`, `explorer`, `chat` or `board`. |
+//! | `pane KIND` | The lesson's tab has a pane of KIND: `terminal`, `editor`, `folder` (an editor showing a folder), `explorer`, `chat` or `board`. |
 //! | `panes N` | The lesson's tab has N panes. |
 //! | `focused WHAT` | The focused pane is the `lesson` pane, the `practice` pane, or one of KIND. |
 //! | `shown lesson`, `shown elsewhere` | The lesson's tab is shown, or another. |
@@ -68,6 +68,8 @@ pub(crate) enum Mode {
 pub(crate) enum Kind {
     Terminal,
     Editor,
+    /// An editor showing a folder.
+    Folder,
     Explorer,
     Chat,
     Board,
@@ -260,6 +262,7 @@ fn kind_of(word: &str) -> Result<Kind, String> {
     Ok(match word {
         "terminal" => Kind::Terminal,
         "editor" => Kind::Editor,
+        "folder" => Kind::Folder,
         "explorer" => Kind::Explorer,
         "chat" => Kind::Chat,
         "board" => Kind::Board,

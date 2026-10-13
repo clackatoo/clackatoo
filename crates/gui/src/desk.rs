@@ -676,7 +676,9 @@ impl Desk {
             .and_then(|(_, _, pane)| match pane.content {
                 Content::Terminal(terminal) => self.panes.get(&terminal)?.title(),
                 Content::Buffer(_) => self.editor_title(pane.id),
-                Content::Files(_) => self.explorer(pane.id).map(crate::explorer::Explorer::title),
+                Content::Files(_) | Content::Folder(_) => {
+                    self.explorer(pane.id).map(crate::explorer::Explorer::title)
+                }
                 Content::Board(_) => self.board(pane.id).map(crate::board::BoardPane::title),
                 Content::Review(_) => self.review(pane.id).map(crate::review::Review::title),
                 Content::Browser(_) => self.browser(pane.id).map(BrowserPane::title),
@@ -963,7 +965,7 @@ impl Desk {
                     }
                     continue;
                 }
-                Content::Files(_) => {
+                Content::Files(_) | Content::Folder(_) => {
                     if let Ok(size) = Size::new(tile.cols, tile.rows) {
                         self.fit_explorer(id, size);
                         // A folder's listing being edited in it.
@@ -1962,6 +1964,8 @@ impl Desk {
             _ => {}
         }
         let Some(shown) = self.shown else { return };
+        // A new pane beside a folder, or a path, is from the folder shown.
+        self.root_folder_first(shown.pane);
         let new = |kind, agent, size| new_pane(kind, agent, size, &self.options);
         match command {
             Command::Open {
@@ -2133,6 +2137,7 @@ fn mode_name(mode: Mode) -> ModeName {
 
 #[cfg(test)]
 mod tests {
+    mod folders;
     mod lessons;
 
     use clackatoo_protocol::{Layout, Pane as LayoutPane, View, Workspace};

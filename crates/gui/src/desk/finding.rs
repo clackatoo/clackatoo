@@ -237,7 +237,11 @@ impl Desk {
         self.searches += 1;
         let id = self.searches;
         if self.connected {
+            // From an editor's folder, the search is from the folder shown.
             let pane = self.shown.map(|shown| shown.pane);
+            if let Some(pane) = pane {
+                self.root_folder_first(pane);
+            }
             (self.outbox).push(ClientMessage::Find { id, pane, search });
         }
         id

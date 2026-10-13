@@ -60,6 +60,10 @@ impl WorkspaceState {
                         id: pane.id.0,
                         chat: chat.0,
                     },
+                    Content::Folder(files) => handover::Layout::Folder {
+                        id: pane.id.0,
+                        files: files.0,
+                    },
                 },
                 Layout::Split {
                     axis,
@@ -98,54 +102,32 @@ impl WorkspaceState {
     /// The workspaces the last build handed over.
     pub(crate) fn resume(handed: &handover::Workspaces) -> Result<Self, HandoverError> {
         fn layout(node: &handover::Layout) -> Result<Layout, HandoverError> {
-            Ok(match node {
-                handover::Layout::Pane { id, terminal } => Layout::Pane(Pane {
-                    id: PaneId(*id),
-                    content: Content::Terminal(TerminalId(*terminal)),
-                }),
-                handover::Layout::Buffer { id, buffer } => Layout::Pane(Pane {
-                    id: PaneId(*id),
-                    content: Content::Buffer(BufferId(*buffer)),
-                }),
-                handover::Layout::Files { id, files } => Layout::Pane(Pane {
-                    id: PaneId(*id),
-                    content: Content::Files(FilesId(*files)),
-                }),
-                handover::Layout::Board { id, board } => Layout::Pane(Pane {
-                    id: PaneId(*id),
-                    content: Content::Board(BoardId(*board)),
-                }),
-                handover::Layout::Review { id, review } => Layout::Pane(Pane {
-                    id: PaneId(*id),
-                    content: Content::Review(ReviewId(*review)),
-                }),
-                handover::Layout::Browser { id, chat } => Layout::Pane(Pane {
-                    id: PaneId(*id),
-                    content: Content::Browser(TerminalId(*chat)),
-                }),
-                handover::Layout::Split {
-                    left_to_right,
-                    parts,
-                    shares,
-                } if parts.len() >= 2 => {
-                    if shares.len() != parts.len() || shares.contains(&0) {
-                        return Err(HandoverError::Damaged(
-                            "a split's shares don't fit its parts",
-                        ));
-                    }
-                    Layout::Split {
-                        axis: if *left_to_right {
-                            Axis::LeftToRight
-                        } else {
-                            Axis::TopToBottom
-                        },
-                        parts: parts.iter().map(layout).collect::<Result<_, _>>()?,
-                        shares: shares.clone(),
-                    }
-                }
-                handover::Layout::Split { .. } => {
-                    return Err(HandoverError::Damaged("a split has fewer than two parts"));
-                }
+            let handover::Layout::Split {
+                left_to_right,
+                parts,
+                shares,
+            } = node
+            else {
+                return handed_pane(node)
+                    .map(Layout::Pane)
+                    .ok_or(HandoverError::Damaged("a pane that isn't one"));
+            };
+            if parts.len() < 2 {
+                return Err(HandoverError::Damaged("a split has fewer than two parts"));
+            }
+            if shares.len() != parts.len() || shares.contains(&0) {
+                return Err(HandoverError::Damaged(
+                    "a split's shares don't fit its parts",
+                ));
+            }
+            Ok(Layout::Split {
+                axis: if *left_to_right {
+                    Axis::LeftToRight
+                } else {
+                    Axis::TopToBottom
+                },
+                parts: parts.iter().map(layout).collect::<Result<_, _>>()?,
+                shares: shares.clone(),
             })
         }
         let mut list = Vec::new();
@@ -559,6 +541,24 @@ impl WorkspaceState {
             .find(|tab| tab.layout.contains(pane))
             .expect("callers check the pane exists")
     }
+}
+
+/// The pane `node` is, as handed over, if it's a pane rather than a split.
+fn handed_pane(node: &handover::Layout) -> Option<Pane> {
+    let (id, content) = match *node {
+        handover::Layout::Pane { id, terminal } => (id, Content::Terminal(TerminalId(terminal))),
+        handover::Layout::Buffer { id, buffer } => (id, Content::Buffer(BufferId(buffer))),
+        handover::Layout::Files { id, files } => (id, Content::Files(FilesId(files))),
+        handover::Layout::Board { id, board } => (id, Content::Board(BoardId(board))),
+        handover::Layout::Review { id, review } => (id, Content::Review(ReviewId(review))),
+        handover::Layout::Browser { id, chat } => (id, Content::Browser(TerminalId(chat))),
+        handover::Layout::Folder { id, files } => (id, Content::Folder(FilesId(files))),
+        handover::Layout::Split { .. } => return None,
+    };
+    Some(Pane {
+        id: PaneId(id),
+        content,
+    })
 }
 
 /// A pane standing in for one about to be made, to try a split with.

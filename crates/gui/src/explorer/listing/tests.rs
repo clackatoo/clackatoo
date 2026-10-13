@@ -43,6 +43,7 @@ impl Session {
                         path: join(dir, &entry.name),
                         kind: entry.kind,
                         stamp: None,
+                        retired: false,
                     });
                 }
             }
@@ -191,6 +192,37 @@ fn marks_are_hidden_characters_read_back_whole_or_not_at_all() {
         mark_len(&format!("{MARK_START}{MARK_SPLIT}{MARK_END}x")),
         0,
         "no digits"
+    );
+}
+
+#[test]
+fn an_entry_whose_listing_was_made_again_without_it_is_only_copied_never_moved_or_deleted() {
+    let mut session = p();
+    // a.txt's listing was made again, as a.txt changed: it's there as new
+    // entry 4, and old entry 1 is retired.
+    session.originals[1].retired = true;
+    session.originals.push(Original {
+        retired: false,
+        ..session.originals[1].clone()
+    });
+    let new_a = format!("{}a.txt", mark(SESSION, 4));
+    let lines = |pasted: Option<String>| {
+        let mut lines = vec![
+            session.line("/p/src"),
+            new_a.clone(),
+            session.line("/p/b.txt"),
+            session.line("/p/c.txt"),
+        ];
+        lines.extend(pasted);
+        lines.join("\n") + "\n"
+    };
+    // Its old line nowhere: nothing to do.
+    assert_eq!(session.plan(&[&lines(None)]), Ok(vec![]));
+    // Its old line, yanked before, pasted and renamed: a copy.
+    let pasted = format!("{}z.txt", mark(SESSION, 1));
+    assert_eq!(
+        session.plan(&[&lines(Some(pasted))]),
+        Ok(vec![copied("/p/a.txt", "/p/z.txt")])
     );
 }
 

@@ -711,13 +711,14 @@ impl Desk {
         }
     }
 
-    /// Keeps the explorers of the lesson's folder in it, so `-` stops
-    /// there, and nothing outside it is touched from them.
+    /// Keeps the explorers of the lesson's folder in it, and the editors
+    /// showing it, so `-` stops there, and nothing outside it is touched
+    /// from them.
     fn fence_explorers(&mut self) {
         let Some(open) = &self.tutor.open else { return };
         let dir = path_text(&open.dir);
         for pane in self.lesson_tab_panes() {
-            if matches!(pane.content, Content::Files(_)) {
+            if matches!(pane.content, Content::Files(_) | Content::Folder(_)) {
                 self.fence_explorer(pane.id, &dir);
             }
         }
@@ -963,7 +964,7 @@ impl Desk {
                     // a file that's gone.
                     (scratch, scratch && Some(pane.id) != open.pane)
                 }
-                Content::Files(_) => {
+                Content::Files(_) | Content::Folder(_) => {
                     let root = self.explorer(pane.id).and_then(|explorer| explorer.root());
                     (root.is_some_and(in_scratch), false)
                 }
@@ -1108,6 +1109,7 @@ impl DeskFacts<'_> {
             Content::Terminal(_) => Kind::Terminal,
             Content::Buffer(_) => Kind::Editor,
             Content::Files(_) => Kind::Explorer,
+            Content::Folder(_) => Kind::Folder,
             Content::Board(_) => Kind::Board,
             Content::Review(_) => Kind::Review,
             Content::Browser(_) => Kind::Browser,
@@ -1227,7 +1229,8 @@ impl Facts for DeskFacts<'_> {
 
     fn file(&self) -> Option<String> {
         let (_, copy) = self.desk.focused_editor()?;
-        copy.loaded().then(|| copy.name().to_owned())
+        // A folder's listing is no file.
+        (copy.loaded() && !copy.is_scratch()).then(|| copy.name().to_owned())
     }
 
     fn recording(&self) -> Option<char> {

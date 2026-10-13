@@ -3,7 +3,8 @@
 //!
 //! Capitalised words are kinds of pane, and open one: `Terminal`, `Agent`,
 //! a chat with an agent such as Claude Code (`Agent codex` names which,
-//! or else the `agent` option does), or `Editor PATH`, in a new
+//! or else the `agent` option does), or `Editor PATH`, a file, or a
+//! folder's listing, and with no path, the focused pane's folder's, in a new
 //! tab, and with a mark before it, beside the focused pane (`|` right, `|<`
 //! left, `-` below, `-^` above). `Terminal@host` asks for it on another
 //! machine's daemon. A number goes to that line in an editor, as Vim's
@@ -99,7 +100,8 @@ pub(crate) enum Command {
     /// or with no name, make a new one.
     Workspace(Option<String>),
     /// A pane editing the file at this path, which is from the directory
-    /// of the focused pane.
+    /// of the focused pane, or showing the folder's listing if it's a
+    /// folder.
     Edit { place: Place, path: String },
     /// A number alone: in an editor, go to that line, as Vim does; or
     /// else move to this tab of the workspace shown, counting from 1.
@@ -288,7 +290,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         return Ok(Command::Find { kind, query });
     }
     let (place, rest) = place(word);
-    if let Some(command) = pane_of(word, rest, place, argument) {
+    if let Some(command) = pane_of(rest, place, argument) {
         return command;
     }
     let agent = agent_named(word, rest, argument)?;
@@ -413,7 +415,9 @@ fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
                     place: Place::Here,
                     path: path.to_owned(),
                 })
-                .ok_or_else(|| "e needs a file: :e PATH".to_owned()),
+                .ok_or_else(|| {
+                    "e needs a file or a folder: :e PATH, or :e . for this one's".to_owned()
+                }),
         ),
         _ => None,
     }
@@ -469,25 +473,19 @@ fn place(word: &str) -> (Place, &str) {
 
 /// The pane `rest` names, after the mark saying where it goes, `place`,
 /// if it's a browser, a board, or an editor, which takes `argument`: the
-/// board's name or the file's path. `word` is the whole word typed.
-fn pane_of(
-    word: &str,
-    rest: &str,
-    place: Place,
-    argument: Option<&str>,
-) -> Option<Result<Command, String>> {
+/// board's name or the file's path.
+fn pane_of(rest: &str, place: Place, argument: Option<&str>) -> Option<Result<Command, String>> {
     Some(match rest {
         BROWSER => Ok(Command::Browser(place)),
         BOARD => Ok(Command::Board {
             place,
             name: argument.map(str::to_owned),
         }),
-        EDITOR => argument
-            .map(|path| Command::Edit {
-                place,
-                path: path.to_owned(),
-            })
-            .ok_or_else(|| format!("{word} needs a file: :{word} PATH")),
+        // With no path, the folder the focused pane is in, as `:e .`.
+        EDITOR => Ok(Command::Edit {
+            place,
+            path: argument.unwrap_or(".").to_owned(),
+        }),
         _ => return None,
     })
 }
@@ -653,7 +651,14 @@ mod tests {
             parse("|Editor src/main.rs"),
             Ok(edit(Place::Beside(Side::Right)))
         );
-        assert!(parse("e").is_err() && parse("-Editor").is_err());
+        assert!(parse("e").is_err());
+        // An editor of the focused pane's folder.
+        let here = |place| Command::Edit {
+            place,
+            path: ".".to_owned(),
+        };
+        assert_eq!(parse("Editor"), Ok(here(Place::Tab)));
+        assert_eq!(parse("-Editor"), Ok(here(Place::Beside(Side::Below))));
         assert_eq!(parse("e!"), Ok(Command::Discard));
         assert_eq!(
             parse("w"),

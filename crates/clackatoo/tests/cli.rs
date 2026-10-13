@@ -351,6 +351,63 @@ fn config_sets_shows_and_unsets_settings() {
 }
 
 #[test]
+fn edit_shows_a_folder_as_its_listing_and_the_current_one_with_no_path() {
+    use clackatoo_daemon::Client;
+    use clackatoo_protocol::{Event, FilesUpdate, Request, Response};
+
+    let runtime = Runtime::new();
+    let daemon = daemon(runtime.path());
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join("src")).unwrap();
+    let edit = |args: &[&str]| {
+        Command::new(BINARY)
+            .env("CLACKATOO_BOARDS", "off")
+            .arg("edit")
+            .args(args)
+            .env("XDG_RUNTIME_DIR", runtime.path())
+            .current_dir(project.path())
+            .output()
+            .expect("clackatoo runs")
+    };
+    let made = edit(&["src"]);
+    assert!(made.status.success(), "{made:?}");
+    let made = edit(&[]);
+    assert!(made.status.success(), "{made:?}");
+
+    let mut client = Client::connect(&runtime.path().join("clackatoo/daemon.sock")).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let folders: Vec<_> = (workspaces.list.iter())
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.layout.panes())
+        .filter(|pane| pane.content.is_folder())
+        .filter_map(|pane| pane.content.files())
+        .collect();
+    assert_eq!(folders.len(), 2, "{workspaces:?}");
+    let mut roots = Vec::new();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    for files in folders {
+        let attached = client.request(&Request::AttachFiles { files }).unwrap();
+        assert_eq!(attached, Response::Done);
+        loop {
+            if let Event::Files {
+                update: FilesUpdate::Root { path, .. },
+                ..
+            } = client.next_event().unwrap()
+            {
+                roots.push(std::path::PathBuf::from(path));
+                break;
+            }
+        }
+    }
+    let real = project.path().canonicalize().unwrap();
+    assert_eq!(roots, [real.join("src"), real]);
+    drop(runtime);
+    wait(daemon);
+}
+
+#[test]
 fn web_password_keeps_only_a_hash_of_a_long_enough_password() {
     let home = tempfile::tempdir().unwrap();
     let password = |input: &str| {

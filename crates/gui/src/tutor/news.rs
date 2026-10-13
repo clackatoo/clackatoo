@@ -197,6 +197,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "An agent slow to open a chat's session says so after 30 s, and what it may be waiting on, with Retry and Stop",
     },
+    News {
+        id: "editor-folders",
+        date: "2026-10-13",
+        lesson: "explorer",
+        what: "Editors open folders: :e . lists one to browse and edit, Enter opens a file in place, - goes up",
+    },
 ];
 
 impl News {

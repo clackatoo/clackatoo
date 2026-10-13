@@ -159,6 +159,11 @@ pub enum Content {
     /// The page a chat's agent drives in clackatoo's browser, by the
     /// chat's ID. Several panes can show one.
     Browser(TerminalId),
+    /// A folder, shown in an editor as its listing, to browse and edit as
+    /// text, as oil.nvim shows one: a file explorer of its own, rooted at
+    /// the folder, whose root follows the folder shown. One pane shows
+    /// each.
+    Folder(FilesId),
 }
 
 impl From<TerminalId> for Content {
@@ -201,7 +206,8 @@ impl Content {
             | Self::Files(_)
             | Self::Board(_)
             | Self::Review(_)
-            | Self::Browser(_) => None,
+            | Self::Browser(_)
+            | Self::Folder(_) => None,
         }
     }
 
@@ -214,21 +220,29 @@ impl Content {
             | Self::Files(_)
             | Self::Board(_)
             | Self::Review(_)
-            | Self::Browser(_) => None,
+            | Self::Browser(_)
+            | Self::Folder(_) => None,
         }
     }
 
-    /// The file explorer it is, if it's one.
+    /// The file explorer it shows, if it's one, or a folder's listing,
+    /// which is made from one.
     #[must_use]
     pub fn files(self) -> Option<FilesId> {
         match self {
-            Self::Files(files) => Some(files),
+            Self::Files(files) | Self::Folder(files) => Some(files),
             Self::Terminal(_)
             | Self::Buffer(_)
             | Self::Board(_)
             | Self::Review(_)
             | Self::Browser(_) => None,
         }
+    }
+
+    /// Whether it's a folder, shown in an editor as its listing.
+    #[must_use]
+    pub fn is_folder(self) -> bool {
+        matches!(self, Self::Folder(_))
     }
 
     /// The board it is, if it's one.
@@ -240,7 +254,8 @@ impl Content {
             | Self::Buffer(_)
             | Self::Files(_)
             | Self::Review(_)
-            | Self::Browser(_) => None,
+            | Self::Browser(_)
+            | Self::Folder(_) => None,
         }
     }
 
@@ -253,7 +268,8 @@ impl Content {
             | Self::Buffer(_)
             | Self::Files(_)
             | Self::Board(_)
-            | Self::Browser(_) => None,
+            | Self::Browser(_)
+            | Self::Folder(_) => None,
         }
     }
     /// The chat whose page it is, if it's a browser's.
@@ -265,7 +281,8 @@ impl Content {
             | Self::Buffer(_)
             | Self::Files(_)
             | Self::Board(_)
-            | Self::Review(_) => None,
+            | Self::Review(_)
+            | Self::Folder(_) => None,
         }
     }
 }

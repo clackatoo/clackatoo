@@ -1074,3 +1074,77 @@ fn a_lessons_explorer_stays_in_the_lessons_folder() {
         [ClientMessage::FileOp { .. }]
     ));
 }
+
+#[test]
+fn the_explorer_lessons_editor_goes_to_its_folder_with_minus_and_opens_a_file_from_it() {
+    use clackatoo_protocol::{FilesId, FilesUpdate};
+    let mut desk = one_terminal(Some(seen_everything()));
+    open(&mut desk, "explorer", file_pane(2, 7));
+    let dir = format!("{SCRATCH}/explorer");
+    load(&mut desk, 7, &format!("{dir}/done.txt"), "Things to do.\n");
+    let lesson = tutor::lesson("explorer").unwrap();
+    let browse = (lesson.steps.iter())
+        .position(|step| step.title == "Browse a folder in an editor")
+        .expect("the step");
+    desk.tutor.open.as_mut().unwrap().step = browse;
+    desk.show_pane(PaneId(2));
+    desk.settle_lesson();
+    // `-` in the practice pane's file: its folder, the lesson's.
+    type_keys(&mut desk, "-");
+    let asked = answer_all(&mut desk);
+    assert!(
+        asked.iter().any(
+            |request| matches!(request, Request::OpenHere { pane: PaneId(2), file } if *file.path == format!("{dir}/"))
+        ),
+        "{asked:?}"
+    );
+    let folder = Layout::Pane(LayoutPane {
+        id: PaneId(2),
+        content: Content::Folder(FilesId(5)),
+    });
+    let layout = side_by_side(vec![file_pane(3, 8), folder]);
+    desk.workspaces_changed(workspaces(vec![with_lesson(layout, vec![], 2)]));
+    answer_all(&mut desk);
+    let root = FilesUpdate::Root {
+        path: dir.clone(),
+        name: "explorer".into(),
+    };
+    desk.files_changed(FilesId(5), root);
+    let entries = ["done.txt", "notes.txt"].map(|name| clackatoo_protocol::Entry {
+        name: name.into(),
+        kind: clackatoo_protocol::EntryKind::File { executable: false },
+        ignored: false,
+        stamp: None,
+    });
+    let listed = FilesUpdate::Listed {
+        dir: dir.clone(),
+        entries: entries.to_vec(),
+        cut_short: false,
+    };
+    desk.files_changed(FilesId(5), listed);
+    assert_eq!(step(&desk), browse + 1);
+    // Kept in the lesson's folder, as its explorer is.
+    type_keys(&mut desk, "-");
+    assert!(answer_all(&mut desk).is_empty());
+    // Enter on notes.txt opens it in the listing's place.
+    type_keys(&mut desk, "j");
+    press(
+        &mut desk,
+        Key::Named(NamedKey::Enter),
+        None,
+        Modifiers::default(),
+    );
+    let notes = format!("{dir}/notes.txt");
+    let asked = answer_all(&mut desk);
+    assert!(
+        asked.iter().any(
+            |request| matches!(request, Request::OpenHere { pane: PaneId(2), file } if file.path == notes)
+        ),
+        "{asked:?}"
+    );
+    let layout = side_by_side(vec![file_pane(3, 8), file_pane(2, 9)]);
+    desk.workspaces_changed(workspaces(vec![with_lesson(layout, vec![], 2)]));
+    answer_all(&mut desk);
+    load(&mut desk, 9, &notes, "Notes for the explorer lesson.\n");
+    assert_eq!(step(&desk), browse + 2);
+}

@@ -1468,9 +1468,7 @@ impl Daemon {
                 self.new_terminal(&request)?
             }
             PaneTerminal::Agent(request) => self.new_chat(request, beside),
-            PaneTerminal::File(file) => {
-                return self.open_buffer(file, beside).map(Content::Buffer);
-            }
+            PaneTerminal::File(file) => return self.open_content(file, beside),
             PaneTerminal::Files(open) => {
                 return self.new_files(open, beside).map(Content::Files);
             }
@@ -1491,7 +1489,8 @@ impl Daemon {
     }
 
     /// The directory `pane` works in: for a terminal, the one the program
-    /// in front is in; for a file, the one it was opened from.
+    /// in front is in; for a file, the one it was opened from; for a
+    /// folder, the folder.
     fn working_directory(&self, pane: PaneId) -> Option<String> {
         match self.workspaces.check_pane(pane).ok()? {
             Content::Terminal(terminal) => {
@@ -1501,7 +1500,9 @@ impl Daemon {
                 let dir = self.buffers.get(&buffer)?.buffer.dir();
                 Some(dir.display().to_string())
             }
-            Content::Files(files) => Some(self.files_root(files)?.display().to_string()),
+            Content::Files(files) | Content::Folder(files) => {
+                Some(self.files_root(files)?.display().to_string())
+            }
             Content::Board(_) => None,
             Content::Review(review) => Some(self.review_root_of(review)?.display().to_string()),
             Content::Browser(chat) => Some(self.chat_ref(chat)?.working_directory().to_owned()),
@@ -1515,7 +1516,9 @@ impl Daemon {
             match pane.content {
                 Content::Terminal(terminal) => self.close_terminal(terminal)?,
                 Content::Buffer(buffer) => self.close_buffer_pane(pane.id, buffer),
-                Content::Files(files) => self.close_files_pane(pane.id, files),
+                Content::Files(files) | Content::Folder(files) => {
+                    self.close_files_pane(pane.id, files);
+                }
                 Content::Board(_) | Content::Browser(_) => self.close_board_pane(pane.id),
                 Content::Review(review) => self.close_review_pane(pane.id, review),
             }
@@ -2068,7 +2071,7 @@ impl Daemon {
                     self.close_buffer_pane(pane, buffer);
                     Ok(Response::Done)
                 }
-                Content::Files(files) => {
+                Content::Files(files) | Content::Folder(files) => {
                     self.close_files_pane(pane, files);
                     Ok(Response::Done)
                 }

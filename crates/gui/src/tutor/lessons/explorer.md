@@ -81,6 +81,26 @@ listed "drafts"
 not listed "todo.txt"
 ```
 
+## Browse a folder in an editor
+
+An editor shows a folder too, as oil.nvim does: `:e .` or `:e DIR` shows a folder's listing in the editor's pane, and `:Editor` with no file opens a new one on the folder you're in. It's the listing `e` shows, edited the same way, with `:w` and `y` making the changes. From a file, `-` shows the folder it's in, with the cursor on the file.
+
+Go to the editor showing `done.txt`, and press `-`.
+
+```check
+focused folder
+```
+
+## Open a file from the listing
+
+Enter on a file opens it in the listing's place, and on a folder goes into it; `-` goes up. `g.` shows hidden files, or hides them, as `explorerhidden` starts them. `<Space>pf` finds files in the folder shown, and Ctrl+O goes back through the folders and files you've been to.
+
+Open `notes.txt` with Enter.
+
+```check
+file "notes.txt"
+```
+
 ## More
 
 `x` or `y` cuts or copies what's at the cursor, and `p` moves or copies it into the folder at the cursor. `.` shows hidden files, `/` searches the names shown, `R` lists everything again, and `q` closes the explorer.

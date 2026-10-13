@@ -66,6 +66,10 @@ pub(crate) struct Original {
     pub(crate) kind: EntryKind,
     /// Which file it was, as it was, if it's a file.
     pub(crate) stamp: Option<FileStamp>,
+    /// Its listing has been made again since, as its folder changed on
+    /// disk, without it: a line of it pasted, as yanked before, copies it,
+    /// and none of it deletes nothing, as it's no longer what's listed.
+    pub(crate) retired: bool,
 }
 
 impl Original {
@@ -317,6 +321,9 @@ pub(crate) fn plan(
     // The paths of entries moved or deleted, which are free once they are.
     let mut freed: HashSet<&str> = HashSet::new();
     for (original, at) in originals.iter().zip(&by_id) {
+        if at.is_empty() && original.retired {
+            continue;
+        }
         if at.is_empty() {
             freed.insert(&original.path);
             let step = Step::Delete {
@@ -328,7 +335,8 @@ pub(crate) fn plan(
         }
         // The first line to take it elsewhere moves it, unless one keeps
         // it where it is; the rest copy it.
-        let mover = (!at.iter().any(|&index| lines[index].stays)).then_some(at[0]);
+        let mover =
+            (!original.retired && !at.iter().any(|&index| lines[index].stays)).then_some(at[0]);
         for &index in at {
             let line = &lines[index];
             if line.stays {

@@ -65,7 +65,9 @@ impl fmt::Display for BufferId {
 pub struct OpenFile {
     /// Its path, on the daemon's machine. A file already being edited is
     /// shown again, not read again, and a file that doesn't exist yet is
-    /// made when it's first saved.
+    /// made when it's first saved. A folder is shown as its listing
+    /// ([`Content::Folder`](crate::Content::Folder)); a path ending `/`
+    /// must be one, and is refused if it isn't.
     pub path: String,
     /// The directory a relative path is from. `None` uses the one the pane
     /// beside it is in.

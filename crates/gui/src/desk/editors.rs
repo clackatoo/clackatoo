@@ -146,9 +146,13 @@ impl Desk {
     }
 
     /// Whether `pane` is an editor a file opened from a link or an
-    /// explorer can go in: any but a lesson's.
+    /// explorer can go in: any but a lesson's, one showing a folder
+    /// included.
     pub(super) fn takes_files(&self, pane: PaneId) -> bool {
-        self.editor(pane).is_some() && !self.is_lesson_pane(pane) && !self.is_explorer(pane)
+        self.editor(pane).is_some()
+            && !self.is_lesson_pane(pane)
+            && (!self.is_explorer(pane)
+                || (self.is_folder(pane) && self.keeps_its_folder(pane).is_none()))
     }
 
     /// The window's copy of `buffer`, if an editor shows it.
@@ -346,24 +350,33 @@ impl Desk {
         self.land();
     }
 
-    /// `pane` shows `path` in place of its file, as `:e` does, saying so if
-    /// the file it showed has changes that aren't written, which are kept,
-    /// unseen. Where its cursor was to go before, it won't.
-    pub(super) fn open_here(&mut self, pane: PaneId, path: String) {
-        if self.is_explorer(pane) {
+    /// `pane` shows `path` in place of its file, or the folder it shows, as
+    /// `:e` does, saying so if the file it showed has changes that aren't
+    /// written, which are kept, unseen. A folder's listing with changes
+    /// isn't left: they'd be lost. Where its cursor was to go before, it
+    /// won't. Returns whether it asked the daemon.
+    pub(super) fn open_here(&mut self, pane: PaneId, path: String) -> bool {
+        if let Some(why) = self.keeps_its_folder(pane) {
+            self.message = Some(why.into());
+            return false;
+        }
+        if self.is_explorer(pane) && !self.is_folder(pane) {
             self.message = Some(
                 "this pane is editing folders as text: :w makes the changes, :q! leaves".into(),
             );
-            return;
+            return false;
         }
         self.editors.landings.remove(&pane);
+        self.forget_folder_landing(pane);
+        // A relative path is from the folder shown.
+        self.root_folder_first(pane);
         if self.connected {
             let opening = self.editors.opening.entry(pane).or_default();
             opening.push_back(path.clone());
         }
         let kept = (self.editors.panes.get(&pane))
             .and_then(|editor| self.editors.buffers.get(&editor.buffer()))
-            .filter(|copy| copy.modified() && copy.path() != path)
+            .filter(|copy| !copy.is_scratch() && copy.modified() && copy.path() != path)
             .map(|copy| copy.path().to_owned());
         if let Some(kept) = kept {
             self.message = Some(format!(
@@ -372,11 +385,18 @@ impl Desk {
         }
         let file = OpenFile { path, cwd: None };
         self.request(Request::OpenHere { pane, file }, Asked::OpenedHere(pane));
+        true
     }
 
     /// The daemon has answered about the oldest file asked to open in
     /// `pane`. If it `failed` to open, the cursor won't go to a place in
     /// it; a place in a file asked for since is still gone to.
+    /// Whether a file or folder asked to open in `pane` hasn't been
+    /// answered about yet.
+    pub(super) fn is_opening(&self, pane: PaneId) -> bool {
+        self.editors.opening.contains_key(&pane)
+    }
+
     pub(super) fn opened_here(&mut self, pane: PaneId, failed: bool) {
         let editors = &mut self.editors;
         let Some(opening) = editors.opening.get_mut(&pane) else {
@@ -391,6 +411,10 @@ impl Desk {
             && (editors.landings.get(&pane)).is_some_and(|place| place.path == path)
         {
             editors.landings.remove(&pane);
+        }
+        // Nor will the cursor go to an entry in a folder that failed to open.
+        if failed {
+            self.forget_folder_landing(pane);
         }
         self.land();
     }
@@ -425,6 +449,7 @@ impl Desk {
             return Some(Jump {
                 pane,
                 file: Some(file),
+                folder: None,
             });
         }
         let file = (editors.panes.get(&pane))
@@ -434,7 +459,8 @@ impl Desk {
                 let byte = byte.unwrap_or_else(|| editor.cursor_byte(copy));
                 FilePlace::at(copy.path(), copy.text(), byte)
             });
-        Some(Jump { pane, file })
+        let folder = self.folder_place(pane);
+        Some(Jump { pane, file, folder })
     }
 
     /// Puts the cursor of the editor `pane` on `place`, once its file's
@@ -444,8 +470,11 @@ impl Desk {
         if !self.editors.panes.contains_key(&pane) {
             return;
         }
-        if self.file_in(pane) != Some(place.path.as_str()) {
-            self.open_here(pane, place.path.clone());
+        // Not into a folder's listing that won't leave, having changes.
+        if self.file_in(pane) != Some(place.path.as_str())
+            && !self.open_here(pane, place.path.clone())
+        {
+            return;
         }
         let location = FileLocation {
             path: place.path.clone(),
@@ -1294,7 +1323,8 @@ impl Desk {
         let file = OpenFile { path, cwd: None };
         if place == Place::Here && self.focused_editor().is_some() {
             self.record_jump(shown.pane, None);
-            return self.open_here(shown.pane, file.path);
+            self.open_here(shown.pane, file.path);
+            return;
         }
         let terminal = PaneTerminal::File(file);
         let request = match place {
@@ -1363,7 +1393,8 @@ impl Desk {
         if self.in_lesson_pane(shown.pane) {
             return self.end_lesson();
         }
-        // In an explorer editing folders as text, it goes back to the tree.
+        // In an explorer editing folders as text, it goes back to the tree;
+        // in an editor showing a folder, it closes, as for a file.
         if self.explorer(shown.pane).is_some_and(Explorer::editing) {
             return self.leave_listings(shown.pane, force);
         }
@@ -1410,6 +1441,11 @@ impl Desk {
         if let Some(pane) = self.shown.map(|shown| shown.pane)
             && self.explorer(pane).is_some_and(Explorer::editing)
         {
+            // An editor's folder throws away every listing's changes, as
+            // they'd keep it from going anywhere else.
+            if self.is_folder(pane) {
+                return self.list_shown_again(pane);
+            }
             return self.listing_as_made(pane);
         }
         match self.focused_editor() {

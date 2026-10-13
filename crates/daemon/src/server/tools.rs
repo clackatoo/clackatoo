@@ -877,6 +877,7 @@ impl Daemon {
             }
             Content::Buffer(_) => Err(format!("pane {pane} shows a file, not a terminal")),
             Content::Files(_) => Err(format!("pane {pane} is a file explorer, not a terminal")),
+            Content::Folder(_) => Err(format!("pane {pane} shows a folder, not a terminal")),
             Content::Board(_) => Err(format!("pane {pane} shows a board, not a terminal")),
             Content::Review(_) => Err(format!("pane {pane} is a review, not a terminal")),
             Content::Browser(_) => Err(format!("pane {pane} shows a browser, not a terminal")),
@@ -1052,6 +1053,10 @@ impl Daemon {
             Content::Files(files) => match self.files_root(files) {
                 Some(root) => format!("file explorer, at {}", shorten(root, dir)),
                 None => "file explorer".to_owned(),
+            },
+            Content::Folder(files) => match self.files_root(files) {
+                Some(root) => format!("editor, listing the folder {}", shorten(root, dir)),
+                None => "editor, listing a folder".to_owned(),
             },
             Content::Board(board) => match self.boards.list.get(board) {
                 Some(board) => format!("board {:?}", board.summary.name),

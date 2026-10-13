@@ -3,9 +3,11 @@
 //! and Ctrl+Shift+I across every tab and workspace, in any mode.
 //!
 //! A jump records the place it left: the pane, and in an editor, the file
-//! and where the cursor was in it. Moving the focus to another pane is a
-//! jump, and so are an editor's long moves, as Vim's are: `gg`, `G`,
-//! searches, `]d` and `[d`, `gd` and its kin, and `:e`. Going back from the
+//! and where the cursor was in it, or the folder it showed and the entry
+//! the cursor was on. Moving the focus to another pane is a jump, and so
+//! are an editor's long moves, as Vim's are: `gg`, `G`, searches, `]d` and
+//! `[d`, `gd` and its kin, and `:e`, and going into a folder, up from one,
+//! or from a folder's listing to a file. Going back from the
 //! newest end first records where you are, so Ctrl+I comes back to it.
 //! Going back and then jumping somewhere new forgets the way forward. A
 //! jump from the line the newest place is on replaces it, so going back
@@ -35,18 +37,48 @@ pub(super) struct Jump {
     pub(super) pane: PaneId,
     /// Where the cursor was, if the pane was editing a file.
     pub(super) file: Option<FilePlace>,
+    /// Where the cursor was, if the pane was showing a folder's listing.
+    pub(super) folder: Option<FolderPlace>,
+}
+
+/// Where the cursor was in a folder's listing: the folder, and the path of
+/// the entry on the cursor's line, if it was on one. The entry is kept,
+/// not the line, as a folder listed again may have more lines, or fewer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FolderPlace {
+    pub(super) dir: String,
+    pub(super) entry: Option<String>,
+}
+
+impl FolderPlace {
+    /// The file or directory at `from` has moved to `to`: the folder, or
+    /// the entry, goes with it if it's in it.
+    fn moved(&mut self, from: &str, to: &str) {
+        let moved = |path: &mut String| {
+            let rest =
+                (path.strip_prefix(from)).filter(|rest| rest.is_empty() || rest.starts_with('/'));
+            if let Some(rest) = rest {
+                *path = format!("{to}{rest}");
+            }
+        };
+        moved(&mut self.dir);
+        if let Some(entry) = &mut self.entry {
+            moved(entry);
+        }
+    }
 }
 
 impl Jump {
     /// Whether `self` and `other` are on the same line of the same pane,
-    /// or are the same pane, without a file.
+    /// or the same entry of the same folder, or are the same pane, with
+    /// neither.
     pub(super) fn same(&self, other: &Self) -> bool {
-        self.pane == other.pane
-            && match (&self.file, &other.file) {
-                (None, None) => true,
-                (Some(mine), Some(theirs)) => mine.path == theirs.path && mine.line == theirs.line,
-                _ => false,
-            }
+        let files = match (&self.file, &other.file) {
+            (None, None) => true,
+            (Some(mine), Some(theirs)) => mine.path == theirs.path && mine.line == theirs.line,
+            _ => false,
+        };
+        self.pane == other.pane && files && self.folder == other.folder
     }
 }
 
@@ -139,9 +171,13 @@ impl Jumps {
     /// The file or directory at `from` has moved to `to`: places in it,
     /// or anything in it, go with it.
     pub(super) fn moved(&mut self, from: &str, to: &str) {
-        let places = (self.list.iter_mut()).filter_map(|jump| jump.file.as_mut());
-        for place in places {
-            place.moved(from, to);
+        for jump in &mut self.list {
+            if let Some(place) = &mut jump.file {
+                place.moved(from, to);
+            }
+            if let Some(place) = &mut jump.folder {
+                place.moved(from, to);
+            }
         }
     }
 
@@ -172,6 +208,9 @@ impl Desk {
         if let Some(file) = &place.file {
             self.show_file_place(place.pane, file);
         }
+        if let Some(folder) = &place.folder {
+            self.show_folder_place(place.pane, folder);
+        }
     }
 
     /// Records a jump from where `pane` is: in an editor, from where its
@@ -179,11 +218,17 @@ impl Desk {
     /// `'` mark then.
     pub(super) fn record_jump(&mut self, pane: PaneId, byte: Option<usize>) {
         if let Some(place) = self.place_of(pane, byte) {
-            if let Some(file) = &place.file {
-                self.jumped_from(file);
-            }
-            self.jumps.left(place);
+            self.record_place(place);
         }
+    }
+
+    /// Records a jump from `place`, taken before the move it was left by,
+    /// once that's seen to go ahead.
+    pub(super) fn record_place(&mut self, place: Jump) {
+        if let Some(file) = &place.file {
+            self.jumped_from(file);
+        }
+        self.jumps.left(place);
     }
 }
 
@@ -195,6 +240,7 @@ mod tests {
         Jump {
             pane: PaneId(pane),
             file: None,
+            folder: None,
         }
     }
 
@@ -258,6 +304,29 @@ mod tests {
         jumps.left(at(1));
         assert_eq!(jumps.step(false, at(4), any), None);
         assert_eq!(pane_of(jumps.step(true, at(4), any)), Some(1));
+    }
+
+    #[test]
+    fn places_in_folders_are_their_entries_and_move_with_them() {
+        let in_folder = |dir: &str, entry: Option<&str>| Jump {
+            folder: Some(FolderPlace {
+                dir: dir.to_owned(),
+                entry: entry.map(str::to_owned),
+            }),
+            ..at(1)
+        };
+        let mut jumps = Jumps::default();
+        jumps.left(in_folder("/p/src", Some("/p/src/a.rs")));
+        // On another entry, it's another place; on the same, it's the same.
+        jumps.left(in_folder("/p/src", Some("/p/src/b.rs")));
+        jumps.left(in_folder("/p/src", Some("/p/src/b.rs")));
+        assert_eq!(jumps.list.len(), 2);
+        assert!(!in_folder("/p", None).same(&at(1)));
+        // A folder moved takes its places, and its entries', with it.
+        jumps.moved("/p/src", "/p/lib");
+        assert_eq!(jumps.list[1], in_folder("/p/lib", Some("/p/lib/b.rs")));
+        jumps.moved("/p/lib/a.rs", "/p/lib/c.rs");
+        assert_eq!(jumps.list[0], in_folder("/p/lib", Some("/p/lib/c.rs")));
     }
 
     #[test]

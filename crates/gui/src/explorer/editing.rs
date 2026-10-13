@@ -16,8 +16,17 @@
 //! A folder's listing is made from the explorer's listing of it, so a
 //! folder to edit that isn't listed yet is expanded, or gone up to, and
 //! shown once the daemon has listed it.
+//!
+//! An editor's folder (see [`Explorer::of_folder`]) shows nothing else:
+//! its folders are listed as they're asked for, wherever they are, its
+//! root follows the folder shown, and once the edits are made, the folder
+//! shown is listed afresh, rather than going back to a tree.
 
-use clackatoo_protocol::{Attributes, Color, Entry, EntryKind, Expect, FileOp, FileOpError, Style};
+use std::collections::HashSet;
+
+use clackatoo_protocol::{
+    Attributes, Color, Entry, EntryKind, Expect, FileOp, FileOpError, FilesAction, Style,
+};
 use clackatoo_term::RowBuilder;
 
 use super::listing::{self, Folder, Original, Problem, Step};
@@ -52,6 +61,14 @@ struct Edited {
     /// How many of its entries were left out, as no line can say their
     /// names.
     left_out: usize,
+    /// It's no longer listed, nor watched: left as its listing was made,
+    /// whose editor is gone, or gone from disk so. It's listed again if
+    /// it's shown again.
+    settled: bool,
+    /// It's gone from disk, or can't be read, since its listing was made.
+    /// It isn't asked for again, but until it settles, as it does if its
+    /// listing has no changes, it's changed, and nothing is done.
+    gone: bool,
 }
 
 /// What listings' edits come to, shown in the pane in place of the tree.
@@ -90,8 +107,9 @@ pub(super) enum Pending {
     Here,
     /// This folder, with the cursor on the line of the entry at `at`.
     Dir { dir: String, at: Option<String> },
-    /// The root, once the daemon says what it is.
-    NextRoot,
+    /// The root, once the daemon says what it is, with the cursor on the
+    /// line of the entry at `at`.
+    NextRoot { at: Option<String> },
 }
 
 /// What `:w` in a listing comes to.
@@ -150,7 +168,7 @@ impl Explorer {
     /// cursor's in, once what's being revealed shows.
     pub(crate) fn edit_soon(&mut self, root: bool) {
         self.pending_edit = Some(if root {
-            Pending::NextRoot
+            Pending::NextRoot { at: None }
         } else {
             Pending::Here
         });
@@ -188,28 +206,118 @@ impl Explorer {
                 self.pending_edit = None;
                 self.edit_folder(dir, at.as_deref());
             }
-            Pending::Here | Pending::Dir { .. } | Pending::NextRoot => {}
+            Pending::Here | Pending::Dir { .. } | Pending::NextRoot { .. } => {}
         }
     }
 
     /// The root is new: the listing waited for once it was is of it.
     pub(super) fn edit_rooted(&mut self) {
-        if self.pending_edit == Some(Pending::NextRoot)
+        if let Some(Pending::NextRoot { at }) = &self.pending_edit
             && let Some(root) = self.root.clone()
         {
-            self.pending_edit = Some(Pending::Dir {
-                dir: root,
-                at: None,
-            });
+            let at = at.clone();
+            self.pending_edit = Some(Pending::Dir { dir: root, at });
+            // An editor's folder lists what it waits for.
+            if self.folder {
+                self.sync();
+            }
         }
     }
 
+    /// The folders an editor's folder has the daemon list: those whose
+    /// listings are made, but for those settled, and the one waited for.
+    /// Not its root, which is the folder shown, or one gone.
+    pub(super) fn folders_wanted(&self) -> HashSet<String> {
+        let made = (self.editing.iter()).flat_map(|editing| &editing.folders);
+        let mut wanted: HashSet<String> = (made.filter(|folder| !folder.settled && !folder.gone))
+            .map(|folder| folder.dir.clone())
+            .collect();
+        if let Some(Pending::Dir { dir, .. }) = &self.pending_edit {
+            wanted.insert(dir.clone());
+        }
+        wanted
+    }
+
+    /// Whether it's waiting for a folder to be listed, to show its listing.
+    pub(crate) fn waiting_for_listing(&self) -> bool {
+        matches!(self.pending_edit, Some(Pending::Dir { .. }))
+    }
+
     /// The folder `dir` can't be listed: a listing waited for of it
-    /// isn't.
+    /// isn't, and one made is gone, so it isn't asked for again and again.
     pub(super) fn edit_unlisted(&mut self, dir: &str) {
         if matches!(&self.pending_edit, Some(Pending::Dir { dir: waited, .. }) if waited == dir) {
             self.pending_edit = None;
             self.say(format!("{dir} can't be listed"));
+        }
+        let folders = (self.editing.iter_mut()).flat_map(|editing| &mut editing.folders);
+        for folder in folders.filter(|folder| folder.dir == dir) {
+            folder.gone = true;
+        }
+    }
+
+    /// The listings, by their places, of folders gone from disk that
+    /// haven't settled, for those with no changes to settle.
+    pub(crate) fn gone_listings(&self) -> Vec<usize> {
+        let folders = (self.editing.iter()).flat_map(|editing| &editing.folders);
+        (folders.enumerate())
+            .filter(|(_, folder)| folder.gone && !folder.settled)
+            .map(|(place, _)| place)
+            .collect()
+    }
+
+    /// Shows the listing of the folder `dir` afresh, with the cursor on the
+    /// line of the entry at `at`, as its folder has changed on disk, or
+    /// hidden files show or hide, or every listing's changes are thrown
+    /// away: the listings made are forgotten, but not the session, so a
+    /// line yanked from one still pastes, as a copy.
+    pub(crate) fn list_afresh(&mut self, dir: String, at: Option<&str>) {
+        if let Some(editing) = &mut self.editing {
+            editing.folders.clear();
+            editing.shown = 0;
+            editing.plan = None;
+            for original in &mut editing.originals {
+                original.retired = true;
+            }
+        }
+        self.pending_edit = None;
+        self.edit_folder(dir, at);
+        if self.folder {
+            self.sync();
+        }
+    }
+
+    /// Settles the folder listing `listing`, by its place, as it's left
+    /// with its text as it was made: it's no longer listed, nor watched,
+    /// until it's shown again. What its edits come to is worked out from
+    /// its text as made.
+    pub(crate) fn settle_listing(&mut self, listing: usize) {
+        let Some(folder) =
+            (self.editing.as_mut()).and_then(|editing| editing.folders.get_mut(listing))
+        else {
+            return;
+        };
+        folder.settled = true;
+        folder.gone = false;
+        if self.folder {
+            self.sync();
+        }
+    }
+
+    /// Asks the daemon to root an editor's folder at the folder it shows,
+    /// or is about to, whatever it was last asked: another window may have
+    /// rooted it elsewhere since.
+    pub(crate) fn root_at_shown(&mut self) {
+        if !self.folder {
+            return;
+        }
+        let shown = match &self.pending_edit {
+            Some(Pending::Dir { dir, .. }) => Some(dir.clone()),
+            _ => self.folder_shown().map(str::to_owned),
+        };
+        if let Some(dir) = shown {
+            self.outbox.push(FilesAction::Root(dir.clone()));
+            self.asked_root = Some(dir);
         }
     }
 
@@ -220,6 +328,13 @@ impl Explorer {
         if self.fenced_out(&dir) {
             return self.say(FENCED.to_owned());
         }
+        // An editor's folder is rooted at the folder it shows, for the
+        // finder, and paths opened, to be from there: asked again only if
+        // this window last asked for another, whatever's been answered.
+        if self.folder && self.asked_root.as_ref().or(self.root.as_ref()) != Some(&dir) {
+            self.outbox.push(FilesAction::Root(dir.clone()));
+            self.asked_root = Some(dir.clone());
+        }
         let editing = self.editing.get_or_insert_with(|| Editing {
             session: new_session(),
             folders: Vec::new(),
@@ -229,47 +344,28 @@ impl Explorer {
         });
         let mark = |editing: &Editing| {
             let at = at?;
-            let id = (editing.originals.iter()).position(|original| original.path == at)?;
+            let id = (editing.originals.iter())
+                .position(|original| original.path == at && !original.retired)?;
             Some(listing::mark(editing.session, id))
         };
         if let Some(index) = editing.folders.iter().position(|folder| folder.dir == dir) {
             editing.shown = index;
             let at = mark(editing);
+            // Shown again, a settled or gone folder is listed again.
+            let folder = &mut editing.folders[index];
+            let settled = std::mem::take(&mut folder.settled) | std::mem::take(&mut folder.gone);
             self.asks.push(Ask::Edit {
                 listing: index,
                 text: None,
                 at,
             });
+            if settled && self.folder {
+                self.sync();
+            }
             return;
         }
         let Some(listing) = self.listings.get(&dir).cloned() else {
-            // Listed once it's expanded, or the root.
-            let root = self.root.clone().unwrap_or_default();
-            if under(&dir, &root) {
-                self.reveal = None;
-                let mut above = dir.as_str();
-                while above != root && under(above, &root) {
-                    self.view.expanded.insert(above.to_owned());
-                    above = parent_of(above);
-                }
-                self.sync();
-            } else if under(&root, &dir) {
-                self.root_at(dir.clone());
-            } else {
-                return self.say(format!("{dir} isn't in the explorer"));
-            }
-            if self
-                .editing
-                .as_ref()
-                .is_some_and(|editing| editing.folders.is_empty())
-            {
-                self.editing = None;
-            }
-            self.pending_edit = Some(Pending::Dir {
-                dir,
-                at: at.map(str::to_owned),
-            });
-            return;
+            return self.list_to_edit(dir, at);
         };
         let editing = self.editing.as_mut().expect("made above");
         let mut text = String::new();
@@ -278,16 +374,21 @@ impl Explorer {
             if !self.view.hidden && entry.name.starts_with('.') {
                 continue;
             }
-            // A name no line can say: one with a line break, or a mark's
-            // characters, or bytes that aren't UTF-8, whose path the
-            // window doesn't have. It's left out, and so left alone.
-            let unsayable = |ch: char| ch == '\n' || ch == '\u{fffd}' || listing::in_marks(ch);
-            if entry.name.chars().any(unsayable) {
+            // A name no line can say is left out, and so left alone.
+            if !says(entry, true) {
                 left_out += 1;
                 continue;
             }
-            let id = editing.originals.len();
             let path = join(&dir, &entry.name);
+            // An entry as it was listed before keeps its number, so its
+            // line, yanked then, is still its own.
+            let before = (editing.originals.iter()).position(|original| {
+                original.retired
+                    && original.path == path
+                    && original.kind == entry.kind
+                    && original.stamp == entry.stamp
+            });
+            let id = before.unwrap_or(editing.originals.len());
             text.push_str(&listing::line_of(
                 editing.session,
                 id,
@@ -295,11 +396,15 @@ impl Explorer {
                 entry.kind,
             ));
             text.push('\n');
-            editing.originals.push(Original {
-                path,
-                kind: entry.kind,
-                stamp: entry.stamp,
-            });
+            match before {
+                Some(id) => editing.originals[id].retired = false,
+                None => editing.originals.push(Original {
+                    path,
+                    kind: entry.kind,
+                    stamp: entry.stamp,
+                    retired: false,
+                }),
+            }
         }
         editing.shown = editing.folders.len();
         editing.folders.push(Edited {
@@ -307,6 +412,8 @@ impl Explorer {
             entries: listing.entries.clone(),
             text: text.clone(),
             left_out,
+            settled: false,
+            gone: false,
         });
         if left_out > 0 {
             self.message = Some(left_out_said(left_out));
@@ -317,6 +424,39 @@ impl Explorer {
             text: Some(text),
             at,
         });
+    }
+
+    /// Has the folder `dir` listed, to show its listing to edit once it
+    /// is, with the cursor on the line of the entry at `at`: asked for, by
+    /// an editor's folder, or else expanded, or gone up to, as the root.
+    fn list_to_edit(&mut self, dir: String, at: Option<&str>) {
+        let pending = Pending::Dir {
+            dir: dir.clone(),
+            at: at.map(str::to_owned),
+        };
+        if self.folder {
+            self.pending_edit = Some(pending);
+            self.sync();
+            return;
+        }
+        let root = self.root.clone().unwrap_or_default();
+        if under(&dir, &root) {
+            self.reveal = None;
+            let mut above = dir.as_str();
+            while above != root && under(above, &root) {
+                self.view.expanded.insert(above.to_owned());
+                above = parent_of(above);
+            }
+            self.sync();
+        } else if under(&root, &dir) {
+            self.root_at(dir);
+        } else {
+            return self.say(format!("{dir} isn't in the explorer"));
+        }
+        if (self.editing.as_ref()).is_some_and(|editing| editing.folders.is_empty()) {
+            self.editing = None;
+        }
+        self.pending_edit = Some(pending);
     }
 
     /// The text listing `listing` was made with, as `:e!` puts it back.
@@ -441,9 +581,13 @@ impl Explorer {
         let Some(editing) = &self.editing else {
             return false;
         };
-        (editing.folders.iter()).any(|folder| {
-            (self.listings.get(&folder.dir)).is_none_or(|now| now.entries != folder.entries)
-        })
+        // A settled folder isn't listed: what's done there expects what
+        // was, one step at a time.
+        (editing.folders.iter())
+            .filter(|folder| !folder.settled)
+            .any(|folder| {
+                (self.listings.get(&folder.dir)).is_none_or(|now| now.entries != folder.entries)
+            })
     }
 
     /// The file operation for step `index` of the plan, expecting what it
@@ -673,10 +817,40 @@ impl Explorer {
             .collect()
     }
 
-    /// Done with the listings: back to the tree.
+    /// Done with the listings: back to the tree, or for an editor's
+    /// folder, the folder shown listed afresh.
     fn finish_editing(&mut self) {
+        let shown = (self.folder)
+            .then(|| self.folder_shown().map(str::to_owned))
+            .flatten();
         self.stop_editing();
         self.asks.push(Ask::StopEditing);
+        if let Some(dir) = shown {
+            self.asks.push(Ask::List { dir, at: None });
+        }
+    }
+
+    /// The path of the entry `line`, a line of a listing, says, if its
+    /// mark names one.
+    pub(crate) fn path_of_line(&self, line: &str) -> Option<String> {
+        let editing = self.editing.as_ref()?;
+        let text = line.trim_start_matches([' ', '\t']);
+        if listing::mark_len(text) == 0 {
+            return None;
+        }
+        let id = listing::id_of(editing.session, text)?;
+        Some(editing.originals.get(id)?.path.clone())
+    }
+
+    /// Whether a folder whose listing is made has changed since, as the
+    /// daemon has listed it again: its entries, or a file's stamp.
+    pub(crate) fn listings_stale(&self) -> bool {
+        let Some(editing) = &self.editing else {
+            return false;
+        };
+        (editing.folders.iter()).any(|folder| {
+            (self.listings.get(&folder.dir)).is_some_and(|now| now.entries != folder.entries)
+        })
     }
 
     /// What the bar says while what the listings' edits come to is shown.
@@ -826,6 +1000,15 @@ fn colour(index: u8) -> Style {
         fg: Color::Indexed(index),
         ..Style::DEFAULT
     }
+}
+
+/// Whether a listing has a line for `entry`: not if it's hidden, unless
+/// `hidden` files show, nor if its name is one no line can say, with a
+/// line break, or a mark's characters, or bytes that aren't UTF-8, whose
+/// path the window doesn't have.
+fn says(entry: &Entry, hidden: bool) -> bool {
+    let unsayable = |ch: char| ch == '\n' || ch == '\u{fffd}' || listing::in_marks(ch);
+    (hidden || !entry.name.starts_with('.')) && !entry.name.chars().any(unsayable)
 }
 
 /// A number for a new editing session, picked at random, so two

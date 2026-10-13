@@ -334,6 +334,12 @@ impl Daemon {
         if self.workspaces.remove_pane(pane) {
             self.workspaces_changed();
         }
+        self.close_files(files);
+    }
+
+    /// Closes explorer `files`, as the pane showing it closes, or shows
+    /// something else.
+    pub(super) fn close_files(&mut self, files: FilesId) {
         if let Some(explorer) = self.explorers.list.remove(&files) {
             log::info!("explorer {files} closed");
             self.collapse_where(|(_, explorer)| explorer == files);

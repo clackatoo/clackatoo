@@ -32,6 +32,12 @@
 //! | `x` `y`, then `p` | Cuts or copies what's at the cursor, then moves or copies it where the cursor is |
 //! | `e` | Edits the folder at the cursor as text (see [`editing`]) |
 //! | `q` | Closes the explorer |
+//!
+//! An editor showing a folder ([`Content::Folder`](clackatoo_protocol::Content::Folder))
+//! is an explorer too, of its own, rooted at the folder, that only ever
+//! shows folders' listings as text (see [`editing`]), never the tree: its
+//! root follows the folder shown, so the finder, and a relative path
+//! opened, are from there.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -80,6 +86,10 @@ pub(crate) enum Ask {
     },
     /// Show the listing shown before what its edits come to was, again.
     BackToText,
+    /// Show the listing of the folder `dir` afresh, with the cursor on the
+    /// line of the entry at `at`, if there's one, as an editor's folder
+    /// does once its listings' edits are made.
+    List { dir: String, at: Option<String> },
     /// Stop editing listings, throwing away the editors.
     StopEditing,
 }
@@ -213,6 +223,12 @@ pub(crate) struct Explorer {
     /// show once it's listed.
     editing: Option<editing::Editing>,
     pending_edit: Option<editing::Pending>,
+    /// It's an editor's folder: it shows only listings, never the tree.
+    folder: bool,
+    /// The folder this window last asked the daemon to root an editor's
+    /// folder at: its answer comes later, so this, not the root, says
+    /// whether to ask again.
+    asked_root: Option<String>,
 }
 
 /// What an explorer says when it's asked to leave its fence.
@@ -253,7 +269,24 @@ impl Explorer {
             fence: None,
             editing: None,
             pending_edit: None,
+            folder: false,
+            asked_root: None,
         }
+    }
+
+    /// The explorer of an editor showing a folder: it shows the listing of
+    /// its root, once the daemon says what that is, with the cursor on the
+    /// line of the entry at `at`, if there's one.
+    pub(crate) fn of_folder(files: FilesId, options: &Options, at: Option<String>) -> Self {
+        let mut explorer = Self::new(files, options);
+        explorer.folder = true;
+        explorer.pending_edit = Some(editing::Pending::NextRoot { at });
+        explorer
+    }
+
+    /// Whether it's an editor's folder, showing only listings.
+    pub(crate) fn is_folder(&self) -> bool {
+        self.folder
     }
 
     pub(crate) fn files(&self) -> FilesId {
@@ -570,11 +603,15 @@ impl Explorer {
 
     /// The directories the daemon should list: the root, and each one
     /// expanded inside one it lists, unless it's hidden and hidden files
-    /// don't show.
+    /// don't show; or for an editor's folder, the root and the folders
+    /// whose listings are made, or waited for.
     fn wanted(&self) -> HashSet<String> {
         let Some(root) = &self.root else {
             return HashSet::new();
         };
+        if self.folder {
+            return self.folders_wanted();
+        }
         let mut dirs: Vec<&String> = (self.view.expanded.iter())
             .filter(|dir| under(dir, root) && *dir != root)
             .filter(|dir| self.view.hidden || !name_of(dir).starts_with('.'))
@@ -1103,7 +1140,7 @@ impl Explorer {
     }
 
     /// `.`: shows hidden files, or hides them.
-    fn toggle_hidden(&mut self) {
+    pub(crate) fn toggle_hidden(&mut self) {
         self.view.hidden = !self.view.hidden;
         self.message = Some(if self.view.hidden {
             "hidden files show".to_owned()

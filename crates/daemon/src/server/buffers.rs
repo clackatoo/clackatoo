@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use clackatoo_protocol::{
     Author, BufferId, BufferSnapshot, BufferUpdate, Change, Content, Edit, Error, Event, OpenFile,
-    PaneId, Response, Resume, ServerMessage, frame,
+    OpenFiles, PaneId, Response, Resume, ServerMessage, frame,
 };
 use clackatoo_syntax::{Found, Highlighted, Syntax};
 use clackatoo_text::{AgentHunks, Highlights, Hunks, Maker};
@@ -114,6 +114,49 @@ impl BufferSlot {
 }
 
 impl Daemon {
+    /// What a pane opening `file` shows: the file, in its buffer, or if
+    /// it's a folder, the folder's listing, made from an explorer of its
+    /// own, rooted there. A relative path is from where
+    /// [`open_buffer`](Self::open_buffer) says.
+    pub(super) fn open_content(
+        &mut self,
+        file: OpenFile,
+        beside: Option<PaneId>,
+    ) -> Result<Content, Error> {
+        let dir = self.opened_from(file.cwd.as_deref(), beside);
+        let path = resolve(&file.path, &dir, &self.config.home);
+        // A stat, as reading a file here is: neither waits on anything
+        // but the disk.
+        if path.is_dir()
+            && let Some(dir) = path.to_str()
+        {
+            let open = OpenFiles {
+                dir: Some(dir.to_owned()),
+            };
+            return self.new_files(open, beside).map(Content::Folder);
+        }
+        // A path ending `/` is a folder's, which a file isn't made at.
+        if file.path.ends_with('/') {
+            return Err(Error::OpenFailed {
+                path: file.path,
+                reason: "it isn't a folder".to_owned(),
+            });
+        }
+        self.open_buffer(file, beside).map(Content::Buffer)
+    }
+
+    /// The directory a relative path is from: `cwd`, or else the directory
+    /// of the pane `beside`, or else the home directory.
+    fn opened_from(&self, cwd: Option<&str>, beside: Option<PaneId>) -> PathBuf {
+        (cwd.map(PathBuf::from))
+            .or_else(|| {
+                beside
+                    .and_then(|pane| self.working_directory(pane))
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| self.config.home.clone())
+    }
+
     /// The buffer for `file`: the one already open for it, or a new one.
     /// A relative path is from `file.cwd`, or else the directory of the
     /// pane `beside`, or else the home directory.
@@ -122,15 +165,9 @@ impl Daemon {
         file: OpenFile,
         beside: Option<PaneId>,
     ) -> Result<BufferId, Error> {
-        let home = &self.config.home;
-        let dir = (file.cwd.map(PathBuf::from))
-            .or_else(|| {
-                beside
-                    .and_then(|pane| self.working_directory(pane))
-                    .map(PathBuf::from)
-            })
-            .unwrap_or_else(|| home.clone());
-        let path = resolve(&file.path, &dir, home);
+        let OpenFile { path, cwd } = file;
+        let dir = self.opened_from(cwd.as_deref(), beside);
+        let path = resolve(&path, &dir, &self.config.home);
         if let Some((&id, _)) = (self.buffers.iter()).find(|(_, slot)| slot.buffer.path() == path) {
             return Ok(id);
         }
@@ -426,18 +463,24 @@ impl Daemon {
     }
 
     /// Answers [`Request::OpenHere`](clackatoo_protocol::Request::OpenHere):
-    /// `pane`, which shows a file, shows `file` instead, and the file it
-    /// showed closes if nothing else shows it and it has no changes to
-    /// save.
+    /// `pane`, which shows a file or a folder, shows `file` instead, which
+    /// may be a folder too. The file it showed closes if nothing else
+    /// shows it and it has no changes to save; the folder it showed always
+    /// does, its listing being only the pane's.
     pub(super) fn open_here(&mut self, pane: PaneId, file: OpenFile) -> Result<Response, Error> {
-        let Content::Buffer(old) = self.workspaces.check_pane(pane)? else {
+        let old = self.workspaces.check_pane(pane)?;
+        if !matches!(old, Content::Buffer(_) | Content::Folder(_)) {
             return Err(Error::NotAFile(pane));
-        };
-        let new = self.open_buffer(file, Some(pane))?;
+        }
+        let new = self.open_content(file, Some(pane))?;
         if new != old {
-            self.workspaces.set_content(pane, Content::Buffer(new))?;
+            self.workspaces.set_content(pane, new)?;
             self.workspaces_changed();
-            self.close_if_unwanted(old);
+            match old {
+                Content::Buffer(old) => self.close_if_unwanted(old),
+                Content::Folder(files) => self.close_files(files),
+                _ => {}
+            }
         }
         Ok(Response::Done)
     }

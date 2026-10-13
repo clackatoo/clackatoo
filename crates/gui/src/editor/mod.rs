@@ -710,6 +710,11 @@ impl Editor {
         !self.typed.is_empty()
     }
 
+    /// The keys of the command half typed, as `g` waiting for its second.
+    pub(crate) fn typed_so_far(&self) -> &[Stroke] {
+        &self.typed
+    }
+
     pub(crate) fn resize(&mut self, size: Size) {
         let (height, width) = (usize::from(size.rows()), usize::from(size.cols()));
         self.resized |= (height, width) != (self.height, self.width);
