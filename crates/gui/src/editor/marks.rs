@@ -2,11 +2,14 @@
 //! sets one at the cursor: `a` to `z` in the file, each file having its
 //! own, and `A` to `Z` anywhere, remembering their file. `` ` `` and the
 //! letter go back to it, and `'` to its line. The window sets `.` itself,
-//! at the last change made to each file.
+//! at the last change made to each file, and `<` and `>` at the start and
+//! end of the last selection, which `:'<,'>` acts on.
 //!
 //! A mark moves with the text, as the jump list's places do (see
 //! [`FilePlace`]): edits made above it, by anyone, take it down with them.
 //! Marks are the window's own, kept until it closes.
+
+use std::borrow::Borrow;
 
 use clackatoo_text::{Bias, Edit, Rope};
 
@@ -60,9 +63,9 @@ impl FilePlace {
     /// Moves it through `edits`, made to its file in turn, which leave its
     /// text as `text`. Text put in where it is goes before it, so a line
     /// opened above its line takes it down with its line.
-    pub(crate) fn edited(&mut self, edits: &[Edit], text: &Rope) {
+    pub(crate) fn edited(&mut self, edits: &[impl Borrow<Edit>], text: &Rope) {
         for edit in edits {
-            self.byte = edit.map(self.byte, Bias::After);
+            self.byte = edit.borrow().map(self.byte, Bias::After);
         }
         self.find_line(text);
     }
@@ -100,7 +103,7 @@ impl FilePlace {
 /// the last jump from the file left. The others, `A` to `Z`, are the
 /// window's, in whichever file they're in.
 fn local(mark: char) -> bool {
-    mark.is_ascii_lowercase() || matches!(mark, '.' | '\'')
+    mark.is_ascii_lowercase() || matches!(mark, '.' | '\'' | '<' | '>')
 }
 
 /// The marks set, in every file.
@@ -144,7 +147,7 @@ impl Marks {
 
     /// Moves the marks in the file at `path` through `edits`, made to it in
     /// turn, which leave its text as `text`.
-    pub(crate) fn edited(&mut self, path: &str, edits: &[Edit], text: &Rope) {
+    pub(crate) fn edited(&mut self, path: &str, edits: &[impl Borrow<Edit>], text: &Rope) {
         if edits.is_empty() {
             return;
         }

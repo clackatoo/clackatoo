@@ -12,8 +12,14 @@
 //! It keeps the buffer's highlights too, moving them along with each edit
 //! until the parse that follows it sends new ones, and so its diagnostics
 //! and hunks.
+//!
+//! A command that makes many edits, as `:g` does, makes them in a batch:
+//! each is made to the text at once, for the next to see, and once it's
+//! done they go as one edit, which moves what moves with the text once,
+//! however many there were.
 
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{
@@ -31,8 +37,10 @@ const MOST_JOINED: usize = 16;
 /// A change waiting for the daemon's answer, or to be sent.
 #[derive(Debug)]
 enum Waiting {
+    /// Shared with what's made, as an edit of thousands of pieces, as
+    /// `:%s` makes, is slow to copy.
     Edit {
-        edit: Edit,
+        edit: Rc<Edit>,
         step: bool,
     },
     Undo,
@@ -77,6 +85,8 @@ pub(crate) enum Heard {
 
 /// A window's copy of a buffer.
 #[derive(Debug)]
+// Separate facts about the copy, not states of one machine.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct BufferCopy {
     id: BufferId,
     path: String,
@@ -97,7 +107,7 @@ pub(crate) struct BufferCopy {
     outbox: Vec<ClientMessage>,
     /// The edits made here since last taken, for other panes showing the
     /// buffer to follow.
-    made: Vec<Edit>,
+    made: Vec<Rc<Edit>>,
     /// What each piece of the text is, as its grammar reads it.
     highlights: Highlights,
     /// What its language server says is wrong with it.
@@ -109,6 +119,12 @@ pub(crate) struct BufferCopy {
     /// Whether the macro being typed has edited the buffer yet, so its
     /// first edit starts an undo step and the rest join it.
     macro_edited: bool,
+    /// The edits of a batch being made, while one is, and how many changes
+    /// were waiting when it began.
+    batch: Option<(Vec<Edit>, usize)>,
+    /// The copy has gone astray from the daemon's text, as a batch whose
+    /// edits couldn't be sent leaves it: a fresh snapshot is wanted.
+    astray: bool,
 }
 
 impl BufferCopy {
@@ -131,6 +147,8 @@ impl BufferCopy {
             hunks: Hunks::new(),
             features: ServerFeatures::default(),
             macro_edited: false,
+            batch: None,
+            astray: false,
         }
     }
 
@@ -138,6 +156,16 @@ impl BufferCopy {
     /// daemon has said.
     pub(crate) fn features(&self) -> &ServerFeatures {
         &self.features
+    }
+
+    pub(crate) fn buffer(&self) -> BufferId {
+        self.id
+    }
+
+    /// Whether the copy has gone astray from the daemon's text since last
+    /// asked, so the window should attach again for a fresh snapshot.
+    pub(crate) fn take_astray(&mut self) -> bool {
+        std::mem::take(&mut self.astray)
     }
 
     pub(crate) fn text(&self) -> &Rope {
@@ -209,10 +237,20 @@ impl BufferCopy {
         if edit.is_noop() {
             return true;
         }
+        if let Some((edits, _)) = &mut self.batch {
+            if let Err(err) = edit.apply(&mut self.text) {
+                log::error!("buffer {}: an edit didn't fit: {err}", self.id);
+                return false;
+            }
+            self.revision += 1;
+            edits.push(edit);
+            return true;
+        }
         if !self.apply(&edit, "an") {
             return false;
         }
-        self.made.push(edit.clone());
+        let edit = Rc::new(edit);
+        self.made.push(Rc::clone(&edit));
         // An edit joining the last step joins the last edit, if that's
         // still to be sent, unless that's grown long, as a macro's many
         // edits all over the file would make it: joining one more costs
@@ -224,7 +262,7 @@ impl BufferCopy {
             && last.ops().len() < MOST_JOINED
             && let Ok(both) = compose(last, &edit)
         {
-            *last = both;
+            *last = Rc::new(both);
         } else {
             self.waiting.push_back(Waiting::Edit { edit, step });
         }
@@ -249,6 +287,48 @@ impl BufferCopy {
     /// its next key, and so asks for nothing after it meanwhile.
     pub(crate) fn reversing(&self) -> bool {
         matches!(self.waiting.back(), Some(Waiting::Undo | Waiting::Redo))
+    }
+
+    /// Starts a batch of edits, which [`edit`](Self::edit) makes to the
+    /// text at once, and [`end_batch`](Self::end_batch) sends as one.
+    pub(crate) fn begin_batch(&mut self) {
+        if self.batch.is_none() {
+            self.batch = Some((Vec::new(), self.waiting.len()));
+        }
+    }
+
+    /// The edits made in the batch so far, oldest first.
+    pub(crate) fn batched(&self) -> &[Edit] {
+        self.batch.as_ref().map_or(&[], |(edits, _)| &edits[..])
+    }
+
+    /// Ends the batch, sending its edits as one, which starts a new undo
+    /// step if `step`, or joins the last. It goes before anything asked
+    /// meanwhile, which was asked of the text it makes.
+    pub(crate) fn end_batch(&mut self, step: bool) {
+        let Some((edits, at)) = self.batch.take() else {
+            return;
+        };
+        let Some(edit) = compose_all(edits) else {
+            // The text has them, and the daemon won't: until a snapshot
+            // comes, nothing more is sent, as it would be made to the
+            // wrong text.
+            log::error!("buffer {}: a batch's edits didn't compose", self.id);
+            self.astray = true;
+            self.loaded = false;
+            return;
+        };
+        if edit.is_noop() {
+            self.send_next();
+            return;
+        }
+        self.highlights.map(&edit);
+        self.diagnostics.map(&edit);
+        self.hunks.map(&edit);
+        let edit = Rc::new(edit);
+        self.made.push(Rc::clone(&edit));
+        self.waiting.insert(at, Waiting::Edit { edit, step });
+        self.send_next();
     }
 
     /// Asks the daemon to undo the user's last step, or redo the last
@@ -402,7 +482,7 @@ impl BufferCopy {
     /// are.
     fn past_waiting(&self, version: u64, answer: Answer) -> Answer {
         let waiting = (self.waiting.iter()).filter_map(|waiting| match waiting {
-            Waiting::Edit { edit, .. } => Some(edit),
+            Waiting::Edit { edit, .. } => Some(&**edit),
             _ => None,
         });
         if let Answer::Completions {
@@ -507,7 +587,7 @@ impl BufferCopy {
             return;
         }
         let waiting = (self.waiting.iter()).filter_map(|waiting| match waiting {
-            Waiting::Edit { edit, .. } => Some(edit),
+            Waiting::Edit { edit, .. } => Some(&**edit),
             Waiting::Undo
             | Waiting::Redo
             | Waiting::Query { .. }
@@ -529,7 +609,7 @@ impl BufferCopy {
     }
 
     /// The edits made here since last asked, oldest first.
-    pub(crate) fn take_made(&mut self) -> Vec<Edit> {
+    pub(crate) fn take_made(&mut self) -> Vec<Rc<Edit>> {
         std::mem::take(&mut self.made)
     }
 
@@ -560,7 +640,7 @@ impl BufferCopy {
             };
             match transform(mine, &edit) {
                 Ok((mine_after, edit_after)) => {
-                    *mine = mine_after;
+                    *mine = Rc::new(mine_after);
                     edit = edit_after;
                 }
                 Err(err) => {
@@ -575,7 +655,7 @@ impl BufferCopy {
     /// Sends the first change waiting, if none is on its way, and the
     /// queries before it, which aren't waited on.
     fn send_next(&mut self) {
-        if self.sent.is_some() || !self.loaded {
+        if self.sent.is_some() || !self.loaded || self.batch.is_some() {
             return;
         }
         while let Some(Waiting::Query { .. } | Waiting::Rename { .. } | Waiting::Stage { .. }) =
@@ -611,7 +691,7 @@ impl BufferCopy {
         };
         let change = match first {
             Waiting::Edit { edit, step } => Change::Edit {
-                edit: edit.clone(),
+                edit: Edit::clone(edit),
                 base: self.version,
                 step: *step,
             },
@@ -630,6 +710,24 @@ impl BufferCopy {
             change,
         });
     }
+}
+
+/// The one edit `edits` make, one after another, or `None` if one isn't
+/// for the text the one before makes. Neighbours are joined, and then
+/// their joins, so each round costs as long as the edits are together.
+fn compose_all(mut edits: Vec<Edit>) -> Option<Edit> {
+    while edits.len() > 1 {
+        let mut joined = Vec::with_capacity(edits.len().div_ceil(2));
+        let mut pairs = edits.into_iter();
+        while let Some(first) = pairs.next() {
+            joined.push(match pairs.next() {
+                Some(second) => compose(&first, &second).ok()?,
+                None => first,
+            });
+        }
+        edits = joined;
+    }
+    Some(edits.pop().unwrap_or_default())
 }
 
 /// The next number for a query.
@@ -748,6 +846,29 @@ pub(super) mod tests {
                 answers: None,
             }
         }
+    }
+
+    #[test]
+    fn a_batch_that_cant_be_sent_asks_for_a_fresh_snapshot() {
+        let daemon = Daemon::new("abc\n");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        copy.begin_batch();
+        assert!(copy.edit(Edit::replace(4, 0, "a", "x"), true));
+        // An edit for another text, as no edit made in turn can be.
+        copy.batch.as_mut().unwrap().0.push(Edit::keep(99));
+        copy.end_batch(true);
+        assert!(copy.take_astray());
+        assert!(
+            copy.take_outbox().is_empty(),
+            "nothing's sent to the wrong text"
+        );
+        copy.edit(Edit::replace(4, 0, "x", "y"), true);
+        assert!(copy.take_outbox().is_empty());
+        // The snapshot puts it right.
+        copy.update(daemon.snapshot());
+        assert_eq!(copy.text().to_string(), "abc\n");
+        assert!(copy.loaded());
     }
 
     #[test]

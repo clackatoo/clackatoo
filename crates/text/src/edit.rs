@@ -2,6 +2,14 @@
 
 use ropey::Rope;
 
+/// An edit of more pieces than this, and more than one for each
+/// [`PIECE_BYTES`] of the text, is made by writing the text out afresh, as
+/// `:%s` can make hundreds of thousands: each piece made in the rope is a
+/// search down its tree, where writing it out costs as much as the text
+/// is long.
+const REWRITE_PIECES: usize = 64;
+const PIECE_BYTES: usize = 64;
+
 /// One piece of an [`Edit`], which goes through the text from its start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -285,6 +293,13 @@ impl Edit {
     ///
     /// As [`check`](Self::check).
     pub fn apply(&self, rope: &mut Rope) -> Result<(), EditError> {
+        if self.ops.len() > REWRITE_PIECES
+            && self.ops.len().saturating_mul(PIECE_BYTES) > rope.len_bytes()
+        {
+            let made = self.apply_to(&rope.to_string())?;
+            *rope = Rope::from_str(&made);
+            return Ok(());
+        }
         self.check(rope)?;
         // The byte the next piece starts at, in the text as edited so far.
         let mut at = 0;
@@ -580,6 +595,22 @@ mod tests {
         edit.apply(&mut rope).unwrap();
         assert_eq!(rope.to_string(), "hello there");
         assert_eq!(edit.apply_to("hello world").unwrap(), "hello there");
+    }
+
+    #[test]
+    fn an_edit_of_many_pieces_is_made_as_one_of_few() {
+        let text = "ab ".repeat(1000);
+        let mut edit = Edit::new();
+        for _ in 0..1000 {
+            edit.delete("a").insert("x").retain(2);
+        }
+        let mut rope = Rope::from_str(&text);
+        edit.apply(&mut rope).unwrap();
+        assert_eq!(rope.to_string(), "xb ".repeat(1000));
+        // And a bad one is refused, leaving the text alone.
+        let mut rope = Rope::from_str(&"zb ".repeat(1000));
+        assert_eq!(edit.apply(&mut rope), Err(EditError::Mismatch));
+        assert_eq!(rope.to_string(), "zb ".repeat(1000));
     }
 
     #[test]

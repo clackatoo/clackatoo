@@ -31,15 +31,26 @@
 //! cursor, or selected, and shows it in a menu by the cursor to pick from
 //! (see [`actions`]). The daemon does what's picked, as the user, so `u`
 //! undoes it.
+//!
+//! Searches, `:s`, `:g` and the rest of Vim's commands for lines read
+//! Vim's patterns (see [`pattern`], [`substitute`] and [`ex`]). Each is one
+//! edit and one undo step, and while `:s` is typed, what it would do is
+//! drawn in place, never made to the text (see [`preview`]).
 
 mod actions;
+mod case;
 mod complete;
 mod copy;
+mod ex;
 mod keys;
+mod marked;
 mod marks;
 mod panel;
+mod pattern;
 mod pieces;
+mod preview;
 mod registers;
+mod substitute;
 mod text;
 mod wrap;
 
@@ -51,12 +62,14 @@ use clackatoo_text::{Bias, Diagnostic, Hunk};
 use winit::keyboard::{Key, NamedKey};
 
 use actions::{ActionMenu, MenuKey, MenuStroke};
+use case::Recase;
 pub use complete::Ranking;
 use complete::{Completion, Resolved, is_word};
 /// The daemon's side of a buffer, for the desk's tests.
 #[cfg(test)]
 pub(crate) use copy::tests::Daemon;
 pub(crate) use copy::{BufferCopy, Heard, queries_asked};
+pub(crate) use ex::is_editor_command;
 pub(crate) use keys::Stroke;
 use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
 pub(crate) use marks::{FilePlace, Marks};
@@ -64,7 +77,9 @@ pub(crate) use marks::{FilePlace, Marks};
 pub(crate) use panel::Line as PanelLine;
 use panel::Panel;
 pub(crate) use panel::PanelView;
+use pattern::{Matching, Pattern};
 pub(crate) use pieces::GiveUp;
+use preview::Preview;
 use registers::Wrote;
 pub(crate) use registers::{Register, Registers};
 use text::{Kept, Text, tab_end};
@@ -122,6 +137,9 @@ pub(crate) enum HunkAction {
 pub(crate) struct Shared {
     pub(crate) registers: Registers,
     pub(crate) marks: Marks,
+    /// The last `:s`, which `&`, `:&&` and `g&` make again, and whose
+    /// replacement `~` stands for.
+    pub(crate) substituted: Option<ex::Substituted>,
 }
 
 /// What a key did that the window must see to.
@@ -314,6 +332,8 @@ enum Prompt {
     Search { query: String, backward: bool },
     /// A new name for what's under the cursor, which was `was`.
     Rename { name: String, was: String },
+    /// Whether to replace each match of `:s///c`, in turn.
+    Confirm(ex::Confirming),
 }
 
 impl Prompt {
@@ -481,6 +501,23 @@ pub(crate) struct Editor {
     /// The keys to note in a macro being recorded for the key just typed,
     /// if a menu took it: what it put in, or nothing.
     menu_keys: Option<Vec<Stroke>>,
+    /// Whether a `:g` is doing its command on each line.
+    in_global: bool,
+    /// How many matches `:s` has replaced, or counted, on how many lines,
+    /// for `:g` to tell of once it's done.
+    counted_matches: (usize, usize),
+    /// What the command being typed would do, shown in place
+    /// (`inccommand`).
+    preview: Option<Preview>,
+    inccommand: bool,
+    /// `~` is an operator, taking a motion (`tildeop`).
+    tildeop: bool,
+    /// The pattern compiled last, kept to compile it once (see
+    /// [`ex`]'s `pattern`).
+    compiled: std::cell::RefCell<Option<Compiled>>,
+    /// The text as one string, for searching, and the buffer and revision
+    /// it's of (see [`ex`]'s `haystack`).
+    whole: std::cell::RefCell<Option<Whole>>,
     /// A macro to type, `@` asked for, and how many times: the desk types
     /// it, as a macro can go on in other panes.
     macro_asked: Option<(Vec<Chord>, usize)>,
@@ -551,6 +588,13 @@ impl Editor {
             replaying: false,
             resume_replaying: false,
             menu_keys: None,
+            in_global: false,
+            counted_matches: (0, 0),
+            preview: None,
+            inccommand: options.inccommand == crate::options::InCommand::NoSplit,
+            tildeop: options.tildeop,
+            compiled: std::cell::RefCell::new(None),
+            whole: std::cell::RefCell::new(None),
             macro_asked: None,
             failed: false,
         }
@@ -584,6 +628,8 @@ impl Editor {
 
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options, copy: &BufferCopy) {
+        self.inccommand = options.inccommand == crate::options::InCommand::NoSplit;
+        self.tildeop = options.tildeop;
         let indent = Indent::of(options);
         if indent.tabstop != self.indent.tabstop {
             // A column is a cell, and tabs take more or fewer of them now:
@@ -645,6 +691,7 @@ impl Editor {
                 return format!("{}{query}▏", if *backward { '?' } else { '/' });
             }
             Some(Prompt::Rename { name, .. }) => return format!("rename to: {name}▏"),
+            Some(Prompt::Confirm(confirming)) => return confirming.question(),
             None => {}
         }
         if let Some(status) = &self.status {
@@ -805,6 +852,11 @@ impl Editor {
     fn stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
         if self.hold_stroke(stroke) {
             return Done::default();
+        }
+        // The selection as each key comes is the last, for `'<` and `'>`,
+        // which the key's edits then move.
+        if matches!(self.mode, Mode::Visual(_)) {
+            self.mark_selection(copy, &mut shared.marks);
         }
         if !std::mem::take(&mut self.keep_status) {
             self.status = None;
@@ -974,7 +1026,7 @@ impl Editor {
 
     fn read_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
         if self.prompt.is_some() {
-            return self.prompt_stroke(stroke, copy);
+            return self.prompt_stroke(stroke, copy, shared);
         }
         if self.mode == Mode::Insert {
             if let Some(change) = &mut self.changing
@@ -1001,7 +1053,7 @@ impl Editor {
         }
         self.typed.push(stroke);
         let visual = matches!(self.mode, Mode::Visual(_));
-        match keys::parse(&self.typed, visual) {
+        match keys::parse_with(&self.typed, visual, self.tildeop) {
             Parsed::Incomplete => Done::default(),
             Parsed::Nothing => {
                 self.typed.clear();
@@ -1068,8 +1120,10 @@ impl Editor {
             Action::Repeat => return self.repeat(command.count, copy, shared),
             Action::Visual { lines } => self.visual(lines),
             Action::Search { backward } => self.prompt = Some(Prompt::search(backward)),
-            Action::SearchAgain { reverse } => self.search_again(reverse, copy),
-            Action::SearchWord { backward } => self.search_word(backward, copy),
+            Action::SearchAgain { reverse } => self.search_again(reverse, copy, shared),
+            Action::SearchWord { backward } => self.search_word(backward, copy, shared),
+            Action::Tilde => self.tilde(times, copy),
+            Action::RepeatSubstitute { all } => self.repeat_substitute(all, copy, shared),
             Action::FindAgain { reverse } => self.find_again(reverse, times, copy),
             Action::HalfPage(direction) => self.page(i64::from(direction), self.height / 2, copy),
             Action::Page(direction) => {
@@ -1121,6 +1175,16 @@ impl Editor {
             self.normal_cursor(copy);
         }
         done
+    }
+
+    /// `&`, or `g&` if `all`, which is `:%s//~/&`, as in Vim: the last
+    /// `:s` again.
+    fn repeat_substitute(&mut self, all: bool, copy: &mut BufferCopy, shared: &mut Shared) {
+        let line = if all { "%s//~/&" } else { "s" };
+        if let Err(why) = self.run(line, copy, shared) {
+            self.status = Some(why);
+            self.fail();
+        }
     }
 
     /// `i` or `a` and `object`, in visual mode: selects it, the `times`th
@@ -1345,6 +1409,26 @@ impl Editor {
         let Some(span) = span else {
             return false;
         };
+        if let Operator::Recase(recase) = operator {
+            self.recase(span.start, span.end, recase, copy);
+            // To the start, as Vim goes, but for whole lines typed, which
+            // keep the cursor's column when there are more than one.
+            let text = self.text(copy);
+            let col = self.cursor.at.col;
+            self.cursor = match span.lines {
+                Some((first, last)) if first < last && target != Target::Selection => {
+                    Cursor::wanting(Point { line: first, col }, col)
+                }
+                Some((first, _)) => Cursor::new(Point {
+                    line: first,
+                    col: 0,
+                }),
+                None => Cursor::new(text.point_of(span.start)),
+            };
+            drop(text);
+            self.leave_visual();
+            return true;
+        }
         if let Operator::Indent | Operator::Dedent = operator {
             // A count is how many lines, or for a selection, how many steps.
             let steps = if target == Target::Selection {
@@ -1380,7 +1464,7 @@ impl Editor {
             Operator::Yank => self.yanked(span, copy),
             Operator::Delete => self.delete_span(span, copy),
             Operator::Change => self.change_span(span, copy),
-            Operator::Indent | Operator::Dedent => {}
+            Operator::Indent | Operator::Dedent | Operator::Recase(_) => {}
         }
         true
     }
@@ -2638,13 +2722,17 @@ impl Editor {
 
     /// A key typed into the bar: a search's, or a new name's. Ctrl+U
     /// clears it, as in Vim's command line.
-    fn prompt_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy) -> Done {
+    fn prompt_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, shared: &Shared) -> Done {
         let Some(prompt) = &mut self.prompt else {
             return Done::default();
         };
         let typed = match prompt {
             Prompt::Search { query, .. } => query,
             Prompt::Rename { name, .. } => name,
+            Prompt::Confirm(_) => {
+                self.confirm_stroke(stroke, copy);
+                return Done::REDRAW;
+            }
         };
         match stroke {
             Stroke::Escape => self.prompt = None,
@@ -2659,21 +2747,24 @@ impl Editor {
             } => typed.clear(),
             Stroke::Enter => match self.prompt.take() {
                 Some(Prompt::Search { query, backward }) => {
+                    // Empty, it's the last search again, this way.
                     if !query.is_empty() {
                         self.search = Some(Searched {
-                            query,
+                            pattern: query,
                             backward,
-                            whole: false,
+                            star: false,
                         });
+                    } else if let Some(search) = &mut self.search {
+                        search.backward = backward;
                     }
                     let from = self.cursor.at;
-                    self.search_again(false, copy);
+                    self.search_again(false, copy, shared);
                     if self.cursor.at != from {
                         self.left_from(from, copy);
                     }
                 }
                 Some(Prompt::Rename { name, was }) => self.rename(name, &was, copy),
-                None => {}
+                Some(Prompt::Confirm(_)) | None => {}
             },
             Stroke::Char { ch, ctrl: false } => typed.push(ch),
             _ => {}
@@ -2779,35 +2870,46 @@ impl Editor {
     }
 
     /// `n`, or `N` if `reverse`: the next match of the last search.
-    fn search_again(&mut self, reverse: bool, copy: &BufferCopy) {
+    fn search_again(&mut self, reverse: bool, copy: &BufferCopy, shared: &Shared) {
         let Some(Searched {
-            query,
+            pattern,
             backward,
-            whole,
+            star,
         }) = self.search.clone()
         else {
             self.status = Some("no search yet".into());
             self.fail();
             return;
         };
+        // As `*` searches, case is ignored or not as `ignorecase` says,
+        // never as `smartcase`, as in Vim.
+        let matching = if star {
+            Matching::Always(self.case)
+        } else {
+            Matching::Typed(self.case)
+        };
+        let compiled = match self.pattern(&pattern, matching, shared) {
+            Ok(compiled) => compiled,
+            Err(why) => {
+                self.status = Some(why);
+                self.fail();
+                return;
+            }
+        };
+        let (whole, len) = self.haystack(copy);
         let text = self.text(copy);
         let from = text.byte_at(self.cursor.at);
-        let all = text.slice(0, text.rope().len_bytes());
-        // A whole word, as `*` searches, ignores case or not as
-        // `ignorecase` says, never as `smartcase`, as in Vim.
-        let exact = if whole {
-            self.case.exact_always()
-        } else {
-            self.case.exact(&query)
-        };
         let backward = backward != reverse;
-        if let Some(start) = find(&all, &query, from, (backward, exact, whole)) {
-            let last = start + query.len() - 1;
-            self.found = Some((text.point_of(start), text.point_of(last)));
-            self.cursor = Cursor::new(text.point_of(start));
+        if let Some(found) = find(&whole[..len], &compiled, from, backward) {
+            // The last character's first byte.
+            let last = (whole[..found.end].char_indices().next_back())
+                .map_or(found.start, |(at, _)| at)
+                .max(found.start);
+            self.found = Some((text.point_of(found.start), text.point_of(last)));
+            self.cursor = Cursor::new(text.point_of(found.start));
         } else {
             self.found = None;
-            self.status = Some(format!("{query} isn't in the file"));
+            self.status = Some(format!("{pattern} isn't in the file"));
             self.fail();
         }
     }
@@ -2815,7 +2917,7 @@ impl Editor {
     /// `*`, or `#` if `backward`: searches for the word under the cursor,
     /// as a whole word, and goes to the next place it is, or the one
     /// before, going round the file's ends.
-    fn search_word(&mut self, backward: bool, copy: &BufferCopy) {
+    fn search_word(&mut self, backward: bool, copy: &BufferCopy, shared: &Shared) {
         let text = self.text(copy);
         // The word under the cursor, or the next on its line, as Vim's.
         let here = text.byte_at(self.cursor.at);
@@ -2829,15 +2931,15 @@ impl Editor {
             self.fail();
             return;
         };
-        let query = text.slice(start, end);
+        let word = text.slice(start, end);
         // From the word's start, so going forward finds the next, not this.
         self.cursor = Cursor::new(text.point_of(start));
         self.search = Some(Searched {
-            query,
+            pattern: format!("\\<{}\\>", pattern::escape(&word)),
             backward,
-            whole: true,
+            star: true,
         });
-        self.search_again(false, copy);
+        self.search_again(false, copy, shared);
     }
 
     /// `]d`, or `[d` if `backward`: to the start of the `times`th
@@ -3084,6 +3186,9 @@ impl Editor {
     pub(crate) fn follow_edit(&mut self, edit: &Edit, copy: &BufferCopy) {
         self.edited(edit);
         self.awaiting_follows(edit);
+        if let Some(Prompt::Confirm(confirming)) = &mut self.prompt {
+            confirming.edited(edit);
+        }
         if let Some((cursor, anchor)) = &mut self.held {
             *cursor = edit.map(*cursor, Bias::Before);
             if let Some(anchor) = anchor {
@@ -3101,6 +3206,11 @@ impl Editor {
             Heard::Replaced => {
                 self.text_replaced();
                 self.held = None;
+                // What `:s///c` was asking about is gone.
+                if matches!(self.prompt, Some(Prompt::Confirm(_))) {
+                    self.prompt = None;
+                    self.found = None;
+                }
                 self.normal_cursor(copy);
             }
             Heard::Edited(edit) => self.follow_edit(edit, copy),
@@ -3382,6 +3492,81 @@ impl Editor {
         }
         let byte = self.cursor_byte(copy);
         marks.set(mark, FilePlace::at(copy.path(), copy.text(), byte));
+    }
+
+    /// Sets `<` and `>` at the start and end of the selection.
+    fn mark_selection(&self, copy: &BufferCopy, marks: &mut Marks) {
+        let Some(anchor) = self.anchor else {
+            return;
+        };
+        let (start, end) = if anchor <= self.cursor.at {
+            (anchor, self.cursor.at)
+        } else {
+            (self.cursor.at, anchor)
+        };
+        let text = self.text(copy);
+        for (mark, at) in [('<', start), ('>', end)] {
+            marks.set(
+                mark,
+                FilePlace::at(copy.path(), copy.text(), text.byte_at(at)),
+            );
+        }
+    }
+
+    /// The command line is opened, with `:`: in visual mode, the
+    /// selection's lines are marked and left, and the command line starts
+    /// with them, `'<,'>`, as in Vim.
+    pub(crate) fn command_line(&mut self, copy: &BufferCopy, marks: &mut Marks) -> &'static str {
+        if !matches!(self.mode, Mode::Visual(_)) {
+            return "";
+        }
+        self.mark_selection(copy, marks);
+        self.leave_visual();
+        "'<,'>"
+    }
+
+    /// `~`, with `tildeop` off: turns over the case of `times` characters
+    /// from the cursor's, on its line, and moves the cursor on past them.
+    fn tilde(&mut self, times: usize, copy: &mut BufferCopy) {
+        let text = self.text(copy);
+        let line = self.cursor.at.line;
+        let Some(laid) = text.laid(line) else {
+            return;
+        };
+        let start = laid.byte_at(self.cursor.at.col);
+        let mut end = start;
+        for _ in 0..times {
+            if end >= laid.text().len() {
+                break;
+            }
+            end = laid.char_end(end);
+        }
+        if end == start {
+            self.fail();
+            return;
+        }
+        let line_start = text.line_start(line);
+        // How long the text is once changed, which can be more bytes or
+        // fewer, as `ß` to `ẞ` is.
+        let changed = Recase::Toggle.text(&laid.text()[start..end]).len();
+        drop(text);
+        self.recase(line_start + start, line_start + end, Recase::Toggle, copy);
+        let text = self.text(copy);
+        if let Some(laid) = text.laid(line) {
+            let after = start + changed;
+            let byte = if after < laid.text().len() {
+                after
+            } else {
+                laid.text()[..after.min(laid.text().len())]
+                    .char_indices()
+                    .next_back()
+                    .map_or(0, |(at, _)| at)
+            };
+            self.cursor = Cursor::new(Point {
+                line,
+                col: laid.col_of(byte),
+            });
+        }
     }
 
     /// `` ` ``, or `'` if not `exact`: to `mark`, or to its line's first
@@ -3696,7 +3881,13 @@ impl Editor {
             self.follow(copy);
         }
         self.gutter = self.gutter_for(self.text(copy).lines());
-        let text = self.text(copy);
+        // A preview's text, if one's shown, in place of the buffer's.
+        let previewed = (self.preview.as_ref()).and_then(|preview| preview.text.clone());
+        let text = match &previewed {
+            Some(rope) => Text::new(rope, self.indent.tabstop)
+                .wrapping(self.wrapping.at(self.text_width().max(1)), None),
+            None => self.text(copy),
+        };
         self.clamp_top(&text);
         let width = self.text_width();
         self.shown = wrap::view(
@@ -3706,6 +3897,16 @@ impl Editor {
             self.view_end(&text),
             self.left,
         );
+        let preview = self.preview.as_ref().filter(|_| previewed.is_some());
+        // What's wrong in view, moved onto the preview's text.
+        let moved = match (preview, self.shown.first(), self.shown.last()) {
+            (Some(preview), Some(first), Some(last)) => {
+                let (start, end) = (text.line_start(first.line), text.line_end(last.line));
+                Some(preview.diagnostics(copy.diagnostics(), start, end))
+            }
+            _ => None,
+        };
+        let all_diagnostics = moved.as_ref().unwrap_or(copy.diagnostics());
         let mut rows = Vec::with_capacity(self.height);
         // What's wrong with the line being drawn, and the worst said of it
         // where it starts, which its number and the text after it tell of:
@@ -3717,7 +3918,7 @@ impl Editor {
             let mut builder = RowBuilder::new(self.width);
             let (start, end) = (text.line_start(line), text.line_end(line));
             if wrong.0 != Some(line) {
-                let diagnostics: Vec<&Diagnostic> = copy.diagnostics().within(start, end).collect();
+                let diagnostics: Vec<&Diagnostic> = all_diagnostics.within(start, end).collect();
                 let worst = (diagnostics.iter().copied())
                     .filter(|diagnostic| diagnostic.start >= start)
                     .min_by_key(|diagnostic| diagnostic.severity);
@@ -3740,7 +3941,14 @@ impl Editor {
             let cells = shown
                 .next
                 .map_or(room, |next| (next - shown.start).min(room));
-            let spans = copy.highlights().within(start, end);
+            let moved_spans;
+            let spans = match preview {
+                Some(preview) => {
+                    moved_spans = preview.spans(copy.highlights(), start, end);
+                    &moved_spans[..]
+                }
+                None => copy.highlights().within(start, end),
+            };
             laid.show(&mut builder, shown.start, cells, spans, diagnostics, start);
             if let Some(diagnostic) = worst.filter(|_| self.virtual_text && shown.next.is_none()) {
                 // Two cells after the line's end, as much as fits:
@@ -3767,6 +3975,9 @@ impl Editor {
             rows.push(builder.finish(false));
         }
         self.rows = rows;
+        if let Some(preview) = &mut self.preview {
+            preview.light(&text);
+        }
         self.place_panels(&text);
     }
 
@@ -3958,6 +4169,15 @@ impl Editor {
             self.highlight(start, last, kind, HighlightKind::Selection, &mut highlights);
         }
         if let Some((start, last)) = self.found {
+            self.highlight(
+                start,
+                last,
+                Selection::Characters,
+                HighlightKind::Match,
+                &mut highlights,
+            );
+        }
+        for &(start, last) in self.preview.iter().flat_map(|preview| &preview.lit) {
             self.highlight(
                 start,
                 last,
@@ -4179,13 +4399,32 @@ fn exclusive(text: &Text<'_>, start: Point, end: Point, word: bool) -> Option<Sp
     })
 }
 
-/// The last search: what was searched for, which way, and if only as a
-/// whole word, as `*` searches.
+/// A buffer's text as one string, and the buffer and revision it's of.
+#[derive(Debug)]
+struct Whole {
+    of: (BufferId, u64),
+    text: std::rc::Rc<str>,
+}
+
+/// A pattern compiled, and what it was compiled from.
+#[derive(Debug)]
+struct Compiled {
+    source: String,
+    matching: Matching,
+    tilde: String,
+    pattern: Pattern,
+}
+
+/// The last search: what was searched for, which way, and whether `*`
+/// searched for it.
 #[derive(Clone, Debug)]
 struct Searched {
-    query: String,
+    /// The pattern, as Vim writes one.
+    pattern: String,
     backward: bool,
-    whole: bool,
+    /// Whether `*` or `#` searched, which match case as `ignorecase`
+    /// says, never as `smartcase`.
+    star: bool,
 }
 
 /// Where the word at byte `at` of `text` starts and ends: letters, digits
@@ -4250,48 +4489,36 @@ fn columns(options: &Options) -> Vec<usize> {
         .collect()
 }
 
-/// Where `query` next is in `text` after `from`, or before it if
-/// `backward`, going round the ends. Case is ignored, for ASCII, unless
-/// `exact`.
-fn find(
-    text: &str,
-    query: &str,
-    from: usize,
-    (backward, exact, whole): (bool, bool, bool),
-) -> Option<usize> {
-    if query.is_empty() {
-        return None;
+/// Where `pattern` next matches in `text` after byte `from`, or before it
+/// if `backward`, going round the ends.
+fn find(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<pattern::Found> {
+    if !backward {
+        let after = from
+            + text[from.min(text.len())..]
+                .chars()
+                .next()
+                .map_or(1, char::len_utf8);
+        return (after <= text.len())
+            .then(|| pattern.find_at(text, after))
+            .flatten()
+            .or_else(|| pattern.find_at(text, 0));
     }
-    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
-    let alone = |at: usize| {
-        let before = text[..at].chars().next_back();
-        let after = text[at + query.len()..].chars().next();
-        !before.is_some_and(is_word) && !after.is_some_and(is_word)
-    };
-    let (haystack, needle) = if exact {
-        (
-            std::borrow::Cow::Borrowed(text),
-            std::borrow::Cow::Borrowed(query),
-        )
-    } else {
-        (
-            std::borrow::Cow::Owned(text.to_ascii_lowercase()),
-            std::borrow::Cow::Owned(query.to_ascii_lowercase()),
-        )
-    };
-    let all: Vec<usize> = (haystack.match_indices(&*needle))
-        .map(|(at, _)| at)
-        .filter(|&at| !whole || alone(at))
-        .collect();
-    if backward {
-        all.iter()
-            .rev()
-            .find(|&&at| at < from)
-            .or(all.last())
-            .copied()
-    } else {
-        all.iter().find(|&&at| at > from).or(all.first()).copied()
+    let (mut before, mut last) = (None, None);
+    let mut at = 0;
+    while at <= text.len()
+        && let Some(found) = pattern.find_at(text, at)
+    {
+        if found.start < from {
+            before = Some(found);
+        }
+        last = Some(found);
+        at = if found.end > found.start {
+            found.end
+        } else {
+            found.end + text[found.end..].chars().next().map_or(1, char::len_utf8)
+        };
     }
+    before.or(last)
 }
 
 #[cfg(test)]

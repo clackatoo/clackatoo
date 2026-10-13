@@ -1,0 +1,1062 @@
+//! Patterns, as Vim writes them, for an editor's `/` and `?`, `:s`, `:g`
+//! and the addresses of its ranges.
+//!
+//! A pattern is translated into the regex crate's syntax, which is
+//! ripgrep's engine and what the finder's grep uses, and matched with it.
+//! Vim's syntax is translated as far as the engine goes: `magic` by
+//! default, with `\v`, `\m`, `\M` and `\V` changing how much is special;
+//! `\(`, `\)`, `\%(` and `\|`; `*`, `\+`, `\=`, `\?` and `\{n,m}`, with
+//! `\{-n,m}` matching as little as it can; `\<` and `\>`; the classes
+//! `\s`, `\d`, `\w`, `\a`, `\l`, `\u`, `\x`, `\o`, `\h`, `\k` and their
+//! kin, each with `\_` to take line breaks too; `[]`; `\n`, `\t`, `\e` and
+//! `\r`; `~`, the last replacement; `\zs` and `\ze` outside groups; and
+//! `\c` and `\C`. What the engine can't do is refused, with why: `\1` in
+//! a pattern, `\@` lookaround, `\&` and `\%V`.
+//!
+//! A line break in the text is `\n`, as in Vim, so `^` and `$` are each
+//! line's start and end, `.` doesn't take a line break, and nor does a
+//! class such as `[^a]` or `\S`.
+
+use regex::{CaptureLocations, Regex, RegexBuilder};
+
+use crate::options::Case;
+
+/// The most memory a compiled pattern takes, so a huge one is refused at
+/// once, rather than compiled again at every key of a preview.
+const MOST_COMPILED: usize = 1 << 20;
+
+/// How a pattern's case is matched, unless `\c` or `\C` in it says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Matching {
+    /// As `ignorecase` and `smartcase` say, as typed patterns are.
+    Typed(Case),
+    /// As `ignorecase` says, never as `smartcase`: as `*` searches.
+    Always(Case),
+    /// Exactly, as `:s`'s `I` flag says.
+    Exact,
+    /// Ignoring case, as `:s`'s `i` flag says.
+    Ignore,
+}
+
+/// A pattern, ready to match.
+#[derive(Clone, Debug)]
+pub(crate) struct Pattern {
+    regex: Regex,
+    /// The regex's group for each of Vim's `\1` to `\9`, by number from 1.
+    groups: Vec<usize>,
+    /// The group between `\zs` and `\ze`, which is what matches, if the
+    /// pattern has either.
+    focus: Option<usize>,
+    /// Whether it can match a line break, so a match can go on past its
+    /// line's end.
+    multiline: bool,
+}
+
+/// Where a match is, in bytes of the text: what Vim calls the match, which
+/// `\zs` and `\ze` narrow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Found {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+impl Pattern {
+    /// `source`, Vim's pattern, with case matched as `matching` says, and
+    /// `~` standing for `tilde`, the last replacement. `Err` says why it
+    /// can't be.
+    pub(crate) fn new(source: &str, matching: Matching, tilde: &str) -> Result<Self, String> {
+        let translated = translate(source, tilde)?;
+        let ignore = match translated.case {
+            Some(exact) => !exact,
+            None => match matching {
+                Matching::Typed(case) => !case.exact(&capitals(source)),
+                Matching::Always(case) => !case.exact_always(),
+                Matching::Exact => false,
+                Matching::Ignore => true,
+            },
+        };
+        let regex = RegexBuilder::new(&translated.regex)
+            .multi_line(true)
+            .case_insensitive(ignore)
+            .size_limit(MOST_COMPILED)
+            .build()
+            .map_err(|err| match err {
+                regex::Error::CompiledTooBig(_) => format!("{source} is too big a pattern"),
+                _ => format!("{source} isn't a pattern this editor can match"),
+            })?;
+        Ok(Self {
+            regex,
+            groups: translated.groups,
+            focus: translated.focus,
+            multiline: translated.multiline,
+        })
+    }
+
+    /// Whether it can match a line break.
+    pub(crate) fn multiline(&self) -> bool {
+        self.multiline
+    }
+
+    /// Room for where a match's groups are, for
+    /// [`captures_at`](Self::captures_at).
+    pub(crate) fn locations(&self) -> CaptureLocations {
+        self.regex.capture_locations()
+    }
+
+    /// The first match in `text` tried from byte `at`, keeping where its
+    /// groups are in `locations`.
+    pub(crate) fn captures_at(
+        &self,
+        text: &str,
+        at: usize,
+        locations: &mut CaptureLocations,
+    ) -> Option<Found> {
+        self.regex.captures_read_at(locations, text, at)?;
+        let (start, end) = locations.get(self.focus.unwrap_or(0))?;
+        Some(Found { start, end })
+    }
+
+    /// The first match in `text` tried from byte `at`.
+    pub(crate) fn find_at(&self, text: &str, at: usize) -> Option<Found> {
+        if self.focus.is_none() {
+            let found = self.regex.find_at(text, at)?;
+            return Some(Found {
+                start: found.start(),
+                end: found.end(),
+            });
+        }
+        self.captures_at(text, at, &mut self.locations())
+    }
+
+    /// Where Vim's group `number` matched, as last kept in `locations`:
+    /// 0 is the whole match.
+    pub(crate) fn group(&self, locations: &CaptureLocations, number: usize) -> Option<Found> {
+        let index = match number {
+            0 => self.focus.unwrap_or(0),
+            _ => *self.groups.get(number - 1)?,
+        };
+        let (start, end) = locations.get(index)?;
+        Some(Found { start, end })
+    }
+}
+
+/// `source` with what follows a backslash left out, which isn't counted
+/// as a capital by `smartcase`, as in Vim: `\S` is a class, not an `S`.
+fn capitals(source: &str) -> String {
+    let mut kept = String::with_capacity(source.len());
+    let mut chars = source.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            // `\_x` and `\%x` are one escape.
+            if matches!(chars.next(), Some('_' | '%')) {
+                chars.next();
+            }
+            continue;
+        }
+        kept.push(ch);
+    }
+    kept
+}
+
+/// Escapes `text`, so a pattern matches it as it is, in Vim's `magic`.
+pub(crate) fn escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '\\' | '/' | '.' | '*' | '$' | '^' | '~' | '[' | ']') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+/// A pattern translated into the regex crate's syntax.
+#[derive(Debug)]
+struct Translated {
+    regex: String,
+    groups: Vec<usize>,
+    focus: Option<usize>,
+    /// Whether `\C` (`true`) or `\c` said how to match case.
+    case: Option<bool>,
+    multiline: bool,
+}
+
+/// How much of a pattern is special without a backslash, as `\v`, `\m`,
+/// `\M` and `\V` say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Magic {
+    Very,
+    On,
+    Off,
+    VeryOff,
+}
+
+/// One piece of a pattern, read with its backslash, if it has one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Token {
+    ch: char,
+    /// Whether it's special, as the magic says of it with or without its
+    /// backslash.
+    special: bool,
+    /// Whether it had a backslash.
+    escaped: bool,
+}
+
+/// Whether `ch`, with a backslash if `escaped`, is special in `magic`.
+/// Letters and digits after a backslash are escapes of their own, read
+/// apart.
+fn is_special(ch: char, escaped: bool, magic: Magic) -> bool {
+    const ALWAYS: &str = "^$";
+    const MAGIC: &str = ".*[~";
+    match magic {
+        Magic::Very => {
+            !escaped && !ch.is_ascii_alphanumeric() && ch != '_' && ch.is_ascii_punctuation()
+        }
+        Magic::On => {
+            if escaped {
+                !ALWAYS.contains(ch) && !MAGIC.contains(ch)
+            } else {
+                ALWAYS.contains(ch) || MAGIC.contains(ch)
+            }
+        }
+        Magic::Off => {
+            if escaped {
+                !ALWAYS.contains(ch)
+            } else {
+                ALWAYS.contains(ch)
+            }
+        }
+        Magic::VeryOff => escaped,
+    }
+}
+
+/// A class of characters, as `\s` or `\d` names one: what's in it, as the
+/// inside of a regex class, and whether that's what's left out.
+/// Capitals and small letters, `\u`, `\l` and their opposites, match case
+/// whatever `ignorecase` says, as in Vim (see [`class_atom`]).
+fn class(ch: char) -> Option<(&'static str, bool)> {
+    Some(match ch {
+        's' => (r" \t", false),
+        'S' => (r" \t", true),
+        'd' => ("0-9", false),
+        'D' => ("0-9", true),
+        'w' => ("0-9A-Za-z_", false),
+        'W' => ("0-9A-Za-z_", true),
+        'a' => ("A-Za-z", false),
+        'A' => ("A-Za-z", true),
+        'l' => ("a-z", false),
+        'L' => ("a-z", true),
+        'u' => ("A-Z", false),
+        'U' => ("A-Z", true),
+        'x' => ("0-9A-Fa-f", false),
+        'X' => ("0-9A-Fa-f", true),
+        'o' => ("0-7", false),
+        'O' => ("0-7", true),
+        'h' => ("A-Za-z_", false),
+        'H' => ("A-Za-z_", true),
+        // Keywords and identifiers, as `iskeyword`'s default reads them,
+        // with letters beyond ASCII; then without digits.
+        'k' | 'i' => (r"\w", false),
+        'K' | 'I' => (r"\w&&[^0-9]", false),
+        // File names, as `isfname`'s default reads them.
+        'f' => (r"\w/.\-+,#$%~=", false),
+        'F' => (r"\w/.\-+,#$%~=&&[^0-9]", false),
+        // Printable characters.
+        'p' => (r"^\p{Cc}", false),
+        'P' => (r"^\p{Cc}0-9", false),
+        _ => return None,
+    })
+}
+
+/// A class as a regex, taking line breaks too if `breaks`, as `\_` says.
+/// One that leaves characters out never takes a line break unless told.
+/// A line break is an alternative of its own, as the inside can be an
+/// intersection (`\w&&[^0-9]`), which a `\n` added to it would join.
+fn class_regex(inside: &str, negated: bool, breaks: bool) -> String {
+    match (negated, breaks) {
+        (false, false) => format!("[{inside}]"),
+        (false, true) => format!(r"(?:[{inside}]|\n)"),
+        (true, false) => format!(r"[^{inside}\n]"),
+        (true, true) => format!("[^{inside}]"),
+    }
+}
+
+/// The class `\ch` names, as a regex, taking line breaks too if `breaks`.
+fn class_atom(ch: char, breaks: bool) -> Option<String> {
+    let (inside, negated) = class(ch)?;
+    let regex = class_regex(inside, negated, breaks);
+    // Case matters to these, whatever `ignorecase` says.
+    Some(if matches!(ch, 'u' | 'U' | 'l' | 'L') {
+        format!("(?-i:{regex})")
+    } else {
+        regex
+    })
+}
+
+/// The reader of a pattern, writing the regex as it goes.
+// What's been read, not states of one machine.
+#[allow(clippy::struct_excessive_bools)]
+struct Reader<'a> {
+    source: &'a str,
+    rest: std::str::Chars<'a>,
+    magic: Magic,
+    out: String,
+    /// The regex's group number of each of Vim's groups so far, and where
+    /// in `out` each opened.
+    groups: Vec<(usize, usize)>,
+    /// How many groups the regex has opened.
+    opened: usize,
+    /// How deep in groups the reader is.
+    depth: usize,
+    /// Where in `out` `\zs` and `\ze` were, at the top level.
+    zs: Option<usize>,
+    ze: Option<usize>,
+    /// Whether the top level has a `\|`.
+    alternatives: bool,
+    case: Option<bool>,
+    multiline: bool,
+    /// Whether what's been read so far could be followed by `^` as the
+    /// line's start: nothing, or a group's start or `\|`.
+    at_start: bool,
+    /// Whether the last thing written can't take a `*`, which is then
+    /// itself: the pattern's start, or `^`.
+    no_repeat: bool,
+}
+
+/// Translates `source`, with `~` standing for `tilde`.
+fn translate(source: &str, tilde: &str) -> Result<Translated, String> {
+    let mut reader = Reader {
+        source,
+        rest: source.chars(),
+        magic: Magic::On,
+        out: String::with_capacity(source.len() * 2),
+        groups: Vec::new(),
+        opened: 0,
+        depth: 0,
+        zs: None,
+        ze: None,
+        alternatives: false,
+        case: None,
+        multiline: false,
+        at_start: true,
+        no_repeat: true,
+    };
+    while let Some(token) = reader.token() {
+        reader.read(token, tilde)?;
+    }
+    if reader.depth > 0 {
+        return Err(format!("{source} opens a group it doesn't close"));
+    }
+    reader.finish()
+}
+
+impl Reader<'_> {
+    /// The next piece of the pattern, if there's more.
+    fn token(&mut self) -> Option<Token> {
+        let ch = self.rest.next()?;
+        if ch == '\\' {
+            let Some(next) = self.rest.next() else {
+                // A backslash at the end is itself.
+                return Some(Token {
+                    ch: '\\',
+                    special: false,
+                    escaped: true,
+                });
+            };
+            return Some(Token {
+                ch: next,
+                special: !next.is_ascii_alphanumeric()
+                    && next != '_'
+                    && is_special(next, true, self.magic),
+                escaped: true,
+            });
+        }
+        // In `\V`, `^` is the line's start at the pattern's start, and `$`
+        // its end at the end, as in Vim.
+        let anchor = self.magic == Magic::VeryOff
+            && ((ch == '^' && self.at_start) || (ch == '$' && self.dollar_ends()));
+        Some(Token {
+            ch,
+            special: anchor || is_special(ch, false, self.magic),
+            escaped: false,
+        })
+    }
+
+    /// What's left of the pattern, unread.
+    fn peek(&self) -> Option<char> {
+        self.rest.clone().next()
+    }
+
+    /// Whether what's left starts with a `$` that ends the pattern or a
+    /// branch of it, so is the line's end.
+    fn dollar_ends(&self) -> bool {
+        let rest = self.rest.as_str();
+        if rest.is_empty() {
+            return true;
+        }
+        let bare = |text: &str| match self.magic {
+            Magic::Very => rest.starts_with(text),
+            _ => rest
+                .strip_prefix('\\')
+                .is_some_and(|rest| rest.starts_with(text)),
+        };
+        bare("|") || bare(")") || rest.starts_with("\\n")
+    }
+
+    fn literal(&mut self, ch: char) {
+        let mut buffer = [0; 4];
+        self.out
+            .push_str(&regex::escape(ch.encode_utf8(&mut buffer)));
+        self.wrote();
+    }
+
+    /// Notes that an atom was written, which can take a `*`.
+    fn wrote(&mut self) {
+        self.at_start = false;
+        self.no_repeat = false;
+    }
+
+    fn read(&mut self, token: Token, tilde: &str) -> Result<(), String> {
+        let Token {
+            ch,
+            special,
+            escaped,
+        } = token;
+        if escaped && (ch.is_ascii_alphanumeric() || ch == '_') {
+            return self.escape(ch);
+        }
+        if !special {
+            self.literal(ch);
+            return Ok(());
+        }
+        match ch {
+            '^' => {
+                if self.at_start {
+                    self.out.push('^');
+                    self.no_repeat = true;
+                    self.at_start = false;
+                } else {
+                    self.literal('^');
+                }
+            }
+            '$' => {
+                if self.dollar_ends() {
+                    self.out.push('$');
+                    self.wrote();
+                } else {
+                    self.literal('$');
+                }
+            }
+            '.' => {
+                self.out.push('.');
+                self.wrote();
+            }
+            '*' | '+' | '=' | '?' if self.no_repeat => self.literal(ch),
+            '*' => self.out.push('*'),
+            '+' => self.out.push('+'),
+            '=' | '?' => self.out.push('?'),
+            '{' => self.interval()?,
+            '[' => self.bracket(false),
+            '~' => {
+                // As one atom, so `~*` repeats all of it.
+                self.out.push_str("(?:");
+                self.out.push_str(&regex::escape(tilde));
+                self.out.push(')');
+                self.wrote();
+            }
+            '(' => self.open(true),
+            ')' => {
+                if self.depth == 0 {
+                    return Err(format!("{} closes a group it didn't open", self.source));
+                }
+                self.depth -= 1;
+                self.out.push(')');
+                self.wrote();
+            }
+            '|' => {
+                if self.depth == 0 {
+                    self.alternatives = true;
+                }
+                self.out.push('|');
+                self.at_start = true;
+                self.no_repeat = true;
+            }
+            '<' => {
+                self.out.push_str(r"\b{start}");
+                self.no_repeat = true;
+            }
+            '>' => {
+                self.out.push_str(r"\b{end}");
+                self.no_repeat = true;
+            }
+            '%' => self.percent()?,
+            '@' => return Err(format!("{}: \\@ lookaround isn't supported", self.source)),
+            '&' => return Err(format!("{}: \\& isn't supported", self.source)),
+            _ => self.literal(ch),
+        }
+        Ok(())
+    }
+
+    /// Opens a group, which `\1` and its kin can name if `capturing`.
+    fn open(&mut self, capturing: bool) {
+        if capturing {
+            self.opened += 1;
+            self.groups.push((self.opened, self.out.len()));
+            self.out.push('(');
+        } else {
+            self.out.push_str("(?:");
+        }
+        self.depth += 1;
+        self.at_start = true;
+        self.no_repeat = true;
+    }
+
+    /// A letter or digit after a backslash.
+    fn escape(&mut self, ch: char) -> Result<(), String> {
+        match ch {
+            'n' => {
+                self.out.push_str(r"\n");
+                self.multiline = true;
+                self.wrote();
+                self.at_start = true;
+            }
+            't' => self.push_atom(r"\t"),
+            'e' => self.push_atom(r"\x1B"),
+            'r' => self.push_atom(r"\r"),
+            'b' => self.push_atom(r"\x08"),
+            'v' => self.magic = Magic::Very,
+            'm' => self.magic = Magic::On,
+            'M' => self.magic = Magic::Off,
+            'V' => self.magic = Magic::VeryOff,
+            'c' => self.case = Some(false),
+            'C' => self.case = Some(true),
+            // Combining characters are matched as they are.
+            'Z' => {}
+            'z' => match self.rest.next() {
+                Some('s') => self.focus_mark(true)?,
+                Some('e') => self.focus_mark(false)?,
+                _ => {
+                    return Err(format!(
+                        "{}: \\z isn't supported but as \\zs and \\ze",
+                        self.source
+                    ));
+                }
+            },
+            '_' => self.underscore()?,
+            '1'..='9' => {
+                return Err(format!(
+                    "{}: \\{ch} in a pattern isn't supported, only in a replacement",
+                    self.source
+                ));
+            }
+            _ => match class_atom(ch, false) {
+                Some(regex) => self.push_atom(&regex),
+                None => {
+                    return Err(format!("{}: \\{ch} isn't supported", self.source));
+                }
+            },
+        }
+        Ok(())
+    }
+
+    fn push_atom(&mut self, regex: &str) {
+        self.out.push_str(regex);
+        self.wrote();
+    }
+
+    /// `\zs`, if `start`, or `\ze`: where what matches starts or ends.
+    fn focus_mark(&mut self, start: bool) -> Result<(), String> {
+        if self.depth > 0 {
+            return Err(format!(
+                "{}: \\zs and \\ze are supported only outside groups",
+                self.source
+            ));
+        }
+        let at = Some(self.out.len());
+        if start {
+            self.zs = at;
+        } else {
+            self.ze = at;
+        }
+        self.no_repeat = true;
+        Ok(())
+    }
+
+    /// `\_` and what follows: a class, or `.`, `^`, `$` or `[`, taking
+    /// line breaks too.
+    fn underscore(&mut self) -> Result<(), String> {
+        let Some(ch) = self.rest.next() else {
+            return Err(format!("{}: \\_ needs a class after it", self.source));
+        };
+        self.multiline = true;
+        match ch {
+            '.' => self.push_atom(r"(?s:.)"),
+            '^' => {
+                self.out.push('^');
+                self.no_repeat = true;
+            }
+            '$' => self.push_atom("$"),
+            '[' => self.bracket(true),
+            _ => match class_atom(ch, true) {
+                Some(regex) => self.push_atom(&regex),
+                None => return Err(format!("{}: \\_{ch} isn't supported", self.source)),
+            },
+        }
+        Ok(())
+    }
+
+    /// `\{` and what follows, to `}`: how many times the last atom goes.
+    fn interval(&mut self) -> Result<(), String> {
+        let rest = self.rest.as_str();
+        let Some(end) = rest.find('}') else {
+            return Err(format!("{}: \\{{ isn't closed with }}", self.source));
+        };
+        let inside = rest[..end].strip_suffix('\\').unwrap_or(&rest[..end]);
+        for _ in rest[..=end].chars() {
+            self.rest.next();
+        }
+        let (lazy, inside) = match inside.strip_prefix('-') {
+            Some(inside) => (true, inside),
+            None => (false, inside),
+        };
+        let number = |text: &str| -> Result<Option<u32>, String> {
+            if text.is_empty() {
+                return Ok(None);
+            }
+            (text.parse().map(Some))
+                .map_err(|_| format!("{}: \\{{{inside}}} isn't a count", self.source))
+        };
+        let repeat = match inside.split_once(',') {
+            None => match number(inside)? {
+                None => "*".to_owned(),
+                Some(times) => format!("{{{times}}}"),
+            },
+            Some((least, most)) => match (number(least)?, number(most)?) {
+                (None, None) => "*".to_owned(),
+                (least, None) => format!("{{{},}}", least.unwrap_or(0)),
+                (least, Some(most)) => format!("{{{},{most}}}", least.unwrap_or(0)),
+            },
+        };
+        if self.no_repeat {
+            return Err(format!("{}: \\{{ follows nothing to repeat", self.source));
+        }
+        self.out.push_str(&repeat);
+        if lazy {
+            self.out.push('?');
+        }
+        Ok(())
+    }
+
+    /// `\%` and what follows.
+    fn percent(&mut self) -> Result<(), String> {
+        match self.rest.next() {
+            Some('(') => self.open(false),
+            // The file's start and end: a match can't be found a line at
+            // a time.
+            Some('^') => {
+                self.multiline = true;
+                self.push_atom(r"\A");
+            }
+            Some('$') => {
+                self.multiline = true;
+                self.push_atom(r"\z");
+            }
+            Some(base @ ('d' | 'o' | 'x' | 'u' | 'U')) => {
+                let (radix, most) = match base {
+                    'd' => (10, 10),
+                    'o' => (8, 11),
+                    'x' => (16, 2),
+                    'u' => (16, 4),
+                    _ => (16, 8),
+                };
+                let mut digits = String::new();
+                while digits.len() < most
+                    && let Some(digit) = self.peek().filter(|ch| ch.is_digit(radix))
+                {
+                    digits.push(digit);
+                    self.rest.next();
+                }
+                let ch = (u32::from_str_radix(&digits, radix).ok())
+                    .and_then(char::from_u32)
+                    .ok_or_else(|| {
+                        format!("{}: \\%{base}{digits} isn't a character", self.source)
+                    })?;
+                self.literal(ch);
+            }
+            Some(ch) => return Err(format!("{}: \\%{ch} isn't supported", self.source)),
+            None => return Err(format!("{}: \\% needs something after it", self.source)),
+        }
+        Ok(())
+    }
+
+    /// `[` and what follows, to its `]`, as a class, taking line breaks
+    /// too if `breaks`. Without a `]` to close it, it's itself.
+    fn bracket(&mut self, breaks: bool) {
+        let rest = self.rest.as_str();
+        let Some((inside, len)) = bracket_end(rest) else {
+            self.literal('[');
+            return;
+        };
+        for _ in rest[..len].chars() {
+            self.rest.next();
+        }
+        let (negated, inside) = match inside.strip_prefix('^') {
+            Some(inside) => (true, inside),
+            None => (false, inside),
+        };
+        let mut class = String::with_capacity(inside.len() * 2);
+        let mut chars = inside.chars().peekable();
+        let mut first = true;
+        while let Some(ch) = chars.next() {
+            match ch {
+                '[' if chars.peek() == Some(&':') => {
+                    // A named class, `[:alpha:]`, which the engine reads.
+                    let mut name = String::from("[:");
+                    chars.next();
+                    for ch in chars.by_ref() {
+                        name.push(ch);
+                        if ch == ']' {
+                            break;
+                        }
+                    }
+                    class.push_str(&name);
+                }
+                '-' if !first && chars.peek().is_some() => class.push('-'),
+                '\\' => {
+                    let escaped = match chars.next() {
+                        Some('e') => '\u{1b}',
+                        Some('t') => '\t',
+                        Some('r') => '\r',
+                        Some('b') => '\u{8}',
+                        Some('n') => '\n',
+                        Some(ch @ ('\\' | ']' | '^' | '-')) => ch,
+                        Some(base @ ('d' | 'o' | 'x' | 'u' | 'U'))
+                            if let Some(ch) = numbered(base, &mut chars) =>
+                        {
+                            ch
+                        }
+                        Some(other) => {
+                            // Any other is itself, backslash and all.
+                            class.push_str(r"\\");
+                            other
+                        }
+                        None => '\\',
+                    };
+                    push_class_char(&mut class, escaped);
+                }
+                _ => push_class_char(&mut class, ch),
+            }
+            first = false;
+        }
+        if class.is_empty() {
+            self.literal('[');
+            return;
+        }
+        let regex = class_regex(&class, negated, breaks);
+        self.push_atom(&regex);
+    }
+
+    /// The regex, with `\zs` and `\ze` making a group of what's between
+    /// them.
+    fn finish(self) -> Result<Translated, String> {
+        let Self {
+            mut out,
+            groups,
+            zs,
+            ze,
+            alternatives,
+            case,
+            multiline,
+            source,
+            ..
+        } = self;
+        if (zs.is_some() || ze.is_some()) && alternatives {
+            return Err(format!(
+                "{source}: \\zs and \\ze aren't supported with \\| outside a group"
+            ));
+        }
+        let mut focus = None;
+        // The groups opened from where the focus opens come after it.
+        let mut start = usize::MAX;
+        if zs.is_some() || ze.is_some() {
+            start = zs.unwrap_or(0);
+            let end = ze.unwrap_or(out.len()).max(start);
+            out.insert(end, ')');
+            out.insert(start, '(');
+            focus = Some(groups.iter().filter(|&&(_, at)| at < start).count() + 1);
+        }
+        let groups = (groups.into_iter())
+            .map(|(number, at)| if at >= start { number + 1 } else { number })
+            .collect();
+        Ok(Translated {
+            regex: out,
+            groups,
+            focus,
+            case,
+            multiline,
+        })
+    }
+}
+
+/// The character `\d123`, `\o40`, `\x20`, `\u20AC` or `\U...` in a class
+/// names, its digits read from `chars`, if they make one. Without digits,
+/// nothing is read, and it's itself.
+fn numbered(base: char, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<char> {
+    let (radix, most) = match base {
+        'd' => (10, 10),
+        'o' => (8, 11),
+        'x' => (16, 2),
+        'u' => (16, 4),
+        _ => (16, 8),
+    };
+    let mut digits = String::new();
+    while digits.len() < most
+        && let Some(&digit) = chars.peek()
+        && digit.is_digit(radix)
+    {
+        digits.push(digit);
+        chars.next();
+    }
+    if digits.is_empty() {
+        return None;
+    }
+    u32::from_str_radix(&digits, radix)
+        .ok()
+        .and_then(char::from_u32)
+}
+
+/// Adds `ch` to a class being written, escaped as the engine needs.
+fn push_class_char(class: &mut String, ch: char) {
+    let mut buffer = [0; 4];
+    class.push_str(&regex::escape(ch.encode_utf8(&mut buffer)));
+}
+
+/// The inside of the class that starts `rest`, just after its `[`, and how
+/// many bytes it takes with its `]`, if it's closed. A `]` first, or after
+/// `^`, is itself.
+fn bracket_end(rest: &str) -> Option<(&str, usize)> {
+    let bytes = rest.as_bytes();
+    let mut at = 0;
+    if bytes.first() == Some(&b'^') {
+        at += 1;
+    }
+    if bytes.get(at) == Some(&b']') {
+        at += 1;
+    }
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'[' if bytes.get(at + 1) == Some(&b':') => {
+                let close = rest[at..].find(":]")?;
+                at += close + 2;
+            }
+            b']' => return Some((&rest[..at], at + 1)),
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn regex(source: &str) -> String {
+        translate(source, "TILDE").unwrap().regex
+    }
+
+    /// Every match of `source` in `text`, as Vim would find them.
+    fn matches(source: &str, text: &str) -> Vec<String> {
+        let pattern = Pattern::new(source, Matching::Exact, "TILDE").unwrap();
+        let mut found = Vec::new();
+        let mut at = 0;
+        while at <= text.len()
+            && let Some(one) = pattern.find_at(text, at)
+        {
+            found.push(text[one.start..one.end].to_owned());
+            at = if one.end > one.start {
+                one.end
+            } else {
+                one.end + 1
+            };
+        }
+        found
+    }
+
+    #[test]
+    fn magic_is_vims_default() {
+        assert_eq!(matches("a.c", "abc a.c"), ["abc", "a.c"]);
+        assert_eq!(matches("a\\.c", "abc a.c"), ["a.c"]);
+        // Literal in `magic`, special with a backslash.
+        assert_eq!(matches("a+", "aa a+"), ["a+"]);
+        assert_eq!(matches("a\\+", "aa a+"), ["aa", "a"]);
+        assert_eq!(matches("(c)", "(c) c"), ["(c)"]);
+        assert_eq!(matches("\\(c\\)", "(c) c"), ["c", "c"]);
+        assert_eq!(matches("{d}|e", "{d}|e"), ["{d}|e"]);
+        assert_eq!(matches("a\\|b", "abc"), ["a", "b"]);
+        assert_eq!(matches("ab\\=c", "ac abc abbc"), ["ac", "abc"]);
+        assert_eq!(matches("ab\\?c", "ac abc"), ["ac", "abc"]);
+        assert_eq!(matches("a\\{2}", "aaaaa"), ["aa", "aa"]);
+        assert_eq!(matches("a\\{2,}", "a aaa"), ["aaa"]);
+        assert_eq!(matches("a\\{,2}b", "aaab"), ["aab"]);
+        assert_eq!(matches("a\\{-1,}", "aaa"), ["a", "a", "a"]);
+        assert_eq!(matches("a\\{-}b", "aab"), ["aab"]);
+    }
+
+    #[test]
+    fn caret_dollar_and_star_are_special_only_where_vim_says() {
+        assert_eq!(matches("a^b", "a^b"), ["a^b"]);
+        assert_eq!(matches("a$b", "a$b"), ["a$b"]);
+        assert_eq!(matches("*a", "*a"), ["*a"]);
+        assert_eq!(matches("^*", "*a"), ["*"]);
+        assert_eq!(matches("^a", "ab\nab"), ["a", "a"]);
+        assert_eq!(matches("b$", "ab\nab"), ["b", "b"]);
+        assert_eq!(matches("x\\|^a", "ab xa"), ["a", "x"]);
+        assert_eq!(matches("\\(^a\\)", "ab ba"), ["a"]);
+        assert_eq!(matches("b$\\|x", "ab\nx"), ["b", "x"]);
+        assert_eq!(matches("b$\\|x", "ab x"), ["x"]);
+    }
+
+    #[test]
+    fn very_magic_and_very_nomagic() {
+        assert_eq!(matches("\\v(\\a+)(\\d{2})", "ab12 cd"), ["ab12"]);
+        assert_eq!(matches("\\va|b", "abc"), ["a", "b"]);
+        assert_eq!(matches("\\v<cat>", "cat concat"), ["cat"]);
+        assert_eq!(matches("\\Va.c", "abc a.c"), ["a.c"]);
+        assert_eq!(matches("\\Va\\.c", "abc a.c"), ["abc", "a.c"]);
+        assert_eq!(matches("\\Ma*b", "aab a*b"), ["a*b"]);
+        assert_eq!(matches("\\Ma\\*b", "aab a*b"), ["aab", "b"]);
+    }
+
+    #[test]
+    fn classes_and_brackets_never_take_a_line_break_unless_told() {
+        assert_eq!(matches("[^x]*", "ab\ncd"), ["ab", "", "cd", ""]);
+        assert_eq!(matches("\\S\\+", "ab\ncd"), ["ab", "cd"]);
+        assert_eq!(matches("\\_S\\+", "ab\ncd"), ["ab\ncd"]);
+        assert_eq!(matches("a\\_.b", "a\nb"), ["a\nb"]);
+        assert_eq!(matches("a\\nb", "a\nb"), ["a\nb"]);
+        assert_eq!(matches("\\_[ab]\\+", "ab\nba"), ["ab\nba"]);
+        assert_eq!(matches("[]\\-\\\\]", "a]b-c\\d"), ["]", "-", "\\"]);
+        assert_eq!(matches("[a-c[:digit:]]\\+", "ab9z"), ["ab9"]);
+        assert_eq!(matches("[[]", "a[b"), ["["]);
+        assert_eq!(matches("a[b", "a[b"), ["a[b"]);
+        assert_eq!(matches("\\d\\+", "ab12"), ["12"]);
+        assert_eq!(matches("\\w\\+", "é ab_1"), ["ab_1"]);
+        assert_eq!(matches("\\k\\+", "é ab_1"), ["é", "ab_1"]);
+        assert_eq!(matches("\\u\\l", "Ab aB"), ["Ab"]);
+        assert_eq!(matches("\\%x41\\%u00e9", "Aé"), ["Aé"]);
+    }
+
+    #[test]
+    fn tilde_is_the_last_replacement_and_zs_ze_narrow_the_match() {
+        assert_eq!(matches("x~", "xTILDE"), ["xTILDE"]);
+        assert_eq!(matches("\\~", "a~"), ["~"]);
+        assert_eq!(matches("foo\\zsbar", "foobar bar"), ["bar"]);
+        assert_eq!(matches("foo\\zebar", "foobar foo"), ["foo"]);
+        let pattern = Pattern::new("\\(a\\)\\zs\\(b\\)", Matching::Exact, "").unwrap();
+        let mut locations = pattern.locations();
+        pattern.captures_at("ab", 0, &mut locations).unwrap();
+        assert_eq!(
+            pattern.group(&locations, 0),
+            Some(Found { start: 1, end: 2 })
+        );
+        assert_eq!(
+            pattern.group(&locations, 1),
+            Some(Found { start: 0, end: 1 })
+        );
+        assert_eq!(
+            pattern.group(&locations, 2),
+            Some(Found { start: 1, end: 2 })
+        );
+    }
+
+    #[test]
+    fn case_is_matched_as_the_options_and_the_pattern_say() {
+        let case = Case::default();
+        let found = |source: &str, matching| {
+            let pattern = Pattern::new(source, matching, "").unwrap();
+            pattern.find_at("Foo foo", 0).map(|found| found.start)
+        };
+        // Smart: a capital matches case, but not one after a backslash.
+        assert_eq!(found("foo", Matching::Typed(case)), Some(0));
+        assert_eq!(found("Foo", Matching::Typed(case)), Some(0));
+        assert_eq!(found("fOo", Matching::Typed(case)), None);
+        assert_eq!(found("\\Sfoo", Matching::Typed(case)), None);
+        assert_eq!(found("\\Soo", Matching::Typed(case)), Some(0));
+        assert_eq!(found("FOO\\c", Matching::Typed(case)), Some(0));
+        assert_eq!(found("\\Cfoo", Matching::Typed(case)), Some(4));
+        assert_eq!(found("foo", Matching::Exact), Some(4));
+        assert_eq!(found("FOO", Matching::Ignore), Some(0));
+        assert_eq!(found("FOo", Matching::Always(case)), Some(0));
+    }
+
+    #[test]
+    fn capitals_and_small_letters_match_case_whatever_ignorecase_says() {
+        let found = |source: &str, text: &str| {
+            let pattern = Pattern::new(source, Matching::Ignore, "").unwrap();
+            let mut found = Vec::new();
+            let mut at = 0;
+            while let Some(one) = pattern.find_at(text, at) {
+                found.push(text[one.start..one.end].to_owned());
+                at = one.end.max(one.start + 1);
+            }
+            found
+        };
+        // As Neovim: `\u` and `\l` keep to case, a typed `[A-Z]` doesn't.
+        assert_eq!(found("\\u", "aBc Def"), ["B", "D"]);
+        assert_eq!(found("\\l\\+", "aBc"), ["a", "c"]);
+        assert_eq!(found("\\U", "aB"), ["a"]);
+        assert_eq!(found("[A-Z]", "aB"), ["a", "B"]);
+        assert_eq!(found("\\_u", "a\nB"), ["\n", "B"]);
+    }
+
+    #[test]
+    fn ze_alone_and_the_rest_of_the_classes_and_escapes() {
+        // `\ze` without `\zs`: the match is up to it, and `\1` its group.
+        let pattern = Pattern::new("\\(a\\)b\\zec", Matching::Exact, "").unwrap();
+        let mut locations = pattern.locations();
+        let found = pattern.captures_at("abc", 0, &mut locations).unwrap();
+        assert_eq!(found, Found { start: 0, end: 2 });
+        assert_eq!(
+            pattern.group(&locations, 1),
+            Some(Found { start: 0, end: 1 })
+        );
+        // `\_K` and its kin take a line break too.
+        assert_eq!(matches("x\\_Ky", "x\ny"), ["x\ny"]);
+        assert_eq!(matches("x\\_I\\_F\\_p\\_Py", "x\n\n\n\ny"), ["x\n\n\n\ny"]);
+        // `~*` repeats all of the last replacement.
+        assert_eq!(matches("x~*", "xTILDETILDE"), ["xTILDETILDE"]);
+        // Numbered characters in a class.
+        assert_eq!(matches("[\\x41\\d66\\u0043]\\+", "ABCD"), ["ABC"]);
+        assert_eq!(matches("[\\x]", "x\\"), ["x", "\\"]);
+        // The file's start and end can't be found a line at a time.
+        assert!(
+            Pattern::new("\\%$", Matching::Exact, "")
+                .unwrap()
+                .multiline()
+        );
+        // A huge pattern is refused, rather than compiled.
+        let huge = "a\\{1000}".repeat(100);
+        assert!(Pattern::new(&huge, Matching::Exact, "").is_err());
+    }
+
+    #[test]
+    fn what_the_engine_cant_do_is_refused() {
+        for source in [
+            "\\(a\\)\\1",
+            "a\\@=",
+            "a\\&b",
+            "\\%V",
+            "\\(a\\zsb\\)",
+            "a\\zsb\\|c",
+            "\\(a",
+        ] {
+            assert!(
+                Pattern::new(source, Matching::Exact, "").is_err(),
+                "{source}"
+            );
+        }
+        assert_eq!(regex("\\v\\{"), r"\{");
+        assert_eq!(escape("a.b/c*"), "a\\.b\\/c\\*");
+    }
+}

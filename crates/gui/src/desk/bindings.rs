@@ -281,9 +281,14 @@ impl Desk {
     }
 
     fn open_palette(&mut self, purpose: Purpose) {
+        // From a selection in an editor, a command starts with its lines.
+        let text = match purpose {
+            Purpose::Command => self.editor_command_line(),
+            _ => String::new(),
+        };
         self.input = Some(Input {
             purpose,
-            text: String::new(),
+            text,
             selected: 0,
         });
     }

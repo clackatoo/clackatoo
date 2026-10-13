@@ -600,6 +600,7 @@ dependencies = [
  "png",
  "pollster",
  "pulldown-cmark",
+ "regex",
  "similar",
  "swash",
  "unicode-width",

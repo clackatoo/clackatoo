@@ -9,6 +9,7 @@
 
 use clackatoo_protocol::{Construct, Query};
 
+use super::case::Recase;
 use crate::keymap::{Base, Chord, Named};
 use crate::motion::Motion;
 use crate::objects::Object;
@@ -173,6 +174,8 @@ pub(crate) enum Operator {
     Indent,
     /// `<`: take as much off their indent.
     Dedent,
+    /// `g~`, `gu`, `gU` and `g?`: change its case.
+    Recase(Recase),
 }
 
 /// What an operator acts on.
@@ -342,6 +345,14 @@ pub(crate) enum Action {
         mark: char,
         exact: bool,
     },
+    /// `~`, with `tildeop` off: turn over the case of the character under
+    /// the cursor, and as many after it as the count, moving on past them.
+    Tilde,
+    /// `&`: the last `:s` again on the cursor's line, without its flags;
+    /// or `g&`, on every line, with them, and the last search's pattern.
+    RepeatSubstitute {
+        all: bool,
+    },
 }
 
 impl Action {
@@ -351,9 +362,14 @@ impl Action {
         matches!(
             self,
             Self::Operate(
-                Operator::Delete | Operator::Change | Operator::Indent | Operator::Dedent,
+                Operator::Delete
+                    | Operator::Change
+                    | Operator::Indent
+                    | Operator::Dedent
+                    | Operator::Recase(_),
                 _
             ) | Self::DeleteChars { .. }
+                | Self::Tilde
                 | Self::DeleteToEnd { .. }
                 | Self::Substitute
                 | Self::Put { .. }
@@ -393,13 +409,22 @@ pub(crate) enum Parsed {
     Command(Command),
 }
 
-/// Reads `keys` as a normal-mode command, or in `visual` mode, where
-/// operators act on the selection and `i` and `a` start an object.
+/// Reads `keys` as a normal-mode command, or in `visual` mode, with
+/// `tildeop` off.
+#[cfg(test)]
 pub(crate) fn parse(keys: &[Stroke], visual: bool) -> Parsed {
+    parse_with(keys, visual, false)
+}
+
+/// Reads `keys` as a normal-mode command, or in `visual` mode, where
+/// operators act on the selection and `i` and `a` start an object; `~`
+/// is an operator if `tildeop`.
+pub(crate) fn parse_with(keys: &[Stroke], visual: bool, tildeop: bool) -> Parsed {
     let mut reader = Reader {
         keys,
         at: 0,
         register: None,
+        tildeop,
     };
     let first = reader.count();
     // A register, and a count after it, which multiplies the first.
@@ -425,6 +450,25 @@ pub(crate) fn parse(keys: &[Stroke], visual: bool) -> Parsed {
     let Some(stroke) = reader.next() else {
         return Parsed::Incomplete;
     };
+    if stroke == Stroke::char('g') {
+        // `g~`, `gu`, `gU` and `g?`, which change case, and `g&`.
+        let recase = match reader.peek().and_then(Stroke::plain) {
+            Some('~') => Some(Recase::Toggle),
+            Some('u') => Some(Recase::Lower),
+            Some('U') => Some(Recase::Upper),
+            Some('?') => Some(Recase::Rot13),
+            Some('&') => return command(first, Action::RepeatSubstitute { all: true }),
+            _ => None,
+        };
+        if let Some(recase) = recase {
+            let key = reader.next().and_then(Stroke::plain).unwrap_or('~');
+            let operator = Operator::Recase(recase);
+            if visual {
+                return command(first, Action::Operate(operator, Target::Selection));
+            }
+            return reader.target(first, operator, key);
+        }
+    }
     if let Some(motion) = reader.motion(stroke) {
         return match motion {
             Read::More => Parsed::Incomplete,
@@ -495,6 +539,8 @@ struct Reader<'a> {
     at: usize,
     /// The register named before the command, if one was.
     register: Option<char>,
+    /// `~` is an operator.
+    tildeop: bool,
 }
 
 impl Reader<'_> {
@@ -557,6 +603,14 @@ impl Reader<'_> {
                 return Err(self.target(first, operator, ch));
             }
             'x' if visual => Action::Operate(Operator::Delete, Target::Selection),
+            '~' if visual => Action::Operate(Operator::Recase(Recase::Toggle), Target::Selection),
+            'u' if visual => Action::Operate(Operator::Recase(Recase::Lower), Target::Selection),
+            'U' if visual => Action::Operate(Operator::Recase(Recase::Upper), Target::Selection),
+            '~' if self.tildeop => {
+                return Err(self.target(first, Operator::Recase(Recase::Toggle), '~'));
+            }
+            '~' => Action::Tilde,
+            '&' => Action::RepeatSubstitute { all: false },
             's' if visual => Action::Operate(Operator::Change, Target::Selection),
             'i' | 'a' if visual => {
                 let Some(next) = self.next() else {
@@ -768,6 +822,14 @@ impl Reader<'_> {
             return Parsed::Incomplete;
         };
         if stroke == Stroke::char(key) {
+            return command(Target::Lines);
+        }
+        // `g~g~` as `g~~`, and their kin.
+        if matches!(operator, Operator::Recase(_))
+            && stroke == Stroke::char('g')
+            && self.peek() == Some(Stroke::char(key))
+        {
+            self.at += 1;
             return command(Target::Lines);
         }
         if let Some(kind @ ('\'' | '`')) = stroke.plain() {
@@ -1051,5 +1113,76 @@ mod tests {
         assert_eq!(read("[C"), command(None, piece(Construct::Class, true)));
         assert_eq!(read("]c"), command(None, Action::Hunk { backward: false }));
         assert!(piece(Construct::Function, true).jumps());
+    }
+
+    #[test]
+    fn case_operators_tilde_and_ampersand() {
+        let recase = |recase, target| Action::Operate(Operator::Recase(recase), target);
+        let lines = |recase| Action::Operate(Operator::Recase(recase), Target::Lines);
+        assert_eq!(read("g"), Parsed::Incomplete);
+        assert_eq!(read("gU"), Parsed::Incomplete);
+        assert_eq!(read("gUg"), Parsed::Incomplete);
+        assert_eq!(
+            read("gUiw"),
+            command(
+                None,
+                recase(
+                    Recase::Upper,
+                    Target::Object {
+                        object: Object::Word,
+                        inner: true
+                    }
+                )
+            )
+        );
+        assert_eq!(read("g~~"), command(None, lines(Recase::Toggle)));
+        assert_eq!(read("3guu"), command(Some(3), lines(Recase::Lower)));
+        assert_eq!(read("gUgU"), command(None, lines(Recase::Upper)));
+        assert_eq!(read("g?g?"), command(None, lines(Recase::Rot13)));
+        assert_eq!(
+            read("gUgg"),
+            command(None, recase(Recase::Upper, Target::Motion(Motion::First)))
+        );
+        assert_eq!(read("3~"), command(Some(3), Action::Tilde));
+        assert!(Action::Tilde.changes() && lines(Recase::Lower).changes());
+        assert_eq!(
+            read("&"),
+            command(None, Action::RepeatSubstitute { all: false })
+        );
+        assert_eq!(
+            read("g&"),
+            command(None, Action::RepeatSubstitute { all: true })
+        );
+        assert!(!Action::RepeatSubstitute { all: false }.changes());
+        // In visual mode, `~`, `u` and `U` act on the selection.
+        let visual = |text: &str| parse(&keys(text), true);
+        assert_eq!(
+            visual("u"),
+            command(None, recase(Recase::Lower, Target::Selection))
+        );
+        assert_eq!(
+            visual("U"),
+            command(None, recase(Recase::Upper, Target::Selection))
+        );
+        assert_eq!(
+            visual("~"),
+            command(None, recase(Recase::Toggle, Target::Selection))
+        );
+        assert_eq!(
+            visual("g?"),
+            command(None, recase(Recase::Rot13, Target::Selection))
+        );
+        // With `tildeop`, `~` takes a motion.
+        assert_eq!(
+            parse_with(&keys("~w"), false, true),
+            command(
+                None,
+                recase(Recase::Toggle, Target::Motion(Motion::WordStart))
+            )
+        );
+        assert_eq!(
+            parse_with(&keys("~~"), false, true),
+            command(None, lines(Recase::Toggle))
+        );
     }
 }

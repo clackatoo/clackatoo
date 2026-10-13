@@ -5,7 +5,8 @@
 //! a chat with an agent such as Claude Code, or `Editor PATH`, in a new
 //! tab, and with a mark before it, beside the focused pane (`|` right, `|<`
 //! left, `-` below, `-^` above). `Terminal@host` asks for it on another
-//! machine's daemon. A number moves to that tab. Lowercase words are the
+//! machine's daemon. A number goes to that line in an editor, as Vim's
+//! does, or else moves to that tab. Lowercase words are the
 //! window's own commands, and Vim's for files, `w`, `q`, `wq` and `e`, and
 //! for options, `set`, and for registers and marks, `registers` and
 //! `marks`, which list them. The finder's are capitalised too, as fzf.vim's are:
@@ -13,6 +14,10 @@
 //! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
 //! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
 //! `prev_hunk`.
+//!
+//! A command with a range of lines before it, or Vim's for lines, `s`,
+//! `&`, `~`, `g`, `v`, `d`, `y`, `m`, `t` and `normal`, is the focused
+//! editor's (see `editor::ex`).
 
 use clackatoo_protocol::Side;
 
@@ -35,7 +40,8 @@ pub(crate) enum Command {
     /// A pane editing the file at this path, which is from the directory
     /// of the focused pane.
     Edit { place: Place, path: String },
-    /// Move to this tab of the workspace shown, counting from 1.
+    /// A number alone: in an editor, go to that line, as Vim does; or
+    /// else move to this tab of the workspace shown, counting from 1.
     Tab(usize),
     /// Rename the workspace shown.
     Rename(String),
@@ -67,6 +73,9 @@ pub(crate) enum Command {
     /// `:marks`: the finder, on the marks the focused editor's file can go
     /// to.
     Marks,
+    /// One of the focused editor's commands, for lines, as typed: `:s`,
+    /// `:g`, `:d`, `:m` and their kin, with any range.
+    Editor(String),
 }
 
 /// Where a new pane goes.
@@ -115,7 +124,8 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 
 /// The window's own commands, for messages.
 const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
-                        w, q, e, Format, Files, Grep, Buffers, Diagnostics and Gitsigns";
+                        w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, Buffers, \
+                        Diagnostics and Gitsigns";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -141,6 +151,9 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     }
     if let Some(command) = file_command(word, argument) {
         return command;
+    }
+    if crate::editor::is_editor_command(line) {
+        return Ok(Command::Editor(line.to_owned()));
     }
     if word == "Gitsigns" {
         let names = || HUNK_ACTIONS.map(|(name, _)| name).join(", ");
@@ -172,7 +185,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     }
     if !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit()) {
         return match word.parse() {
-            Ok(0) | Err(_) => Err(format!("there's no tab {word}; tabs count from 1")),
+            Err(_) => Err(format!("there's no tab or line {word}")),
             Ok(number) => Ok(Command::Tab(number)),
         };
     }
@@ -361,7 +374,7 @@ mod tests {
     fn numbers_are_tabs() {
         assert_eq!(parse("1"), Ok(Command::Tab(1)));
         assert_eq!(parse(" 14 "), Ok(Command::Tab(14)));
-        assert!(parse("0").is_err());
+        assert_eq!(parse("0"), Ok(Command::Tab(0)));
         assert!(parse("99999999999999999999999").is_err());
         assert!(parse("2 3").is_err());
     }
@@ -398,6 +411,38 @@ mod tests {
         );
         assert!(parse("Gitsigns").unwrap_err().contains("preview_hunk"));
         assert!(parse("Gitsigns blame").unwrap_err().contains("reset_hunk"));
+    }
+
+    #[test]
+    fn ranges_and_vims_commands_for_lines_are_the_editors() {
+        for line in [
+            "s/a/b/",
+            "%s/a/b/g",
+            "'<,'>s/x/y/",
+            "10,20d",
+            "g/x/d",
+            "v/x/d",
+            "m0",
+            "t.",
+            "co$",
+            "normal Ax",
+            "&&",
+            "~",
+            ".,+3s",
+            "-2,.d",
+            "$d",
+            "/x/d",
+            "y a",
+        ] {
+            assert_eq!(parse(line), Ok(Command::Editor(line.to_owned())), "{line}");
+        }
+        // Numbers alone are tabs, and marks alone splits, as before.
+        assert_eq!(parse("3"), Ok(Command::Tab(3)));
+        assert!(matches!(parse("-"), Ok(Command::Open { .. })));
+        assert!(matches!(parse("-Terminal"), Ok(Command::Open { .. })));
+        assert_eq!(parse("set nowrap"), Ok(Command::Set("nowrap".into())));
+        assert_eq!(parse("marks"), Ok(Command::Marks));
+        assert!(parse("sx").is_err());
     }
 
     #[test]

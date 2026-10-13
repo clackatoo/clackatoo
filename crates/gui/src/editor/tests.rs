@@ -16,6 +16,7 @@ use crate::options::{CompleteAccept, Options};
 use crate::pane::Selection;
 use crate::render::{HighlightKind, Ink};
 
+mod substitute;
 mod wrapped;
 
 struct Setup {
@@ -84,8 +85,15 @@ impl Setup {
         for stroke in Stroke::read(keys) {
             self.editor
                 .typed(stroke, &mut self.copy, &mut self.shared, false);
+            self.follow_marks();
             self.serve();
         }
+    }
+
+    /// Moves the marks through the edits just made, as the desk does.
+    fn follow_marks(&mut self) {
+        let made = self.copy.take_made();
+        (self.shared.marks).edited(self.copy.path(), &made, self.copy.text());
     }
 
     /// Passes the window's changes to the daemon, and its answers back,

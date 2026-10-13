@@ -348,6 +348,14 @@ options! {
     ignorecase("ic"): bool = true;
     /// ...unless, with `ignorecase`, what's searched for has a capital.
     smartcase("scs"): bool = true;
+    /// While `:s` is typed, show what it would do, in place, as Neovim
+    /// does; and the matches of `:g`'s pattern. Nothing changes until
+    /// Enter, and Esc puts the view back. `none` shows nothing.
+    inccommand("icm"): InCommand = InCommand::NoSplit;
+    /// `~` is an operator, as `g~` is, taking a motion: `~w`. Off, it
+    /// turns over the case of the character under the cursor, and moves
+    /// on past it.
+    tildeop("top"): bool = false;
     /// `:w` formats the file first, as its language server does.
     formatonsave("fos"): bool = false;
     /// What's done when a file is opened in a language that isn't
@@ -396,6 +404,16 @@ choice! {
         /// The primary selection, `"*`.
         Unnamed = "unnamed",
         /// Neither.
+        Off = "none",
+    }
+}
+
+choice! {
+    /// What `inccommand` shows while `:s` is typed.
+    InCommand {
+        /// What it would do, in place.
+        NoSplit = "nosplit",
+        /// Nothing.
         Off = "none",
     }
 }

@@ -114,7 +114,12 @@ impl Jumps {
     /// in turn, which leave its text as `text`. Text put in where a place
     /// is goes before it, so a line opened above a place's line takes the
     /// place down with its line.
-    pub(super) fn edited(&mut self, path: &str, edits: &[Edit], text: &Rope) {
+    pub(super) fn edited(
+        &mut self,
+        path: &str,
+        edits: &[impl std::borrow::Borrow<Edit>],
+        text: &Rope,
+    ) {
         if edits.is_empty() {
             return;
         }

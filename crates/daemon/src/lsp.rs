@@ -298,7 +298,7 @@ impl LanguageServer {
             // text, which needs none.
             Sync::Full => vec![json!({ "text": after.to_string() })],
             Sync::Incremental if !self.ready => vec![json!({ "text": after.to_string() })],
-            Sync::Incremental => content_changes(edit, before, self.encoding),
+            Sync::Incremental => content_changes(edit, before, after, self.encoding),
         };
         if !self.ready {
             // Each held holds the whole text, so only the last is needed,
@@ -1254,12 +1254,24 @@ fn diagnostics(name: &str, params: Value) -> Option<Incoming> {
     })
 }
 
-/// `edit`, made to `before`, as the changes in a `didChange`. Each change
-/// is at a place in the text before the edit, but the server makes each to
-/// the text the one before left, so they go last first, and each is made
-/// where it was.
-fn content_changes(edit: &Edit, before: &Rope, encoding: Encoding) -> Vec<Value> {
+/// More changes than this in one edit go to a server as the whole text,
+/// as `:%s` can make hundreds of thousands, which a server takes far longer
+/// to read and make one by one than the text.
+const MOST_CHANGES: usize = 1000;
+
+/// `edit`, made to `before`, making `after`, as the changes in a
+/// `didChange`. Each change is at a place in the text before the edit, but
+/// the server makes each to the text the one before left, so they go last
+/// first, and each is made where it was. More than [`MOST_CHANGES`], or
+/// more text in them than the whole, go as the whole text instead.
+fn content_changes(edit: &Edit, before: &Rope, after: &Rope, encoding: Encoding) -> Vec<Value> {
     let changes: Vec<_> = edit.changes().collect();
+    let bytes: usize = (changes.iter())
+        .map(|(_, removed, inserted)| removed.len() + inserted.len())
+        .sum();
+    if changes.len() > MOST_CHANGES || bytes > after.len_bytes() {
+        return vec![json!({ "text": after.to_string() })];
+    }
     (changes.iter().rev())
         .map(|&(at, removed, inserted)| {
             let start = position(before, at, encoding);
@@ -1385,6 +1397,37 @@ mod tests {
         assert_eq!(place(&text, at(9, 0), Encoding::Utf8), text.len_bytes());
         assert_eq!(place(&text, at(0, 2), Encoding::Utf8), 1, "inside é");
         assert_eq!(place(&text, at(0, 3), Encoding::Utf16), 3, "inside 𝄞");
+    }
+
+    #[test]
+    fn many_changes_go_as_the_whole_text() {
+        let before = Rope::from_str(&"a\n".repeat(2000));
+        let after_text = "b\n".repeat(2000);
+        let after = Rope::from_str(&after_text);
+        let mut many = Edit::new();
+        for _ in 0..2000 {
+            many.delete("a").insert("b").retain(1);
+        }
+        let changes = content_changes(&many, &before, &after, Encoding::Utf8);
+        assert_eq!(changes, [json!({ "text": after_text })]);
+        // A few go as ranges, last first.
+        let mut few = Edit::new();
+        few.delete("a")
+            .insert("b")
+            .retain(1)
+            .delete("a")
+            .insert("b");
+        few.retain(before.len_bytes() - 3);
+        let changes = content_changes(&few, &before, &Rope::new(), Encoding::Utf8);
+        assert_eq!(changes.len(), 1, "more text in them than the whole");
+        let mut after_few = before.clone();
+        few.apply(&mut after_few).unwrap();
+        let changes = content_changes(&few, &before, &after_few, Encoding::Utf8);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(
+            changes[0]["range"]["start"],
+            json!({ "line": 1, "character": 0 })
+        );
     }
 
     #[test]
@@ -1600,7 +1643,7 @@ mod tests {
             .retain(1);
         let mut after = before.clone();
         edit.apply(&mut after).unwrap();
-        let sent = content_changes(&edit, &before, Encoding::Utf8);
+        let sent = content_changes(&edit, &before, &after, Encoding::Utf8);
         let range = |line, start, end| {
             json!({
                 "start": { "line": line, "character": start },

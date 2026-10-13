@@ -10,6 +10,7 @@
 //! a mark set or a file opened, is seen to before the next. A macro's keys
 //! come the same way, one at a time, from the desk (see [`super::macros`]).
 
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use clackatoo_protocol::{
@@ -19,7 +20,7 @@ use clackatoo_protocol::{
 use clackatoo_text::Edit;
 
 use super::jumps::{FilePlace, Jump, Jumps};
-use super::{Asked, Desk};
+use super::{Asked, Desk, Purpose};
 use crate::command::Place;
 use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Marks, Shared, Stroke};
 use crate::input::{KeptPress, KeyPress};
@@ -103,14 +104,14 @@ fn follow_places(
     jumps: &mut Jumps,
     marks: &mut Marks,
     copy: &BufferCopy,
-    made: &[Edit],
+    made: &[impl Borrow<Edit>],
     ours: bool,
 ) {
     let (path, text) = (copy.path(), copy.text());
     jumps.edited(path, made, text);
     marks.edited(path, made, text);
     if ours
-        && let Some(last) = made.last()
+        && let Some(last) = made.last().map(Borrow::borrow)
         && let Some((at, _, _)) = last.changes().last()
     {
         let at = last.map(at, clackatoo_text::Bias::Before);
@@ -714,6 +715,7 @@ impl Desk {
         let failed = editor.take_failed();
         let asked_macro = editor.take_macro();
         let made = copy.take_made();
+        let astray = copy.take_astray();
         for pane in &others {
             let editor = editors.panes.get_mut(pane).expect("just found");
             for edit in &made {
@@ -740,6 +742,10 @@ impl Desk {
         }
         if failed {
             self.stop_macro(None);
+        }
+        // Attaching again sends a fresh snapshot, which puts it right.
+        if astray && self.connected {
+            self.request(Request::AttachBuffer { buffer }, Asked::Quiet);
         }
         if let Some((keys, times)) = asked_macro {
             self.type_macro(&keys, times);
@@ -923,13 +929,57 @@ impl Desk {
     pub(crate) fn settle_editors(&mut self) {
         let Some(tab) = self.shown_tab() else { return };
         let shown: Vec<PaneId> = tab.layout.panes().iter().map(|pane| pane.id).collect();
+        // The command being typed, which the focused editor shows what it
+        // would do, as `inccommand` says.
+        let typing = (self.input.as_ref())
+            .filter(|input| input.purpose == Purpose::Command)
+            .map(|input| input.text.as_str());
+        let focused = self.shown.map(|shown| shown.pane);
         let editors = &mut self.editors;
         for pane in shown {
             if let Some(editor) = editors.panes.get_mut(&pane)
                 && let Some(copy) = editors.buffers.get(&editor.buffer())
             {
+                let line = typing.filter(|_| Some(pane) == focused);
+                editor.preview(line, copy, &editors.shared);
                 editor.settle(copy);
             }
+        }
+    }
+
+    /// What the command line starts with as `:` opens it: in an editor in
+    /// visual mode, `'<,'>`, the selection's lines, which it leaves.
+    pub(super) fn editor_command_line(&mut self) -> String {
+        let editors = &mut self.editors;
+        let Some(editor) = (self.shown).and_then(|shown| editors.panes.get_mut(&shown.pane)) else {
+            return String::new();
+        };
+        let Some(copy) = editors.buffers.get(&editor.buffer()) else {
+            return String::new();
+        };
+        editor
+            .command_line(copy, &mut editors.shared.marks)
+            .to_owned()
+    }
+
+    /// One of an editor's commands, such as `:s` or `:g`, typed after `:`,
+    /// done in the focused editor. One that can't be done is refused, which
+    /// stops a macro typing it, as in Vim.
+    pub(super) fn editor_command(&mut self, line: &str) {
+        let replaying = self.replaying();
+        let mut refused = None;
+        let done = self.in_focused_editor(|editor, copy, shared| {
+            editor
+                .ex(line, copy, shared, replaying)
+                .unwrap_or_else(|why| {
+                    refused = Some(why);
+                    Done::default()
+                })
+        });
+        if done.is_none() {
+            self.refuse(format!(":{line} is for an editor, and none has the focus"));
+        } else if let Some(why) = refused {
+            self.refuse(why);
         }
     }
 

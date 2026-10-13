@@ -1611,6 +1611,10 @@ impl Desk {
                     self.request(Request::NewWorkspace { name, terminal }, Asked::Pane);
                 }
             }
+            // In an editor, a number is a line, as in Vim.
+            Command::Tab(number) if self.focused_editor().is_some() => {
+                self.editor_command(&number.to_string());
+            }
             Command::Tab(number) => self.show_tab_numbered(shown.workspace, number),
             Command::Rename(name) => self.request(
                 Request::RenameWorkspace {
@@ -1631,6 +1635,7 @@ impl Desk {
             Command::Hunk(action) => self.editor_hunk(action),
             Command::Registers => self.show_registers(),
             Command::Marks => self.open_finder(crate::finder::Kind::Marks, String::new()),
+            Command::Editor(line) => self.editor_command(&line),
             Command::Reload | Command::Set(_) => {}
         }
     }
@@ -1642,12 +1647,10 @@ impl Desk {
             (self.workspaces.get(workspace)).map_or(&[][..], |workspace| &workspace.tabs[..]);
         match number.checked_sub(1).and_then(|index| tabs.get(index)) {
             Some(tab) => self.show_pane(tab.focused),
-            None => {
-                self.message = Some(match tabs.len() {
-                    1 => format!("there's no tab {number}; this workspace has one"),
-                    count => format!("there's no tab {number}; this workspace has {count}"),
-                });
-            }
+            None => self.refuse(match tabs.len() {
+                1 => format!("there's no tab {number}; this workspace has one"),
+                count => format!("there's no tab {number}; this workspace has {count}"),
+            }),
         }
     }
 
@@ -5593,5 +5596,70 @@ mod tests {
             times[4],
             times[0] * 1000.0 / 20_000.0
         );
+    }
+
+    #[test]
+    fn editor_commands_run_from_the_command_line_and_stop_a_macro_when_refused() {
+        let mut desk = editing("/t.txt", "x\nx\ny\nx\n");
+        type_text(&mut desk, "qa:s/x/-/");
+        enter(&mut desk);
+        type_text(&mut desk, "jq");
+        assert_eq!(editor_text(&desk), "-\nx\ny\nx\n");
+        // The third line has no x: the macro stops there, as in Vim.
+        type_text(&mut desk, "5@a");
+        assert_eq!(editor_text(&desk), "-\n-\ny\nx\n");
+        assert!(
+            desk.message
+                .as_deref()
+                .is_some_and(|message| message.contains("isn't in"))
+        );
+        // A mistake is said in the bar.
+        type_text(&mut desk, ":1,2frob");
+        enter(&mut desk);
+        assert!(
+            desk.message
+                .as_deref()
+                .is_some_and(|message| message.contains("frob"))
+        );
+    }
+
+    #[test]
+    fn the_command_being_typed_is_previewed_in_the_focused_editor_until_esc() {
+        let rows = |desk: &mut Desk| -> Vec<String> {
+            desk.settle_editors();
+            let editor = desk.editor(PaneId(1)).expect("an editor");
+            editor
+                .scene()
+                .0
+                .iter()
+                .map(|row| row.text().trim_end().to_owned())
+                .collect()
+        };
+        let mut desk = editing("/t.txt", "one two\n");
+        let before = rows(&mut desk);
+        type_text(&mut desk, ":%s/two/2/");
+        assert!(rows(&mut desk)[0].ends_with("one 2"));
+        assert_eq!(editor_text(&desk), "one two\n");
+        escape(&mut desk);
+        assert_eq!(rows(&mut desk), before);
+        // From a selection, the command line starts with its lines.
+        type_text(&mut desk, "V:");
+        assert!(matches!(desk.status(), Status::Typing { text, .. } if text == ":'<,'>▏"));
+        type_text(&mut desk, "s/one/1/");
+        enter(&mut desk);
+        assert_eq!(editor_text(&desk), "1 two\n");
+    }
+
+    #[test]
+    fn a_number_is_a_line_in_an_editor() {
+        let mut desk = editing("/t.txt", "1\n2\n3\n4\n");
+        type_text(&mut desk, ":3");
+        enter(&mut desk);
+        let (editor, copy) = desk.focused_editor().expect("an editor");
+        assert_eq!(editor.cursor_byte(copy), 4);
+        // Ctrl+O comes back, as from a jump.
+        ctrl(&mut desk, "o");
+        let (editor, copy) = desk.focused_editor().expect("an editor");
+        assert_eq!(editor.cursor_byte(copy), 0);
     }
 }
