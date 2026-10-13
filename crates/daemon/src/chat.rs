@@ -6,9 +6,11 @@
 //! [`ChatPatch`]es, which each viewer is sent from where it last was.
 //!
 //! The agent behind the chat is the server's: a chat asks for what it
-//! needs with [`Action`]s, and is told what the agent said.
+//! needs with [`Action`]s, and is told what the agent said. Agents differ
+//! in what they send: the chat takes what any of them sends, rather than
+//! asking which agent it is, so a new agent that sends the same works too.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol_schema::MaybeUndefined;
@@ -26,15 +28,20 @@ use clackatoo_protocol::{
 use serde_json::Value;
 
 use crate::agent::Opened;
+use crate::agents::AgentSpec;
 use crate::handover;
 
-/// The mode a new chat asks for, if the agent offers it: Claude Code's
-/// Auto, which decides itself what needs asking about (jack, 2026-10-08).
-const STARTING_MODE: &str = "auto";
+/// The most characters of a title the agent gives a conversation that a
+/// chat keeps, for its tab.
+const TITLE: usize = 80;
 
 /// How many changes a chat keeps for viewers that are behind. One further
 /// behind gets the whole chat again.
 const JOURNAL: usize = 4096;
+
+/// About the most a chat's journal keeps, in bytes, so a command's output
+/// streamed a piece at a time can't fill it.
+const JOURNAL_BYTES: usize = 2 * 1024 * 1024;
 
 /// The most of a tool's text a chat keeps, in bytes: the end of it, as
 /// the end of a command's output is where what went wrong is.
@@ -60,6 +67,24 @@ pub(crate) enum Action {
     },
     /// Change one of the agent's settings for the chat.
     Set { setting: String, value: String },
+    /// Install the chat's agent, as the user agreed to.
+    Install,
+}
+
+/// The answer to an install offer that installs.
+pub(crate) const INSTALL: &str = "install";
+
+/// What the chat's question is.
+#[derive(Debug)]
+enum Asking {
+    /// The agent's, in the request with this JSON-RPC ID.
+    Agent(Value),
+    /// The daemon's: whether to install the agent, which the chat waits
+    /// for.
+    Install,
+    /// The daemon's: whether to install the agent, which runs another way
+    /// meanwhile, so nothing waits for the answer.
+    Suggest,
 }
 
 /// Files a tool changed on disk itself, as the agent says once it has.
@@ -107,6 +132,8 @@ pub(crate) struct HostedChat {
     size: Size,
     title: String,
     cwd: String,
+    /// The agent's name, which the server finds it by.
+    agent: String,
     /// The agent's session, once it has made one.
     session: Option<String>,
     /// Whether the session is open in the agent now. It isn't before it's
@@ -115,14 +142,14 @@ pub(crate) struct HostedChat {
     /// A message sent while there's no session, to go once there is.
     queued: Option<String>,
     node: ChatNode,
-    /// The JSON-RPC ID of the request the agent's question came in.
-    asking: Option<Value>,
+    /// What the question waiting for an answer is.
+    asking: Option<Asking>,
     /// The values the user gave settings, by their IDs, which the chat
     /// asks for again whenever its session opens: the agent forgets them
     /// when it stops.
     chosen: Vec<(String, String)>,
     /// The mode a new chat asks for when its session first opens.
-    starting_mode: Option<&'static str>,
+    starting_mode: Option<String>,
     journal: Journal,
     /// What each tool of the turn being answered last said it changed in
     /// files, by its ID.
@@ -135,15 +162,22 @@ struct Journal {
     /// The number of the first change kept.
     first: u64,
     patches: VecDeque<ChatPatch>,
+    /// About how much the changes kept take, in bytes.
+    bytes: usize,
 }
 
 impl Journal {
+    /// Keeps `patch`, and lets the oldest go past the journal's bounds, of
+    /// changes and of bytes: a viewer that far behind gets the chat whole.
     fn push(&mut self, patch: ChatPatch) {
-        if self.patches.len() == JOURNAL {
-            self.patches.pop_front();
+        self.bytes += weight(&patch);
+        self.patches.push_back(patch);
+        while self.patches.len() > 1 && (self.patches.len() > JOURNAL || self.bytes > JOURNAL_BYTES)
+        {
+            let gone = self.patches.pop_front().expect("more than one");
+            self.bytes -= weight(&gone);
             self.first += 1;
         }
-        self.patches.push_back(patch);
     }
 
     /// The number the next change will get.
@@ -162,21 +196,26 @@ pub(crate) struct ChatSent {
 }
 
 impl HostedChat {
-    /// A chat in `cwd`, not yet with a session: the server is to get it
-    /// one.
-    pub(crate) fn new(id: TerminalId, size: Size, cwd: String) -> Self {
+    /// A chat with `agent`, in `cwd`, not yet with a session: the server
+    /// is to get it one. It's named after the agent until the agent names
+    /// the conversation.
+    pub(crate) fn new(id: TerminalId, size: Size, cwd: String, agent: &AgentSpec) -> Self {
         Self {
             id,
             size,
-            title: "agent".to_owned(),
+            title: agent.title.clone(),
             cwd,
+            agent: agent.name.clone(),
             session: None,
             link: Link::Opening,
             queued: None,
-            node: ChatNode::default(),
+            node: ChatNode {
+                agent: agent.title.clone(),
+                ..ChatNode::default()
+            },
             asking: None,
             chosen: Vec::new(),
-            starting_mode: Some(STARTING_MODE),
+            starting_mode: agent.starting_mode.clone(),
             journal: Journal::default(),
             diffs: Vec::new(),
         }
@@ -206,13 +245,15 @@ impl HostedChat {
                 .map(setting_to_handover)
                 .collect(),
             chosen: self.chosen,
+            agent: self.agent,
         }
     }
 
-    /// A chat the last build handed over.
-    pub(crate) fn resume(chat: handover::Chat) -> Self {
+    /// A chat the last build handed over, with `agent`, which is what
+    /// its name is now.
+    pub(crate) fn resume(chat: handover::Chat, agent: &AgentSpec) -> Self {
         let size = Size::new(chat.cols, chat.rows).unwrap_or(Size::new(80, 24).expect("valid"));
-        let mut resumed = Self::new(TerminalId(chat.id), size, chat.cwd);
+        let mut resumed = Self::new(TerminalId(chat.id), size, chat.cwd, agent);
         resumed.link = Link::Closed;
         resumed.title = chat.title;
         resumed.session = chat.session;
@@ -240,6 +281,11 @@ impl HostedChat {
         &self.cwd
     }
 
+    /// The agent's name.
+    pub(crate) fn agent(&self) -> &str {
+        &self.agent
+    }
+
     /// The agent's session, if it has made one.
     pub(crate) fn session(&self) -> Option<&str> {
         self.session.as_deref()
@@ -249,7 +295,7 @@ impl HostedChat {
         View {
             title: self.title.clone(),
             cwd: None,
-            root: Node::Chat(self.node.clone()),
+            root: Node::Chat(Box::new(self.node.clone())),
         }
     }
 
@@ -273,23 +319,40 @@ impl HostedChat {
             patches.push(Patch::Title(self.title.clone()));
         }
         let skip = usize::try_from(next - self.journal.first).expect("the journal is short");
+        let mut chat: Vec<Option<ChatPatch>> = Vec::new();
+        // Where each item's first whole value in this update is, which a
+        // later one takes the place of.
+        let mut items: HashMap<(u32, u32), usize> = HashMap::new();
         for patch in self.journal.patches.iter().skip(skip) {
-            // Pieces of the same words, streamed, go as one.
-            if let (
-                ChatPatch::Append { turn, item, text },
-                Some(Patch::Chat(ChatPatch::Append {
-                    turn: last_turn,
-                    item: last_item,
-                    text: last_text,
-                })),
-            ) = (patch, patches.last_mut())
-                && (turn, item) == (last_turn, last_item)
+            match patch {
+                ChatPatch::Turn { index, .. } => items.retain(|(turn, _), _| turn != index),
+                ChatPatch::Item { turn, item, .. } => {
+                    if let Some(&at) = items.get(&(*turn, *item)) {
+                        // What was added to it since is in this value.
+                        for later in &mut chat[at + 1..] {
+                            if later
+                                .as_ref()
+                                .is_some_and(|later| adds_to(later, *turn, *item))
+                            {
+                                *later = None;
+                            }
+                        }
+                        chat[at] = Some(patch.clone());
+                        continue;
+                    }
+                    items.insert((*turn, *item), chat.len());
+                }
+                _ => {}
+            }
+            // Pieces of the same words, or output, streamed, go as one.
+            if let Some(Some(last)) = chat.last_mut()
+                && merge(last, patch)
             {
-                last_text.push_str(text);
                 continue;
             }
-            patches.push(Patch::Chat(patch.clone()));
+            chat.push(Some(patch.clone()));
         }
+        patches.extend(chat.into_iter().flatten().map(Patch::Chat));
         sent.next = Some(end);
         (!patches.is_empty()).then_some(ViewUpdate::Patch(patches))
     }
@@ -303,12 +366,34 @@ impl HostedChat {
         match action {
             ChatAction::Send(text) => self.send(text, &mut actions),
             ChatAction::Stop => self.stop(&mut actions),
-            ChatAction::Answer(option) => {
-                if let Some(request) = self.asking.take() {
+            ChatAction::Answer(option) => match self.asking.take() {
+                Some(Asking::Agent(request)) => {
                     self.set_question(None);
                     actions.push(Action::Answer { request, option });
                 }
-            }
+                Some(Asking::Install) => {
+                    self.set_question(None);
+                    if option.as_deref() == Some(INSTALL) {
+                        self.installing();
+                        actions.push(Action::Install);
+                    } else {
+                        self.failed_to_connect(
+                            "it isn't installed. The next message offers to install it again.",
+                        );
+                    }
+                }
+                Some(Asking::Suggest) => {
+                    self.set_question(None);
+                    if option.as_deref() == Some(INSTALL) {
+                        self.set_notice(Some(format!(
+                            "Installing {}'s adapter. The chat carries on meanwhile.",
+                            self.node.agent
+                        )));
+                        actions.push(Action::Install);
+                    }
+                }
+                None => {}
+            },
             // Only a value the agent offers is kept, and asked for.
             ChatAction::Set { setting, value } => {
                 if self.set_value(&setting, &value) {
@@ -380,12 +465,22 @@ impl HostedChat {
             return;
         }
         // A question waiting is answered with none, as the protocol asks.
-        if let Some(request) = self.asking.take() {
-            self.set_question(None);
-            actions.push(Action::Answer {
-                request,
-                option: None,
-            });
+        match self.asking.take() {
+            Some(Asking::Agent(request)) => {
+                self.set_question(None);
+                actions.push(Action::Answer {
+                    request,
+                    option: None,
+                });
+            }
+            Some(Asking::Install) => {
+                self.set_question(None);
+                self.link = Link::Closed;
+                self.set_state(ChatState::Ready);
+            }
+            // Nothing waits for it.
+            Some(Asking::Suggest) => self.asking = Some(Asking::Suggest),
+            None => {}
         }
         if self.link == Link::Open {
             actions.push(Action::Cancel);
@@ -417,7 +512,7 @@ impl HostedChat {
             })
             && !self.chosen.iter().any(|(id, _)| *id == setting.id)
         {
-            self.chosen.push((setting.id.clone(), mode.to_owned()));
+            self.chosen.push((setting.id.clone(), mode));
         }
         let mut actions = Vec::new();
         for (setting, value) in self.chosen.clone() {
@@ -447,23 +542,122 @@ impl HostedChat {
         }
     }
 
-    /// The session couldn't be made or opened.
+    /// The chat's agent isn't installed: asks, in `what`, whether to
+    /// install it, and holds any message until it's answered.
+    pub(crate) fn offer_install(&mut self, what: &str) {
+        self.asking = Some(Asking::Install);
+        self.set_question(Some(Question {
+            title: clean(what),
+            choices: vec![
+                Choice {
+                    id: INSTALL.to_owned(),
+                    name: "Install".to_owned(),
+                    kind: ChoiceKind::AllowOnce,
+                },
+                Choice {
+                    id: "later".to_owned(),
+                    name: "Not now".to_owned(),
+                    kind: ChoiceKind::RejectOnce,
+                },
+            ],
+        }));
+    }
+
+    /// Whether the chat is asking whether to install its agent.
+    pub(crate) fn offering_install(&self) -> bool {
+        matches!(self.asking, Some(Asking::Install | Asking::Suggest))
+    }
+
+    /// Whether the chat's session is open.
+    pub(crate) fn is_connected(&self) -> bool {
+        self.link == Link::Open
+    }
+
+    /// The chat's agent runs, but not from where clackatoo installs it:
+    /// suggests, in `what`, installing it there, waiting for nothing.
+    pub(crate) fn suggest_install(&mut self, what: &str) {
+        if self.asking.is_some() {
+            return;
+        }
+        self.asking = Some(Asking::Suggest);
+        self.set_question(Some(Question {
+            title: clean(what),
+            choices: vec![
+                Choice {
+                    id: INSTALL.to_owned(),
+                    name: "Install".to_owned(),
+                    kind: ChoiceKind::AllowOnce,
+                },
+                Choice {
+                    id: "later".to_owned(),
+                    name: "Not now".to_owned(),
+                    kind: ChoiceKind::RejectOnce,
+                },
+            ],
+        }));
+    }
+
+    /// The chat's agent, which runs another way meanwhile, has been
+    /// installed, or couldn't be: why.
+    pub(crate) fn installed_meanwhile(&mut self, outcome: &Result<(), String>) {
+        if self.offering_install() {
+            self.asking = None;
+            self.set_question(None);
+        }
+        self.set_notice(outcome.as_ref().err().cloned());
+    }
+
+    /// The chat's agent is being installed, as another chat asked: it
+    /// waits for that.
+    pub(crate) fn installing(&mut self) {
+        self.set_state(ChatState::Starting);
+        self.set_notice(Some(format!("Installing {}…", self.node.agent)));
+    }
+
+    /// The chat's agent has been installed: the server gets it a session
+    /// next.
+    pub(crate) fn installed(&mut self) {
+        if self.offering_install() {
+            self.asking = None;
+            self.set_question(None);
+        }
+        self.link = Link::Opening;
+        self.set_notice(None);
+    }
+
+    /// The session couldn't be made or opened, nor the agent installed.
     pub(crate) fn failed_to_connect(&mut self, reason: &str) {
+        self.set_notice(None);
+        if self.offering_install() {
+            self.asking = None;
+            self.set_question(None);
+        }
         self.link = Link::Closed;
         if self.queued.take().is_some() {
             self.end_turn(Outcome::Failed(format!(
-                "the agent couldn't start: {reason}"
+                "{} couldn't start: {reason}",
+                self.node.agent
             )));
         }
         self.set_state(ChatState::Failed(reason.to_owned()));
     }
 
-    /// The agent has gone: it exited, or stopped answering.
-    pub(crate) fn disconnected(&mut self) {
+    /// The agent has gone: it exited, or stopped answering. If it never
+    /// started, `why` says why, as far as it said.
+    pub(crate) fn disconnected(&mut self, why: Option<&str>) {
         let was_opening = self.link == Link::Opening;
         self.link = Link::Closed;
-        self.queued = None;
-        if self.answering() {
+        let queued = self.queued.take();
+        if let Some(why) = why.filter(|_| was_opening) {
+            let why = format!("it stopped, saying: {why}");
+            if queued.is_some() {
+                self.end_turn(Outcome::Failed(format!(
+                    "{} couldn't start: {why}",
+                    self.node.agent
+                )));
+            }
+            self.set_state(ChatState::Failed(why));
+        } else if self.answering() {
             self.end_turn(Outcome::Failed("the agent stopped".to_owned()));
             self.set_state(ChatState::Ready);
         } else if was_opening {
@@ -503,12 +697,11 @@ impl HostedChat {
         tool: &ToolCallUpdate,
         options: &[PermissionOption],
     ) {
+        // The tool's own title, if it's been seen: Codex's questions call
+        // every command "Run command", but its tool call has the command.
         let id = tool.tool_call_id.0.to_string();
-        let title = tool
-            .fields
-            .title
-            .clone()
-            .or_else(|| self.tool(&id).map(|tool| tool.title.clone()))
+        let title = (self.tool(&id).map(|tool| tool.title.clone()))
+            .or_else(|| tool.fields.title.clone())
             .unwrap_or_else(|| "use a tool".to_owned());
         let choices = options
             .iter()
@@ -524,7 +717,7 @@ impl HostedChat {
                 },
             })
             .collect();
-        self.asking = Some(request);
+        self.asking = Some(Asking::Agent(request));
         self.set_question(Some(Question {
             title: clean(&title),
             choices,
@@ -548,8 +741,9 @@ impl HostedChat {
                     content: tool_content(&call.content),
                     locations: tool_locations(&call.locations),
                 };
-                let wrote = self.wrote(&tool);
+                let (id, wrote) = (tool.id.clone(), self.wrote(&tool));
                 self.set_tool(tool);
+                self.add_output(&id, call.meta.as_ref());
                 return wrote;
             }
             SessionUpdate::ToolCallUpdate(update) => {
@@ -557,8 +751,9 @@ impl HostedChat {
                     self.note_diffs(&update.tool_call_id.0, content);
                 }
                 let id = update.tool_call_id.0.to_string();
-                let mut tool = self.tool(&id).cloned().unwrap_or(Tool {
-                    id,
+                let known = self.tool(&id).cloned();
+                let mut tool = known.clone().unwrap_or(Tool {
+                    id: id.clone(),
                     title: "a tool".to_owned(),
                     status: ToolStatus::Running,
                     kind: ToolKind::Other,
@@ -575,9 +770,14 @@ impl HostedChat {
                     tool.kind = tool_kind(kind);
                 }
                 // What it shows is replaced, not added to: a command's
-                // description gives way to its output.
+                // description gives way to its output. Output streamed
+                // beside stays.
                 if let Some(content) = &update.fields.content {
+                    let streamed = (tool.content.drain(..))
+                        .filter(|content| matches!(content, ToolContent::Output(_)));
+                    let streamed: Vec<ToolContent> = streamed.collect();
                     tool.content = tool_content(content);
+                    tool.content.extend(streamed);
                 }
                 if let Some(locations) = &update.fields.locations {
                     tool.locations = tool_locations(locations);
@@ -590,13 +790,23 @@ impl HostedChat {
                     || fields.content.is_some()
                     || fields.locations.is_some();
                 let wrote = says.then(|| self.wrote(&tool)).flatten();
-                self.set_tool(tool);
+                // A piece of output alone changes nothing else, and goes
+                // as an append, not the tool again.
+                if known.as_ref() != Some(&tool) {
+                    self.set_tool(tool);
+                }
+                self.add_output(&id, update.meta.as_ref());
                 return wrote;
             }
             SessionUpdate::SessionInfoUpdate(info) => {
                 // Not a change to the turns: viewers pick it up anyway.
+                // Codex's is the whole of the first message.
                 if let MaybeUndefined::Value(title) = info.title {
                     self.title = clean(&title);
+                    if let Some((cut, _)) = self.title.char_indices().nth(TITLE) {
+                        self.title.truncate(cut);
+                        self.title.push('…');
+                    }
                 }
             }
             SessionUpdate::ConfigOptionUpdate(update) => {
@@ -646,7 +856,7 @@ impl HostedChat {
     fn wrote(&self, tool: &Tool) -> Option<Wrote> {
         let diffs = (tool.content.iter()).filter_map(|content| match content {
             ToolContent::Diff(diff) => Some(&diff.path),
-            ToolContent::Text(_) => None,
+            ToolContent::Text(_) | ToolContent::Output(_) => None,
         });
         let edits = tool.kind == ToolKind::Edit || diffs.clone().next().is_some();
         if tool.status != ToolStatus::Done || !edits {
@@ -680,9 +890,9 @@ impl HostedChat {
         .filter(|wrote| !wrote.paths.is_empty())
     }
 
-    /// The chat's title, as the agent gives it.
-    pub(crate) fn title(&self) -> &str {
-        &self.title
+    /// The agent, as it's shown: "Claude Code", "Codex"…
+    pub(crate) fn agent_title(&self) -> &str {
+        &self.node.agent
     }
 
     /// Says `notice` in the chat, until the next message.
@@ -746,6 +956,42 @@ impl HostedChat {
         });
     }
 
+    /// Adds to the output of tool `id`'s command what `meta` streams, as
+    /// Codex's adapter streams it (and Zed's convention, `terminal_output`),
+    /// rather than in the tool's content. Each piece goes to viewers as an
+    /// append. Past twice what a tool keeps, it's cut back to the end of
+    /// it, which goes as the tool again.
+    fn add_output(&mut self, id: &str, meta: Option<&serde_json::Map<String, Value>>) {
+        let Some(meta) = meta else { return };
+        let data = ["terminal_output_delta", "terminal_output"]
+            .iter()
+            .find_map(|key| meta.get(*key)?.get("data")?.as_str());
+        let (Some(data), Some(turn)) = (data, self.answering_turn()) else {
+            return;
+        };
+        let items = &mut self.node.turns[turn].items;
+        let Some((at, tool)) = (items.iter_mut().enumerate()).find_map(|(at, item)| match item {
+            Item::Tool(tool) if tool.id == id => Some((at, tool)),
+            _ => None,
+        }) else {
+            return;
+        };
+        let text = clean_text(data);
+        tool.append_output(&text);
+        let output = tool.output_mut().expect("just added to");
+        if output.len() > 2 * TOOL_TEXT {
+            *output = tail(output, TOOL_TEXT);
+            let tool = Item::Tool(tool.clone());
+            self.patch_item(turn, at, tool);
+        } else {
+            self.journal.push(ChatPatch::Output {
+                turn: index_u32(turn),
+                item: index_u32(at),
+                text,
+            });
+        }
+    }
+
     /// Adds `tool` to the turn answering, or changes the one with its ID.
     fn set_tool(&mut self, tool: Tool) {
         let Some(index) = self.answering_turn() else {
@@ -804,8 +1050,12 @@ impl HostedChat {
         }
         turn.end = Some(TurnEnd { at: now(), outcome });
         self.patch_turn(index);
-        self.asking = None;
-        self.set_question(None);
+        // The agent's question goes with the turn; an offer to install
+        // stays until it's answered.
+        if matches!(self.asking, Some(Asking::Agent(_))) {
+            self.asking = None;
+            self.set_question(None);
+        }
     }
 
     fn push_turn(&mut self, turn: Turn) {
@@ -865,6 +1115,86 @@ impl HostedChat {
             self.journal.push(ChatPatch::Notice(notice));
         }
     }
+}
+
+/// Whether `patch` adds to item `item` of turn `turn`.
+fn adds_to(patch: &ChatPatch, turn: u32, item: u32) -> bool {
+    matches!(patch, ChatPatch::Append { turn: t, item: i, .. } | ChatPatch::Output { turn: t, item: i, .. }
+        if (*t, *i) == (turn, item))
+}
+
+/// Adds `patch` to `last`, if both add to the same item the same way.
+/// Returns whether it did.
+fn merge(last: &mut ChatPatch, patch: &ChatPatch) -> bool {
+    match (last, patch) {
+        (
+            ChatPatch::Append { turn, item, text },
+            ChatPatch::Append {
+                turn: next_turn,
+                item: next_item,
+                text: next,
+            },
+        )
+        | (
+            ChatPatch::Output { turn, item, text },
+            ChatPatch::Output {
+                turn: next_turn,
+                item: next_item,
+                text: next,
+            },
+        ) if (*turn, *item) == (*next_turn, *next_item) => {
+            text.push_str(next);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// About how many bytes `patch` takes.
+fn weight(patch: &ChatPatch) -> usize {
+    let item = |item: &Item| match item {
+        Item::Words(text) | Item::Thought(text) => text.len(),
+        Item::Tool(tool) => {
+            let content: usize = (tool.content.iter())
+                .map(|content| match content {
+                    ToolContent::Text(text) | ToolContent::Output(text) => text.len(),
+                    ToolContent::Diff(diff) => {
+                        diff.path.len() + diff.old.as_ref().map_or(0, String::len) + diff.new.len()
+                    }
+                })
+                .sum();
+            let locations: usize = tool
+                .locations
+                .iter()
+                .map(|location| location.path.len())
+                .sum();
+            tool.title.len() + content + locations
+        }
+    };
+    let size = match patch {
+        ChatPatch::Turn { turn, .. } => {
+            turn.prompt.len() + turn.items.iter().map(item).sum::<usize>()
+        }
+        ChatPatch::Item { value, .. } => item(value),
+        ChatPatch::Append { text, .. }
+        | ChatPatch::Output { text, .. }
+        | ChatPatch::Notice(Some(text)) => text.len(),
+        ChatPatch::Question(Some(question)) => {
+            question.title.len()
+                + question
+                    .choices
+                    .iter()
+                    .map(|choice| choice.name.len())
+                    .sum::<usize>()
+        }
+        ChatPatch::Settings(settings) => (settings.iter())
+            .flat_map(|setting| &setting.choices)
+            .map(|choice| choice.name.len() + choice.value.len())
+            .sum(),
+        _ => 0,
+    };
+    // What each change takes, whatever's in it.
+    size + 32
 }
 
 /// Now, in milliseconds since the Unix epoch.
@@ -1102,6 +1432,7 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
                     content: (tool.content.into_iter())
                         .map(|content| match content {
                             ToolContent::Text(text) => handover::ToolContent::Text(text),
+                            ToolContent::Output(text) => handover::ToolContent::Output(text),
                             ToolContent::Diff(diff) => handover::ToolContent::Diff {
                                 path: diff.path,
                                 old: diff.old,
@@ -1166,6 +1497,7 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
                     content: (content.into_iter())
                         .map(|content| match content {
                             handover::ToolContent::Text(text) => ToolContent::Text(text),
+                            handover::ToolContent::Output(text) => ToolContent::Output(text),
                             handover::ToolContent::Diff { path, old, new } => {
                                 ToolContent::Diff(Diff { path, old, new })
                             }
@@ -1193,12 +1525,23 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol_schema::v1::SessionNotification;
+    use agent_client_protocol_schema::v1::{RequestPermissionRequest, SessionNotification};
 
     use super::*;
 
     fn chat() -> HostedChat {
-        HostedChat::new(TerminalId(1), Size::new(40, 12).unwrap(), "/tmp".to_owned())
+        chat_with("claude")
+    }
+
+    /// A chat with the known agent called `name`.
+    fn chat_with(name: &str) -> HostedChat {
+        let agent = crate::agents::AgentConfig::default().find(name).unwrap();
+        HostedChat::new(
+            TerminalId(1),
+            Size::new(40, 12).unwrap(),
+            "/tmp".to_owned(),
+            &agent,
+        )
     }
 
     fn update(chat: &mut HostedChat, json: &str) -> Option<Wrote> {
@@ -1550,7 +1893,7 @@ mod tests {
             &mut chat,
             r#"{"sessionUpdate":"tool_call","toolCallId":"t","title":"Run","status":"in_progress"}"#,
         );
-        chat.disconnected();
+        chat.disconnected(None);
         let turn = &chat.node.turns[0];
         assert_eq!(
             outcome(turn),
@@ -1559,7 +1902,7 @@ mod tests {
         assert!(matches!(&turn.items[0], Item::Tool(tool) if tool.status == ToolStatus::Failed));
         // Idle, it says so, and the next message opens the session again.
         connect(&mut chat, "");
-        chat.disconnected();
+        chat.disconnected(None);
         assert!(chat.node.notice.is_some());
         assert_eq!(send(&mut chat, "hi"), [Action::Connect]);
         assert_eq!(chat.node.notice, None);
@@ -1583,7 +1926,10 @@ mod tests {
         connect(&mut chat, "s");
         send(&mut chat, "hi");
         words(&mut chat, "hello");
-        let resumed = HostedChat::resume(chat.hand_over());
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let resumed = HostedChat::resume(chat.hand_over(), &agent);
         assert_eq!(resumed.session(), Some("s"));
         let turn = &resumed.node.turns[0];
         assert_eq!(turn.items, [Item::Words("hello".into())]);
@@ -1636,7 +1982,7 @@ mod tests {
 
         // The agent stops, and comes back having forgotten: the choices go
         // again, but Auto only as the user had it.
-        chat.disconnected();
+        chat.disconnected(None);
         assert_eq!(
             chat.connected(opened("haiku")),
             [set("mode", "auto"), set("model", "sonnet")]
@@ -1680,5 +2026,245 @@ mod tests {
         );
         assert_eq!(chat.node.settings[0].value, "auto");
         assert_eq!(chat.node.settings[1].value, "sonnet");
+    }
+
+    #[test]
+    fn a_chat_is_named_after_its_agent_and_starts_in_the_agents_own_mode() {
+        let chat = chat_with("codex");
+        assert_eq!(
+            (chat.title.as_str(), chat.node.agent.as_str()),
+            ("Codex", "Codex")
+        );
+        assert_eq!(chat.agent(), "codex");
+        assert_eq!(chat.starting_mode, None);
+        assert_eq!(chat_with("claude").starting_mode.as_deref(), Some("auto"));
+    }
+
+    /// Has `chat`'s agent stream `data` as the output of tool `e`.
+    fn output(chat: &mut HostedChat, data: &str) {
+        let data = serde_json::to_string(data).unwrap();
+        update(
+            chat,
+            &format!(
+                r#"{{"sessionUpdate":"tool_call_update","toolCallId":"e",
+                    "_meta":{{"terminal_output_delta":{{"data":{data},"terminal_id":"e"}}}}}}"#
+            ),
+        );
+    }
+
+    /// Starts tool `e`, a command, as Codex's adapter does.
+    fn start_command(chat: &mut HostedChat) {
+        update(
+            chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"e","title":"cat x","kind":"execute",
+                "status":"in_progress","content":[{"type":"terminal","terminalId":"e"}]}"#,
+        );
+    }
+
+    #[test]
+    fn streamed_output_goes_as_appends_and_is_cut_to_its_end() {
+        let mut chat = chat_with("codex");
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        start_command(&mut chat);
+        let shown = |chat: &HostedChat| match &chat.node.turns[0].items[0] {
+            Item::Tool(tool) => tool.content.clone(),
+            other => panic!("{other:?}"),
+        };
+        // Nothing shown of a terminal the daemon never made.
+        assert_eq!(shown(&chat), []);
+        let before = chat.journal.end();
+        output(&mut chat, "a ``` b\n");
+        assert_eq!(shown(&chat), [ToolContent::Output("a ``` b\n".into())]);
+        assert_eq!(
+            chat.journal.patches.back(),
+            Some(&ChatPatch::Output {
+                turn: 0,
+                item: 0,
+                text: "a ``` b\n".into(),
+            })
+        );
+        assert_eq!(chat.journal.end(), before + 1, "the piece alone");
+        let line = "x".repeat(99) + "\n";
+        for _ in 0..1000 {
+            output(&mut chat, &line);
+        }
+        let content = shown(&chat);
+        let [ToolContent::Output(text)] = content.as_slice() else {
+            panic!()
+        };
+        assert!(text.len() <= 2 * TOOL_TEXT, "{}", text.len());
+        assert!(
+            text.starts_with("…\nxxx") && text.ends_with("x\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_flood_of_output_keeps_the_journal_bounded_and_a_late_viewer_gets_it_once() {
+        let mut chat = chat_with("codex");
+        connect(&mut chat, "s");
+        let mut late = Viewer::new();
+        late.catch_up(&chat);
+        let mut keeping_up = Viewer::new();
+        keeping_up.catch_up(&chat);
+        send(&mut chat, "build");
+        start_command(&mut chat);
+        let line = "y".repeat(199) + "\n";
+        for at in 0..10_000 {
+            output(&mut chat, &line);
+            if at % 1000 == 0 {
+                keeping_up.catch_up(&chat);
+            }
+        }
+        assert!(
+            chat.journal.bytes <= JOURNAL_BYTES,
+            "{}",
+            chat.journal.bytes
+        );
+        assert!(chat.journal.patches.len() > 1);
+        // Behind by the whole flood: one copy of the output, not one for
+        // each piece, however it comes.
+        let update = late.catch_up(&chat).unwrap();
+        let size = postcard::to_allocvec(&update).unwrap().len();
+        assert!(size < 4 * TOOL_TEXT, "{size}");
+        keeping_up.catch_up(&chat);
+        for viewer in [&late, &keeping_up] {
+            assert_eq!(viewer.view.as_ref(), Some(&chat.view()));
+        }
+    }
+
+    #[test]
+    fn a_later_value_of_an_item_takes_the_place_of_the_first_in_an_update() {
+        let mut chat = chat_with("codex");
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        let mut viewer = Viewer::new();
+        viewer.catch_up(&chat);
+        start_command(&mut chat);
+        output(&mut chat, "one\n");
+        // Another tool after it, then the first again, finished.
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"f","title":"ls","kind":"execute",
+                "status":"in_progress"}"#,
+        );
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call_update","toolCallId":"e","status":"completed"}"#,
+        );
+        output(&mut chat, "two\n");
+        let Some(ViewUpdate::Patch(patches)) = viewer.catch_up(&chat) else {
+            panic!()
+        };
+        let items: Vec<(u32, bool)> = (patches.iter())
+            .filter_map(|patch| match patch {
+                Patch::Chat(ChatPatch::Item { item, .. }) => Some((*item, false)),
+                Patch::Chat(ChatPatch::Output { item, .. }) => Some((*item, true)),
+                _ => None,
+            })
+            .collect();
+        // The first tool once, where it was first added, with the output
+        // it had by then; the second; then the output since.
+        assert_eq!(items, [(0, false), (1, false), (0, true)]);
+        assert_eq!(viewer.view.as_ref(), Some(&chat.view()));
+    }
+
+    #[test]
+    fn a_question_says_what_the_tool_said_it_does() {
+        let mut chat = chat_with("codex");
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"t","title":"rm -r build","kind":"execute",
+                "status":"pending"}"#,
+        );
+        let request: RequestPermissionRequest = serde_json::from_str(
+            r#"{"sessionId":"s","toolCall":{"toolCallId":"t","title":"Run command"},
+                "options":[{"optionId":"a","name":"Yes","kind":"allow_once"}]}"#,
+        )
+        .unwrap();
+        chat.ask(Value::from(1), &request.tool_call, &request.options);
+        assert_eq!(chat.node.question.as_ref().unwrap().title, "rm -r build");
+        // One it hasn't said anything of goes by the question's.
+        let request: RequestPermissionRequest = serde_json::from_str(
+            r#"{"sessionId":"s","toolCall":{"toolCallId":"u","title":"Write a"},"options":[]}"#,
+        )
+        .unwrap();
+        chat.ask(Value::from(2), &request.tool_call, &request.options);
+        assert_eq!(chat.node.question.as_ref().unwrap().title, "Write a");
+    }
+
+    #[test]
+    fn an_install_offer_holds_the_message_until_its_answered() {
+        let mut chat = chat_with("codex");
+        chat.offer_install("Codex isn't installed. Install it?");
+        assert!(chat.offering_install());
+        assert_eq!(send(&mut chat, "hi"), []);
+        assert_eq!(
+            chat.act(ChatAction::Answer(Some(INSTALL.into()))),
+            [Action::Install]
+        );
+        assert_eq!(chat.node.question, None);
+        assert_eq!(chat.node.notice.as_deref(), Some("Installing Codex…"));
+        assert_eq!(chat.node.state, ChatState::Starting);
+        // Installed, its session opens and the message goes.
+        chat.installed();
+        assert_eq!(chat.node.notice, None);
+        assert_eq!(connect(&mut chat, "s"), [Action::Prompt("hi".into())]);
+
+        // No: the message goes nowhere, and the next asks again.
+        let mut chat = chat_with("codex");
+        chat.offer_install("Install?");
+        send(&mut chat, "hi");
+        assert_eq!(chat.act(ChatAction::Answer(Some("later".into()))), []);
+        assert!(
+            matches!(&chat.node.state, ChatState::Failed(why) if why.contains("isn't installed"))
+        );
+        assert!(matches!(
+            outcome(&chat.node.turns[0]),
+            Some(Outcome::Failed(_))
+        ));
+        assert_eq!(send(&mut chat, "again"), [Action::Connect]);
+
+        // Stopped while it's asked: the message is taken back.
+        let mut chat = chat_with("codex");
+        chat.offer_install("Install?");
+        send(&mut chat, "hi");
+        assert_eq!(chat.act(ChatAction::Stop), []);
+        assert_eq!(outcome(&chat.node.turns[0]), Some(&Outcome::Stopped));
+        assert_eq!(
+            (chat.node.question.as_ref(), chat.offering_install()),
+            (None, false)
+        );
+    }
+
+    #[test]
+    fn a_long_title_is_cut_short() {
+        let mut chat = chat_with("codex");
+        let title = "é".repeat(100);
+        update(
+            &mut chat,
+            &format!(r#"{{"sessionUpdate":"session_info_update","title":"{title}"}}"#),
+        );
+        assert_eq!(chat.title, "é".repeat(TITLE) + "…");
+    }
+
+    #[test]
+    fn an_agent_that_never_started_says_why() {
+        let mut chat = chat_with("codex");
+        send(&mut chat, "hi");
+        chat.disconnected(Some("npm ERR! nope"));
+        assert_eq!(
+            chat.node.state,
+            ChatState::Failed("it stopped, saying: npm ERR! nope".into())
+        );
+        assert_eq!(
+            outcome(&chat.node.turns[0]),
+            Some(&Outcome::Failed(
+                "Codex couldn't start: it stopped, saying: npm ERR! nope".into()
+            ))
+        );
     }
 }

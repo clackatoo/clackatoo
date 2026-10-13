@@ -2,7 +2,8 @@
 //! mean.
 //!
 //! Capitalised words are kinds of pane, and open one: `Terminal`, `Agent`,
-//! a chat with an agent such as Claude Code, or `Editor PATH`, in a new
+//! a chat with an agent such as Claude Code (`Agent codex` names which,
+//! or else the `agent` option does), or `Editor PATH`, in a new
 //! tab, and with a mark before it, beside the focused pane (`|` right, `|<`
 //! left, `-` below, `-^` above). `Terminal@host` asks for it on another
 //! machine's daemon. A number goes to that line in an editor, as Vim's
@@ -34,6 +35,9 @@ pub(crate) enum Command {
         kind: Kind,
         /// The daemon to open it on, if not the focused pane's.
         daemon: Option<String>,
+        /// For a chat, the agent it talks to, by name, if not the one the
+        /// `agent` option names.
+        agent: Option<String>,
     },
     /// Switch to the workspace with this name, making it if there's none,
     /// or with no name, make a new one.
@@ -183,11 +187,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             })
             .ok_or_else(|| format!("{word} needs a file: :{word} PATH"));
     }
-    if let Some(argument) = argument {
-        return Err(format!(
-            "{word} takes nothing after it, but has {argument:?}"
-        ));
-    }
+    let agent = agent_named(word, rest, argument)?;
     if !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit()) {
         return match word.parse() {
             Err(_) => Err(format!("there's no tab or line {word}")),
@@ -205,6 +205,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             place,
             kind: Kind::Terminal,
             daemon,
+            agent: None,
         });
     }
     if let Some(&(_, kind)) = KINDS.iter().find(|(kind, _)| *kind == name) {
@@ -212,6 +213,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             place,
             kind,
             daemon,
+            agent,
         });
     }
     let kinds = format!("{}, {EDITOR}", KINDS.map(|(kind, _)| kind).join(", "));
@@ -227,6 +229,26 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         Err(format!(
             "no command called {name}; the commands are {COMMANDS}, and the kinds of pane {kinds}"
         ))
+    }
+}
+
+/// The agent named after `word`, a kind of pane, as `rest`, without its
+/// mark, says: only a chat takes a word after it, the agent's name.
+fn agent_named(word: &str, rest: &str, argument: Option<&str>) -> Result<Option<String>, String> {
+    match argument {
+        Some(argument) if rest.split('@').next() == Some("Agent") => {
+            if argument.contains(char::is_whitespace) {
+                Err(format!(
+                    "{word} takes one agent's name, such as :{word} codex"
+                ))
+            } else {
+                Ok(Some(argument.to_owned()))
+            }
+        }
+        Some(argument) => Err(format!(
+            "{word} takes nothing after it, but has {argument:?}"
+        )),
+        None => Ok(None),
     }
 }
 
@@ -279,6 +301,7 @@ mod tests {
             place,
             kind: Kind::Terminal,
             daemon: daemon.map(str::to_owned),
+            agent: None,
         }
     }
 
@@ -307,11 +330,47 @@ mod tests {
                 place: Place::Beside(Side::Right),
                 kind: Kind::Agent,
                 daemon: None,
+                agent: None,
             }
         );
         // A mark alone means a terminal.
         assert_eq!(parse("|").unwrap(), open(Place::Beside(Side::Right), None));
         assert_eq!(parse("-^").unwrap(), open(Place::Beside(Side::Above), None));
+    }
+
+    #[test]
+    fn a_chat_takes_the_name_of_its_agent() {
+        let agent = |place, agent: Option<&str>| Command::Open {
+            place,
+            kind: Kind::Agent,
+            daemon: None,
+            agent: agent.map(str::to_owned),
+        };
+        assert_eq!(
+            parse("Agent codex").unwrap(),
+            agent(Place::Tab, Some("codex"))
+        );
+        assert_eq!(
+            parse("|Agent  gemini ").unwrap(),
+            agent(Place::Beside(Side::Right), Some("gemini"))
+        );
+        assert_eq!(
+            parse("-Agent").unwrap(),
+            agent(Place::Beside(Side::Below), None)
+        );
+        assert!(matches!(
+            parse("Agent@desktop codex").unwrap(),
+            Command::Open { agent: Some(name), daemon: Some(_), .. } if name == "codex"
+        ));
+        assert_eq!(
+            parse("Agent codex claude").unwrap_err(),
+            "Agent takes one agent's name, such as :Agent codex"
+        );
+        assert!(
+            parse("Terminal codex")
+                .unwrap_err()
+                .contains("takes nothing after it")
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! and keeps what the program writes to stderr for the log. What the
 //! messages mean is for the agent's and language servers' own modules.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, RawFd};
@@ -66,7 +67,15 @@ pub(crate) struct Peer {
     incoming: Vec<u8>,
     /// What's been read of a line of stderr not yet ended.
     errors: Vec<u8>,
+    /// The last lines of stderr, to say why it stopped if it stops soon.
+    last_errors: VecDeque<String>,
 }
+
+/// How many of a program's last lines of stderr are kept.
+const LAST_ERRORS: usize = 4;
+
+/// The most of each of those lines kept, in bytes.
+const LAST_ERROR_LEN: usize = 300;
 
 impl Peer {
     /// Starts `command`, in `cwd` if given, called `name` in the log.
@@ -111,6 +120,7 @@ impl Peer {
             outgoing: Vec::new(),
             incoming: Vec::new(),
             errors: Vec::new(),
+            last_errors: VecDeque::new(),
         })
     }
 
@@ -232,7 +242,18 @@ impl Peer {
                     while let Some(end) = self.errors.iter().position(|&byte| byte == b'\n') {
                         let line: Vec<u8> = self.errors.drain(..=end).collect();
                         let line = String::from_utf8_lossy(&line);
-                        log::debug!("{}: {}", self.name, line.trim_end());
+                        let line = line.trim();
+                        log::debug!("{}: {line}", self.name);
+                        if !line.is_empty() {
+                            if self.last_errors.len() == LAST_ERRORS {
+                                self.last_errors.pop_front();
+                            }
+                            let mut end = line.len().min(LAST_ERROR_LEN);
+                            while !line.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            self.last_errors.push_back(line[..end].to_owned());
+                        }
                     }
                     if self.errors.len() > MAX_MESSAGE {
                         self.errors.clear();
@@ -242,6 +263,13 @@ impl Peer {
                 Err(_) => return,
             }
         }
+    }
+
+    /// The last few lines it wrote to stderr, on one line, if it wrote
+    /// any.
+    pub(crate) fn last_errors(&self) -> Option<String> {
+        let lines: Vec<&str> = self.last_errors.iter().map(String::as_str).collect();
+        (!lines.is_empty()).then(|| lines.join(" / "))
     }
 
     pub(crate) fn stdout_fd(&self) -> RawFd {

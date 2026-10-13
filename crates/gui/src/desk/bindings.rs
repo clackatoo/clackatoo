@@ -272,6 +272,7 @@ impl Desk {
                 place: Place::Beside(side),
                 kind,
                 daemon: None,
+                agent: None,
             }),
             Action::Close => self.run(Command::Close),
             Action::Jump { back, within_tab } => self.jump(back, within_tab),

@@ -7,13 +7,21 @@
 //! against the SHA-256 here, as grammars are. One published to npm is
 //! installed with npm into its directory, at the version here, without
 //! running any package's install scripts; the packages it depends on
-//! aren't pinned. One that needs a toolchain to build, such as gopls,
-//! isn't installed: what to run instead is said.
+//! aren't pinned, unless a lockfile comes with it, as with agents'
+//! adapters, which `npm ci` installs exactly. One that needs a toolchain
+//! to build, such as gopls, isn't installed: what to run instead is said.
+//!
+//! Installs into one directory hold a lock on its `.lock`, so two daemons
+//! never install there at once. Each installs beside where it goes, under
+//! a name no other install, of this build or another, ever has, and swaps
+//! it into place. What an install cut off by an exit or an upgrade left
+//! beside is removed by the next install of the same program.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::install::{Download, InstallError, download};
 
@@ -35,6 +43,16 @@ pub enum Source {
     Npm {
         /// The packages, as `name@version`.
         packages: &'static [&'static str],
+    },
+    /// An npm package, and every package it depends on, at exactly the
+    /// versions and checksums a lockfile gives.
+    NpmLocked {
+        /// The package, as `name@version`.
+        package: &'static str,
+        /// The `package.json` that asks for it.
+        manifest: &'static str,
+        /// The `package-lock.json` that pins everything.
+        lock: &'static str,
     },
     /// Not installed by clackatoo: run this to install it.
     Manual(&'static str),
@@ -221,7 +239,7 @@ impl KnownServer {
             Source::Release { assets, .. } => assets
                 .iter()
                 .any(|(arch, _)| *arch == std::env::consts::ARCH),
-            Source::Npm { .. } => on_path("npm").is_some(),
+            Source::Npm { .. } | Source::NpmLocked { .. } => on_path("npm").is_some(),
             Source::Manual(_) => false,
         }
     }
@@ -238,7 +256,7 @@ impl KnownServer {
         let dir = self.dir(servers);
         match &self.source {
             Source::Release { program, .. } => dir.join(program),
-            Source::Npm { .. } | Source::Manual(_) => {
+            Source::Npm { .. } | Source::NpmLocked { .. } | Source::Manual(_) => {
                 dir.join("node_modules/.bin").join(self.program)
             }
         }
@@ -254,23 +272,33 @@ impl KnownServer {
     pub fn install(&self, servers: &Path) -> Result<(), InstallError> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         fs::create_dir_all(servers)?;
+        let _locked = lock(servers)?;
         let dir = self.dir(servers);
-        // Hidden, and named for this install alone.
-        let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let partial = servers.join(format!(".{}.{}.{next}", self.program, std::process::id()));
-        if partial.exists() {
-            fs::remove_dir_all(&partial)?;
+        // Left by installs cut off before they finished: none is under
+        // way, as this one holds the lock.
+        let hidden = format!(".{}.", self.program);
+        for entry in fs::read_dir(servers)?.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&hidden) {
+                log::info!("removing {}, left by an install", entry.path().display());
+                let _ = fs::remove_dir_all(entry.path());
+            }
         }
+        // Hidden, and named for this install alone: when it started, so
+        // the build an upgrade starts never takes the last one's name.
+        let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let started = (SystemTime::now().duration_since(UNIX_EPOCH)).map_or(0, |at| at.as_nanos());
+        let partial = servers.join(format!(
+            ".{}.{}.{started}.{next}",
+            self.program,
+            std::process::id()
+        ));
         fs::create_dir(&partial)?;
         let installed = self.install_into(&partial);
         if let Err(err) = installed {
             let _ = fs::remove_dir_all(&partial);
             return Err(err);
         }
-        if dir.exists() {
-            fs::remove_dir_all(&dir)?;
-        }
-        fs::rename(&partial, &dir)?;
+        put_in_place(&partial, &dir)?;
         Ok(())
     }
 
@@ -315,11 +343,62 @@ impl KnownServer {
                     )))
                 }
             }
+            Source::NpmLocked {
+                package,
+                manifest,
+                lock,
+            } => {
+                fs::write(dir.join("package.json"), manifest)?;
+                fs::write(dir.join("package-lock.json"), lock)?;
+                let output = Command::new("npm")
+                    .args(["ci", "--no-audit", "--no-fund", "--ignore-scripts"])
+                    .current_dir(dir)
+                    .output()
+                    .map_err(|err| {
+                        InstallError::Unavailable(format!("npm couldn't be run: {err}"))
+                    })?;
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(InstallError::Unavailable(format!(
+                        "npm couldn't install {package}: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )))
+                }
+            }
             Source::Manual(command) => Err(InstallError::Unavailable(format!(
                 "{} is installed by hand: {command}",
                 self.program
             ))),
         }
+    }
+}
+
+/// Locks `dir` against installs by other threads and processes, waiting
+/// for any under way, until the file returned is dropped.
+///
+/// # Errors
+///
+/// If its lock file can't be opened or locked.
+pub fn lock(dir: &Path) -> io::Result<File> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".lock"))?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+    Ok(file)
+}
+
+/// Puts the directory `new` where `dir` is, in one step: swapped with the
+/// one there, which then goes, so `dir` is never missing.
+fn put_in_place(new: &Path, dir: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    match renameat_with(CWD, new, CWD, dir, RenameFlags::EXCHANGE) {
+        // Swapped: the old one is where the new one was.
+        Ok(()) => fs::remove_dir_all(new),
+        Err(rustix::io::Errno::NOENT) => fs::rename(new, dir),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -477,6 +556,48 @@ mod tests {
         unpack(&packed, Packed::Gzip, dir.path(), "server").unwrap();
         assert_eq!(fs::read(dir.path().join("server")).unwrap(), b"#!/bin/sh\n");
         assert!(!dir.path().join(".download").exists());
+    }
+
+    #[test]
+    fn a_new_install_is_swapped_into_place_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let (new, old) = (dir.path().join(".new"), dir.path().join("server"));
+        fs::create_dir(&new).unwrap();
+        fs::write(new.join("v"), "2").unwrap();
+        // Nothing there yet.
+        put_in_place(&new, &old).unwrap();
+        assert_eq!(fs::read_to_string(old.join("v")).unwrap(), "2");
+        fs::create_dir(&new).unwrap();
+        fs::write(new.join("v"), "3").unwrap();
+        put_in_place(&new, &old).unwrap();
+        assert_eq!(fs::read_to_string(old.join("v")).unwrap(), "3");
+        assert!(!new.exists());
+    }
+
+    #[test]
+    fn an_install_clears_what_cut_off_ones_left_and_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = KnownServer {
+            program: "manual",
+            source: Source::Manual("make install"),
+        };
+        let left = dir.path().join(".manual.1234.5.0");
+        fs::create_dir(&left).unwrap();
+        let other = dir.path().join(".other.1234.5.0");
+        fs::create_dir(&other).unwrap();
+        // A program installed by hand fails to install, after clearing up.
+        assert!(server.install(dir.path()).is_err());
+        assert!(!left.exists());
+        assert!(other.exists(), "another program's is left for it");
+
+        // Held, the lock keeps another install waiting.
+        let held = lock(dir.path()).unwrap();
+        let file = fs::File::open(dir.path().join(".lock")).unwrap();
+        let try_lock =
+            || rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive);
+        assert!(try_lock().is_err());
+        drop(held);
+        assert!(try_lock().is_ok());
     }
 
     #[test]

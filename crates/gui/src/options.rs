@@ -415,6 +415,10 @@ options! {
     /// unless asked for, since the clipboard may hold a password, and
     /// whatever runs in a terminal would get it.
     osc52("osc52"): Osc52 = Osc52::Copy;
+    /// The agent `:Agent` and Ctrl+B `a` open a chat with, by its name:
+    /// `claude`, `codex`, `gemini`, or one the daemon's `agents.toml`
+    /// adds. Empty is the daemon's default, Claude Code.
+    agent("ag"): String = "claude".to_owned();
 }
 
 choice! {

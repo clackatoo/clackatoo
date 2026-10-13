@@ -29,8 +29,9 @@ pub struct View {
 pub enum Node {
     /// A grid of character cells.
     Grid(GridNode),
-    /// A chat with an agent.
-    Chat(ChatNode),
+    /// A chat with an agent, boxed, as it's the larger, and views go
+    /// in every update.
+    Chat(Box<ChatNode>),
 }
 
 /// Names a node within a view, so patches can say which one they change.

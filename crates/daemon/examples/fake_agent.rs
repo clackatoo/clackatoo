@@ -19,6 +19,15 @@
 //! as Manual and Haiku, and each answer ends with how much context it uses.
 //!
 //! Run with `--log FILE`, it notes each session it's asked to close there.
+//!
+//! Run with `--codex`, it sends what Codex's adapter sends where that
+//! differs: Codex's settings (its modes, Read-only to Full access, starting
+//! at Auto review, and models, efforts and more), a notification of its
+//! own with the account's email address, commands with their output in
+//! `_meta.terminal_output_delta` rather than in their content, and
+//! questions that call every change "Edit files". With `--logged-out`, it
+//! refuses sessions as Codex does when no one's logged in. With
+//! `--broken`, it says why on stderr and exits before it starts.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -27,11 +36,15 @@ use serde_json::{Value, json};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let flag = |name: &str| args.iter().any(|arg| arg == name);
+    if flag("--broken") {
+        eprintln!("npm ERR! notarget No matching version found for left-pad@^9");
+        return;
+    }
     let mut agent = Fake {
-        log: match args.as_slice() {
-            [_, flag, path] if flag == "--log" => Some(path.clone()),
-            _ => None,
-        },
+        log: (args.iter().position(|arg| arg == "--log")).and_then(|at| args.get(at + 1).cloned()),
+        codex: flag("--codex"),
+        logged_out: flag("--logged-out"),
         sessions: BTreeMap::new(),
         settings: BTreeMap::new(),
         waiting: None,
@@ -47,6 +60,10 @@ fn main() {
 
 struct Fake {
     log: Option<String>,
+    /// Sends what Codex's adapter sends.
+    codex: bool,
+    /// Refuses sessions, as no one's logged in.
+    logged_out: bool,
     /// Each session's working directory.
     sessions: BTreeMap<String, String>,
     /// Each session's mode and model.
@@ -85,6 +102,30 @@ fn done(id: &Value, reason: &str) {
     reply(id, &json!({ "stopReason": reason }));
 }
 
+/// A session's settings, as Codex's adapter gives them.
+fn codex_options((mode, model): &(String, String)) -> Value {
+    json!([
+        { "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": mode,
+          "options": [
+              { "value": "read-only", "name": "Read-only" },
+              { "value": "workspace-write", "name": "Workspace access" },
+              { "value": "agent", "name": "Auto review" },
+              { "value": "agent-full-access", "name": "Full access" }] },
+        { "id": "collaboration_mode", "name": "Collaboration mode",
+          "category": "collaboration_mode", "type": "select", "currentValue": "default",
+          "options": [{ "value": "default", "name": "Default" }, { "value": "plan", "name": "Plan" }] },
+        { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
+          "options": [{ "value": "gpt-6-astra", "name": "6 Astra" },
+                      { "value": "gpt-6-luna", "name": "6 Luna" }] },
+        { "id": "reasoning_effort", "name": "Reasoning effort", "category": "thought_level",
+          "type": "select", "currentValue": "high",
+          "options": [{ "value": "low", "name": "Low" }, { "value": "high", "name": "High" }] },
+        { "id": "fast-mode", "name": "Fast mode", "category": "model_config", "type": "select",
+          "currentValue": "off",
+          "options": [{ "value": "off", "name": "Off" }, { "value": "on", "name": "On" }] },
+    ])
+}
+
 /// A session's settings, as Claude Code's adapter gives them.
 fn config_options((mode, model): &(String, String)) -> Value {
     json!([
@@ -96,27 +137,59 @@ fn config_options((mode, model): &(String, String)) -> Value {
 }
 
 impl Fake {
+    /// A new session's settings.
+    fn starting_settings(&self) -> (String, String) {
+        if self.codex {
+            ("agent".to_owned(), "gpt-6-astra".to_owned())
+        } else {
+            ("default".to_owned(), "haiku".to_owned())
+        }
+    }
+
+    /// A session's settings, as the agent impersonated gives them.
+    fn options(&self, settings: &(String, String)) -> Value {
+        if self.codex {
+            codex_options(settings)
+        } else {
+            config_options(settings)
+        }
+    }
+
+    /// Answers `initialize`, and as Codex's adapter does, says who's
+    /// logged in.
+    fn initialize(&self, id: &Value) {
+        reply(
+            id,
+            &json!({
+                "protocolVersion": 1,
+                "agentCapabilities": { "sessionCapabilities": { "close": {}, "resume": {} } },
+                "agentInfo": { "name": "fake-agent", "version": "0" },
+                "authMethods": [],
+            }),
+        );
+        if self.codex {
+            send(&json!({ "jsonrpc": "2.0", "method": "_auth/status_update",
+                          "params": { "authStatus": { "kind": "account",
+                              "account": { "email": "someone@example.com" } } } }));
+        }
+    }
+
     /// Acts on a message. Returns whether to carry on.
     fn receive(&mut self, message: &Value) -> bool {
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let params = &message["params"];
         let session = params["sessionId"].as_str().unwrap_or_default().to_owned();
         match message.get("method").and_then(Value::as_str) {
-            Some("initialize") => reply(
-                &id,
-                &json!({
-                    "protocolVersion": 1,
-                    "agentCapabilities": { "sessionCapabilities": { "close": {}, "resume": {} } },
-                    "agentInfo": { "name": "fake-agent", "version": "0" },
-                    "authMethods": [],
-                }),
-            ),
+            Some("initialize") => self.initialize(&id),
+            Some("session/new" | "session/resume") if self.logged_out => send(&json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32000, "message": "Authentication required" } })),
             Some("session/new") => {
                 let session = format!("s{}", self.sessions.len() + 1);
                 self.sessions
                     .insert(session.clone(), params["cwd"].as_str().unwrap().to_owned());
-                let settings = ("default".to_owned(), "haiku".to_owned());
-                let options = config_options(&settings);
+                let settings = self.starting_settings();
+                let options = self.options(&settings);
                 self.settings.insert(session.clone(), settings);
                 reply(
                     &id,
@@ -127,20 +200,21 @@ impl Fake {
             Some("session/resume") => {
                 self.sessions
                     .insert(session.clone(), params["cwd"].as_str().unwrap().to_owned());
-                let settings = ("default".to_owned(), "haiku".to_owned());
-                let options = config_options(&settings);
+                let settings = self.starting_settings();
+                let options = self.options(&settings);
                 self.settings.insert(session, settings);
                 reply(&id, &json!({ "configOptions": options }));
             }
             Some("session/set_config_option") => {
                 let value = params["value"].as_str().unwrap_or_default().to_owned();
-                let settings = self.settings.entry(session).or_default();
+                let mut settings = self.settings.get(&session).cloned().unwrap_or_default();
                 match params["configId"].as_str() {
                     Some("mode") => settings.0 = value,
                     Some("model") => settings.1 = value,
                     _ => {}
                 }
-                reply(&id, &json!({ "configOptions": config_options(settings) }));
+                reply(&id, &json!({ "configOptions": self.options(&settings) }));
+                self.settings.insert(session, settings);
             }
             Some("session/close") => {
                 if let Some(log) = &self.log {
@@ -187,6 +261,13 @@ impl Fake {
                     .as_str()
                     .unwrap_or("nothing");
                 if let Some((id, session)) = self.waiting.take() {
+                    if self.codex {
+                        update(
+                            &session,
+                            &json!({ "sessionUpdate": "tool_call_update",
+                                     "toolCallId": "t2", "status": "completed" }),
+                        );
+                    }
                     say(&session, &format!("picked {picked}\n"));
                     done(&id, "end_turn");
                 }
@@ -196,6 +277,66 @@ impl Fake {
         true
     }
 
+    /// Answers `tool` or `ask` as Codex's adapter would.
+    fn codex_prompt(&mut self, id: Value, session: String, text: &str) {
+        match text {
+            "tool" => {
+                // A command, as Codex's adapter runs one: a terminal the
+                // client never made in its content, and its output in
+                // pieces beside.
+                let terminal = json!({ "terminal_info": { "cwd": "/", "terminal_id": "e1" } });
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "e1",
+                             "kind": "execute", "title": "ls", "status": "in_progress",
+                             "content": [{ "type": "terminal", "terminalId": "e1" }],
+                             "_meta": terminal }),
+                );
+                for data in ["notes", ".txt\n", "todo.txt\n"] {
+                    update(
+                        &session,
+                        &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "e1",
+                                 "_meta": { "terminal_output_delta":
+                                     { "data": data, "terminal_id": "e1" } } }),
+                    );
+                }
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "e1",
+                             "status": "completed",
+                             "_meta": { "terminal_exit": { "exit_code": 0, "terminal_id": "e1" } } }),
+                );
+                say(&session, "done\n");
+                done(&id, "end_turn");
+            }
+            "ask" => {
+                // A change to a file, shown whole before it's made, then
+                // asked about by a title that says nothing of it.
+                update(
+                    &session,
+                    &json!({ "sessionUpdate": "tool_call", "toolCallId": "t2",
+                             "kind": "edit", "title": "Editing files", "status": "in_progress",
+                             "content": [{ "type": "diff", "path": "/notes.txt",
+                                           "oldText": "hi\n", "newText": "bye\n",
+                                           "_meta": { "kind": "update" } }] }),
+                );
+                send(
+                    &json!({ "jsonrpc": "2.0", "id": "p1", "method": "session/request_permission",
+                    "params": { "sessionId": session,
+                        "toolCall": { "toolCallId": "t2", "title": "Edit files", "kind": "edit",
+                                      "status": "pending",
+                                      "locations": [{ "path": "/notes.txt" }] },
+                        "options": [
+                            { "optionId": "allow_once", "name": "Yes, proceed", "kind": "allow_once" },
+                            { "optionId": "cancel", "name": "No", "kind": "reject_once" },
+                        ] } }),
+                );
+                self.waiting = Some((id, session));
+            }
+            _ => {}
+        }
+    }
+
     /// Answers a message by the script its words choose. Returns whether
     /// to carry on.
     fn prompt(&mut self, id: Value, session: String, text: &str) -> bool {
@@ -203,6 +344,10 @@ impl Fake {
         if !matches!(text, "ask" | "wait" | "exit") {
             let usage = json!({ "sessionUpdate": "usage_update", "used": 1000, "size": 200_000 });
             update(&session, &usage);
+        }
+        if self.codex && matches!(text, "tool" | "ask") {
+            self.codex_prompt(id, session, text);
+            return true;
         }
         if self.file(&id, &session, text) {
             return true;

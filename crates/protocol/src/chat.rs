@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 /// A chat with an agent, as a view's node.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatNode {
+    /// The agent the chat talks to, as it's shown: "Claude Code",
+    /// "Codex"…
+    pub agent: String,
     /// The turns, oldest first.
     pub turns: Vec<Turn>,
     /// What the chat is doing.
@@ -192,6 +195,27 @@ pub enum ToolContent {
     Text(String),
     /// A change to a file.
     Diff(Diff),
+    /// A command's output as it ran, as plain text, streamed apart from
+    /// the tool's other content, as Codex's adapter streams it.
+    Output(String),
+}
+
+impl Tool {
+    /// Adds `text` to the end of its output.
+    pub fn append_output(&mut self, text: &str) {
+        match self.output_mut() {
+            Some(output) => output.push_str(text),
+            None => self.content.push(ToolContent::Output(text.to_owned())),
+        }
+    }
+
+    /// Its output, if it has any.
+    pub fn output_mut(&mut self) -> Option<&mut String> {
+        self.content.iter_mut().find_map(|content| match content {
+            ToolContent::Output(output) => Some(output),
+            _ => None,
+        })
+    }
 }
 
 /// A change to a file: the part of it changed, before and after.
@@ -294,6 +318,16 @@ pub enum ChatPatch {
         /// What's added.
         text: String,
     },
+    /// More of a command's output: `text` goes on the end of the output
+    /// of the tool that's item `item` of turn `turn`.
+    Output {
+        /// The turn's index.
+        turn: u32,
+        /// The tool's index in the turn.
+        item: u32,
+        /// What's added.
+        text: String,
+    },
     /// The chat's state is now this.
     State(ChatState),
     /// The agent's question is now this.
@@ -355,6 +389,15 @@ impl ChatNode {
                     .and_then(|turn| turn.items.get_mut(item as usize))
                 {
                     words.push_str(&text);
+                }
+            }
+            ChatPatch::Output { turn, item, text } => {
+                if let Some(Item::Tool(tool)) = self
+                    .turns
+                    .get_mut(turn as usize)
+                    .and_then(|turn| turn.items.get_mut(item as usize))
+                {
+                    tool.append_output(&text);
                 }
             }
             ChatPatch::State(state) => self.state = state,

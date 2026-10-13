@@ -82,7 +82,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 45;
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -639,6 +639,9 @@ pub struct NewAgent {
     /// The directory the agent works in. `None` uses the one the pane
     /// beside it is in, as for a new terminal.
     pub cwd: Option<String>,
+    /// The agent, by its name: `claude`, `codex`, or one the daemon's
+    /// `agents.toml` adds. `None` is the daemon's default, Claude Code.
+    pub agent: Option<String>,
 }
 
 /// The daemon's answer to a [`Request`].

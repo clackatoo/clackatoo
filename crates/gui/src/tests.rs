@@ -709,12 +709,12 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                 },
             ],
         }),
-        notice: None,
         settings: claude_settings(),
         usage: Some(clackatoo_protocol::Usage {
             used: 38_400,
             size: 200_000,
         }),
+        ..ChatNode::default()
     }
 }
 
@@ -941,10 +941,10 @@ fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
     pane.view_changed(&ViewUpdate::Snapshot(View {
         title: "agent".into(),
         cwd: None,
-        root: Node::Chat(ChatNode {
+        root: Node::Chat(Box::new(ChatNode {
             state: ChatState::Ready,
             ..ChatNode::default()
-        }),
+        })),
     }));
     assert!(pane.is_chat());
     for ch in ["h", "i"] {

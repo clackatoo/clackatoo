@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 mod agent;
+mod agents;
 mod buffer;
 mod chat;
 pub mod client;
@@ -38,6 +39,7 @@ use std::ffi::OsString;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
+pub use agents::{AgentConfig, CustomAgent};
 pub use client::{Client, ClientError, Receiver, Sender};
 pub use quic::{Contact, Route};
 pub use runtime::{DaemonLock, LockError, RuntimeDir};
@@ -56,9 +58,9 @@ pub struct DaemonConfig {
     /// commands, which [`upgrade::serve`] writes. Without them, shells
     /// start as they are.
     pub shell_integration: Option<PathBuf>,
-    /// The agent chats talk to, and its arguments: a program speaking ACP,
-    /// the Agent Client Protocol, on its stdin and stdout.
-    pub agent: Vec<OsString>,
+    /// The agents chats can talk to: programs speaking ACP, the Agent
+    /// Client Protocol, on their stdin and stdout.
+    pub agents: AgentConfig,
     /// The UDP ports clients on other machines may move their QUIC
     /// connections onto: the first free one is taken, when the first
     /// connection over SSH arrives. 0 means any port. `None` keeps every
@@ -93,26 +95,18 @@ pub struct DaemonConfig {
 /// told otherwise.
 pub const DEFAULT_SERVER_IDLE: std::time::Duration = std::time::Duration::from_mins(5);
 
-/// The agent chats talk to unless told otherwise: Claude Code, through
-/// the adapter that speaks ACP for it, at the version tried with
-/// clackatoo. `npx` fetches it the first time.
-pub const DEFAULT_AGENT: &[&str] = &[
-    "npx",
-    "--yes",
-    "--prefer-offline",
-    "@agentclientprotocol/claude-agent-acp@0.88.0",
-];
-
 /// The UDP ports a daemon uses unless told otherwise: mosh's, so a
 /// firewall opened for mosh lets clackatoo through too.
 pub const DEFAULT_UDP_PORTS: RangeInclusive<u16> = 60000..=61000;
 
 impl DaemonConfig {
     /// Defaults taken from the environment: `$SHELL` (or `/bin/sh`),
-    /// `$HOME` (or `/`), `$CLACKATOO_AGENT`: a command, split at spaces
-    /// (or [`DEFAULT_AGENT`]), `$CLACKATOO_UDP_PORTS`: a port, a range
-    /// such as `60000-61000` (the default), or `off`, and the language
-    /// packs in [`languages_dir`].
+    /// `$HOME` (or `/`), `$CLACKATOO_AGENT`: the command of the agent a
+    /// chat gets when it asks for none, split at spaces (or else Claude
+    /// Code's adapter), `$CLACKATOO_UDP_PORTS`: a port, a range such as
+    /// `60000-61000` (the default), or `off`, the language packs in
+    /// [`languages_dir`], and agents added in `daemon/agents.toml` in
+    /// [`config_dir`].
     #[must_use]
     pub fn from_env() -> Self {
         let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
@@ -130,13 +124,20 @@ impl DaemonConfig {
             shell: non_empty("SHELL").unwrap_or_else(|| "/bin/sh".into()),
             home: non_empty("HOME").map_or_else(|| "/".into(), PathBuf::from),
             shell_integration: None,
-            agent: match non_empty("CLACKATOO_AGENT") {
-                Some(command) => command
-                    .to_string_lossy()
-                    .split_whitespace()
-                    .map(OsString::from)
+            agents: AgentConfig {
+                custom: (non_empty("CLACKATOO_AGENT").into_iter())
+                    .map(|command| CustomAgent {
+                        name: agents::DEFAULT.to_owned(),
+                        title: None,
+                        command: (command.to_string_lossy().split_whitespace())
+                            .map(OsString::from)
+                            .collect(),
+                        starting_mode: None,
+                    })
                     .collect(),
-                None => DEFAULT_AGENT.iter().map(OsString::from).collect(),
+                file: config_dir().map(|dir| dir.join("daemon/agents.toml")),
+                dir: languages_dir().map(|dir| dir.with_file_name("agents")),
+                path: None,
             },
             udp_ports: match non_empty("CLACKATOO_UDP_PORTS") {
                 None => Some(DEFAULT_UDP_PORTS),
@@ -174,6 +175,17 @@ fn data_dir() -> Option<PathBuf> {
     non_empty("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+}
+
+/// clackatoo's config directory: `clackatoo` in `$XDG_CONFIG_HOME`, or
+/// else in `~/.config`.
+#[must_use]
+pub fn config_dir() -> Option<PathBuf> {
+    let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let config = non_empty("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(config.join("clackatoo"))
 }
 
 /// A port, or a range of them.

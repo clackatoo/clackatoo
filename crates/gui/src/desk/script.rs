@@ -3,10 +3,9 @@
 
 use std::fmt;
 
-use clackatoo_protocol::{NewAgent, NewTerminal, PaneId, PaneTerminal, Request};
+use clackatoo_protocol::{PaneId, Request};
 
 use super::{Asked, Desk};
-use crate::command::Kind;
 use crate::input::{KeptPress, KeyPress};
 use crate::keymap::{self, Chord};
 use crate::lua::{FromLua, KeyInfo, Lua, PaneInfo, Scope, ToLua, WINDOW, World};
@@ -308,15 +307,7 @@ impl Desk {
                     return;
                 }
                 let size = self.new_pane_size(Some(side));
-                let terminal = match kind {
-                    Kind::Terminal => PaneTerminal::New(NewTerminal {
-                        size,
-                        command: None,
-                        cwd: None,
-                        record_to: None,
-                    }),
-                    Kind::Agent => PaneTerminal::Agent(NewAgent { size, cwd: None }),
-                };
+                let terminal = super::new_pane(kind, None, size, &self.options);
                 self.request(
                     Request::Split {
                         pane,

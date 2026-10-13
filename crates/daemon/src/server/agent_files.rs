@@ -40,6 +40,7 @@ use serde_json::{Value, json};
 
 use super::Daemon;
 use super::buffers::resolve;
+use super::chats::AgentId;
 use crate::agent::{FAILED, NOT_FOUND};
 use crate::buffer::{self, Buffer, Made, Refused};
 use crate::chat::{RawDiff, Wrote};
@@ -240,25 +241,29 @@ impl Daemon {
     /// file is open, or else the file's.
     pub(super) fn read_for_agent(
         &mut self,
+        (agent, name): (AgentId, &str),
         session: &str,
         request: &Value,
         path: &Path,
         (line, limit): (Option<u32>, Option<u32>),
     ) {
-        let result = self.read_file(session, path).map(|(chat, path, text)| {
-            let content = lines(&text, line, limit);
-            self.agent_files.remember(chat, &path, text);
-            json!({ "content": content })
-        });
-        self.answer_agent(request, result);
+        let result = self
+            .read_file(name, session, path)
+            .map(|(chat, path, text)| {
+                let content = lines(&text, line, limit);
+                self.agent_files.remember(chat, &path, text);
+                json!({ "content": content })
+            });
+        self.answer_agent(agent, request, result);
     }
 
     fn read_file(
         &mut self,
+        name: &str,
         session: &str,
         path: &Path,
     ) -> Result<(TerminalId, PathBuf, Rope), (i64, String)> {
-        let (chat, path) = self.agent_path(session, path)?;
+        let (chat, path) = self.agent_path(name, session, path)?;
         if let Some(id) = self.buffer_of(&path) {
             let text = self.buffers[&id].buffer.text().clone();
             return Ok((chat, path, text));
@@ -275,22 +280,24 @@ impl Daemon {
     /// Makes the agent's `fs/write_text_file`, and answers it.
     pub(super) fn write_for_agent(
         &mut self,
+        (agent, name): (AgentId, &str),
         session: &str,
         request: &Value,
         path: &Path,
         content: &str,
     ) {
-        let result = self.write_file(session, path, content).map(|()| json!({}));
-        self.answer_agent(request, result);
+        let result = (self.write_file(name, session, path, content)).map(|()| json!({}));
+        self.answer_agent(agent, request, result);
     }
 
     fn write_file(
         &mut self,
+        name: &str,
         session: &str,
         path: &Path,
         content: &str,
     ) -> Result<(), (i64, String)> {
-        let (chat, path) = self.agent_path(session, path)?;
+        let (chat, path) = self.agent_path(name, session, path)?;
         let (turn, tool) = (self.chat(chat))
             .map(|chat| chat.working_on())
             .unwrap_or_default();
@@ -500,8 +507,10 @@ impl Daemon {
             || path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let title = (self.chat(chat))
-            .map_or_else(|| "the agent".to_owned(), |chat| chat.title().to_owned());
+        let title = (self.chat(chat)).map_or_else(
+            || "the agent".to_owned(),
+            |chat| chat.agent_title().to_owned(),
+        );
         let notice = if conflict {
             format!(
                 "{title} changed {file} where you have unsaved edits: \
@@ -546,10 +555,11 @@ impl Daemon {
     /// working directory, or the git worktree that's in.
     fn agent_path(
         &mut self,
+        name: &str,
         session: &str,
         path: &Path,
     ) -> Result<(TerminalId, PathBuf), (i64, String)> {
-        let Some((chat, hosted)) = self.chat_in(session) else {
+        let Some((chat, hosted)) = self.chat_in(name, session) else {
             return Err((FAILED, format!("there's no session {session}")));
         };
         let cwd = PathBuf::from(hosted.working_directory());
@@ -573,11 +583,13 @@ impl Daemon {
     }
 
     /// Sends the agent the answer to its request about a file.
-    fn answer_agent(&mut self, request: &Value, result: Result<Value, (i64, String)>) {
-        if let Some(agent) = &mut self.agent {
-            agent.agent.answer(request, result);
-        }
-        self.flush_agent();
+    fn answer_agent(
+        &mut self,
+        agent: AgentId,
+        request: &Value,
+        result: Result<Value, (i64, String)>,
+    ) {
+        self.agent_answer(agent, request, result);
     }
 }
 
@@ -670,7 +682,7 @@ mod tests {
             shell: "/bin/sh".into(),
             home: dir.to_owned(),
             shell_integration: None,
-            agent: Vec::new(),
+            agents: crate::AgentConfig::default(),
             udp_ports: None,
             languages: None,
             servers: None,
@@ -681,7 +693,9 @@ mod tests {
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let id = TerminalId(1);
-        let mut chat = HostedChat::new(id, Size::new(40, 10).unwrap(), dir.display().to_string());
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let cwd = dir.display().to_string();
+        let mut chat = HostedChat::new(id, Size::new(40, 10).unwrap(), cwd, &agent);
         chat.connected(Opened {
             session: "s1".into(),
             settings: None,
@@ -721,11 +735,29 @@ mod tests {
         // Two writes in one tool call, then one in another, having read
         // your line.
         start_tool(&mut daemon, chat, "t1");
-        daemon.read_for_agent("s1", &json!(0), &path, (None, None));
-        daemon.write_for_agent("s1", &json!(1), &path, "ONE\ntwo\nthree\n");
-        daemon.write_for_agent("s1", &json!(2), &path, "ONE\nTWO\nthree\n");
+        daemon.read_for_agent((AgentId(0), "claude"), "s1", &json!(0), &path, (None, None));
+        daemon.write_for_agent(
+            (AgentId(0), "claude"),
+            "s1",
+            &json!(1),
+            &path,
+            "ONE\ntwo\nthree\n",
+        );
+        daemon.write_for_agent(
+            (AgentId(0), "claude"),
+            "s1",
+            &json!(2),
+            &path,
+            "ONE\nTWO\nthree\n",
+        );
         start_tool(&mut daemon, chat, "t2");
-        daemon.write_for_agent("s1", &json!(3), &path, "ONE\nTWO\nthree\nfour\n");
+        daemon.write_for_agent(
+            (AgentId(0), "claude"),
+            "s1",
+            &json!(3),
+            &path,
+            "ONE\nTWO\nthree\nfour\n",
+        );
         assert_eq!(text(&daemon), "ONE\nTWO\nthree\nfour\n");
 
         let logged: Vec<_> = (daemon.agent_files.log.changes())

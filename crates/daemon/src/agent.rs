@@ -34,7 +34,7 @@ use clackatoo_protocol::TerminalId;
 use serde_json::{Value, json};
 
 use crate::pty::Process;
-use crate::rpc::{Framing, Message, Peer};
+use crate::rpc::{Framing, Message, Peer, RpcError};
 
 /// The ACP version spoken.
 const PROTOCOL_VERSION: u16 = 1;
@@ -44,6 +44,9 @@ pub(crate) const NOT_FOUND: i64 = -32002;
 
 /// The JSON-RPC error code for a request that couldn't be carried out.
 pub(crate) const FAILED: i64 = -32603;
+
+/// The error ACP's agents answer with when they need logging in to.
+const AUTH_REQUIRED: i64 = -32000;
 
 /// What a request the daemon sent was for, so its answer can be acted on.
 #[derive(Clone, Copy, Debug)]
@@ -66,7 +69,7 @@ pub(crate) enum Incoming {
     /// The chat in `terminal` has a session, or couldn't get one.
     Session {
         terminal: TerminalId,
-        result: Result<Opened, String>,
+        result: Result<Opened, Refused>,
     },
     /// The settings of the chat in `terminal`, after it asked to change
     /// one, or why it couldn't.
@@ -112,6 +115,15 @@ pub(crate) enum Incoming {
     },
 }
 
+/// Why the agent wouldn't make or open a session.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Refused {
+    /// What it said.
+    pub(crate) message: String,
+    /// It needs logging in to first.
+    pub(crate) login: bool,
+}
+
 /// A session made or opened again.
 #[derive(Debug)]
 pub(crate) struct Opened {
@@ -134,10 +146,11 @@ pub(crate) struct Agent {
 }
 
 impl Agent {
-    /// Starts `command`, and introduces the daemon to it.
-    pub(crate) fn start(command: &[OsString]) -> io::Result<Self> {
+    /// Starts `command`, the agent called `name`, and introduces the
+    /// daemon to it.
+    pub(crate) fn start(name: &str, command: &[OsString]) -> io::Result<Self> {
         let mut agent = Self {
-            peer: Peer::start("agent", command, None, Framing::Lines)?,
+            peer: Peer::start(&format!("agent {name}"), command, None, Framing::Lines)?,
             next_id: 0,
             pending: BTreeMap::new(),
             held: None,
@@ -151,6 +164,9 @@ impl Agent {
                 "clientCapabilities": {
                     "fs": { "readTextFile": true, "writeTextFile": true },
                     "terminal": false,
+                    // Codex's adapter streams commands' output in this,
+                    // which the daemon adds to the tool's.
+                    "_meta": { "terminal_output_delta": true },
                 },
                 "clientInfo": { "name": "clackatoo", "version": env!("CARGO_PKG_VERSION") },
             }),
@@ -357,9 +373,12 @@ impl Agent {
                     return;
                 };
                 let result = match (message.result, message.error) {
-                    (_, Some(error)) => Err(error.message),
+                    (_, Some(error)) => Err(error),
                     (Some(result), None) => Ok(result),
-                    (None, None) => Err("the agent's answer was empty".to_owned()),
+                    (None, None) => Err(RpcError {
+                        code: 0,
+                        message: "the agent's answer was empty".to_owned(),
+                    }),
                 };
                 self.answered(pending, result, incoming);
             }
@@ -370,9 +389,31 @@ impl Agent {
     fn answered(
         &mut self,
         pending: Pending,
-        result: Result<Value, String>,
+        result: Result<Value, RpcError>,
         incoming: &mut Vec<Incoming>,
     ) {
+        if let Pending::Session(terminal) = pending {
+            incoming.push(Incoming::Session {
+                terminal,
+                // A resumed session's ID is the one asked for, which the
+                // answer leaves out: the chat keeps it.
+                result: result
+                    .map(|result| Opened {
+                        session: result
+                            .get("sessionId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        settings: settings(&result),
+                    })
+                    .map_err(|error| Refused {
+                        login: error.code == AUTH_REQUIRED,
+                        message: error.message,
+                    }),
+            });
+            return;
+        }
+        let result = result.map_err(|error| error.message);
         match pending {
             Pending::Initialize => {
                 if let Err(err) = &result {
@@ -387,19 +428,6 @@ impl Agent {
                     self.peer.send(&message);
                 }
             }
-            Pending::Session(terminal) => incoming.push(Incoming::Session {
-                terminal,
-                // A resumed session's ID is the one asked for, which the
-                // answer leaves out: the chat keeps it.
-                result: result.map(|result| Opened {
-                    session: result
-                        .get("sessionId")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    settings: settings(&result),
-                }),
-            }),
             Pending::Setting(terminal) => incoming.push(Incoming::Settings {
                 terminal,
                 result: result.map(|result| settings(&result).unwrap_or_default()),
@@ -412,8 +440,20 @@ impl Agent {
                         .map_err(|err| format!("the agent's answer made no sense: {err}"))
                 }),
             }),
-            Pending::Ignored => {}
+            Pending::Session(_) | Pending::Ignored => {}
         }
+    }
+
+    /// Whether the agent has answered `initialize`: if it stops before,
+    /// it never started.
+    pub(crate) fn started(&self) -> bool {
+        self.held.is_none()
+    }
+
+    /// The last lines the agent wrote to stderr, which say why, if it
+    /// stopped before it started.
+    pub(crate) fn last_errors(&self) -> Option<String> {
+        self.peer.last_errors()
     }
 
     /// The requests still waiting for an answer, for the chats in these

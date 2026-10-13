@@ -30,9 +30,9 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine, HistoryLines,
-    Line, LinkTarget, NewAgent, NodeId, PROTOCOL_VERSION, Pane, PaneId, PaneTerminal, Patch,
-    Request, Response, ServerMessage, Side, Size, TabId, TerminalId, TerminalInfo, TerminalStatus,
-    Udp, View, ViewUpdate, WorkspaceId,
+    Line, LinkTarget, NodeId, PROTOCOL_VERSION, Pane, PaneId, PaneTerminal, Patch, Request,
+    Response, ServerMessage, Side, Size, TabId, TerminalId, TerminalInfo, TerminalStatus, Udp,
+    View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_syntax::{Languages, Syntax};
 use clackatoo_term::{Damage, Terminal};
@@ -44,9 +44,8 @@ use quinn_proto::{ConnectionHandle, StreamId};
 use slab::Slab;
 
 use crate::DaemonConfig;
-use crate::agent::{Agent, Incoming};
 use crate::buffer::Buffer;
-use crate::chat::{Action, ChatSent, HostedChat};
+use crate::chat::{ChatSent, HostedChat};
 use crate::handover::{self, Fds, Handover, HandoverError};
 use crate::hosted::{HostedTerminal, Orphan, ReadOutcome};
 use crate::memory;
@@ -56,6 +55,7 @@ use crate::workspaces::WorkspaceState;
 
 mod agent_files;
 mod buffers;
+mod chats;
 mod clipboard;
 mod explorers;
 mod finder;
@@ -66,6 +66,7 @@ mod rename;
 mod signs;
 
 use buffers::BufferSlot;
+use chats::AgentId;
 use explorers::Explorers;
 use finder::Finds;
 use language::{Pipe, ServerId, Servers};
@@ -98,14 +99,8 @@ enum Source {
     Exit(TerminalId),
     /// The pidfd of a closed terminal's program that hasn't exited yet.
     Orphan(Orphan),
-    /// The agent's stdout, where its messages come.
-    AgentOutput,
-    /// The agent's stderr.
-    AgentErrors,
-    /// The agent's stdin, watched for room to write.
-    AgentInput,
-    /// The agent's pidfd.
-    AgentExit,
+    /// One of an agent's pipes.
+    Agent(AgentId, Pipe),
     /// One of a language server's pipes.
     Server(ServerId, Pipe),
     /// The inotify instance watching repositories' indexes.
@@ -443,10 +438,9 @@ pub struct Daemon {
     /// A client may have writes to the clipboard waiting that it can be
     /// sent.
     clipboard_unsent: bool,
-    /// The agent chats talk to, while any chat needs it.
-    agent: Option<AgentSlot>,
-    /// What the agent sent last, for the chats to act on.
-    incoming: Vec<Incoming>,
+    /// The agents chats talk to, while any chat needs them, and those
+    /// being installed.
+    agents: chats::Agents,
     /// Files as agents read them, and what agents changed in them.
     agent_files: agent_files::AgentFiles,
     /// The QUIC endpoint, set up when a connection first carries QUIC.
@@ -474,15 +468,6 @@ pub struct Daemon {
     /// The arguments an upgrade runs the next build with. Without them,
     /// the daemon can't upgrade.
     upgrade_args: Vec<std::ffi::OsString>,
-}
-
-/// The agent plus its event-loop registrations.
-#[derive(Debug)]
-struct AgentSlot {
-    agent: Agent,
-    tokens: [Token; 4],
-    /// Its read budget ran out with more of its output waiting.
-    unread: bool,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -557,8 +542,7 @@ impl Daemon {
             clipboard_asks: 0,
             clipboard_due: Vec::new(),
             clipboard_unsent: false,
-            agent: None,
-            incoming: Vec::new(),
+            agents: chats::Agents::default(),
             agent_files: agent_files::AgentFiles::default(),
             quic: None,
             quic_events: Vec::new(),
@@ -611,7 +595,8 @@ impl Daemon {
             }
         }
         for chat in chats {
-            daemon.add_chat(HostedChat::resume(chat));
+            let agent = daemon.agent_spec(&chat.agent);
+            daemon.add_chat(HostedChat::resume(chat, &agent));
         }
         daemon.next_buffer = state.next_buffer;
         for buffer in buffers {
@@ -671,9 +656,9 @@ impl Daemon {
         // Renames under way are dropped, rather than leave their new files
         // beside the old.
         self.abandon_renames();
-        // The agent and language servers stop, and the next build reaps
+        // The agents and language servers stop, and the next build reaps
         // them.
-        self.stop_agent();
+        self.stop_agents();
         self.stop_servers();
         let orphan_tokens: Vec<usize> = (self.sources.iter())
             .filter(|(_, source)| matches!(source, Source::Orphan(_)))
@@ -749,7 +734,7 @@ impl Daemon {
             // With output still waiting, poll without blocking so it gets read
             // right after anything else that's ready. Otherwise wait for the
             // next compaction or QUIC timer, if there is one.
-            let agent_unread = self.agent.as_ref().is_some_and(|agent| agent.unread);
+            let agent_unread = self.agents.unread();
             let servers_unread = self.servers_unread();
             let timeout = if self.unread.is_empty() && !agent_unread && !servers_unread {
                 let compaction = self.compactions.values().min().copied();
@@ -780,7 +765,7 @@ impl Daemon {
                 self.read_output(id);
             }
             if agent_unread {
-                self.read_agent();
+                self.read_agents_unread();
             }
             if servers_unread {
                 self.read_servers_unread();
@@ -788,6 +773,7 @@ impl Daemon {
             self.take_highlights();
             self.take_signs();
             self.take_installs();
+            self.take_agent_installs();
             self.take_renames();
             self.ask_again();
             self.take_found();
@@ -824,18 +810,7 @@ impl Daemon {
                     self.reap(id);
                 }
                 Some(Source::Orphan(_)) => self.reap_orphan(token),
-                Some(Source::AgentOutput) => self.read_agent(),
-                Some(Source::AgentErrors) => {
-                    if let Some(agent) = &mut self.agent {
-                        agent.agent.read_errors(&mut self.buffer);
-                    }
-                }
-                Some(Source::AgentInput) => self.flush_agent(),
-                Some(Source::AgentExit) => {
-                    // What it said last comes first.
-                    self.read_agent();
-                    self.agent_gone();
-                }
+                Some(&Source::Agent(id, pipe)) => self.agent_event(id, pipe),
                 Some(&Source::Server(id, pipe)) => match pipe {
                     Pipe::Output => self.read_server(id),
                     Pipe::Errors => self.read_server_errors(id),
@@ -1347,315 +1322,6 @@ impl Daemon {
             .register(&mut SourceFd(&fd), token, Interest::READABLE)?;
         entry.insert(source);
         Ok(Some(token))
-    }
-
-    // --- Chats and the agent -----------------------------------------------
-
-    /// Starts a chat, working in the directory asked for, or the one the
-    /// pane `beside` is in.
-    fn new_chat(&mut self, request: NewAgent, beside: Option<PaneId>) -> TerminalId {
-        let id = TerminalId(self.next_id);
-        self.next_id += 1;
-        let cwd = request
-            .cwd
-            .or_else(|| beside.and_then(|pane| self.working_directory(pane)))
-            .unwrap_or_else(|| self.config.home.to_string_lossy().into_owned());
-        let chat = HostedChat::new(id, request.size, cwd);
-        log::info!("chat {id} started");
-        self.add_chat(chat);
-        self.connect(id);
-        id
-    }
-
-    fn add_chat(&mut self, chat: HostedChat) {
-        let id = chat.info().id;
-        self.terminals.insert(
-            id,
-            Slot {
-                terminal: Hosted::Chat(chat),
-                output: None,
-                exit: None,
-                wants_writable: false,
-                viewers: Vec::new(),
-                typist: None,
-                clipboard: None,
-            },
-        );
-    }
-
-    /// The chat in terminal `id`.
-    fn chat(&mut self, id: TerminalId) -> Option<&mut HostedChat> {
-        self.terminals.get_mut(&id)?.terminal.chat()
-    }
-
-    /// The chat whose session is `session`.
-    fn chat_in(&mut self, session: &str) -> Option<(TerminalId, &mut HostedChat)> {
-        self.terminals.iter_mut().find_map(|(&id, slot)| {
-            let chat = slot.terminal.chat()?;
-            (chat.session() == Some(session)).then_some((id, chat))
-        })
-    }
-
-    /// Asks the agent for the chat's session, starting the agent if it
-    /// isn't running.
-    fn connect(&mut self, id: TerminalId) {
-        if let Err(err) = self.start_agent() {
-            log::warn!("the agent couldn't start: {err}");
-            if let Some(chat) = self.chat(id) {
-                chat.failed_to_connect(&err.to_string());
-            }
-            self.collect_damage(id);
-            return;
-        }
-        let Some(chat) = self
-            .terminals
-            .get_mut(&id)
-            .and_then(|slot| slot.terminal.chat())
-        else {
-            return;
-        };
-        let (cwd, session) = (
-            chat.working_directory().to_owned(),
-            chat.session().map(str::to_owned),
-        );
-        if let Some(agent) = &mut self.agent {
-            agent.agent.open_session(id, &cwd, session.as_deref());
-        }
-        self.flush_agent();
-    }
-
-    /// Starts the agent, unless it's running.
-    fn start_agent(&mut self) -> io::Result<()> {
-        if self.agent.is_some() {
-            return Ok(());
-        }
-        let agent = Agent::start(&self.config.agent)?;
-        let mut tokens: Vec<Token> = Vec::new();
-        let sources = [
-            (agent.stdout_fd(), Source::AgentOutput, Interest::READABLE),
-            (agent.stderr_fd(), Source::AgentErrors, Interest::READABLE),
-            (agent.stdin_fd(), Source::AgentInput, Interest::WRITABLE),
-            (agent.exit_fd(), Source::AgentExit, Interest::READABLE),
-        ];
-        for (fd, source, interest) in sources {
-            let entry = self.sources.vacant_entry();
-            let token = Token(entry.key());
-            if let Err(err) = self
-                .poll
-                .registry()
-                .register(&mut SourceFd(&fd), token, interest)
-            {
-                for token in tokens {
-                    self.sources.remove(token.0);
-                }
-                // Its pipes close as it's dropped, which ends it.
-                self.watch_orphan(Orphan::new(agent.stop()));
-                return Err(err);
-            }
-            entry.insert(source);
-            tokens.push(token);
-        }
-        self.agent = Some(AgentSlot {
-            agent,
-            tokens: tokens.try_into().expect("four sources"),
-            unread: false,
-        });
-        Ok(())
-    }
-
-    /// Carries out what a chat asked for.
-    fn act(&mut self, id: TerminalId, actions: Vec<Action>) {
-        for action in actions {
-            let session = self
-                .chat(id)
-                .and_then(|chat| chat.session().map(str::to_owned));
-            match (action, &mut self.agent, session) {
-                (Action::Connect, _, _) => self.connect(id),
-                (Action::Prompt(text), Some(agent), Some(session)) => {
-                    agent.agent.prompt(id, &session, &text);
-                }
-                (Action::Cancel, Some(agent), Some(session)) => agent.agent.cancel(&session),
-                (Action::Set { setting, value }, Some(agent), Some(session)) => {
-                    agent.agent.set_setting(id, &session, &setting, &value);
-                }
-                (Action::Answer { request, option }, Some(agent), _) => {
-                    agent.agent.answer_permission(&request, option.as_deref());
-                }
-                // The agent has gone, which the chat has heard or will.
-                _ => {}
-            }
-        }
-        self.flush_agent();
-    }
-
-    /// Writes what's queued for the agent.
-    fn flush_agent(&mut self) {
-        let Some(agent) = &mut self.agent else { return };
-        if agent.agent.has_outgoing() && agent.agent.flush().is_err() {
-            self.agent_gone();
-        }
-    }
-
-    /// Reads what the agent sent, and hands it to the chats.
-    fn read_agent(&mut self) {
-        let Some(agent) = &mut self.agent else { return };
-        let mut incoming = std::mem::take(&mut self.incoming);
-        let read = agent
-            .agent
-            .read(&mut self.buffer, OUTPUT_BUDGET, &mut incoming);
-        if let Ok(more) = read {
-            agent.unread = more;
-        }
-        for message in incoming.drain(..) {
-            self.receive_from_agent(message);
-        }
-        self.incoming = incoming;
-        if read.is_err() {
-            self.agent_gone();
-        } else {
-            self.flush_agent();
-        }
-    }
-
-    fn receive_from_agent(&mut self, message: Incoming) {
-        let id = match message {
-            Incoming::Session { terminal, result } => {
-                let Some(chat) = self.chat(terminal) else {
-                    // The chat closed while its session was being made.
-                    if let (Ok(opened), Some(agent)) = (result, &mut self.agent)
-                        && !opened.session.is_empty()
-                    {
-                        agent.agent.close_session(&opened.session);
-                    }
-                    return;
-                };
-                match result {
-                    Ok(opened) => {
-                        let actions = chat.connected(opened);
-                        self.act(terminal, actions);
-                    }
-                    Err(err) => chat.failed_to_connect(&err),
-                }
-                terminal
-            }
-            Incoming::Settings { terminal, result } => {
-                let Some(chat) = self.chat(terminal) else {
-                    return;
-                };
-                chat.settings_changed(result);
-                terminal
-            }
-            Incoming::Update { session, update } => {
-                let Some((id, chat)) = self.chat_in(&session) else {
-                    return;
-                };
-                if let Some(wrote) = chat.update(*update) {
-                    self.take_written(id, &wrote);
-                }
-                id
-            }
-            Incoming::ReadFile {
-                session,
-                request,
-                path,
-                line,
-                limit,
-            } => {
-                self.read_for_agent(&session, &request, &path, (line, limit));
-                return;
-            }
-            Incoming::WriteFile {
-                session,
-                request,
-                path,
-                content,
-            } => {
-                self.write_for_agent(&session, &request, &path, &content);
-                return;
-            }
-            Incoming::Answered { terminal, result } => {
-                let Some(chat) = self.chat(terminal) else {
-                    return;
-                };
-                chat.answered(result);
-                self.settle_turn(terminal);
-                terminal
-            }
-            Incoming::Permission {
-                session,
-                request,
-                tool,
-                options,
-            } => {
-                let Some((id, chat)) = self.chat_in(&session) else {
-                    if let Some(agent) = &mut self.agent {
-                        agent.agent.answer_permission(&request, None);
-                    }
-                    return;
-                };
-                chat.ask(request, &tool, &options);
-                id
-            }
-        };
-        self.schedule_compaction(id);
-        self.collect_damage(id);
-    }
-
-    /// The agent has gone: every chat hears, and opens its session again
-    /// when it's next needed.
-    fn agent_gone(&mut self) {
-        if !self.stop_agent() {
-            return;
-        }
-        let chats: Vec<TerminalId> = (self.terminals.iter_mut())
-            .filter_map(|(&id, slot)| {
-                slot.terminal.chat()?.disconnected();
-                Some(id)
-            })
-            .collect();
-        for id in chats {
-            self.collect_damage(id);
-        }
-    }
-
-    /// Ends a closed chat's session, and the agent with the last one.
-    fn close_chat(&mut self, id: TerminalId, chat: &HostedChat) {
-        let Some(agent) = &mut self.agent else { return };
-        if let Some(session) = chat.session() {
-            agent.agent.close_session(session);
-        }
-        let chats_left = self
-            .terminals
-            .values()
-            .any(|slot| matches!(slot.terminal, Hosted::Chat(_)));
-        let waiting = agent.agent.waiting().any(|terminal| terminal != id);
-        if chats_left || waiting {
-            self.flush_agent();
-        } else {
-            // Unsent, the close goes with the agent, whose sessions all end
-            // as it does.
-            self.stop_agent();
-        }
-    }
-
-    /// Stops the agent, if it's running, and watches its process until it
-    /// exits, to reap it. Returns whether it was running.
-    fn stop_agent(&mut self) -> bool {
-        let Some(agent) = self.agent.take() else {
-            return false;
-        };
-        for token in agent.tokens {
-            self.sources.remove(token.0);
-        }
-        // Its pidfd is registered under a token just freed: it's watched
-        // anew, as an orphan's.
-        let process = agent.agent.stop();
-        let fd = std::os::fd::AsRawFd::as_raw_fd(&process);
-        if let Err(err) = self.poll.registry().deregister(&mut SourceFd(&fd)) {
-            log::warn!("agent: unwatching its process failed: {err}");
-        }
-        self.watch_orphan(Orphan::new(process));
-        true
     }
 
     // --- Clients ----------------------------------------------------------

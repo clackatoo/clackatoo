@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use clackatoo_daemon::{Client, ClientError, Daemon, DaemonConfig, ShutdownHandle};
+use clackatoo_daemon::{
+    AgentConfig, Client, ClientError, CustomAgent, Daemon, DaemonConfig, ShutdownHandle,
+};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode,
@@ -42,9 +44,11 @@ impl TestDaemon {
     }
 
     /// A daemon whose chats talk to the agent `agent` names, given the
-    /// daemon's directory.
+    /// daemon's directory, as Claude Code, the default.
     fn start_with_agent(agent: impl FnOnce(&Path) -> Vec<std::ffi::OsString>) -> Self {
-        Self::start_with(|dir, config| config.agent = agent(dir))
+        Self::start_with(|dir, config| {
+            config.agents.custom = vec![custom_agent("claude", agent(dir))];
+        })
     }
 
     /// A daemon with its config changed by `change`, given its directory.
@@ -55,7 +59,7 @@ impl TestDaemon {
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),
             shell_integration: None,
-            agent: Vec::new(),
+            agents: AgentConfig::default(),
             udp_ports: Some(0..=0),
             languages: None,
             servers: None,
@@ -91,6 +95,16 @@ impl Drop for TestDaemon {
         if let Some(thread) = self.thread.take() {
             thread.join().expect("daemon thread panicked");
         }
+    }
+}
+
+/// The agent called `name`, run with `command`.
+fn custom_agent(name: &str, command: Vec<std::ffi::OsString>) -> CustomAgent {
+    CustomAgent {
+        name: name.to_owned(),
+        title: None,
+        command,
+        starting_mode: None,
     }
 }
 
@@ -1385,9 +1399,15 @@ fn a_daemon_that_stops_answering_is_out_of_contact_until_it_answers_again() {
 
 /// A new chat, working where the pane beside it is.
 fn new_chat() -> PaneTerminal {
+    new_chat_with(None)
+}
+
+/// A new chat with the agent called `agent`, or the default.
+fn new_chat_with(agent: Option<&str>) -> PaneTerminal {
     PaneTerminal::Agent(NewAgent {
         size: Size::new(40, 10).unwrap(),
         cwd: None,
+        agent: agent.map(str::to_owned),
     })
 }
 
@@ -1655,10 +1675,404 @@ fn a_chat_starts_in_auto_mode_and_keeps_the_settings_chosen() {
     );
 }
 
+/// A daemon whose chats talk to the fake agent as Claude Code, and as
+/// Codex, run with `codex_flags` besides `--codex`.
+fn with_fake_codex(codex_flags: &'static [&'static str]) -> TestDaemon {
+    TestDaemon::start_with(move |dir, config| {
+        let fake = |flags: &[&str], log: &str| -> Vec<std::ffi::OsString> {
+            std::iter::once(fake_agent().into_os_string())
+                .chain(flags.iter().map(Into::into))
+                .chain(["--log".into(), dir.join(log).into()])
+                .collect()
+        };
+        let codex = [&["--codex"][..], codex_flags].concat();
+        config.agents.custom = vec![
+            custom_agent("claude", fake(&[], "agent.log")),
+            custom_agent("codex", fake(&codex, "codex.log")),
+        ];
+    })
+}
+
+/// Starts a workspace with a chat with `agent`, and waits for it to be
+/// ready, or else to have failed.
+fn start_chat_with(client: &mut Client, agent: &str) -> (TerminalId, ChatNode) {
+    client
+        .new_workspace(None, new_chat_with(Some(agent)))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let node = wait_for_chat(client, chat, |node| {
+        matches!(node.state, ChatState::Ready | ChatState::Failed(_))
+    });
+    (chat, node)
+}
+
+/// The processes this one has started whose commands mention `dir`, as
+/// the agents of the daemon in it do, given their logs there.
+fn child_processes_in(dir: &Path) -> Vec<String> {
+    let dir = dir.to_string_lossy().into_owned();
+    (child_processes().into_iter())
+        .filter(|pid| {
+            let command = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            String::from_utf8_lossy(&command).contains(&dir)
+        })
+        .collect()
+}
+
+/// The processes this one has started, which for a daemon run in it are
+/// its agents and language servers.
+fn child_processes() -> Vec<String> {
+    std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .flatten()
+        .flat_map(|task| {
+            let list = std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            list.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[test]
+fn a_codex_chat_shows_its_commands_output_and_its_own_settings() {
+    let daemon = with_fake_codex(&[]);
+    let mut client = daemon.client();
+    let (chat, node) = start_chat_with(&mut client, "codex");
+    assert_eq!(node.state, ChatState::Ready);
+    // Named after its agent until the agent names the conversation.
+    assert_eq!(node.agent, "Codex");
+    assert_eq!(client.list_terminals().unwrap()[0].title, "Codex");
+    // Codex's settings, and its mode left where Codex's own config put it:
+    // it has no Auto to start in.
+    let ids: Vec<&str> = node
+        .settings
+        .iter()
+        .map(|setting| setting.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "mode",
+            "collaboration_mode",
+            "model",
+            "reasoning_effort",
+            "fast-mode"
+        ]
+    );
+    assert_eq!(
+        last_words(&ask(&mut client, chat, "settings")),
+        "agent gpt-6-astra\n"
+    );
+
+    // A command's output comes in pieces beside its content, which holds
+    // a terminal the daemon never made.
+    let node = ask(&mut client, chat, "tool");
+    assert_eq!(
+        node.turns.last().unwrap().items,
+        [
+            Item::Tool(Tool {
+                id: "e1".into(),
+                title: "ls".into(),
+                status: ToolStatus::Done,
+                kind: ToolKind::Execute,
+                content: vec![ToolContent::Output("notes.txt\ntodo.txt\n".into())],
+                locations: Vec::new(),
+            }),
+            Item::Words("done\n".into()),
+        ]
+    );
+
+    // Its question calls the change "Edit files": the chat says what its
+    // tool call said, and keeps the change once it's made.
+    client
+        .chat(chat, ChatAction::Send("ask".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    assert_eq!(node.question.unwrap().title, "Editing files");
+    client
+        .chat(chat, ChatAction::Answer(Some("allow_once".into())))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert_eq!(last_words(&node), "picked allow_once\n");
+    let Item::Tool(tool) = &node.turns.last().unwrap().items[0] else {
+        panic!("{node:#?}");
+    };
+    assert_eq!(tool.status, ToolStatus::Done);
+    assert_eq!(
+        tool.content,
+        [ToolContent::Diff(Diff {
+            path: "/notes.txt".into(),
+            old: Some("hi\n".into()),
+            new: "bye\n".into(),
+        })]
+    );
+}
+
+#[test]
+fn chats_with_different_agents_have_an_agent_each() {
+    let daemon = with_fake_codex(&[]);
+    let mut client = daemon.client();
+    let claude = client
+        .new_workspace(None, new_chat_with(Some("claude")))
+        .unwrap();
+    client
+        .split_pane(claude, Side::Right, new_chat_with(Some("codex")))
+        .unwrap();
+    client
+        .split_pane(claude, Side::Below, new_chat_with(Some("codex")))
+        .unwrap();
+    let chats = client.watch_workspaces().unwrap().list[0].terminals();
+    for &chat in &chats {
+        wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    }
+    let agents: Vec<String> = (chats.iter())
+        .map(|&chat| client.capture(chat).unwrap().chat().unwrap().agent.clone())
+        .collect();
+    assert_eq!(agents, ["Claude Code", "Codex", "Codex"]);
+    let agents = || child_processes_in(daemon.dir.path()).len();
+    assert_eq!(agents(), 2, "one process for each agent");
+    // Each agent numbers its sessions from 1: each chat hears its own.
+    for &chat in &chats {
+        assert_eq!(last_words(&ask(&mut client, chat, "hi")), "echo: hi\n");
+    }
+
+    // Closing one Codex chat ends its session, and closing the other
+    // stops Codex, but not Claude Code.
+    let panes = client.watch_workspaces().unwrap().list[0].tabs[0]
+        .layout
+        .panes();
+    let pane_of = |chat| {
+        (panes.iter())
+            .find(|pane| pane.content.terminal() == Some(chat))
+            .unwrap()
+            .id
+    };
+    client.close_pane(pane_of(chats[1])).unwrap();
+    let log = daemon.dir.path().join("codex.log");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&log).is_ok_and(|log| log.contains("closed")) {
+        assert!(Instant::now() < deadline, "the session was never closed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    client.close_pane(pane_of(chats[2])).unwrap();
+    while agents() != 1 {
+        assert!(Instant::now() < deadline, "Codex never stopped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        last_words(&ask(&mut client, chats[0], "still")),
+        "echo: still\n"
+    );
+}
+
+#[test]
+fn a_chat_with_an_agent_there_isnt_says_which_there_are() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let (_, node) = start_chat_with(&mut client, "nope");
+    let ChatState::Failed(why) = node.state else {
+        panic!("{node:#?}");
+    };
+    assert!(
+        why.starts_with("there's no agent called nope: the agents are claude, codex"),
+        "{why}"
+    );
+    assert_eq!(node.agent, "nope");
+}
+
+#[test]
+fn an_agent_no_one_is_logged_in_to_says_how_to_log_in() {
+    let daemon = with_fake_codex(&["--logged-out"]);
+    let mut client = daemon.client();
+    let (_, node) = start_chat_with(&mut client, "codex");
+    assert_eq!(
+        node.state,
+        ChatState::Failed(
+            "no one's logged in to it. Log in with `codex login` in a terminal, then send a \
+             message."
+                .into()
+        )
+    );
+}
+
+#[test]
+fn an_agent_that_stops_before_it_starts_says_why() {
+    let daemon = TestDaemon::start_with_agent(|_| vec![fake_agent().into(), "--broken".into()]);
+    let mut client = daemon.client();
+    let (chat, node) = start_chat_with(&mut client, "claude");
+    assert_eq!(
+        node.state,
+        ChatState::Failed(
+            "it stopped, saying: npm ERR! notarget No matching version found for left-pad@^9"
+                .into()
+        )
+    );
+    // A message tries again, and its turn says why it went nowhere.
+    let node = ask(&mut client, chat, "hi");
+    assert!(
+        matches!(last_outcome(&node), Some(Outcome::Failed(why)) if why.contains("notarget")),
+        "{node:#?}"
+    );
+}
+
+/// A daemon that installs known agents into its `agents` directory.
+/// It looks for adapters, npx and npm in its `bin`, which has an `npm`
+/// that's never run.
+fn installing_agents() -> TestDaemon {
+    TestDaemon::start_with(|dir, config| {
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        script(&bin.join("npm"), "exit 1");
+        config.agents.dir = Some(dir.join("agents"));
+        config.agents.path = Some(bin.into());
+    })
+}
+
+/// Writes a shell script that does `body` at `path`, ready to run.
+fn script(path: &Path, body: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn a_known_agent_on_path_or_through_npx_runs_and_suggests_its_install_once() {
+    let daemon = installing_agents();
+    let bin = daemon.dir.path().join("bin");
+    let fake = fake_agent();
+    // npx, as the old builds ran agents: it's asked for the version pinned.
+    let args = daemon.dir.path().join("npx-args");
+    let npx = format!(
+        "echo \"$@\" > {}\nexec {} --codex",
+        args.display(),
+        fake.display()
+    );
+    script(&bin.join("npx"), &npx);
+    let mut client = daemon.client();
+    let (chat, node) = start_chat_with(&mut client, "codex");
+    assert_eq!(node.state, ChatState::Ready);
+    assert_eq!(
+        std::fs::read_to_string(&args).unwrap(),
+        "--yes --prefer-offline @agentclientprotocol/codex-acp@2.2.2\n"
+    );
+    // The suggestion waits for nothing: the chat answers meanwhile.
+    let question = node.question.expect("a suggestion");
+    assert!(
+        question
+            .title
+            .starts_with("Install Codex's adapter for faster starts")
+    );
+    assert!(question.title.contains("agents.toml"), "{question:?}");
+    assert_eq!(last_words(&ask(&mut client, chat, "hi")), "echo: hi\n");
+    assert!(
+        client
+            .capture(chat)
+            .unwrap()
+            .chat()
+            .unwrap()
+            .question
+            .is_some()
+    );
+    client
+        .chat(chat, ChatAction::Answer(Some("later".into())))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_none());
+    assert_eq!(node.state, ChatState::Ready);
+
+    // On PATH, it's run from there, before npx, and suggested no more.
+    script(
+        &bin.join("codex-acp"),
+        &format!("exec {} --codex", fake.display()),
+    );
+    std::fs::remove_file(&args).unwrap();
+    let first = client.watch_workspaces().unwrap().list[0].tabs[0]
+        .layout
+        .panes()[0]
+        .id;
+    client.close_pane(first).unwrap();
+    let (_, node) = start_chat_with(&mut client, "codex");
+    assert_eq!(node.state, ChatState::Ready);
+    assert_eq!(node.question, None);
+    assert!(!args.exists(), "npx wasn't run");
+}
+
+#[test]
+fn a_known_agent_not_installed_is_offered_and_one_installed_is_run_from_there() {
+    let daemon = installing_agents();
+    let mut client = daemon.client();
+    client
+        .new_workspace(None, new_chat_with(Some("codex")))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let question = node.question.unwrap();
+    assert!(
+        question.title.starts_with(
+            "Codex isn't installed. Install its ACP adapter, \
+             @agentclientprotocol/codex-acp@2.2.2, with npm?"
+        ),
+        "{question:?}"
+    );
+    assert!(
+        question
+            .title
+            .ends_with("Or give it a command in agents.toml.")
+    );
+    assert_eq!(question.choices[0].id, "install");
+    // A message waits for the answer.
+    client
+        .chat(chat, ChatAction::Send("hi".to_owned()))
+        .unwrap();
+    // Not now: the chat says how it stands, and the message goes nowhere.
+    client
+        .chat(chat, ChatAction::Answer(Some("later".into())))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert!(
+        matches!(&node.state, ChatState::Failed(why) if why.starts_with("it isn't installed")),
+        "{node:#?}"
+    );
+    assert_eq!(node.question, None);
+
+    // Installed, as if npm had put the adapter where clackatoo looks for
+    // it: the next message runs it from there.
+    let program =
+        (daemon.dir.path()).join("agents/codex-2.2.2/codex-acp/node_modules/.bin/codex-acp");
+    script(
+        &program,
+        &format!("exec {} --codex", fake_agent().display()),
+    );
+    assert_eq!(
+        last_words(&ask(&mut client, chat, "settings")),
+        "agent gpt-6-astra\n"
+    );
+}
+
+#[test]
+fn an_agent_added_in_agents_toml_is_found_when_a_chat_starts() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.agents.file = Some(dir.join("agents.toml"));
+    });
+    let toml = format!(
+        "[agents.mine]\nname = \"Mine\"\ncommand = [\"{}\", \"--codex\"]\nmode = \"read-only\"\n",
+        fake_agent().display()
+    );
+    std::fs::write(daemon.dir.path().join("agents.toml"), toml).unwrap();
+    let mut client = daemon.client();
+    let (chat, node) = start_chat_with(&mut client, "mine");
+    assert_eq!(node.agent, "Mine");
+    // It starts in the mode the file gives it.
+    assert_eq!(
+        last_words(&ask(&mut client, chat, "settings")),
+        "read-only gpt-6-astra\n"
+    );
+}
+
 /// Claude Code, through its adapter, on the cheapest model. Run by hand,
 /// with the adapter's command in `CLACKATOO_REAL_AGENT`, such as
-/// `npx --yes @agentclientprotocol/claude-agent-acp@0.88.0`: it uses the
-/// account `claude` is logged in to.
+/// `~/.local/share/clackatoo/agents/claude-0.88.0/claude-agent-acp/node_modules/.bin/claude-agent-acp`,
+/// where a chat installs it, or `npx --yes @agentclientprotocol/claude-agent-acp@0.88.0`:
+/// it uses the account `claude` is logged in to.
 #[test]
 #[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
 fn a_real_agent_answers_and_asks_before_running_commands() {
@@ -1701,16 +2115,7 @@ fn a_real_agent_answers_and_asks_before_running_commands() {
     // The agent crashes: the chat says so, and the next message starts it
     // again, carrying on the same conversation. The daemon runs in this
     // process, so the agent is this process's one child.
-    let children: Vec<String> = std::fs::read_dir("/proc/self/task")
-        .unwrap()
-        .flatten()
-        .flat_map(|task| {
-            let list = std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
-            list.split_whitespace()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let children = child_processes();
     assert_eq!(children.len(), 1, "{children:?}");
     let killed = std::process::Command::new("kill")
         .args(["-KILL", &children[0]])
@@ -1976,7 +2381,7 @@ fn an_agents_own_write_across_unsaved_edits_is_left_out_and_said() {
 
     let write = format!("disk {path}\none\nTWO\n");
     assert_eq!(agent_says(&mut chatter, chat, &write), "done\n");
-    let notice = "agent changed notes.txt where you have unsaved edits: \
+    let notice = "Claude Code changed notes.txt where you have unsaved edits: \
                   `:e!` takes its version, `:w!` keeps yours";
     assert_eq!(next_notice(&mut editor), notice);
     let node = wait_for_chat(&mut chatter, chat, |node| node.notice.is_some());
@@ -2018,7 +2423,7 @@ fn a_file_changed_by_more_than_the_agent_says_is_left_out_and_said() {
     assert_eq!(agent_says(&mut chatter, chat, &write), "done\n");
     assert_eq!(
         next_notice(&mut editor),
-        "notes.txt changed on disk, and not only as agent said: \
+        "notes.txt changed on disk, and not only as Claude Code said: \
          `:e!` takes the file's version, `:w!` keeps yours"
     );
     assert_eq!(
@@ -2143,6 +2548,96 @@ fn a_real_agents_edit_lands_in_the_buffer_open_on_its_file() {
     let snapshot = attach_buffer(&mut daemon.client(), buffer);
     assert_eq!(snapshot.text, "// mine\nalpha\ngamma\n");
     assert!(snapshot.modified);
+}
+
+/// Codex, through its adapter, which the daemon installs as the chat asks,
+/// into a directory of the test's own, on the cheapest model: Luna, with
+/// low effort. Run by hand: it uses the account `codex` is logged in to,
+/// and npm, which downloads about 450 MB.
+#[test]
+#[ignore = "installs Codex and talks to a real model: run with --ignored"]
+fn a_real_codex_is_installed_and_answers_and_shows_its_commands_output() {
+    // Only the real npm is found, so it's installed, not run through npx.
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let npm = clackatoo_syntax::servers::on_path("npm").expect("npm");
+        std::os::unix::fs::symlink(npm, bin.join("npm")).unwrap();
+        config.agents.dir = Some(dir.join("agents"));
+        config.agents.path = Some(bin.into());
+    });
+    let mut client = daemon.client();
+    client
+        .new_workspace(None, new_chat_with(Some("codex")))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    let node = wait_for_chat_for(&mut client, chat, minute, |node| node.question.is_some());
+    assert!(node.question.unwrap().title.contains("codex-acp@2.2.2"));
+    client
+        .chat(chat, ChatAction::Answer(Some("install".into())))
+        .unwrap();
+    wait_for_chat_for(&mut client, chat, 5 * minute, |node| {
+        matches!(node.state, ChatState::Ready | ChatState::Failed(_))
+    });
+    for (setting, value) in [("model", "gpt-6-luna"), ("reasoning_effort", "low")] {
+        client
+            .chat(
+                chat,
+                ChatAction::Set {
+                    setting: setting.into(),
+                    value: value.into(),
+                },
+            )
+            .unwrap();
+        wait_for_chat_for(&mut client, chat, minute, |node| {
+            node.settings
+                .iter()
+                .any(|known| known.id == setting && known.value == value)
+        });
+    }
+    // Sends `text`, saying yes to anything asked, and waits for the answer.
+    let send = |client: &mut Client, text: &str| {
+        client
+            .chat(chat, ChatAction::Send(text.to_owned()))
+            .unwrap();
+        loop {
+            let node = wait_for_chat_for(client, chat, 2 * minute, |node| {
+                node.turns.last().is_some_and(|turn| turn.prompt == text)
+                    && (last_outcome(node).is_some() || node.question.is_some())
+            });
+            let Some(question) = node.question else {
+                break node;
+            };
+            let yes = question.choices[0].id.clone();
+            client.chat(chat, ChatAction::Answer(Some(yes))).unwrap();
+        }
+    };
+
+    let node = send(
+        &mut client,
+        "Reply with exactly one word, pong, and use no tools.",
+    );
+    assert!(
+        last_words(&node).to_lowercase().contains("pong"),
+        "{node:#?}"
+    );
+    let node = send(
+        &mut client,
+        "Use your shell tool to run `echo clackatoo-$((6*7))`, then reply with what it printed.",
+    );
+    let output = (node.turns.last().unwrap().items.iter())
+        .filter_map(|item| match item {
+            // Codex calls some commands reads.
+            Item::Tool(tool) => Some(&tool.content),
+            _ => None,
+        })
+        .flatten()
+        .any(|content| {
+            matches!(content, ToolContent::Text(text) | ToolContent::Output(text)
+                if text.contains("clackatoo-42"))
+        });
+    assert!(output, "{node:#?}");
 }
 
 // --- Buffers -------------------------------------------------------------

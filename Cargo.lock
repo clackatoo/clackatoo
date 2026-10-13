@@ -577,6 +577,7 @@ dependencies = [
  "slab",
  "tempfile",
  "thiserror 2.0.21",
+ "toml_edit",
  "unicode-width",
 ]
 
@@ -630,6 +631,7 @@ dependencies = [
  "regex",
  "ring",
  "ropey",
+ "rustix 1.1.5",
  "tempfile",
  "thiserror 2.0.21",
  "toml_edit",

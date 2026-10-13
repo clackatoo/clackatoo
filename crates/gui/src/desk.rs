@@ -577,6 +577,7 @@ impl Desk {
             place: Place::Tab,
             kind: Kind::Terminal,
             daemon: None,
+            agent: None,
         });
     }
 
@@ -1642,15 +1643,7 @@ impl Desk {
             _ => {}
         }
         let Some(shown) = self.shown else { return };
-        let new = |kind, size| match kind {
-            Kind::Terminal => PaneTerminal::New(NewTerminal {
-                size,
-                command: None,
-                cwd: None,
-                record_to: None,
-            }),
-            Kind::Agent => PaneTerminal::Agent(NewAgent { size, cwd: None }),
-        };
+        let new = |kind, agent, size| new_pane(kind, agent, size, &self.options);
         match command {
             Command::Open {
                 daemon: Some(daemon),
@@ -1664,8 +1657,9 @@ impl Desk {
                 place: Place::Tab | Place::Here,
                 kind,
                 daemon: None,
+                agent,
             } => {
-                let terminal = new(kind, self.new_pane_size(None));
+                let terminal = new(kind, agent, self.new_pane_size(None));
                 self.request(
                     Request::NewTab {
                         workspace: shown.workspace,
@@ -1678,8 +1672,9 @@ impl Desk {
                 place: Place::Beside(side),
                 kind,
                 daemon: None,
+                agent,
             } => {
-                let terminal = new(kind, self.new_pane_size(Some(side)));
+                let terminal = new(kind, agent, self.new_pane_size(Some(side)));
                 self.request(
                     Request::Split {
                         pane: shown.pane,
@@ -1699,7 +1694,7 @@ impl Desk {
                 if let Some(workspace) = existing {
                     self.show_workspace(workspace.id);
                 } else {
-                    let terminal = new(Kind::Terminal, self.new_pane_size(None));
+                    let terminal = new(Kind::Terminal, None, self.new_pane_size(None));
                     self.request(Request::NewWorkspace { name, terminal }, Asked::Pane);
                 }
             }
@@ -1776,6 +1771,25 @@ impl Desk {
             _ => (whole.cols, whole.rows),
         };
         Size::new(cols, rows).unwrap_or(fallback)
+    }
+}
+
+/// What to start in a new pane of `kind`, of `size`: for a chat, with
+/// `agent`, or else the one the `agent` option names, or else the
+/// daemon's default.
+fn new_pane(kind: Kind, agent: Option<String>, size: Size, options: &Options) -> PaneTerminal {
+    match kind {
+        Kind::Terminal => PaneTerminal::New(NewTerminal {
+            size,
+            command: None,
+            cwd: None,
+            record_to: None,
+        }),
+        Kind::Agent => PaneTerminal::Agent(NewAgent {
+            size,
+            cwd: None,
+            agent: agent.or_else(|| Some(options.agent.clone()).filter(|name| !name.is_empty())),
+        }),
     }
 }
 
@@ -1955,6 +1969,50 @@ mod tests {
 
     fn shown_pane(desk: &Desk) -> PaneId {
         desk.shown().expect("something shown").pane
+    }
+
+    /// The agent each chat asked for among `requests` would talk to.
+    fn agents_asked_for(requests: &[Request]) -> Vec<Option<String>> {
+        (requests.iter())
+            .filter_map(|request| match request {
+                Request::NewTab {
+                    terminal: PaneTerminal::Agent(new),
+                    ..
+                }
+                | Request::Split {
+                    terminal: PaneTerminal::Agent(new),
+                    ..
+                } => Some(new.agent.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chat_talks_to_the_agent_named_or_else_the_one_the_option_names() {
+        let mut desk = desk(workspaces(vec![workspace(
+            1,
+            "work",
+            vec![tab(1, side_by_side(vec![pane(1)]))],
+        )]));
+        snapshot(&mut desk, 1);
+        normal_mode(&mut desk);
+        command(&mut desk, "Agent codex");
+        command(&mut desk, "|Agent");
+        command(&mut desk, "set agent=gemini");
+        command(&mut desk, "-Agent");
+        // Empty leaves it to the daemon.
+        command(&mut desk, "set agent=");
+        command(&mut desk, "Agent");
+        assert_eq!(
+            agents_asked_for(&answer_all(&mut desk)),
+            [
+                Some("codex".to_owned()),
+                Some("claude".to_owned()),
+                Some("gemini".to_owned()),
+                None,
+            ]
+        );
     }
 
     #[test]

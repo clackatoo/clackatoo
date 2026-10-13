@@ -24,6 +24,7 @@
 //!    them.
 //! 9. Each terminal's links ([`clackatoo_term::LinksSnapshot`]).
 //! 10. File explorers, and panes showing them.
+//! 11. Which agent each chat talks to.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -36,10 +37,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 10;
+pub(crate) const VERSION: u32 = 11;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -78,7 +79,7 @@ impl Fds {
     }
 }
 
-/// The daemon's state, version 10.
+/// The daemon's state, version 11.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The listening socket.
@@ -142,6 +143,8 @@ pub(crate) struct Chat {
     pub(crate) settings: Vec<ChatSetting>,
     /// The values the user gave settings, by their IDs.
     pub(crate) chosen: Vec<(String, String)>,
+    /// The agent, by its name: `claude`, `codex`…
+    pub(crate) agent: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -228,6 +231,8 @@ pub(crate) enum ToolContent {
         old: Option<String>,
         new: String,
     },
+    /// A command's output, as plain text. Since version 11.
+    Output(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -414,6 +419,7 @@ impl State {
             7 => Ok(postcard::from_bytes::<v7::State>(body)?.into()),
             8 => Ok(postcard::from_bytes::<v8::State>(body)?.into()),
             9 => Ok(postcard::from_bytes::<v9::State>(body)?.into()),
+            10 => Ok(postcard::from_bytes::<v10::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -548,7 +554,7 @@ mod v3 {
 
         fn try_from(state: State) -> Result<Self, HandoverError> {
             let chats = (state.chats.into_iter())
-                .map(super::Chat::try_from)
+                .map(super::v10::Chat::try_from)
                 .collect::<Result<_, _>>()?;
             Ok(Self {
                 listener: state.listener,
@@ -562,7 +568,7 @@ mod v3 {
         }
     }
 
-    impl TryFrom<Chat> for super::Chat {
+    impl TryFrom<Chat> for super::v10::Chat {
         type Error = HandoverError;
 
         /// The chat's text, as written into its screen and history, in
@@ -871,7 +877,7 @@ mod v6 {
                 next_terminal: state.next_terminal,
                 terminals: state.terminals,
                 chats: (state.chats.into_iter())
-                    .map(|chat| super::Chat {
+                    .map(|chat| super::v10::Chat {
                         id: chat.id,
                         cols: chat.cols,
                         rows: chat.rows,
@@ -897,7 +903,8 @@ mod v7 {
     use serde::Deserialize;
 
     use super::v8::Terminal;
-    use super::{Chat, Process, Workspaces};
+    use super::v10::Chat;
+    use super::{Process, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -917,7 +924,7 @@ mod v7 {
                 lock: state.lock,
                 next_terminal: state.next_terminal,
                 terminals: state.terminals.into_iter().map(Into::into).collect(),
-                chats: state.chats,
+                chats: state.chats.into_iter().map(Into::into).collect(),
                 orphans: state.orphans,
                 workspaces: state.workspaces,
                 next_buffer: 1,
@@ -935,7 +942,8 @@ mod v8 {
     use clackatoo_term::{BlocksSnapshot, LinksSnapshot, Snapshot};
     use serde::Deserialize;
 
-    use super::{Buffer, Chat, Process, Status, Workspaces};
+    use super::v10::Chat;
+    use super::{Buffer, Process, Status, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -985,7 +993,7 @@ mod v8 {
                 lock: state.lock,
                 next_terminal: state.next_terminal,
                 terminals: state.terminals.into_iter().map(Into::into).collect(),
-                chats: state.chats,
+                chats: state.chats.into_iter().map(Into::into).collect(),
                 orphans: state.orphans,
                 workspaces: state.workspaces,
                 next_buffer: state.next_buffer,
@@ -1001,7 +1009,8 @@ mod v8 {
 mod v9 {
     use serde::Deserialize;
 
-    use super::{Buffer, Chat, Process, Terminal, Workspaces};
+    use super::v10::Chat;
+    use super::{Buffer, Process, Terminal, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -1023,13 +1032,87 @@ mod v9 {
                 lock: state.lock,
                 next_terminal: state.next_terminal,
                 terminals: state.terminals,
-                chats: state.chats,
+                chats: state.chats.into_iter().map(Into::into).collect(),
                 orphans: state.orphans,
                 workspaces: state.workspaces,
                 next_buffer: state.next_buffer,
                 buffers: state.buffers,
                 next_files: 1,
                 explorers: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Version 10, as the builds that wrote it wrote it: chats without their
+/// agent, as there was only ever Claude Code. Older versions share its
+/// chats.
+mod v10 {
+    use serde::Deserialize;
+
+    use super::{Buffer, ChatSetting, ChatTurn, Files, Process, Terminal, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct Chat {
+        pub(super) id: u32,
+        pub(super) cols: u16,
+        pub(super) rows: u16,
+        pub(super) title: String,
+        pub(super) cwd: String,
+        pub(super) session: Option<String>,
+        pub(super) failure: Option<String>,
+        pub(super) turns: Vec<ChatTurn>,
+        pub(super) settings: Vec<ChatSetting>,
+        pub(super) chosen: Vec<(String, String)>,
+    }
+
+    impl From<Chat> for super::Chat {
+        fn from(chat: Chat) -> Self {
+            Self {
+                id: chat.id,
+                cols: chat.cols,
+                rows: chat.rows,
+                title: chat.title,
+                cwd: chat.cwd,
+                session: chat.session,
+                failure: chat.failure,
+                turns: chat.turns,
+                settings: chat.settings,
+                chosen: chat.chosen,
+                agent: crate::agents::DEFAULT.to_owned(),
+            }
+        }
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats.into_iter().map(Into::into).collect(),
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
             }
         }
     }
@@ -1065,6 +1148,7 @@ mod tests {
                             kind: ToolKind::Edit,
                             content: vec![
                                 ToolContent::Text("for".to_owned()),
+                                ToolContent::Output("ran\n".to_owned()),
                                 ToolContent::Diff {
                                     path: "/src/a".to_owned(),
                                     old: None,
@@ -1094,6 +1178,7 @@ mod tests {
                     }],
                 }],
                 chosen: vec![("model".to_owned(), "haiku".to_owned())],
+                agent: "codex".to_owned(),
             }],
             orphans: vec![Process { pid: 42, pidfd: 2 }],
             workspaces: Workspaces {
@@ -1353,6 +1438,8 @@ mod tests {
         let state = State::read(&mut file).unwrap();
         assert_eq!((state.next_terminal, state.orphans[0].pid), (9, 94));
         assert_eq!(state.chats[0].session.as_deref(), Some("s8"));
+        // From before there were other agents.
+        assert_eq!(state.chats[0].agent, "claude");
         assert_eq!(
             (state.next_buffer, state.buffers[0].text.as_str()),
             (2, "new")
@@ -1412,6 +1499,32 @@ mod tests {
         };
         assert!(matches!(parts[3], Layout::Files { id: 4, files: 1 }));
         assert_eq!(state.buffers[0].text, "new");
+    }
+
+    /// Written by a build that wrote version 11. It must always be read.
+    #[test]
+    fn version_11_is_read_with_each_chats_agent() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v11.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let chat = &state.chats[0];
+        assert_eq!(
+            (chat.agent.as_str(), chat.session.as_deref()),
+            ("codex", Some("s"))
+        );
+        let ChatItem::Tool { content, .. } = &chat.turns[0].items[1] else {
+            panic!("not a tool");
+        };
+        assert!(matches!(&content[1], ToolContent::Output(text) if text == "ran\n"));
+        assert_eq!(
+            (state.next_files, state.buffers[0].text.as_str()),
+            (2, "new")
+        );
+        let Layout::Split { parts, .. } = &state.workspaces.list[0].tabs[0].layout else {
+            panic!("not split");
+        };
+        assert!(matches!(parts[3], Layout::Files { id: 4, files: 1 }));
     }
 
     #[test]

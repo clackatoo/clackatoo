@@ -68,7 +68,7 @@ impl Card {
         let diffs: Vec<&Diff> = (tool.content.iter())
             .filter_map(|content| match content {
                 ToolContent::Diff(diff) => Some(diff),
-                ToolContent::Text(_) => None,
+                ToolContent::Text(_) | ToolContent::Output(_) => None,
             })
             .collect();
         if !diffs.is_empty() {
@@ -79,8 +79,13 @@ impl Card {
         }
         let (mut purpose, mut output) = (None, Vec::new());
         for content in &tool.content {
-            let ToolContent::Text(text) = content else {
-                continue;
+            let text = match content {
+                ToolContent::Output(text) => {
+                    output.extend(text.trim_end_matches('\n').lines().map(str::to_owned));
+                    continue;
+                }
+                ToolContent::Text(text) => text,
+                ToolContent::Diff(_) => continue,
             };
             match fenced(text) {
                 Some(body) => output.extend(body.lines().map(str::to_owned)),
@@ -243,6 +248,12 @@ mod tests {
         };
         assert_eq!(output(Card::of(&done)), ["a", "b"]);
         assert_eq!(output(Card::of(&failed)), ["Exit code 1"]);
+        // Streamed beside, as Codex's adapter does: plain text.
+        let streamed = tool(
+            ToolKind::Execute,
+            vec![ToolContent::Output("a ``` b\nc\n".into())],
+        );
+        assert_eq!(output(Card::of(&streamed)), ["a ``` b", "c"]);
         // Reading a file is a line, not a card.
         assert!(!Card::shows(&tool(ToolKind::Read, Vec::new())));
     }

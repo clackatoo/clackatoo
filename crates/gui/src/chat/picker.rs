@@ -495,4 +495,16 @@ mod tests {
             (None, Some(true))
         );
     }
+
+    #[test]
+    fn an_effort_with_no_default_is_a_slider_with_nothing_off_it() {
+        // As Codex's adapter offers it.
+        let mut setting = effort("low");
+        setting.choices.remove(0);
+        let rows = rows(&[setting], &menu(&["effort"], None));
+        let [Row::Slider(slider)] = rows.as_slice() else {
+            panic!("{rows:?}")
+        };
+        assert_eq!((slider.at, slider.reset.as_ref()), (Some(0), None));
+    }
 }

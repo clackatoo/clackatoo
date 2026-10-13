@@ -363,15 +363,30 @@ impl ChatView {
         paint
     }
 
-    /// What's said just above the box, if anything: the agent starting,
-    /// or failing to, or a notice.
+    /// The agent, as the chat names it: "Codex", or "the agent" for a
+    /// chat from before chats said which.
+    fn agent(&self) -> &str {
+        if self.node.agent.is_empty() {
+            "the agent"
+        } else {
+            &self.node.agent
+        }
+    }
+
+    /// What's said just above the box, if anything: a notice, such as
+    /// that the agent is being installed, or the agent starting, or
+    /// failing to.
     fn status(&self) -> Option<(String, Tone)> {
-        match &self.node.state {
-            ChatState::Starting => Some(("Starting the agent…".to_owned(), Tone::Muted)),
-            ChatState::Failed(why) => {
-                Some((format!("The agent couldn't start: {why}"), Tone::Warning))
+        match (&self.node.state, &self.node.notice) {
+            (ChatState::Failed(why), _) => Some((
+                format!("{} couldn't start: {why}", capitalised(self.agent())),
+                Tone::Warning,
+            )),
+            (_, Some(notice)) => Some((notice.clone(), Tone::Muted)),
+            (ChatState::Starting, None) => {
+                Some((format!("Starting {}…", self.agent()), Tone::Muted))
             }
-            _ => self.node.notice.clone().map(|notice| (notice, Tone::Muted)),
+            _ => None,
         }
     }
 
@@ -492,7 +507,7 @@ impl ChatView {
                 Outcome::Failed(why) => Some((format!("⚠ {}", capitalised(why)), Tone::Warning)),
             },
             (None, true, ChatState::Starting) => {
-                Some(("Starting the agent…".to_owned(), Tone::Muted))
+                Some((format!("Starting {}…", self.agent()), Tone::Muted))
             }
             (None, true, _) if self.node.question.is_none() => {
                 Some(("Working…".to_owned(), Tone::Muted))
@@ -785,13 +800,12 @@ impl ChatView {
             canvas.fill(Fill::solid(rect_at(bounds, shown), Paint::Picked));
         }
         if self.editor.raw_text().is_empty() {
-            let laid = self.note(canvas.fonts, m, PLACEHOLDER, Tone::Muted, frame.inner);
+            let placeholder = format!("Message {}", self.agent());
+            let laid = self.note(canvas.fonts, m, &placeholder, Tone::Muted, frame.inner);
             for block in &laid.blocks {
                 canvas.text(&block.layout, [shown[0], shown[1] + block.top]);
             }
-            self.cache
-                .notes
-                .insert((PLACEHOLDER.to_owned(), Tone::Muted), laid);
+            self.cache.notes.insert((placeholder, Tone::Muted), laid);
         } else if let Some(layout) = self.editor.try_layout() {
             canvas.text(layout, shown);
         }
@@ -1339,9 +1353,6 @@ impl MenuRow {
         }
     }
 }
-
-/// What the box says while nothing's typed.
-const PLACEHOLDER: &str = "Message the agent";
 
 /// What a chat with no turns says.
 const EMPTY: &str = "Send a message to start.";

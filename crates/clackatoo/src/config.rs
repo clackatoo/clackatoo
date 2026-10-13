@@ -62,11 +62,7 @@ pub(crate) struct ClientConfig {
 /// clackatoo's config directory: `$XDG_CONFIG_HOME/clackatoo`, or
 /// `~/.config/clackatoo`.
 pub(crate) fn dir() -> Option<PathBuf> {
-    let non_empty = |name| std::env::var_os(name).filter(|value| !value.is_empty());
-    let config = non_empty("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(config.join("clackatoo"))
+    clackatoo_daemon::config_dir()
 }
 
 /// Where the file is: `client/startup.toml` in the [config
