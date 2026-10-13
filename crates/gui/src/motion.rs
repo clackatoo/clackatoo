@@ -594,6 +594,10 @@ pub(crate) struct Walk<'a, L> {
     lines: &'a L,
     at: Point,
     kind: fn(Class) -> Class,
+    /// The last line whose text's end was asked for, and where that is:
+    /// finding it reads back over the blanks after it, which a step along
+    /// a line of many shouldn't do each time.
+    end: std::cell::Cell<Option<(u64, usize)>>,
 }
 
 impl<'a, L: Lines> Walk<'a, L> {
@@ -602,6 +606,7 @@ impl<'a, L: Lines> Walk<'a, L> {
             lines,
             at,
             kind: Class::of,
+            end: std::cell::Cell::new(None),
         }
     }
 
@@ -652,12 +657,25 @@ impl<'a, L: Lines> Walk<'a, L> {
         self.previous().map(|at| self.class_of(at))
     }
 
+    /// Where the text of line `line`, whose row is `row`, ends.
+    fn text_end(&self, line: u64, row: Option<&L::Line>) -> usize {
+        match self.end.get() {
+            Some((known, end)) if known == line => end,
+            _ => {
+                let end = text_end(row);
+                self.end.set(Some((line, end)));
+                end
+            }
+        }
+    }
+
     fn next(&self) -> Option<Point> {
         let row = self.lines.row(self.at.line);
         let row = row.as_deref();
+        let end = self.text_end(self.at.line, row);
         // A line's end is the position just past its text.
         match next_cell(row, self.at.col) {
-            Some(col) if col <= text_end(row) && self.at.col < text_end(row) => Some(Point {
+            Some(col) if col <= end && self.at.col < end => Some(Point {
                 line: self.at.line,
                 col,
             }),
@@ -681,7 +699,7 @@ impl<'a, L: Lines> Walk<'a, L> {
             let line = self.at.line - 1;
             return Some(Point {
                 line,
-                col: text_end(self.lines.row(line).as_deref()),
+                col: self.text_end(line, self.lines.row(line).as_deref()),
             });
         }
         None
@@ -991,6 +1009,62 @@ pub(crate) mod tests {
         assert_eq!(moved(&text, at(0, 0), &[Motion::Right]), at(0, 1));
         assert_eq!(moved(&text, at(0, 1), &[Motion::Right]), at(0, 3));
         assert_eq!(moved(&text, at(0, 3), &[Motion::Left]), at(0, 1));
+    }
+
+    /// A line that counts how often it's read back from.
+    struct Counted {
+        row: Row,
+        backs: std::cell::Cell<usize>,
+    }
+
+    impl Cells for Counted {
+        fn width(&self) -> usize {
+            self.row.width()
+        }
+
+        fn cell(&self, col: usize) -> Option<Spot> {
+            self.row.cell(col)
+        }
+
+        fn on_from(&self, col: usize) -> impl Iterator<Item = (usize, Spot)> {
+            self.row.on_from(col)
+        }
+
+        fn back_from(&self, col: usize) -> impl Iterator<Item = (usize, Spot)> {
+            self.backs.set(self.backs.get() + 1);
+            self.row.back_from(col)
+        }
+    }
+
+    /// A document of one line.
+    struct One(Counted);
+
+    impl Lines for One {
+        type Line = Counted;
+        type Row<'a> = &'a Counted;
+
+        fn row(&self, line: u64) -> Option<&Counted> {
+            (line == 0).then_some(&self.0)
+        }
+
+        fn bounds(&self) -> (u64, u64) {
+            (0, 0)
+        }
+    }
+
+    #[test]
+    fn a_word_motion_reads_back_over_a_lines_blanks_once() {
+        // A long word, and many more blanks after it.
+        let mut builder = RowBuilder::new(20_000);
+        builder.push(&"a".repeat(1000), &Style::DEFAULT, false);
+        let one = One(Counted {
+            row: builder.finish(false),
+            backs: std::cell::Cell::new(0),
+        });
+        let mut cursor = Cursor::new(at(0, 0));
+        cursor.apply(Motion::WordEnd, &one);
+        assert_eq!(cursor.at, at(0, 999));
+        assert_eq!(one.0.backs.get(), 1);
     }
 
     #[test]
