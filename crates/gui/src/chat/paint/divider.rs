@@ -7,8 +7,13 @@
 //! says does: "14:32" becomes "Yesterday 14:32" at midnight. So, as with
 //! the line a turn's work folds under, what it says is laid out apart from
 //! the turn, for the turns near the view, and again only when it changes.
+//!
+//! A turn where the chat moved to another agent is a line across of its
+//! own, so it never has the time over it: the gap before it shows over
+//! the next message, counted from the last turn before the move.
 
-use std::cell::OnceCell;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::Turn;
 use jiff::Timestamp;
@@ -33,13 +38,38 @@ pub(super) fn below(m: Measures) -> f32 {
     m.em(1.2)
 }
 
+/// How long the local time zone is kept before it's looked up again, as
+/// it would be after travelling.
+const ZONE_KEPT: Duration = Duration::from_mins(10);
+
+/// The local time zone, and when it was looked up.
+static ZONE: Mutex<Option<(Instant, TimeZone)>> = Mutex::new(None);
+
+/// The local time zone, looked up at most every [`ZONE_KEPT`]: jiff keeps
+/// one it found, but not that it found none, so a system without one
+/// would read the disk every frame.
+fn local_zone() -> TimeZone {
+    let mut kept = ZONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match &*kept {
+        Some((at, zone)) if at.elapsed() < ZONE_KEPT => zone.clone(),
+        _ => {
+            let zone = TimeZone::system();
+            *kept = Some((Instant::now(), zone.clone()));
+            zone
+        }
+    }
+}
+
 /// When turn `index` of `turns` was sent, in milliseconds since the Unix
 /// epoch, if that was long enough after the turn before it ended for the
-/// time to show above it. Turns from before turns said when they were
-/// sent never show it.
+/// time to show above it: the last turn before it, that is, where the
+/// chat didn't move to another agent. Turns from before turns said when
+/// they were sent never show it, nor do turns where the chat moved.
 pub(in crate::chat) fn divided(turns: &[Turn], index: usize) -> Option<u64> {
-    let turn = turns.get(index)?;
-    let before = turns.get(index.checked_sub(1)?)?;
+    let turn = turns.get(index).filter(|turn| turn.switch.is_none())?;
+    let before = (turns.get(..index)?.iter().rev()).find(|turn| turn.switch.is_none())?;
     let ended = (before.end.as_ref()).map_or(before.sent, |end| end.at.max(before.sent));
     (turn.sent > 0 && before.sent > 0 && turn.sent.saturating_sub(ended) > GAP).then_some(turn.sent)
 }
@@ -79,7 +109,7 @@ impl ChatView {
     ) {
         let now = self.now();
         // Only looked up if a line's in view.
-        let zone = OnceCell::new();
+        let mut zone = None;
         for index in turns {
             let sent = divided(&self.node.turns, index);
             let Some(slot) = self.cache.turns.get_mut(index) else {
@@ -89,7 +119,7 @@ impl ChatView {
                 slot.divider = None;
                 continue;
             };
-            let label = when(sent, now, zone.get_or_init(TimeZone::system));
+            let label = when(sent, now, zone.get_or_insert_with(local_zone));
             if (slot.divider.as_ref()).is_none_or(|laid| laid.source != label) {
                 let look = Look::Plain(Tone::Muted);
                 let laid = lay_out(&mut self.layout_cx, fonts, m, &label, look, f32::INFINITY);
@@ -137,7 +167,7 @@ impl ChatView {
 
 #[cfg(test)]
 mod tests {
-    use clackatoo_protocol::{Item, Outcome, Turn, TurnEnd};
+    use clackatoo_protocol::{Outcome, Turn, TurnEnd};
     use jiff::tz::{Offset, TimeZone};
 
     use super::super::PROMPT;
@@ -246,35 +276,67 @@ mod tests {
         assert!(chat.cache.turns[0].divider.is_none());
     }
 
+    /// Whether turn `index` of `chat` was laid out with the line over it.
+    fn lined(chat: &ChatView, index: usize) -> bool {
+        let laid = chat.cache.turns[index].laid.as_ref().expect("laid out");
+        (laid.spans.iter()).any(|span| span.piece == super::super::Piece::Divider)
+    }
+
     #[test]
-    fn a_turn_ending_late_moves_the_line_from_the_one_after() {
+    fn when_the_turn_before_ended_moves_the_line_onto_the_one_after_and_off() {
         use clackatoo_protocol::{ChatPatch, Patch, ViewUpdate};
 
         let mut fonts = fonts();
         let mut node = sent_at(&[TUESDAY, TUESDAY + 40 * MINUTE]);
-        node.turns[0].end = None;
-        node.turns[0].items.push(Item::Words("more".into()));
+        node.turns[0].end.as_mut().unwrap().at = TUESDAY + 30 * MINUTE;
         let mut chat = ChatView::new(String::new(), node);
         chat.set_clock(TUESDAY + 41 * MINUTE);
         paint(&mut chat, &mut fonts);
-        assert!(chat.cache.turns[1].divider.is_some());
-        // The turn before is replaced, as ending late: no gap now.
-        let mut ended: Turn = chat.node.turns[0].clone();
-        ended.end = Some(TurnEnd {
-            at: TUESDAY + 30 * MINUTE,
-            outcome: Outcome::Done,
-        });
-        chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
-            index: 0,
-            turn: ended,
-        })]));
+        assert!(!lined(&chat, 1));
+        // The turn before is replaced, as having ended earlier: the gap is
+        // over half an hour, and the line shows; and the other way back.
+        let ended = |chat: &mut ChatView, at: u64| {
+            let mut turn: Turn = chat.node.turns[0].clone();
+            turn.end = Some(TurnEnd {
+                at,
+                outcome: Outcome::Done,
+            });
+            chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Turn {
+                index: 0,
+                turn,
+            })]));
+        };
+        ended(&mut chat, TUESDAY + 5 * MINUTE);
         paint(&mut chat, &mut fonts);
-        assert!(divided(&chat.node.turns, 1).is_none());
-        let laid = chat.cache.turns[1].laid.as_ref().unwrap();
-        assert!(
-            laid.spans
-                .iter()
-                .all(|span| span.piece != super::super::Piece::Divider)
-        );
+        assert!(lined(&chat, 1));
+        assert!(chat.cache.turns[1].divider.is_some());
+        ended(&mut chat, TUESDAY + 30 * MINUTE);
+        paint(&mut chat, &mut fonts);
+        assert!(!lined(&chat, 1));
+        assert!(chat.cache.turns[1].divider.is_none());
+    }
+
+    #[test]
+    fn a_turn_where_the_chat_moved_has_no_line_and_the_next_message_has_it() {
+        let mut fonts = fonts();
+        let hour = 60 * MINUTE;
+        let mut node = sent_at(&[TUESDAY, TUESDAY + 2 * hour, TUESDAY + 2 * hour + MINUTE]);
+        let moved = &mut node.turns[1];
+        moved.prompt = String::new();
+        moved.items.clear();
+        moved.switch = Some(clackatoo_protocol::Switch {
+            from: "Claude Code".into(),
+            to: "Codex".into(),
+            model: None,
+            resumed: false,
+            notes: Vec::new(),
+        });
+        assert_eq!(divided(&node.turns, 1), None);
+        // Counted from the last turn before the move.
+        assert_eq!(divided(&node.turns, 2), Some(TUESDAY + 2 * hour + MINUTE));
+        let mut chat = ChatView::new(String::new(), node);
+        chat.set_clock(TUESDAY + 3 * hour);
+        paint(&mut chat, &mut fonts);
+        assert!(!lined(&chat, 1) && lined(&chat, 2));
     }
 }

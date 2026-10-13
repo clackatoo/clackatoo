@@ -359,11 +359,17 @@ impl ChatView {
                                 self.restyled(turn);
                             }
                             // When a turn ended says whether the time
-                            // shows over the turn after it.
+                            // shows over the next turn the chat didn't
+                            // move to another agent in.
                             if let clackatoo_protocol::ChatPatch::Turn { index, .. } = patch
                                 && let Ok(index) = usize::try_from(*index)
                             {
-                                self.restyled(index + 1);
+                                for next in index + 1..self.node.turns.len() {
+                                    self.restyled(next);
+                                    if self.node.turns[next].switch.is_none() {
+                                        break;
+                                    }
+                                }
                             }
                             // The turns with cards, before and after.
                             if let clackatoo_protocol::ChatPatch::Subagents(new) = patch {
@@ -442,6 +448,15 @@ impl ChatView {
 
     pub(crate) fn release(&mut self) {
         self.queued.push(Input::Release);
+    }
+
+    /// The window lost the focus mid-drag, so the button's release may
+    /// never come: the drag ends as if let go, and the view stops
+    /// scrolling by itself at once.
+    pub(crate) fn drag_lost(&mut self) {
+        self.drag_to = None;
+        self.edge_step = None;
+        self.release();
     }
 
     /// The input method is composing `text`, with its cursor over that
@@ -992,6 +1007,9 @@ impl ChatView {
         shift: bool,
         settled: &mut Settled,
     ) {
+        // A drag whose release was lost, as outside the window, is over.
+        self.drag_to = None;
+        self.edge_step = None;
         // Over everything, a menu takes the click first.
         let hit = (self.hits.iter().rev())
             .find(|(_, rect)| contains(*rect, at))
@@ -1803,7 +1821,12 @@ mod tests {
         use clackatoo_protocol::{Item, Tool, ToolKind, ToolStatus};
 
         let mut fonts = fonts();
-        let mut node = fixtures::talk(&[("one", "first"), ("two", "second"), ("three", "")]);
+        let mut node = fixtures::talk(&[
+            ("one", "first"),
+            ("two", "second"),
+            ("three", ""),
+            ("four", "shown"),
+        ]);
         // Ending with a tool: nothing to copy.
         node.turns[1].items.push(Item::Tool(Tool {
             id: "t".into(),
@@ -1820,6 +1843,8 @@ mod tests {
         for turn in 0..3 {
             assert_eq!(drawn_at(&view, &Hit::CopyAnswer(turn)), None, "{turn}");
         }
+        // Done, ending in words: it has.
+        assert!(drawn_at(&view, &Hit::CopyAnswer(3)).is_some());
     }
 
     #[test]
@@ -1838,7 +1863,22 @@ mod tests {
         assert!((copy[1] - undo[1]).abs() < 1.0 && copy[0] < undo[0]);
         // No answer, no button, and Undo goes to the left.
         assert_eq!(drawn_at(&alone, &Hit::CopyAnswer(0)), None);
-        assert!(drawn_at(&alone, &Hit::Undo(0)).unwrap()[0] < undo[0]);
+        let moved = undo[0] - drawn_at(&alone, &Hit::Undo(0)).unwrap()[0];
+        // The files line, moved along that far, starts after the button
+        // ends, which is at the column's left.
+        let (_, button) = (view.hits.iter())
+            .find(|(hit, _)| *hit == Hit::CopyAnswer(0))
+            .unwrap();
+        assert!(button[2] < moved, "{button:?} {moved}");
+        // Narrow, the line is laid out in what's left of the column.
+        view.paint(&mut fonts, [0.0, 0.0], [220.0, 800.0], false);
+        let undo = (view.hits.iter()).find(|(hit, _)| *hit == Hit::Undo(0));
+        let (_, undo) = undo.expect("Undo, narrow");
+        assert!(
+            undo[0] < view.column_right,
+            "{undo:?} {}",
+            view.column_right
+        );
     }
 
     #[test]

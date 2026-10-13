@@ -189,6 +189,9 @@ struct FilesLaid {
     label: Laid,
     buttons: Vec<(Hit, Laid)>,
     height: f32,
+    /// Where it starts, from the column's left: after the button that
+    /// copies the answer, if that's there.
+    left: f32,
 }
 
 /// Something laid out: the text it was laid out from, and its blocks.
@@ -796,7 +799,19 @@ impl ChatView {
         let files = turn.files.filter(|_| turn.end.is_some());
         if laid.copy || files.is_some() {
             y += m.em(0.75);
-            let files = files.map(|files| self.lay_out_files(fonts, m, column, (index, files)));
+            // After the button, if it's there, and no wider than what's
+            // left of the column.
+            let left = if laid.copy {
+                self.copy_width(fonts, m) + m.em(1.2)
+            } else {
+                0.0
+            };
+            let files = files.map(|files| {
+                let wide = (column - left).max(m.em(4.0));
+                let mut files = self.lay_out_files(fonts, m, wide, (index, files));
+                files.left = left;
+                files
+            });
             let height = (files.as_ref()).map_or(0.0, |files| files.height);
             let height = height.max(fold::height(m));
             laid.spans.push(Span::of(Piece::Footer, y, height));
@@ -804,6 +819,19 @@ impl ChatView {
             laid.files = files;
         }
         y
+    }
+
+    /// The width of the button under an answer, however it's labelled.
+    fn copy_width(&mut self, fonts: &mut Fonts, m: Measures) -> f32 {
+        let mut widest: f32 = 0.0;
+        for label in COPY {
+            let laid = self.note(fonts, m, label, Tone::Muted, f32::INFINITY);
+            widest = widest.max(laid.width);
+            self.cache
+                .notes
+                .insert((label.to_owned(), Tone::Muted), laid);
+        }
+        widest
     }
 
     /// Lays out what turn `turn` changed in files, `files`, and the
@@ -835,6 +863,7 @@ impl ChatView {
             label,
             buttons,
             height,
+            left: 0.0,
         }
     }
 
@@ -938,19 +967,17 @@ impl ChatView {
                 }
                 Piece::Divider => self.draw_divider(canvas, m, index, [origin[0], top]),
                 Piece::Footer => {
-                    let mut x = origin[0];
                     if laid.copy {
                         let copied = self.copied_answer == Some(index);
                         let label = &drawn.copy[usize::from(copied)];
-                        draw_laid(canvas, m, label, [x, top], label.width);
-                        let rect = [x, top, label.width, span.bottom - span.top];
+                        draw_laid(canvas, m, label, [origin[0], top], label.width);
+                        let rect = [origin[0], top, label.width, span.bottom - span.top];
                         drawn.hit(canvas.clip, Hit::CopyAnswer(index), rect);
-                        // What follows stays put as it says "Copied".
-                        let widest = drawn.copy[0].width.max(drawn.copy[1].width);
-                        x += widest + m.em(1.2);
                     }
+                    // Laid out after the wider label, so it stays put as
+                    // the button says "Copied".
                     if let Some(files) = &laid.files {
-                        draw_files(canvas, m, files, [x, top], drawn);
+                        draw_files(canvas, m, files, [origin[0] + files.left, top], drawn);
                     }
                 }
             }

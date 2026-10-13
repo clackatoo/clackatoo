@@ -1724,9 +1724,16 @@ impl Desk {
     }
 
     /// The window gained or lost the focus: the focused pane's program is
-    /// told, if it asked.
+    /// told, if it asked. Losing it ends a drag, whose release may then
+    /// never come, as in a chat, which would scroll on by itself.
     pub(crate) fn window_focus(&mut self, focused: bool) {
         self.unfocused = !focused;
+        if !focused
+            && let Some((terminal, _)) = self.dragging.take()
+            && let Some(pane) = self.panes.get_mut(&terminal)
+        {
+            pane.drag_lost();
+        }
         if let Some(pane) = self.focused_pane() {
             pane.focus_changed(focused);
         }

@@ -138,6 +138,14 @@ impl Pane {
         }
     }
 
+    /// The window lost the focus during a drag in the pane: a chat ends
+    /// it, as if let go.
+    pub(crate) fn drag_lost(&mut self) {
+        if let Some(chat) = &mut self.chat {
+            chat.drag_lost();
+        }
+    }
+
     /// Tells a program that asked (mode 1004) that the pane gained or lost
     /// the focus.
     pub(crate) fn focus_changed(&mut self, focused: bool) {

@@ -241,4 +241,60 @@ mod tests {
         paint(&mut chat, &mut fonts);
         assert!(chat.live().is_none());
     }
+
+    #[test]
+    fn it_stops_waking_once_at_the_top() {
+        let (mut chat, mut fonts, answer) = selecting(60);
+        chat.drag([answer.at[0], -200.0]);
+        chat.settle(&mut fonts);
+        // Nearly at the top, as having scrolled up a long way.
+        chat.scroll = 30.0;
+        chat.follow = false;
+        paint(&mut chat, &mut fonts);
+        assert!(chat.live().is_some());
+        for now in (1..20).map(|frame| 1_000_000 + 100 * frame) {
+            chat.set_clock(now);
+            paint(&mut chat, &mut fonts);
+            if chat.scroll <= 0.0 {
+                break;
+            }
+        }
+        assert!(chat.scroll <= 0.0, "{}", chat.scroll);
+        assert!(chat.live().is_none());
+    }
+
+    #[test]
+    fn a_press_after_a_lost_release_doesnt_scroll() {
+        let (mut chat, mut fonts, answer) = selecting(60);
+        chat.drag([answer.at[0], -40.0]);
+        chat.settle(&mut fonts);
+        paint(&mut chat, &mut fonts);
+        assert!(chat.live().is_some());
+        // The release never came. The next press, on text in view, starts
+        // a selection afresh, which doesn't scroll until it's dragged
+        // past the edge.
+        let middle = chat.shown[chat.shown.len() / 2];
+        chat.press([middle.at[0] + 2.0, middle.at[1] + 4.0], 1, false);
+        chat.settle(&mut fonts);
+        assert!(step(&mut chat, &mut fonts, 1_000_100).abs() < f32::EPSILON);
+        assert!(chat.live().is_none());
+    }
+
+    #[test]
+    fn losing_the_focus_ends_the_drag_as_letting_go_does() {
+        let (mut chat, mut fonts, answer) = selecting(60);
+        chat.drag([answer.at[0], -40.0]);
+        chat.settle(&mut fonts);
+        paint(&mut chat, &mut fonts);
+        assert!(chat.live().is_some());
+        chat.drag_lost();
+        let copied = chat.settle(&mut fonts).copied;
+        assert!(
+            matches!(copied[..], [(_, crate::pane::Copy::Primary)]),
+            "{copied:?}"
+        );
+        assert!(!chat.picking);
+        assert!(step(&mut chat, &mut fonts, 1_000_100).abs() < f32::EPSILON);
+        assert!(chat.live().is_none());
+    }
 }
