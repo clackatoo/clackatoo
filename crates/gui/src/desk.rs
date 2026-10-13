@@ -147,6 +147,7 @@ const POINTED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// The window's view of the daemon's workspaces.
 #[derive(Debug, Default)]
+#[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
 pub(crate) struct Desk {
     /// The daemon's workspaces, as last heard.
     workspaces: Workspaces,
@@ -159,6 +160,9 @@ pub(crate) struct Desk {
     panes: HashMap<TerminalId, Pane>,
     /// Whether there's a connection to send messages on.
     connected: bool,
+    /// Whether the daemon is on another machine, which makes terminals
+    /// guess at the echo of what's typed (see `pane::predict`).
+    remote: bool,
     /// The terminals attached to on this connection.
     attached: HashSet<TerminalId>,
     /// Who sent each request not yet answered, oldest first: answers come
@@ -330,6 +334,18 @@ impl Desk {
 
     pub(crate) fn finished(&self) -> bool {
         self.finished
+    }
+
+    /// Settles the terminals' guesses at the echo of what's typed whose
+    /// time is up at `now`. Returns whether the window must be redrawn.
+    pub(crate) fn tick_panes(&mut self, now: std::time::Instant) -> bool {
+        (self.panes.values_mut()).fold(false, |redraw, pane| pane.tick(now) | redraw)
+    }
+
+    /// When a terminal's guess at the echo of what's typed is next due to
+    /// be settled, the soonest of them, for [`tick_panes`](Self::tick_panes).
+    pub(crate) fn pane_wakes(&self) -> Option<std::time::Instant> {
+        self.panes.values().filter_map(Pane::wakes).min()
     }
 
     /// When a pane's highlight on text just copied goes, the soonest of
@@ -810,6 +826,7 @@ impl Desk {
             self.panes.entry(terminal).or_insert_with(|| {
                 let mut pane = Pane::new(terminal);
                 pane.set_options(&self.options);
+                pane.set_remote(self.remote);
                 pane
             });
         }
@@ -877,14 +894,17 @@ impl Desk {
 
     // --- The daemon's news ------------------------------------------------
 
-    /// A new connection, watching `workspaces`. Nothing is attached or
-    /// asked yet, and panes kept from the last one start over, keeping
-    /// their mode, scroll and history.
-    pub(crate) fn connected(&mut self, workspaces: Workspaces) {
+    /// A new connection, watching `workspaces`, to a daemon on another
+    /// machine if `remote`. Nothing is attached or asked yet, and panes
+    /// kept from the last one start over, keeping their mode, scroll and
+    /// history.
+    pub(crate) fn connected(&mut self, workspaces: Workspaces, remote: bool) {
         self.connected = true;
+        self.remote = remote;
         self.forget_asked();
         for pane in self.panes.values_mut() {
             pane.reconnected();
+            pane.set_remote(remote);
         }
         self.workspaces_changed(workspaces);
         self.tutor_connected();
@@ -2003,7 +2023,7 @@ mod tests {
             gap: 10.0,
             inset: 5.0,
         }));
-        desk.connected(workspaces);
+        desk.connected(workspaces, false);
         answer_all(&mut desk);
         desk
     }
@@ -2993,7 +3013,10 @@ mod tests {
             content: Content::Buffer(buffer),
         });
         let mut desk = Desk::default();
-        desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+        desk.connected(
+            workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]),
+            false,
+        );
         answer_all(&mut desk);
         desk.buffer_changed(
             buffer,
@@ -3043,7 +3066,10 @@ mod tests {
             content: Content::Buffer(BufferId(7)),
         });
         let mut desk = Desk::default();
-        desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+        desk.connected(
+            workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]),
+            false,
+        );
         answer_all(&mut desk);
         command(&mut desk, "e src/other.rs");
         assert_eq!(
@@ -3068,7 +3094,10 @@ mod tests {
             content: Content::Buffer(buffer),
         });
         let mut desk = Desk::default();
-        desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+        desk.connected(
+            workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]),
+            false,
+        );
         answer_all(&mut desk);
         let offer = || BufferUpdate::Offer {
             language: "toml".into(),
@@ -3175,7 +3204,10 @@ mod tests {
             gap: 10.0,
             inset: 5.0,
         }));
-        desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+        desk.connected(
+            workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]),
+            false,
+        );
         let asked = answer_all(&mut desk);
         assert!(
             asked.contains(&Request::AttachBuffer { buffer }),
@@ -6164,7 +6196,7 @@ mod tests {
         };
         assert!(waiting(&desk));
         desk.lost();
-        desk.connected(one_tab(file_pane(1, 7)));
+        desk.connected(one_tab(file_pane(1, 7)), false);
         assert!(!waiting(&desk));
     }
 

@@ -1,9 +1,10 @@
 # clackatoo's shell integration for bash. clackatoo starts bash with this
 # as its startup file, in place of ~/.bashrc, which it reads first.
 #
-# It marks where each prompt starts (OSC 133 A), where a command's output
-# starts (C) and how the command exited (D), and says where the shell is
-# (OSC 7), so clackatoo can tell commands apart. See `clackatoo_term::blocks`.
+# It marks where each prompt starts (OSC 133 A) and ends (B), where a
+# command's output starts (C) and how the command exited (D), and says
+# where the shell is (OSC 7), so clackatoo can tell commands apart, and
+# knows when typing is read by the shell. See `clackatoo_term::blocks`.
 
 if [[ -f ~/.bashrc ]]; then
     . ~/.bashrc
@@ -19,11 +20,17 @@ if [[ $- == *i* && -z ${__clackatoo_integrated-} ]]; then
         return "$status"
     }
 
-    # Last, after anything that sets PS1 afresh for each prompt. The mark
-    # is in PS1 itself, so it comes again when bash draws the prompt again.
+    # Last, after anything that sets PS1 afresh for each prompt. The marks
+    # are in PS1 itself, so they come again when bash draws the prompt
+    # again. Typing is only marked where commands are (PS0, bash 4.4 and
+    # later): without C, there's no telling the prompt has been left.
     __clackatoo_prompt() {
         if [[ $PS1 != *'\e]133;A\a'* ]]; then
             PS1='\[\e]133;A\a\]'$PS1
+        fi
+        if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) &&
+            [[ $PS1 != *'\e]133;B\a'* ]]; then
+            PS1=$PS1'\[\e]133;B\a\]'
         fi
     }
 

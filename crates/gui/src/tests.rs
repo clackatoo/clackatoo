@@ -39,16 +39,34 @@ fn render(
     scale: f64,
     (normal_mode, highlights): (bool, &[Highlight]),
 ) -> Option<([u32; 2], Vec<u8>)> {
-    let gpu = gpu()?;
     let screen = screen(cols, rows, output);
-    let mut fonts = fonts(scale);
-    let padding = 4;
-    let size = [
-        u32::from(cols) * fonts.cell.width + 2 * padding,
-        u32::from(rows) * fonts.cell.height + 2 * padding,
-    ];
     let rows: Vec<_> = screen.rows.iter().collect();
     let cursor = screen.state.cursor;
+    let cursor = SceneCursor {
+        line: usize::from(cursor.line),
+        col: usize::from(cursor.col),
+        style: CursorStyle::Block,
+    };
+    render_rows(cols, &rows, Some(cursor), scale, (normal_mode, highlights))
+}
+
+/// Renders `rows`, `cols` wide, with `cursor`, and returns the image's
+/// size and RGBA pixels.
+fn render_rows(
+    cols: u16,
+    rows: &[&clackatoo_term::Row],
+    cursor: Option<SceneCursor>,
+    scale: f64,
+    (normal_mode, highlights): (bool, &[Highlight]),
+) -> Option<([u32; 2], Vec<u8>)> {
+    let gpu = gpu()?;
+    let mut fonts = fonts(scale);
+    let padding = 4;
+    let height = u32::try_from(rows.len()).unwrap();
+    let size = [
+        u32::from(cols) * fonts.cell.width + 2 * padding,
+        height * fonts.cell.height + 2 * padding,
+    ];
     #[allow(clippy::cast_precision_loss)]
     let scene = Scene {
         origin: [padding as f32; 2],
@@ -56,12 +74,8 @@ fn render(
             (size[0] - 2 * padding) as f32,
             (size[1] - 2 * padding) as f32,
         ],
-        rows: &rows,
-        cursor: Some(SceneCursor {
-            line: usize::from(cursor.line),
-            col: usize::from(cursor.col),
-            style: CursorStyle::Block,
-        }),
+        rows,
+        cursor,
         normal_mode,
         highlights,
     };
@@ -259,6 +273,75 @@ fn the_link_under_the_mouse_is_underlined_and_nothing_else_changes() {
         assert!(columns.contains(&x) && lower_half.contains(&y), "{x}, {y}");
     }
     save("link", size, &underlined);
+}
+
+#[test]
+fn guesses_at_the_echo_of_what_is_typed_are_drawn_underlined() {
+    use crate::input::{KeyPress, Modifiers};
+    use crate::options::{Options, PredictEcho};
+    use crate::pane::Pane;
+    use clackatoo_protocol::{TerminalId, ViewUpdate};
+    use winit::keyboard::{Key, KeyLocation};
+
+    let mut terminal = Terminal::new(Size::new(20, 2).unwrap(), &Config::default());
+    // A shell that has run a command, marked, now at its prompt.
+    terminal.advance(b"\x1b]133;A\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    let mut pane = Pane::new(TerminalId(1));
+    pane.set_options(&Options {
+        predictecho: PredictEcho::Always,
+        ..Options::default()
+    });
+    pane.view_changed(&ViewUpdate::Snapshot(View::capture(&terminal)));
+    let draw_pane = |pane: &Pane| {
+        let (rows, cursor) = pane.scene(2);
+        render_rows(20, &rows, cursor, 1.0, (false, &[]))
+    };
+    let Some((size, plain)) = draw_pane(&pane) else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    for ch in ["l", "s"] {
+        pane.key(&KeyPress {
+            key: &Key::Character(ch.into()),
+            text: Some(ch),
+            location: KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers::default(),
+        });
+    }
+    let (_, guessed) = draw_pane(&pane).unwrap();
+    save("predicted", size, &guessed);
+
+    // Only the two cells typed into, and the cursor moving off the first,
+    // changed: their glyphs and their underlines.
+    let cell = fonts(1.0).cell;
+    let padding = 4;
+    let changed: Vec<[u32; 2]> = (0..size[1])
+        .flat_map(|y| (0..size[0]).map(move |x| [x, y]))
+        .filter(|&[x, y]| {
+            let at = usize::try_from((y * size[0] + x) * 4).unwrap();
+            plain[at..at + 4] != guessed[at..at + 4]
+        })
+        .collect();
+    let cells = padding + 2 * cell.width..padding + 5 * cell.width;
+    for &[x, y] in &changed {
+        assert!(cells.contains(&x) && y < padding + cell.height, "{x}, {y}");
+    }
+    let typed = padding + 2 * cell.width..padding + 4 * cell.width;
+    let upper = padding..padding + cell.height / 2;
+    let lower = padding + cell.height * 3 / 4..padding + cell.height;
+    for half in [&upper, &lower] {
+        for column in [0, 1] {
+            let start = typed.start + column * cell.width;
+            let columns = start..start + cell.width;
+            assert!(
+                changed
+                    .iter()
+                    .any(|[x, y]| columns.contains(x) && half.contains(y)),
+                "cell {column} lacks a glyph or an underline"
+            );
+        }
+    }
 }
 
 /// A window with room for two tiles of 20 x 4 cells side by side, with

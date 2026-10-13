@@ -5,7 +5,8 @@
 //! zsh through scripts:
 //!
 //! - `A` where the prompt starts,
-//! - `B` where it ends and typing starts (ignored here),
+//! - `B` where it ends and typing starts, which says the shell is
+//!   reading a command line (see [`ShellState`]),
 //! - `C` where the command's output starts, optionally with
 //!   `cmdline_url=` and the command, percent-encoded,
 //! - `D;status` when it has finished, with its exit status.
@@ -78,6 +79,28 @@ pub(crate) enum Phase {
     Finished,
 }
 
+/// What the shell is doing, as its marks say: whether it is reading a
+/// command line, which a window can count on to echo what's typed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ShellState {
+    /// The shell hasn't marked anything: it may have no shell
+    /// integration, or the terminal runs some other program.
+    #[default]
+    Unmarked,
+    /// The shell is reading a command line: it has shown its prompt
+    /// (`A`), and no command has started since. If it marks where typing
+    /// starts (`B`), as clackatoo's shell integration does, that mark has
+    /// come too, so the prompt has been drawn in full. What's typed goes
+    /// to its line editor.
+    Prompt,
+    /// The shell isn't reading a command line: a command has started
+    /// (`C`), and the shell hasn't shown its prompt again since, or it's
+    /// still drawing the prompt. What's typed goes to the command, if it
+    /// reads it.
+    Busy,
+}
+
 /// Every block a row is still marked with, and maybe a few older ones,
 /// numbered in order.
 #[derive(Clone, Debug, Default)]
@@ -85,17 +108,69 @@ pub(crate) struct Blocks {
     entries: VecDeque<Entry>,
     /// The number of the first entry.
     first: u32,
+    /// Whether the shell has marked where typing starts (`B`) since its
+    /// prompt started.
+    typing: bool,
+    /// Whether the shell marks where typing starts at all. Not every shell
+    /// does, and for those, a prompt is ready for typing from the start.
+    marks_typing: bool,
+    /// Whether the shell marks where commands start (`C`). One that
+    /// doesn't, as bash before 4.4, where `PS0` does nothing, never
+    /// says it has left its prompt, so it's never taken to be at one.
+    marks_commands: bool,
 }
 
 impl Blocks {
     /// The blocks `entries`, numbered from `first`.
     pub(crate) fn from_parts(first: u32, entries: VecDeque<Entry>) -> Self {
-        Self { entries, first }
+        let marks_commands = entries.iter().any(|entry| entry.phase != Phase::Prompt);
+        Self {
+            entries,
+            first,
+            typing: false,
+            marks_typing: false,
+            marks_commands,
+        }
     }
 
     /// The number of the first block, and every block from it on.
     pub(crate) fn parts(&self) -> (u32, &VecDeque<Entry>) {
         (self.first, &self.entries)
+    }
+
+    /// Whether a command is running: it has started (`C`) and not
+    /// finished (`D`).
+    pub(crate) fn running(&self) -> bool {
+        self.entries
+            .back()
+            .is_some_and(|last| last.phase == Phase::Running)
+    }
+
+    /// The prompt has been drawn, and typing starts here.
+    pub(crate) fn typing(&mut self) {
+        if self
+            .entries
+            .back()
+            .is_some_and(|last| last.phase == Phase::Prompt)
+        {
+            self.typing = true;
+            self.marks_typing = true;
+        }
+    }
+
+    /// What the shell is doing, as the last block says.
+    pub(crate) fn state(&self) -> ShellState {
+        match self.entries.back() {
+            None => ShellState::Unmarked,
+            Some(last)
+                if last.phase == Phase::Prompt
+                    && self.marks_commands
+                    && (self.typing || !self.marks_typing) =>
+            {
+                ShellState::Prompt
+            }
+            Some(_) => ShellState::Busy,
+        }
     }
 
     pub(crate) fn get(&self, block: u32) -> Option<&Entry> {
@@ -107,6 +182,7 @@ impl Blocks {
     /// before any command ran, as shells do after a resize, is the same
     /// block.
     pub(crate) fn prompt(&mut self) -> u32 {
+        self.typing = false;
         match self.entries.back() {
             Some(last) if last.phase == Phase::Prompt => self.last(),
             _ => self.push(Entry::default()),
@@ -115,6 +191,7 @@ impl Blocks {
 
     /// `command` has started running in `cwd`: the number of its block.
     pub(crate) fn command(&mut self, command: Option<String>, cwd: Option<String>) -> u32 {
+        self.marks_commands = true;
         let running = Entry {
             command,
             cwd,
@@ -360,6 +437,64 @@ mod tests {
             ..Config::default()
         };
         Terminal::new(Size::new(cols, rows).unwrap(), &config)
+    }
+
+    #[test]
+    fn the_shell_state_follows_the_marks() {
+        let mut t = terminal(20, 5, 100);
+        assert_eq!(t.shell_state(), ShellState::Unmarked);
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(
+            t.shell_state(),
+            ShellState::Busy,
+            "not known to mark commands yet"
+        );
+        t.advance(b"true\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.shell_state(), ShellState::Prompt);
+        t.advance(b"sleep 1\r\n\x1b]133;C\x07");
+        assert_eq!(t.shell_state(), ShellState::Busy);
+        t.advance(b"\x1b]133;D;0\x07");
+        assert_eq!(t.shell_state(), ShellState::Busy, "no prompt yet");
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.shell_state(), ShellState::Prompt);
+    }
+
+    #[test]
+    fn a_shell_marking_where_typing_starts_reads_a_command_line_from_there() {
+        let mut t = terminal(20, 5, 100);
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        t.advance(b"ls\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+        // Now it's known to mark typing, a prompt half drawn isn't ready.
+        t.advance(b"\x1b]133;A\x07");
+        assert_eq!(t.shell_state(), ShellState::Busy);
+        t.advance(b"$ \x1b]133;B\x07");
+        assert_eq!(t.shell_state(), ShellState::Prompt);
+    }
+
+    #[test]
+    fn a_shell_that_never_marks_commands_is_never_at_its_prompt() {
+        // bash before 4.4, where PS0 does nothing: prompts, but no C.
+        let mut t = terminal(20, 5, 100);
+        for _ in 0..3 {
+            t.advance(PROMPT.as_bytes());
+            assert_eq!(t.shell_state(), ShellState::Busy);
+            t.advance(b"sudo true\r\n[sudo] password: \r\n\x1b]133;D;0\x07");
+        }
+    }
+
+    #[test]
+    fn a_prompt_printed_while_a_command_runs_is_its_output() {
+        let mut t = terminal(20, 5, 100);
+        t.advance(PROMPT.as_bytes());
+        t.advance(b"ssh box\r\n\x1b]133;C\x07");
+        // The shell on the other end marks its prompt, but it's a program
+        // here, which reads its own keys.
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.shell_state(), ShellState::Busy);
+        t.advance(b"exit\r\n\x1b]133;D;0\x07");
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.shell_state(), ShellState::Prompt);
     }
 
     /// A block's first line, output line, last line, command and exit

@@ -2,9 +2,10 @@
 # in an interactive shell, before the user's .zshrc. Its hooks go in after
 # .zshrc, before the first prompt.
 #
-# It marks where each prompt starts (OSC 133 A), where a command's output
-# starts (C, with the command) and how the command exited (D), and says
-# where the shell is (OSC 7), so clackatoo can tell commands apart. See
+# It marks where each prompt starts (OSC 133 A) and ends (B), where a
+# command's output starts (C, with the command) and how the command exited
+# (D), and says where the shell is (OSC 7), so clackatoo can tell commands
+# apart, and knows when typing is read by the shell. See
 # `clackatoo_term::blocks`.
 
 [[ -z ${__clackatoo_integrated-} ]] || return 0
@@ -54,12 +55,15 @@ __clackatoo_prompt() {
     __clackatoo_mark_prompt
 }
 
-# The mark is in PS1 itself, so it comes again when zsh draws the prompt
-# again.
+# The marks are in PS1 itself, so they come again when zsh draws the
+# prompt again.
 __clackatoo_mark_prompt() {
     emulate -L zsh
     if [[ $PS1 != *$'\e]133;A\a'* ]]; then
         PS1=$'%{\e]133;A\a%}'$PS1
+    fi
+    if [[ $PS1 != *$'\e]133;B\a'* ]]; then
+        PS1=$PS1$'%{\e]133;B\a%}'
     fi
 }
 

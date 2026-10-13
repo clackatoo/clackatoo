@@ -437,6 +437,25 @@ options! {
     /// after the window opens, and say in the bar when one is out. It's
     /// never installed until `:update` or `clackatoo update` asks.
     updatecheck("uc"): bool = true;
+    /// What's typed in a terminal shows at once, underlined, before the
+    /// daemon's screen shows the program's echo, as mosh shows it, so
+    /// typing over a slow link doesn't wait for the round trip: `auto`
+    /// does this only for a daemon on another machine, while its round
+    /// trip is over 30 ms or a key has just taken a long time; `always`
+    /// does it even for a daemon on this machine; `never` doesn't.
+    predictecho("pe"): PredictEcho = PredictEcho::Auto;
+}
+
+choice! {
+    /// When `predictecho` shows what's typed before its echo.
+    PredictEcho {
+        /// On a slow link to another machine.
+        Auto = "auto",
+        /// Always, even on this machine.
+        Always = "always",
+        /// Never.
+        Never = "never",
+    }
 }
 
 choice! {

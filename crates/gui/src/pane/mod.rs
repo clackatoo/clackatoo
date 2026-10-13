@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::{
     ChatAction, ClientMessage, CursorShape, Match, Request, Response, Size, TerminalId, ViewUpdate,
 };
-use clackatoo_term::{Row, RowBuilder};
+use clackatoo_term::{Row, RowBuilder, Underline};
 use winit::keyboard::{Key, KeyCode, NamedKey};
 
 use crate::chat::{ChatPaint, ChatView};
@@ -34,8 +34,10 @@ mod links;
 mod mouse;
 mod normal;
 mod operator;
+mod predict;
 
 pub(crate) use mouse::{Copy, PaneMouse};
+use predict::Predictor;
 
 /// Whether keys go to the program or drive clackatoo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,8 +101,20 @@ enum Pending {
     Search,
     /// A block, and what for.
     Block(operator::BlockUse),
+    /// Input for the program, numbered by the [`Predictor`].
+    Input(u64),
     /// Anything answered with just "done" or an error.
     Other,
+}
+
+/// The guesses at the echo of what's typed, drawn over a line of the
+/// screen.
+#[derive(Debug)]
+struct Overlay {
+    /// The guesses.
+    shown: predict::Shown,
+    /// Their line as drawn: the screen's, with the guesses over it.
+    row: Row,
 }
 
 /// A terminal shown in the window.
@@ -158,6 +172,10 @@ pub(crate) struct Pane {
     /// How many links the screen may know of before those no row shows
     /// are forgotten.
     links_kept: usize,
+    /// Guesses at the echo of what's typed (see [`predict`]).
+    predictor: Predictor,
+    /// The guesses to draw, if any.
+    overlay: Option<Overlay>,
 }
 
 impl Pane {
@@ -189,12 +207,53 @@ impl Pane {
             hovered: None,
             opening: None,
             links_kept: links::KEPT_LINKS,
+            predictor: Predictor::new(),
+            overlay: None,
         }
     }
 
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.case = Case::of(options);
+        self.predictor.set_choice(options.predictecho);
+        self.refresh_overlay();
+    }
+
+    /// Takes in whether the daemon is on another machine, where the echo
+    /// of what's typed is guessed at.
+    pub(crate) fn set_remote(&mut self, remote: bool) {
+        self.predictor.set_remote(remote);
+    }
+
+    /// Settles the guesses at the echo of what's typed whose time is up
+    /// at `now`. Returns whether the pane must be redrawn.
+    pub(crate) fn tick(&mut self, now: Instant) -> bool {
+        self.predictor.tick(now, self.screen.as_ref());
+        self.refresh_overlay()
+    }
+
+    /// When a guess at the echo of what's typed is next due to be
+    /// settled, for [`tick`](Self::tick).
+    pub(crate) fn wakes(&self) -> Option<Instant> {
+        self.predictor.wakes()
+    }
+
+    /// Works out the guesses to draw again, as they or the screen have
+    /// changed. Returns whether what's drawn changed.
+    fn refresh_overlay(&mut self) -> bool {
+        let overlay = self.screen.as_ref().and_then(|screen| {
+            let shown = self.predictor.shown(screen)?;
+            let row = usize::try_from(shown.line.checked_sub(screen.state.history_end)?).ok()?;
+            Some(Overlay {
+                row: overlaid(screen.rows.get(row)?, &shown.cells),
+                shown,
+            })
+        });
+        let shown =
+            |overlay: &Option<Overlay>| overlay.as_ref().map(|overlay| overlay.shown.clone());
+        let changed = shown(&self.overlay) != shown(&overlay);
+        self.overlay = overlay;
+        changed
     }
 
     pub(crate) fn screen(&self) -> Option<&Screen> {
@@ -386,6 +445,8 @@ impl Pane {
         self.history.forget_fetch();
         self.requested_size = None;
         self.unacknowledged = false;
+        self.predictor.reconnected();
+        self.overlay = None;
     }
 
     /// Asks the daemon to make the terminal `size`, unless it was asked
@@ -428,6 +489,13 @@ impl Pane {
             (None, ViewUpdate::Patch(_)) => return false,
         }
         let end = self.history_end();
+        if let Some(screen) = &self.screen {
+            if snapshot || old_end.is_some_and(|old_end| end < old_end) {
+                self.predictor.screen_replaced();
+            }
+            self.predictor.screen_changed(screen);
+        }
+        self.refresh_overlay();
         // Stay on the lines being read, and in normal mode, on the lines
         // around the cursor.
         let follow = self.scroll > 0 || self.mode != Mode::Insert;
@@ -465,7 +533,15 @@ impl Pane {
     /// Takes the daemon's answer to the oldest request. Returns whether the
     /// pane must be redrawn.
     pub(crate) fn answered(&mut self, response: Response) -> bool {
-        match (self.pending.pop_front(), response) {
+        let pending = self.pending.pop_front();
+        if let Some(Pending::Input(number)) = pending {
+            if let Response::Error(err) = response {
+                log::warn!("the daemon refused input: {err}");
+            }
+            self.predictor.answered(number, Instant::now());
+            return self.refresh_overlay();
+        }
+        match (pending, response) {
             (_, Response::Error(err)) => {
                 log::warn!("the daemon refused a request: {err}");
                 false
@@ -541,11 +617,11 @@ impl Pane {
                 self.prefix = ctrl_backslash.then_some(Prefix::CtrlBackslash);
                 true
             }
-            Mode::Insert => {
-                let sent = self.type_key(press);
-                // Typing returns to the live screen, where the typing shows.
-                sent && std::mem::replace(&mut self.scroll, 0) > 0
-            }
+            // Typing returns to the live screen, where the typing shows, and
+            // a guess at its echo may show at once.
+            Mode::Insert => self
+                .type_key(press)
+                .is_some_and(|guessed| std::mem::replace(&mut self.scroll, 0) > 0 || guessed),
             _ if ctrl_backslash && prefix == Some(Prefix::CtrlBackslash) => {
                 self.send_input(vec![0x1c]);
                 self.insert()
@@ -652,8 +728,14 @@ impl Pane {
         let end = self.history_end();
         let top = self.view_top();
         let document = Document(self);
+        // Guesses at the echo of what's typed show only in insert mode,
+        // where keys go to the program.
+        let overlay = self.overlay.as_ref().filter(|_| self.mode == Mode::Insert);
         let rows = (top..top + height as u64)
-            .map(|line| document.line(line).unwrap_or(&self.blank))
+            .map(|line| match overlay {
+                Some(overlay) if overlay.shown.line == line => &overlay.row,
+                _ => document.line(line).unwrap_or(&self.blank),
+            })
             .collect();
         // In normal mode, only clackatoo's cursor shows.
         let (at, style) = if let Some(cursor) = self.cursor {
@@ -665,10 +747,16 @@ impl Pane {
                 CursorShape::Underline => CursorStyle::Underline,
                 CursorShape::Default | CursorShape::Bar => CursorStyle::Bar,
             };
-            let at = cursor.visible.then_some(Point {
-                line: end + u64::from(cursor.line),
-                col: usize::from(cursor.col),
-            });
+            let at = match overlay {
+                Some(overlay) => Some(Point {
+                    line: overlay.shown.line,
+                    col: overlay.shown.cursor,
+                }),
+                None => cursor.visible.then_some(Point {
+                    line: end + u64::from(cursor.line),
+                    col: usize::from(cursor.col),
+                }),
+            };
             (at, style)
         };
         let cursor = at
@@ -813,18 +901,16 @@ impl Pane {
             .map_or(0, |screen| u64::from(screen.size.rows()))
     }
 
-    /// Sends a key to the program. Returns whether it sent anything.
-    fn type_key(&mut self, press: &KeyPress<'_>) -> bool {
-        let Some(screen) = &self.screen else {
-            return false;
-        };
+    /// Sends a key to the program. Returns `None` if it sent nothing, or
+    /// else whether the guesses drawn at the echo of what's typed changed.
+    fn type_key(&mut self, press: &KeyPress<'_>) -> Option<bool> {
+        let screen = self.screen.as_ref()?;
         let mut bytes = Vec::new();
         input::encode(press, screen.state.modes, &mut bytes);
         if bytes.is_empty() {
-            return false;
+            return None;
         }
-        self.send_input(bytes);
-        true
+        Some(self.send_typed(bytes, predict::Input::of(press)))
     }
 
     fn scroll_by(&mut self, lines: i64) -> bool {
@@ -896,13 +982,25 @@ impl Pane {
     }
 
     fn send_input(&mut self, bytes: Vec<u8>) {
+        // Guesses already drawn stay, and nothing new is drawn.
+        let _ = self.send_typed(bytes, predict::Input::Other);
+    }
+
+    /// Sends `bytes`, which are `input`, to the program, guessing at
+    /// their echo if that can be guessed. Returns whether the guesses drawn
+    /// changed.
+    fn send_typed(&mut self, bytes: Vec<u8>, input: predict::Input) -> bool {
+        let number = self
+            .predictor
+            .sent(input, self.screen.as_ref(), Instant::now());
         self.request(
             Request::SendInput {
                 terminal: self.terminal,
                 bytes,
             },
-            Pending::Other,
+            Pending::Input(number),
         );
+        self.refresh_overlay()
     }
 
     fn request(&mut self, request: Request, pending: Pending) {
@@ -918,6 +1016,28 @@ impl Pane {
     pub(crate) fn take_outbox(&mut self) -> Vec<ClientMessage> {
         std::mem::take(&mut self.outbox)
     }
+}
+
+/// `row` with `cells` drawn over it, each a column and its character,
+/// underlined, in the style of the cell it covers.
+fn overlaid(row: &Row, cells: &[(usize, char)]) -> Row {
+    let mut builder = RowBuilder::new(row.width());
+    let mut text = String::new();
+    for (col, &cell) in row.cells().iter().enumerate() {
+        let mut style = *row.style(cell);
+        text.clear();
+        match cells.iter().find(|&&(at, _)| at == col) {
+            Some(&(_, ch)) => {
+                text.push(ch);
+                style.underline = Underline::Single;
+            }
+            None => row.push_text(col, &mut text),
+        }
+        if !text.is_empty() {
+            builder.push(&text, &style, true);
+        }
+    }
+    builder.finish(row.is_wrapped())
 }
 
 /// Whether `press` is Ctrl+\\.

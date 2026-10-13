@@ -69,7 +69,7 @@ mod tests {
 
     fn desk() -> Desk {
         let mut desk = Desk::default();
-        desk.connected(Workspaces::default());
+        desk.connected(Workspaces::default(), false);
         desk.take_outbox();
         desk
     }

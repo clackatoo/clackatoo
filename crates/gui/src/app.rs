@@ -1948,6 +1948,11 @@ impl ApplicationHandler<SessionEvent> for App {
             self.send_outbox();
             self.request_redraw();
         }
+        // A terminal's guess at the echo of a key may have waited long
+        // enough to be taken as wrong.
+        if self.desk.tick_panes(Instant::now()) {
+            self.request_redraw();
+        }
         // While the daemon is out of contact, the top bar counts the
         // seconds, a highlight on text just copied goes after a moment, an
         // editor asks its language server once typing pauses, and a chat
@@ -1964,6 +1969,7 @@ impl ApplicationHandler<SessionEvent> for App {
             .chain(self.desk.format_at())
             .chain(self.desk.editor_wakes())
             .chain(self.desk.chat_wakes())
+            .chain(self.desk.pane_wakes())
             .min();
         let flow = match soonest {
             Some(wake) => ControlFlow::WaitUntil(wake),
@@ -2120,7 +2126,8 @@ impl App {
                 self.notice = None;
                 self.contact = contact;
                 self.sender = Some(sender);
-                self.desk.connected(workspaces);
+                let remote = self.session.location().host().is_some();
+                self.desk.connected(workspaces, remote);
                 let host = self.session.location().host();
                 let news = self.updates.daemon_is(daemon_version.as_deref(), host);
                 self.tell_updates(news);

@@ -36,7 +36,7 @@ mod width;
 #[cfg(test)]
 mod tests;
 
-pub use blocks::{Block, Progress, Which};
+pub use blocks::{Block, Progress, ShellState, Which};
 pub use cell::{Cell, CellFlags};
 pub use clipboard::{ClipboardRead, ClipboardRequest, MAX_CLIPBOARD_TEXT, Selection};
 pub use damage::Damage;

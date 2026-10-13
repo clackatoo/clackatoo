@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 
-use clackatoo_term::{CursorShape, InputModes, LinkId, Row, RowBuilder, Size, Style, Terminal};
+use clackatoo_term::{
+    CursorShape, InputModes, LinkId, Row, RowBuilder, ShellState, Size, Style, Terminal,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::chat::{ChatNode, ChatPatch};
@@ -118,6 +120,15 @@ pub struct GridState {
     /// The number the next line scrolled into history will get: the
     /// history's lines are numbered below it (see [`HistoryLines`]).
     pub history_end: u64,
+    /// What the shell is doing, as its marks say. A window predicting
+    /// the echo of what's typed trusts a shell reading a command line.
+    pub shell: ShellState,
+    /// The number of the shell's latest block (see [`Block`]), if it has
+    /// marked any: a new block's prompt, below where Enter was typed,
+    /// shows Enter has been carried out.
+    ///
+    /// [`Block`]: clackatoo_term::Block
+    pub block: Option<u32>,
 }
 
 /// Lines of a terminal's history, answering a request for them.
@@ -314,6 +325,8 @@ impl GridState {
             modes: terminal.input_modes(),
             alternate: terminal.is_alternate_screen(),
             history_end: terminal.primary().scrollback_end(),
+            shell: terminal.shell_state(),
+            block: terminal.latest_block().map(|(block, _)| block),
         }
     }
 }

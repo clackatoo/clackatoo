@@ -226,6 +226,12 @@ impl Terminal {
         self.emulator.links.get(id)
     }
 
+    /// What the shell is doing, as its OSC 133 marks say.
+    #[must_use]
+    pub fn shell_state(&self) -> blocks::ShellState {
+        self.emulator.blocks.state()
+    }
+
     /// What the shell said about block `block`, if it is still kept.
     pub(crate) fn block_entry(&self, block: u32) -> Option<&blocks::Entry> {
         self.emulator.blocks.get(block)
@@ -1541,13 +1547,18 @@ impl Emulator {
 
     // --- Shell integration (see crate::blocks) ------------------------
 
-    /// OSC 133: the shell marks where a prompt (`A`) or a command's output
-    /// (`C`) starts, or that the command finished (`D`), with `options`.
+    /// OSC 133: the shell marks where a prompt (`A`), typing (`B`) or a
+    /// command's output (`C`) starts, or that the command finished (`D`),
+    /// with `options`.
     pub(crate) fn shell_mark(&mut self, kind: &[u8], options: &[&[u8]]) {
         if self.screen == Screen::Alternate {
             return;
         }
         match kind {
+            // A prompt while a command runs is the command's output, not
+            // the shell's: a program printing marks of its own, or a
+            // shell nested inside it, such as one over ssh.
+            b"A" if self.blocks.running() => {}
             b"A" => {
                 let block = self.blocks.prompt();
                 self.mark_cursor_row(block, false);
@@ -1555,6 +1566,7 @@ impl Emulator {
                 let oldest = self.primary.marks().map(|(_, mark)| mark.block).min();
                 self.blocks.forget_before(oldest.unwrap_or(block));
             }
+            b"B" => self.blocks.typing(),
             b"C" => {
                 let command = options
                     .iter()

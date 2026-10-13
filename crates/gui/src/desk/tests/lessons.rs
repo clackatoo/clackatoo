@@ -33,7 +33,7 @@ fn tutored(workspaces: Workspaces, state: Option<State>) -> Desk {
         scratch: Some(SCRATCH.into()),
         ..Start::default()
     });
-    desk.connected(workspaces);
+    desk.connected(workspaces, false);
     answer_all(&mut desk);
     desk
 }
@@ -844,7 +844,10 @@ fn the_tutor_says_why_it_cant_open_a_lesson() {
         unavailable: Some("the tutor needs the daemon on this machine, not another".into()),
         ..Start::default()
     });
-    desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, pane(1))])]));
+    desk.connected(
+        workspaces(vec![workspace(1, "w", vec![tab(1, pane(1))])]),
+        false,
+    );
     answer_all(&mut desk);
     snapshot(&mut desk, 1);
     normal_mode(&mut desk);
@@ -891,7 +894,10 @@ fn whats_new_is_noticed_once_for_each_build_with_something_new() {
     // Once a window at most, even if it couldn't be written down, as in a
     // directory the window may only read: connecting again says nothing.
     desk.message = None;
-    desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, pane(1))])]));
+    desk.connected(
+        workspaces(vec![workspace(1, "w", vec![tab(1, pane(1))])]),
+        false,
+    );
     assert_eq!(desk.message, None);
     let io = desk.take_tutor_io();
     let [Io::Save { path, state }] = &io[..] else {
@@ -930,7 +936,10 @@ fn whats_new_has_the_bar_until_a_key_then_a_release_out_says_so() {
         scratch: Some(SCRATCH.into()),
         ..Start::default()
     });
-    desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, pane(1))])]));
+    desk.connected(
+        workspaces(vec![workspace(1, "w", vec![tab(1, pane(1))])]),
+        false,
+    );
     answer_all(&mut desk);
     snapshot(&mut desk, 1);
     assert_eq!(
@@ -973,7 +982,10 @@ fn leftover_lesson_panes_of_windows_gone_are_closed() {
         ..Start::default()
     });
     let layout = side_by_side(vec![file_pane(3, 8), pane(2)]);
-    desk.connected(workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]));
+    desk.connected(
+        workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]),
+        false,
+    );
     answer_all(&mut desk);
     load(&mut desk, 8, "/scratch/1/basics.txt", "the lesson\n");
     let asked = take_requests(&mut desk);
