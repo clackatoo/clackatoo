@@ -6990,6 +6990,90 @@ fn an_explorer_says_what_git_says_and_what_it_ignores() {
 }
 
 #[test]
+fn a_repository_inside_another_has_git_asked_about_it_once_its_expanded() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let repo = repo_with(dir, "a\n", "a\n");
+    run_git(&repo, &["commit", "-q", "-m", "a"]);
+    let inner = repo.join("inner");
+    std::fs::create_dir(&inner).unwrap();
+    run_git(&inner, &["init", "-q"]);
+    std::fs::write(inner.join("b.txt"), "b\n").unwrap();
+    run_git(&inner, &["add", "b.txt"]);
+    run_git(&inner, &["commit", "-q", "-m", "b"]);
+    std::fs::write(inner.join("b.txt"), "changed\n").unwrap();
+    std::fs::write(inner.join("new.txt"), "").unwrap();
+    let repo = repo.canonicalize().unwrap();
+    let inner = inner.canonicalize().unwrap();
+    let path = |path: &Path| path.display().to_string();
+    let mut client = daemon.client();
+    let (files, _) = explore(&mut client, &repo);
+    files_action(&mut client, files, FilesAction::Expand(path(&repo)));
+    // The outer repository's say: the inner one is a folder it doesn't
+    // know.
+    let outer = loop {
+        if let FilesUpdate::Git(said) = next_files_update(&mut client) {
+            break said;
+        }
+    };
+    assert_eq!(outer, [(path(&inner), GitMark::Untracked)]);
+    // Expanded, the inner one says what it says of its own files, in
+    // place of what the outer said of it.
+    files_action(&mut client, files, FilesAction::Expand(path(&inner)));
+    let both = loop {
+        if let FilesUpdate::Git(said) = next_files_update(&mut client)
+            && said != outer
+        {
+            break said;
+        }
+    };
+    assert_eq!(
+        both,
+        [
+            (path(&inner.join("b.txt")), GitMark::Modified),
+            (path(&inner.join("new.txt")), GitMark::Untracked),
+        ]
+    );
+    // A change in it is the inner one's to say.
+    run_git(&inner, &["add", "new.txt"]);
+    loop {
+        if let FilesUpdate::Git(said) = next_files_update(&mut client)
+            && said.contains(&(path(&inner.join("new.txt")), GitMark::Added))
+        {
+            break;
+        }
+    }
+    // Collapsed, it's the outer one's say again.
+    files_action(&mut client, files, FilesAction::Collapse(path(&inner)));
+    loop {
+        if let FilesUpdate::Git(said) = next_files_update(&mut client)
+            && said == outer
+        {
+            break;
+        }
+    }
+    // One the outer one ignores, as a project cloned into another is,
+    // still says what changes in it.
+    std::fs::write(repo.join(".gitignore"), "inner/\n").unwrap();
+    files_action(&mut client, files, FilesAction::Expand(path(&inner)));
+    loop {
+        if let FilesUpdate::Git(said) = next_files_update(&mut client)
+            && said.contains(&(path(&inner.join("b.txt")), GitMark::Modified))
+        {
+            break;
+        }
+    }
+    std::fs::write(inner.join("c.txt"), "").unwrap();
+    loop {
+        if let FilesUpdate::Git(said) = next_files_update(&mut client)
+            && said.contains(&(path(&inner.join("c.txt")), GitMark::Untracked))
+        {
+            break;
+        }
+    }
+}
+
+#[test]
 fn moving_a_file_or_its_directory_takes_buffers_open_on_it_along() {
     let daemon = TestDaemon::start();
     let dir = daemon.dir.path();

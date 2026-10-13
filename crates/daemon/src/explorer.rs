@@ -269,8 +269,7 @@ impl Ignores {
                 file.is_file().then(|| one_file(ancestor, &file))
             })
             .collect();
-        let exclude = top.join(".git/info/exclude");
-        if exclude.is_file() {
+        if let Some(exclude) = exclude_file(top).filter(|exclude| exclude.is_file()) {
             files.push(one_file(top, &exclude));
         }
         files.push(global().clone());
@@ -289,6 +288,29 @@ impl Ignores {
             .find(|matched| !matched.is_none())
             .is_some_and(|matched| matched.is_ignore())
     }
+}
+
+/// The repository's own ignore file, for the work tree whose top is
+/// `top`: `info/exclude` in its git directory. A linked worktree's `.git`,
+/// and a submodule's, is a file naming its git directory, and a linked
+/// worktree's git directory has a `commondir` naming the directory it
+/// shares with the main work tree, which holds `info`, as git reads it.
+fn exclude_file(top: &Path) -> Option<PathBuf> {
+    let dot_git = top.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let named = fs::read_to_string(&dot_git).ok()?;
+        let named = named
+            .lines()
+            .find_map(|line| line.strip_prefix("gitdir:"))?;
+        top.join(named.trim())
+    };
+    let common = match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(common) => git_dir.join(common.trim()),
+        Err(_) => git_dir,
+    };
+    Some(common.join("info/exclude"))
 }
 
 /// The ignore file `file`, whose patterns are from `dir`.
@@ -375,5 +397,80 @@ mod tests {
         let gen_rs = src.entries.iter().find(|entry| entry.name == "gen.rs");
         assert!(gen_rs.unwrap().ignored, "by the directory's own file");
         assert!(list(&root.join("gone")).is_err());
+    }
+
+    /// Whether the entry called `name` in the listing of `dir` is ignored.
+    fn ignored(dir: &Path, name: &str) -> bool {
+        let listing = list(dir).unwrap();
+        (listing.entries.iter())
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} isn't listed"))
+            .ignored
+    }
+
+    #[test]
+    fn a_linked_worktrees_excludes_are_those_of_the_git_directory_it_shares() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        fs::create_dir_all(main.join(".git/info")).unwrap();
+        fs::create_dir_all(main.join(".git/worktrees/wt")).unwrap();
+        fs::write(main.join(".git/info/exclude"), "secret.txt\n").unwrap();
+        fs::write(main.join(".git/worktrees/wt/commondir"), "../..\n").unwrap();
+        // As git writes it: the worktree's `.git` names its git directory,
+        // which names the one it shares.
+        let tree = dir.path().join("wt");
+        fs::create_dir(&tree).unwrap();
+        let git_dir = main.join(".git/worktrees/wt");
+        fs::write(
+            tree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        fs::write(tree.join("secret.txt"), "").unwrap();
+        fs::write(tree.join("open.txt"), "").unwrap();
+        assert!(ignored(&tree, "secret.txt"));
+        assert!(!ignored(&tree, "open.txt"));
+        // A submodule's, named relatively, with no `commondir`.
+        let sub = main.join("sub");
+        fs::create_dir_all(main.join(".git/modules/sub/info")).unwrap();
+        fs::write(main.join(".git/modules/sub/info/exclude"), "*.tmp\n").unwrap();
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+        fs::write(sub.join("x.tmp"), "").unwrap();
+        assert!(ignored(&sub, "x.tmp"));
+    }
+
+    #[test]
+    fn a_worktree_git_made_has_its_main_trees_excludes() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        fs::create_dir(&main).unwrap();
+        let git = |args: &[&str]| {
+            let done = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .args(args)
+                .current_dir(&main)
+                .output()
+                .expect("git runs");
+            assert!(done.status.success(), "{args:?}: {done:?}");
+        };
+        git(&["init", "-q"]);
+        fs::write(main.join("a.txt"), "a\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "a"]);
+        git(&["worktree", "add", "-q", "../wt"]);
+        fs::write(main.join(".git/info/exclude"), "local/\n").unwrap();
+        let tree = dir.path().join("wt");
+        fs::create_dir(tree.join("local")).unwrap();
+        assert!(tree.join(".git").is_file());
+        assert!(ignored(&tree, "local"));
+        assert!(!ignored(&tree, "a.txt"));
     }
 }

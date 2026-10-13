@@ -20,6 +20,12 @@
 //! the repository's index changes, as staging from a terminal changes it,
 //! and when a buffer is saved.
 //!
+//! A repository inside another, as a submodule or a project cloned into
+//! another is, has git asked about it too, once a folder holding its
+//! `.git` is expanded: what an explorer is sent of git is what its root's
+//! repository says, but for what's in the one inside, and what that one
+//! says of itself.
+//!
 //! The same watches serve buffers: each buffer's file is watched through
 //! the directory it's in, as most programs write a file by renaming a new
 //! one over it, which a watch on the file itself wouldn't outlive. What
@@ -56,6 +62,11 @@ const LIST_GAP: Duration = Duration::from_millis(100);
 /// The least time between two asks of git about a repository.
 const STATUS_GAP: Duration = Duration::from_millis(300);
 
+/// The most repositories inside its root's that one explorer has git
+/// asked about: a folder of hundreds of projects, expanded, doesn't start
+/// hundreds of `git status`es.
+const MOST_NESTED: usize = 32;
+
 /// The explorers, the directories expanded in them, and the work on them
 /// going on.
 #[derive(Debug)]
@@ -81,6 +92,30 @@ pub(super) struct Explorers {
     /// them with: the client that asked, and its number for it.
     ops: HashMap<u64, (Token, u64)>,
     next_ticket: u64,
+}
+
+impl Explorers {
+    /// What git says of explorer `files`' files: what its root's
+    /// repository says, but for what's in the repositories inside it, and
+    /// what they say of themselves. `None` until git has said anything.
+    fn marks_of(&self, files: FilesId) -> Option<Vec<(String, GitMark)>> {
+        let explorer = self.list.get(&files)?;
+        let said = |top: &PathBuf| self.repos.get(top).and_then(|repo| repo.marks.clone());
+        let mut marks = Vec::new();
+        let mut any = false;
+        if let Some(outer) = explorer.repo.as_ref().and_then(said) {
+            any = true;
+            let inside =
+                |path: &str| (explorer.nested.iter()).any(|top| Path::new(path).starts_with(top));
+            marks.extend(outer.iter().filter(|(path, _)| !inside(path)).cloned());
+        }
+        for inner in explorer.nested.iter().filter_map(said) {
+            any = true;
+            marks.extend(inner.iter().cloned());
+        }
+        marks.sort();
+        any.then_some(marks)
+    }
 }
 
 impl Default for Explorers {
@@ -109,6 +144,9 @@ struct Explorer {
     viewers: Vec<Token>,
     /// The top of the work tree its root is in, once found, if it's in one.
     repo: Option<PathBuf>,
+    /// The tops of the repositories found inside folders expanded in it,
+    /// as their listings show a `.git`.
+    nested: Vec<PathBuf>,
 }
 
 /// A directory some client has expanded.
@@ -216,6 +254,7 @@ impl Daemon {
             root: root.clone(),
             viewers: Vec::new(),
             repo: None,
+            nested: Vec::new(),
         };
         self.explorers.list.insert(id, explorer);
         if let Some(workers) = self.files_workers() {
@@ -249,12 +288,10 @@ impl Daemon {
             explorer.viewers.push(token);
         }
         let root = root_update(&explorer.root, &self.config.home);
-        let marks = (explorer.repo.as_ref())
-            .and_then(|repo| self.explorers.repos.get(repo))
-            .and_then(|repo| repo.marks.clone());
+        let marks = self.explorers.marks_of(files);
         self.tell_files(token, files, root);
         if let Some(marks) = marks {
-            self.tell_files(token, files, FilesUpdate::Git(marks.to_vec()));
+            self.tell_files(token, files, FilesUpdate::Git(marks));
         }
         Ok(Response::Done)
     }
@@ -290,6 +327,9 @@ impl Daemon {
             log::info!("explorer {files} closed");
             self.collapse_where(|(_, explorer)| explorer == files);
             self.forget_repo_unless_used(explorer.repo);
+            for nested in explorer.nested {
+                self.forget_repo_unless_used(Some(nested));
+            }
         }
     }
 
@@ -317,10 +357,20 @@ impl Daemon {
                         dir.due = Some(now);
                     }
                 }
-                let repo =
-                    (self.explorers.list.get(&files)).and_then(|explorer| explorer.repo.clone());
-                if let Some(repo) = repo.and_then(|repo| self.explorers.repos.get_mut(&repo)) {
-                    repo.due = Some(now);
+                let repos: Vec<PathBuf> = (self.explorers.list.get(&files))
+                    .map(|explorer| {
+                        explorer
+                            .repo
+                            .iter()
+                            .chain(&explorer.nested)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for repo in repos {
+                    if let Some(repo) = self.explorers.repos.get_mut(&repo) {
+                        repo.due = Some(now);
+                    }
                 }
             }
         }
@@ -379,8 +429,12 @@ impl Daemon {
         }
         explorer.root.clone_from(&root);
         let old = explorer.repo.take();
+        let nested = std::mem::take(&mut explorer.nested);
         let viewers = explorer.viewers.clone();
         self.forget_repo_unless_used(old);
+        for nested in nested {
+            self.forget_repo_unless_used(Some(nested));
+        }
         let update = root_update(&root, &self.config.home);
         for viewer in viewers {
             self.tell_files(viewer, files, update.clone());
@@ -406,9 +460,25 @@ impl Daemon {
         };
         entry.viewers.retain(|&viewer| !which(viewer));
         entry.sent.retain(|&viewer| !which(viewer));
+        let still: Vec<FilesId> = entry.viewers.iter().map(|&(_, files)| files).collect();
         if entry.viewers.is_empty() {
             self.explorers.dirs.remove(dir);
             self.unwatch(|watched| watched.dirs.retain(|watched| watched != dir));
+        }
+        // A repository found in it is no longer asked about by explorers
+        // that don't have it expanded.
+        let mut unnested = Vec::new();
+        for (&files, explorer) in &mut self.explorers.list {
+            if !still.contains(&files) && explorer.nested.iter().any(|nested| nested == dir) {
+                explorer.nested.retain(|nested| nested != dir);
+                unnested.push(files);
+            }
+        }
+        if !unnested.is_empty() {
+            self.forget_repo_unless_used(Some(dir.to_owned()));
+            for files in unnested {
+                self.send_marks_to(files);
+            }
         }
     }
 
@@ -416,8 +486,9 @@ impl Daemon {
     /// is in it any more.
     fn forget_repo_unless_used(&mut self, repo: Option<PathBuf>) {
         let Some(repo) = repo else { return };
-        let used =
-            (self.explorers.list.values()).any(|explorer| explorer.repo.as_ref() == Some(&repo));
+        let used = (self.explorers.list.values()).any(|explorer| {
+            explorer.repo.as_ref() == Some(&repo) || explorer.nested.contains(&repo)
+        });
         if !used {
             self.explorers.repos.remove(&repo);
             self.unwatch(|watched| {
@@ -650,11 +721,16 @@ impl Daemon {
             };
             for dir in &watched.dirs {
                 // What's written in a repository changes what git says,
-                // unless git ignores it, as a build's output.
-                if ignored_here(&explorers.dirs, dir, name.as_deref()) {
+                // unless git ignores it, as a build's output. What one
+                // repository says of another inside it doesn't count.
+                let top = explorers.repos.contains_key(dir);
+                if ignored_here(&explorers.dirs, dir, name.as_deref(), top) {
                     continue;
                 }
-                let repo = (explorers.repos.keys()).find(|top| dir.starts_with(top));
+                // The deepest: a repository inside another is its own.
+                let repo = (explorers.repos.keys())
+                    .filter(|top| dir.starts_with(top))
+                    .max_by_key(|top| top.as_os_str().len());
                 repos.extend(repo.cloned());
             }
         }
@@ -814,6 +890,8 @@ impl Daemon {
         entry.last = Some(Instant::now());
         let rewatch = listing.is_ok() && !entry.watched;
         let mut viewers = entry.viewers.clone();
+        let holds_git = (listing.as_ref())
+            .is_ok_and(|listing| listing.entries.iter().any(|entry| entry.name == ".git"));
         let update = match listing {
             Ok(listing) => {
                 let listing = Arc::new(listing);
@@ -845,19 +923,68 @@ impl Daemon {
         if rewatch {
             self.watch(dir, None);
         }
+        self.nest(dir, holds_git);
+    }
+
+    /// Notes whether the folder `dir`, just listed, holds a `.git`, and so
+    /// is the top of a repository inside the one its explorers' roots are
+    /// in, which git is asked about for them; or no longer does.
+    fn nest(&mut self, dir: &Path, holds_git: bool) {
+        let expanded: Vec<FilesId> = (self.explorers.dirs.get(dir))
+            .map(|entry| entry.viewers.iter().map(|&(_, files)| files).collect())
+            .unwrap_or_default();
+        let mut find = false;
+        let mut unnested = Vec::new();
+        for (&files, explorer) in &mut self.explorers.list {
+            let nested = explorer.nested.iter().any(|nested| nested == dir);
+            if !holds_git && nested {
+                explorer.nested.retain(|nested| nested != dir);
+                unnested.push(files);
+            } else if holds_git
+                && !nested
+                && expanded.contains(&files)
+                && explorer.repo.as_deref() != Some(dir)
+                && explorer.nested.len() < MOST_NESTED
+            {
+                explorer.nested.push(dir.to_owned());
+                find = true;
+            }
+        }
+        if !unnested.is_empty() {
+            self.forget_repo_unless_used(Some(dir.to_owned()));
+            for files in unnested {
+                self.send_marks_to(files);
+            }
+        }
+        if find {
+            if self.explorers.repos.contains_key(dir) {
+                self.send_marks(dir);
+            } else if let Some(workers) = self.files_workers() {
+                workers.find_repository(dir.to_owned());
+            }
+        }
     }
 
     /// Notes the repository explorers rooted at `root` are in, watching its
     /// index, and asks git about it if no one has yet.
     fn found_repository(&mut self, root: &Path, tree: Option<(PathBuf, PathBuf)>) {
-        let Some((top, git_dir)) = tree else { return };
-        let top = top.canonicalize().unwrap_or(top);
+        let found = tree.map(|(top, git_dir)| (top.canonicalize().unwrap_or(top), git_dir));
+        // A folder thought to hold a repository inside another, which git
+        // says doesn't, isn't asked about.
+        let real_root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+        if found.as_ref().is_none_or(|(top, _)| *top != real_root) {
+            for explorer in self.explorers.list.values_mut() {
+                explorer.nested.retain(|nested| nested != root);
+            }
+        }
+        let Some((top, git_dir)) = found else { return };
         let mut used = false;
         for explorer in self.explorers.list.values_mut() {
             if explorer.root == root && explorer.repo.is_none() {
                 explorer.repo = Some(top.clone());
                 used = true;
             }
+            used |= explorer.nested.contains(&top);
         }
         if !used || self.explorers.repos.contains_key(&top) {
             if used {
@@ -898,20 +1025,31 @@ impl Daemon {
     }
 
     /// Sends what git last said of the repository whose top is `top` to
-    /// every client following an explorer in it.
+    /// every client following an explorer in it, or with it inside.
     fn send_marks(&mut self, top: &Path) {
-        let Some(marks) = (self.explorers.repos.get(top)).and_then(|repo| repo.marks.clone())
-        else {
+        let explorers: Vec<FilesId> = (self.explorers.list.iter())
+            .filter(|(_, explorer)| {
+                explorer.repo.as_deref() == Some(top)
+                    || explorer.nested.iter().any(|nested| nested == top)
+            })
+            .map(|(&files, _)| files)
+            .collect();
+        for files in explorers {
+            self.send_marks_to(files);
+        }
+    }
+
+    /// Sends what git says of explorer `files`' files to every client
+    /// following it.
+    fn send_marks_to(&mut self, files: FilesId) {
+        let Some(marks) = self.explorers.marks_of(files) else {
             return;
         };
-        let viewers: Vec<(Token, FilesId)> = (self.explorers.list.iter())
-            .filter(|(_, explorer)| explorer.repo.as_deref() == Some(top))
-            .flat_map(|(&files, explorer)| {
-                explorer.viewers.iter().map(move |&token| (token, files))
-            })
-            .collect();
-        for (viewer, files) in viewers {
-            self.tell_files(viewer, files, FilesUpdate::Git(marks.to_vec()));
+        let viewers = (self.explorers.list.get(&files))
+            .map(|explorer| explorer.viewers.clone())
+            .unwrap_or_default();
+        for viewer in viewers {
+            self.tell_files(viewer, files, FilesUpdate::Git(marks.clone()));
         }
     }
 
@@ -1011,8 +1149,9 @@ impl Daemon {
 
 /// Whether git ignores what an event in the directory `dir` is about:
 /// the thing called `name` in it, or the directory itself, as the
-/// listings say.
-fn ignored_here(dirs: &HashMap<PathBuf, Dir>, dir: &Path, name: Option<&[u8]>) -> bool {
+/// listings say; but not the directory itself if it's the `top` of a
+/// repository, which the one it's in may ignore.
+fn ignored_here(dirs: &HashMap<PathBuf, Dir>, dir: &Path, name: Option<&[u8]>, top: bool) -> bool {
     let ignored = |dir: &Path, name: &[u8]| {
         (dirs.get(dir))
             .and_then(|entry| entry.listed.as_ref())
@@ -1020,7 +1159,7 @@ fn ignored_here(dirs: &HashMap<PathBuf, Dir>, dir: &Path, name: Option<&[u8]>) -
             .is_some_and(|entry| entry.ignored)
     };
     let itself = match (dir.parent(), dir.file_name()) {
-        (Some(parent), Some(own)) => ignored(parent, own.as_bytes()),
+        (Some(parent), Some(own)) if !top => ignored(parent, own.as_bytes()),
         _ => false,
     };
     itself || name.is_some_and(|name| ignored(dir, name))
@@ -1092,7 +1231,7 @@ mod tests {
         );
         dirs.insert(PathBuf::from("/p/target"), listed(&[("out.o", false)]));
         let ignored = |dir: &str, name: Option<&str>| {
-            ignored_here(&dirs, Path::new(dir), name.map(str::as_bytes))
+            ignored_here(&dirs, Path::new(dir), name.map(str::as_bytes), false)
         };
         assert!(!ignored("/p", Some("a.rs")));
         assert!(ignored("/p", Some("target")));
@@ -1101,6 +1240,10 @@ mod tests {
             "in an ignored directory"
         );
         assert!(ignored("/p/target", None), "the ignored directory itself");
+        assert!(
+            !ignored_here(&dirs, Path::new("/p/target"), Some(b"out.o"), true),
+            "a repository inside, which the outer one ignores"
+        );
         assert!(!ignored("/p", Some("new.rs")), "not listed yet");
         assert!(!ignored("/p", None));
     }
