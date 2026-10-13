@@ -30,6 +30,7 @@
 //! | `r` | Renames, or moves, what's at the cursor |
 //! | `d` | Deletes what's at the cursor, to the trash |
 //! | `x` `y`, then `p` | Cuts or copies what's at the cursor, then moves or copies it where the cursor is |
+//! | `e` | Edits the folder at the cursor as text (see [`editing`]) |
 //! | `q` | Closes the explorer |
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -46,8 +47,12 @@ use crate::editor::{Matching, Pattern, Stroke};
 use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 
+mod editing;
+pub(crate) mod listing;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use editing::Planned;
 
 /// What the explorer asks of the desk, which it can't do itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +67,18 @@ pub(crate) enum Ask {
     Paste { dir: String },
     /// Close the explorer's pane.
     Close,
+    /// Show folders' listing number `listing` in an editor in the pane,
+    /// made with `text` if it's new, with the cursor on the line starting
+    /// with the mark `at`, if one does.
+    Edit {
+        listing: usize,
+        text: Option<String>,
+        at: Option<String>,
+    },
+    /// Show the listing shown before what its edits come to was, again.
+    BackToText,
+    /// Stop editing listings, throwing away the editors.
+    StopEditing,
 }
 
 /// Where a file the explorer opens goes.
@@ -189,6 +206,10 @@ pub(crate) struct Explorer {
     /// The directory it may not go above, nor change anything outside, as
     /// a lesson's explorer may not leave the lesson's scratch directory.
     fence: Option<String>,
+    /// Folders' listings being edited as text, if they are, and one to
+    /// show once it's listed.
+    editing: Option<editing::Editing>,
+    pending_edit: Option<editing::Pending>,
 }
 
 /// What an explorer says when it's asked to leave its fence.
@@ -227,6 +248,8 @@ impl Explorer {
             asks: Vec::new(),
             message: None,
             fence: None,
+            editing: None,
+            pending_edit: None,
         }
     }
 
@@ -262,6 +285,18 @@ impl Explorer {
     pub(crate) fn resize(&mut self, size: Size) {
         self.height = usize::from(size.rows());
         self.width = usize::from(size.cols());
+    }
+
+    /// Its size, once it's been given one.
+    pub(crate) fn size(&self) -> Option<Size> {
+        let cols = u16::try_from(self.width).ok()?;
+        let rows = u16::try_from(self.height).ok()?;
+        Size::new(cols, rows).ok()
+    }
+
+    /// Takes what the bar is to say, if anything.
+    pub(crate) fn take_message(&mut self) -> Option<String> {
+        self.message.take()
     }
 
     /// What it keeps of how it's shown, for another explorer on its root.
@@ -315,6 +350,7 @@ impl Explorer {
         self.reveal = Some(path);
         self.expand_to_reveal();
         self.flatten_if_stale();
+        self.edit_if_ready();
     }
 
     /// Whether a search, a name or an answer is being typed, in the bar.
@@ -336,6 +372,9 @@ impl Explorer {
     /// What the bar says: what's being typed, a message, or the root and
     /// the path at the cursor, from it.
     pub(crate) fn label(&self) -> String {
+        if let Some(label) = self.plan_label() {
+            return label;
+        }
         match &self.prompt {
             Some(Prompt::Search { query, backward }) => {
                 return format!("{}{query}▏", if *backward { '?' } else { '/' });
@@ -390,6 +429,7 @@ impl Explorer {
     pub(crate) fn update(&mut self, update: FilesUpdate) {
         self.heard(update);
         self.flatten_if_stale();
+        self.edit_if_ready();
     }
 
     /// Takes in `update`, leaving the tree to be flattened.
@@ -401,6 +441,7 @@ impl Explorer {
                 self.stale = true;
                 self.sync();
                 self.expand_to_reveal();
+                self.edit_rooted();
             }
             FilesUpdate::Listed { dir, entries, .. } => {
                 if !self.asked.contains(&dir) {
@@ -414,6 +455,7 @@ impl Explorer {
                 self.stale = true;
             }
             FilesUpdate::Unlisted { dir, reason } => {
+                self.edit_unlisted(&dir);
                 self.listings.remove(&dir);
                 self.asked.remove(&dir);
                 self.view.expanded.remove(&dir);
@@ -431,6 +473,7 @@ impl Explorer {
     /// stays until it is again.
     pub(crate) fn reconnected(&mut self) {
         self.asked.clear();
+        self.plan_cut_off();
     }
 
     /// Takes what's to be asked of the daemon, oldest first.
@@ -447,6 +490,11 @@ impl Explorer {
     /// to write over what's there, or to delete for good what can't go to
     /// the trash.
     pub(crate) fn answered(&mut self, op: FileOp, outcome: Result<(), FileOpError>) {
+        // A step of listings' edits goes on to the next, or stops: it
+        // never asks to write over, or delete for good.
+        if self.step_done(&outcome) {
+            return;
+        }
         match (outcome, op) {
             (Ok(()), FileOp::Create { path, .. }) => {
                 self.message = Some(format!("made {}", self.shown(&path)));
@@ -683,6 +731,11 @@ impl Explorer {
         self.message = None;
         // Where a view kept put the cursor is forgotten once it's moved.
         self.view.cursor = None;
+        // What listings' edits come to, shown in place of the tree.
+        if self.editing.as_ref().is_some_and(editing::Editing::planned) {
+            self.plan_stroke(stroke);
+            return true;
+        }
         if self.prompt.is_some() {
             self.prompt_stroke(stroke);
             return true;
@@ -737,6 +790,7 @@ impl Explorer {
             (None, 'a') => self.ask_add(),
             (None, 'r') => self.ask_rename(),
             (None, 'd') => self.ask_delete(),
+            (None, 'e') => self.edit_here(),
             (None, 'x' | 'y') => {
                 if let Some(line) = self.lines.get(self.cursor) {
                     let path = line.path();
@@ -1178,7 +1232,7 @@ impl Explorer {
         let Some(line) = (row.checked_sub(1)).map(|row| self.top + row) else {
             return false;
         };
-        if line >= self.lines.len() || self.prompt.is_some() {
+        if line >= self.lines.len() || self.prompt.is_some() || self.editing.is_some() {
             return false;
         }
         self.cursor = line;
@@ -1193,6 +1247,9 @@ impl Explorer {
     /// Scrolls `lines` down, or up if it's negative, as the wheel does,
     /// the cursor staying in view.
     pub(crate) fn scroll(&mut self, lines: i64) -> bool {
+        if self.editing.is_some() {
+            return false;
+        }
         self.flatten_if_stale();
         let by = usize::try_from(lines.unsigned_abs()).unwrap_or(usize::MAX);
         let last = self.lines.len().saturating_sub(1);
@@ -1215,6 +1272,9 @@ impl Explorer {
     /// Lays out the rows shown, for [`scene`](Self::scene).
     pub(crate) fn settle(&mut self) {
         self.flatten_if_stale();
+        if self.settle_plan() {
+            return;
+        }
         let height = self.list_height();
         if self.cursor < self.top {
             self.top = self.cursor;

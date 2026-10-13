@@ -53,6 +53,7 @@ mod pattern;
 mod pieces;
 mod preview;
 mod registers;
+mod scratch;
 mod snippet;
 mod substitute;
 mod text;
@@ -391,6 +392,9 @@ pub(crate) struct Editor {
     /// Lines laid out, and the rows they wrap onto, kept from frame to
     /// frame while the text stays as it is.
     kept: Kept,
+    /// How much of the start of a line is hidden, if any is, as a folder's
+    /// listing hides each line's mark.
+    hide: Option<fn(&str) -> usize>,
     height: usize,
     width: usize,
     /// How lines are numbered.
@@ -593,6 +597,7 @@ impl Editor {
             left: 0,
             resized: false,
             kept: Kept::default(),
+            hide: None,
             height: 1,
             width: 1,
             numbers: Numbers::of(options),
@@ -780,8 +785,17 @@ impl Editor {
     fn text<'c>(&self, copy: &'c BufferCopy) -> Text<'c> {
         let typing = (self.mode == Mode::Insert).then_some(self.cursor.at);
         Text::new(copy.text(), self.indent.tabstop)
+            .hiding(self.hide)
             .wrapping(self.wrapping.at(self.text_width().max(1)), typing)
             .keeping(&self.kept, self.buffer, copy.revision(), copy.line_log())
+    }
+
+    /// Hides as much of the start of each line as `hide` says: the cursor
+    /// never goes there, nothing is drawn of it, and changing a whole line
+    /// keeps it, as it keeps the line's indent.
+    pub(crate) fn hide_starts(&mut self, hide: fn(&str) -> usize) {
+        self.hide = Some(hide);
+        self.kept = Kept::default();
     }
 
     /// Enters normal mode, as moving the focus here from a pane in normal
@@ -1773,10 +1787,12 @@ impl Editor {
     fn change_span(&mut self, span: Span, copy: &mut BufferCopy) {
         let text = self.text(copy);
         let (start, end) = match span.lines {
-            // Lines keep the first's indent, and one line break.
+            // Lines keep the first's indent, and what's hidden of it, and
+            // one line break.
             Some((first, last)) => {
                 let line = text.line_text(first);
-                let indent = indent_of(&line).len();
+                let hidden = text.hidden(&line);
+                let indent = hidden + indent_of(&line[hidden..]).len();
                 (text.line_start(first) + indent, text.line_end(last))
             }
             None => (span.start, span.end),
@@ -2300,9 +2316,18 @@ impl Editor {
                 ctrl: true,
             } => {
                 let text = self.text(copy);
-                let start = previous_char(&text, at);
+                let line = text.point_of(at).line;
+                let (start, end) = if line > 0 && at == text.shown_start(line) {
+                    // At the start of what's shown, it joins the line to
+                    // the one before, taking only the line break: what's
+                    // hidden of the line goes with it.
+                    let start = text.line_start(line);
+                    (start - 1, start)
+                } else {
+                    (previous_char(&text, at), at)
+                };
                 drop(text);
-                self.delete_text(start, at, copy);
+                self.delete_text(start, end, copy);
             }
             Stroke::Delete => {
                 let text = self.text(copy);
@@ -4156,6 +4181,7 @@ impl Editor {
         let previewed = (self.preview.as_ref()).and_then(|preview| preview.text.clone());
         let text = match &previewed {
             Some(rope) => Text::new(rope, self.indent.tabstop)
+                .hiding(self.hide)
                 .wrapping(self.wrapping.at(self.text_width().max(1)), None),
             None => self.text(copy),
         };
@@ -4680,7 +4706,13 @@ fn can_fail(motion: Motion) -> bool {
 /// Where the word before `byte` starts, on its line, taking the blanks
 /// after it too, as Ctrl+W deletes back to in insert mode.
 fn word_before(text: &Text<'_>, byte: usize) -> usize {
-    let line_start = text.line_start(text.point_of(byte).line);
+    let line = text.point_of(byte).line;
+    let line_start = text.shown_start(line);
+    // At the start of what's shown of a line some of which is hidden, it
+    // deletes nothing: what's hidden goes with its line.
+    if byte == line_start && line_start != text.line_start(line) {
+        return byte;
+    }
     let before = |at: usize| text.slice(previous_char(text, at), at);
     let blank = |at: usize| before(at).chars().all(char::is_whitespace);
     let word = |at: usize| (before(at).chars()).all(|ch| ch.is_alphanumeric() || ch == '_');
@@ -4703,8 +4735,9 @@ fn word_before(text: &Text<'_>, byte: usize) -> usize {
 /// or from there, the line's start.
 fn indent_before(text: &Text<'_>, byte: usize) -> usize {
     let line = text.point_of(byte).line;
-    let start = text.line_start(line);
-    let indent = start + indent_of(&text.line_text(line)).len();
+    let start = text.shown_start(line);
+    let shown = &text.line_text(line)[start - text.line_start(line)..];
+    let indent = start + indent_of(shown).len();
     if byte > indent { indent } else { start }
 }
 

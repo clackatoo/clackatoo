@@ -418,7 +418,7 @@ fn serve_lesson(desk: &mut Desk, daemon: &mut Daemon) {
                     query,
                     ..
                 } => {
-                    let text = daemon.text.to_string();
+                    let text = daemon.text().to_string();
                     let found = match query {
                         Query::Pieces(construct) => {
                             let all = pieces(&text, construct);
@@ -548,7 +548,7 @@ fn the_text_objects_lesson_is_done_from_start_to_end_with_the_grammar_answering(
     // The last is to read.
     type_keys(&mut desk, "]s");
     assert_eq!(step(&desk), lesson.steps.len());
-    assert_eq!(daemon.text.to_string(), editor_text(&desk));
+    assert_eq!(daemon.text().to_string(), editor_text(&desk));
 }
 
 // --- Steps --------------------------------------------------------------------
@@ -662,7 +662,7 @@ fn a_step_that_sets_the_practice_text_puts_it_in_as_it_starts() {
     command(&mut desk, "s/cat/fish/g");
     serve_lesson(&mut desk, &mut daemon);
     assert_eq!(step(&desk), 2);
-    assert_eq!(daemon.text.to_string(), editor_text(&desk));
+    assert_eq!(daemon.text().to_string(), editor_text(&desk));
 }
 
 #[test]

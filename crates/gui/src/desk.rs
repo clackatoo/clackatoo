@@ -96,8 +96,8 @@ enum Asked {
     /// put at this place once the file's text has come.
     PaneAt(Option<FileLocation>),
     /// A new file explorer, to switch to once made, showing the file at
-    /// this path once it can.
-    Explorer(Option<String>),
+    /// `reveal` once it can, and editing a folder as text if `edit`.
+    Explorer { reveal: Option<String>, edit: bool },
     /// Something for the tutor's lesson.
     Lesson(lessons::Serial, lessons::LessonAsked),
     /// Something asked of reviewing, whose answer is said in the bar.
@@ -932,6 +932,8 @@ impl Desk {
                 Content::Files(_) => {
                     if let Ok(size) = Size::new(tile.cols, tile.rows) {
                         self.fit_explorer(id, size);
+                        // A folder's listing being edited in it.
+                        self.fit_editor(id, size);
                     }
                     continue;
                 }
@@ -1144,9 +1146,9 @@ impl Desk {
                 }
                 true
             }
-            Some(Asker::Window(Asked::Explorer(reveal))) => {
+            Some(Asker::Window(Asked::Explorer { reveal, edit })) => {
                 match response {
-                    Response::PaneCreated(pane) => self.explorer_made(pane, reveal),
+                    Response::PaneCreated(pane) => self.explorer_made(pane, reveal, edit),
                     Response::Error(err) => self.message = Some(err.to_string()),
                     _ => {}
                 }
@@ -1357,7 +1359,7 @@ impl Desk {
         }
         let had_message = self.message.take().is_some() || asked;
         if self.focused_editor().is_some() {
-            return self.editor_key(press) || had_message;
+            return self.listing_key(press) || self.editor_key(press) || had_message;
         }
         if let Some(redraw) = self.list_key(press) {
             return redraw || had_message;
@@ -1983,7 +1985,7 @@ impl Desk {
             Command::Registers => self.show_registers(),
             Command::Marks => self.open_finder(crate::finder::Kind::Marks, String::new()),
             Command::Editor(line) => self.editor_command(&line),
-            Command::Explore(dir) => self.open_explorer(dir),
+            Command::Explore { dir, edit } => self.open_explorer(dir, edit),
             Command::AgentUndo { turn, redo, force } => self.agent_undo(turn, redo, force),
             Command::Board { place, name } => self.open_board(name, place),
             Command::Review(review) => self.run_review(review),
@@ -5772,7 +5774,7 @@ mod tests {
 
     /// The text the daemon has for `buffer`.
     fn daemon_text(daemons: &Daemons, buffer: u32) -> String {
-        daemons[&BufferId(buffer)].text.to_string()
+        daemons[&BufferId(buffer)].text().to_string()
     }
 
     fn enter(desk: &mut Desk) {
@@ -7086,6 +7088,237 @@ mod tests {
         type_keys(&mut desk, "q");
         assert_eq!(desk.recording(), None);
         assert!(!answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));
+    }
+
+    // --- Folders edited as text --------------------------------------------
+
+    /// What the listing in the focused explorer's editor shows, a line
+    /// each, its marks hidden.
+    fn listing_shown(desk: &Desk) -> Vec<String> {
+        (editor_text(desk).lines())
+            .map(|line| line[crate::explorer::listing::mark_len(line)..].to_owned())
+            .collect()
+    }
+
+    /// The rows explorer 2 shows, without the blank ones.
+    fn explorer_rows(desk: &mut Desk) -> Vec<String> {
+        desk.settle_explorers();
+        let (rows, _) = desk.explorer(PaneId(2)).expect("an explorer").scene();
+        (rows.iter())
+            .map(|row| row.text().trim_end().to_owned())
+            .filter(|row| !row.is_empty())
+            .collect()
+    }
+
+    /// What's sent to the daemon, but for how panes are sized and drawn.
+    fn sent(desk: &mut Desk) -> Vec<ClientMessage> {
+        (desk.take_outbox().into_iter())
+            .filter(|message| {
+                !matches!(
+                    message,
+                    ClientMessage::FrameDone { .. }
+                        | ClientMessage::Request(Request::Resize { .. })
+                )
+            })
+            .collect()
+    }
+
+    /// The line of its listing the focused editor's cursor is on.
+    fn listing_line(desk: &Desk) -> usize {
+        let (editor, copy) = desk.focused_editor().expect("an editor");
+        copy.text().byte_to_line(editor.cursor_byte(copy))
+    }
+
+    #[test]
+    fn e_edits_a_folder_as_text_and_w_shows_each_step_then_does_them_through_file_ops() {
+        use clackatoo_protocol::FileOp;
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "je");
+        // In an editor in the explorer's pane, on the line it was on.
+        assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
+        assert_eq!(listing_line(&desk), 1);
+        type_keys(&mut desk, "cwb");
+        escape(&mut desk);
+        type_keys(&mut desk, "onew/");
+        escape(&mut desk);
+        type_keys(&mut desk, "u");
+        assert_eq!(
+            listing_shown(&desk),
+            ["src/", "b.txt"],
+            "undone, as in any editor"
+        );
+        ctrl(&mut desk, "r");
+        assert_eq!(listing_shown(&desk), ["src/", "b.txt", "new/"]);
+        // The text is the window's alone: nothing of it is sent.
+        assert_eq!(sent(&mut desk), []);
+        command(&mut desk, "w");
+        assert_eq!(note(&desk), "make these 2 changes? (y/n)");
+        assert_eq!(
+            explorer_rows(&mut desk),
+            ["to do", "  make   new/", "  rename a.txt to b.txt"]
+        );
+        assert_eq!(file_ops(&mut desk), [], "not until it's said yes to");
+        type_keys(&mut desk, "y");
+        let made = FileOp::Create {
+            path: "/p/new".into(),
+            dir: true,
+        };
+        assert_eq!(file_ops(&mut desk), [(0, made)]);
+        assert_eq!(note(&desk), "making change 1 of 2: Esc stops after it");
+        desk.file_op_done(0, Ok(()));
+        let moved = FileOp::Move {
+            from: "/p/a.txt".into(),
+            to: "/p/b.txt".into(),
+            overwrite: None,
+        };
+        assert_eq!(file_ops(&mut desk), [(1, moved)], "one at a time");
+        assert_eq!(explorer_rows(&mut desk)[1], "✓ make   new/");
+        desk.file_op_done(1, Ok(()));
+        assert_eq!(note(&desk), "made all 2 changes");
+        assert!(desk.focused_editor().is_none(), "back to the tree");
+        assert!(!desk.explorer(PaneId(2)).unwrap().editing());
+    }
+
+    #[test]
+    fn a_step_that_fails_stops_the_rest_and_says_what_was_done() {
+        use clackatoo_protocol::{FileOp, FileOpError};
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        type_keys(&mut desk, "jeddox");
+        escape(&mut desk);
+        command(&mut desk, "w");
+        assert_eq!(note(&desk), "make these 2 changes? (y/n)");
+        // `n` goes back to the text, as it was left.
+        type_keys(&mut desk, "n");
+        assert_eq!(listing_shown(&desk), ["src/", "x"]);
+        command(&mut desk, "q");
+        assert_eq!(
+            note(&desk),
+            "the listings have changes: :w makes them, :q! throws them away"
+        );
+        command(&mut desk, "w");
+        type_keys(&mut desk, "y");
+        let ops = file_ops(&mut desk);
+        assert_eq!(ops.len(), 1);
+        desk.file_op_done(ops[0].0, Ok(()));
+        let trashed = FileOp::Delete {
+            path: "/p/a.txt".into(),
+            trash: true,
+        };
+        let ops = file_ops(&mut desk);
+        assert_eq!(ops[0].1, trashed);
+        // No trash: it stops, and never deletes for good unasked.
+        desk.file_op_done(ops[0].0, Err(FileOpError::NoTrash("no trash there".into())));
+        assert_eq!(file_ops(&mut desk), []);
+        assert_eq!(
+            note(&desk),
+            "stopped after 1 of 2: no trash there, so nothing was deleted: d in the tree \
+             deletes for good. q goes back to the tree"
+        );
+        assert_eq!(
+            explorer_rows(&mut desk),
+            ["stopped", "✓ make   x", "✗ delete a.txt, to the trash"]
+        );
+        type_keys(&mut desk, "q");
+        assert!(!desk.explorer(PaneId(2)).unwrap().editing());
+        assert!(desk.focused_editor().is_none(), "the tree again");
+    }
+
+    #[test]
+    fn what_cant_be_done_is_refused_at_its_line_and_q_bang_leaves() {
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        type_keys(&mut desk, "jeyyp");
+        type_keys(&mut desk, "gg");
+        command(&mut desk, "w");
+        assert_eq!(
+            note(&desk),
+            "can't: two lines are both a.txt: a copy needs a name of its own"
+        );
+        assert_eq!(listing_line(&desk), 2);
+        assert_eq!(file_ops(&mut desk), []);
+        command(&mut desk, "e!");
+        assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
+        type_keys(&mut desk, "dd");
+        command(&mut desk, "q!");
+        assert!(desk.focused_editor().is_none());
+        assert_eq!(file_ops(&mut desk), []);
+    }
+
+    #[test]
+    fn enter_and_minus_go_between_folders_so_a_line_cut_in_one_and_put_in_another_moves() {
+        use clackatoo_protocol::{FileOp, FilesAction, FilesId, FilesUpdate};
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "e");
+        enter(&mut desk);
+        // Listed once it's expanded.
+        let expanded = (desk.take_outbox().into_iter()).any(|message| {
+            matches!(message, ClientMessage::Files { action: FilesAction::Expand(dir), .. } if dir == "/p/src")
+        });
+        assert!(expanded);
+        let listed = FilesUpdate::Listed {
+            dir: "/p/src".into(),
+            entries: vec![entry("main.rs", false)],
+            cut_short: false,
+        };
+        desk.files_changed(FilesId(1), listed);
+        assert_eq!(listing_shown(&desk), ["main.rs"]);
+        type_keys(&mut desk, "dd-");
+        assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
+        assert_eq!(listing_line(&desk), 0, "on the folder come from");
+        type_keys(&mut desk, "p");
+        assert_eq!(listing_shown(&desk), ["src/", "main.rs", "a.txt"]);
+        command(&mut desk, "w");
+        assert_eq!(
+            explorer_rows(&mut desk),
+            ["to do", "  move   src/main.rs to main.rs"]
+        );
+        type_keys(&mut desk, "y");
+        let moved = FileOp::Move {
+            from: "/p/src/main.rs".into(),
+            to: "/p/main.rs".into(),
+            overwrite: None,
+        };
+        assert_eq!(file_ops(&mut desk), [(0, moved)]);
+        // Enter on a file's line opens it beside, as in the tree.
+        let mut desk = super::tests::desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "jej");
+        enter(&mut desk);
+        assert!(matches!(
+            answer_all(&mut desk).as_slice(),
+            [Request::Split { terminal: PaneTerminal::File(file), .. }] if file.path == "/p/a.txt"
+        ));
+    }
+
+    #[test]
+    fn colon_explore_bang_edits_the_folder_of_the_editors_file() {
+        let mut desk = editing("/p/src/main.rs", "fn main() {}\n");
+        command(&mut desk, "Explore!");
+        let asked = (desk.take_outbox().into_iter()).any(|message| {
+            matches!(
+                message,
+                ClientMessage::Request(Request::SplitTab {
+                    terminal: PaneTerminal::Files(_),
+                    ..
+                })
+            )
+        });
+        assert!(asked);
+        let layout = side_by_side(vec![files_pane(2, 1), file_pane(1, 7)]);
+        desk.workspaces_changed(one_tab(layout));
+        desk.answered(Response::PaneCreated(PaneId(2)));
+        answer_all(&mut desk);
+        explore_p(&mut desk);
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        assert_eq!(listing_shown(&desk), ["main.rs"]);
+        let (editor, _) = desk.focused_editor().expect("an editor");
+        assert_eq!(editor.mode, Mode::Normal);
     }
 
     #[test]

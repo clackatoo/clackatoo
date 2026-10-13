@@ -1784,9 +1784,12 @@ fn drawings<'a>(
             continue;
         };
         let has_focus = id == focused;
+        // An explorer shows an editor while a folder's listing is edited.
+        let editing = matches!(pane.content, Content::Buffer(_))
+            || (matches!(pane.content, Content::Files(_)) && desk.editor(id).is_some());
         let terminal = match pane.content {
             Content::Terminal(terminal) => terminal,
-            Content::Buffer(_) => {
+            Content::Files(_) | Content::Buffer(_) if editing => {
                 let Some(editor) = desk.editor(id) else {
                     continue;
                 };
@@ -1807,6 +1810,7 @@ fn drawings<'a>(
                 });
                 continue;
             }
+            Content::Buffer(_) => continue,
             Content::Files(_) => {
                 let Some(explorer) = desk.explorer(id) else {
                     continue;

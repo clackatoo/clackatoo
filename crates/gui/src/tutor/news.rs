@@ -143,6 +143,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Subagents: background chats agents start, several at once, as profiles like explore, shown as a card",
     },
+    News {
+        id: "explorer-text",
+        date: "2026-10-13",
+        lesson: "explorer",
+        what: "Edit folders as text in the explorer with e or :Explore!, and :w to rename, move, copy, make and delete",
+    },
 ];
 
 impl News {

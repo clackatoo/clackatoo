@@ -16,18 +16,27 @@
 //! it closes, by its root, for the next to open there in this window. It
 //! isn't kept anywhere else: another window, or this one opened again,
 //! starts afresh.
+//!
+//! An explorer editing folders as text (see [`crate::explorer`]'s
+//! `editing`) shows an editor in its pane, one of the editors the desk
+//! keeps, on a buffer only the window has: a scratch copy, answering its
+//! own changes. Each folder's listing has its own; those not shown wait
+//! here, with their cursors and undo, and all of them while what their
+//! edits come to is shown in the pane.
 
 use std::collections::{HashMap, HashSet};
 
 use clackatoo_protocol::{
-    ClientMessage, Content, Event, FileOp, FileOpError, FilesId, FilesUpdate, OpenFile, OpenFiles,
-    PaneId, PaneTerminal, Request, Side, Size,
+    BufferId, ClientMessage, Content, Event, FileOp, FileOpError, FilesId, FilesUpdate, OpenFile,
+    OpenFiles, PaneId, PaneTerminal, Request, Side, Size,
 };
 
 use super::{Asked, Desk};
-use crate::explorer::{Ask, Explorer, Opening, View};
+use crate::editor::{BufferCopy, Editor, Stroke};
+use crate::explorer::{Ask, Explorer, Opening, Planned, View, listing};
 use crate::input::KeyPress;
 use crate::layout::Placement;
+use crate::pane::Mode;
 
 /// How many panes focused are remembered, the latest first, to know where
 /// a file picked in an explorer opens.
@@ -50,6 +59,20 @@ pub(super) struct Explorers {
     clipped: Option<(String, bool)>,
     /// The panes focused, the latest first.
     recent: Vec<PaneId>,
+    /// The editors of the folders' listings explorers are editing, by
+    /// their panes.
+    listings: HashMap<PaneId, Listings>,
+    /// How many scratch buffers have been numbered.
+    scratch_buffers: u32,
+}
+
+/// The editors of the folders' listings one explorer is editing.
+#[derive(Debug, Default)]
+struct Listings {
+    /// Each listing's buffer, by its place, as the explorer numbers them.
+    buffers: Vec<BufferId>,
+    /// The editors of those not shown, and their copies, by their buffers.
+    waiting: HashMap<BufferId, (Editor, BufferCopy)>,
 }
 
 impl Desk {
@@ -109,6 +132,9 @@ impl Desk {
         explorers
             .recent
             .retain(|&pane| workspaces.find_pane(pane).is_some());
+        explorers
+            .listings
+            .retain(|pane, _| explorers.panes.contains_key(pane));
         explorers
             .ops
             .retain(|_, (pane, _)| anywhere.contains_key(pane));
@@ -210,6 +236,10 @@ impl Desk {
         {
             explorer.restore(view);
         }
+        let asks = explorer.take_asks();
+        for ask in asks {
+            self.explorer_asked(pane, ask);
+        }
         self.settle_lesson();
         self.shown_tab()
             .is_some_and(|tab| tab.layout.contains(pane))
@@ -250,6 +280,11 @@ impl Desk {
         }
         if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
             explorer.answered(op, outcome);
+            // The next of the steps a listing's edits come to.
+            let asks = explorer.take_asks();
+            for ask in asks {
+                self.explorer_asked(pane, ask);
+            }
         }
         true
     }
@@ -377,12 +412,244 @@ impl Desk {
                 self.file_op(pane, op);
             }
             Ask::Close => self.request(Request::ClosePane { pane }, Asked::Command),
+            Ask::Edit { listing, text, at } => {
+                self.show_listing(pane, listing, text, at.as_deref());
+            }
+            Ask::BackToText => {
+                let shown = (self.explorers.panes.get(&pane)).and_then(Explorer::listing_shown);
+                if let Some(listing) = shown {
+                    self.show_listing(pane, listing, None, None);
+                }
+            }
+            Ask::StopEditing => self.drop_listings(pane),
         }
+    }
+
+    // --- Folders as text ----------------------------------------------------
+
+    /// Shows the explorer `pane`'s listing number `listing` in an editor in
+    /// its pane, with the cursor on the line starting with the mark `at`,
+    /// if one does: the editor kept for it, or a new one, of `text`. The
+    /// one shown waits.
+    fn show_listing(
+        &mut self,
+        pane: PaneId,
+        listing: usize,
+        text: Option<String>,
+        at: Option<&str>,
+    ) {
+        let Some(explorer) = self.explorers.panes.get(&pane) else {
+            return;
+        };
+        let size = explorer.size();
+        let dir = explorer.folder_shown().unwrap_or_default().to_owned();
+        if let Some((editor, copy)) = self.take_listing_editor(pane) {
+            let listings = self.explorers.listings.entry(pane).or_default();
+            listings.waiting.insert(copy.buffer(), (editor, copy));
+        }
+        let explorers = &mut self.explorers;
+        let listings = explorers.listings.entry(pane).or_default();
+        let kept =
+            (listings.buffers.get(listing)).and_then(|buffer| listings.waiting.remove(buffer));
+        let (mut editor, copy) = match kept {
+            Some(kept) => kept,
+            None if listing == listings.buffers.len() => {
+                // Numbered down from the top, where the daemon's never get.
+                let buffer = BufferId(u32::MAX - explorers.scratch_buffers);
+                explorers.scratch_buffers += 1;
+                listings.buffers.push(buffer);
+                let copy = BufferCopy::scratch(buffer, &dir, &text.unwrap_or_default());
+                let mut editor = Editor::new(buffer, &self.options);
+                editor.hide_starts(listing::mark_len);
+                (editor, copy)
+            }
+            None => {
+                log::error!("explorer listing {listing} isn't one made");
+                return;
+            }
+        };
+        if let Some(size) = size {
+            editor.resize(size);
+        }
+        if let Some(at) = at {
+            let text = copy.text();
+            let line =
+                (0..text.len_lines()).find(|&line| text.line(line).to_string().starts_with(at));
+            if let Some(line) = line {
+                editor.go_to(line as u64, 0, &copy);
+            }
+        }
+        self.put_listing_editor(pane, editor, copy);
+    }
+
+    /// Stops the explorer `pane` editing folders as text, throwing away
+    /// the editors and what was typed in them.
+    fn drop_listings(&mut self, pane: PaneId) {
+        self.take_listing_editor(pane);
+        self.explorers.listings.remove(&pane);
+        if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+            explorer.stop_editing();
+        }
+    }
+
+    /// The texts of the explorer `pane`'s listings, by their places.
+    fn listing_texts(&self, pane: PaneId) -> Vec<String> {
+        let Some(listings) = self.explorers.listings.get(&pane) else {
+            return Vec::new();
+        };
+        (listings.buffers.iter())
+            .map(|&buffer| {
+                (listings.waiting.get(&buffer))
+                    .map(|(_, copy)| copy.text().to_string())
+                    .or_else(|| self.scratch_text(buffer))
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// Whether any of the explorer `pane`'s listings has been changed.
+    fn listings_changed(&self, pane: PaneId) -> bool {
+        let Some(explorer) = self.explorers.panes.get(&pane) else {
+            return false;
+        };
+        (self.listing_texts(pane).iter().enumerate())
+            .any(|(listing, text)| explorer.listing_as_made(listing) != Some(text.as_str()))
+    }
+
+    /// `:w` in an explorer editing folders as text: shows what the edits
+    /// to its listings come to, asking whether to do it, or why it can't
+    /// be done, at the line that says so. Leaves, with `:wq`, if nothing's
+    /// changed.
+    pub(super) fn write_listings(&mut self, pane: PaneId, quit: bool) {
+        let texts = self.listing_texts(pane);
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let Some(explorer) = self.explorers.panes.get_mut(&pane) else {
+            return;
+        };
+        if !explorer.editing_text() {
+            self.message = Some("y makes the changes, n goes back to the listing".into());
+            return;
+        }
+        match explorer.plan(&texts) {
+            Planned::Nothing if quit => self.drop_listings(pane),
+            Planned::Nothing => self.message = Some("nothing has changed".into()),
+            Planned::Asking if !self.connected => {
+                if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+                    explorer.back_to_text();
+                }
+                self.message = Some("not connected: nothing can be changed".into());
+            }
+            Planned::Asking => {
+                if let Some((editor, copy)) = self.take_listing_editor(pane) {
+                    let listings = self.explorers.listings.entry(pane).or_default();
+                    listings.waiting.insert(copy.buffer(), (editor, copy));
+                }
+            }
+            Planned::Refused { at, why } => {
+                if let Some((listing, line)) = at
+                    && let Some(explorer) = self.explorers.panes.get_mut(&pane)
+                    && let Some(dir) = explorer.folder_of(listing)
+                {
+                    explorer.edit_folder(dir, None);
+                    let asks = explorer.take_asks();
+                    for ask in asks {
+                        self.explorer_asked(pane, ask);
+                    }
+                    self.with_editor(pane, |editor, copy| editor.go_to(line, 0, copy));
+                }
+                self.message = Some(format!("can't: {why}"));
+            }
+        }
+    }
+
+    /// `:q` in an explorer editing folders as text: back to the tree,
+    /// unless a listing has been changed, which `force` throws away.
+    pub(super) fn leave_listings(&mut self, pane: PaneId, force: bool) {
+        if (self.explorers.panes.get(&pane)).is_some_and(|explorer| !explorer.editing_text()) {
+            self.message = Some("y makes the changes, n goes back to the listing".into());
+            return;
+        }
+        if !force && self.listings_changed(pane) {
+            self.message =
+                Some("the listings have changes: :w makes them, :q! throws them away".into());
+            return;
+        }
+        self.drop_listings(pane);
+    }
+
+    /// `:e!` in an explorer editing folders as text: puts the listing shown
+    /// back as it was made.
+    pub(super) fn listing_as_made(&mut self, pane: PaneId) {
+        let Some(explorer) = self.explorers.panes.get(&pane) else {
+            return;
+        };
+        let Some(text) = (explorer.listing_shown())
+            .and_then(|listing| explorer.listing_as_made(listing))
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let Some(buffer) = self.editor(pane).map(Editor::buffer) else {
+            return;
+        };
+        self.replace_text(buffer, &text);
+        self.answer_scratch();
+    }
+
+    /// Enter and `-`, in normal mode, in an explorer editing folders as
+    /// text, as oil.nvim has them: Enter on a folder's line shows its
+    /// listing, and on a file's opens it; `-` shows the folder above's.
+    /// Returns whether `press` was one of them.
+    pub(super) fn listing_key(&mut self, press: &crate::input::KeyPress<'_>) -> bool {
+        let Some(pane) = self.shown.map(|shown| shown.pane) else {
+            return false;
+        };
+        if !self.is_explorer(pane) {
+            return false;
+        }
+        let Some((editor, copy)) = self.focused_editor() else {
+            return false;
+        };
+        if editor.mode != Mode::Normal || editor.pending() || editor.prompting() {
+            return false;
+        }
+        let strokes = crate::editor::strokes(press, false);
+        let line = {
+            let text = copy.text();
+            let byte = editor.cursor_byte(copy).min(text.len_bytes());
+            let line = text.line(text.byte_to_line(byte)).to_string();
+            line.trim_end_matches('\n').to_owned()
+        };
+        let Some(explorer) = self.explorers.panes.get_mut(&pane) else {
+            return false;
+        };
+        match strokes.as_slice() {
+            [Stroke::Enter] => explorer.enter_line(&line),
+            [
+                Stroke::Char {
+                    ch: '-',
+                    ctrl: false,
+                },
+            ] => explorer.edit_above(),
+            _ => return false,
+        }
+        if let Some(message) = explorer.take_message() {
+            self.message = Some(message);
+        }
+        let asks = explorer.take_asks();
+        for ask in asks {
+            self.explorer_asked(pane, ask);
+        }
+        true
     }
 
     /// Asks the daemon to do `op`, for the explorer `pane`.
     pub(super) fn file_op(&mut self, pane: PaneId, op: FileOp) {
         if !self.connected {
+            if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+                let why = "not connected: nothing was done".to_owned();
+                explorer.answered(op, Err(FileOpError::Failed(why)));
+            }
             return;
         }
         // A lesson's explorer touches nothing outside the lesson's folder.
@@ -521,28 +788,48 @@ impl Desk {
     /// it if it doesn't, or opens one down the tab's left.
     pub(super) fn toggle_explorer(&mut self) {
         match self.explorer_in_tab() {
+            // Not while what's typed in its listings would be lost.
+            Some(pane)
+                if self.shown.is_some_and(|shown| shown.pane == pane)
+                    && self.listings_changed(pane) =>
+            {
+                self.message =
+                    Some("the listings have changes: :w makes them, :q! throws them away".into());
+            }
             Some(pane) if self.shown.is_some_and(|shown| shown.pane == pane) => {
                 self.request(Request::ClosePane { pane }, Asked::Command);
             }
-            _ => self.open_explorer(None),
+            _ => self.open_explorer(None, false),
         }
     }
 
     /// `:Explore`: goes to the tab's explorer, rooting it at `dir` if
     /// given, or opens one down the tab's left, rooted at `dir`, or the
     /// focused pane's project. Either way, from an editor, it shows the
-    /// editor's file.
-    pub(super) fn open_explorer(&mut self, dir: Option<String>) {
+    /// editor's file. With `edit`, as `:Explore!`, it edits the folder
+    /// the cursor's in as text, or with `dir`, the root.
+    pub(super) fn open_explorer(&mut self, dir: Option<String>, edit: bool) {
         let Some(shown) = self.shown else { return };
         let reveal = self.file_in(shown.pane).map(str::to_owned);
         if let Some(pane) = self.explorer_in_tab() {
             self.show_pane(pane);
             if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+                if edit && explorer.editing() {
+                    return;
+                }
+                let rooting = dir.is_some();
                 if let Some(dir) = dir {
                     explorer.root_at(dir);
                 }
                 if let Some(path) = reveal {
                     explorer.reveal(path);
+                }
+                if edit {
+                    explorer.edit_soon(rooting);
+                    let asks = explorer.take_asks();
+                    for ask in asks {
+                        self.explorer_asked(pane, ask);
+                    }
                 }
             }
             return;
@@ -553,15 +840,23 @@ impl Desk {
             terminal: PaneTerminal::Files(OpenFiles { dir }),
             share: Some(self.explorer_share()),
         };
-        self.request(request, Asked::Explorer(reveal));
+        self.request(request, Asked::Explorer { reveal, edit });
     }
 
     /// The explorer `pane`, made at the window's asking, is to show the
-    /// file at `reveal`, once it can.
-    pub(super) fn explorer_made(&mut self, pane: PaneId, reveal: Option<String>) {
+    /// file at `reveal`, once it can, and edit the folder it's in, or its
+    /// root, as text if `edit`.
+    pub(super) fn explorer_made(&mut self, pane: PaneId, reveal: Option<String>, edit: bool) {
         self.show_pane(pane);
-        if let (Some(explorer), Some(path)) = (self.explorers.panes.get_mut(&pane), reveal) {
+        let Some(explorer) = self.explorers.panes.get_mut(&pane) else {
+            return;
+        };
+        let rooted = reveal.is_none();
+        if let Some(path) = reveal {
             explorer.reveal(path);
+        }
+        if edit {
+            explorer.edit_soon(rooted);
         }
     }
 

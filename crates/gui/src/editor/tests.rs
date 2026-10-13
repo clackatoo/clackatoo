@@ -179,7 +179,7 @@ impl Setup {
         let text = self.copy.text().to_string();
         assert_eq!(
             text,
-            self.daemon.text.to_string(),
+            self.daemon.text().to_string(),
             "the daemon has the same"
         );
         text
@@ -2579,4 +2579,61 @@ fn marks_go_to_their_place_or_line_and_operators_act_up_to_them() {
         Some("mark Q is in other.rs")
     );
     assert_eq!(setup.text(), "  ohree\n");
+}
+
+#[test]
+fn ctrl_w_and_backspace_at_a_lines_start_join_it_to_the_line_before() {
+    let mut setup = Setup::new("one\ntwo\nthree\n");
+    setup.keys("ji<C-w><Esc>");
+    assert_eq!(setup.text(), "onetwo\nthree\n");
+    setup.keys("j0i<BS><Esc>");
+    assert_eq!(setup.text(), "onetwothree\n");
+}
+
+#[test]
+fn hidden_starts_are_never_drawn_nor_gone_to_and_changing_a_line_keeps_them() {
+    use crate::explorer::listing::{mark, mark_len};
+    let (one, two) = (mark(0), mark(1));
+    let mut setup = Setup::new(&format!("{one}alpha\n{two}beta/\n"));
+    setup.set(|options| {
+        options.number = false;
+        options.relativenumber = false;
+    });
+    setup.editor.hide_starts(mark_len);
+    setup.editor.settle(&setup.copy);
+    let rows: Vec<String> = (setup.editor.scene().0.iter())
+        .take(2)
+        .map(|row| row.text())
+        .collect();
+    assert_eq!(rows, ["alpha", "beta/"]);
+    setup.keys("$0x");
+    assert_eq!(setup.cursor(), (0, 0));
+    assert_eq!(setup.text(), format!("{one}lpha\n{two}beta/\n"));
+    setup.keys("Ixy<Esc>Az<Esc>");
+    assert_eq!(setup.text(), format!("{one}xylphaz\n{two}beta/\n"));
+    setup.keys("ccgamma<Esc>");
+    assert_eq!(
+        setup.text(),
+        format!("{one}gamma\n{two}beta/\n"),
+        "kept, as an indent is"
+    );
+    setup.keys("ddp");
+    assert_eq!(
+        setup.text(),
+        format!("{two}beta/\n{one}gamma\n"),
+        "moved with its line"
+    );
+    setup.keys("ggd$");
+    assert_eq!(setup.text(), format!("{two}\n{one}gamma\n"));
+    // Typed into a line with nothing shown, it goes after what's hidden.
+    setup.keys("ix<Esc>");
+    assert_eq!(setup.text(), format!("{two}x\n{one}gamma\n"));
+    setup.keys("u");
+    // Backspace at the start of what's shown joins the line to the one
+    // before, taking its mark, whole, into the middle of that line, which
+    // a listing refuses; Ctrl+W and Ctrl+U there do nothing.
+    setup.keys("ji<C-w><C-u><Esc>");
+    assert_eq!(setup.text(), format!("{two}\n{one}gamma\n"));
+    setup.keys("i<BS><Esc>");
+    assert_eq!(setup.text(), format!("{two}{one}gamma\n"));
 }

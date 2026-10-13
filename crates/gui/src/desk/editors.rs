@@ -23,6 +23,7 @@ use super::jumps::{FilePlace, Jump, Jumps};
 use super::{Asked, Desk, Purpose};
 use crate::command::Place;
 use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Marks, Shared, Stroke};
+use crate::explorer::Explorer;
 use crate::input::{KeptPress, KeyPress};
 use crate::options::Options;
 use crate::pane::{Copy, Mode};
@@ -122,6 +123,10 @@ fn follow_places(
     made: &[impl Borrow<Edit>],
     ours: bool,
 ) {
+    // A folder's listing isn't a file places are kept in.
+    if copy.is_scratch() {
+        return;
+    }
     let (path, text) = (copy.path(), copy.text());
     jumps.edited(path, made, text);
     marks.edited(path, made, text);
@@ -143,7 +148,7 @@ impl Desk {
     /// Whether `pane` is an editor a file opened from a link or an
     /// explorer can go in: any but a lesson's.
     pub(super) fn takes_files(&self, pane: PaneId) -> bool {
-        self.editor(pane).is_some() && !self.is_lesson_pane(pane)
+        self.editor(pane).is_some() && !self.is_lesson_pane(pane) && !self.is_explorer(pane)
     }
 
     /// The window's copy of `buffer`, if an editor shows it.
@@ -228,15 +233,29 @@ impl Desk {
         };
         let anywhere: HashMap<PaneId, BufferId> =
             self.workspaces.list.iter().flat_map(panes).collect();
+        let explorers: HashSet<PaneId> = (self.workspaces.list.iter())
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.layout.panes())
+            .filter(|pane| pane.content.files().is_some())
+            .map(|pane| pane.id)
+            .collect();
         let shown = self
             .shown
             .and_then(|shown| self.workspaces.get(shown.workspace))
             .map(panes)
             .unwrap_or_default();
         let editors = &mut self.editors;
-        editors
-            .panes
-            .retain(|pane, editor| anywhere.get(pane) == Some(&editor.buffer()));
+        // An explorer's editor, of a folder's listing, goes with it.
+        let scratch =
+            |buffer: &BufferId| (editors.buffers.get(buffer)).is_some_and(BufferCopy::is_scratch);
+        let kept: Vec<PaneId> = (editors.panes.iter())
+            .filter(|(pane, editor)| {
+                anywhere.get(pane) == Some(&editor.buffer())
+                    || (explorers.contains(pane) && scratch(&editor.buffer()))
+            })
+            .map(|(&pane, _)| pane)
+            .collect();
+        editors.panes.retain(|pane, _| kept.contains(pane));
         // Where a closed pane's cursor was to go, it won't.
         editors
             .landings
@@ -255,6 +274,15 @@ impl Desk {
         }
         let wanted: HashSet<BufferId> = editors.panes.values().map(Editor::buffer).collect();
         editors.buffers.retain(|buffer, _| wanted.contains(buffer));
+        // Only the daemon's buffers are attached to.
+        let wanted: HashSet<BufferId> = (wanted.into_iter())
+            .filter(|buffer| {
+                !editors
+                    .buffers
+                    .get(buffer)
+                    .is_some_and(BufferCopy::is_scratch)
+            })
+            .collect();
         // A file opened to show a place in it may be open already.
         self.land();
         if !self.connected {
@@ -322,6 +350,12 @@ impl Desk {
     /// the file it showed has changes that aren't written, which are kept,
     /// unseen. Where its cursor was to go before, it won't.
     pub(super) fn open_here(&mut self, pane: PaneId, path: String) {
+        if self.is_explorer(pane) {
+            self.message = Some(
+                "this pane is editing folders as text: :w makes the changes, :q! leaves".into(),
+            );
+            return;
+        }
         self.editors.landings.remove(&pane);
         if self.connected {
             let opening = self.editors.opening.entry(pane).or_default();
@@ -369,7 +403,9 @@ impl Desk {
             return Some(path);
         }
         let editor = editors.panes.get(&pane)?;
-        editors.buffers.get(&editor.buffer()).map(BufferCopy::path)
+        (editors.buffers.get(&editor.buffer()))
+            .filter(|copy| !copy.is_scratch())
+            .map(BufferCopy::path)
     }
 
     /// Where `pane` is, for the jump list: in an editor whose file has
@@ -393,7 +429,7 @@ impl Desk {
         }
         let file = (editors.panes.get(&pane))
             .and_then(|editor| Some((editor, editors.buffers.get(&editor.buffer())?)))
-            .filter(|(_, copy)| copy.loaded())
+            .filter(|(_, copy)| copy.loaded() && !copy.is_scratch())
             .map(|(editor, copy)| {
                 let byte = byte.unwrap_or_else(|| editor.cursor_byte(copy));
                 FilePlace::at(copy.path(), copy.text(), byte)
@@ -895,7 +931,58 @@ impl Desk {
         if let Some((keys, times)) = asked_macro {
             self.type_macro(&keys, times);
         }
+        self.answer_scratch();
         Some(done.redraw)
+    }
+
+    /// Hands back what scratch copies, of buffers only the window has,
+    /// have answered themselves, as the daemon's answers are handed to
+    /// the others: each in turn, until none has anything more.
+    pub(super) fn answer_scratch(&mut self) {
+        loop {
+            let answers: Vec<(BufferId, BufferUpdate)> = (self.editors.buffers.values_mut())
+                .filter(|copy| copy.is_scratch())
+                .flat_map(|copy| {
+                    let buffer = copy.buffer();
+                    copy.take_answers()
+                        .into_iter()
+                        .map(move |answer| (buffer, answer))
+                })
+                .collect();
+            if answers.is_empty() {
+                return;
+            }
+            for (buffer, answer) in answers {
+                self.buffer_changed(buffer, answer);
+            }
+        }
+    }
+
+    /// Shows `editor`, of `copy`, a folder's listing, in the explorer
+    /// `pane`.
+    pub(super) fn put_listing_editor(&mut self, pane: PaneId, editor: Editor, copy: BufferCopy) {
+        self.editors.buffers.insert(copy.buffer(), copy);
+        self.editors.panes.insert(pane, editor);
+    }
+
+    /// Takes the editor of a folder's listing the explorer `pane` shows,
+    /// and its copy, if it shows one.
+    pub(super) fn take_listing_editor(&mut self, pane: PaneId) -> Option<(Editor, BufferCopy)> {
+        let editors = &mut self.editors;
+        let buffer = editors.panes.get(&pane)?.buffer();
+        if !editors.buffers.get(&buffer)?.is_scratch() {
+            return None;
+        }
+        let editor = editors.panes.remove(&pane)?;
+        let copy = editors.buffers.remove(&buffer)?;
+        Some((editor, copy))
+    }
+
+    /// The text of the scratch buffer `buffer`, if an editor shows it.
+    pub(super) fn scratch_text(&self, buffer: BufferId) -> Option<String> {
+        (self.editors.buffers.get(&buffer))
+            .filter(|copy| copy.is_scratch())
+            .map(|copy| copy.text().to_string())
     }
 
     /// Puts `text` on the clipboard, or the primary selection, once the
@@ -1157,6 +1244,7 @@ impl Desk {
         if gave_up {
             self.gave_up();
         }
+        self.answer_scratch();
         // A macro goes on once what it waited for is done, as after
         // anything the daemon says, or gives up if it's waited too long.
         asked |= self.macro_patience(now);
@@ -1227,6 +1315,9 @@ impl Desk {
     /// first if `formatonsave` says, then closes the pane if `quit`.
     pub(super) fn write_file(&mut self, force: bool, quit: bool) {
         let Some(shown) = self.shown else { return };
+        if self.explorer(shown.pane).is_some_and(Explorer::editing) {
+            return self.write_listings(shown.pane, quit);
+        }
         let Some((editor, _)) = self.focused_editor() else {
             self.message = Some("this pane has no file to write".into());
             return;
@@ -1272,6 +1363,10 @@ impl Desk {
         if self.in_lesson_pane(shown.pane) {
             return self.end_lesson();
         }
+        // In an explorer editing folders as text, it goes back to the tree.
+        if self.explorer(shown.pane).is_some_and(Explorer::editing) {
+            return self.leave_listings(shown.pane, force);
+        }
         if let Some((editor, copy)) = self.focused_editor() {
             let buffer = editor.buffer();
             let last = !(self.workspaces.list.iter())
@@ -1312,6 +1407,11 @@ impl Desk {
 
     /// `:e!`: throws away the focused pane's file's changes not saved.
     pub(super) fn discard_changes(&mut self) {
+        if let Some(pane) = self.shown.map(|shown| shown.pane)
+            && self.explorer(pane).is_some_and(Explorer::editing)
+        {
+            return self.listing_as_made(pane);
+        }
         match self.focused_editor() {
             Some((editor, _)) => {
                 let buffer = editor.buffer();

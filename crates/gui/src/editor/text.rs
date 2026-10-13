@@ -289,10 +289,23 @@ fn lay(
 impl Laid {
     /// Lays out `text`, with tabs stopping at multiples of `tabstop`.
     pub(crate) fn new(text: String, tabstop: usize) -> Self {
+        Self::hiding(text, tabstop, 0)
+    }
+
+    /// Lays out `text`, with tabs stopping at multiples of `tabstop`, and
+    /// its first `hidden` bytes, where a character starts, taking no
+    /// cells: nothing's drawn of them, and no cell is theirs, so the
+    /// cursor never goes there. A line with any hidden is never plain, as
+    /// its first character shown isn't at its first byte.
+    pub(crate) fn hiding(text: String, tabstop: usize, hidden: usize) -> Self {
         let room = room_for(&text, tabstop);
         let plain = text.len();
+        let hidden = (0..=hidden.min(text.len()))
+            .rev()
+            .find(|&at| text.is_char_boundary(at))
+            .unwrap_or(0);
         let laying = Laying::Row(RowBuilder::new(room), room);
-        lay(text, 0, plain, tabstop, laying, Starts::Plain(0))
+        lay(text, hidden, plain, tabstop, laying, Starts::Plain(0))
     }
 
     /// The line laid out again, its text now its first `from` bytes and
@@ -610,6 +623,8 @@ pub(crate) struct Text<'a> {
     /// Where the cursor is typing in insert mode: at a line's end, the line
     /// has a cell more after it, for the cursor, when lines wrap.
     typing: Option<Point>,
+    /// How much of the start of each line is hidden, if any is.
+    hide: Option<fn(&str) -> usize>,
     kept: Kept,
 }
 
@@ -621,7 +636,30 @@ impl<'a> Text<'a> {
             tabstop: tabstop.max(1),
             wrap: None,
             typing: None,
+            hide: None,
             kept: Kept::default(),
+        }
+    }
+
+    /// The text with as much of the start of each line hidden as `hide`
+    /// says, if it says.
+    pub(crate) fn hiding(self, hide: Option<fn(&str) -> usize>) -> Self {
+        Self { hide, ..self }
+    }
+
+    /// How many bytes of the start of `line`, a line of the text, are
+    /// hidden.
+    pub(crate) fn hidden(&self, line: &str) -> usize {
+        self.hide.map_or(0, |hide| hide(line))
+    }
+
+    /// The byte what's shown of line `line` starts at: its start, but for
+    /// what's hidden of it.
+    pub(crate) fn shown_start(&self, line: u64) -> usize {
+        let start = self.line_start(line);
+        match self.hide {
+            Some(_) => start + self.hidden(&self.line_text(line)),
+            None => start,
         }
     }
 
@@ -680,7 +718,7 @@ impl<'a> Text<'a> {
             return None;
         }
         let bytes = || (self.line_start(line), self.line_end(line));
-        Some(self.kept.laid(line, self.rope, bytes, self.tabstop))
+        Some(self.kept.laid(line, self.rope, bytes, self.tabstop, self.hide))
     }
 
     /// The text of line `line`, without its line break.

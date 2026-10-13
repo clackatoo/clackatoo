@@ -386,15 +386,17 @@ impl Kept {
     }
 
     /// Line `line`, laid out, with tabs stopping at multiples of
-    /// `tabstop`: as kept, or else laid out now, from what's kept of it if
-    /// it's changed since. Its text is the bytes of `rope` that `bytes`
-    /// says, asked only if it's to be laid out.
+    /// `tabstop`, and as much of its start hidden as `hide` says: as kept,
+    /// or else laid out now, from what's kept of it if it's changed since.
+    /// Its text is the bytes of `rope` that `bytes` says, asked only if
+    /// it's to be laid out.
     pub(super) fn laid(
         &self,
         line: u64,
         rope: &Rope,
         bytes: impl FnOnce() -> (usize, usize),
         tabstop: usize,
+        hide: Option<fn(&str) -> usize>,
     ) -> Rc<Laid> {
         let mut kept = self.0.borrow_mut();
         if let Some(line) = kept.lines.get(&line)
@@ -403,6 +405,24 @@ impl Kept {
             return Rc::clone(&line.laid);
         }
         let (start, end) = bytes();
+        // A change may change what's hidden: such a line, as a listing's,
+        // which is short, is laid out afresh.
+        if let Some(hide) = hide {
+            let text = rope.byte_slice(start..end).to_string();
+            let hidden = hide(&text);
+            let laid = Rc::new(Laid::hiding(text, tabstop, hidden));
+            let mut old = kept
+                .forget(line)
+                .unwrap_or_else(|| KeptLine::new(Rc::clone(&laid)));
+            old.changed = None;
+            for rows in old.rows.iter_mut().flatten() {
+                rows.stale = Some(0);
+            }
+            old.laid = Rc::clone(&laid);
+            old.measure();
+            kept.keep(line, old);
+            return laid;
+        }
         let Some(mut old) = kept.forget(line) else {
             let laid = Rc::new(Laid::new(rope.byte_slice(start..end).to_string(), tabstop));
             kept.keep(line, KeptLine::new(Rc::clone(&laid)));

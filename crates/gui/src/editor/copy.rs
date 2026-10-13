@@ -32,6 +32,7 @@ use clackatoo_text::{
 };
 
 use super::kept::{LineChange, LineLog};
+use super::scratch::Scratch;
 
 /// The most pieces an edit waiting to be sent grows to by joining the
 /// edits after it in its undo step; those after go on their own, in the
@@ -181,6 +182,10 @@ pub(crate) struct BufferCopy {
     /// The connection was lost, and the next snapshot is the new one's:
     /// the changes waiting are kept, to be brought past it and sent again.
     reattaching: bool,
+    /// What answers its changes, if it's a buffer only the window has,
+    /// rather than the daemon, and the answers not yet taken in.
+    scratch: Option<Box<Scratch>>,
+    answers: Vec<BufferUpdate>,
 }
 
 impl BufferCopy {
@@ -211,7 +216,31 @@ impl BufferCopy {
             batch: None,
             astray: false,
             reattaching: false,
+            scratch: None,
+            answers: Vec::new(),
         }
+    }
+
+    /// A copy of a buffer only the window has, called `path`, holding
+    /// `text`, which answers its own changes (see [`Scratch`]): `id` must
+    /// be one the daemon never gives.
+    pub(crate) fn scratch(id: BufferId, path: &str, text: &str) -> Self {
+        let scratch = Scratch::new(path, text);
+        let mut copy = Self::new(id);
+        copy.replace(scratch.snapshot());
+        copy.scratch = Some(Box::new(scratch));
+        copy
+    }
+
+    /// Whether it's of a buffer only the window has.
+    pub(crate) fn is_scratch(&self) -> bool {
+        self.scratch.is_some()
+    }
+
+    /// What a scratch copy has answered itself, for the desk to hand back
+    /// to it as it would the daemon's answers, oldest first.
+    pub(crate) fn take_answers(&mut self) -> Vec<BufferUpdate> {
+        std::mem::take(&mut self.answers)
     }
 
     /// What the buffer's language server does as you type, as far as the
@@ -1069,6 +1098,10 @@ impl BufferCopy {
     /// which of them it made, and the rest are brought past what changed
     /// meanwhile and sent again (see [`resumed`](Self::resumed)).
     pub(crate) fn reconnected(&mut self) {
+        // A scratch copy's changes never go to the daemon.
+        if self.is_scratch() {
+            return;
+        }
         self.reattaching = true;
     }
 
@@ -1197,7 +1230,7 @@ impl BufferCopy {
             self.waiting.front()
         {
             let (buffer, version) = (self.id, self.version);
-            self.outbox.push(match self.waiting.pop_front() {
+            let message = match self.waiting.pop_front() {
                 Some(Waiting::Query { id, at, query }) => ClientMessage::Query {
                     buffer,
                     id,
@@ -1219,7 +1252,8 @@ impl BufferCopy {
                     at,
                 },
                 _ => unreachable!("a query, a rename or a stage"),
-            });
+            };
+            self.send(message);
         }
         let Some(first) = self.waiting.front() else {
             return;
@@ -1238,11 +1272,20 @@ impl BufferCopy {
         };
         let seq = next_seq();
         self.sent = Some(seq);
-        self.outbox.push(ClientMessage::Edit {
+        self.send(ClientMessage::Edit {
             buffer: self.id,
             seq,
             change,
         });
+    }
+
+    /// Sends `message` to the daemon, or answers it, if it's a scratch
+    /// copy.
+    fn send(&mut self, message: ClientMessage) {
+        match &mut self.scratch {
+            Some(scratch) => self.answers.extend(scratch.answer(self.id, message)),
+            None => self.outbox.push(message),
+        }
     }
 }
 
@@ -1327,6 +1370,10 @@ pub(super) mod tests {
         /// The text's version: how many edits have been made to it.
         pub(crate) fn version(&self) -> u64 {
             self.history.version()
+        }
+
+        pub(crate) fn text(&self) -> &Rope {
+            &self.text
         }
 
         pub(in crate::editor) fn snapshot(&self) -> BufferUpdate {

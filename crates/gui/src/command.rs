@@ -134,8 +134,9 @@ pub(crate) enum Command {
     /// Reviewing what agents changed.
     Review(ReviewCommand),
     /// `:Explore`: the tab's file explorer, rooted at this directory if
-    /// given.
-    Explore(Option<String>),
+    /// given; with `!`, editing the folder at its cursor, or that
+    /// directory, as text.
+    Explore { dir: Option<String>, edit: bool },
     /// `:Tutor`: the lessons, to pick one; with a lesson's name, that
     /// lesson; with `new`, what's new.
     Tutor(Option<String>),
@@ -234,7 +235,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "set" | "se" => return Ok(Command::Set(argument.unwrap_or_default().to_owned())),
         "registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
         "marks" => return Ok(Command::Marks),
-        "Explore" | "Ex" => return Ok(Command::Explore(argument.map(str::to_owned))),
+        "Explore" | "Ex" | "Explore!" | "Ex!" => return Ok(explore(word, argument)),
         "update" => return Ok(Command::Update(argument.map(str::to_owned))),
         "connect" => return Ok(Command::Connect(argument.map(str::to_owned))),
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
@@ -400,6 +401,14 @@ fn agent_undo(word: &str, argument: Option<&str>) -> Option<Result<Command, Stri
         redo: word.starts_with("AgentRedo"),
         force: word.ends_with('!'),
     }))
+}
+
+/// `:Explore`, typed as `word`, with `argument`: `!` edits as text.
+fn explore(word: &str, argument: Option<&str>) -> Command {
+    Command::Explore {
+        dir: argument.map(str::to_owned),
+        edit: word.ends_with('!'),
+    }
 }
 
 /// Where a word's mark puts a new pane, and the rest of the word.
