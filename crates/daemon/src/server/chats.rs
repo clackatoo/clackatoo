@@ -20,13 +20,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io;
 use std::os::fd::OwnedFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol_schema::v1::SessionUpdate;
 use clackatoo_protocol::{
-    NewAgent, PaneId, Provider, ProviderModels, Setting, SettingKind, TerminalId,
+    AgentSession, ChatChoices, Error, Event, NewAgent, PaneId, Provider, ProviderModels, Setting,
+    SettingKind, TerminalId,
 };
 use mio::unix::SourceFd;
 use mio::{Interest, Token};
@@ -34,7 +35,7 @@ use rustix::process::Signal;
 
 use super::language::Pipe;
 use super::{Daemon, Hosted, OUTPUT_BUDGET, Orphan, Slot, Source};
-use crate::agent::{Agent, Incoming, Opened, Opening, Refused};
+use crate::agent::{Agent, Incoming, Listed, Opened, Opening, Refused};
 use crate::agents::{self, AgentSpec, Launch, Start};
 use crate::chat::{Action, HostedChat, settings_of};
 
@@ -92,6 +93,28 @@ pub(super) struct Agents {
     /// The processes of agents stopped firmly, by their pidfds, and when
     /// each is killed if it hasn't gone (see [`Daemon::kill_agent`]).
     killing: Vec<(Instant, OwnedFd)>,
+    /// The lists of sessions agents were asked for, by the daemon's number
+    /// for each: the client that asked, its number for it, and the agent.
+    listings: HashMap<u64, Listing>,
+    /// The number the next listing gets.
+    next_listing: u64,
+    /// The agents that said they can't list the sessions they kept, by
+    /// name: none is started again just to be asked.
+    unlisting: HashSet<String>,
+}
+
+/// A list of an agent's sessions a client asked for, waiting for the
+/// agent.
+#[derive(Debug)]
+struct Listing {
+    client: Token,
+    id: u64,
+    /// The agent's name.
+    agent: String,
+    /// The directory asked about: sessions listed in another are left out.
+    cwd: String,
+    /// When it's given up on, if the agent hasn't answered.
+    due: Instant,
 }
 
 /// A chat's request for its session, waiting for an answer.
@@ -138,16 +161,39 @@ impl Agents {
 
 impl Daemon {
     /// Starts a chat with the agent asked for, or the default, working in
-    /// the directory asked for, or the one the pane `beside` is in.
-    pub(super) fn new_chat(&mut self, request: NewAgent, beside: Option<PaneId>) -> TerminalId {
+    /// the directory asked for, or the one the pane `beside` is in: on a
+    /// session the agent kept, if it's asked to resume one. A session a
+    /// chat holds already isn't opened twice: that chat is the answer,
+    /// unless it's in a pane or of another workspace than `beside`'s,
+    /// which would take it from there.
+    pub(super) fn new_chat(
+        &mut self,
+        request: NewAgent,
+        beside: Option<PaneId>,
+    ) -> Result<TerminalId, Error> {
+        let name = request.agent.as_deref().unwrap_or(agents::DEFAULT);
+        if let Some(resume) = &request.resume
+            && let Some(open) = self.holder_of(name, &resume.session)
+        {
+            let workspaces = self.workspaces.get();
+            if workspaces.pane_showing(open).is_some() {
+                return Err(Error::TerminalInPane(open));
+            }
+            let here = (beside.and_then(|pane| workspaces.find_pane(pane)))
+                .map(|(workspace, ..)| workspace.id);
+            let theirs = self.workspace_of_chat(open);
+            if theirs.is_some() && theirs != here {
+                return Err(Error::SessionOpen(open));
+            }
+            return Ok(open);
+        }
         let id = self.next_terminal();
         let cwd = request
             .cwd
             .or_else(|| beside.and_then(|pane| self.working_directory(pane)))
             .unwrap_or_else(|| self.config.home.to_string_lossy().into_owned());
-        let name = request.agent.as_deref().unwrap_or(agents::DEFAULT);
         let spec = self.agent_spec(name);
-        let chat = HostedChat::new(
+        let mut chat = HostedChat::new(
             id,
             request.size,
             cwd,
@@ -156,9 +202,203 @@ impl Daemon {
             request.task,
             request.browser,
         );
-        log::info!("chat {id} started, with {name}");
+        if let Some(model) = request.model {
+            chat.want_model(model);
+        }
+        if let Some(resume) = request.resume {
+            log::info!("chat {id} started, with {name}, resuming a session");
+            chat.go_on_with(resume);
+        } else {
+            log::info!("chat {id} started, with {name}");
+        }
         self.start_hosted_chat(chat);
-        id
+        Ok(id)
+    }
+
+    /// The chat that holds the session `session` of the agent called
+    /// `name`: its own now, or one it had before moving to another agent.
+    fn holder_of(&mut self, name: &str, session: &str) -> Option<TerminalId> {
+        if let Some((open, _)) = self.chat_in(name, session) {
+            return Some(open);
+        }
+        (self.terminals.iter()).find_map(|(&id, slot)| {
+            let chat = slot.terminal.chat_ref()?;
+            (chat.parked().iter())
+                .any(|parked| parked.agent == name && parked.session.as_deref() == Some(session))
+                .then_some(id)
+        })
+    }
+
+    /// Answers [`Request::ChatChoices`](clackatoo_protocol::Request::ChatChoices):
+    /// what a new chat beside `pane` could be started with, and the chats
+    /// in no pane.
+    pub(super) fn chat_choices(&self, pane: Option<PaneId>) -> ChatChoices {
+        let home = self.config.home.to_string_lossy().into_owned();
+        let workspaces = self.workspaces.get();
+        let unshown = (self.terminals.keys())
+            .filter(|&&id| workspaces.pane_showing(id).is_none())
+            .filter_map(|&id| self.chat_summary(id))
+            .collect();
+        ChatChoices {
+            agents: self.providers(),
+            default: agents::DEFAULT.to_owned(),
+            cwd: (pane.and_then(|pane| self.working_directory(pane)))
+                .unwrap_or_else(|| home.clone()),
+            home,
+            unshown,
+        }
+    }
+
+    /// Asks the agent called `agent` for the sessions it kept that work in
+    /// `cwd`, for the client at `token`, which numbered the ask `id`,
+    /// starting the agent if it isn't running, unless it's known not to
+    /// list them. The answer comes as an [`Event::Sessions`] once the agent
+    /// has said, or it's given up on after the probe wait.
+    pub(super) fn list_sessions(&mut self, token: Token, id: u64, agent: &str, cwd: &str) {
+        let running = match self.agents.named(agent) {
+            _ if self.agents.unlisting.contains(agent) => {
+                Err("it can't list the sessions it kept".to_owned())
+            }
+            Some(running) => Ok(running),
+            None => self.start_agent_named(agent),
+        };
+        let running = match running {
+            Ok(running) => running,
+            Err(why) => {
+                let sessions = Err(why);
+                return self.send_event(token, Event::Sessions { id, sessions });
+            }
+        };
+        let listing = self.agents.next_listing;
+        self.agents.next_listing += 1;
+        (self.agents.listings).insert(
+            listing,
+            Listing {
+                client: token,
+                id,
+                agent: agent.to_owned(),
+                cwd: cwd.to_owned(),
+                due: Instant::now() + self.config.probe_wait,
+            },
+        );
+        if let Some(slot) = self.agents.running.get_mut(&running) {
+            slot.agent.list_sessions(listing, cwd);
+        }
+        self.flush_agent(running);
+    }
+
+    /// Starts the agent called `name` for something that isn't a chat, as
+    /// listing its sessions: never offering to install it, but saying
+    /// why it can't start.
+    fn start_agent_named(&mut self, name: &str) -> Result<AgentId, String> {
+        let spec = self.config.agents.find(name)?;
+        match self.config.agents.start(&spec) {
+            Start::Ready { command, .. } => self
+                .start_agent(spec, command)
+                .map_err(|err| err.to_string()),
+            Start::Install(known) => Err(format!("{} isn't installed", known.title)),
+            Start::Unavailable(why) => Err(why),
+        }
+    }
+
+    /// The agent called `name` listed the sessions it kept for the listing
+    /// numbered `listing`, or couldn't: the client that asked hears, with
+    /// each session a chat has open marked as that chat's. Those it listed
+    /// in another directory than the one asked about are left out, so a
+    /// chat resuming one never works further afield than asked.
+    fn sessions_listed(&mut self, listing: u64, name: &str, result: Result<Vec<Listed>, String>) {
+        let Some(Listing {
+            client, id, cwd, ..
+        }) = self.agents.listings.remove(&listing)
+        else {
+            return;
+        };
+        let sessions = result.map(|listed| {
+            (listed.into_iter())
+                .filter(|listed| Path::new(&listed.cwd) == Path::new(&cwd))
+                .map(|listed| AgentSession {
+                    chat: self.holder_of(name, &listed.session),
+                    session: listed.session,
+                    title: listed.title,
+                    cwd: listed.cwd,
+                    updated: listed.updated,
+                })
+                .collect()
+        });
+        self.send_event(client, Event::Sessions { id, sessions });
+    }
+
+    /// Agent `agent`, called `name`, listed the sessions it kept for the
+    /// listing numbered `listing`, or couldn't: one that can't is noted,
+    /// not to be started again to be asked, and it's stopped if nothing
+    /// else needs it.
+    fn agent_listed(
+        &mut self,
+        (agent, name): (AgentId, &str),
+        listing: u64,
+        result: Result<Vec<Listed>, String>,
+    ) {
+        let unlisting = (self.agents.running.get(&agent))
+            .is_some_and(|slot| slot.agent.can_list() == Some(false));
+        if unlisting {
+            self.agents.unlisting.insert(name.to_owned());
+        }
+        self.sessions_listed(listing, name, result);
+        self.stop_if_unneeded(agent);
+    }
+
+    /// Fails the listings waiting for the agent called `name`, which has
+    /// gone, saying `why`.
+    fn fail_listings(&mut self, name: &str, why: &str) {
+        let failed: Vec<u64> = (self.agents.listings.iter())
+            .filter(|(_, listing)| listing.agent == name)
+            .map(|(&listing, _)| listing)
+            .collect();
+        for listing in failed {
+            self.sessions_listed(listing, name, Err(why.to_owned()));
+        }
+    }
+
+    /// Gives up on the listings whose agents haven't answered in time:
+    /// each client hears so, and each agent is stopped if nothing else
+    /// needs it. Cheap when none is due.
+    fn time_out_listings(&mut self) {
+        let now = Instant::now();
+        if self.next_listing_due().is_none_or(|due| due > now) {
+            return;
+        }
+        let late: Vec<(u64, String)> = (self.agents.listings.iter())
+            .filter(|(_, listing)| listing.due <= now)
+            .map(|(&listing, asked)| (listing, asked.agent.clone()))
+            .collect();
+        let wait = took(self.config.probe_wait);
+        for (listing, name) in late {
+            log::info!("{name} didn't list its sessions in time");
+            let agent = self.agents.named(&name);
+            if let Some(slot) = agent.and_then(|agent| self.agents.running.get_mut(&agent)) {
+                slot.agent.forget_listing(listing);
+            }
+            let why = format!("it didn't list the sessions it kept within {wait}");
+            self.sessions_listed(listing, &name, Err(why));
+            if let Some(agent) = agent {
+                self.stop_if_unneeded(agent);
+            }
+        }
+    }
+
+    /// When the next listing is given up on, if one waits.
+    fn next_listing_due(&self) -> Option<Instant> {
+        (self.agents.listings.values())
+            .map(|listing| listing.due)
+            .min()
+    }
+
+    /// Forgets the listings the client at `token`, which has gone, asked
+    /// for: the agent's answers go nowhere.
+    pub(super) fn forget_listings(&mut self, token: Token) {
+        self.agents
+            .listings
+            .retain(|_, listing| listing.client != token);
     }
 
     /// The ID the next terminal or chat gets.
@@ -239,9 +479,20 @@ impl Daemon {
             return;
         };
         let Some(chat) = self.chat(id) else { return };
-        let (cwd, session, task, limits) = (
+        // The rest of a load it stopped waiting for is still being told:
+        // it asks once that's done (see `late_session`), and is told it's
+        // slow meanwhile as if it had asked.
+        if chat.skipping() {
+            let at = Instant::now();
+            let due = at + self.config.session_wait;
+            let fetching = false;
+            (self.agents.opening).insert(id, Asked { at, due, fetching });
+            return;
+        }
+        let (cwd, session, load, task, limits) = (
             chat.working_directory().to_owned(),
             chat.session().map(str::to_owned),
+            chat.loading(),
             chat.task(),
             chat.limits(),
         );
@@ -252,7 +503,7 @@ impl Daemon {
         };
         if let Some(slot) = self.agents.running.get_mut(&agent) {
             slot.agent
-                .open_session(id, &cwd, session.as_deref(), opening);
+                .open_session(id, &cwd, session.as_deref(), load, opening);
             let fetching = !slot.agent.started() && through_npx(&slot.command);
             let mut wait = self.config.session_wait;
             if fetching {
@@ -506,6 +757,25 @@ impl Daemon {
             self.agents.context.insert(name.to_owned(), usage.size);
         }
         let (id, chat) = self.chat_in(name, session)?;
+        // The conversation so far, written long ago. A load that goes on
+        // telling isn't slow to open: it's waited for as long again.
+        if chat.loading() {
+            chat.replay(update);
+            let wait = self.config.session_wait;
+            if let Some(asked) = self.agents.opening.get_mut(&id) {
+                let wait = if asked.fetching {
+                    wait * FETCH_WAIT
+                } else {
+                    wait
+                };
+                asked.due = Instant::now() + wait;
+            }
+            return Some(id);
+        }
+        // The rest of a load the chat stopped waiting for.
+        if chat.skipping() {
+            return None;
+        }
         // Before anything is made of it: see `writing_ended`.
         if chat.finishes_writing(&update) {
             self.writing_ended(id);
@@ -523,18 +793,25 @@ impl Daemon {
 
     fn receive_from_agent(&mut self, agent: AgentId, name: &str, message: Incoming) {
         let id = match message {
-            Incoming::Session { terminal, result } => {
-                if !self.session_opened((agent, name), terminal, result) {
+            Incoming::Session {
+                terminal,
+                result,
+                loaded,
+            } => {
+                if !self.session_opened((agent, name), terminal, result, loaded) {
                     return;
                 }
                 terminal
+            }
+            Incoming::Listed { listing, result } => {
+                return self.agent_listed((agent, name), listing, result);
             }
             Incoming::Probed { result } => {
                 self.probed(agent, name, result);
                 return;
             }
             Incoming::Late { terminal, session } => {
-                return self.late_session((agent, name), terminal, &session);
+                return self.late_session((agent, name), terminal, session.as_deref());
             }
             Incoming::Settings { terminal, result } => {
                 // A chat that moved to another agent since asked its last.
@@ -593,7 +870,11 @@ impl Daemon {
                 tool,
                 options,
             } => {
-                let Some((id, chat)) = self.chat_in(name, &session) else {
+                // One asked as a conversation is told again was asked long
+                // ago: no one's there to answer it.
+                let Some((id, chat)) =
+                    (self.chat_in(name, &session)).filter(|(_, chat)| !chat.told_again())
+                else {
                     if let Some(slot) = self.agents.running.get_mut(&agent) {
                         slot.agent.answer_permission(&request, None);
                     }
@@ -620,13 +901,15 @@ impl Daemon {
     }
 
     /// Agent `agent`, called `name`, made or opened the session the chat
-    /// in `terminal` asked for, or couldn't. Returns whether that chat is
-    /// still there, with that agent, to hear of it.
+    /// in `terminal` asked for, or couldn't: one opened again told again
+    /// as it went if `loaded`. Returns whether that chat is still there,
+    /// with that agent, to hear of it.
     fn session_opened(
         &mut self,
         (agent, name): (AgentId, &str),
         terminal: TerminalId,
         result: Result<Opened, Refused>,
+        loaded: bool,
     ) -> bool {
         // Looked for on PATH, so only when it's needed.
         let login = (result.as_ref().err())
@@ -649,6 +932,7 @@ impl Daemon {
         };
         match result {
             Ok(opened) => {
+                chat.opened_again(loaded);
                 let actions = chat.connected(opened);
                 self.act(terminal, actions);
                 self.note_settings(terminal);
@@ -657,6 +941,7 @@ impl Daemon {
             // starts a new one, which hears the whole conversation.
             Err(refused) if !refused.login && chat.session().is_some() => {
                 log::info!("chat {terminal}: its session is gone: {}", refused.message);
+                chat.load_failed(&refused.message);
                 chat.session_lost();
                 self.connect(terminal);
             }
@@ -665,18 +950,28 @@ impl Daemon {
         true
     }
 
-    /// Agent `agent`, called `name`, made or opened `session` after all
-    /// for the chat in `terminal`, which stopped waiting for it, or asked
-    /// again: it's closed, unless the chat holds it, as a session it asked
-    /// to open again, and may be asking for again now. An agent that
-    /// can't close sessions keeps it until it stops: ACP has no other way
-    /// to end one.
+    /// Agent `agent`, called `name`, answered a request for a session for
+    /// the chat in `terminal`, which stopped waiting for it, or asked
+    /// again: a load it was telling has been told, and the chat, if it
+    /// waited for that to ask for its session again, asks now. A session
+    /// made or opened after all, `session`, is closed, unless the chat
+    /// holds it, as a session it asked to open again, and may be asking
+    /// for again now. An agent that can't close sessions keeps it until it
+    /// stops: ACP has no other way to end one.
     fn late_session(
         &mut self,
         (agent, name): (AgentId, &str),
         terminal: TerminalId,
-        session: &str,
+        session: Option<&str>,
     ) {
+        let ours = self.chat(terminal).filter(|chat| chat.agent() == name);
+        if ours.is_some_and(HostedChat::load_answered) {
+            self.connect(terminal);
+            self.collect_damage(terminal);
+        }
+        let Some(session) = session else {
+            return self.stop_if_unneeded(agent);
+        };
         let held = (self.chat(terminal))
             .is_some_and(|chat| chat.agent() == name && chat.session() == Some(session));
         if held {
@@ -728,6 +1023,11 @@ impl Daemon {
         let name = slot.spec.name.clone();
         let why = (!slot.agent.started()).then(|| slot.agent.last_errors());
         let why = why.map(|why| why.unwrap_or_else(|| "it said nothing".to_owned()));
+        let stopped = why.as_deref().map_or_else(
+            || "it stopped".to_owned(),
+            |why| format!("it stopped, saying: {why}"),
+        );
+        self.fail_listings(&name, &stopped);
         self.stop_agent(id);
         let mut chats = Vec::new();
         for (&id, slot) in &mut self.terminals {
@@ -870,7 +1170,30 @@ impl Daemon {
     /// Tells the chat in `id`, or every chat, which other agents it could
     /// move to, and their models, as far as they're known.
     fn offer_providers(&mut self, only: Option<TerminalId>) {
-        let offered: Vec<Provider> = (self.config.agents.all().into_iter())
+        let offered = self.providers();
+        let mut told = Vec::new();
+        for (&id, slot) in &mut self.terminals {
+            if only.is_some_and(|only| only != id) {
+                continue;
+            }
+            let Some(chat) = slot.terminal.chat() else {
+                continue;
+            };
+            let others = (offered.iter())
+                .filter(|provider| provider.agent != chat.agent())
+                .cloned()
+                .collect();
+            chat.set_providers(others);
+            told.push(id);
+        }
+        for id in told {
+            self.collect_damage(id);
+        }
+    }
+
+    /// Every agent, and its models, as far as they're known.
+    fn providers(&self) -> Vec<Provider> {
+        (self.config.agents.all().into_iter())
             .map(|spec| {
                 let name = spec.name.as_str();
                 let models = if !self.config.agents.installed(&spec) {
@@ -892,25 +1215,7 @@ impl Daemon {
                     models,
                 }
             })
-            .collect();
-        let mut told = Vec::new();
-        for (&id, slot) in &mut self.terminals {
-            if only.is_some_and(|only| only != id) {
-                continue;
-            }
-            let Some(chat) = slot.terminal.chat() else {
-                continue;
-            };
-            let others = (offered.iter())
-                .filter(|provider| provider.agent != chat.agent())
-                .cloned()
-                .collect();
-            chat.set_providers(others);
-            told.push(id);
-        }
-        for id in told {
-            self.collect_damage(id);
-        }
+            .collect()
     }
 
     /// Asks each other agent the chat in `id` could move to, that's
@@ -1001,6 +1306,7 @@ impl Daemon {
         self.take_agent_installs();
         self.time_out_probes();
         self.time_out_sessions();
+        self.time_out_listings();
         self.park_idle();
         self.kill_late();
     }
@@ -1201,6 +1507,7 @@ impl Daemon {
         (self.next_probe_due().into_iter())
             .chain(self.next_park_due())
             .chain(self.next_session_due())
+            .chain(self.next_listing_due())
             .chain(self.agents.killing.iter().map(|(due, _)| *due).min())
             .min()
     }
@@ -1245,8 +1552,10 @@ impl Daemon {
                 .insert(name.clone(), (why, Instant::now()));
             let talked_to = (self.terminals.values())
                 .any(|slot| matches!(&slot.terminal, Hosted::Chat(chat) if chat.agent() == name));
+            let listing = (self.agents.listings.values()).any(|listing| listing.agent == name);
             if let Some(agent) = self.agents.named(&name)
                 && !talked_to
+                && !listing
             {
                 self.stop_agent(agent);
             }
@@ -1271,7 +1580,7 @@ impl Daemon {
         if let Some(session) = chat.session() {
             slot.agent.close_session(session);
         }
-        let waiting = slot.agent.waiting().any(|terminal| terminal != id);
+        let waiting = slot.agent.waiting().any(|terminal| terminal != id) || slot.agent.probing();
         let chats_left = (self.terminals.values()).any(
             |slot| matches!(&slot.terminal, Hosted::Chat(other) if other.agent() == chat.agent()),
         );
@@ -1304,6 +1613,9 @@ impl Daemon {
         let Some(slot) = self.agents.running.remove(&id) else {
             return;
         };
+        // What it was asked to list goes unanswered.
+        let name = slot.spec.name.clone();
+        self.fail_listings(&name, "it was stopped");
         for token in slot.tokens {
             self.sources.remove(token.0);
         }

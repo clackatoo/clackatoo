@@ -509,6 +509,54 @@ impl ChatSummary {
     }
 }
 
+/// What a new chat could be started with, as the start page `:Agent`
+/// opens offers it, and the chats it could show instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatChoices {
+    /// Every agent, with its models as far as they're known.
+    pub agents: Vec<Provider>,
+    /// The agent a chat talks to when none is named, by its name.
+    pub default: String,
+    /// The directory a chat beside the pane asked about would work in:
+    /// the one its program or file is in, or else the home directory.
+    pub cwd: String,
+    /// The home directory.
+    pub home: String,
+    /// The chats in no pane, summed up: chats agents started in the
+    /// background, and those started by scripts.
+    pub unshown: Vec<ChatSummary>,
+}
+
+/// A session an agent kept, as it lists them: one of clackatoo's chats',
+/// or one started elsewhere, as in a terminal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSession {
+    /// The agent's ID for it.
+    pub session: String,
+    /// What the agent calls it, often its first message. Empty if it
+    /// gives it no title.
+    pub title: String,
+    /// The directory it works in.
+    pub cwd: String,
+    /// When it last changed, as the agent says it: RFC 3339, as
+    /// `2026-10-13T20:54:20Z`.
+    pub updated: Option<String>,
+    /// The chat that has it open now, if one does: showing that chat is
+    /// resuming it.
+    pub chat: Option<crate::TerminalId>,
+}
+
+/// A session an agent kept, for a new chat to go on with instead of
+/// starting one: see [`crate::NewAgent::resume`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeSession {
+    /// The agent's ID for it.
+    pub session: String,
+    /// What the agent calls it, for the chat's title until the agent
+    /// names it. Empty for none.
+    pub title: String,
+}
+
 /// One change to a chat a client already has.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatPatch {

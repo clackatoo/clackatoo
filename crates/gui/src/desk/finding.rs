@@ -79,13 +79,16 @@ impl Desk {
         }
     }
 
-    /// Whether the finder is open.
+    /// Whether the finder is open, or the start page, which takes keys
+    /// as it does.
     pub(super) fn finding(&self) -> bool {
-        self.finder.is_some()
+        self.finder.is_some() || self.start.is_some()
     }
 
-    /// Closes the finder, stopping the searches it was waiting on.
+    /// Closes the finder, stopping the searches it was waiting on, or the
+    /// start page.
     pub(super) fn close_finder(&mut self) {
+        self.start = None;
         self.grep_at = None;
         let Some(finder) = self.finder.take() else {
             return;
@@ -97,6 +100,9 @@ impl Desk {
 
     /// Handles a key while the finder is open.
     pub(super) fn finder_key(&mut self, press: &KeyPress<'_>) {
+        if self.start.is_some() {
+            return self.start_key(press);
+        }
         let Some(finder) = &mut self.finder else {
             return;
         };
@@ -107,7 +113,10 @@ impl Desk {
     /// A click on row `row` of the finder's list, or a double click if
     /// `open`, which opens what it shows.
     pub(crate) fn finder_click(&mut self, row: usize, open: bool) {
-        if let Some(finder) = &mut self.finder {
+        if let Some(page) = &mut self.start {
+            let outcome = page.click(row, open);
+            self.start_did(outcome);
+        } else if let Some(finder) = &mut self.finder {
             let outcome = finder.click(row, open);
             self.finder_did(outcome);
         }
@@ -116,8 +125,11 @@ impl Desk {
     /// The mouse's wheel turned `lines` over the finder: up, for more than
     /// none, moves to things before.
     pub(crate) fn finder_wheel(&mut self, lines: i64) {
-        if let Some(finder) = &mut self.finder {
-            let by = isize::try_from(-lines).unwrap_or_default();
+        let by = isize::try_from(-lines).unwrap_or_default();
+        if let Some(page) = &mut self.start {
+            let outcome = page.scroll(by);
+            self.start_did(outcome);
+        } else if let Some(finder) = &mut self.finder {
             let outcome = finder.scroll(by);
             self.finder_did(outcome);
         }
@@ -125,7 +137,10 @@ impl Desk {
 
     /// Types `text` into the finder.
     pub(super) fn paste_into_finder(&mut self, text: &str) {
-        if let Some(finder) = &mut self.finder {
+        if let Some(page) = &mut self.start {
+            let outcome = page.paste(text);
+            self.start_did(outcome);
+        } else if let Some(finder) = &mut self.finder {
             let outcome = finder.paste(text);
             self.finder_did(outcome);
         }
@@ -280,6 +295,9 @@ impl Desk {
         list: (usize, usize),
         preview: Option<(usize, usize)>,
     ) -> Option<FinderView> {
+        if let Some(page) = &mut self.start {
+            return Some(page.view(list, preview));
+        }
         self.grep_if_due(Instant::now());
         let view = self.finder.as_mut()?.view(list, preview);
         if preview.is_some() {

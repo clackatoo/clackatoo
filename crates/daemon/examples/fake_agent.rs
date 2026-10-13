@@ -55,6 +55,26 @@
 //! hold only unless FILE is there, and it makes it: started again, it
 //! answers, and ends. With `--slow-new MS`, it answers a request for a
 //! new session only after MS milliseconds.
+//!
+//! It keeps sessions from before it started, in whatever directory it's
+//! asked about, as an agent keeps the sessions of a terminal: `past-1`,
+//! "Fix the parser", whose conversation edits `a.txt` in that directory,
+//! and, as it went, asked to read it and to edit it; `past-2`, "Write the
+//! docs"; and `past-odd`, whose title is long and of several lines.
+//! `session/list` lists them, the sessions it made in that directory,
+//! untitled, and two a daemon must leave out: one in another directory,
+//! and one with an ID far too long. It notes the answers to what
+//! `past-1` asked as `replay read: ANSWER` and `replay asked: OUTCOME`.
+//! `session/load` tells a session's conversation again before it
+//! answers, as Claude Code's and Codex's adapters do, noting `told
+//! SESSION` once it has, and refuses a session it doesn't know.
+//!
+//! With `--no-load`, it says it can't load sessions, as an older adapter
+//! would; with `--no-list`, that it can't list them; with `--mute-list`,
+//! it never answers a request to list them. With `--slow-load MS`, it
+//! waits MS milliseconds before telling a session it loads again, and with
+//! `--replay-gap MS`, between its pieces, going on with what else it's
+//! asked meanwhile.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -104,6 +124,13 @@ fn main() {
             .or_else(|| value("--mute-after").map(|most| most.parse().unwrap()))
             .filter(|_| first),
         slow: value("--slow-new").map(|ms| std::time::Duration::from_millis(ms.parse().unwrap())),
+        load: !flag("--no-load"),
+        list: !flag("--no-list"),
+        mute_list: flag("--mute-list"),
+        slow_load: value("--slow-load")
+            .map(|ms| std::time::Duration::from_millis(ms.parse().unwrap())),
+        replay_gap: value("--replay-gap")
+            .map(|ms| std::time::Duration::from_millis(ms.parse().unwrap())),
         sessions: BTreeMap::new(),
         settings: BTreeMap::new(),
         tools: BTreeMap::new(),
@@ -128,6 +155,10 @@ fn main() {
     }
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each a flag it was started with"
+)]
 struct Fake {
     log: Option<String>,
     /// Sends what Codex's adapter sends.
@@ -141,6 +172,17 @@ struct Fake {
     /// How long it takes to answer a request for a new session, if it's
     /// slow to.
     slow: Option<std::time::Duration>,
+    /// Can load a session, telling its conversation again.
+    load: bool,
+    /// Can list the sessions it kept.
+    list: bool,
+    /// Never answers a request to list its sessions.
+    mute_list: bool,
+    /// How long it waits before telling a session it loads again, if it's
+    /// slow to, going on with other requests meanwhile.
+    slow_load: Option<std::time::Duration>,
+    /// How long it waits between the pieces of a session it tells again.
+    replay_gap: Option<std::time::Duration>,
     /// Each session's working directory.
     sessions: BTreeMap<String, String>,
     /// Each session's mode and model.
@@ -204,6 +246,56 @@ fn write_itself(session: &str, path: &str, text: &str) {
                                "oldText": old, "newText": text }],
                  "locations": [{ "path": path, "line": 1 }] }),
     );
+}
+
+/// Tells `past-1`'s conversation again, as loading it does: two messages,
+/// the first in two pieces, and what the agent did with each, an edit to
+/// `a.txt` in `cwd` among it.
+fn tell_again(session: &str, cwd: &str, gap: Option<std::time::Duration>) {
+    let pause = || {
+        if let Some(gap) = gap {
+            std::thread::sleep(gap);
+        }
+    };
+    let user = |text: &str| {
+        pause();
+        update(
+            session,
+            &json!({ "sessionUpdate": "user_message_chunk",
+                     "content": { "type": "text", "text": text } }),
+        );
+    };
+    let path = format!("{cwd}/a.txt");
+    user("fix the parser");
+    user("in src/parse.rs");
+    pause();
+    say(session, "Looking.");
+    // What it asked as it worked, long ago: the daemon turns both down.
+    send(
+        &json!({ "jsonrpc": "2.0", "id": "f-replay", "method": "fs/read_text_file",
+                  "params": { "sessionId": session, "path": path } }),
+    );
+    send(
+        &json!({ "jsonrpc": "2.0", "id": "p-replay", "method": "session/request_permission",
+                  "params": { "sessionId": session,
+                              "toolCall": { "toolCallId": "r1", "title": "Edit a.txt" },
+                              "options": [{ "optionId": "allow", "name": "Allow",
+                                            "kind": "allow_once" }] } }),
+    );
+    pause();
+    update(
+        session,
+        &json!({ "sessionUpdate": "tool_call", "toolCallId": "r1", "title": "Edit a.txt",
+                 "kind": "edit", "status": "completed",
+                 "content": [{ "type": "diff", "path": path,
+                               "oldText": "old\n", "newText": "new\n" }],
+                 "locations": [{ "path": path, "line": 1 }] }),
+    );
+    pause();
+    say(session, "Fixed.");
+    user("thanks");
+    pause();
+    say(session, "You're welcome.");
 }
 
 fn done(id: &Value, reason: &str) {
@@ -278,11 +370,19 @@ impl Fake {
     /// Answers `initialize`, and as Codex's adapter does, says who's
     /// logged in.
     fn initialize(&self, id: &Value) {
+        self.note("initialized");
         reply(
             id,
             &json!({
                 "protocolVersion": 1,
-                "agentCapabilities": { "sessionCapabilities": { "close": {}, "resume": {} } },
+                "agentCapabilities": {
+                    "loadSession": self.load,
+                    "sessionCapabilities": if self.list {
+                        json!({ "close": {}, "resume": {}, "list": {} })
+                    } else {
+                        json!({ "close": {}, "resume": {} })
+                    },
+                },
                 "agentInfo": { "name": "fake-agent", "version": "0" },
                 "authMethods": [],
             }),
@@ -303,9 +403,11 @@ impl Fake {
         match message.get("method").and_then(Value::as_str) {
             Some("initialize") if self.mute_init => {}
             Some("initialize") => self.initialize(&id),
-            Some("session/new" | "session/resume") if self.logged_out => send(&json!({
+            Some("session/new" | "session/resume" | "session/load") if self.logged_out => {
+                send(&json!({
                 "jsonrpc": "2.0", "id": id,
-                "error": { "code": -32000, "message": "Authentication required" } })),
+                "error": { "code": -32000, "message": "Authentication required" } }));
+            }
             Some("session/new") if self.answers.is_some_and(|most| self.sessions.len() >= most) => {
             }
             Some("session/new") => {
@@ -342,6 +444,69 @@ impl Fake {
                 self.settings.insert(session, settings);
                 reply(&id, &json!({ "configOptions": options }));
             }
+            Some("session/list") if self.mute_list => {}
+            Some("session/list") => {
+                let cwd = params["cwd"].as_str().unwrap_or_default();
+                let messy = format!("  Many\nlines\tand {}", "x".repeat(300));
+                let mut sessions = vec![
+                    json!({ "sessionId": "past-1", "cwd": cwd, "title": "Fix the parser",
+                            "updatedAt": "2026-10-12T09:00:00Z" }),
+                    json!({ "sessionId": "past-2", "cwd": cwd, "title": "Write the docs",
+                            "updatedAt": "2026-10-13T08:00:00Z" }),
+                    json!({ "sessionId": "past-odd", "cwd": cwd, "title": messy,
+                            "updatedAt": "2026-10-01T08:00:00Z" }),
+                    // Elsewhere, and an ID no agent gives: both left out.
+                    json!({ "sessionId": "elsewhere", "cwd": "/elsewhere",
+                            "updatedAt": "2026-10-13T09:00:00Z" }),
+                    json!({ "sessionId": "x".repeat(1000), "cwd": cwd }),
+                ];
+                for (session, dir) in &self.sessions {
+                    if dir == cwd {
+                        sessions.push(json!({ "sessionId": session, "cwd": dir }));
+                    }
+                }
+                reply(&id, &json!({ "sessions": sessions }));
+            }
+            Some("session/load") if self.load => {
+                let cwd = params["cwd"].as_str().unwrap().to_owned();
+                if !session.starts_with("past-") && !self.sessions.contains_key(&session) {
+                    send(&json!({ "jsonrpc": "2.0", "id": id,
+                                  "error": { "code": -32002, "message": "no such session" } }));
+                    return true;
+                }
+                self.note(&format!("loaded {session}"));
+                self.sessions.insert(session.clone(), cwd.clone());
+                self.tools
+                    .insert(session.clone(), params["mcpServers"].clone());
+                self.meta.insert(session.clone(), params["_meta"].clone());
+                let settings = self.starting_settings();
+                let options = self.options(&settings);
+                self.settings.insert(session.clone(), settings);
+                let (slow, gap, log) = (self.slow_load, self.replay_gap, self.log.clone());
+                let load = move || {
+                    if let Some(slow) = slow {
+                        std::thread::sleep(slow);
+                    }
+                    if session == "past-1" {
+                        tell_again(&session, &cwd, gap);
+                    }
+                    // Noted before the answer, which may be all a test
+                    // waits for.
+                    if let Some(log) = log {
+                        let mut file = (std::fs::OpenOptions::new().create(true).append(true))
+                            .open(log)
+                            .unwrap();
+                        writeln!(file, "told {session}").unwrap();
+                    }
+                    reply(&id, &json!({ "configOptions": options }));
+                };
+                // Slow, it goes on with what else it's asked meanwhile.
+                if slow.is_some() || gap.is_some() {
+                    std::thread::spawn(load);
+                } else {
+                    load();
+                }
+            }
             Some("session/set_config_option") => {
                 let value = params["value"].as_str().unwrap_or_default().to_owned();
                 let mut settings = self.settings.get(&session).cloned().unwrap_or_default();
@@ -370,6 +535,20 @@ impl Fake {
                 }
                 let text = (*text).to_owned();
                 return self.prompt(id, session, &text);
+            }
+            None if id == "f-replay" => {
+                let answer = if message["error"].is_object() {
+                    "refused"
+                } else {
+                    "answered"
+                };
+                self.note(&format!("replay read: {answer}"));
+            }
+            None if id == "p-replay" => {
+                let outcome = message["result"]["outcome"]["outcome"]
+                    .as_str()
+                    .unwrap_or("?");
+                self.note(&format!("replay asked: {outcome}"));
             }
             // The answer about a file.
             None if id == "f1" => {

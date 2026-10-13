@@ -98,7 +98,8 @@ pub struct DaemonConfig {
     /// the shell never became ready.
     pub prompt_wait: std::time::Duration,
     /// How long an agent asked what models it has, for a chat's model
-    /// menu, has to say, before it's given up on and stopped.
+    /// menu, or for the sessions it kept, for the start page, has to say,
+    /// before it's given up on and stopped, unless a chat needs it.
     pub probe_wait: std::time::Duration,
     /// How long an agent asked for a chat's session has to open it before
     /// the chat says it hasn't, and what it may be waiting on, and offers

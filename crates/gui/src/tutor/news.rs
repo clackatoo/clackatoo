@@ -203,6 +203,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "Editors open folders: :e . lists one to browse and edit, Enter opens a file in place, - goes up",
     },
+    News {
+        id: "startpage",
+        date: "2026-10-13",
+        lesson: "agents",
+        what: ":Agent opens a start page: start a chat, or go on with one, the agent's own past sessions too",
+    },
 ];
 
 impl News {

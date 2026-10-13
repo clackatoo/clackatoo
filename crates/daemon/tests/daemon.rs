@@ -1476,6 +1476,8 @@ fn new_chat_with(agent: Option<&str>) -> PaneTerminal {
         tools: AgentTools::Ask,
         task: true,
         browser: false,
+        model: None,
+        resume: None,
     })
 }
 
@@ -3456,7 +3458,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Review { .. }
             | Event::Browser { .. }
             | Event::Chats(_)
-            | Event::Pairing(_)) => {
+            | Event::Pairing(_)
+            | Event::Sessions { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }
@@ -7490,6 +7493,8 @@ fn start_tooled_chat(client: &mut Client, tools: AgentTools) -> TerminalId {
             tools,
             task: true,
             browser: false,
+            model: None,
+            resume: None,
         },
     )
 }
@@ -7560,6 +7565,8 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
         tools,
         task,
         browser: false,
+        model: None,
+        resume: None,
     };
     let allowed = serde_json::json!(["mcp__clackatoo"]);
     let disallowed = serde_json::json!(["Agent", "Task"]);
@@ -8038,6 +8045,8 @@ fn start_tooled_chat_in(client: &mut Client, tools: AgentTools, cwd: &Path) -> T
             tools,
             task: true,
             browser: false,
+            model: None,
+            resume: None,
         },
     )
 }
@@ -9014,6 +9023,8 @@ fn a_real_haiku_chat_fans_out_to_two_explorers_and_gets_one_summary() {
             tools: AgentTools::Allow,
             task: false,
             browser: false,
+            model: None,
+            resume: None,
         },
     );
     let prompt = "Call clackatoo's start_chats tool once, starting two chats with profile \
@@ -9517,6 +9528,8 @@ fn an_agent_is_told_when_to_hand_work_to_another_chat() {
             tools: AgentTools::Ask,
             task: false,
             browser: false,
+            model: None,
+            resume: None,
         },
     );
     let told = told_on_connecting(&daemon, without);
@@ -10475,6 +10488,8 @@ fn a_chat_without_claude_codes_task_tool_stays_without_it_wherever_it_moves() {
         tools: AgentTools::Off,
         task: false,
         browser: false,
+        model: None,
+        resume: None,
     };
     let disallowed = serde_json::json!(["Agent", "Task"]);
     // Started with Codex, it opens a new session with Claude Code without
@@ -10617,6 +10632,8 @@ fn start_browsing_chat(client: &mut Client) -> TerminalId {
             tools: AgentTools::Ask,
             task: true,
             browser: true,
+            model: None,
+            resume: None,
         },
     )
 }
@@ -11419,6 +11436,8 @@ fn a_read_only_chat_reads_pages_but_clicks_and_types_in_none() {
             tools: AgentTools::Allow,
             task: true,
             browser: true,
+            model: None,
+            resume: None,
         },
     );
     // Its subagent gets its browser, with explore's limits.
@@ -11447,4 +11466,450 @@ fn a_read_only_chat_reads_pages_but_clicks_and_types_in_none() {
         words.contains("this chat is read-only: it opens web pages, but no data: ones"),
         "{words}"
     );
+}
+
+// --- Resuming an agent's sessions ----------------------------------------
+
+/// Asks for `agent`'s sessions in `cwd`, as the start page does, and
+/// waits for them.
+fn sessions(
+    client: &mut Client,
+    id: u64,
+    agent: &str,
+    cwd: &Path,
+) -> Result<Vec<clackatoo_protocol::AgentSession>, String> {
+    client
+        .list_sessions(id, agent, &cwd.to_string_lossy())
+        .unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    loop {
+        if let Event::Sessions {
+            id: listed,
+            sessions,
+        } = client.next_event().unwrap()
+            && listed == id
+        {
+            return sessions;
+        }
+    }
+}
+
+/// A new chat working in `cwd`, going on with `session`, on `model`.
+fn resumed_chat(cwd: &Path, session: &str, model: Option<&str>) -> PaneTerminal {
+    PaneTerminal::Agent(NewAgent {
+        size: Size::new(40, 10).unwrap(),
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+        agent: None,
+        tools: AgentTools::Ask,
+        task: true,
+        browser: false,
+        model: model.map(str::to_owned),
+        resume: Some(clackatoo_protocol::ResumeSession {
+            session: session.to_owned(),
+            title: "Fix the parser".to_owned(),
+        }),
+    })
+}
+
+/// Opens a workspace with `chat`, and waits for it to be ready.
+fn open_resumed(client: &mut Client, chat: PaneTerminal) -> TerminalId {
+    let pane = client.new_workspace(None, chat).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let (_, _, pane) = workspaces.find_pane(pane).unwrap();
+    let Content::Terminal(chat) = pane.content else {
+        panic!("a chat is in the pane");
+    };
+    wait_for_chat(client, chat, |node| node.state == ChatState::Ready);
+    chat
+}
+
+#[test]
+fn an_agent_lists_the_sessions_it_kept_newest_first_marking_those_a_chat_has_open() {
+    let daemon = TestDaemon::start();
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    // What a new chat could be, before any: the agent, not running.
+    let Response::ChatChoices(choices) = client
+        .request(&Request::ChatChoices { pane: None })
+        .unwrap()
+    else {
+        panic!("choices");
+    };
+    assert_eq!(choices.default, "claude");
+    assert_eq!(choices.cwd, home.to_string_lossy());
+    assert!(choices.agents.iter().any(|agent| agent.agent == "claude"));
+    assert!(choices.unshown.is_empty());
+
+    // Started for the listing.
+    let listed = sessions(&mut client, 7, "claude", &home).unwrap();
+    let ids: Vec<&str> = (listed.iter())
+        .map(|session| session.session.as_str())
+        .collect();
+    // Newest first; one elsewhere, and one with an ID no agent gives, are
+    // left out, and a title is one line, cut short.
+    assert_eq!(ids, ["past-2", "past-1", "past-odd"]);
+    let odd = &listed[2].title;
+    assert!(odd.starts_with("Many lines and xxx"), "{odd}");
+    assert_eq!(odd.chars().count(), 201, "{odd}");
+    assert!(odd.ends_with('…'));
+    assert_eq!(listed[1].title, "Fix the parser");
+    assert_eq!(listed[1].updated.as_deref(), Some("2026-10-12T09:00:00Z"));
+    assert!(listed.iter().all(|session| session.chat.is_none()));
+
+    // A chat's own session is listed as that chat's.
+    let chat = start_chat(&mut client);
+    let listed = sessions(&mut client, 8, "claude", &home).unwrap();
+    let own = (listed.iter())
+        .find(|session| session.session == "s1")
+        .unwrap();
+    assert_eq!(own.chat, Some(chat));
+    assert_eq!(listed.last().unwrap().session, "s1", "untimed, last");
+
+    // An agent there's none of says so.
+    let nope = sessions(&mut client, 9, "nope", &home).unwrap_err();
+    assert!(nope.contains("nope"), "{nope}");
+}
+
+#[test]
+fn an_agent_that_stops_before_it_lists_its_sessions_says_why() {
+    let daemon = TestDaemon::start_with_agent(|_| vec![fake_agent().into(), "--broken".into()]);
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let why = sessions(&mut client, 1, "claude", &home).unwrap_err();
+    assert!(why.contains("No matching version"), "{why}");
+}
+
+#[test]
+fn resuming_a_session_tells_its_conversation_again_as_turns_written_long_ago() {
+    let daemon = TestDaemon::start();
+    let home = daemon.dir.path().to_owned();
+    // A file open as it was before the conversation's edit, which is on
+    // disk: were that edit taken as the agent writing it now, it would be
+    // merged into the buffer as the agent's.
+    std::fs::write(home.join("a.txt"), "old\n").unwrap();
+    let mut files = daemon.client();
+    let pane = files
+        .new_workspace(None, open_file(&home, "a.txt"))
+        .unwrap();
+    let workspaces = files.watch_workspaces().unwrap();
+    let buffer = (workspaces.find_pane(pane))
+        .and_then(|(_, _, pane)| pane.content.buffer())
+        .unwrap();
+    std::fs::write(home.join("a.txt"), "new\n").unwrap();
+    let mut client = daemon.client();
+    let chat = open_resumed(&mut client, resumed_chat(&home, "past-1", Some("sonnet")));
+    wait_for_log(&daemon, "agent.log", "loaded past-1");
+    // What it asked as it worked long ago is turned down.
+    wait_for_log(&daemon, "agent.log", "replay read: refused");
+    wait_for_log(&daemon, "agent.log", "replay asked: cancelled");
+
+    let node = client.capture(chat).unwrap().chat().unwrap().clone();
+    assert_eq!(node.turns.len(), 2, "{node:#?}");
+    let (first, second) = (&node.turns[0], &node.turns[1]);
+    assert_eq!(
+        first.prompt, "fix the parser\n\nin src/parse.rs",
+        "its blocks, apart"
+    );
+    assert!(
+        matches!(&first.items[..], [
+            Item::Words(looking),
+            Item::Tool(tool),
+            Item::Words(fixed),
+        ] if looking == "Looking." && tool.status == ToolStatus::Done && fixed == "Fixed."),
+        "{first:#?}"
+    );
+    assert_eq!(first.files, None, "nothing taken as written now");
+    assert_eq!(attach_buffer(&mut files, buffer).text, "old\n");
+    assert_eq!(second.prompt, "thanks");
+    assert!(
+        (node.turns.iter())
+            .all(|turn| (turn.end.as_ref()).is_some_and(|end| end.outcome == Outcome::Done))
+    );
+    assert_eq!(client.capture(chat).unwrap().title, "Fix the parser");
+    let model = (node.settings.iter())
+        .find(|setting| setting.id == "model")
+        .unwrap();
+    assert_eq!(model.value, "sonnet", "on the model asked for");
+
+    // It goes on, the session having heard every turn shown.
+    let node = ask(&mut client, chat, "hello");
+    assert_eq!(last_words(&node), "echo: hello\n");
+    assert!(carried(&daemon, "agent.log", "past-1").is_empty());
+
+    // Not opened twice: the chat that has it is in a pane.
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let again = client.new_tab(workspace, resumed_chat(&home, "past-1", None));
+    assert!(
+        matches!(again, Err(ClientError::Daemon(Error::TerminalInPane(open))) if open == chat),
+        "{again:?}"
+    );
+    assert_eq!(
+        agent_log(&daemon, "agent.log")
+            .matches("loaded past-1")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn an_agent_that_cant_load_a_session_resumes_it_saying_the_turns_before_arent_shown() {
+    let daemon = TestDaemon::start_with_agent(|dir| {
+        vec![
+            fake_agent().into(),
+            "--no-load".into(),
+            "--log".into(),
+            dir.join("agent.log").into(),
+        ]
+    });
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let chat = open_resumed(&mut client, resumed_chat(&home, "past-2", None));
+    wait_for_log(&daemon, "agent.log", "resumed past-2");
+    let node = client.capture(chat).unwrap().chat().unwrap().clone();
+    assert!(node.turns.is_empty());
+    let notice = node.notice.unwrap_or_default();
+    assert!(notice.contains("the turns before aren't shown"), "{notice}");
+    assert_eq!(last_words(&ask(&mut client, chat, "hi")), "echo: hi\n");
+}
+
+#[test]
+fn a_session_that_cant_be_opened_again_makes_way_for_a_new_one_saying_so() {
+    let daemon = TestDaemon::start();
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let chat = open_resumed(&mut client, resumed_chat(&home, "gone", None));
+    let node = wait_for_chat(&mut client, chat, |node| node.notice.is_some());
+    let notice = node.notice.unwrap();
+    assert!(
+        notice.contains("couldn't open that conversation again (no such session)"),
+        "{notice}"
+    );
+    assert_eq!(last_words(&ask(&mut client, chat, "hi")), "echo: hi\n");
+    assert!(!agent_log(&daemon, "agent.log").contains("loaded gone"));
+}
+
+/// Lists a real Claude Code's sessions for a folder of its own, as the
+/// start page does: it makes none, and asks no model. Give
+/// `CLACKATOO_REAL_AGENT` as for
+/// [`a_real_agent_answers_and_asks_before_running_commands`].
+#[test]
+#[ignore = "runs a real agent's adapter: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_lists_the_sessions_it_kept() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with_agent(|_| {
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect()
+    });
+    let scratch = daemon.dir.path().join("scratch");
+    std::fs::create_dir(&scratch).unwrap();
+    let mut client = daemon.client();
+    let listed = sessions(&mut client, 1, "claude", &scratch);
+    assert_eq!(listed, Ok(Vec::new()), "a new folder has none");
+}
+
+/// A daemon whose agent is the fake one with `flags`, noting what it does
+/// in `agent.log`, and changed by `change`.
+fn with_fake(flags: &[&str], change: impl FnOnce(&mut DaemonConfig)) -> TestDaemon {
+    let flags: Vec<std::ffi::OsString> = flags.iter().map(Into::into).collect();
+    TestDaemon::start_with(|dir, config| {
+        let mut command = vec![fake_agent().into()];
+        command.extend(flags);
+        command.extend(["--log".into(), dir.join("agent.log").into()]);
+        config.agents.custom = vec![custom_agent("claude", command)];
+        change(config);
+    })
+}
+
+/// Opens a workspace with `chat`, which isn't waited for.
+fn open_unwaited(client: &mut Client, chat: PaneTerminal) -> TerminalId {
+    let pane = client.new_workspace(None, chat).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let (_, _, pane) = workspaces.find_pane(pane).unwrap();
+    pane.content.terminal().unwrap()
+}
+
+#[test]
+fn a_load_refused_is_made_again_with_the_next_message_which_isnt_lost() {
+    let daemon = with_fake(&["--logged-out"], |_| {});
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let chat = open_unwaited(&mut client, resumed_chat(&home, "past-1", None));
+    wait_for_chat(&mut client, chat, |node| {
+        matches!(node.state, ChatState::Failed(_))
+    });
+    // Not held forever: it asks again, and says how it went.
+    client
+        .chat(chat, ChatAction::Send("hi".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert_eq!(node.turns.last().unwrap().prompt, "hi");
+    assert!(
+        matches!(last_outcome(&node), Some(Outcome::Failed(why)) if why.contains("couldn't start")),
+        "{node:#?}"
+    );
+    assert!(matches!(node.state, ChatState::Failed(_)));
+}
+
+#[test]
+fn a_load_stopped_while_it_tells_is_passed_over_until_the_agent_answers_it() {
+    // The agent tells the conversation slowly, answering what else it's
+    // asked meanwhile, as a resume of the same session.
+    let daemon = with_fake(&["--slow-load", "300", "--replay-gap", "20"], |_| {});
+    let home = daemon.dir.path().to_owned();
+    std::fs::write(home.join("a.txt"), "old\n").unwrap();
+    let mut files = daemon.client();
+    let pane = files
+        .new_workspace(None, open_file(&home, "a.txt"))
+        .unwrap();
+    let workspaces = files.watch_workspaces().unwrap();
+    let buffer = (workspaces.find_pane(pane))
+        .and_then(|(_, _, pane)| pane.content.buffer())
+        .unwrap();
+    std::fs::write(home.join("a.txt"), "new\n").unwrap();
+    let mut client = daemon.client();
+    let chat = open_unwaited(&mut client, resumed_chat(&home, "past-1", None));
+    wait_for_log(&daemon, "agent.log", "loaded past-1");
+    client.chat(chat, ChatAction::Stop).unwrap();
+    let node = ask(&mut client, chat, "hi");
+    assert_eq!(last_words(&node), "echo: hi\n");
+    // Its session was asked for only once the load was answered, so
+    // nothing more of it was taken as what the agent does now.
+    let log = agent_log(&daemon, "agent.log");
+    let (told, resumed) = (log.find("told past-1"), log.find("resumed past-1"));
+    assert!(told.is_some() && told < resumed, "{log}");
+    let prompts: Vec<&str> = node.turns.iter().map(|turn| turn.prompt.as_str()).collect();
+    assert_eq!(prompts, ["hi"], "{node:#?}");
+    assert!(node.turns.iter().all(|turn| turn.files.is_none()));
+    assert_eq!(attach_buffer(&mut files, buffer).text, "old\n");
+    assert!(log.contains("replay asked: cancelled"), "{log}");
+    assert!(log.contains("replay read: refused"), "{log}");
+}
+
+#[test]
+fn a_load_that_goes_on_telling_isnt_said_to_be_slow() {
+    // It takes three times the wait to tell, a piece at a time.
+    let daemon = with_fake(&["--replay-gap", "100"], |config| {
+        config.session_wait = Duration::from_millis(300);
+    });
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let chat = open_unwaited(&mut client, resumed_chat(&home, "past-1", None));
+    let node = wait_for_chat(&mut client, chat, |node| {
+        assert!(node.question.is_none(), "said to be slow: {node:#?}");
+        node.state == ChatState::Ready
+    });
+    assert_eq!(node.turns.len(), 2);
+}
+
+#[test]
+fn a_listing_the_agent_never_answers_is_given_up_on() {
+    let daemon = with_fake(&["--mute-list"], |config| {
+        config.probe_wait = Duration::from_millis(300);
+    });
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let why = sessions(&mut client, 1, "claude", &home).unwrap_err();
+    assert!(
+        why.contains("didn't list the sessions it kept within"),
+        "{why}"
+    );
+}
+
+#[test]
+fn an_agent_that_cant_list_its_sessions_says_so() {
+    let daemon = with_fake(&["--no-list"], |_| {});
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    for id in 1..=2 {
+        let why = sessions(&mut client, id, "claude", &home).unwrap_err();
+        assert!(why.contains("can't list the sessions it kept"), "{why}");
+    }
+    // Known not to, it isn't started again to be asked.
+    let log = agent_log(&daemon, "agent.log");
+    assert_eq!(log.matches("initialized").count(), 1, "{log}");
+}
+
+#[test]
+fn starting_a_slow_agent_again_fails_what_it_was_asked_to_list() {
+    let daemon = with_fake(&["--mute", "--mute-list"], |config| {
+        config.session_wait = Duration::from_millis(300);
+    });
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let chat = open_chat(&mut client);
+    client
+        .list_sessions(1, "claude", &home.to_string_lossy())
+        .unwrap();
+    wait_for_chat(&mut client, chat, says_slow);
+    answer(&mut client, chat, Some("retry".to_owned()));
+    // Failed as the agent was stopped, long before it would be given up on.
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let why = loop {
+        if let Event::Sessions { id: 1, sessions } = client.next_event().unwrap() {
+            break sessions.unwrap_err();
+        }
+    };
+    assert!(why.contains("was stopped"), "{why}");
+}
+
+#[test]
+fn a_session_a_chat_had_with_its_agent_before_isnt_opened_twice() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![
+            custom_agent("claude", vec![fake_agent().into()]),
+            custom_agent("codex", vec![fake_agent().into(), "--codex".into()]),
+        ];
+    });
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    switch_to(&mut client, chat, "codex", None);
+    let workspace = client.watch_workspaces().unwrap().list[0].id;
+    let again = client.new_tab(workspace, resumed_chat(&home, "s1", None));
+    assert!(
+        matches!(again, Err(ClientError::Daemon(Error::TerminalInPane(open))) if open == chat),
+        "{again:?}"
+    );
+}
+
+#[test]
+fn a_session_open_in_another_workspaces_chat_isnt_moved_here() {
+    let daemon = TestDaemon::with_tools();
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let kid = TerminalId(a.0 + 1);
+    let prompt =
+        format!("mcp start_chat {{\"prompt\":\"hi\"}}\nmcp wait_for_chat {{\"chat\":{kid}}}");
+    ask_for(&mut client, a, &prompt, Duration::from_secs(10));
+    let terminal = PaneTerminal::New(NewTerminal {
+        size: Size::new(40, 10).unwrap(),
+        command: None,
+        cwd: None,
+        record_to: None,
+    });
+    client.new_workspace(None, terminal).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let (here, there) = (workspaces.list[0].id, workspaces.list[1].id);
+    let elsewhere = client.new_tab(there, resumed_chat(&home, "s2", None));
+    assert!(
+        matches!(elsewhere, Err(ClientError::Daemon(Error::SessionOpen(open))) if open == kid),
+        "{elsewhere:?}"
+    );
+    // In its own workspace, it's shown.
+    let pane = client
+        .new_tab(here, resumed_chat(&home, "s2", None))
+        .unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let (_, _, pane) = workspaces.find_pane(pane).unwrap();
+    assert_eq!(pane.content.terminal(), Some(kid));
 }

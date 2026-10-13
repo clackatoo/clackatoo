@@ -72,10 +72,11 @@ pub use buffer::{
     FileLocation, OpenFile, Query, Resume, ServerFeatures, TextChange, Trigger,
 };
 pub use chat::{
-    ChatAction, ChatNode, ChatPatch, ChatState, ChatSummary, Choice, ChoiceKind, Diff, Item,
-    Location, Outcome, Provider, ProviderModels, Question, Sender, Setting, SettingChoice,
-    SettingKind, Subagent, SubagentStatus, Switch, Tool, ToolContent, ToolKind, ToolStatus, Turn,
-    TurnEnd, TurnFiles, TurnFilesState, Usage, turn_number, turn_numbered,
+    AgentSession, ChatAction, ChatChoices, ChatNode, ChatPatch, ChatState, ChatSummary, Choice,
+    ChoiceKind, Diff, Item, Location, Outcome, Provider, ProviderModels, Question, ResumeSession,
+    Sender, Setting, SettingChoice, SettingKind, Subagent, SubagentStatus, Switch, Tool,
+    ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, TurnFilesState, Usage,
+    turn_number, turn_numbered,
 };
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
@@ -101,7 +102,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 71;
+pub const PROTOCOL_VERSION: u32 = 72;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -271,6 +272,19 @@ pub enum ClientMessage {
         /// Whether they are.
         here: bool,
     },
+    /// Asks an agent for the sessions it kept that work in a directory,
+    /// to go on with one (see [`NewAgent::resume`]): clackatoo's chats',
+    /// and those started elsewhere. Not answered as a request is, since
+    /// the agent may have to start first: they come in an
+    /// [`Event::Sessions`] numbered `id`.
+    ListSessions {
+        /// The client's number for it, which the answer gives back.
+        id: u64,
+        /// The agent, by its name: `claude`.
+        agent: String,
+        /// The directory.
+        cwd: String,
+    },
 }
 
 /// Everything the daemon sends.
@@ -416,6 +430,14 @@ pub enum Event {
     /// too, if any are asking or it's locked. Never sent to a device on
     /// the web app.
     Pairing(PairingState),
+    /// The sessions the client's [`ClientMessage::ListSessions`] numbered
+    /// `id` asked for, newest first, or why the agent couldn't list them.
+    Sessions {
+        /// Its number.
+        id: u64,
+        /// The sessions, or why there are none.
+        sessions: Result<Vec<AgentSession>, String>,
+    },
 }
 
 /// A message from a client to the daemon that expects an answer.
@@ -804,6 +826,15 @@ pub enum Request {
     /// ones locked it. Refused from a device on the web app. Answered with
     /// [`Response::Text`], saying what was done.
     UnlockPairing,
+    /// Asks what a new chat beside `pane` could be started with: the
+    /// agents and their models, and the directory it would work in; and
+    /// for the chats in no pane, which could be shown instead. Answered
+    /// with [`Response::ChatChoices`].
+    ChatChoices {
+        /// The pane the chat would go beside, or `None` for the home
+        /// directory.
+        pane: Option<PaneId>,
+    },
 }
 
 /// How to start a terminal.
@@ -847,6 +878,20 @@ pub struct NewAgent {
     /// tools that drive a browser of clackatoo's, in a profile of its own,
     /// never the user's. The user is asked before the first page opens.
     pub browser: bool,
+    /// The model to start on, by its value or its name, as the agent
+    /// offers it, or a part of the name only one model has. `None`, or
+    /// one the agent doesn't offer, leaves it the agent's own choice.
+    pub model: Option<String>,
+    /// A session the agent kept, to go on with rather than start a new
+    /// one, as [`ClientMessage::ListSessions`] lists them. Where the agent
+    /// can, it tells the chat the conversation so far, which the chat
+    /// shows as its turns; otherwise the chat says the turns before
+    /// aren't shown. A session another chat has open already, or had
+    /// before it moved to another agent, isn't opened twice: that chat
+    /// goes in the pane instead, if it's in no pane and of this workspace
+    /// or none; otherwise it's refused, with [`Error::TerminalInPane`] or
+    /// [`Error::SessionOpen`].
+    pub resume: Option<ResumeSession>,
 }
 
 /// What an agent may do through the tools clackatoo gives it, which show
@@ -910,6 +955,8 @@ pub enum Response {
     Chats(Vec<ChatSummary>),
     /// Answers [`Request::Devices`]: the devices, in the order they paired.
     Devices(Vec<Device>),
+    /// Answers [`Request::ChatChoices`].
+    ChatChoices(ChatChoices),
 }
 
 /// Where a daemon takes QUIC packets over UDP, and how a client finds out
@@ -1043,6 +1090,10 @@ pub enum Error {
     /// An answer to devices asking to pair couldn't be given, and why.
     #[error("{0}")]
     Pairing(String),
+    /// The session asked to be resumed is open in this chat already, in
+    /// another workspace: a session is never opened twice.
+    #[error("chat {0}, in another workspace, has that session open")]
+    SessionOpen(TerminalId),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while

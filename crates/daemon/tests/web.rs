@@ -796,6 +796,8 @@ fn a_device_answers_a_chats_question_over_its_websocket() {
         tools: AgentTools::Ask,
         task: true,
         browser: false,
+        model: None,
+        resume: None,
     });
     assert!(matches!(
         phone.request(Request::NewWorkspace {
@@ -868,6 +870,8 @@ fn a_turn_ending_while_no_one_looks_is_unseen_until_someone_does() {
         tools: AgentTools::Ask,
         task: true,
         browser: false,
+        model: None,
+        resume: None,
     });
     phone.request(Request::NewWorkspace {
         name: None,
@@ -1211,6 +1215,8 @@ fn a_device_cant_upgrade_the_daemon_carry_quic_or_serve_tools() {
         tools: AgentTools::Ask,
         task: true,
         browser: false,
+        model: None,
+        resume: None,
     });
     phone.request(Request::NewWorkspace {
         name: None,

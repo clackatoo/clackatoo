@@ -1467,7 +1467,7 @@ impl Daemon {
                 }
                 self.new_terminal(&request)?
             }
-            PaneTerminal::Agent(request) => self.new_chat(request, beside),
+            PaneTerminal::Agent(request) => self.new_chat(request, beside)?,
             PaneTerminal::File(file) => return self.open_content(file, beside),
             PaneTerminal::Files(open) => {
                 return self.new_files(open, beside).map(Content::Files);
@@ -1737,7 +1737,8 @@ impl Daemon {
                 | ClientMessage::Clipboard { .. }
                 | ClientMessage::Files { .. }
                 | ClientMessage::FileOp { .. }
-                | ClientMessage::Board { .. }) => {
+                | ClientMessage::Board { .. }
+                | ClientMessage::ListSessions { .. }) => {
                     self.serve_unanswered(token, message);
                     continue;
                 }
@@ -1805,6 +1806,9 @@ impl Daemon {
             ClientMessage::Files { files, action } => self.serve_files(token, files, action),
             ClientMessage::FileOp { id, op } => self.serve_file_op(token, id, op),
             ClientMessage::Board { board, action } => self.serve_board(token, board, action),
+            ClientMessage::ListSessions { id, agent, cwd } => {
+                self.list_sessions(token, id, &agent, &cwd);
+            }
             other => log::error!("{other:?} is answered"),
         }
     }
@@ -2018,6 +2022,7 @@ impl Daemon {
             Request::DetachBrowser { chat } => Ok(self.detach_browser(token, chat)),
             Request::Review(action) => self.serve_review(action),
             Request::WatchChats => Ok(self.watch_chats(token)),
+            Request::ChatChoices { pane } => Ok(Response::ChatChoices(self.chat_choices(pane))),
             Request::Devices => Ok(self.devices()),
             Request::RevokeDevice { device } => self.revoke_device(device),
             Request::AnswerPairing { code } => self.answer_pairing(token, code.as_deref()),
@@ -2328,6 +2333,7 @@ impl Daemon {
             self.forget_browser_viewer(token);
             self.forget_stages(token, None);
             self.forget_piece_questions(token, None);
+            self.forget_listings(token);
             if let Link::Quic(handle) = client.link
                 && let Some(quic) = self.quic.as_mut()
             {

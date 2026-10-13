@@ -1,0 +1,319 @@
+//! A chat that goes on with a session its agent kept, as the start page
+//! `:Agent` opens resumes one: one of clackatoo's chats', or one started
+//! elsewhere, as in a terminal.
+//!
+//! The chat starts with the session's ID, so its first connect opens that
+//! session again rather than making one. Where the agent can, it's asked
+//! to load it (ACP's `session/load`), which tells the conversation so far
+//! as updates before it answers: those are taken as turns, each message
+//! the user sent starting one. Nothing in them acts now: no edit is taken
+//! as the agent writing a file, no tool counts as running, and a question
+//! or a request about a file that comes with them is turned down, since
+//! it was all said long ago. Where the agent can't load it, the session
+//! is resumed, and the chat says the turns before aren't shown.
+//!
+//! It loads until the session opens. A load that couldn't be made, as
+//! with no one logged in, is made again with the next message. One the
+//! agent stopped telling partway, as when it stopped, is resumed instead,
+//! so no turn is told twice.
+//!
+//! A load the chat stopped waiting for, as at Stop, may still be telling:
+//! what more it tells is passed over until the agent answers it, and the
+//! session isn't asked for again until then, so nothing the agent goes
+//! on telling of it can be taken for what it does now.
+//!
+//! A message sent while it loads waits until the turns told again are in,
+//! and goes after them. Another sent meanwhile joins it. If the load ends
+//! another way, the message shows as a turn of its own, saying how.
+
+use agent_client_protocol_schema::v1::{ContentBlock, SessionUpdate};
+use clackatoo_protocol::{ChatState, Outcome, ResumeSession, Turn};
+
+use super::{Action, HostedChat, Link, TITLE, Wanted, clean, clean_text, now};
+
+/// Where a chat is in loading a session its agent kept.
+#[derive(Debug, Default)]
+pub(super) struct Told {
+    /// Its session is to be loaded as it opens, telling the conversation
+    /// so far.
+    load: bool,
+    /// What its agent says of its session is passed over: the rest of a
+    /// load it stopped waiting for, which the agent may still be telling,
+    /// until the agent answers it.
+    skip: bool,
+    /// Some of the conversation so far came as the session loaded.
+    replayed: bool,
+    /// A message sent while its session loaded, to go once it has, after
+    /// the turns told again.
+    held: Option<String>,
+}
+
+/// What becomes of a message held while the session loaded, once the
+/// load is over.
+#[derive(Debug)]
+pub(super) enum Held {
+    /// It goes, once the session opens.
+    Send,
+    /// It shows as a turn of its own that ended so.
+    End(Outcome),
+}
+
+impl HostedChat {
+    /// It goes on with `resume`, a session its agent kept, rather than
+    /// making a new one: its first connect loads it, where the agent can.
+    pub(crate) fn go_on_with(&mut self, resume: ResumeSession) {
+        self.session = Some(resume.session);
+        self.told.load = true;
+        let title = clean(&resume.title);
+        if !title.is_empty() {
+            self.title = title;
+            if let Some((cut, _)) = self.title.char_indices().nth(TITLE) {
+                self.title.truncate(cut);
+                self.title.push('…');
+            }
+        }
+    }
+
+    /// It starts on `model`, as its first session opens, where its agent
+    /// offers it.
+    pub(crate) fn want_model(&mut self, model: String) {
+        let wanted = self.wanted.get_or_insert_with(Wanted::default);
+        wanted.model = Some(model);
+    }
+
+    /// Whether its session is to be loaded as it opens, telling the
+    /// conversation so far: what its agent says of the session until it
+    /// opens is that conversation, to [`replay`](Self::replay).
+    pub(crate) fn loading(&self) -> bool {
+        self.told.load
+    }
+
+    /// Whether what its agent says of its session is passed over, as the
+    /// rest of a load it stopped waiting for: until the agent answers that
+    /// load (see [`load_answered`](Self::load_answered)).
+    pub(crate) fn skipping(&self) -> bool {
+        self.told.skip
+    }
+
+    /// Whether what its agent says of its session was said long ago, and
+    /// so mustn't act now: it's loading, or passing over what's left of a
+    /// load.
+    pub(crate) fn told_again(&self) -> bool {
+        self.told.load || self.told.skip
+    }
+
+    /// Takes a piece of the conversation so far, as the agent tells it
+    /// while its session loads. A message from the user starts a turn,
+    /// ending the last; what the agent did before any goes in a turn
+    /// with no message. Nothing a tool did is taken as written now.
+    pub(crate) fn replay(&mut self, update: SessionUpdate) {
+        self.told.replayed = true;
+        match update {
+            SessionUpdate::UserMessageChunk(chunk) => {
+                let ContentBlock::Text(text) = chunk.content else {
+                    return;
+                };
+                let text = clean_text(&text.text);
+                // A message of several blocks comes a block at a time,
+                // before the agent does anything with it.
+                if let Some(index) = self.answering_turn()
+                    && self.node.turns[index].items.is_empty()
+                    && !self.node.turns[index].prompt.is_empty()
+                {
+                    let prompt = &mut self.node.turns[index].prompt;
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&text);
+                    self.patch_turn(index);
+                    return;
+                }
+                self.end_turn(Outcome::Done);
+                self.push_replayed(text);
+            }
+            update @ (SessionUpdate::AgentMessageChunk(_)
+            | SessionUpdate::AgentThoughtChunk(_)
+            | SessionUpdate::ToolCall(_)
+            | SessionUpdate::ToolCallUpdate(_)) => {
+                if !self.answering() {
+                    self.push_replayed(String::new());
+                }
+                // Written long ago: never merged into buffers as the
+                // agent's, nor kept for undo.
+                let _ = self.update(update);
+            }
+            // Its title, settings, usage and plan, as at any time.
+            update => {
+                let _ = self.update(update);
+            }
+        }
+    }
+
+    /// Adds a turn told again, with `prompt` its message, still open for
+    /// what the agent did with it.
+    fn push_replayed(&mut self, prompt: String) {
+        self.push_turn(Turn {
+            prompt,
+            sent: now(),
+            items: Vec::new(),
+            end: None,
+            files: None,
+            from: None,
+            switch: None,
+        });
+    }
+
+    /// Its session has opened again: told again as it opened if `loaded`,
+    /// or else resumed, as its agent can't load one, which the chat says.
+    /// The session has seen every turn it shows. A message sent while it
+    /// loaded goes now.
+    pub(crate) fn opened_again(&mut self, loaded: bool) {
+        if !self.told.load {
+            return;
+        }
+        self.finish_loading();
+        if !loaded {
+            self.set_notice(Some(format!(
+                "{} can't tell clackatoo a conversation it kept, so the turns before aren't \
+                 shown here. It remembers them, and goes on from where it was.",
+                self.node.agent
+            )));
+        }
+        self.release_held(Held::Send);
+    }
+
+    /// Its session couldn't be opened again, saying `why`: it starts a new
+    /// one, which hears the turns shown, if any came, with its next
+    /// message, and the chat says so. A message sent while it loaded goes
+    /// now.
+    pub(crate) fn load_failed(&mut self, why: &str) {
+        if !self.told.load {
+            return;
+        }
+        self.finish_loading();
+        self.known = 0;
+        self.set_notice(Some(format!(
+            "{} couldn't open that conversation again ({why}), so this is a new one.",
+            self.node.agent
+        )));
+        self.release_held(Held::Send);
+    }
+
+    /// The chat stops waiting for its load, which the agent may go on
+    /// telling: what came of the conversation so far stays, what more
+    /// comes is passed over until the agent answers it, and the session is
+    /// resumed. The message held goes as `held` says.
+    pub(super) fn stop_waiting_for_load(&mut self, held: Held) {
+        if !self.told.load {
+            return;
+        }
+        if self.link == Link::Opening {
+            self.told.skip = true;
+        }
+        let nothing = !self.told.replayed;
+        self.finish_loading();
+        if nothing {
+            self.set_notice(Some(format!(
+                "{} hadn't told the conversation so far yet, so the turns before aren't shown \
+                 here. It remembers them.",
+                self.node.agent
+            )));
+        }
+        self.release_held(held);
+    }
+
+    /// Its agent stopped, or is being started again, while its session
+    /// loaded: nothing more of the load comes. A load nothing came of yet
+    /// is made again when the session is next asked for; one told partway
+    /// is resumed instead, so no turn is told twice. The message held goes
+    /// as `held` says.
+    pub(super) fn load_cut_off(&mut self, held: Held) {
+        self.told.skip = false;
+        if self.told.load && self.told.replayed {
+            self.finish_loading();
+        }
+        self.release_held(held);
+    }
+
+    /// The agent answered a request for the session the chat stopped
+    /// waiting for, so what it told for it has been told. Returns whether
+    /// the chat now asks for its session, which it waited to do.
+    pub(crate) fn load_answered(&mut self) -> bool {
+        std::mem::take(&mut self.told.skip) && self.link == Link::Opening
+    }
+
+    /// Ends the turn told again last, if one is open: the session has seen
+    /// every turn.
+    fn finish_loading(&mut self) {
+        self.told.load = false;
+        self.end_turn(Outcome::Done);
+        self.known = self.node.turns.len();
+    }
+
+    /// Holds `text`, a message sent while the session is to load, as the
+    /// turn it starts must come after those told again, joining any held
+    /// already; and asks for the session, if it isn't asked for. Returns
+    /// whether it did, adding to `actions` what the server must do.
+    pub(super) fn hold_while_loading(&mut self, text: &str, actions: &mut Vec<Action>) -> bool {
+        if !self.told.load {
+            return false;
+        }
+        match &mut self.told.held {
+            Some(held) => {
+                held.push_str("\n\n");
+                held.push_str(text);
+            }
+            None => self.told.held = Some(text.to_owned()),
+        }
+        self.set_notice(Some(format!(
+            "Your message goes once {} has told the conversation so far.",
+            self.node.agent
+        )));
+        self.set_state(ChatState::Starting);
+        if self.link == Link::Closed {
+            self.link = Link::Opening;
+            actions.push(Action::Connect);
+        }
+        true
+    }
+
+    /// Does with the message held while the session loaded, if there is
+    /// one, as `held` says.
+    pub(super) fn release_held(&mut self, held: Held) {
+        let Some(text) = self.told.held.take() else {
+            return;
+        };
+        match held {
+            Held::Send => {
+                let mut actions = Vec::new();
+                self.send(text, &mut actions);
+                // The session is being asked for whenever a message is
+                // released to go.
+                debug_assert!(actions.is_empty(), "nothing goes before the session opens");
+            }
+            Held::End(outcome) => {
+                self.set_notice(None);
+                self.push_turn(Turn {
+                    prompt: text,
+                    sent: now(),
+                    items: Vec::new(),
+                    end: None,
+                    files: None,
+                    from: None,
+                    switch: None,
+                });
+                self.end_turn(outcome);
+            }
+        }
+    }
+
+    /// The chat is handed over to the next build mid-load: the turns that
+    /// came are kept as heard, as the next build resumes the session, and
+    /// a message held shows as cut off.
+    pub(super) fn hand_over_loading(&mut self) {
+        if self.told.load {
+            self.finish_loading();
+        }
+        self.release_held(Held::End(Outcome::Failed(
+            "cut off by an upgrade".to_owned(),
+        )));
+    }
+}

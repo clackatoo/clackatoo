@@ -715,6 +715,13 @@ impl Daemon {
         let Some((chat, hosted)) = self.chat_in(name, session) else {
             return Err((FAILED, format!("there's no session {session}")));
         };
+        // Asked as the conversation so far is told again: asked long ago.
+        if hosted.told_again() {
+            return Err((
+                FAILED,
+                format!("session {session} is being told again, not worked in"),
+            ));
+        }
         let cwd = PathBuf::from(hosted.working_directory());
         let Some(asked) = path.to_str() else {
             return Err((FAILED, format!("{} isn't UTF-8", path.display())));

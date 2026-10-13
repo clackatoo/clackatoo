@@ -16,7 +16,7 @@
 //! | `workspace "NAME"` | The workspace shown is called NAME. |
 //! | `exited N` | The practice terminal's last command exited with status N. |
 //! | `option SETTING` | An option is as `:set` writes it: `option nowrap`, `option tabstop=8`. |
-//! | `finder`, `finder KIND` | The finder is open: any, or `files`, `grep`, `buffers`, `diagnostics`, `marks`, `places` or `boards`. |
+//! | `finder`, `finder KIND` | The finder is open: any, or `files`, `grep`, `buffers`, `diagnostics`, `marks`, `places` or `boards`; or `agent`, the start page `:Agent` opens. |
 //! | `listed "PATH"` | A file explorer in the lesson's tab lists PATH, from its root. |
 //! | `file "NAME"` | The focused editor's file is called NAME. |
 //! | `recording R` | A macro is being recorded into register R. |
@@ -85,8 +85,9 @@ pub(crate) enum Focus {
     Kind(Kind),
 }
 
-/// The finder's kinds, as checks name them.
-const FINDERS: [&str; 7] = [
+/// The finder's kinds, as checks name them, and the start page `:Agent`
+/// opens, which is drawn as the finder is.
+const FINDERS: [&str; 8] = [
     "files",
     "grep",
     "buffers",
@@ -94,6 +95,7 @@ const FINDERS: [&str; 7] = [
     "marks",
     "places",
     "boards",
+    "agent",
 ];
 
 /// What checks look at: the window's state, as it is now.

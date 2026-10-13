@@ -708,7 +708,7 @@ impl Daemon {
     }
 
     /// The chat `id`, summed up.
-    fn chat_summary(&self, id: TerminalId) -> Option<ChatSummary> {
+    pub(super) fn chat_summary(&self, id: TerminalId) -> Option<ChatSummary> {
         let chat = self.chat_ref(id)?;
         let node = chat.node();
         let active = node.turns.last().map_or(0, |turn| {
@@ -731,7 +731,7 @@ impl Daemon {
 
     /// The workspace chat `id` is in: its pane's, or that of the nearest
     /// chat above it in one.
-    fn workspace_of_chat(&self, mut id: TerminalId) -> Option<WorkspaceId> {
+    pub(super) fn workspace_of_chat(&self, mut id: TerminalId) -> Option<WorkspaceId> {
         let workspaces = self.workspaces.get();
         // Chats are started at most a few deep: this only guards a loop.
         for _ in 0..16 {

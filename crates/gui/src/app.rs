@@ -2805,6 +2805,11 @@ impl App {
                     self.request_redraw();
                 }
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Sessions { id, sessions })) => {
+                if self.desk.sessions_listed(id, sessions) {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Message(ServerMessage::Event(
                 event @ (Event::Clipboard { .. } | Event::ClipboardAsked { .. }),
             )) => self.clipboard_event(event),

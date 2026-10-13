@@ -47,6 +47,7 @@ mod render;
 mod review;
 mod screen;
 mod session;
+mod start;
 mod tutor;
 mod updates;
 

@@ -106,6 +106,8 @@ enum Asked {
     /// Something asked about the devices paired with the web app, whose
     /// answer is said in the bar.
     Devices,
+    /// What a new chat could be, for the start page.
+    ChatChoices,
 }
 
 mod bindings;
@@ -126,6 +128,7 @@ mod offers;
 mod reviews;
 mod script;
 mod settings;
+mod starting;
 mod updating;
 
 pub(crate) use script::LuaStart;
@@ -279,6 +282,11 @@ pub(crate) struct Desk {
     font_in_use: settings::FontInUse,
     /// The finder, while it's open.
     finder: Option<Finder>,
+    /// The start page `:Agent` opens, while it's open.
+    start: Option<crate::start::StartPage>,
+    /// What the last new chat started from the start page had, for the
+    /// next to start with.
+    last_chat: crate::start::LastChat,
     /// How many searches the window has asked the daemon for, which
     /// numbers them.
     searches: u64,
@@ -1036,6 +1044,7 @@ impl Desk {
         }
         // Its searches went with the connection.
         self.finder = None;
+        self.start = None;
     }
 
     /// Forgets everything sent on the last connection, which will never be
@@ -1194,6 +1203,7 @@ impl Desk {
                 true
             }
             Some(Asker::Window(Asked::Devices)) => self.devices_answered(response),
+            Some(Asker::Window(Asked::ChatChoices)) => self.chat_choices(response),
             Some(Asker::Window(Asked::Explorer { reveal, edit })) => {
                 match response {
                     Response::PaneCreated(pane) => self.explorer_made(pane, reveal, edit),
@@ -1955,6 +1965,7 @@ impl Desk {
     }
 
     /// Carries out a command.
+    #[allow(clippy::too_many_lines, reason = "one arm per command, each short")]
     fn run(&mut self, command: Command) {
         match command {
             Command::Reload => return self.reload_lua(),
@@ -1976,6 +1987,13 @@ impl Desk {
                     "panes on {daemon} come with :connect, which isn't built yet"
                 ));
             }
+            // A chat with no agent named: the start page, to pick one.
+            Command::Open {
+                place,
+                kind: Kind::Agent,
+                daemon: None,
+                agent: None,
+            } => self.open_start_page(place),
             Command::Open {
                 place: Place::Tab | Place::Here,
                 kind,
@@ -2121,6 +2139,8 @@ fn new_pane(kind: Kind, agent: Option<String>, size: Size, options: &Options) ->
             tools: options.agenttools.asked(),
             task: options.claudetask,
             browser: options.chatbrowser,
+            model: None,
+            resume: None,
         }),
     }
 }
@@ -2229,6 +2249,7 @@ mod tests {
                 | ClientMessage::FileOp { .. }
                 | ClientMessage::Hello { .. }
                 | ClientMessage::Present { .. }
+                | ClientMessage::ListSessions { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
             .collect();
@@ -2326,7 +2347,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_talks_to_the_agent_named_or_else_the_one_the_option_names() {
+    fn a_chat_talks_to_the_agent_named_or_else_the_start_pages_pick() {
         let mut desk = desk(workspaces(vec![workspace(
             1,
             "work",
@@ -2334,22 +2355,196 @@ mod tests {
         )]));
         snapshot(&mut desk, 1);
         normal_mode(&mut desk);
+        // Named, it starts at once.
         command(&mut desk, "Agent codex");
-        command(&mut desk, "|Agent");
+        assert!(!desk.finding());
+        // Otherwise the page picks the agent the option names, and Enter
+        // starts it, before the daemon has said what there is.
         command(&mut desk, "set agent=gemini");
-        command(&mut desk, "-Agent");
-        // Empty leaves it to the daemon.
+        command(&mut desk, "|Agent");
+        assert!(desk.finding(), "the start page is open");
+        enter(&mut desk);
+        // Then the one last started from it.
         command(&mut desk, "set agent=");
-        command(&mut desk, "Agent");
+        command(&mut desk, "-Agent");
+        enter(&mut desk);
         assert_eq!(
             agents_asked_for(&answer_all(&mut desk)),
             [
                 Some("codex".to_owned()),
-                Some("claude".to_owned()),
                 Some("gemini".to_owned()),
-                None,
+                Some("gemini".to_owned()),
             ]
         );
+        // With none named, and none started from it, it's the daemon's
+        // default.
+        let mut other = self::desk(workspaces(vec![workspace(
+            1,
+            "work",
+            vec![tab(1, pane(1))],
+        )]));
+        snapshot(&mut other, 1);
+        normal_mode(&mut other);
+        command(&mut other, "set agent=");
+        ctrl_b(&mut other, "a");
+        enter(&mut other);
+        assert_eq!(agents_asked_for(&answer_all(&mut other)), [None]);
+    }
+
+    /// Answers the requests waiting: what a chat could be with `choices`,
+    /// and the rest with "done". Returns them, and the agents' sessions
+    /// asked for, by their numbers.
+    fn answer_choices(
+        desk: &mut Desk,
+        choices: &clackatoo_protocol::ChatChoices,
+    ) -> (Vec<Request>, Vec<u64>) {
+        let mut requests = Vec::new();
+        let mut listings = Vec::new();
+        for message in desk.take_outbox() {
+            match message {
+                ClientMessage::Request(request) => requests.push(request),
+                ClientMessage::ListSessions { id, agent, cwd } => {
+                    assert_eq!((agent.as_str(), cwd.as_str()), ("claude", "/home/me/x"));
+                    listings.push(id);
+                }
+                _ => {}
+            }
+        }
+        for request in &requests {
+            desk.answered(match request {
+                Request::ChatChoices { .. } => Response::ChatChoices(choices.clone()),
+                _ => Response::Done,
+            });
+        }
+        // What the choices asked for.
+        for message in desk.take_outbox() {
+            if let ClientMessage::ListSessions { id, .. } = message {
+                listings.push(id);
+            }
+        }
+        (requests, listings)
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "one way to go on after another")]
+    fn the_start_page_starts_shows_or_resumes_a_chat_where_agent_asked() {
+        use clackatoo_protocol::{
+            AgentSession, ChatChoices, ChatState, ChatSummary, Provider, ProviderModels,
+            ResumeSession,
+        };
+        let summary = |chat: u32, workspace: u32| ChatSummary {
+            chat: TerminalId(chat),
+            title: format!("Chat {chat}"),
+            agent: "Claude Code".to_owned(),
+            state: ChatState::Ready,
+            asking: false,
+            unseen: false,
+            parent: None,
+            workspace: Some(WorkspaceId(workspace)),
+            active: 0,
+        };
+        let choices = ChatChoices {
+            agents: vec![Provider {
+                agent: "claude".to_owned(),
+                title: "Claude Code".to_owned(),
+                models: ProviderModels::Unknown,
+            }],
+            default: "claude".to_owned(),
+            cwd: "/home/me/x".to_owned(),
+            home: "/home/me".to_owned(),
+            // Another workspace's isn't this one's to show.
+            unshown: vec![summary(7, 1), summary(8, 2)],
+        };
+        let kept = AgentSession {
+            session: "past-1".to_owned(),
+            title: "Fix the parser".to_owned(),
+            cwd: "/home/me/x".to_owned(),
+            updated: None,
+            chat: None,
+        };
+        let mut desk = desk(workspaces(vec![workspace(
+            1,
+            "work",
+            vec![tab(1, pane(1))],
+        )]));
+        snapshot(&mut desk, 1);
+        normal_mode(&mut desk);
+
+        // A chat in no pane, shown beside.
+        command(&mut desk, "|Agent");
+        let (requests, listings) = answer_choices(&mut desk, &choices);
+        assert_eq!(
+            requests,
+            [Request::ChatChoices {
+                pane: Some(PaneId(1))
+            }]
+        );
+        assert_eq!(listings.len(), 1, "the agent's sessions asked for");
+        assert!(desk.sessions_listed(listings[0], Ok(vec![kept.clone()])));
+        let rows = desk.finder_view((10, 60), None).unwrap().rows;
+        assert_eq!(rows.len(), 3, "the new chat, chat 7, the session");
+        type_keys(&mut desk, "j");
+        enter(&mut desk);
+        assert!(!desk.finding(), "closed");
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::Split {
+                pane: PaneId(1),
+                side: Side::Right,
+                terminal: PaneTerminal::Existing(TerminalId(7)),
+            }]
+        );
+
+        // A session the agent kept, gone on with in a new tab: what's
+        // typed picks it.
+        command(&mut desk, "Agent");
+        let (_, listings) = answer_choices(&mut desk, &choices);
+        // One no longer wanted is dropped.
+        assert!(!desk.sessions_listed(listings[0] + 1, Ok(Vec::new())));
+        desk.sessions_listed(listings[0], Ok(vec![kept.clone()]));
+        type_keys(&mut desk, "parser");
+        enter(&mut desk);
+        let requests = answer_all(&mut desk);
+        let [
+            Request::NewTab {
+                terminal: PaneTerminal::Agent(new),
+                ..
+            },
+        ] = &requests[..]
+        else {
+            panic!("{requests:?}");
+        };
+        assert_eq!(new.agent.as_deref(), Some("claude"));
+        assert_eq!(new.cwd.as_deref(), Some("/home/me/x"));
+        assert_eq!(
+            new.resume,
+            Some(ResumeSession {
+                session: "past-1".to_owned(),
+                title: "Fix the parser".to_owned(),
+            })
+        );
+
+        // `n` starts a new chat, whatever's picked; Esc closes, asking
+        // nothing.
+        command(&mut desk, "Agent");
+        answer_choices(&mut desk, &choices);
+        type_keys(&mut desk, "jn");
+        let requests = answer_all(&mut desk);
+        assert!(
+            matches!(&requests[..], [Request::NewTab { terminal: PaneTerminal::Agent(new), .. }]
+                if new.resume.is_none() && new.cwd.as_deref() == Some("/home/me/x")),
+            "{requests:?}"
+        );
+        command(&mut desk, "Agent");
+        answer_choices(&mut desk, &choices);
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+        assert!(!desk.finding());
+        assert!(answer_all(&mut desk).is_empty());
     }
 
     #[test]

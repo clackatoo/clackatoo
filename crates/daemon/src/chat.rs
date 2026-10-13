@@ -33,6 +33,9 @@ use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
 mod relations;
+mod resume;
+
+use resume::Held;
 mod subagent;
 
 pub(crate) use relations::{Cause, MAX_INBOX, Message, Relations};
@@ -310,6 +313,10 @@ pub(crate) struct HostedChat {
     /// Whether the notice says the agent is slow to open the session: it
     /// goes once the session opens, or isn't waited for.
     slow: bool,
+    /// Where it is in loading a session its agent kept, if it goes on
+    /// with one (see `resume.rs`). Not handed over: after an upgrade, the
+    /// session is resumed.
+    told: resume::Told,
     node: ChatNode,
     /// The questions waiting for answers, the first shown: the agent may
     /// ask about several tools at once, and clackatoo's own tools ask
@@ -492,6 +499,7 @@ impl HostedChat {
             link: Link::Opening,
             queued: None,
             slow: false,
+            told: resume::Told::default(),
             node: ChatNode {
                 agent: agent.title.clone(),
                 settings: vec![tools_setting(tools), browser_setting(browser)],
@@ -532,6 +540,7 @@ impl HostedChat {
     /// it: the next build opens the session again when it's next needed,
     /// and an answer under way is cut off.
     pub(crate) fn hand_over(mut self) -> handover::Chat {
+        self.hand_over_loading();
         if self.answering() {
             self.end_turn(Outcome::Failed("cut off by an upgrade".to_owned()));
         }
@@ -907,7 +916,7 @@ impl HostedChat {
     /// Sends a message, if there is one and the agent isn't still
     /// answering the last.
     fn send(&mut self, text: String, actions: &mut Vec<Action>) {
-        if text.trim().is_empty() || self.answering() {
+        if text.trim().is_empty() || self.hold_while_loading(&text, actions) || self.answering() {
             return;
         }
         // The user's own: what agents do of it comes of this turn.
@@ -1096,6 +1105,7 @@ impl HostedChat {
             self.end_turn(Outcome::Stopped);
         }
         if self.link == Link::Opening {
+            self.stop_waiting_for_load(Held::End(Outcome::Stopped));
             self.link = Link::Closed;
             self.set_state(ChatState::Ready);
             self.clear_slow();
@@ -1587,6 +1597,8 @@ impl HostedChat {
     /// The agent is asked again for the session, without being started
     /// again, as another chat is in the middle of a turn with it.
     pub(crate) fn asked_again(&mut self) {
+        // Asked to resume it now: it has its turns, as far as they came.
+        self.stop_waiting_for_load(Held::Send);
         self.set_notice(Some(format!(
             "Asking {} again. It isn't started again, as another chat is in the middle of a \
              turn with it.",
@@ -1649,7 +1661,10 @@ impl HostedChat {
     /// it again, as after the agent stopped.
     pub(crate) fn agent_restarted(&mut self) -> bool {
         match self.link {
-            Link::Opening => true,
+            Link::Opening => {
+                self.load_cut_off(Held::Send);
+                true
+            }
             // The agent stopping ends the session it was letting go.
             Link::Closing => !self.session_closed().is_empty(),
             Link::Open | Link::Closed => {
@@ -1717,6 +1732,11 @@ impl HostedChat {
                 self.node.agent
             )));
         }
+        // A load that couldn't be made is made with the next message.
+        self.release_held(Held::End(Outcome::Failed(format!(
+            "{} couldn't start: {reason}",
+            self.node.agent
+        ))));
         self.set_state(ChatState::Failed(reason.to_owned()));
     }
 
@@ -1724,6 +1744,7 @@ impl HostedChat {
     /// started, `why` says why, as far as it said.
     pub(crate) fn disconnected(&mut self, why: Option<&str>) {
         self.clear_slow();
+        self.load_cut_off(Held::End(Outcome::Failed("the agent stopped".to_owned())));
         let was_opening = self.link == Link::Opening;
         self.link = Link::Closed;
         let queued = self.queued.take();
@@ -1780,6 +1801,11 @@ impl HostedChat {
     fn note_own_tool(&mut self, id: &str, input: Option<&Value>) {
         /// How many are kept: more than run at once.
         const KEPT: usize = 64;
+        // A tool told again was called long ago: no question now is
+        // about it.
+        if self.told_again() {
+            return;
+        }
         if names_our_server(input) && !self.own_tools.iter().any(|own| own == id) {
             if self.own_tools.len() == KEPT {
                 self.own_tools.pop_front();
@@ -2175,6 +2201,10 @@ impl HostedChat {
     /// be allowed isn't running, and while one is asked about, none is
     /// taken to be.
     pub(crate) fn writing(&self) -> bool {
+        // Tools told again as the session loads ran long ago.
+        if self.told_again() {
+            return false;
+        }
         let asked = (self.asking.iter())
             .any(|(asker, _)| matches!(asker, Asker::Agent(_) | Asker::Tool(_)));
         let Some(turn) = self.answering_turn().filter(|_| !asked) else {
@@ -4514,5 +4544,184 @@ mod tests {
                 "Codex couldn't start: it stopped, saying: npm ERR! nope".into()
             ))
         );
+    }
+
+    /// A piece of the conversation told again as the session loads.
+    fn replay(chat: &mut HostedChat, json: &str) {
+        let json = format!(r#"{{"sessionId":"past","update":{json}}}"#);
+        let notification: SessionNotification = serde_json::from_str(&json).unwrap();
+        chat.replay(notification.update);
+    }
+
+    /// The user's message `text`, told again.
+    fn replay_user(chat: &mut HostedChat, text: &str) {
+        let json = serde_json::json!({ "sessionUpdate": "user_message_chunk",
+                                       "content": { "type": "text", "text": text } });
+        replay(chat, &json.to_string());
+    }
+
+    /// A chat going on with a session its agent kept, its load asked for.
+    fn resuming() -> HostedChat {
+        let mut chat = chat();
+        chat.go_on_with(clackatoo_protocol::ResumeSession {
+            session: "past".to_owned(),
+            title: String::new(),
+        });
+        assert!(chat.loading());
+        chat
+    }
+
+    /// The messages of `chat`'s turns, in order.
+    fn prompts(chat: &HostedChat) -> Vec<&str> {
+        (chat.node.turns.iter())
+            .map(|turn| turn.prompt.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn messages_sent_while_a_session_loads_go_together_after_the_turns_told_again() {
+        let mut chat = resuming();
+        replay_user(&mut chat, "before");
+        replay_user(&mut chat, "and its second block");
+        // While the turn told again is open, as most of a load is.
+        assert!(send(&mut chat, "and now?").is_empty(), "held");
+        assert!(send(&mut chat, "also this").is_empty(), "joined, not lost");
+        assert!(chat.node.notice.is_some(), "says it waits");
+        replay(
+            &mut chat,
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}"#,
+        );
+        chat.opened_again(true);
+        let actions = connect(&mut chat, "past");
+        let prompted: Vec<&Action> = (actions.iter())
+            .filter(|action| matches!(action, Action::Prompt(_)))
+            .collect();
+        assert!(
+            matches!(prompted[..], [Action::Prompt(text)] if text == "and now?\n\nalso this"),
+            "{actions:?}"
+        );
+        assert_eq!(
+            prompts(&chat),
+            ["before\n\nand its second block", "and now?\n\nalso this"]
+        );
+        assert_eq!(outcome(&chat.node.turns[0]), Some(&Outcome::Done));
+        assert_eq!(
+            chat.known, 2,
+            "nothing carried: the session saw the turn told again"
+        );
+    }
+
+    #[test]
+    fn a_load_refused_holds_no_message_and_loads_again_with_the_next() {
+        let mut chat = resuming();
+        send(&mut chat, "first");
+        chat.failed_to_connect("no one's logged in");
+        // The message held shows, failed, and the load is still to come.
+        assert_eq!(prompts(&chat), ["first"]);
+        assert!(matches!(
+            outcome(&chat.node.turns[0]),
+            Some(Outcome::Failed(_))
+        ));
+        assert!(chat.loading());
+        // The next message asks for it again.
+        assert_eq!(send(&mut chat, "second"), [Action::Connect]);
+        assert_eq!(prompts(&chat), ["first"], "held for after the load");
+    }
+
+    #[test]
+    fn stopping_a_load_shows_the_message_held_and_passes_over_the_rest_until_answered() {
+        let mut chat = resuming();
+        replay_user(&mut chat, "before");
+        assert!(chat.answering(), "the turn told again is open");
+        send(&mut chat, "held");
+        let actions = chat.act(ChatAction::Stop);
+        assert!(actions.contains(&Action::Abandon), "{actions:?}");
+        assert!(!chat.loading() && chat.skipping());
+        assert_eq!(prompts(&chat), ["before", "held"]);
+        assert_eq!(outcome(&chat.node.turns[1]), Some(&Outcome::Stopped));
+        // Its session opening again doesn't end the passing over: only the
+        // agent answering the load it stopped waiting for does.
+        chat.opened_again(false);
+        assert!(chat.skipping());
+        assert!(!chat.load_answered(), "it wasn't waiting to ask");
+        assert!(!chat.skipping());
+    }
+
+    #[test]
+    fn a_chat_waits_to_ask_for_its_session_until_a_load_it_left_is_answered() {
+        let mut chat = resuming();
+        replay_user(&mut chat, "before");
+        chat.act(ChatAction::Stop);
+        assert_eq!(send(&mut chat, "now"), [Action::Connect]);
+        assert!(chat.skipping(), "the server waits to ask");
+        assert!(chat.load_answered(), "now it asks");
+    }
+
+    #[test]
+    fn stopping_before_anything_is_told_says_the_turns_before_arent_shown() {
+        let mut chat = resuming();
+        chat.act(ChatAction::Stop);
+        let notice = chat.node.notice.clone().unwrap_or_default();
+        assert!(notice.contains("the turns before aren't shown"), "{notice}");
+    }
+
+    #[test]
+    fn an_agent_gone_mid_load_shows_the_message_held_and_ends_the_passing_over() {
+        let mut chat = resuming();
+        send(&mut chat, "held");
+        chat.disconnected(None);
+        assert_eq!(prompts(&chat), ["held"]);
+        assert!(matches!(
+            outcome(&chat.node.turns[0]),
+            Some(Outcome::Failed(_))
+        ));
+        assert!(
+            chat.loading(),
+            "nothing came: it loads with the next message"
+        );
+        let mut chat = resuming();
+        replay_user(&mut chat, "before");
+        chat.act(ChatAction::Stop);
+        chat.disconnected(None);
+        assert!(
+            !chat.skipping(),
+            "nothing more comes of a load whose agent has gone"
+        );
+    }
+
+    #[test]
+    fn nothing_told_again_counts_as_running_or_as_one_of_clackatoos_tools() {
+        let mut chat = resuming();
+        replay_user(&mut chat, "edit it");
+        replay(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"t","title":"Edit a.txt","kind":"edit",
+                "status":"in_progress","rawInput":{"server":"clackatoo"}}"#,
+        );
+        assert!(!chat.writing(), "it ran long ago");
+        assert!(chat.own_tools.is_empty(), "{:?}", chat.own_tools);
+    }
+
+    #[test]
+    fn an_agent_started_again_loads_anew_only_if_nothing_came() {
+        let mut chat = resuming();
+        assert!(chat.agent_restarted());
+        assert!(chat.loading(), "nothing came: loaded from the new process");
+        replay_user(&mut chat, "before");
+        assert!(chat.agent_restarted());
+        assert!(!chat.loading(), "partly told: resumed, not told twice");
+    }
+
+    #[test]
+    fn a_chat_handed_over_mid_load_keeps_what_came_as_heard() {
+        let mut chat = resuming();
+        replay_user(&mut chat, "before");
+        send(&mut chat, "held");
+        let handed = chat.hand_over();
+        assert_eq!(
+            handed.known, 1,
+            "what was told again is heard; the message held never went"
+        );
+        assert_eq!(handed.turns.len(), 2);
     }
 }

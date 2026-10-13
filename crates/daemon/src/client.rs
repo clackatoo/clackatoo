@@ -503,6 +503,20 @@ impl Client {
         self.send(&ClientMessage::FileOp { id, op })
     }
 
+    /// Asks the agent called `agent` for the sessions it kept that work in
+    /// `cwd`, numbered `id`. They come in an [`Event::Sessions`].
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn list_sessions(&mut self, id: u64, agent: &str, cwd: &str) -> Result<(), ClientError> {
+        self.send(&ClientMessage::ListSessions {
+            id,
+            agent: agent.to_owned(),
+            cwd: cwd.to_owned(),
+        })
+    }
+
     /// Limits how long [`next_event`](Self::next_event) and requests wait.
     /// A wait that runs out fails with an I/O error of kind `WouldBlock`.
     ///

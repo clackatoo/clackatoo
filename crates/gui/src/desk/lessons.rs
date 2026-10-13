@@ -1208,6 +1208,9 @@ impl Facts for DeskFacts<'_> {
     }
 
     fn finder(&self) -> Option<&'static str> {
+        if self.desk.start.is_some() {
+            return Some("agent");
+        }
         Some(match self.desk.finder.as_ref()?.kind() {
             finder::Kind::Files => "files",
             finder::Kind::Grep => "grep",

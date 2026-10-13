@@ -10,11 +10,23 @@ Notes for the agents lesson.
 
 ## Opening a chat
 
-Ctrl+B and then `a` opens a chat to the right of the focused pane; `:Agent` opens one in a new tab, and `:|Agent` beside the pane. `:Agent codex` or `:Agent gemini` names another agent, and the `agent` option says which `:Agent` opens without a name.
+`:Agent codex` or `:Agent gemini` opens a chat with that agent in a new tab, at once; `:|Agent codex` opens it beside the focused pane.
 
 A chat works in the directory a new terminal would start in. Like any pane, it opens in normal mode: `i` starts typing in its box, Enter sends, and Shift+Enter starts a new line.
 
 If the agent hasn't opened the chat's session after 30 seconds, the chat says so, and what it may be waiting on: most often an MCP server in the agent's config that needs a login. It goes on waiting, and asks whether to keep waiting, which Esc picks, Retry, which starts the agent again, or Stop. Ctrl+C stops it too.
+
+## The start page
+
+`:Agent` with no agent named, `:|Agent` beside the pane, or Ctrl+B and then `a`, opens the start page. Its first row is a new chat, with its agent, model and folder: Enter, or `n`, starts it, so a new chat is still one key away. Tab moves between those three, and `h` and `l` change the one picked. They start as the last new chat had them; the `agent` option says which agent to offer before that.
+
+Under it are chats to go on with: this workspace's chats in no pane, such as those agents started in the background, then the sessions the agent keeps for the folder, its own and clackatoo's, newest first. `j` and `k` move, and Enter shows the chat, or goes on with the session in a new chat, with its conversation so far shown as its turns where the agent can tell it. Type to filter them, as in the finder; `/` first types a letter that's a key. Esc closes it.
+
+Open the start page with `:|Agent`, look around, then press Esc.
+
+```check
+finder agent
+```
 
 ## What it shows
 
@@ -72,7 +84,7 @@ The browser is clackatoo's own, headless, with a profile of its own: never your 
 
 ## Try a chat
 
-Only if you'd like to, and are happy for it to use your agent: press Ctrl+B and then `a` to open a chat beside the practice file. The first chat starts the agent, which takes a second or two, and may first ask to install the agent's adapter. Otherwise, press `]s`.
+Only if you'd like to, and are happy for it to use your agent: press Ctrl+B, `a`, and then Enter to open a chat beside the practice file. The first chat starts the agent, which takes a second or two, and may first ask to install the agent's adapter. Otherwise, press `]s`.
 
 ```check
 pane chat

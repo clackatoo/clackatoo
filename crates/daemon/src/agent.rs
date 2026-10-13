@@ -55,8 +55,13 @@ const AUTH_REQUIRED: i64 = -32000;
 enum Pending {
     Initialize,
     /// A session for the chat in this terminal: a new one or, given its
-    /// ID, one it had before.
-    Session(TerminalId, Option<String>),
+    /// ID, given as `resumed`, one it had before, told again as it goes
+    /// if `load`.
+    Session {
+        terminal: TerminalId,
+        resumed: Option<String>,
+        load: bool,
+    },
     /// A message from the chat in this terminal.
     Prompt(TerminalId),
     /// A change to a setting of the chat in this terminal.
@@ -71,6 +76,9 @@ enum Pending {
     /// The end of the session of the chat in this terminal, which it
     /// opens again only once the agent has answered.
     Closing(TerminalId),
+    /// The sessions the agent kept, for the server's listing with this
+    /// number.
+    Listing(u64),
     /// Nothing waits for the answer.
     Ignored,
 }
@@ -78,10 +86,19 @@ enum Pending {
 /// Something the agent sent that a chat must act on.
 #[derive(Debug)]
 pub(crate) enum Incoming {
-    /// The chat in `terminal` has a session, or couldn't get one.
+    /// The chat in `terminal` has a session, or couldn't get one. One
+    /// opened again was told again as it went, as updates before this, if
+    /// `loaded`.
     Session {
         terminal: TerminalId,
         result: Result<Opened, Refused>,
+        loaded: bool,
+    },
+    /// The sessions the agent kept, for the server's listing numbered
+    /// `listing`, or why it couldn't say.
+    Listed {
+        listing: u64,
+        result: Result<Vec<Listed>, String>,
     },
     /// A session made to learn the agent's settings was made, or not.
     Probed { result: Result<Opened, Refused> },
@@ -97,12 +114,13 @@ pub(crate) enum Incoming {
         session: String,
         update: Box<SessionUpdate>,
     },
-    /// A session the chat in `terminal` stopped waiting for was made, or
-    /// opened again, after all: the server closes it, unless the chat
-    /// holds it.
+    /// The agent answered the request for a session the chat in
+    /// `terminal` stopped waiting for: whatever it told of the session
+    /// for it has been told. It made or opened `session` after all, if
+    /// it did, which the server closes unless the chat holds it.
     Late {
         terminal: TerminalId,
-        session: String,
+        session: Option<String>,
     },
     /// The session the chat in `terminal` let go has ended, or the agent
     /// couldn't end it: either way, it can be opened again.
@@ -157,6 +175,32 @@ pub(crate) struct Opened {
     pub(crate) settings: Option<Vec<SessionConfigOption>>,
 }
 
+/// A session the agent kept, as it listed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Listed {
+    pub(crate) session: String,
+    pub(crate) cwd: String,
+    /// Empty if it has none.
+    pub(crate) title: String,
+    /// When it last changed, in RFC 3339, as the agent said it.
+    pub(crate) updated: Option<String>,
+}
+
+/// The most sessions a listing keeps, newest first, of the many an agent
+/// may have kept: Claude Code's adapter lists up to 1000 at a time.
+pub(crate) const MOST_LISTED: usize = 200;
+
+/// The most characters of a listed session's title kept.
+const MOST_TITLE: usize = 200;
+
+/// The longest session ID, in bytes, a listing keeps: longer is no
+/// agent's.
+const MOST_ID: usize = 256;
+
+/// The longest directory, in bytes, a listing keeps, as Linux's paths
+/// are at most.
+const MOST_PATH: usize = 4096;
+
 /// A running agent.
 #[derive(Debug)]
 pub(crate) struct Agent {
@@ -167,6 +211,12 @@ pub(crate) struct Agent {
     held: Option<Vec<Value>>,
     /// Whether the agent can close a session, ending its work.
     can_close: bool,
+    /// Whether the agent can open a session again telling the
+    /// conversation so far as it goes (ACP's `session/load`).
+    can_load: bool,
+    /// Whether the agent can list the sessions it kept, once it has said
+    /// what it can.
+    can_list: Option<bool>,
 }
 
 impl Agent {
@@ -179,6 +229,8 @@ impl Agent {
             pending: BTreeMap::new(),
             held: None,
             can_close: false,
+            can_load: false,
+            can_list: None,
         };
         agent.request(
             Pending::Initialize,
@@ -201,24 +253,50 @@ impl Agent {
 
     /// Asks for a session for the chat in `terminal`, working in `cwd`:
     /// `session`, which it had before, or else a new one, opened as
-    /// `opening` says.
+    /// `opening` says. One opened again is told again as it goes, as
+    /// updates, if `load` and the agent can (see [`Incoming::Session`]),
+    /// as for a chat that has none of its turns.
     pub(crate) fn open_session(
         &mut self,
         terminal: TerminalId,
         cwd: &str,
         session: Option<&str>,
+        load: bool,
         opening: Opening,
     ) {
         let mut params = session_params(cwd, opening);
+        // Before the agent has said what it can, it's asked to load, and
+        // that's changed as it says, if it can't (see `cannot_load`).
+        let load = session.is_some() && load && (self.can_load || self.held.is_some());
         let method = match session {
             Some(session) => {
                 params["sessionId"] = session.into();
-                "session/resume"
+                if load {
+                    "session/load"
+                } else {
+                    "session/resume"
+                }
             }
             None => "session/new",
         };
         let resumed = session.map(str::to_owned);
-        self.request(Pending::Session(terminal, resumed), method, &params);
+        let pending = Pending::Session {
+            terminal,
+            resumed,
+            load,
+        };
+        self.request(pending, method, &params);
+    }
+
+    /// Asks for the sessions the agent kept that work in `cwd`, for the
+    /// server's listing numbered `listing`. An agent that can't list them
+    /// says so, as an error.
+    pub(crate) fn list_sessions(&mut self, listing: u64, cwd: &str) {
+        self.request(
+            Pending::Listing(listing),
+            "session/list",
+            &json!({ "cwd": cwd }),
+        );
     }
 
     /// Asks for a session in `cwd` only to learn the settings the agent
@@ -238,7 +316,11 @@ impl Agent {
     /// and the chat never hears of it.
     pub(crate) fn abandon_session(&mut self, terminal: TerminalId) {
         for pending in self.pending.values_mut() {
-            if let Pending::Session(asked, resumed) = pending
+            if let Pending::Session {
+                terminal: asked,
+                resumed,
+                ..
+            } = pending
                 && *asked == terminal
             {
                 *pending = Pending::Abandoned(terminal, resumed.take());
@@ -252,10 +334,12 @@ impl Agent {
         self.can_close
     }
 
-    /// Whether a session asked for by [`probe`](Self::probe) is still to
-    /// come.
+    /// Whether a session asked for by [`probe`](Self::probe), or a list
+    /// of sessions, is still to come: work for no chat that still needs
+    /// the agent.
     pub(crate) fn probing(&self) -> bool {
-        (self.pending.values()).any(|pending| matches!(pending, Pending::Probe))
+        (self.pending.values())
+            .any(|pending| matches!(pending, Pending::Probe | Pending::Listing(_)))
     }
 
     /// Sends the chat in `terminal` a message from its user, as `blocks`
@@ -489,12 +573,10 @@ impl Agent {
                 let made = result.get("sessionId").and_then(Value::as_str);
                 made.map(str::to_owned).or(resumed)
             });
-            if let Some(session) = session {
-                incoming.push(Incoming::Late { terminal, session });
-            }
+            incoming.push(Incoming::Late { terminal, session });
             return;
         }
-        if let Pending::Session(..) | Pending::Probe = pending {
+        if let Pending::Session { .. } | Pending::Probe = pending {
             // A resumed session's ID is the one asked for, which the
             // answer leaves out: the chat keeps it.
             let result = result
@@ -511,7 +593,11 @@ impl Agent {
                     message: error.message,
                 });
             incoming.push(match pending {
-                Pending::Session(terminal, _) => Incoming::Session { terminal, result },
+                Pending::Session { terminal, load, .. } => Incoming::Session {
+                    terminal,
+                    result,
+                    loaded: load,
+                },
                 _ => Incoming::Probed { result },
             });
             return;
@@ -527,10 +613,30 @@ impl Agent {
                         .pointer("/agentCapabilities/sessionCapabilities/close")
                         .is_some()
                 });
-                for message in self.held.take().unwrap_or_default() {
+                self.can_load = result.as_ref().is_ok_and(|result| {
+                    (result.pointer("/agentCapabilities/loadSession"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                });
+                let can_list = result.as_ref().is_ok_and(|result| {
+                    (result.pointer("/agentCapabilities/sessionCapabilities/list")).is_some()
+                });
+                self.can_list = Some(can_list);
+                for mut message in self.held.take().unwrap_or_default() {
+                    if !self.can_load && message["method"] == "session/load" {
+                        self.cannot_load(&mut message);
+                    }
+                    if !can_list && message["method"] == "session/list" {
+                        self.cannot_list(&message, incoming);
+                        continue;
+                    }
                     self.peer.send(&message);
                 }
             }
+            Pending::Listing(listing) => incoming.push(Incoming::Listed {
+                listing,
+                result: result.map(|result| listed(&result)),
+            }),
             Pending::Setting(terminal) => incoming.push(Incoming::Settings {
                 terminal,
                 result: result.map(|result| settings(&result).unwrap_or_default()),
@@ -549,7 +655,52 @@ impl Agent {
                 }
                 incoming.push(Incoming::Closed { terminal });
             }
-            Pending::Session(..) | Pending::Probe | Pending::Abandoned(..) | Pending::Ignored => {}
+            Pending::Session { .. }
+            | Pending::Probe
+            | Pending::Abandoned(..)
+            | Pending::Ignored => {}
+        }
+    }
+
+    /// Makes `message`, a request to load a session held back until the
+    /// agent said what it can, a request to resume it instead, as the
+    /// agent can't load one: its answer says the session wasn't told
+    /// again.
+    /// Answers the listing `message` asks for, held back until the agent
+    /// said what it can, as it can't list its sessions: it's never sent.
+    fn cannot_list(&mut self, message: &Value, incoming: &mut Vec<Incoming>) {
+        let Some(id) = message["id"].as_u64() else {
+            return;
+        };
+        if let Some(Pending::Listing(listing)) = self.pending.remove(&id) {
+            incoming.push(Incoming::Listed {
+                listing,
+                result: Err("it can't list the sessions it kept".to_owned()),
+            });
+        }
+    }
+
+    /// Whether the agent can list the sessions it kept, once it has said
+    /// what it can.
+    pub(crate) fn can_list(&self) -> Option<bool> {
+        self.can_list
+    }
+
+    /// Forgets the listing numbered `listing`, given up on: its answer, if
+    /// it comes, goes nowhere.
+    pub(crate) fn forget_listing(&mut self, listing: u64) {
+        for pending in self.pending.values_mut() {
+            if matches!(pending, Pending::Listing(asked) if *asked == listing) {
+                *pending = Pending::Ignored;
+            }
+        }
+    }
+
+    fn cannot_load(&mut self, message: &mut Value) {
+        message["method"] = "session/resume".into();
+        let id = message["id"].as_u64();
+        if let Some(Pending::Session { load, .. }) = id.and_then(|id| self.pending.get_mut(&id)) {
+            *load = false;
         }
     }
 
@@ -569,13 +720,15 @@ impl Agent {
     /// terminals: a session, or the answer to a message.
     pub(crate) fn waiting(&self) -> impl Iterator<Item = TerminalId> + '_ {
         self.pending.values().filter_map(|pending| match pending {
-            Pending::Session(terminal, _)
+            Pending::Session { terminal, .. }
             | Pending::Prompt(terminal)
             | Pending::Setting(terminal)
             | Pending::Closing(terminal) => Some(*terminal),
-            Pending::Initialize | Pending::Probe | Pending::Abandoned(..) | Pending::Ignored => {
-                None
-            }
+            Pending::Initialize
+            | Pending::Probe
+            | Pending::Listing(_)
+            | Pending::Abandoned(..)
+            | Pending::Ignored => None,
         })
     }
 
@@ -661,6 +814,49 @@ fn session_params(cwd: &str, opening: Opening) -> Value {
         params["_meta"] = json!({ "claudeCode": { "options": options } });
     }
     params
+}
+
+/// The sessions an answer to `session/list` lists, newest first, at most
+/// [`MOST_LISTED`]: those it lists without an ID or a directory are left
+/// out.
+fn listed(result: &Value) -> Vec<Listed> {
+    let sessions = result.get("sessions").and_then(Value::as_array);
+    let mut listed: Vec<Listed> = (sessions.into_iter().flatten())
+        .filter_map(|session| {
+            let text = |key: &str| session.get(key).and_then(Value::as_str);
+            let id = text("sessionId").filter(|id| {
+                !id.is_empty() && id.len() <= MOST_ID && !id.contains(char::is_control)
+            })?;
+            let cwd = text("cwd").filter(|cwd| cwd.len() <= MOST_PATH)?;
+            let updated = text("updatedAt").filter(|updated| updated.len() <= 64);
+            Some(Listed {
+                session: id.to_owned(),
+                cwd: cwd.to_owned(),
+                title: one_line(text("title").unwrap_or_default(), MOST_TITLE),
+                updated: updated.map(str::to_owned),
+            })
+        })
+        .collect();
+    // Times in RFC 3339, in UTC, sort as text; in other zones only
+    // nearly, which does for a list.
+    listed.sort_by(|a, b| b.updated.cmp(&a.updated));
+    listed.truncate(MOST_LISTED);
+    listed
+}
+
+/// `text` on one line, its runs of spaces, line breaks and other controls
+/// each one space, and at most `most` characters, cut short with `…`.
+fn one_line(text: &str, most: usize) -> String {
+    let mut line: String = text
+        .split(|ch: char| ch.is_whitespace() || ch.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some((cut, _)) = line.char_indices().nth(most) {
+        line.truncate(cut);
+        line.push('…');
+    }
+    line
 }
 
 /// The settings an answer gives, if it gives any.
