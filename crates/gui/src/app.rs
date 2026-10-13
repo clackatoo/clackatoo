@@ -71,6 +71,31 @@ const SLOW_GPU: Duration = Duration::from_millis(500);
 /// The grid of panes a new window is sized for.
 const INITIAL_GRID: (u16, u16) = (100, 30);
 
+/// The longest wait between tries at connecting again to a daemon on
+/// another machine. Each failed try doubles the wait, from a second.
+const RECONNECT_AT_MOST: Duration = Duration::from_secs(30);
+
+/// How long to wait before connecting again, after `tries` that failed:
+/// a second after the first, doubling, up to [`RECONNECT_AT_MOST`].
+fn reconnect_wait(tries: u32) -> Duration {
+    let doubled = 1_u64 << tries.saturating_sub(1).min(16);
+    Duration::from_secs(doubled).min(RECONNECT_AT_MOST)
+}
+
+/// Connecting again to a daemon on another machine, after the connection
+/// was lost, with the panes kept as they were.
+#[derive(Debug)]
+struct Reconnecting {
+    /// When the connection was lost.
+    since: Instant,
+    /// Tries so far.
+    tries: u32,
+    /// When to try again, after a try failed.
+    retry_at: Option<Instant>,
+    /// Why the connection, or the last try, was lost.
+    reason: String,
+}
+
 /// A GPU device, made on its own thread while the window opens.
 #[derive(Debug)]
 pub(crate) struct Gpu {
@@ -309,6 +334,8 @@ pub(crate) struct App {
     notice: Option<Notice>,
     /// Whether a daemon on another machine is in contact.
     contact: Option<Contact>,
+    /// Connecting again to a daemon on another machine.
+    reconnecting: Option<Reconnecting>,
     /// Whether a frame has shown a terminal, rather than a notice.
     first_frame_drawn: bool,
     /// The input method: whether it's on, which it is while keys type
@@ -355,6 +382,7 @@ impl App {
             // on Wayland, a window that hasn't drawn isn't shown at all.
             notice: Some(Notice::Connecting),
             contact: None,
+            reconnecting: None,
             first_frame_drawn: false,
             ime: InputMethod::default(),
             ime_area: None,
@@ -500,7 +528,7 @@ impl App {
                 menu: self
                     .menu
                     .map(|menu| (menu.at, MENU_ITEMS.map(str::to_owned).to_vec())),
-                alert: self.out_of_contact(),
+                alert: self.reconnecting().or_else(|| self.out_of_contact()),
                 rounded,
                 finder,
             }
@@ -509,6 +537,53 @@ impl App {
         Some(Chrome::new(geometry, contents, &mut |text, bold| {
             fonts.ui_width(text, bold)
         }))
+    }
+
+    /// What the top bar says while connecting again to a daemon on another
+    /// machine: since when, to the second, and why it was lost.
+    fn reconnecting(&self) -> Option<String> {
+        let reconnecting = self.reconnecting.as_ref()?;
+        let host = self.session.location().host().unwrap_or("the daemon");
+        Some(format!(
+            "Reconnecting to {host} ({} s): {}",
+            reconnecting.since.elapsed().as_secs(),
+            reconnecting.reason
+        ))
+    }
+
+    /// Connects again to the daemon on another machine, after the
+    /// connection was lost `why`: at once if it had been working, and
+    /// otherwise, after a try that failed, a while later, longer each time.
+    /// The panes stay as they were meanwhile, and the top bar says so.
+    fn reconnect_later(&mut self, why: String, was_connected: bool) {
+        let now = Instant::now();
+        let reconnecting = self.reconnecting.get_or_insert(Reconnecting {
+            since: now,
+            tries: 0,
+            retry_at: None,
+            reason: String::new(),
+        });
+        reconnecting.reason = why;
+        if was_connected {
+            reconnecting.tries += 1;
+            reconnecting.retry_at = None;
+            self.session.reconnect();
+        } else {
+            let wait = reconnect_wait(reconnecting.tries);
+            log::info!("trying to connect again in {wait:?}");
+            reconnecting.retry_at = Some(now + wait);
+        }
+    }
+
+    /// Tries connecting again, if a try is due.
+    fn retry_if_due(&mut self, now: Instant) {
+        if let Some(reconnecting) = &mut self.reconnecting
+            && reconnecting.retry_at.is_some_and(|at| at <= now)
+        {
+            reconnecting.retry_at = None;
+            reconnecting.tries += 1;
+            self.session.reconnect();
+        }
     }
 
     /// What the top bar says while a daemon on another machine is out of
@@ -925,6 +1000,11 @@ impl App {
             self.notice_key(event_loop, event);
             return;
         }
+        // Nothing typed would reach the daemon, and editors shouldn't
+        // change what they can't send.
+        if self.reconnecting.is_some() {
+            return;
+        }
         let redraw = if is_paste(&event.logical_key, self.modifiers) {
             match paste_text(&mut self.clipboard, Copy::Clipboard) {
                 Ok(text) => self.desk.paste(&text),
@@ -976,6 +1056,9 @@ impl App {
             if let Notice::Ask { input, .. } = notice {
                 input.push(text);
             }
+            return;
+        }
+        if self.reconnecting.is_some() {
             return;
         }
         let key = Key::Character(text.into());
@@ -1934,9 +2017,11 @@ impl ApplicationHandler<SessionEvent> for App {
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if let StartCause::ResumeTimeReached { .. } = cause {
-            if self.desk.format_if_due(Instant::now()) {
+            let now = Instant::now();
+            if self.desk.format_if_due(now) {
                 self.send_outbox();
             }
+            self.retry_if_due(now);
             self.request_redraw();
         }
     }
@@ -1958,12 +2043,19 @@ impl ApplicationHandler<SessionEvent> for App {
         // editor asks its language server once typing pauses, and a chat
         // counts the seconds its agent has been working; otherwise,
         // nothing wakes the window but events.
-        let counting = self
-            .contact
-            .as_ref()
+        let counting = (self.contact.as_ref())
             .and_then(Contact::silent_since)
+            .or(self
+                .reconnecting
+                .as_ref()
+                .map(|reconnecting| reconnecting.since))
             .map(|since| since + Duration::from_secs(since.elapsed().as_secs() + 1));
+        let retry = self
+            .reconnecting
+            .as_ref()
+            .and_then(|reconnecting| reconnecting.retry_at);
         let soonest = (counting.into_iter())
+            .chain(retry)
             .chain(self.desk.flash_ends())
             .chain(self.desk.grep_at())
             .chain(self.desk.format_at())
@@ -2123,6 +2215,13 @@ impl App {
                 contact,
                 daemon_version,
             } => {
+                if let Some(reconnecting) = self.reconnecting.take() {
+                    log::info!(
+                        "connected again after {:.1?}, at try {}",
+                        reconnecting.since.elapsed(),
+                        reconnecting.tries
+                    );
+                }
                 self.notice = None;
                 self.contact = contact;
                 self.sender = Some(sender);
@@ -2155,6 +2254,7 @@ impl App {
             }
             SessionEvent::Contact => self.request_redraw(),
             SessionEvent::OtherDaemon { protocol } => {
+                self.reconnecting = None;
                 self.notice = Some(Notice::OtherDaemon { protocol });
                 self.request_redraw();
             }
@@ -2225,29 +2325,46 @@ impl App {
                     self.request_redraw();
                 }
             }
-            SessionEvent::Lost(reason) => {
-                log::warn!("lost the daemon: {reason}");
-                let was_connected = self.sender.take().is_some();
-                self.desk.lost();
-                self.contact = None;
-                // A daemon still listening has just upgraded, or restarted:
-                // carry on with it. Only once per connection, so one that
-                // keeps hanging up is reported.
-                if was_connected && self.session.daemon_listening() {
-                    self.notice = Some(Notice::Connecting);
-                    self.session.reconnect();
-                } else {
-                    self.notice = Some(Notice::Lost { reason });
-                }
-                self.request_redraw();
-            }
+            SessionEvent::Lost(reason) => self.lost(reason),
         }
+    }
+
+    /// The connection was lost, or a try at making it failed, `why`.
+    fn lost(&mut self, why: String) {
+        log::warn!("lost the daemon: {why}");
+        let was_connected = self.sender.take().is_some();
+        self.desk.lost();
+        self.contact = None;
+        // One on another machine is connected to again and again, keeping
+        // the panes, until it answers: a network can be gone a while. A
+        // daemon here still listening has just upgraded, or restarted:
+        // carry on with it. Only once per connection, so one that keeps
+        // hanging up is reported.
+        let remote = self.session.location().host().is_some();
+        if remote && (was_connected || self.reconnecting.is_some()) {
+            self.reconnect_later(why, was_connected);
+        } else if was_connected && self.session.daemon_listening() {
+            self.notice = Some(Notice::Connecting);
+            self.session.reconnect();
+        } else {
+            self.notice = Some(Notice::Lost { reason: why });
+        }
+        self.request_redraw();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnecting_waits_longer_after_each_try_that_fails_up_to_a_limit() {
+        let waits: Vec<u64> = (1..=8)
+            .map(|tries| reconnect_wait(tries).as_secs())
+            .collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30, 30]);
+        assert_eq!(reconnect_wait(u32::MAX), RECONNECT_AT_MOST);
+    }
 
     #[test]
     fn notices_wrap_between_words_and_keep_lines_that_fit() {
