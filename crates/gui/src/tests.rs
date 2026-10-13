@@ -618,7 +618,7 @@ fn joined_emoji_are_shaped_into_one_glyph() {
 fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
     use clackatoo_protocol::{
         ChatNode, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome, Question, Tool,
-        ToolContent, ToolKind, ToolStatus, Turn, TurnEnd,
+        ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, TurnFilesState,
     };
     let tool = |title: &str, status| {
         Item::Tool(Tool {
@@ -680,12 +680,17 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                     at: 1,
                     outcome: Outcome::Done,
                 }),
+                files: Some(TurnFiles {
+                    count: 2,
+                    state: TurnFilesState::Made,
+                }),
             },
             Turn {
                 prompt: "Turn on vendored and try again".into(),
                 sent: 2,
                 items: vec![edit],
                 end: None,
+                files: None,
             },
         ],
         state: ChatState::Answering,
@@ -961,6 +966,72 @@ fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
     assert_eq!(pane.mode, Mode::Normal);
     press(&mut pane, Key::Character("i".into()), Some("i"));
     assert_eq!(pane.mode, Mode::Insert);
+}
+
+#[test]
+fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
+    use clackatoo_protocol::{
+        ChatAction, ChatNode, ChatState, ClientMessage, Node, Outcome, Request, Turn, TurnEnd,
+        TurnFiles, TurnFilesState, ViewUpdate,
+    };
+    use winit::keyboard::{Key, KeyLocation};
+
+    use crate::input::{KeyPress, Modifiers};
+    use crate::pane::Pane;
+
+    let press = |pane: &mut Pane, ch: &str| {
+        pane.key(&KeyPress {
+            key: &Key::Character(ch.into()),
+            text: Some(ch),
+            location: KeyLocation::Standard,
+            code: None,
+            modifiers: Modifiers::default(),
+        })
+    };
+    let chat = |files: Option<TurnFiles>| {
+        ViewUpdate::Snapshot(View {
+            title: "agent".into(),
+            cwd: None,
+            root: Node::Chat(Box::new(ChatNode {
+                state: ChatState::Ready,
+                turns: vec![Turn {
+                    prompt: "change it".into(),
+                    sent: 0,
+                    items: Vec::new(),
+                    end: Some(TurnEnd {
+                        at: 0,
+                        outcome: Outcome::Done,
+                    }),
+                    files,
+                }],
+                ..ChatNode::default()
+            })),
+        })
+    };
+    let mut pane = Pane::new(TerminalId(3));
+    pane.view_changed(&chat(None));
+    pane.enter_normal_mode();
+    // Nothing to undo: the bar says so, until the next key.
+    assert!(press(&mut pane, "u"));
+    assert_eq!(pane.label().as_deref(), Some("no turn has files to undo"));
+    assert!(pane.take_outbox().is_empty());
+    press(&mut pane, "j");
+    assert_eq!(pane.label(), None);
+
+    let made = TurnFiles {
+        count: 1,
+        state: TurnFilesState::Made,
+    };
+    pane.view_changed(&chat(Some(made)));
+    press(&mut pane, "u");
+    let undo = ClientMessage::Request(Request::Chat {
+        terminal: TerminalId(3),
+        action: ChatAction::Undo {
+            turn: 0,
+            force: false,
+        },
+    });
+    assert!(pane.take_outbox().contains(&undo));
 }
 
 #[test]

@@ -19,8 +19,8 @@ use clackatoo_protocol::{
     Found, FoundBuffer, FoundLine, GitMark, Item, Kind, Layout, Location, NewAgent, NewTerminal,
     OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Query,
     Request, Response, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span,
-    TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, View,
-    ViewUpdate, Workspaces,
+    TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger,
+    TurnFiles, TurnFilesState, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -2557,6 +2557,59 @@ fn a_real_agents_edit_lands_in_the_buffer_open_on_its_file() {
     let snapshot = attach_buffer(&mut daemon.client(), buffer);
     assert_eq!(snapshot.text, "// mine\nalpha\ngamma\n");
     assert!(snapshot.modified);
+}
+
+/// Claude Code's Edit tool, on the cheapest model, changing a file not
+/// open, which the daemon reads as the tool's input names it, before the
+/// tool can write it: so the turn can be undone. Run by hand, as
+/// [`a_real_agent_answers_and_asks_before_running_commands`] is.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agents_edit_to_a_file_not_open_can_be_undone() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with_agent(|_| {
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect()
+    });
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "alpha\nbeta\n").unwrap();
+    let mut chatter = daemon.client();
+    chatter.new_workspace(None, new_chat()).unwrap();
+    let chat = chatter.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(&mut chatter, chat, minute, |node| {
+        node.state == ChatState::Ready
+    });
+    let text =
+        format!("Use your Edit tool to change the word beta to gamma in {path}. Do nothing else.");
+    chatter.chat(chat, ChatAction::Send(text)).unwrap();
+    loop {
+        let node = wait_for_chat_for(&mut chatter, chat, minute, |node| {
+            last_outcome(node).is_some() || node.question.is_some()
+        });
+        let Some(question) = node.question else {
+            break;
+        };
+        let allow = (question.choices.iter())
+            .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::AllowOnce)
+            .expect("a way to say yes");
+        let answer = ChatAction::Answer {
+            question: question.id,
+            option: Some(allow.id.clone()),
+        };
+        chatter.chat(chat, answer).unwrap();
+        wait_for_chat_for(&mut chatter, chat, minute, |node| node.question.is_none());
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
+    let notice = undo_turn(&mut chatter, chat, 0, false, false);
+    assert_eq!(notice, "Undid turn 1: notes.txt.");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\nbeta\n");
 }
 
 /// Codex, through its adapter, which the daemon installs as the chat asks,
@@ -7156,4 +7209,153 @@ fn an_answer_counts_only_for_the_question_it_was_given_for() {
         "run `false` in a new terminal"
     );
     client.chat(chat, ChatAction::Stop).unwrap();
+}
+
+/// Undoes, or with `redo` redoes, turn `turn` of `chat`, and waits for the
+/// chat to say how that went.
+fn undo_turn(client: &mut Client, chat: TerminalId, turn: u32, redo: bool, force: bool) -> String {
+    let action = if redo {
+        ChatAction::Redo { turn, force }
+    } else {
+        ChatAction::Undo { turn, force }
+    };
+    let before = client.capture(chat).unwrap().chat().unwrap().notice.clone();
+    client.chat(chat, action).unwrap();
+    let node = wait_for_chat(client, chat, |node| {
+        node.notice.is_some() && node.notice != before
+    });
+    node.notice.unwrap()
+}
+
+/// What `chat` shows its turn `turn` changed in files.
+fn turn_files(client: &mut Client, chat: TerminalId, turn: usize) -> Option<TurnFiles> {
+    client.capture(chat).unwrap().chat().unwrap().turns[turn].files
+}
+
+#[test]
+fn undoing_a_turn_keeps_your_edits_and_redoing_puts_it_back() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    let said = agent_says(
+        &mut chatter,
+        chat,
+        &format!("write {path}\nONE\ntwo\nthree\n"),
+    );
+    assert_eq!(said, "wrote");
+    let made = TurnFiles {
+        count: 1,
+        state: TurnFilesState::Made,
+    };
+    assert_eq!(turn_files(&mut chatter, chat, 0), Some(made));
+    // Yours, on another line, after the agent's.
+    let version = attach_buffer(&mut daemon.client(), buffer).version;
+    type_in(&mut editor, buffer, 0, insert(14, 8, "3: ", version));
+
+    let notice = undo_turn(&mut chatter, chat, 0, false, false);
+    assert_eq!(notice, "Undid turn 1: notes.txt.");
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(snapshot.text, "one\ntwo\n3: three\n");
+    // The file is undone too, and your edit still isn't saved.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\nthree\n");
+    assert!(snapshot.modified);
+    let state = turn_files(&mut chatter, chat, 0).map(|files| files.state);
+    assert_eq!(state, Some(TurnFilesState::Undone));
+
+    let notice = undo_turn(&mut chatter, chat, 0, true, false);
+    assert_eq!(notice, "Redid turn 1: notes.txt.");
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(snapshot.text, "ONE\ntwo\n3: three\n");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE\ntwo\nthree\n");
+}
+
+#[test]
+fn undoing_a_turn_whose_lines_you_changed_is_refused_and_said() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+    let said = agent_says(&mut chatter, chat, &format!("write {path}\none\nTWO\n"));
+    assert_eq!(said, "wrote");
+    let version = attach_buffer(&mut daemon.client(), buffer).version;
+    type_in(&mut editor, buffer, 0, insert(8, 7, "!", version));
+
+    let notice = undo_turn(&mut chatter, chat, 0, false, false);
+    assert_eq!(
+        notice,
+        "Couldn't undo turn 1, so nothing was: in notes.txt, line 2 has changed since."
+    );
+    assert_eq!(
+        attach_buffer(&mut daemon.client(), buffer).text,
+        "one\nTWO!\n"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\n");
+}
+
+/// Sends `text`, which has the agent ask before it writes a file itself,
+/// allows it, and waits for the turn to end.
+fn allow_edit(client: &mut Client, chat: TerminalId, text: &str) {
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    let node = wait_for_chat(client, chat, |node| node.question.is_some());
+    let question = node.question.unwrap();
+    let answer = ChatAction::Answer {
+        question: question.id,
+        option: Some(question.choices[0].id.clone()),
+    };
+    client.chat(chat, answer).unwrap();
+    wait_for_chat(client, chat, |node| {
+        node.turns.last().is_some_and(|turn| turn.prompt == text) && last_outcome(node).is_some()
+    });
+}
+
+#[test]
+fn files_an_agent_writes_itself_while_closed_are_undone_on_disk_and_made_ones_trashed() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let notes = dir.join("notes.txt");
+    let made = dir.join("made.txt");
+    std::fs::write(&notes, "one\ntwo\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+
+    // As Claude Code in Manual mode: it names the file, asks, then
+    // writes it itself.
+    allow_edit(
+        &mut chatter,
+        chat,
+        &format!("edit {}\none\nTWO\n", notes.display()),
+    );
+    allow_edit(
+        &mut chatter,
+        chat,
+        &format!("edit {}\nnew\n", made.display()),
+    );
+    assert_eq!(std::fs::read_to_string(&made).unwrap(), "new\n");
+    // Something else adds a line, apart from the agent's.
+    std::fs::write(&notes, "zero\none\nTWO\n").unwrap();
+
+    let notice = undo_turn(&mut chatter, chat, 0, false, false);
+    assert_eq!(notice, "Undid turn 1: notes.txt.");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "zero\none\ntwo\n");
+    let notice = undo_turn(&mut chatter, chat, 1, false, false);
+    assert_eq!(notice, "Undid turn 2: made.txt.");
+    assert!(!made.exists());
+    let trashed = dir.join("trash/files/made.txt");
+    assert_eq!(std::fs::read_to_string(trashed).unwrap(), "new\n");
+
+    let notice = undo_turn(&mut chatter, chat, 1, true, false);
+    assert_eq!(notice, "Redid turn 2: made.txt.");
+    assert_eq!(std::fs::read_to_string(&made).unwrap(), "new\n");
 }

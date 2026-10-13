@@ -32,7 +32,7 @@ const NAMES: u32 = 1000;
 
 /// Moves what's at `path` to the trash on its file system, `home` being
 /// the home trash.
-pub(super) fn put(path: &Path, home: Option<&Path>) -> Result<(), FileOpError> {
+pub(crate) fn put(path: &Path, home: Option<&Path>) -> Result<(), FileOpError> {
     let failed = |err: &io::Error| FileOpError::Failed(format!("{}: {err}", path.display()));
     let device = fs::symlink_metadata(path)
         .map_err(|err| failed(&err))?

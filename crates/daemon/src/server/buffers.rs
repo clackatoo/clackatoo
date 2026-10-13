@@ -367,6 +367,10 @@ impl Daemon {
     pub(super) fn close_if_unwanted(&mut self, buffer: BufferId) {
         let unwanted = !self.workspaces.shows(buffer)
             && (self.buffers.get(&buffer)).is_some_and(|slot| !slot.buffer.modified());
+        if unwanted {
+            // What agents changed in it outlives it, in the log.
+            self.buffer_closing(buffer);
+        }
         if unwanted && let Some(slot) = self.buffers.remove(&buffer) {
             log::info!("buffer {buffer} closed: {}", slot.buffer.path().display());
             if let Some(syntax) = &self.syntax

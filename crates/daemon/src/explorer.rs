@@ -32,6 +32,8 @@ mod mounts;
 mod ops;
 mod trash;
 
+pub(crate) use trash::put as trash;
+
 /// The most a directory's listing holds: far more than anyone scrolls
 /// through, but short of all of a directory of millions.
 pub(crate) const MAX_ENTRIES: usize = 100_000;

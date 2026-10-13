@@ -16,7 +16,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    ClientMessage, CursorShape, Match, Request, Response, Size, TerminalId, ViewUpdate,
+    ChatAction, ClientMessage, CursorShape, Match, Request, Response, Size, TerminalId, ViewUpdate,
 };
 use clackatoo_term::{Row, RowBuilder};
 use winit::keyboard::{Key, KeyCode, NamedKey};
@@ -203,6 +203,38 @@ impl Pane {
         self.chat.is_some()
     }
 
+    /// Asks the daemon to undo what turn `turn` of the chat the pane shows
+    /// changed in files, or with `redo` to make it again: or, with no
+    /// turn, the last that can be undone, or the first that can be
+    /// redone, as `u` and Ctrl+R do. `force` does what can be done though
+    /// some files can't be. Says why not, if it can't be asked.
+    pub(crate) fn undo_turn(
+        &mut self,
+        turn: Option<usize>,
+        redo: bool,
+        force: bool,
+    ) -> Result<(), String> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or("that's for a chat with an agent")?;
+        let undo = if redo { "redo" } else { "undo" };
+        let turn = match turn {
+            Some(turn) if turn < chat.node.turns.len() => turn,
+            Some(turn) => return Err(format!("there's no turn {}", turn + 1)),
+            None => (chat.turn_to_undo(redo)).ok_or(format!("no turn has files to {undo}"))?,
+        };
+        let turn = u32::try_from(turn).unwrap_or(u32::MAX);
+        let action = if redo {
+            ChatAction::Redo { turn, force }
+        } else {
+            ChatAction::Undo { turn, force }
+        };
+        let terminal = self.terminal;
+        self.request(Request::Chat { terminal, action }, Pending::Other);
+        Ok(())
+    }
+
     /// The title its program set, or its chat has.
     pub(crate) fn title(&self) -> Option<&str> {
         match (&self.screen, &self.chat) {
@@ -290,11 +322,13 @@ impl Pane {
             return true;
         }
         let prefix = self.prefix.take();
+        // What the window said of the chat lasts until the next key.
+        let unsaid = chat.unsay();
         let character = match press.key {
             Key::Character(text) => text.chars().next(),
             _ => None,
         };
-        match (modifiers.ctrl, character, press.key) {
+        let redraw = match (modifiers.ctrl, character, press.key) {
             (false, Some('i' | 'a' | 'I' | 'A' | 'o'), _)
             | (false, _, Key::Named(NamedKey::Enter)) => {
                 self.mode = Mode::Insert;
@@ -320,8 +354,17 @@ impl Pane {
                 false
             }
             (false, Some('G'), _) => chat.scroll_to_end(true),
+            // What the last turn changed in files, undone, as Vim's `u`
+            // undoes, and made again, as its Ctrl+R redoes.
+            (false, Some('u'), _) | (true, Some('r'), _) => {
+                let Err(why) = self.undo_turn(None, modifiers.ctrl, false) else {
+                    return unsaid;
+                };
+                self.chat.as_mut().is_some_and(|chat| chat.say(why))
+            }
             _ => false,
-        }
+        };
+        redraw || unsaid
     }
 
     /// Whether a search is being typed, which takes every key.

@@ -57,6 +57,7 @@ mod agent_files;
 mod buffers;
 mod chats;
 mod clipboard;
+mod edit_log;
 mod explorers;
 mod finder;
 mod language;
@@ -65,6 +66,7 @@ mod pieces;
 mod rename;
 mod signs;
 mod tools;
+mod turn_undo;
 
 use buffers::BufferSlot;
 use chats::AgentId;
@@ -200,6 +202,10 @@ impl Hosted {
             Self::Chat(chat) => Some(chat),
             Self::Pty(_) => None,
         }
+    }
+
+    fn is_chat(&self) -> bool {
+        matches!(self, Self::Chat(_))
     }
 }
 
@@ -586,6 +592,7 @@ impl Daemon {
         let chats = std::mem::take(&mut handover.state.chats);
         let buffers = std::mem::take(&mut handover.state.buffers);
         let explorers = std::mem::take(&mut handover.state.explorers);
+        let edits = std::mem::take(&mut handover.state.edits);
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
@@ -618,6 +625,8 @@ impl Daemon {
             daemon.parse_buffer(id);
         }
         daemon.resume_files(state.next_files, explorers);
+        daemon.agent_files.log = edit_log::EditLog::resume(edits);
+        daemon.refresh_all_files();
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
                 Ok(orphan) => daemon.watch_orphan(orphan),
@@ -698,6 +707,7 @@ impl Daemon {
                     .collect(),
                 next_files,
                 explorers,
+                edits: self.agent_files.log.hand_over(),
             },
             fds,
         })
@@ -1827,6 +1837,13 @@ impl Daemon {
             .get_mut(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
         let chat = slot.terminal.chat().ok_or(Error::NotAChat(id))?;
+        // Undoing is about files, so the daemon's, not the agent's.
+        if let ChatAction::Undo { turn, force } | ChatAction::Redo { turn, force } = action {
+            let redo = matches!(action, ChatAction::Redo { .. });
+            let turn = usize::try_from(turn).unwrap_or(usize::MAX);
+            self.undo_turn(id, turn, redo, force);
+            return Ok(());
+        }
         let actions = chat.act(action);
         self.act(id, actions);
         self.collect_damage(id);

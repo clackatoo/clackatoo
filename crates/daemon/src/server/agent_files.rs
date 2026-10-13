@@ -28,19 +28,25 @@
 //! written over the file unless forced, and you're told.
 //!
 //! Every change is noted in the [`EditLog`], by chat, turn and tool call,
-//! for checkpoints, review and the provenance of each line to build on.
+//! so a turn can be undone (see `turn_undo`). For a file not open that an
+//! agent writes itself, the daemon needs its text from before: it reads
+//! the file as soon as a tool that's running names it, which with Claude
+//! Code's adapter is as the tool's input streams in, before it can run,
+//! and takes that text only if the tool's own changes make of it what's
+//! on disk once the tool's done.
 
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use clackatoo_protocol::{Author, BufferId, BufferUpdate, TerminalId};
-use clackatoo_text::{Edit, Op, Rope};
+use clackatoo_text::Rope;
 use serde_json::{Value, json};
 
 use super::Daemon;
 use super::buffers::resolve;
 use super::chats::AgentId;
+use super::edit_log::{EditLog, Maker, edit_bytes};
 use crate::agent::{FAILED, NOT_FOUND};
 use crate::buffer::{self, Buffer, Made, Refused};
 use crate::chat::{RawDiff, Wrote};
@@ -54,12 +60,10 @@ const READS: usize = 256;
 /// bytes, counting each file whole, though a buffer's shares its text.
 const READ_BYTES: usize = 64 * 1024 * 1024;
 
-/// How many changes the [`EditLog`] keeps, at most.
-const LOG_CHANGES: usize = 4096;
-
-/// How much text the [`EditLog`] keeps, at most, in bytes put in and
-/// taken away: past it, the oldest changes go.
-const LOG_BYTES: usize = 16 * 1024 * 1024;
+/// How much text of files not open is read before the agent's tools
+/// change them, at most, in bytes. A file that would go past it isn't
+/// read, and what the tool does to it can't be undone.
+const CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 
 /// What the daemon knows of agents' files.
 #[derive(Debug, Default)]
@@ -67,9 +71,12 @@ pub(super) struct AgentFiles {
     /// The text of each file as an agent last read or wrote it, newest
     /// last.
     reads: VecDeque<Read>,
-    /// What agents' tools said they changed in files open in buffers, not
-    /// yet taken into them.
+    /// What agents' tools said they changed in files, not yet taken into
+    /// buffers or the log.
     reports: Vec<Report>,
+    /// The text of files not open, as the turns' tools are about to change
+    /// them.
+    pub(super) captures: Vec<Capture>,
     pub(super) log: EditLog,
 }
 
@@ -79,6 +86,29 @@ struct Read {
     chat: TerminalId,
     path: PathBuf,
     text: Rope,
+}
+
+/// A file not open, as it was before the tools of the turn the agent in
+/// `chat` is answering changed it, or as they last left it, as far as is
+/// known.
+#[derive(Debug)]
+pub(super) struct Capture {
+    chat: TerminalId,
+    path: PathBuf,
+    pub(super) text: Seen,
+}
+
+/// What a file not open was found to hold.
+#[derive(Clone, Debug)]
+pub(super) enum Seen {
+    /// This text.
+    Text(String),
+    /// Nothing: there was no file.
+    Absent,
+    /// It couldn't be read: it isn't a regular file, or is too big, or
+    /// reading it failed. It isn't read again, and what the turn does to
+    /// it isn't known.
+    Unreadable,
 }
 
 impl AgentFiles {
@@ -110,120 +140,58 @@ impl AgentFiles {
         });
     }
 
-    /// Forgets what the agent in `chat` read, as the chat has closed. What
-    /// it changed stays in the log.
+    /// Forgets what the agent in `chat` read and changed, as the chat has
+    /// closed: nothing can undo its turns now.
     pub(super) fn forget(&mut self, chat: TerminalId) {
         self.reads.retain(|read| read.chat != chat);
         self.reports.retain(|report| report.chat != chat);
+        self.captures.retain(|capture| capture.chat != chat);
+        self.log.forget(chat);
     }
-}
 
-/// Every change agents have made to files, oldest first, as far back as
-/// it reaches.
-#[derive(Debug, Default)]
-pub(super) struct EditLog {
-    changes: VecDeque<AgentChange>,
-    /// The bytes of text the changes keep.
-    bytes: usize,
-}
-
-/// A change an agent made to a file.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct AgentChange {
-    /// The chat whose agent made it.
-    pub(super) chat: TerminalId,
-    /// The turn of the chat it was made in, counting from 0.
-    pub(super) turn: usize,
-    /// The tool call that made it, if the agent said.
-    pub(super) tool: Option<String>,
-    /// The file, by its real path.
-    pub(super) path: PathBuf,
-    /// What it did to the file, if the daemon saw: not for a file not open
-    /// that the agent wrote itself.
-    pub(super) edit: Option<LoggedEdit>,
-}
-
-/// What a change did to a file's text.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct LoggedEdit {
-    /// The version of the buffer it made, if the file was open: the edit
-    /// is to the version before. For a file not open, it's to the file's
-    /// text as it was.
-    pub(super) version: Option<u64>,
-    /// The edit. It keeps the text it takes away, so [`inverse`] undoes
-    /// it without the text it was made to.
-    ///
-    /// [`inverse`]: Self::inverse
-    pub(super) edit: Edit,
-}
-
-impl LoggedEdit {
-    /// The edit that undoes it, made to the text it made.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "for checkpoints and review to use (CLACKA-7)")
-    )]
-    pub(super) fn inverse(&self) -> Edit {
-        self.edit.invert()
-    }
-}
-
-impl EditLog {
-    /// Notes `change`, letting the oldest go past the log's bounds.
-    fn push(&mut self, change: AgentChange) {
-        self.bytes += size(&change);
-        self.changes.push_back(change);
-        while self.changes.len() > LOG_CHANGES || self.bytes > LOG_BYTES {
-            let Some(old) = self.changes.pop_front() else {
-                break;
-            };
-            self.bytes -= size(&old);
+    /// Reads the file `path`, not open, as a tool of the agent in `chat`
+    /// is about to change it, unless it has been already this turn.
+    fn capture(&mut self, chat: TerminalId, path: &Path) {
+        if (self.captures.iter()).any(|capture| capture.chat == chat && capture.path == path) {
+            return;
         }
-    }
-
-    /// The changes kept, oldest first.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "for checkpoints and review to read (CLACKA-7)")
-    )]
-    pub(super) fn changes(&self) -> impl Iterator<Item = &AgentChange> {
-        self.changes.iter()
-    }
-
-    /// Whether the agent in `chat` last changed `path` in tool call `tool`
-    /// of turn `turn`, so another change there joins its undo step.
-    fn continues(&self, chat: TerminalId, path: &Path, turn: usize, tool: Option<&str>) -> bool {
-        tool.is_some()
-            && (self.changes.iter().rev())
-                .find(|change| change.chat == chat && change.path == path)
-                .is_some_and(|change| change.turn == turn && change.tool.as_deref() == tool)
+        let kept: usize = (self.captures.iter())
+            .map(|capture| match &capture.text {
+                Seen::Text(text) => text.len(),
+                Seen::Absent | Seen::Unreadable => 0,
+            })
+            .sum();
+        let not_found = |err: &std::io::Error| err.kind() == std::io::ErrorKind::NotFound;
+        // Its size first, so a big file or a device isn't read at all.
+        let text = match std::fs::metadata(path) {
+            Err(err) if not_found(&err) => Seen::Absent,
+            Ok(metadata)
+                if metadata.is_file()
+                    && kept
+                        .saturating_add(usize::try_from(metadata.len()).unwrap_or(usize::MAX))
+                        <= CAPTURE_BYTES =>
+            {
+                match buffer::read(path) {
+                    Ok((text, _)) => Seen::Text(buffer::lf(text)),
+                    Err(err) if not_found(&err) => Seen::Absent,
+                    Err(err) => {
+                        log::debug!("{}: {err}", path.display());
+                        Seen::Unreadable
+                    }
+                }
+            }
+            Ok(_) | Err(_) => Seen::Unreadable,
+        };
+        self.captures.push(Capture {
+            chat,
+            path: path.to_owned(),
+            text,
+        });
     }
 }
 
-/// The bytes of text `change` keeps.
-fn size(change: &AgentChange) -> usize {
-    let ops = change
-        .edit
-        .as_ref()
-        .map_or(&[][..], |logged| logged.edit.ops());
-    (ops.iter())
-        .map(|op| match op {
-            Op::Retain(_) => 0,
-            Op::Insert(text) | Op::Delete(text) => text.len(),
-        })
-        .sum()
-}
-
-/// Where a change is being made from: which chat's agent, in which turn
-/// and tool call.
-struct Maker {
-    chat: TerminalId,
-    turn: usize,
-    tool: Option<String>,
-}
-
-/// What a tool of an agent said it changed in a file open in a buffer,
-/// waiting for the file to be checked against it.
+/// What a tool of an agent said it changed in a file, waiting for the file
+/// to be checked against it.
 #[derive(Debug)]
 struct Report {
     chat: TerminalId,
@@ -322,11 +290,12 @@ impl Daemon {
         if let Some(id) = self.buffer_of(&path) {
             let slot = self.buffers.get_mut(&id).expect("the buffer just found");
             let base = read.unwrap_or_else(|| slot.buffer.saved().to_string());
+            let existed = slot.buffer.disk().is_some();
             let made = (slot.buffer)
                 .write_merged(&base, &content, author, step)
                 .map_err(|err| refused(err, &base))?;
             // Its server hears of the edit before that the file's saved.
-            self.landed(id, &maker, &path, made);
+            self.landed(id, &maker, &path, made, existed);
             self.saved_in_server(id);
         } else {
             // A file not open is changed as a buffer opened for the moment,
@@ -341,21 +310,13 @@ impl Daemon {
             let mut file =
                 Buffer::open(path.clone(), dir).map_err(|err| (FAILED, err.to_string()))?;
             let base = read.unwrap_or_else(|| file.saved().to_string());
-            let made = file
-                .write_merged(&base, &content, author, true)
+            let before = file.disk().is_some().then(|| file.saved().to_string());
+            file.write_merged(&base, &content, author, true)
                 .map_err(|err| refused(err, &base))?;
-            if let Some(made) = made {
-                self.agent_files.log.push(AgentChange {
-                    chat,
-                    turn,
-                    tool: maker.tool.clone(),
-                    path: path.clone(),
-                    edit: Some(LoggedEdit {
-                        version: None,
-                        edit: made.edit,
-                    }),
-                });
-            }
+            let after = file.saved().to_string();
+            let dropped =
+                (self.agent_files.log).note_text(&maker, &path, before.as_deref(), Some(&after));
+            self.refresh_files(chat, dropped.into_iter().chain([turn]));
         }
         self.agent_files
             .remember(chat, &path, Rope::from_str(&content));
@@ -364,7 +325,9 @@ impl Daemon {
 
     /// Takes what a tool of the agent in `chat` wrote to files itself into
     /// the buffers open for them, once each file is found to be what the
-    /// tool says it made it.
+    /// tool says it made it, and into the log. A tool still running names
+    /// files it's about to change: those not open are read, so what it
+    /// does to them can be undone.
     pub(super) fn take_written(&mut self, chat: TerminalId, wrote: &Wrote) {
         let Some(cwd) = (self.chat(chat)).map(|chat| PathBuf::from(chat.working_directory()))
         else {
@@ -373,21 +336,13 @@ impl Daemon {
         let home = self.config.home.clone();
         for path in &wrote.paths {
             let path = resolve(path, &cwd, &home);
-            let Some(id) = self.buffer_of(&path) else {
-                // Not open: noted, though what changed wasn't seen, once
-                // however often the agent says so.
-                let tool = Some(wrote.tool.as_str());
-                if !(self.agent_files.log).continues(chat, &path, wrote.turn, tool) {
-                    self.agent_files.log.push(AgentChange {
-                        chat,
-                        turn: wrote.turn,
-                        tool: Some(wrote.tool.clone()),
-                        path,
-                        edit: None,
-                    });
+            let open = self.buffer_of(&path);
+            if !wrote.done {
+                if open.is_none() {
+                    self.agent_files.capture(chat, &path);
                 }
                 continue;
-            };
+            }
             let diffs: Vec<RawDiff> = (wrote.diffs.iter())
                 .filter(|diff| resolve(&diff.path, &cwd, &home) == path)
                 .cloned()
@@ -408,27 +363,44 @@ impl Daemon {
                     diffs,
                 }),
             }
-            self.settle(chat, &path, id, false);
+            match open {
+                Some(id) => self.settle(chat, &path, id, false),
+                None => self.settle_closed(chat, &path, false),
+            }
         }
     }
 
     /// The agent in `chat` has finished answering: a file it changed that
     /// isn't what its tools said they made it was changed by something
-    /// else too, and the buffer open on it is told so.
+    /// else too, and the buffer open on it is told so. A file not open
+    /// whose text before its tools isn't known is noted so, as what they
+    /// did to it can't be undone.
     pub(super) fn settle_turn(&mut self, chat: TerminalId) {
         let mut paths: Vec<PathBuf> = (self.agent_files.reports.iter())
             .filter(|report| report.chat == chat)
             .map(|report| report.path.clone())
             .collect();
+        paths.sort();
         paths.dedup();
         for path in paths {
-            if let Some(id) = self.buffer_of(&path) {
-                self.settle(chat, &path, id, true);
+            match self.buffer_of(&path) {
+                Some(id) => self.settle(chat, &path, id, true),
+                None => self.settle_closed(chat, &path, true),
             }
         }
-        self.agent_files
-            .reports
-            .retain(|report| report.chat != chat);
+        let files = &mut self.agent_files;
+        files.reports.retain(|report| report.chat != chat);
+        files.captures.retain(|capture| capture.chat != chat);
+    }
+
+    /// The reports of the tools of the agent in `chat` about `path`, in
+    /// the order the agent made the changes.
+    fn reports_of(&self, chat: TerminalId, path: &Path) -> Vec<&Report> {
+        let mut reports: Vec<&Report> = (self.agent_files.reports.iter())
+            .filter(|report| report.chat == chat && report.path == path)
+            .collect();
+        reports.sort_by_key(|report| (report.turn, report.order));
+        reports
     }
 
     /// Checks buffer `id`'s file, `path`, against what the tools of the
@@ -451,10 +423,8 @@ impl Daemon {
                 return forget(&mut self.agent_files);
             }
         };
-        let mut reports: Vec<&Report> = (self.agent_files.reports.iter())
-            .filter(|report| report.chat == chat && report.path == path)
-            .collect();
-        reports.sort_by_key(|report| (report.turn, report.order));
+        let existed = buffer.disk().is_some();
+        let reports = self.reports_of(chat, path);
         // Each report's own changes, in the order the agent made them.
         let mut text = buffer.saved().to_string();
         let mut steps = Vec::with_capacity(reports.len());
@@ -488,13 +458,93 @@ impl Daemon {
         {
             Ok(made) => {
                 for (made, maker) in made.into_iter().zip(&makers) {
-                    self.landed(id, maker, path, made);
+                    self.landed(id, maker, path, made, existed);
                 }
                 self.note_modified(id);
                 self.saved_in_server(id);
             }
             Err(Refused::Conflict(_)) => self.tell_of_change(chat, id, path, true),
             Err(Refused::Failed(err)) => log::warn!("buffer {id}: {err}"),
+        }
+    }
+
+    /// Checks the file `path`, not open, against what the tools of the
+    /// agent in `chat` said they changed in it, and the text it had before
+    /// them, if that was read. If their changes, made in turn to that
+    /// text, make the file's, the change is noted in the log, and the
+    /// file's text is the one the next changes are made to. Otherwise,
+    /// with `last`, as the agent's turn ends, the change is noted as not
+    /// known; without, more may yet be said.
+    fn settle_closed(&mut self, chat: TerminalId, path: &Path, last: bool) {
+        let reports = self.reports_of(chat, path);
+        let Some(first) = reports.first() else {
+            return;
+        };
+        let maker = Maker {
+            chat,
+            turn: first.turn,
+            tool: reports.last().map(|report| report.tool.clone()),
+        };
+        let before = (self.agent_files.captures.iter())
+            .find(|capture| capture.chat == chat && capture.path == path)
+            .and_then(|capture| match &capture.text {
+                Seen::Text(text) => Some(Some(text.clone())),
+                Seen::Absent => Some(None),
+                Seen::Unreadable => None,
+            });
+        let disk = match buffer::read(path) {
+            Ok((text, _)) => Some(buffer::lf(text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            // Not to be taken for gone: if it can't be read by the turn's
+            // end, what was done to it isn't known.
+            Err(err) => {
+                log::warn!("{}: {err}", path.display());
+                if last {
+                    (self.agent_files.reports)
+                        .retain(|report| report.chat != chat || report.path != path);
+                    self.agent_files.log.note_unknown(&maker, path);
+                    self.refresh_files(chat, [maker.turn]);
+                }
+                return;
+            }
+        };
+        // What the tools' changes make of the text before: a file deleted
+        // by tools that show no changes is gone.
+        let made = before.as_ref().and_then(|before| {
+            if disk.is_none() && before.is_some() && reports.iter().all(|r| r.diffs.is_empty()) {
+                return Some(None);
+            }
+            let mut text = before.clone().unwrap_or_default();
+            for report in &reports {
+                text = apply(&text, &report.diffs)?;
+            }
+            Some(Some(text))
+        });
+        let forget = |files: &mut AgentFiles| {
+            (files.reports).retain(|report| report.chat != chat || report.path != path);
+        };
+        match (before, made) {
+            (Some(before), Some(made)) if made == disk => {
+                forget(&mut self.agent_files);
+                let dropped = (self.agent_files.log).note_text(
+                    &maker,
+                    path,
+                    before.as_deref(),
+                    disk.as_deref(),
+                );
+                if let Some(capture) = (self.agent_files.captures.iter_mut())
+                    .find(|capture| capture.chat == chat && capture.path == path)
+                {
+                    capture.text = disk.map_or(Seen::Absent, Seen::Text);
+                }
+                self.refresh_files(chat, dropped.into_iter().chain([maker.turn]));
+            }
+            _ if last => {
+                forget(&mut self.agent_files);
+                self.agent_files.log.note_unknown(&maker, path);
+                self.refresh_files(chat, [maker.turn]);
+            }
+            _ => {}
         }
     }
 
@@ -530,24 +580,25 @@ impl Daemon {
     }
 
     /// Passes on the edit an agent's change made to buffer `id`, if it
-    /// made one, and notes it in the log.
-    fn landed(&mut self, id: BufferId, maker: &Maker, path: &Path, made: Option<Made>) {
+    /// made one, and notes it in the log. `existed` says whether the file
+    /// was there before.
+    fn landed(
+        &mut self,
+        id: BufferId,
+        maker: &Maker,
+        path: &Path,
+        made: Option<Made>,
+        existed: bool,
+    ) {
         let Some(made) = made else {
             // The file may have been written all the same.
             self.note_modified(id);
             return;
         };
-        self.agent_files.log.push(AgentChange {
-            chat: maker.chat,
-            turn: maker.turn,
-            tool: maker.tool.clone(),
-            path: path.to_owned(),
-            edit: Some(LoggedEdit {
-                version: Some(made.version),
-                edit: made.edit.clone(),
-            }),
-        });
+        let change = (id, made.version, edit_bytes(&made.edit));
+        let dropped = (self.agent_files.log).note_buffer(maker, path, change, existed);
         self.made_by(id, made, Author::Agent(maker.chat));
+        self.refresh_files(maker.chat, dropped.into_iter().chain([maker.turn]));
     }
 
     /// The chat with `session`, and `path` as a buffer's path would be,
@@ -637,7 +688,7 @@ fn apply(text: &str, diffs: &[RawDiff]) -> Option<String> {
 
 /// The lines `ranges` of bytes of `text` are on, counting from 1, as
 /// "line 3" or "lines 3–5", for the agent to read.
-fn line_numbers(text: &str, ranges: &[Range<usize>]) -> String {
+pub(super) fn line_numbers(text: &str, ranges: &[Range<usize>]) -> String {
     let line =
         |at: usize| memchr::memchr_iter(b'\n', &text.as_bytes()[..at.min(text.len())]).count() + 1;
     let named: Vec<String> = (ranges.iter())
@@ -666,17 +717,19 @@ fn lines(text: &Rope, line: Option<u32>, limit: Option<u32>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use clackatoo_protocol::{ChatAction, OpenFile, Size};
+    use clackatoo_text::Edit;
 
     use super::*;
     use crate::DaemonConfig;
     use crate::agent::Opened;
     use crate::chat::HostedChat;
+    use crate::server::edit_log::Change;
 
     /// A daemon in `dir`, not running, with a chat in it whose session is
     /// `s1`, answering a message.
-    fn daemon_with_chat(dir: &Path) -> (Daemon, TerminalId) {
+    pub(in crate::server) fn daemon_with_chat(dir: &Path) -> (Daemon, TerminalId) {
         let config = DaemonConfig {
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
@@ -691,7 +744,7 @@ mod tests {
             server_idle: std::time::Duration::ZERO,
             prompt_wait: crate::DEFAULT_PROMPT_WAIT,
             rename_gate: None,
-            trash: None,
+            trash: Some(dir.join("Trash")),
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let id = TerminalId(1);
@@ -709,7 +762,7 @@ mod tests {
     }
 
     /// Has the chat's agent start tool call `tool`.
-    fn start_tool(daemon: &mut Daemon, chat: TerminalId, tool: &str) {
+    pub(in crate::server) fn start_tool(daemon: &mut Daemon, chat: TerminalId, tool: &str) {
         let update = serde_json::from_value(json!({
             "sessionUpdate": "tool_call", "toolCallId": tool, "title": "Edit",
             "kind": "edit", "status": "in_progress",
@@ -763,33 +816,20 @@ mod tests {
         );
         assert_eq!(text(&daemon), "ONE\nTWO\nthree\nfour\n");
 
-        let logged: Vec<_> = (daemon.agent_files.log.changes())
-            .map(|change| {
-                let edit = change.edit.as_ref().unwrap();
-                (
-                    change.chat,
-                    change.turn,
-                    change.tool.as_deref(),
-                    edit.version,
-                )
+        let file = &daemon.agent_files.log.turn(chat, 0).unwrap().files[0];
+        assert_eq!(
+            (file.path.as_path(), file.tool.as_deref()),
+            (path.as_path(), Some("t2"))
+        );
+        let versions: Vec<_> = (file.changes.iter())
+            .map(|change| match change {
+                Change::Buffer {
+                    buffer, version, ..
+                } => (*buffer, *version),
+                Change::Text { .. } => panic!("the file is open"),
             })
             .collect();
-        assert_eq!(
-            logged,
-            [
-                (chat, 0, Some("t1"), Some(2)),
-                (chat, 0, Some("t1"), Some(3)),
-                (chat, 0, Some("t2"), Some(4)),
-            ]
-        );
-        let first = daemon.agent_files.log.changes().next().unwrap();
-        assert_eq!(first.path, path);
-        let edit = first.edit.as_ref().unwrap();
-        assert_eq!(edit.edit.changes().collect::<Vec<_>>(), [(0, "one", "ONE")]);
-        assert_eq!(
-            edit.inverse().apply_to("ONE\ntwo\nthree\n").unwrap(),
-            "one\ntwo\nthree\n"
-        );
+        assert_eq!(versions, [(id, 2), (id, 3), (id, 4)]);
 
         // Undoing the agent takes back one tool call at a time, and leaves
         // yours.
@@ -818,6 +858,7 @@ mod tests {
         // Two tools change the file, and the second says so first.
         std::fs::write(&path, "ONE\nTWO\n").unwrap();
         let wrote = |tool: &str, order, old: &str, new: &str| Wrote {
+            done: true,
             turn: 0,
             tool: tool.into(),
             order,
@@ -832,22 +873,14 @@ mod tests {
         assert_eq!(daemon.buffers[&id].buffer.text().to_string(), "one\ntwo\n");
         daemon.take_written(chat, &wrote("t1", 0, "one", "ONE"));
         assert_eq!(daemon.buffers[&id].buffer.text().to_string(), "ONE\nTWO\n");
-        let logged: Vec<_> = (daemon.agent_files.log.changes())
-            .map(|change| {
-                let edit = &change.edit.as_ref().unwrap().edit;
-                (
-                    change.tool.as_deref(),
-                    edit.changes().next().map(|(_, old, _)| old.to_owned()),
-                )
-            })
-            .collect();
-        assert_eq!(
-            logged,
+        let changes = &daemon.agent_files.log.turn(chat, 0).unwrap().files[0].changes;
+        assert!(matches!(
+            changes[..],
             [
-                (Some("t1"), Some("one".to_owned())),
-                (Some("t2"), Some("two".to_owned()))
+                Change::Buffer { version: 1, .. },
+                Change::Buffer { version: 2, .. }
             ]
-        );
+        ));
         // Each its own step.
         let buffer = &mut daemon.buffers.get_mut(&id).unwrap().buffer;
         buffer.reverse(Author::Agent(chat), false).unwrap().unwrap();
@@ -902,58 +935,5 @@ mod tests {
         assert_eq!(lines(&text, Some(2), Some(1)), "two\n");
         assert_eq!(lines(&text, Some(9), Some(1)), "");
         assert_eq!(lines(&text, Some(0), Some(1)), "one\n");
-    }
-
-    fn change(chat: u32, tool: &str, inserted: &str) -> AgentChange {
-        let mut edit = Edit::new();
-        edit.insert(inserted);
-        AgentChange {
-            chat: TerminalId(chat),
-            turn: 0,
-            tool: Some(tool.to_owned()),
-            path: PathBuf::from("/a"),
-            edit: Some(LoggedEdit {
-                version: Some(1),
-                edit,
-            }),
-        }
-    }
-
-    #[test]
-    fn the_log_lets_its_oldest_changes_go_past_its_bounds() {
-        let mut log = EditLog::default();
-        for _ in 0..=LOG_CHANGES {
-            log.push(change(1, "t", "x"));
-        }
-        assert_eq!(log.changes().count(), LOG_CHANGES);
-        assert_eq!(log.bytes, LOG_CHANGES);
-        // A change bigger than the log can hold leaves only itself.
-        log.push(change(1, "t", &"y".repeat(LOG_BYTES + 1)));
-        assert_eq!(log.changes().count(), 0);
-        assert_eq!(log.bytes, 0);
-    }
-
-    #[test]
-    fn a_change_in_the_same_tool_call_continues_its_step() {
-        let mut log = EditLog::default();
-        let a = Path::new("/a");
-        assert!(!log.continues(TerminalId(1), a, 0, Some("t1")));
-        log.push(change(1, "t1", "x"));
-        assert!(log.continues(TerminalId(1), a, 0, Some("t1")));
-        assert!(!log.continues(TerminalId(1), a, 0, Some("t2")));
-        assert!(!log.continues(TerminalId(1), a, 1, Some("t1")));
-        assert!(!log.continues(TerminalId(2), a, 0, Some("t1")));
-        assert!(!log.continues(TerminalId(1), Path::new("/b"), 0, Some("t1")));
-        // A write in no tool call is a step of its own.
-        assert!(!log.continues(TerminalId(1), a, 0, None));
-        let inverse = log
-            .changes()
-            .next()
-            .unwrap()
-            .edit
-            .as_ref()
-            .unwrap()
-            .inverse();
-        assert_eq!(inverse.apply_to("x").unwrap(), "");
     }
 }

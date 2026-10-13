@@ -399,7 +399,7 @@ pub(super) fn draw_card(
 
 /// Where rectangles `a` and `b` overlap: nothing wide or high, if they
 /// don't.
-fn intersection(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+pub(super) fn intersection(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     let (left, top) = (a[0].max(b[0]), a[1].max(b[1]));
     let right = (a[0] + a[2]).min(b[0] + b[2]);
     let bottom = (a[1] + a[3]).min(b[1] + b[3]);

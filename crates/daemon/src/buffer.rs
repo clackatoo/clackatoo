@@ -250,6 +250,27 @@ impl Buffer {
     /// unless something else has changed the file since it was read or
     /// last written and not `force`.
     fn write_out(&mut self, text: Rope, force: bool) -> Result<(), Error> {
+        let staged = self.stage(&text, force)?;
+        let failed = |err: io::Error| Error::SaveFailed {
+            path: self.path.display().to_string(),
+            reason: err.to_string(),
+        };
+        // Again, just before it's put in place: something may have written
+        // the file while the new text was being synced. Dropped, the new
+        // file is removed.
+        if !force && DiskStamp::now(&self.path).map_err(failed)? != self.disk {
+            return Err(Error::ChangedOnDisk(self.path.display().to_string()));
+        }
+        let stamp = staged.commit().map_err(failed)?;
+        self.written(text, Some(stamp));
+        Ok(())
+    }
+
+    /// Writes `text` beside the file, to be put in its place, unless
+    /// something else has changed the file since it was read or last
+    /// written and not `force`. Once it is, [`written`](Self::written)
+    /// says so.
+    pub(crate) fn stage(&self, text: &Rope, force: bool) -> Result<Staged, Error> {
         let failed = |err: io::Error| Error::SaveFailed {
             path: self.path.display().to_string(),
             reason: err.to_string(),
@@ -263,9 +284,40 @@ impl Buffer {
         } else {
             text.clone()
         };
-        self.disk = Some(write(&self.path, &written).map_err(failed)?);
+        stage(&self.path, &written).map_err(failed)
+    }
+
+    /// The file now holds `text`, and is as `disk` says, or is gone.
+    pub(crate) fn written(&mut self, text: Rope, disk: Option<DiskStamp>) {
+        self.disk = disk;
         self.saved = text;
-        Ok(())
+    }
+
+    /// The text at each of `versions`, rebuilt from the text now by
+    /// taking out the edits since. `None` if the history doesn't reach
+    /// back to one of them.
+    pub(crate) fn texts_at(&self, versions: &[u64]) -> Option<Vec<Rope>> {
+        let oldest = versions.iter().copied().min()?;
+        let since: Vec<&Edit> = self
+            .history
+            .since(oldest)
+            .ok()?
+            .map(|(edit, _)| edit)
+            .collect();
+        let mut wanted: Vec<(usize, u64)> = versions.iter().copied().enumerate().collect();
+        wanted.sort_by_key(|&(_, version)| std::cmp::Reverse(version));
+        let mut texts = vec![Rope::new(); versions.len()];
+        let mut text = self.text.clone();
+        let mut version = self.version();
+        for (index, at) in wanted {
+            while version > at {
+                let edit = since[usize::try_from(version - oldest - 1).ok()?];
+                edit.invert().apply(&mut text).ok()?;
+                version -= 1;
+            }
+            texts[index] = text.clone();
+        }
+        Some(texts)
     }
 
     /// The file's text now, with its line ends as the buffer keeps them,
@@ -573,12 +625,6 @@ pub(crate) fn read(path: &Path) -> io::Result<(String, DiskStamp)> {
     Ok((text, DiskStamp::of(&metadata)))
 }
 
-/// Writes `text` to a new file beside `path`, with the same permissions
-/// as the file there, then renames it over that file.
-pub(crate) fn write(path: &Path, text: &Rope) -> io::Result<DiskStamp> {
-    stage(path, text)?.commit()
-}
-
 /// A file's new text, written and synced beside it, but not yet in its
 /// place: what can go wrong in writing it, such as the disk being full,
 /// has gone right. Dropped without being put in place, the new file is
@@ -738,7 +784,7 @@ impl Placed {
     }
 }
 
-fn edit_ops(edit: &Edit) -> Vec<handover::EditOp> {
+pub(crate) fn edit_ops(edit: &Edit) -> Vec<handover::EditOp> {
     (edit.ops().iter())
         .map(|op| match op {
             Op::Retain(len) => handover::EditOp::Retain(*len as u64),
@@ -748,7 +794,7 @@ fn edit_ops(edit: &Edit) -> Vec<handover::EditOp> {
         .collect()
 }
 
-fn resume_edit(ops: Vec<handover::EditOp>) -> Edit {
+pub(crate) fn resume_edit(ops: Vec<handover::EditOp>) -> Edit {
     (ops.into_iter())
         .map(|op| match op {
             handover::EditOp::Retain(len) => Op::Retain(usize::try_from(len).unwrap_or(usize::MAX)),

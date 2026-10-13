@@ -1765,6 +1765,15 @@ impl Desk {
             Command::Marks => self.open_finder(crate::finder::Kind::Marks, String::new()),
             Command::Editor(line) => self.editor_command(&line),
             Command::Explore(dir) => self.open_explorer(dir),
+            Command::AgentUndo { turn, redo, force } => {
+                let asked = (self.focused_pane()).map_or_else(
+                    || Err("that's for a chat with an agent".to_owned()),
+                    |pane| pane.undo_turn(turn, redo, force),
+                );
+                if let Err(why) = asked {
+                    self.refuse(why);
+                }
+            }
             Command::Reload | Command::Set(_) => {}
         }
     }

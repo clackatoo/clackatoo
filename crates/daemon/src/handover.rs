@@ -25,6 +25,8 @@
 //! 9. Each terminal's links ([`clackatoo_term::LinksSnapshot`]).
 //! 10. File explorers, and panes showing them.
 //! 11. Which agent each chat talks to.
+//! 12. The edit log: what agents changed in files, by chat and turn, so
+//!     that turns can still be undone.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -37,10 +39,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 11;
+pub(crate) const VERSION: u32 = 12;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -104,6 +106,61 @@ pub(crate) struct State {
     pub(crate) next_files: u32,
     /// File explorers.
     pub(crate) explorers: Vec<Files>,
+    /// What agents changed in files.
+    pub(crate) edits: EditLog,
+}
+
+/// What agents changed in files, by chat and turn. Since version 12.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct EditLog {
+    pub(crate) chats: Vec<ChatEdits>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatEdits {
+    pub(crate) chat: u32,
+    /// Turns dropped to keep to the bound, and how many files each changed.
+    pub(crate) dropped: Vec<(u64, u32)>,
+    pub(crate) turns: Vec<TurnEdits>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct TurnEdits {
+    pub(crate) turn: u64,
+    pub(crate) files: Vec<FileEdits>,
+}
+
+/// What a turn changed in one file.
+#[derive(Debug, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four facts about a file, each yes or no, and each free of the others"
+)]
+pub(crate) struct FileEdits {
+    /// The file's path, as bytes.
+    pub(crate) path: Vec<u8>,
+    /// The tool call that last changed it.
+    pub(crate) tool: Option<String>,
+    /// Whether the file was there before the changes, and after.
+    pub(crate) existed: bool,
+    pub(crate) exists: bool,
+    /// Whether what the turn did to it is known.
+    pub(crate) known: bool,
+    /// Whether the turn's changes to it are undone.
+    pub(crate) undone: bool,
+    pub(crate) changes: Vec<FileChange>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum FileChange {
+    /// The edit that made `version` of buffer `buffer`, keeping `bytes`.
+    Buffer {
+        buffer: u32,
+        version: u64,
+        bytes: u64,
+    },
+    /// A change to the file not open: `edit` made `after`.
+    Text { after: String, edit: Vec<EditOp> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -420,6 +477,7 @@ impl State {
             8 => Ok(postcard::from_bytes::<v8::State>(body)?.into()),
             9 => Ok(postcard::from_bytes::<v9::State>(body)?.into()),
             10 => Ok(postcard::from_bytes::<v10::State>(body)?.into()),
+            11 => Ok(postcard::from_bytes::<v11::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -931,6 +989,7 @@ mod v7 {
                 buffers: Vec::new(),
                 next_files: 1,
                 explorers: Vec::new(),
+                edits: super::EditLog::default(),
             }
         }
     }
@@ -1000,6 +1059,7 @@ mod v8 {
                 buffers: state.buffers,
                 next_files: 1,
                 explorers: Vec::new(),
+                edits: super::EditLog::default(),
             }
         }
     }
@@ -1039,6 +1099,48 @@ mod v9 {
                 buffers: state.buffers,
                 next_files: 1,
                 explorers: Vec::new(),
+                edits: super::EditLog::default(),
+            }
+        }
+    }
+}
+
+/// Version 11, as the builds that wrote it wrote it: no edit log.
+mod v11 {
+    use serde::Deserialize;
+
+    use super::{Buffer, Chat, Files, Process, Terminal, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: super::EditLog::default(),
             }
         }
     }
@@ -1113,6 +1215,7 @@ mod v10 {
                 buffers: state.buffers,
                 next_files: state.next_files,
                 explorers: state.explorers,
+                edits: super::EditLog::default(),
             }
         }
     }
@@ -1213,6 +1316,46 @@ mod tests {
             explorers: vec![Files {
                 id: 1,
                 root: b"/src".to_vec(),
+            }],
+            edits: edits(),
+        }
+    }
+
+    fn edits() -> EditLog {
+        EditLog {
+            chats: vec![ChatEdits {
+                chat: 2,
+                dropped: vec![(0, 3)],
+                turns: vec![TurnEdits {
+                    turn: 1,
+                    files: vec![
+                        FileEdits {
+                            path: b"/src/a".to_vec(),
+                            tool: Some("t1".to_owned()),
+                            existed: true,
+                            exists: true,
+                            known: true,
+                            undone: false,
+                            changes: vec![FileChange::Buffer {
+                                buffer: 1,
+                                version: 1,
+                                bytes: 6,
+                            }],
+                        },
+                        FileEdits {
+                            path: b"/src/b".to_vec(),
+                            tool: None,
+                            existed: false,
+                            exists: true,
+                            known: true,
+                            undone: true,
+                            changes: vec![FileChange::Text {
+                                after: "made\n".to_owned(),
+                                edit: vec![EditOp::Insert("made\n".to_owned())],
+                            }],
+                        },
+                    ],
+                }],
             }],
         }
     }
@@ -1525,6 +1668,44 @@ mod tests {
             panic!("not split");
         };
         assert!(matches!(parts[3], Layout::Files { id: 4, files: 1 }));
+    }
+
+    /// Written by a build that wrote version 12. It must always be read.
+    #[test]
+    fn version_12_is_read_with_the_edit_log() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v12.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let chat = &state.edits.chats[0];
+        assert_eq!((chat.chat, chat.dropped.as_slice()), (2, &[(0, 3)][..]));
+        let files = &chat.turns[0].files;
+        assert_eq!(chat.turns[0].turn, 1);
+        assert!(matches!(
+            files[0].changes[..],
+            [FileChange::Buffer {
+                buffer: 1,
+                version: 1,
+                bytes: 6
+            }]
+        ));
+        assert_eq!(files[0].tool.as_deref(), Some("t1"));
+        let FileChange::Text { after, edit } = &files[1].changes[0] else {
+            panic!("not a change to a file not open");
+        };
+        assert_eq!(after, "made\n");
+        assert!(matches!(&edit[..], [EditOp::Insert(made)] if made == "made\n"));
+        assert!(!files[1].existed && files[1].exists && files[1].undone);
+        assert_eq!(state.buffers[0].text, "new");
+    }
+
+    /// Versions before 12 come with an empty edit log.
+    #[test]
+    fn version_11_comes_with_no_edits() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v11.bin"))
+            .unwrap();
+        assert!(State::read(&mut file).unwrap().edits.chats.is_empty());
     }
 
     #[test]

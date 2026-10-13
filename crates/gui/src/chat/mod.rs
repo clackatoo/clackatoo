@@ -17,7 +17,9 @@ mod markdown;
 mod paint;
 mod picker;
 
-use clackatoo_protocol::{ChatAction, ChatNode, ChoiceKind, Setting, SettingKind, ViewUpdate};
+use clackatoo_protocol::{
+    ChatAction, ChatNode, ChoiceKind, Setting, SettingKind, TurnFilesState, ViewUpdate,
+};
 use parley::{LayoutContext, PlainEditor};
 use winit::keyboard::{Key, NamedKey};
 
@@ -117,6 +119,10 @@ enum Hit {
     },
     /// A tool's card, which opens and folds, by the tool's ID.
     Card(String),
+    /// The button that undoes what a turn changed in files, by the turn.
+    Undo(usize),
+    /// The button that redoes it, once undone.
+    Redo(usize),
 }
 
 /// What the mouse pointer looks like over a chat.
@@ -193,6 +199,9 @@ pub(crate) struct ChatView {
     /// The tools whose cards are open, showing all they have, by their
     /// IDs.
     open_cards: std::collections::HashSet<String>,
+    /// What the window says about the chat in the bottom bar, until the
+    /// next key, such as that there's nothing to undo.
+    said: Option<String>,
 }
 
 impl std::fmt::Debug for ChatView {
@@ -228,6 +237,7 @@ impl ChatView {
             menu: None,
             menu_anchor: None,
             open_cards: std::collections::HashSet::new(),
+            said: None,
         }
     }
 
@@ -274,6 +284,7 @@ impl ChatView {
     // --- Input, queued until the fonts are at hand --------------------------
 
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) {
+        self.said = None;
         self.queued.push(Input::Key {
             key: press.key.clone(),
             text: press.text.map(str::to_owned),
@@ -795,6 +806,14 @@ impl ChatView {
                     self.open_cards.insert(tool);
                 }
             }
+            Some(Hit::Undo(turn)) => settled.actions.push(ChatAction::Undo {
+                turn: u32::try_from(turn).unwrap_or(u32::MAX),
+                force: false,
+            }),
+            Some(Hit::Redo(turn)) => settled.actions.push(ChatAction::Redo {
+                turn: u32::try_from(turn).unwrap_or(u32::MAX),
+                force: false,
+            }),
             Some(Hit::Send) => self.send(settled),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
             Some(Hit::Choice(id)) => {
@@ -874,9 +893,47 @@ impl ChatView {
         (self.scroll - old).abs() > f32::EPSILON
     }
 
-    /// What the bottom bar says about the chat: how far up the view is.
+    /// What the bottom bar says about the chat: what the window last said
+    /// of it, or how far up the view is.
     pub(crate) fn label(&self) -> Option<String> {
-        (!self.follow && self.max_scroll > 0.0).then(|| "↑ scrolled".to_owned())
+        self.said
+            .clone()
+            .or_else(|| (!self.follow && self.max_scroll > 0.0).then(|| "↑ scrolled".to_owned()))
+    }
+
+    /// Says `text` in the bottom bar, until the next key in the chat.
+    /// Returns that the pane must be drawn again.
+    pub(crate) fn say(&mut self, text: String) -> bool {
+        self.said = Some(text);
+        true
+    }
+
+    /// Stops saying what [`say`](Self::say) said. Returns whether it said
+    /// anything, so the pane must be drawn again.
+    pub(crate) fn unsay(&mut self) -> bool {
+        self.said.take().is_some()
+    }
+
+    /// The turn `u` undoes, or with `redo`, the one Ctrl+R redoes, as Vim
+    /// steps through its undo: the last whose changes to files are made,
+    /// or the first of those undone. `None` if there's none.
+    pub(crate) fn turn_to_undo(&self, redo: bool) -> Option<usize> {
+        let undoable = |turn: &&clackatoo_protocol::Turn| {
+            turn.end.is_some()
+                && turn.files.is_some_and(|files| match files.state {
+                    TurnFilesState::Made => !redo,
+                    TurnFilesState::Undone => redo,
+                    TurnFilesState::Partly => true,
+                    TurnFilesState::TooOld => false,
+                })
+        };
+        let mut turns = self.node.turns.iter().enumerate();
+        let found = if redo {
+            turns.find(|(_, turn)| undoable(turn))
+        } else {
+            turns.rfind(|(_, turn)| undoable(turn))
+        };
+        found.map(|(at, _)| at)
     }
 }
 
@@ -976,6 +1033,7 @@ mod tests {
             sent: 0,
             items: Vec::new(),
             end: None,
+            files: None,
         });
         let mut view = ChatView::new(String::new(), node);
         typed(&mut view, "more");
@@ -1254,6 +1312,65 @@ mod tests {
         view.press([10.0, 10.0], 1, false);
         view.settle(&mut fonts);
         assert!(view.open_cards.is_empty());
+    }
+
+    /// A chat whose turns changed files, made or undone, as `states` say.
+    fn with_files(states: &[clackatoo_protocol::TurnFilesState]) -> ChatView {
+        use clackatoo_protocol::{Outcome, TurnEnd, TurnFiles};
+        let mut node = ChatNode::default();
+        for &state in states {
+            node.turns.push(Turn {
+                prompt: "change it".into(),
+                sent: 0,
+                items: Vec::new(),
+                end: Some(TurnEnd {
+                    at: 0,
+                    outcome: Outcome::Done,
+                }),
+                files: Some(TurnFiles { count: 2, state }),
+            });
+        }
+        ChatView::new(String::new(), node)
+    }
+
+    #[test]
+    fn a_turn_that_changed_files_has_a_button_to_undo_it() {
+        use clackatoo_protocol::TurnFilesState::{Made, Undone};
+        let mut fonts = fonts();
+        let mut view = with_files(&[Undone, Made]);
+        view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        let button = |view: &ChatView, wanted: &Hit| {
+            let (_, [x, y, width, height]) = (view.hits.iter())
+                .find(|(hit, _)| hit == wanted)
+                .expect("the button is drawn");
+            [x + width / 2.0, y + height / 2.0]
+        };
+        let at = button(&view, &Hit::Undo(1));
+        assert_eq!(view.pointer(at), Pointer::Hand);
+        view.press(at, 1, false);
+        let undo = ChatAction::Undo {
+            turn: 1,
+            force: false,
+        };
+        assert_eq!(view.settle(&mut fonts).actions, [undo]);
+        let at = button(&view, &Hit::Redo(0));
+        view.press(at, 1, false);
+        let redo = ChatAction::Redo {
+            turn: 0,
+            force: false,
+        };
+        assert_eq!(view.settle(&mut fonts).actions, [redo]);
+    }
+
+    #[test]
+    fn u_takes_the_last_turn_made_and_ctrl_r_the_first_undone() {
+        use clackatoo_protocol::TurnFilesState::{Made, TooOld, Undone};
+        let view = with_files(&[TooOld, Made, Made, Undone, Undone]);
+        assert_eq!(view.turn_to_undo(false), Some(2));
+        assert_eq!(view.turn_to_undo(true), Some(3));
+        let view = with_files(&[TooOld]);
+        assert_eq!(view.turn_to_undo(false), None);
+        assert_eq!(view.turn_to_undo(true), None);
     }
 
     #[test]

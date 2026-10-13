@@ -14,6 +14,7 @@
 //! | `disk PATH`, a line's end, then text | Writes the text to the file itself, as Claude Code's tools do, then says so as its adapter does: the tool call finished, then what it changed, the file's old and new text, in an update of its own; and `done` |
 //! | `tools` | The MCP servers it was given, as JSON |
 //! | `mcp NAME ARGS`, a line each | Calls each of clackatoo's tools `NAME` with the JSON `ARGS`, in turn, and says what each answered |
+//! | `edit PATH`, a line's end, then text | As `disk`, but asks permission first, as Claude Code does in Manual mode, and writes the file only once it's allowed |
 //! | anything else | `echo:` and the message, in two pieces |
 //!
 //! Run as `fake_agent mcp --chat ID --socket PATH`, it relays MCP for a
@@ -69,6 +70,7 @@ fn main() {
         tools: BTreeMap::new(),
         waiting: None,
         asked: None,
+        editing: None,
     };
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -95,6 +97,9 @@ struct Fake {
     /// A message waiting on the daemon's answer about a file: its
     /// request's ID, its session, and the tool call it's in, if any.
     asked: Option<(Value, String, Option<String>)>,
+    /// A message waiting on permission to write a file itself: its
+    /// request's ID, its session, the file's path and its new text.
+    editing: Option<(Value, String, String, String)>,
 }
 
 fn send(message: &Value) {
@@ -117,6 +122,27 @@ fn say(session: &str, text: &str) {
         session,
         &json!({ "sessionUpdate": "agent_message_chunk",
                              "content": { "type": "text", "text": text } }),
+    );
+}
+
+/// Writes `text` to the file at `path`, as tool call `td`, as Claude
+/// Code's tools do, then says so as its adapter does: the tool call
+/// finished, then what it changed, the file's old and new text, in an
+/// update of its own.
+fn write_itself(session: &str, path: &str, text: &str) {
+    let old = std::fs::read_to_string(path).ok();
+    std::fs::write(path, text).unwrap();
+    update(
+        session,
+        &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "td",
+                 "status": "completed" }),
+    );
+    update(
+        session,
+        &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "td",
+                 "content": [{ "type": "diff", "path": path,
+                               "oldText": old, "newText": text }],
+                 "locations": [{ "path": path, "line": 1 }] }),
     );
 }
 
@@ -298,7 +324,8 @@ impl Fake {
                     done(&id, "end_turn");
                 }
             }
-            _ => {}
+            // The answer to the permission to write a file, or nothing.
+            _ => self.edit_answered(&id, message),
         }
         true
     }
@@ -360,6 +387,22 @@ impl Fake {
                 self.waiting = Some((id, session));
             }
             _ => {}
+        }
+    }
+
+    /// Takes the answer to the permission to write a file itself, if
+    /// `id` is its: writes it, if it's allowed to.
+    fn edit_answered(&mut self, id: &Value, message: &Value) {
+        if id != "p2" || message.get("method").is_some() {
+            return;
+        }
+        let allowed = message["result"]["outcome"]["optionId"] == "allow";
+        if let Some((id, session, path, text)) = self.editing.take() {
+            if allowed {
+                write_itself(&session, &path, &text);
+                say(&session, "done\n");
+            }
+            done(&id, "end_turn");
         }
     }
 
@@ -505,24 +548,33 @@ impl Fake {
                          "title": format!("Write {path}"), "kind": "edit",
                          "status": "pending", "locations": [{ "path": path }] }),
             );
-            let old = std::fs::read_to_string(path).ok();
-            std::fs::write(path, rest).unwrap();
-            // As Claude Code's adapter says it: finished, then what the
-            // tool wrote, in an update of its own.
-            update(
-                session,
-                &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "td",
-                         "status": "completed" }),
-            );
-            update(
-                session,
-                &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "td",
-                         "content": [{ "type": "diff", "path": path,
-                                       "oldText": old, "newText": rest }],
-                         "locations": [{ "path": path, "line": 1 }] }),
-            );
+            write_itself(session, path, rest);
             say(session, "done\n");
             done(id, "end_turn");
+            return true;
+        }
+        if let Some(path) = command.strip_prefix("edit ") {
+            update(
+                session,
+                &json!({ "sessionUpdate": "tool_call", "toolCallId": "td",
+                         "title": format!("Edit {path}"), "kind": "edit",
+                         "status": "pending", "locations": [{ "path": path }] }),
+            );
+            send(
+                &json!({ "jsonrpc": "2.0", "id": "p2", "method": "session/request_permission",
+                "params": { "sessionId": session,
+                    "toolCall": { "toolCallId": "td", "title": format!("Edit {path}") },
+                    "options": [
+                        { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                        { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
+                    ] } }),
+            );
+            self.editing = Some((
+                id.clone(),
+                session.to_owned(),
+                path.to_owned(),
+                rest.to_owned(),
+            ));
             return true;
         }
         false

@@ -12,7 +12,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use clackatoo_protocol::{
-    ChatState, ChoiceKind, Item, Outcome, Setting, SettingKind, ToolStatus, Turn,
+    ChatState, ChoiceKind, Item, Outcome, Setting, SettingKind, ToolStatus, Turn, TurnFiles,
+    TurnFilesState,
 };
 use parley::{
     Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontStyle, FontWeight, GenericFamily,
@@ -493,8 +494,41 @@ impl ChatView {
                 y += laid.height;
                 self.cache.notes.insert((text, tone), laid);
             }
+            // What it changed in files, once it's done, and the buttons
+            // that undo and redo it.
+            if let (Some(files), Some(_)) = (turn.files, &turn.end) {
+                y += m.em(0.75);
+                let height = self.lay_out_files(fonts, m, column, (index, files));
+                spans.push(Span {
+                    piece: Piece::Files(index),
+                    top: y,
+                    bottom: y + height,
+                });
+                y += height;
+            }
         }
         spans
+    }
+
+    /// Lays out what turn `turn` changed in files, `files`, and its
+    /// buttons, and returns the height of the line they make.
+    fn lay_out_files(
+        &mut self,
+        fonts: &mut Fonts,
+        m: Measures,
+        column: f32,
+        (turn, files): (usize, TurnFiles),
+    ) -> f32 {
+        let (label, buttons) = files_line(turn, files);
+        let texts = std::iter::once((label, Tone::Muted))
+            .chain((buttons.into_iter()).map(|(_, text)| (text.to_owned(), Tone::Accent)));
+        let mut height = 0.0_f32;
+        for (text, tone) in texts {
+            let laid = self.note(fonts, m, &text, tone, column);
+            height = height.max(laid.height);
+            self.cache.notes.insert((text, tone), laid);
+        }
+        height
     }
 
     /// What's said under a turn: how it ended, or that it's still going,
@@ -598,6 +632,31 @@ impl ChatView {
             Piece::Note(text, tone) => {
                 if let Some(laid) = self.cache.notes.get(&(text.clone(), *tone)) {
                     draw_laid(canvas, m, laid, [origin[0], top], column);
+                }
+            }
+            Piece::Files(turn) => {
+                let Some(files) = self.node.turns.get(*turn).and_then(|turn| turn.files) else {
+                    return;
+                };
+                let (label, buttons) = files_line(*turn, files);
+                let Some(laid) = self.cache.notes.get(&(label, Tone::Muted)) else {
+                    return;
+                };
+                draw_laid(canvas, m, laid, [origin[0], top], column);
+                let mut x = origin[0] + laid.width + m.em(0.8);
+                let (pane, hits) = hits;
+                for (hit, text) in buttons {
+                    let Some(laid) = self.cache.notes.get(&(text.to_owned(), Tone::Accent)) else {
+                        continue;
+                    };
+                    draw_laid(canvas, m, laid, [x, top], column);
+                    // Only what's in view takes a click.
+                    let rect = [x, top, laid.width, laid.height];
+                    let [left, top, wide, high] = cards::intersection(canvas.clip, rect);
+                    if wide > 0.0 && high > 0.0 {
+                        hits.push((hit, [left - pane[0], top - pane[1], wide, high]));
+                    }
+                    x += laid.width + m.em(0.8);
                 }
             }
         }
@@ -1445,7 +1504,10 @@ struct Span {
 impl Span {
     fn turn(&self) -> Option<usize> {
         match self.piece {
-            Piece::Prompt(turn) | Piece::Item(turn, _) | Piece::Card(turn, _) => Some(turn),
+            Piece::Prompt(turn)
+            | Piece::Item(turn, _)
+            | Piece::Card(turn, _)
+            | Piece::Files(turn) => Some(turn),
             Piece::Note(..) => None,
         }
     }
@@ -1460,6 +1522,9 @@ enum Piece {
     Card(usize, usize),
     /// Text of the chat's own.
     Note(String, Tone),
+    /// What a turn changed in files, and what undoes or redoes it, by
+    /// turn.
+    Files(usize),
 }
 
 /// Draws `laid` with the column's left at `origin[0]`, its top at
@@ -1674,6 +1739,25 @@ fn lay_out_marker(
 }
 
 /// A tool call's line: a mark for how it's going, and its title.
+/// What's said of what a turn changed in files, as `files` says, and the
+/// buttons beside it: "2 files changed", then "Undo".
+fn files_line(turn: usize, files: TurnFiles) -> (String, Vec<(Hit, &'static str)>) {
+    let count = match files.count {
+        1 => "1 file changed".to_owned(),
+        count => format!("{count} files changed"),
+    };
+    let (label, buttons) = match files.state {
+        TurnFilesState::Made => (count, vec![(Hit::Undo(turn), "Undo")]),
+        TurnFilesState::Undone => (format!("{count}, undone"), vec![(Hit::Redo(turn), "Redo")]),
+        TurnFilesState::Partly => (
+            format!("{count}, partly undone"),
+            vec![(Hit::Undo(turn), "Undo"), (Hit::Redo(turn), "Redo")],
+        ),
+        TurnFilesState::TooOld => (format!("{count}, too long ago to undo"), Vec::new()),
+    };
+    (label, buttons)
+}
+
 fn tool_text(status: ToolStatus, title: &str) -> String {
     let mark = match status {
         ToolStatus::Running => "○",

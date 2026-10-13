@@ -106,6 +106,31 @@ pub struct Turn {
     pub items: Vec<Item>,
     /// How the turn ended, once it has.
     pub end: Option<TurnEnd>,
+    /// What the agent changed in files in the turn, if it changed any.
+    pub files: Option<TurnFiles>,
+}
+
+/// What an agent changed in files in a turn, and whether it can be undone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnFiles {
+    /// How many files it changed, made or deleted.
+    pub count: u32,
+    /// Where they are.
+    pub state: TurnFilesState,
+}
+
+/// Whether a turn's changes to files are made, or undone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TurnFilesState {
+    /// Made, as the agent made them: they can be undone.
+    Made,
+    /// Undone: they can be made again.
+    Undone,
+    /// Undone in some files, as forced where others couldn't be.
+    Partly,
+    /// Too old: the daemon no longer keeps what they were, so they can't
+    /// be undone.
+    TooOld,
 }
 
 /// How a turn ended, and when.
@@ -344,6 +369,13 @@ pub enum ChatPatch {
     Settings(Vec<Setting>),
     /// The usage is now this.
     Usage(Option<Usage>),
+    /// What turn `turn` changed in files is now `files`.
+    Files {
+        /// The turn's index.
+        turn: u32,
+        /// What it changed.
+        files: Option<TurnFiles>,
+    },
 }
 
 /// What a client asks of a chat.
@@ -368,6 +400,23 @@ pub enum ChatAction {
         setting: String,
         /// The value to give it, by its ID.
         value: String,
+    },
+    /// Undo what the agent changed in files in turn `turn`, keeping what
+    /// anyone changed since. If any file can't be, because a change since
+    /// touches the same lines, none is, unless `force`, which undoes the
+    /// rest.
+    Undo {
+        /// The turn's index.
+        turn: u32,
+        /// Undo what can be, though some files can't be.
+        force: bool,
+    },
+    /// Make again what undoing turn `turn` took out of files, as `Undo`.
+    Redo {
+        /// The turn's index.
+        turn: u32,
+        /// Redo what can be, though some files can't be.
+        force: bool,
     },
 }
 
@@ -417,6 +466,11 @@ impl ChatNode {
             ChatPatch::Notice(notice) => self.notice = notice,
             ChatPatch::Settings(settings) => self.settings = settings,
             ChatPatch::Usage(usage) => self.usage = usage,
+            ChatPatch::Files { turn, files } => {
+                if let Some(turn) = self.turns.get_mut(turn as usize) {
+                    turn.files = files;
+                }
+            }
         }
     }
 
@@ -470,6 +524,7 @@ mod tests {
             sent: 0,
             items,
             end: None,
+            files: None,
         }
     }
 

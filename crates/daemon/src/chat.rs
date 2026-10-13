@@ -23,7 +23,7 @@ use clackatoo_protocol::{
     AgentTools, ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item,
     Location, Node, Outcome, Patch, Question, Setting, SettingChoice, SettingKind, Size,
     TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, Turn,
-    TurnEnd, Usage, View, ViewUpdate,
+    TurnEnd, TurnFiles, Usage, View, ViewUpdate,
 };
 use serde_json::Value;
 
@@ -118,9 +118,13 @@ pub(crate) enum Action {
 /// The answer to an install offer that installs.
 pub(crate) const INSTALL: &str = "install";
 
-/// Files a tool changed on disk itself, as the agent says once it has.
+/// Files a tool changed on disk itself, as the agent says once it has,
+/// or, while it runs, files it's about to change.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Wrote {
+    /// Whether the tool has finished: if not, it names files it's going
+    /// to change, which it hasn't yet, or not all.
+    pub(crate) done: bool,
     /// The turn it's in.
     pub(crate) turn: usize,
     /// Its ID.
@@ -470,6 +474,8 @@ impl HostedChat {
                     self.set_tools(tools);
                 }
             }
+            // The server's to do: they're about files, not the agent.
+            ChatAction::Undo { .. } | ChatAction::Redo { .. } => {}
             // Only a value the agent offers is kept, and asked for.
             ChatAction::Set { setting, value } => {
                 if self.set_value(&setting, &value) {
@@ -518,6 +524,7 @@ impl HostedChat {
             sent: now(),
             items: Vec::new(),
             end: None,
+            files: None,
         });
         match self.link {
             Link::Open => {
@@ -1043,14 +1050,16 @@ impl HostedChat {
         self.diffs.push((id.to_owned(), diffs));
     }
 
-    /// The files `tool` changed, if it's a finished edit that names any.
+    /// The files `tool` changed, if it's a finished edit that names any,
+    /// or the files it's about to change, if it's one still running.
     fn wrote(&self, tool: &Tool) -> Option<Wrote> {
         let diffs = (tool.content.iter()).filter_map(|content| match content {
             ToolContent::Diff(diff) => Some(&diff.path),
             ToolContent::Text(_) | ToolContent::Output(_) => None,
         });
-        let edits = tool.kind == ToolKind::Edit || diffs.clone().next().is_some();
-        if tool.status != ToolStatus::Done || !edits {
+        let edits = matches!(tool.kind, ToolKind::Edit | ToolKind::Delete)
+            || diffs.clone().next().is_some();
+        if tool.status == ToolStatus::Failed || !edits {
             return None;
         }
         let mut paths: Vec<String> = Vec::new();
@@ -1072,6 +1081,7 @@ impl HostedChat {
             .map(|(_, diffs)| diffs.clone())
             .unwrap_or_default();
         Some(Wrote {
+            done: tool.status == ToolStatus::Done,
             turn,
             tool: tool.id.clone(),
             order,
@@ -1089,6 +1099,24 @@ impl HostedChat {
     /// Says `notice` in the chat, until the next message.
     pub(crate) fn notify(&mut self, notice: String) {
         self.set_notice(Some(notice));
+    }
+
+    /// How many turns the chat has.
+    pub(crate) fn turns(&self) -> usize {
+        self.node.turns.len()
+    }
+
+    /// Says that turn `turn` changed `files`.
+    pub(crate) fn set_files(&mut self, turn: usize, files: Option<TurnFiles>) {
+        if let Some(edited) = self.node.turns.get_mut(turn)
+            && edited.files != files
+        {
+            edited.files = files;
+            self.journal.push(ChatPatch::Files {
+                turn: index_u32(turn),
+                files,
+            });
+        }
     }
 
     /// Where the agent is in its work, for what it writes now: the turn
@@ -1215,7 +1243,7 @@ impl HostedChat {
     // --- Changes ------------------------------------------------------------
 
     /// Whether a message has been sent and not yet answered.
-    fn answering(&self) -> bool {
+    pub(crate) fn answering(&self) -> bool {
         self.answering_turn().is_some()
     }
 
@@ -1741,6 +1769,7 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
                 handover::ChatOutcome::Failed(why) => Outcome::Failed(why),
             },
         }),
+        files: None,
     }
 }
 
@@ -1784,20 +1813,26 @@ mod tests {
         let mut chat = chat();
         connect(&mut chat, "s");
         send(&mut chat, "edit it");
-        // Asking first, as Claude Code's adapter does: nothing written yet.
-        let pending = r#"{"sessionUpdate":"tool_call","toolCallId":"e","title":"Edit","kind":"edit",
-                          "status":"pending","locations":[{"path":"/a"}]}"#;
-        assert_eq!(update(&mut chat, pending), None);
-        assert_eq!(chat.working_on(), (0, Some("e".to_owned())));
-        // Finished, then what it wrote, each saying so.
-        let done = r#"{"sessionUpdate":"tool_call_update","toolCallId":"e","status":"completed"}"#;
         let wrote = |paths: &[&str], diffs: Vec<RawDiff>| Wrote {
+            done: true,
             turn: 0,
             tool: "e".into(),
             order: 0,
             paths: paths.iter().map(|&path| path.to_owned()).collect(),
             diffs,
         };
+        // Asking first, as Claude Code's adapter does: nothing written yet,
+        // but the file it's about to change is named.
+        let pending = r#"{"sessionUpdate":"tool_call","toolCallId":"e","title":"Edit","kind":"edit",
+                          "status":"pending","locations":[{"path":"/a"}]}"#;
+        let about_to = Wrote {
+            done: false,
+            ..wrote(&["/a"], Vec::new())
+        };
+        assert_eq!(update(&mut chat, pending), Some(about_to));
+        assert_eq!(chat.working_on(), (0, Some("e".to_owned())));
+        // Finished, then what it wrote, each saying so.
+        let done = r#"{"sessionUpdate":"tool_call_update","toolCallId":"e","status":"completed"}"#;
         assert_eq!(update(&mut chat, done), Some(wrote(&["/a"], Vec::new())));
         assert_eq!(chat.working_on(), (0, None));
         let content = r#"{"sessionUpdate":"tool_call_update","toolCallId":"e",

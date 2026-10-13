@@ -15,7 +15,10 @@
 //! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
 //! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
 //! `prev_hunk`. `Explore`, or `Ex`, opens the tab's file explorer, with a
-//! directory for its root after it if wanted.
+//! directory for its root after it if wanted. In a chat, `AgentUndo`
+//! undoes what a turn of the agent's changed in files, the turn's number
+//! after it, or else the last, and `AgentRedo` makes it again; with `!`,
+//! in the files that can be, though others can't.
 //!
 //! A command with a range of lines before it, or Vim's for lines, `s`,
 //! `&`, `~`, `g`, `v`, `d`, `y`, `m`, `t` and `normal`, is the focused
@@ -84,6 +87,15 @@ pub(crate) enum Command {
     /// `:Explore`: the tab's file explorer, rooted at this directory if
     /// given.
     Explore(Option<String>),
+    /// `:AgentUndo`: undo what turn `turn` of the focused chat changed in
+    /// files, counting from 0, or the last that can be; or with `redo`,
+    /// `:AgentRedo`, make it again. With `force`, in the files that can be
+    /// though others can't.
+    AgentUndo {
+        turn: Option<usize>,
+        redo: bool,
+        force: bool,
+    },
 }
 
 /// Where a new pane goes.
@@ -133,7 +145,7 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 /// The window's own commands, for messages.
 const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
                         w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, Buffers, \
-                        Diagnostics, Gitsigns and Explore";
+                        Diagnostics, Gitsigns, Explore, AgentUndo and AgentRedo";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -158,7 +170,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "Explore" | "Ex" => return Ok(Command::Explore(argument.map(str::to_owned))),
         _ => {}
     }
-    if let Some(command) = file_command(word, argument) {
+    if let Some(command) = file_command(word, argument).or_else(|| agent_undo(word, argument)) {
         return command;
     }
     if crate::editor::is_editor_command(line) {
@@ -275,6 +287,31 @@ fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
         ),
         _ => None,
     }
+}
+
+/// `:AgentUndo` or `:AgentRedo`, with `!` or not, if `word` is one, and the
+/// turn's number after it, from 1, if there is one.
+fn agent_undo(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
+    if !matches!(
+        word,
+        "AgentUndo" | "AgentUndo!" | "AgentRedo" | "AgentRedo!"
+    ) {
+        return None;
+    }
+    let turn = match argument.map(str::parse::<usize>) {
+        None => None,
+        Some(Ok(number)) if number > 0 => Some(number - 1),
+        Some(_) => {
+            return Some(Err(format!(
+                "{word} takes a turn's number, from 1: :{word} 3"
+            )));
+        }
+    };
+    Some(Ok(Command::AgentUndo {
+        turn,
+        redo: word.starts_with("AgentRedo"),
+        force: word.ends_with('!'),
+    }))
 }
 
 /// Where a word's mark puts a new pane, and the rest of the word.
@@ -524,5 +561,16 @@ mod tests {
             parse("Buffers rs").unwrap(),
             find(finder::Kind::Buffers, "rs")
         );
+    }
+
+    #[test]
+    fn agent_undo_takes_a_turn_from_one_and_a_bang_to_force() {
+        let undo = |turn, redo, force| Command::AgentUndo { turn, redo, force };
+        assert_eq!(parse("AgentUndo").unwrap(), undo(None, false, false));
+        assert_eq!(parse("AgentUndo 3").unwrap(), undo(Some(2), false, false));
+        assert_eq!(parse("AgentUndo! 1").unwrap(), undo(Some(0), false, true));
+        assert_eq!(parse("AgentRedo!").unwrap(), undo(None, true, true));
+        assert!(parse("AgentUndo 0").is_err());
+        assert!(parse("AgentRedo last").is_err());
     }
 }
