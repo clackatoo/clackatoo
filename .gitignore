@@ -1,9 +1,12 @@
 /target
 
-# Claude Code's per-user settings, session locks and agent worktrees. Each
-# worktree has a .git of its own, so `git add -A` would stage it as an
-# embedded repository.
-/.claude/
+# Claude Code's session locks and agent worktrees, but for the project's
+# settings. Each worktree has a .git of its own, so `git add -A` would
+# stage it as an embedded repository.
+/.claude/*
+!/.claude/settings.json
+# Notes for agents working on clackatoo, kept by each checkout.
+/CLAUDE.md
 
 # insta snapshots waiting to be reviewed
 *.snap.new
