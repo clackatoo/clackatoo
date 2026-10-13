@@ -14,8 +14,9 @@
 //!
 //! Macros are kept in registers too: `qa` records the keys typed into
 //! `"a`, written down as Vim writes keys in mappings (see
-//! [`Stroke::write`]), so `"ap` puts them in a file, and `@a` types
-//! whatever text the register holds.
+//! [`write_macro`]), so `"ap` puts them in a file, and `@a` types
+//! whatever text the register holds. The window records the keys, as
+//! they're pressed, and types them (see `desk::macros`).
 //!
 //! The window can't wait for the clipboard while keys are typed, so `"+`
 //! and `"*` hold what was last put there: by the window, or by anything
@@ -28,7 +29,7 @@
 //! or the primary selection, as Neovim's `unnamedplus` and `unnamed` do:
 //! what's yanked or deleted goes there too, and `p` puts what's there.
 
-use super::keys::Stroke;
+use crate::keymap::{Chord, read_macro, write_macro};
 use crate::options::Clipboard;
 use crate::pane::Copy;
 
@@ -109,9 +110,9 @@ pub(crate) struct Registers {
     put_since_asked: [bool; 2],
     /// Which the unnamed register goes along with, as `clipboard` says.
     sync: Clipboard,
-    /// The register a macro is being recorded into, and the keys typed so
-    /// far.
-    recording: Option<(char, Vec<Stroke>)>,
+    /// The register a macro is being recorded into, the keys pressed so
+    /// far, and how many of them came before the key being pressed now.
+    recording: Option<(char, Vec<Chord>, usize)>,
     /// The register last typed with `@`, for `@@`.
     replayed: Option<char>,
 }
@@ -284,33 +285,60 @@ impl Registers {
 
     /// The register a macro is being recorded into, if one is.
     pub(crate) fn recording(&self) -> Option<char> {
-        self.recording.as_ref().map(|(name, _)| *name)
+        self.recording.as_ref().map(|(name, _, _)| *name)
     }
 
-    /// Starts recording the keys typed into the register `name`.
+    /// Starts recording the keys pressed into the register `name`.
     pub(crate) fn record(&mut self, name: char) {
-        self.recording = Some((name, Vec::new()));
+        self.recording = Some((name, Vec::new(), 0));
     }
 
-    /// Notes `stroke`, typed, if a macro is being recorded.
-    pub(crate) fn typed(&mut self, stroke: Stroke) {
-        if let Some((_, strokes)) = &mut self.recording {
-            strokes.push(stroke);
+    /// Notes `keys`, the next key pressed, if a macro is being recorded.
+    pub(crate) fn pressed(&mut self, keys: impl IntoIterator<Item = Chord>) {
+        if let Some((_, recorded, before)) = &mut self.recording {
+            *before = recorded.len();
+            recorded.extend(keys);
         }
     }
 
-    /// Stops recording, keeping the keys typed in the register.
+    /// Where the key being pressed starts in the macro being recorded, if
+    /// one is.
+    pub(crate) fn press_start(&self) -> Option<usize> {
+        self.recording.as_ref().map(|&(_, _, before)| before)
+    }
+
+    /// The key being handled now is the one pressed at `at`, as a key
+    /// held while something waited is: a `q` among them stops the
+    /// recording there.
+    pub(crate) fn pressed_at(&mut self, at: usize) {
+        if let Some((_, recorded, before)) = &mut self.recording {
+            *before = at.min(recorded.len());
+        }
+    }
+
+    /// Notes `keys` in place of what the key just pressed was noted as, as
+    /// for a key a completion menu took, which is noted as what it put in.
+    pub(crate) fn pressed_instead(&mut self, keys: impl IntoIterator<Item = Chord>) {
+        if let Some((_, recorded, before)) = &mut self.recording {
+            recorded.truncate(*before);
+            recorded.extend(keys);
+        }
+    }
+
+    /// Stops recording, keeping the keys pressed in the register, but not
+    /// the key being pressed, which stopped it.
     pub(crate) fn stop_recording(&mut self) {
-        let Some((name, strokes)) = self.recording.take() else {
+        let Some((name, mut recorded, before)) = self.recording.take() else {
             return;
         };
-        let text = Stroke::write(&strokes);
+        recorded.truncate(before);
+        let text = write_macro(&recorded);
         self.set(name, Register { text, lines: false });
     }
 
     /// The keys the register `name` holds, to type as a macro: `@` is the
     /// last register typed so. Says why not if there are none.
-    pub(crate) fn macro_keys(&mut self, name: char) -> Result<Vec<Stroke>, String> {
+    pub(crate) fn macro_keys(&mut self, name: char) -> Result<Vec<Chord>, String> {
         let name = match name {
             '@' => self.replayed.ok_or("no macro has been typed yet")?,
             name => name,
@@ -318,9 +346,9 @@ impl Registers {
         let register = self
             .get(Some(name))
             .ok_or(format!("register {name} is empty"))?;
-        let strokes = Stroke::read(&register.text);
+        let keys = read_macro(&register.text);
         self.replayed = Some(name);
-        Ok(strokes)
+        Ok(keys)
     }
 
     /// The registers that hold something, a line for each as `:registers`
@@ -521,14 +549,19 @@ mod tests {
     fn a_macro_is_kept_as_text() {
         let mut registers = registers();
         registers.record('m');
-        for stroke in Stroke::read("ihi<Esc>") {
-            registers.typed(stroke);
+        for key in read_macro("ihi<Esc>x") {
+            registers.pressed([key]);
         }
+        // What's noted in place of the x, and the q that stops it, which
+        // isn't kept.
+        registers.pressed_instead(read_macro("<C-l>"));
+        registers.pressed(read_macro("q"));
         registers.stop_recording();
         assert_eq!(registers.recording(), None);
-        assert_eq!(text_of(&registers, 'm'), Some("ihi<Esc>"));
-        assert_eq!(registers.macro_keys('m'), Ok(Stroke::read("ihi<Esc>")));
-        assert_eq!(registers.macro_keys('@'), Ok(Stroke::read("ihi<Esc>")));
+        assert_eq!(text_of(&registers, 'm'), Some("ihi<Esc><C-l>"));
+        let keys = read_macro("ihi<Esc><C-l>");
+        assert_eq!(registers.macro_keys('m'), Ok(keys.clone()));
+        assert_eq!(registers.macro_keys('@'), Ok(keys));
         assert!(registers.macro_keys('z').is_err());
     }
 

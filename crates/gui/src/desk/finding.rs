@@ -40,7 +40,7 @@ impl Desk {
         self.close_finder();
         self.close_focused_panel();
         if !self.connected {
-            self.message = Some("the finder needs the daemon, which is out of reach".into());
+            self.refuse("the finder needs the daemon, which is out of reach".into());
             return;
         }
         let case = Case::of(&self.options);
@@ -138,6 +138,8 @@ impl Desk {
             }
             Outcome::Search => self.grep_at = Some(Instant::now() + GREP_WAIT),
             Outcome::Close => self.close_finder(),
+            // Said, and a macro typing it stops, as at a key that fails.
+            Outcome::NothingPicked => self.refuse("nothing in the finder is picked".into()),
             Outcome::Open(opening) => {
                 self.close_finder();
                 self.open_picked(opening);
@@ -168,6 +170,13 @@ impl Desk {
     /// When the window must wake for the finder's grep to search.
     pub(crate) fn grep_at(&self) -> Option<Instant> {
         self.grep_at
+    }
+
+    /// Greps for what's typed now, without waiting for typing to pause, as
+    /// for a macro, which waits for what it finds.
+    pub(super) fn grep_now(&mut self) {
+        self.grep_at = None;
+        self.grep();
     }
 
     /// Greps for what's typed, if typing has paused long enough by `now`.
@@ -236,6 +245,8 @@ impl Desk {
         };
         if finder.search() == Some(id) {
             finder.found(found);
+            // A macro waiting for what it finds goes on.
+            self.type_macros();
         } else if finder.preview_search() == Some(id) {
             finder.preview_found(found);
         } else {

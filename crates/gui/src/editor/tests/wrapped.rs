@@ -336,25 +336,11 @@ fn the_panel_by_the_cursor_is_by_its_row() {
 }
 
 #[test]
-fn gj_g0_and_g_dollar_are_typed_by_macros_and_copy_into_registers() {
+fn gj_and_g_dollar_copy_into_registers() {
     // Rows of 36: the first line goes on over three, from 0, 36 and 72.
+    // (Macros of them are the desk's: see its tests.)
     let text = format!("{}\nshort\n{}\n", "a".repeat(80), "b".repeat(50));
     let mut setup = Setup::new(&text);
-    setup.keys("qagjq");
-    assert_eq!(setup.held('a').as_deref(), Some("gj"));
-    assert_eq!(setup.cursor(), (0, 36));
-    setup.keys("@a");
-    assert_eq!(setup.cursor(), (0, 72));
-    setup.keys("2@a");
-    assert_eq!(setup.cursor(), (2, 0));
-    // gj that can't go on, on the last row, fails, stopping the macro;
-    // g$ and g0 never do.
-    setup.keys("qbg$g0gjxq");
-    assert_eq!(setup.cursor(), (2, 36));
-    assert_eq!(setup.text().lines().nth(2).unwrap().len(), 49);
-    setup.keys("@b");
-    let left = setup.text().lines().nth(2).unwrap().len();
-    assert_eq!(left, 49, "the x wasn't typed");
     // gj with an operator and a register: what's up to a row down.
     setup.keys("gg\"cygj");
     assert_eq!(setup.held('c'), Some("a".repeat(36)));

@@ -6,9 +6,9 @@
 //! made in one, or by anyone else, moves the others' cursors with the text.
 //!
 //! Every editor shares the registers and marks too. A key is handed to the
-//! focused editor one stroke at a time, and so is each key of a macro it
-//! types, so what each does, such as a jump, a mark set or a file opened,
-//! is seen to before the next.
+//! focused editor one stroke at a time, so what each does, such as a jump,
+//! a mark set or a file opened, is seen to before the next. A macro's keys
+//! come the same way, one at a time, from the desk (see [`super::macros`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -51,11 +51,13 @@ pub(super) struct Editors {
 #[derive(Debug)]
 pub(super) enum Held {
     /// A key: for the config's keypress handlers too if `handlers`, and
-    /// typed by a binding if `typing`, as it came.
+    /// typed by a binding if `typing`, as it came; and where it starts in
+    /// the macro being recorded, so a `q` among them stops it there.
     Key {
         press: KeptPress,
         handlers: bool,
         typing: bool,
+        recorded: Option<usize>,
     },
     Paste(String),
 }
@@ -68,6 +70,10 @@ impl Editors {
         self.opening.clear();
         for copy in self.buffers.values_mut() {
             copy.reconnected();
+        }
+        // Nor will what the editors asked be answered.
+        for editor in self.panes.values_mut() {
+            editor.reconnected();
         }
     }
 
@@ -368,12 +374,11 @@ impl Desk {
         let mut left = Vec::new();
         let mut places = None;
         let mut resuming = Vec::new();
+        let mut gave_up = false;
         for pane in &showing {
             let editor = editors.panes.get_mut(pane).expect("just found");
             editor.heard(&mut heard, Some(*pane) == focused, copy);
-            if editor.take_gave_up() {
-                editors.held.clear();
-            }
+            gave_up |= editor.take_gave_up();
             left.extend(editor.take_left().map(|byte| (*pane, byte)));
             opening.extend(editor.take_opening().map(|place| (*pane, place)));
             places = places.or_else(|| editor.take_places());
@@ -382,19 +387,18 @@ impl Desk {
             }
         }
         let here = copy.path().to_owned();
+        if gave_up {
+            self.gave_up();
+        }
         // A command that waited for the answer is done now, as a key
         // would do it.
         self.give_up_off_focus();
         for pane in resuming {
             self.in_editor(pane, Editor::resume);
             if (self.editors.panes.get_mut(&pane)).is_some_and(Editor::take_gave_up) {
-                self.editors.held.clear();
+                self.gave_up();
             }
-            // A macro whose key waited goes on, before the keys held,
-            // which were typed after it.
-            self.replay_in(pane);
         }
-        self.read_held();
         for (pane, byte) in left {
             self.record_jump(pane, Some(byte));
         }
@@ -410,21 +414,26 @@ impl Desk {
         }
         self.land();
         let formatted = answered.is_some_and(|(id, answer)| self.formatted(id, &answer));
-        formatted
+        // A macro whose key waited goes on, once what it waited for is
+        // seen to, and then the keys held, which were typed after it.
+        let typed = self.type_macros();
+        typed
+            || formatted
             || self.shown_tab().is_some_and(|tab| {
                 (tab.layout.panes().iter()).any(|pane| pane.content == Content::Buffer(buffer))
             })
     }
 
-    /// Holds `held`, if an editor's command is waiting for the grammar, to
-    /// be had once it's done. Returns `None` if nothing is waiting, or
-    /// else whether the window must be redrawn.
+    /// Holds `held`, if an editor's command is waiting for the grammar, or
+    /// a macro for something its keys started, to be had once it's done.
+    /// Returns `None` if nothing is waiting, or else whether the window
+    /// must be redrawn.
     ///
-    /// Unless the command is to be given up on, with what's held: if the
+    /// Unless what waits is to be given up on, with what's held: if the
     /// focus has moved to another pane, or it's waited too long, `held`
     /// isn't held, but had as if nothing were waiting, so it returns
     /// `None`; or if `cancel`, as Esc does, `held` goes too.
-    pub(super) fn hold_for_grammar(
+    pub(super) fn hold_while_waiting(
         &mut self,
         cancel: bool,
         held: impl FnOnce() -> Held,
@@ -432,30 +441,56 @@ impl Desk {
         if self.give_up_off_focus() {
             return None;
         }
-        let editor =
-            (self.editors.panes.values_mut()).find(|editor| editor.waiting_for_grammar())?;
-        if editor.waited_too_long(std::time::Instant::now()) {
-            editor.give_up(GiveUp::TooLong);
-            // Said until the key after this one.
-            editor.keep_status();
-            editor.take_gave_up();
-            self.editors.held.clear();
-            return None;
-        }
-        if cancel {
-            editor.give_up(GiveUp::Cancelled);
-            editor.take_gave_up();
-            self.editors.held.clear();
-            return Some(true);
+        let now = std::time::Instant::now();
+        if let Some(editor) =
+            (self.editors.panes.values_mut()).find(|editor| editor.waiting_for_grammar())
+        {
+            if editor.waited_too_long(now) {
+                editor.give_up(GiveUp::TooLong);
+                // Said until the key after this one.
+                editor.keep_status();
+                editor.take_gave_up();
+                self.gave_up();
+                return None;
+            }
+            if cancel {
+                editor.give_up(GiveUp::Cancelled);
+                editor.take_gave_up();
+                self.gave_up();
+                return Some(true);
+            }
+        } else {
+            if !self.macro_waiting() || self.macro_patience(now) {
+                return None;
+            }
+            if cancel {
+                self.stop_macro(Some("the macro was stopped".into()));
+                self.drop_held();
+                return Some(true);
+            }
         }
         self.editors.held.push_back(held());
         Some(false)
     }
 
-    /// Gives up on a command waiting for the grammar in an editor that no
-    /// longer has the focus, as a click moves it, and drops what's held
-    /// for it, which was typed for that pane. Returns whether it did.
-    fn give_up_off_focus(&mut self) -> bool {
+    /// What an editor's command waited for was given up on: what's held
+    /// for it goes, and so does a macro whose command it was.
+    fn gave_up(&mut self) {
+        self.drop_held();
+        self.stop_macro(None);
+    }
+
+    /// Drops the keys and pastes held while something waited.
+    pub(super) fn drop_held(&mut self) {
+        self.editors.held.clear();
+    }
+
+    /// Gives up on what waits if the focus has left the pane it waits in,
+    /// as a click, or another window closing the pane, moves it: a command
+    /// waiting for the grammar in an editor that no longer has the focus,
+    /// or a macro waiting for something its keys started. What's held for
+    /// it goes too, as it was typed for that pane. Returns whether it did.
+    pub(super) fn give_up_off_focus(&mut self) -> bool {
         let focused = self.shown.map(|shown| shown.pane);
         let mut gave_up = false;
         for (&pane, editor) in &mut self.editors.panes {
@@ -465,22 +500,70 @@ impl Desk {
                 gave_up = true;
             }
         }
+        if self.macro_left_behind() {
+            self.stop_macro(Some("the macro was stopped: the focus moved".into()));
+            gave_up = true;
+        }
         if gave_up {
-            self.editors.held.clear();
+            self.gave_up();
         }
         gave_up
     }
 
-    /// Drops what's held for a command waiting for the grammar if no
-    /// editor's waiting any more, as when the one that was has gone,
-    /// saying so.
+    /// Drops what's held for a command waiting for the grammar if nothing
+    /// is waiting any more, as when the editor that was has gone, saying
+    /// so.
     fn drop_held_for_none(&mut self) {
-        let waiting = (self.editors.panes.values()).any(Editor::waiting_for_grammar);
-        if !waiting && !self.editors.held.is_empty() {
+        if !self.editors_wait_for_grammar()
+            && !self.macro_waiting()
+            && !self.editors.held.is_empty()
+        {
             self.editors.held.clear();
             self.message =
                 Some("the editor waiting for the grammar closed: nothing was done".into());
         }
+    }
+
+    /// Whether an editor's command waits for the grammar.
+    pub(super) fn editors_wait_for_grammar(&self) -> bool {
+        (self.editors.panes.values()).any(Editor::waiting_for_grammar)
+    }
+
+    /// What the editor `pane` waits for, if anything, that the next key a
+    /// macro types may depend on: its file to open, or its text to come;
+    /// or the language server or the daemon to answer it, about a query
+    /// numbered `since` or later.
+    pub(super) fn editor_waits_for(&self, pane: PaneId, since: u64) -> Option<&'static str> {
+        let editors = &self.editors;
+        if editors.opening.contains_key(&pane) || editors.landings.contains_key(&pane) {
+            return Some("a file to open");
+        }
+        let editor = editors.panes.get(&pane)?;
+        let copy = editors.buffers.get(&editor.buffer())?;
+        if !copy.loaded() {
+            return Some("a file to open");
+        }
+        editor
+            .waiting_for_answer(copy, since)
+            .then_some("the language server")
+    }
+
+    /// Forgets the keys of a command half typed in the editor `pane`, if
+    /// it's one.
+    pub(super) fn forget_typed_in(&mut self, pane: PaneId) {
+        if let Some(editor) = self.editors.panes.get_mut(&pane) {
+            editor.forget_typed();
+        }
+    }
+
+    /// What every editor shares, as Vim's registers and marks are.
+    pub(super) fn shared_mut(&mut self) -> &mut Shared {
+        &mut self.editors.shared
+    }
+
+    /// Does `act` to each buffer's copy.
+    pub(super) fn each_copy(&mut self, act: impl FnMut(&mut BufferCopy)) {
+        self.editors.buffers.values_mut().for_each(act);
     }
 
     /// What the bar of the editor `pane` says, and how many keys and
@@ -503,33 +586,35 @@ impl Desk {
         }
     }
 
-    /// Has the keys and pastes held while an editor's command waited for
-    /// the grammar, in order, until another starts waiting, which holds
-    /// the rest.
+    /// Has the oldest key or paste held while an editor's command, or a
+    /// macro, waited, if there is one. Returns whether there was.
     ///
-    /// The rest are taken out while each is had, and put back after, so
-    /// what that one holds, such as the keys a binding it set off types,
-    /// comes before them.
-    fn read_held(&mut self) {
-        while !(self.editors.panes.values()).any(Editor::waiting_for_grammar) {
-            let Some(held) = self.editors.held.pop_front() else {
-                return;
-            };
-            let rest = std::mem::take(&mut self.editors.held);
-            match held {
-                Held::Key {
-                    press,
-                    handlers,
-                    typing,
-                } => {
-                    let typing = std::mem::replace(&mut self.script.typing, typing);
-                    self.key_with(&press.press(), handlers);
-                    self.script.typing = typing;
+    /// The rest are taken out while it's had, and put back after, so what
+    /// it holds, should something start waiting meanwhile, comes before
+    /// them.
+    pub(super) fn have_held(&mut self) -> bool {
+        let Some(held) = self.editors.held.pop_front() else {
+            return false;
+        };
+        let rest = std::mem::take(&mut self.editors.held);
+        match held {
+            Held::Key {
+                press,
+                handlers,
+                typing,
+                recorded,
+            } => {
+                if let Some(at) = recorded {
+                    self.editors.shared.registers.pressed_at(at);
                 }
-                Held::Paste(text) => self.paste(&text),
+                let typing = std::mem::replace(&mut self.script.typing, typing);
+                self.key_with(&press.press(), handlers);
+                self.script.typing = typing;
             }
-            self.editors.held.extend(rest);
+            Held::Paste(text) => self.paste(&text),
         }
+        self.editors.held.extend(rest);
+        true
     }
 
     /// Asks the language server of the focused editor's file `query`,
@@ -546,9 +631,8 @@ impl Desk {
     }
 
     /// Hands `press` to the focused pane's editor, moving the cursors of
-    /// the other editors of its buffer with any edits it makes. Each key of
-    /// a macro it types is handed over in turn. Returns whether the window
-    /// must be redrawn.
+    /// the other editors of its buffer with any edits it makes. Returns
+    /// whether the window must be redrawn.
     pub(super) fn editor_key(&mut self, press: &KeyPress<'_>) -> bool {
         let Some(strokes) = (self.shown)
             .and_then(|shown| self.editors.panes.get(&shown.pane))
@@ -563,35 +647,21 @@ impl Desk {
         redraw
     }
 
-    /// Hands `stroke`, typed, to the focused pane's editor, and then the
-    /// keys of any macro it types, until it's done.
+    /// Hands `stroke`, typed, to the focused pane's editor: by a macro,
+    /// if the key comes from one.
     fn editor_stroke(&mut self, stroke: Stroke) -> bool {
         let Some(focused) = self.shown.map(|shown| shown.pane) else {
             return false;
         };
+        let replaying = self.replaying();
+        let mut menu = None;
         let typed = |editor: &mut Editor, copy: &mut BufferCopy, shared: &mut Shared| {
-            editor.typed(stroke, copy, shared)
+            let done = editor.typed(stroke, copy, shared, replaying);
+            menu = editor.take_menu_keys();
+            done
         };
         let redraw = self.in_editor(focused, typed).unwrap_or(false);
-        self.replay_in(focused) || redraw
-    }
-
-    /// Hands the editor `pane` the keys of the macro it's typing, one at a
-    /// time, until it's done, or a key waits for the grammar: the rest
-    /// wait too, and go on once it's answered. Returns whether the window
-    /// must be redrawn.
-    fn replay_in(&mut self, pane: PaneId) -> bool {
-        let mut redraw = false;
-        while (self.editors.panes.get(&pane)).is_some_and(Editor::replaying) {
-            let next = |editor: &mut Editor, copy: &mut BufferCopy, shared: &mut Shared| {
-                editor.replay_next(copy, shared).unwrap_or_default()
-            };
-            // Without its file, it can't go on.
-            let Some(more) = self.in_editor(pane, next) else {
-                break;
-            };
-            redraw |= more;
-        }
+        self.handed_to_editor(stroke, menu);
         redraw
     }
 
@@ -620,7 +690,8 @@ impl Desk {
 
     /// Has `act` done to the editor `focused` and its buffer, as
     /// [`in_focused_editor`](Self::in_focused_editor) does to the focused
-    /// one.
+    /// one. A key that failed in it stops the macro typing it, and a
+    /// macro `@` asked for is typed after.
     fn in_editor(
         &mut self,
         focused: PaneId,
@@ -640,6 +711,8 @@ impl Desk {
         let done = act(editor, copy, &mut editors.shared);
         let left = editor.take_left();
         let opening = editor.take_opening();
+        let failed = editor.take_failed();
+        let asked_macro = editor.take_macro();
         let made = copy.take_made();
         for pane in &others {
             let editor = editors.panes.get_mut(pane).expect("just found");
@@ -665,6 +738,12 @@ impl Desk {
             self.open_here(focused, place.path.clone());
             self.editors.landings.insert(focused, place);
         }
+        if failed {
+            self.stop_macro(None);
+        }
+        if let Some((keys, times)) = asked_macro {
+            self.type_macro(&keys, times);
+        }
         Some(done.redraw)
     }
 
@@ -688,17 +767,6 @@ impl Desk {
     /// put something there since it asked.
     pub(crate) fn clipboard_heard(&mut self, from: Copy, text: String) {
         self.editors.shared.registers.heard_system(from, text);
-    }
-
-    /// A key the window takes itself, such as a binding's or `:`, which
-    /// stops a macro being recorded: it records only an editor's keys, and
-    /// would otherwise lose this one silently.
-    pub(super) fn stop_recording_for_window(&mut self) {
-        let registers = &mut self.editors.shared.registers;
-        if registers.recording().is_some() {
-            registers.stop_recording();
-            self.message = Some("recording stopped: macros record an editor's keys only".into());
-        }
     }
 
     /// `:registers`: lists what the registers hold, in a panel by the
@@ -872,22 +940,30 @@ impl Desk {
     pub(crate) fn tick_editors(&mut self, now: std::time::Instant) -> bool {
         let mut asked = self.give_up_off_focus();
         let editors = &mut self.editors;
+        let mut gave_up = false;
         for editor in editors.panes.values_mut() {
             if let Some(copy) = editors.buffers.get_mut(&editor.buffer()) {
                 asked |= editor.tick(now, copy);
             }
             // Given up on, as it waited too long, with no key to see to it.
-            if editor.take_gave_up() {
-                editors.held.clear();
-            }
+            gave_up |= editor.take_gave_up();
         }
-        asked
+        if gave_up {
+            self.gave_up();
+        }
+        // A macro goes on once what it waited for is done, as after
+        // anything the daemon says, or gives up if it's waited too long.
+        asked |= self.macro_patience(now);
+        asked | self.type_macros()
     }
 
     /// When an editor next has something due to ask its language server,
-    /// or a command waiting for the grammar to give up on.
+    /// or a command waiting for the grammar to give up on, or a macro
+    /// waiting is to give up.
     pub(crate) fn editor_wakes(&self) -> Option<std::time::Instant> {
-        self.editors.panes.values().filter_map(Editor::wakes).min()
+        (self.editors.panes.values().filter_map(Editor::wakes))
+            .chain(self.macro_gives_up())
+            .min()
     }
 
     /// The soonest an editor's highlight on text just copied goes.

@@ -213,10 +213,9 @@ impl Editor {
     fn give_up_saying(&mut self, why: &str) {
         if self.awaiting.take().is_some() {
             self.status = Some(why.to_owned());
+            // A macro waiting for it stops too: the desk sees to that.
             self.gave_up = true;
-            // A macro waiting for it stops, as at a key that fails.
             self.resume_replaying = false;
-            self.fail();
         }
     }
 
@@ -241,8 +240,7 @@ impl Editor {
     /// Does the command that was waiting, now that its answer's come, and
     /// then the rest of the key it was read from. Unless the answer took
     /// too long, or the cursor has moved: then it's given up on. A macro
-    /// whose key it was goes on after, as its driver types the rest (see
-    /// [`replay_next`](Self::replay_next)).
+    /// whose key it was goes on after, as the desk types the rest.
     pub(crate) fn resume(&mut self, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
         let Some(awaiting) = self.awaiting.take_if(|awaiting| awaiting.answer.is_some()) else {
             return Done::default();
@@ -273,7 +271,6 @@ impl Editor {
             // Held again if a command starts waiting.
             done.redraw |= self.stroke(stroke, copy, shared).redraw;
         }
-        self.replay_settled();
         self.follow(copy);
         done
     }

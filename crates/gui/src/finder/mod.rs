@@ -102,6 +102,8 @@ pub(crate) enum Outcome {
     Search,
     /// It's to close.
     Close,
+    /// It was to open the thing picked, but nothing is: nothing matches.
+    NothingPicked,
     /// It's to close, opening a file.
     Open(Opening),
 }
@@ -433,7 +435,7 @@ impl Finder {
     /// Opens the thing picked, at `place`.
     fn open(&mut self, place: Place) -> Outcome {
         let Some(entry) = self.picked().cloned() else {
-            return Outcome::Nothing;
+            return Outcome::NothingPicked;
         };
         Outcome::Open(Opening {
             path: self.absolute(&entry),

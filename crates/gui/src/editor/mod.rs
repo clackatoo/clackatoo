@@ -53,7 +53,10 @@ use winit::keyboard::{Key, NamedKey};
 use actions::{ActionMenu, MenuKey, MenuStroke};
 pub use complete::Ranking;
 use complete::{Completion, Resolved, is_word};
-pub(crate) use copy::{BufferCopy, Heard};
+/// The daemon's side of a buffer, for the desk's tests.
+#[cfg(test)]
+pub(crate) use copy::tests::Daemon;
+pub(crate) use copy::{BufferCopy, Heard, queries_asked};
 pub(crate) use keys::Stroke;
 use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
 pub(crate) use marks::{FilePlace, Marks};
@@ -69,6 +72,7 @@ use wrap::{Shown, Top, Wrapping};
 
 use crate::colors;
 use crate::input::KeyPress;
+use crate::keymap::Chord;
 use crate::motion::{
     Class, Cursor, Lines, Motion, Point, Reach, RowAt, before, class_at, last_row, row_at,
     rows_down, rows_up,
@@ -98,15 +102,6 @@ const NO_CHANGES: &str = "nothing's changed since git's index";
 
 /// ...and when there's none at the cursor's line.
 const NO_CHANGE_HERE: &str = "nothing's changed here since git's index";
-
-/// The most keys a macro types before it's stopped: one that types
-/// itself again, and never fails, would go on for ever, and the window
-/// can't be asked to stop it meanwhile. Fewer in tests, which run
-/// unoptimised.
-const MOST_REPLAYED: usize = if cfg!(test) { 20_000 } else { 1_000_000 };
-
-/// The deepest macros type macros, as Vim's `maxmapdepth`.
-const DEEPEST_REPLAY: usize = 1000;
 
 /// What's done to the hunk at an editor's cursor, by the window's keys and
 /// commands.
@@ -138,15 +133,6 @@ pub(crate) struct Done {
 
 impl Done {
     const REDRAW: Self = Self { redraw: true };
-}
-
-/// The keys of a macro being typed, as many `times` over again as are
-/// left after this, and how far through them it's got.
-#[derive(Debug)]
-struct Replay {
-    strokes: std::rc::Rc<[Stroke]>,
-    next: usize,
-    times: usize,
 }
 
 /// The text an operator acts on.
@@ -488,20 +474,19 @@ pub(crate) struct Editor {
     gave_up: bool,
     /// Whether what the bar says stays through the next key.
     keep_status: bool,
-    /// The macros being typed, the one typed by the others last.
-    replays: Vec<Replay>,
-    /// How many keys the macros being typed have typed so far.
-    replayed: usize,
     /// Whether the key being read comes from a macro.
     replaying: bool,
-    /// Whether the macros being typed have made an edit, which started
-    /// their undo step.
-    replay_edited: bool,
     /// Whether the command waiting for the grammar is a macro's.
     resume_replaying: bool,
     /// The keys to note in a macro being recorded for the key just typed,
     /// if a menu took it: what it put in, or nothing.
     menu_keys: Option<Vec<Stroke>>,
+    /// A macro to type, `@` asked for, and how many times: the desk types
+    /// it, as a macro can go on in other panes.
+    macro_asked: Option<(Vec<Chord>, usize)>,
+    /// Whether a key failed since the desk last asked, as a motion that
+    /// can't move does, which stops the macros being typed.
+    failed: bool,
 }
 
 impl Editor {
@@ -563,12 +548,11 @@ impl Editor {
             answered: None,
             gave_up: false,
             keep_status: false,
-            replays: Vec::new(),
-            replayed: 0,
             replaying: false,
-            replay_edited: false,
             resume_replaying: false,
             menu_keys: None,
+            macro_asked: None,
+            failed: false,
         }
     }
 
@@ -704,8 +688,7 @@ impl Editor {
 
     // --- Keys ---------------------------------------------------------------
 
-    /// Does what `press` does, and what any macro it types does. What
-    /// every editor shares is in `shared`.
+    /// Does what `press` does. What every editor shares is in `shared`.
     #[cfg(test)]
     pub(crate) fn key(
         &mut self,
@@ -715,10 +698,7 @@ impl Editor {
     ) -> Done {
         let mut done = Done::default();
         for stroke in self.strokes(press) {
-            done.redraw |= self.typed(stroke, copy, shared).redraw;
-            while let Some(one) = self.replay_next(copy, shared) {
-                done.redraw |= one.redraw;
-            }
+            done.redraw |= self.typed(stroke, copy, shared, false).redraw;
         }
         done
     }
@@ -728,112 +708,84 @@ impl Editor {
         strokes(press, self.mode == Mode::Insert || self.prompt.is_some())
     }
 
-    /// Does what `stroke`, typed, does, noting it in the macro being
-    /// recorded, if one is. A macro it types is typed by
-    /// [`replay_next`](Self::replay_next), a key at a time.
+    /// Does what `stroke`, typed, does: by a macro, if `replaying`. The
+    /// desk records macros and types them (see `desk::macros`); a macro
+    /// `@` asks for is [`take_macro`](Self::take_macro)'s, and a key a
+    /// menu took is noted for [`take_menu_keys`](Self::take_menu_keys).
     pub(crate) fn typed(
         &mut self,
         stroke: Stroke,
         copy: &mut BufferCopy,
         shared: &mut Shared,
+        replaying: bool,
     ) -> Done {
-        let recording = shared.registers.recording().is_some();
         self.menu_keys = None;
+        self.failed = false;
+        self.replaying = replaying;
         let done = self.stroke(stroke, copy, shared);
-        // Noted once done, so neither the `q` that starts recording nor
-        // the one that stops it is. A key a menu took is noted as what it
-        // put in, if anything, so typing the macro again doesn't need the
-        // menu, which comes only when the language server answers.
-        if recording && shared.registers.recording().is_some() {
-            match self.menu_keys.take() {
-                Some(strokes) => strokes.into_iter().for_each(|s| shared.registers.typed(s)),
-                None => shared.registers.typed(stroke),
-            }
+        self.replaying = false;
+        // Its command waits for the grammar: it's done as the macro's,
+        // in its undo step, when the answer comes, and the desk types the
+        // rest after.
+        if replaying {
+            self.resume_replaying = self.awaiting.is_some();
         }
         done
     }
 
-    /// Does what the next key of the macro being typed does, if one is.
-    pub(crate) fn replay_next(
-        &mut self,
-        copy: &mut BufferCopy,
-        shared: &mut Shared,
-    ) -> Option<Done> {
-        // A key waiting for the grammar goes first, as typed keys wait.
-        if self.awaiting.is_some() {
-            return None;
-        }
-        let replay = self.replays.last_mut()?;
-        let stroke = replay.strokes[replay.next];
-        replay.next += 1;
-        if replay.next == replay.strokes.len() {
-            if replay.times > 1 {
-                replay.times -= 1;
-                replay.next = 0;
-            } else {
-                // Done with before its last key is read, so a macro that
-                // types itself last goes no deeper.
-                self.replays.pop();
-            }
-        }
-        self.replayed += 1;
-        if self.replayed > MOST_REPLAYED {
-            self.status = Some(format!(
-                "the macro was stopped after {MOST_REPLAYED} keys: it may type itself for ever"
-            ));
-            self.fail();
-            return Some(Done::REDRAW);
-        }
-        self.replaying = true;
-        let done = self.stroke(stroke, copy, shared);
-        self.replaying = false;
-        // Its command waits for the grammar: the rest wait for it, and
-        // it's done as the macro's when the answer comes.
-        self.resume_replaying = self.awaiting.is_some();
-        self.replay_settled();
-        Some(done)
+    /// What the key just typed is to be noted as in a macro being
+    /// recorded, if a menu took it: what it put in, or nothing, so typing
+    /// the macro again doesn't need the menu, which comes only when the
+    /// language server answers.
+    pub(crate) fn take_menu_keys(&mut self) -> Option<Vec<Stroke>> {
+        self.menu_keys.take()
     }
 
-    /// Forgets how far the macros typed have got once they're done, and
-    /// not waiting for the grammar.
-    fn replay_settled(&mut self) {
-        if self.replays.is_empty() && self.awaiting.is_none() {
-            self.replayed = 0;
-            self.replay_edited = false;
-        }
+    /// The macro `@` asked for since last asked, and how many times to
+    /// type it.
+    pub(crate) fn take_macro(&mut self) -> Option<(Vec<Chord>, usize)> {
+        self.macro_asked.take()
     }
 
-    /// Types `strokes`, a macro, `times` over, once the keys being read
-    /// are done with.
-    fn replay(&mut self, strokes: Vec<Stroke>, times: usize) {
-        if strokes.is_empty() {
-            return;
-        }
-        if self.replays.len() >= DEEPEST_REPLAY {
-            self.status = Some(format!(
-                "macros typed macros {DEEPEST_REPLAY} deep, so they were stopped"
-            ));
-            self.fail();
-            return;
-        }
-        self.replays.push(Replay {
-            strokes: strokes.into(),
-            next: 0,
-            times,
-        });
+    /// Whether a key failed since last asked, which stops the macros
+    /// being typed, as in Vim.
+    pub(crate) fn take_failed(&mut self) -> bool {
+        std::mem::take(&mut self.failed)
+    }
+
+    /// Forgets the keys of a command half typed, as when the macro typing
+    /// them is stopped.
+    pub(crate) fn forget_typed(&mut self) {
+        self.typed.clear();
+    }
+
+    /// Whether the editor waits for the language server or the daemon to
+    /// answer something the keys after may depend on, asked as query
+    /// `since` or later: where `gd` goes, a menu or panel to show, a
+    /// rename or a stage; or an undo. A macro waits for it before its next
+    /// key.
+    pub(crate) fn waiting_for_answer(&self, copy: &BufferCopy, since: u64) -> bool {
+        let new = |query: u64| query >= since;
+        self.asked.is_some_and(|(query, _)| new(query))
+            || self.acting.is_some_and(new)
+            || self.renaming.is_some_and(new)
+            || self.staging.iter().any(|&query| new(query))
+            || copy.reversing()
+    }
+
+    /// The connection to the daemon was lost: what was asked of it will
+    /// never be answered.
+    pub(crate) fn reconnected(&mut self) {
+        self.asked = None;
+        self.acting = None;
+        self.renaming = None;
+        self.staging.clear();
     }
 
     /// A key failed, as a motion that can't move does: the macros being
     /// typed stop, as in Vim.
     fn fail(&mut self) {
-        self.replays.clear();
-        self.replayed = 0;
-        self.replay_edited = false;
-    }
-
-    /// Whether a macro is being typed, with keys still to come.
-    pub(crate) fn replaying(&self) -> bool {
-        !self.replays.is_empty() && self.awaiting.is_none()
+        self.failed = true;
     }
 
     /// Puts `text` in at the cursor, as typed in insert mode.
@@ -1146,7 +1098,7 @@ impl Editor {
             Action::Select { object, inner } => self.select(object, inner, times, copy),
             Action::Record(name) => shared.registers.record(name),
             Action::Replay(name) => match shared.registers.macro_keys(name) {
-                Ok(strokes) => self.replay(strokes, times),
+                Ok(keys) => self.macro_asked = Some((keys, times)),
                 Err(why) => {
                     self.status = Some(why);
                     self.fail();
@@ -2215,10 +2167,10 @@ impl Editor {
     /// Makes `edit` to the buffer, as part of the change being made.
     fn make(&mut self, edit: Edit, copy: &mut BufferCopy) {
         self.edited(&edit);
-        // A macro's edits, however many, are one undo step, as in Vim,
-        // which its first starts.
+        // A macro's edits to a file, however many, are one undo step, as
+        // in Vim, which its first starts.
         let step = if self.replaying {
-            !std::mem::replace(&mut self.replay_edited, true)
+            copy.first_macro_edit()
         } else {
             self.new_step
         };

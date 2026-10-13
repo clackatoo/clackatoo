@@ -102,6 +102,7 @@ mod finding;
 mod formatting;
 mod jumps;
 mod links;
+mod macros;
 mod offers;
 mod script;
 mod settings;
@@ -190,6 +191,9 @@ pub(crate) struct Desk {
     script: script::Script,
     /// Panes editing files.
     editors: editors::Editors,
+    /// The macros being typed, and what's noted of keys pressed for the
+    /// one being recorded.
+    macros: macros::Macros,
     /// Where you've been, to go back to.
     jumps: jumps::Jumps,
     /// The options, as config and `:set` have set them.
@@ -759,6 +763,13 @@ impl Desk {
     pub(crate) fn lost(&mut self) {
         self.connected = false;
         self.forget_asked();
+        // A macro can't go on without the daemon, nor wait for it.
+        if self.macro_waiting() {
+            self.stop_macro(Some(
+                "the macro was stopped: the daemon is out of reach".into(),
+            ));
+            self.drop_held();
+        }
         // Its searches went with the connection.
         self.finder = None;
     }
@@ -770,6 +781,7 @@ impl Desk {
         self.attached.clear();
         self.editors_reconnected();
         self.asked.clear();
+        self.macros.requests_forgotten();
         self.outbox.clear();
         self.formatting.clear();
         self.unformatted.clear();
@@ -788,7 +800,14 @@ impl Desk {
             self.finished = true;
             return;
         }
+        let shown = self.shown;
         self.settle();
+        // A pane a macro waiting closed, as with `:q`, moves the focus as it
+        // asked: it goes on in the pane that has it. Closed by anyone else,
+        // the macro stops, as its keys were for that pane.
+        if self.macro_asked() && self.shown != shown {
+            self.macro_follows_focus();
+        }
         self.attach_shown();
         self.fit_panes();
         self.forget_gone_handlers();
@@ -812,9 +831,32 @@ impl Desk {
         })
     }
 
+    /// Hands the daemon's answer to whoever asked, and goes on with a
+    /// macro that waited for it, unless it's refused, which stops it, as a
+    /// key that fails does. Returns whether the window must be redrawn.
+    pub(crate) fn answered(&mut self, response: Response) -> bool {
+        if matches!(response, Response::Error(_))
+            && self.asked.front().is_some_and(macros::waits_for)
+        {
+            self.stop_macro(None);
+        }
+        // An answer the macro waited for may move the focus, as to a pane
+        // it asked for: the macro goes on there.
+        let asked_by_macro = self.macro_asked();
+        if let Some(asker) = self.asked.front() {
+            self.macros.request_answered(asker);
+        }
+        let shown = self.shown;
+        let redraw = self.hand_answer(response);
+        if asked_by_macro && self.shown != shown {
+            self.macro_follows_focus();
+        }
+        redraw | self.type_macros()
+    }
+
     /// Hands the daemon's answer to whoever asked. Returns whether the
     /// window must be redrawn.
-    pub(crate) fn answered(&mut self, response: Response) -> bool {
+    fn hand_answer(&mut self, response: Response) -> bool {
         match self.asked.pop_front() {
             Some(Asker::Pane(terminal)) => {
                 let Some(pane) = self.panes.get_mut(&terminal) else {
@@ -917,7 +959,9 @@ impl Desk {
     /// Queues a request of the window's own.
     fn request(&mut self, request: Request, asked: Asked) {
         if self.connected {
-            self.asked.push_back(Asker::Window(asked));
+            let window = Asker::Window(asked);
+            self.macros.requested(&window);
+            self.asked.push_back(window);
             self.outbox.push(ClientMessage::Request(request));
         }
     }
@@ -944,15 +988,24 @@ impl Desk {
     // --- Keys -------------------------------------------------------------
 
     /// Handles a key press: the command line's, a binding's, then the
-    /// focused pane's. Returns whether the window must be redrawn.
+    /// focused pane's, noting it in the macro being recorded, if one is,
+    /// and then the keys of any macro it types. Returns whether the
+    /// window must be redrawn.
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) -> bool {
-        self.key_with(press, true)
+        if input::is_modifier(press.key) {
+            return false;
+        }
+        self.record_press(press);
+        let redraw = self.key_with(press, true);
+        let typed = self.type_macros();
+        self.recorded_press();
+        redraw || typed
     }
 
     /// Handles a key press, as [`key`](Self::key) does, but for the
     /// config's keypress handlers if not `handlers`, as for a key they've
-    /// had already. Keys a binding types meet neither them nor the
-    /// config's bindings, only the window's.
+    /// had already, and without noting it in a macro. Keys a binding types
+    /// meet neither them nor the config's bindings, only the window's.
     fn key_with(&mut self, press: &KeyPress<'_>, handlers: bool) -> bool {
         // The keyboard reports Shift, Ctrl and the like as keys of their
         // own, on the way to a chord such as Ctrl+Shift+C. They mustn't
@@ -961,17 +1014,22 @@ impl Desk {
         if input::is_modifier(press.key) {
             return false;
         }
-        // While an editor's command waits for the grammar, keys wait too,
-        // so none, not even a binding's, gets ahead of it.
+        // While an editor's command waits for the grammar, or a macro for
+        // what its keys started, keys wait too, so none, not even a
+        // binding's, gets ahead of it.
         let typing = self.script.typing;
+        let recorded = self.shared_mut().registers.press_start();
         let held = || editors::Held::Key {
             press: KeptPress::of(press),
             handlers,
             typing,
+            recorded,
         };
-        // Esc pressed cancels it; one a binding types waits its turn.
+        // Esc pressed cancels it; one a macro or binding types waits its
+        // turn.
         let escape = *press.key == Key::Named(NamedKey::Escape) || pane::enters_normal_mode(press);
-        if let Some(redraw) = self.hold_for_grammar(escape && !typing, held) {
+        let cancel = escape && !typing && !self.key_from_frame();
+        if let Some(redraw) = self.hold_while_waiting(cancel, held) {
             return redraw;
         }
         let asked = self.offer_asked();
@@ -1010,7 +1068,6 @@ impl Desk {
                 Pressed::Bound(Binding::Window(action)) => {
                     self.forget_waiting();
                     self.message = None;
-                    self.stop_recording_for_window();
                     self.act(action);
                     return true;
                 }
@@ -1021,7 +1078,6 @@ impl Desk {
                 }
                 Pressed::Bound(Binding::Lua(binding)) => {
                     self.message = None;
-                    self.stop_recording_for_window();
                     self.run_lua_binding(binding, chord, press);
                     return true;
                 }
@@ -1051,6 +1107,9 @@ impl Desk {
         if self.focused_editor().is_some() {
             return self.editor_key(press) || had_message;
         }
+        if self.stop_recording_in_terminal(press) {
+            return true;
+        }
         let redraw = self.focused_pane().is_some_and(|pane| pane.key(press));
         if let Some(terminal) = self.focused_terminal() {
             self.open_pane_link(terminal);
@@ -1062,7 +1121,7 @@ impl Desk {
     /// focused pane.
     pub(crate) fn paste(&mut self, text: &str) {
         if self
-            .hold_for_grammar(false, || editors::Held::Paste(text.to_owned()))
+            .hold_while_waiting(false, || editors::Held::Paste(text.to_owned()))
             .is_some()
         {
             return;
@@ -1449,7 +1508,7 @@ impl Desk {
                 match purpose {
                     Purpose::Command => match command::parse(&text) {
                         Ok(command) => self.run(command),
-                        Err(message) => self.message = Some(message),
+                        Err(message) => self.refuse(message),
                     },
                     Purpose::RenameWorkspace(workspace) => self.request(
                         Request::RenameWorkspace {
@@ -4613,32 +4672,40 @@ mod tests {
         assert_eq!(editor_text(&desk), "one two\n");
     }
 
+    /// What the register `name` holds.
+    fn register(desk: &mut Desk, name: char) -> Option<String> {
+        let registers = &desk.shared_mut().registers;
+        registers
+            .get(Some(name))
+            .map(|register| register.text.clone())
+    }
+
     #[test]
-    fn macros_and_keys_mapped_to_keys_work_together() {
-        let mut desk = editing("/t.txt", "a\nb\nc\nd\n");
+    fn macros_type_keys_through_the_bindings_as_they_are_bound_now() {
+        let mut desk = editing("/t.txt", "a\nb\nc\nd\ne\n");
         desk.lua_from(
             r#"
             client.keys.map("n", "<Space>x", "A!<Esc>")
-            client.keys.map("n", "<Space>m", "@q")
+            client.keys.map("n", "<Space>m", "@qx")
             "#,
         );
         answer_all(&mut desk);
-        // A macro recorded with a mapped key keeps what it typed, so it
-        // types the same again, whatever the key's mapped to by then.
+        // The keys pressed are recorded, not what the binding typed...
         type_keys(&mut desk, "qq x");
         type_keys(&mut desk, "jq");
-        assert_eq!(editor_text(&desk), "a!\nb\nc\nd\n");
+        assert_eq!(editor_text(&desk), "a!\nb\nc\nd\ne\n");
+        assert_eq!(register(&mut desk, 'q').as_deref(), Some(" xj"));
+        // ...so they're typed through the bindings, as pressing them would
+        // be. A binding that types `@qx` types q's keys, and then the x,
+        // as in Vim.
+        type_keys(&mut desk, " m");
+        assert_eq!(editor_text(&desk), "a!\nb!\n\nd\ne\n");
+        // Bound to something else, the macro does what that does now.
         desk.lua_from(r#"client.keys.map("n", "<Space>x", "dd")"#);
         answer_all(&mut desk);
-        // A mapping that types `@q` types the macro.
-        type_keys(&mut desk, " m");
-        assert_eq!(editor_text(&desk), "a!\nb!\nc\nd\n");
-        type_keys(&mut desk, "@@");
-        assert_eq!(editor_text(&desk), "a!\nb!\nc!\nd\n");
-        // And it's a macro's keys that are typed, not the mapping's: `"qp`
-        // puts what the editor was given.
-        type_keys(&mut desk, "\"qp");
-        assert_eq!(editor_text(&desk), "a!\nb!\nc!\ndA!<Esc>j\n");
+        type_keys(&mut desk, "@q");
+        assert_eq!(editor_text(&desk), "a!\nb!\nd\ne\n");
+        assert_eq!(note(&desk), "t.txt  4:1");
     }
 
     #[test]
@@ -4672,18 +4739,15 @@ mod tests {
         // `q` in insert mode is typed, and so is a macro's.
         type_text(&mut desk, "@z");
         assert_eq!(editor_text(&desk), "hhiix\n");
-        // A key the window takes, such as `:`, stops recording, saying so,
-        // as the macro would lose it.
-        type_text(&mut desk, "qyx");
-        type_text(&mut desk, ":");
+        // Keys the window takes, such as `:`, and Esc on the command line,
+        // are recorded too, and recording goes on.
+        type_text(&mut desk, "qy:");
         escape(&mut desk);
-        assert!(desk.recording().is_none());
-        assert_eq!(
-            desk.message.as_deref(),
-            Some("recording stopped: macros record an editor's keys only")
-        );
+        type_text(&mut desk, "xq");
+        assert_eq!(register(&mut desk, 'y').as_deref(), Some(":<Esc>x"));
+        assert_eq!(editor_text(&desk), "hhix\n");
         type_text(&mut desk, "@y");
-        assert_eq!(editor_text(&desk), "hhx\n", "the x it did record");
+        assert_eq!(editor_text(&desk), "hhx\n");
     }
 
     #[test]
@@ -4729,6 +4793,771 @@ mod tests {
         );
         command(&mut desk, "marks");
         assert_eq!(finder_rows(&mut desk), ["t.txt:2: b  two"]);
+    }
+
+    // --- Macros, through the desk --------------------------------------------
+
+    /// The daemon's side of each buffer, by buffer.
+    type Daemons = HashMap<BufferId, crate::editor::Daemon>;
+
+    /// The daemon's side of buffer 7, whose text is `text`.
+    fn daemon_of_7(text: &str) -> Daemons {
+        HashMap::from([(BufferId(7), crate::editor::Daemon::new(text))])
+    }
+
+    /// Makes the changes to buffers sent, with `daemons`, as the daemon
+    /// does, and answers them, until none are left. Returns whether each
+    /// edit sent started an undo step, with its buffer, and the other
+    /// messages sent meanwhile, unanswered.
+    fn serve(
+        desk: &mut Desk,
+        daemons: &mut Daemons,
+    ) -> (Vec<(BufferId, bool)>, Vec<ClientMessage>) {
+        let (mut steps, mut others) = (Vec::new(), Vec::new());
+        loop {
+            let messages = desk.take_outbox();
+            if messages.is_empty() {
+                return (steps, others);
+            }
+            for message in messages {
+                let ClientMessage::Edit { buffer, change, .. } = &message else {
+                    others.push(message);
+                    continue;
+                };
+                let buffer = *buffer;
+                if let clackatoo_protocol::Change::Edit { step, .. } = change {
+                    steps.push((buffer, *step));
+                }
+                let daemon = daemons.get_mut(&buffer).expect("a daemon for the buffer");
+                let (answer, _) = daemon.take(message);
+                desk.buffer_changed(buffer, answer);
+            }
+        }
+    }
+
+    /// The requests among `messages`.
+    fn requests(messages: &[ClientMessage]) -> Vec<&Request> {
+        (messages.iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(request) => Some(request),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The text the daemon has for `buffer`.
+    fn daemon_text(daemons: &Daemons, buffer: u32) -> String {
+        daemons[&BufferId(buffer)].text.to_string()
+    }
+
+    fn enter(desk: &mut Desk) {
+        press(
+            desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+    }
+
+    /// The byte the focused editor's cursor is on.
+    fn cursor_byte(desk: &Desk) -> usize {
+        let (editor, copy) = desk.focused_editor().expect("an editor");
+        editor.cursor_byte(copy)
+    }
+
+    /// The line the focused editor's cursor is on, from 0.
+    fn cursor_line(desk: &Desk) -> usize {
+        let (_, copy) = desk.focused_editor().expect("an editor");
+        copy.text().byte_to_line(cursor_byte(desk))
+    }
+
+    /// The number of the finder's search, which must have been asked for.
+    fn finder_search(desk: &mut Desk) -> u64 {
+        let asked = (desk.take_outbox().into_iter()).find_map(|message| match message {
+            ClientMessage::Find { id, .. } => Some(id),
+            _ => None,
+        });
+        asked.expect("a search")
+    }
+
+    /// Gives the finder's search `id` the files `a.rs` and `b.rs`, in `/p`,
+    /// and says that's all.
+    fn found_a_and_b(desk: &mut Desk, id: u64) {
+        found_files(desk, id, &["a.rs", "b.rs"]);
+        let done = clackatoo_protocol::Found::Done(clackatoo_protocol::Done::All);
+        desk.found(id, done);
+    }
+
+    #[test]
+    fn a_macro_types_through_insert_mode_and_a_count_types_it_again() {
+        let text = "a\nb\nc\nd\ne\n";
+        let mut desk = editing("/t.txt", text);
+        let mut daemons = daemon_of_7(text);
+        type_text(&mut desk, "qaA!");
+        escape(&mut desk);
+        type_text(&mut desk, "jq");
+        assert_eq!(desk.recording(), None);
+        assert_eq!(register(&mut desk, 'a').as_deref(), Some("A!<Esc>j"));
+        serve(&mut desk, &mut daemons);
+        type_text(&mut desk, "2@a");
+        // Its edits are one undo step, as in Vim, which `u` undoes and
+        // Ctrl+R redoes.
+        let (steps, _) = serve(&mut desk, &mut daemons);
+        assert_eq!(steps, [(BufferId(7), true), (BufferId(7), false)]);
+        assert_eq!(daemon_text(&daemons, 7), "a!\nb!\nc!\nd\ne\n");
+        type_text(&mut desk, "u");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(editor_text(&desk), "a!\nb\nc\nd\ne\n");
+        ctrl(&mut desk, "r");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(editor_text(&desk), "a!\nb!\nc!\nd\ne\n");
+        type_text(&mut desk, "4G@@");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(editor_text(&desk), "a!\nb!\nc!\nd!\ne\n");
+        // `"ap` puts the keys, which can be changed and typed again.
+        type_text(&mut desk, "G\"ap");
+        assert_eq!(editor_text(&desk), "a!\nb!\nc!\nd!\neA!<Esc>j\n");
+        type_text(&mut desk, "0f!r?0l\"by$gg@b");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(editor_text(&desk), "a!?\nb!\nc!\nd!\neA?<Esc>j\n");
+    }
+
+    #[test]
+    fn a_macro_runs_commands_and_waits_for_the_daemon_to_answer_them() {
+        let text = "a\nb\nc\nd\n";
+        let mut desk = editing("/t.txt", text);
+        let mut daemons = daemon_of_7(text);
+        type_text(&mut desk, "qaA!");
+        escape(&mut desk);
+        command(&mut desk, "w");
+        type_text(&mut desk, "jq");
+        assert_eq!(register(&mut desk, 'a').as_deref(), Some("A!<Esc>:w<CR>j"));
+        let save = Request::Save {
+            buffer: BufferId(7),
+            force: false,
+        };
+        let (_, sent) = serve(&mut desk, &mut daemons);
+        assert_eq!(requests(&sent), [&save]);
+        desk.answered(Response::Done);
+        // Typed again, it writes the file, and goes on once the daemon
+        // has, with an x pressed meanwhile waiting behind it.
+        type_text(&mut desk, "@ax");
+        let (_, sent) = serve(&mut desk, &mut daemons);
+        assert_eq!(requests(&sent), [&save]);
+        assert_eq!(editor_text(&desk), "a!\nb!\nc\nd\n");
+        assert_eq!(cursor_line(&desk), 1, "waiting after the :w");
+        desk.answered(Response::Done);
+        serve(&mut desk, &mut daemons);
+        assert_eq!(editor_text(&desk), "a!\nb!\n\nd\n", "then the j, and the x");
+        // A write the daemon refuses stops it, as a key that fails does.
+        type_text(&mut desk, "@a");
+        serve(&mut desk, &mut daemons);
+        let changed = clackatoo_protocol::Error::ChangedOnDisk("/t.txt".into());
+        desk.answered(Response::Error(changed));
+        serve(&mut desk, &mut daemons);
+        assert_eq!(cursor_line(&desk), 2, "no j");
+        assert_eq!(daemon_text(&daemons, 7), "a!\nb!\n!\nd\n");
+    }
+
+    #[test]
+    fn keys_written_in_a_register_type_through_the_command_line() {
+        let text = "x\n";
+        let mut desk = editing("/t.txt", text);
+        let mut daemons = daemon_of_7(text);
+        // A line of keys, yanked into a register, types as it reads.
+        type_text(&mut desk, "O:w<CR>A?<Esc>");
+        escape(&mut desk);
+        type_text(&mut desk, "0\"ay$dd@a");
+        let (_, sent) = serve(&mut desk, &mut daemons);
+        let save = Request::Save {
+            buffer: BufferId(7),
+            force: false,
+        };
+        assert_eq!(requests(&sent), [&save]);
+        desk.answered(Response::Done);
+        serve(&mut desk, &mut daemons);
+        assert_eq!(editor_text(&desk), "x?\n");
+        // A command that isn't one stops it, saying so.
+        type_text(&mut desk, "O:nosuch<CR>A!<Esc>");
+        escape(&mut desk);
+        type_text(&mut desk, "0\"by$dd");
+        desk.message = None;
+        type_text(&mut desk, "@b");
+        serve(&mut desk, &mut daemons);
+        assert!(desk.message.is_some(), "why it stopped");
+        assert_eq!(editor_text(&desk), "x?\n");
+    }
+
+    /// Whether each edit sent to `buffer`, of those `steps` lists, started
+    /// an undo step.
+    fn starts_in(steps: &[(BufferId, bool)], buffer: u32) -> Vec<bool> {
+        (steps.iter())
+            .filter(|&&(of, _)| of == BufferId(buffer))
+            .map(|&(_, step)| step)
+            .collect()
+    }
+
+    #[test]
+    fn a_macro_moves_between_panes_and_is_one_undo_step_in_each_file() {
+        let mut desk = desk(one_tab(side_by_side(vec![
+            file_pane(1, 7),
+            file_pane(2, 8),
+        ])));
+        let (left, right) = ("abc1\nabc2\nabc3\n", "xyz1\nxyz2\nxyz3\n");
+        load(&mut desk, 7, "/a.txt", left);
+        load(&mut desk, 8, "/b.txt", right);
+        let mut daemons = HashMap::from([
+            (BufferId(7), crate::editor::Daemon::new(left)),
+            (BufferId(8), crate::editor::Daemon::new(right)),
+        ]);
+        // With the window's own keys for moving between panes.
+        type_text(&mut desk, "qaxxj");
+        ctrl(&mut desk, "l");
+        type_text(&mut desk, "xxj");
+        ctrl(&mut desk, "h");
+        type_text(&mut desk, "q");
+        assert_eq!(
+            register(&mut desk, 'a').as_deref(),
+            Some("xxj<C-l>xxj<C-h>")
+        );
+        serve(&mut desk, &mut daemons);
+        type_text(&mut desk, "@a");
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        let (steps, _) = serve(&mut desk, &mut daemons);
+        assert_eq!(daemon_text(&daemons, 7), "c1\nc2\nabc3\n");
+        assert_eq!(daemon_text(&daemons, 8), "z1\nz2\nxyz3\n");
+        // One undo step in each file, which its first edit starts.
+        assert_eq!(starts_in(&steps, 7), [true, false]);
+        assert_eq!(starts_in(&steps, 8), [true, false]);
+        // So `u` in each undoes all the macro did there, and no more.
+        type_text(&mut desk, "u");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(daemon_text(&daemons, 7), "c1\nabc2\nabc3\n");
+        ctrl(&mut desk, "l");
+        type_text(&mut desk, "u");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(daemon_text(&daemons, 8), "z1\nxyz2\nxyz3\n");
+        // And the next macro starts steps of its own.
+        ctrl(&mut desk, "h");
+        type_text(&mut desk, "@a");
+        let (steps, _) = serve(&mut desk, &mut daemons);
+        assert_eq!(starts_in(&steps, 7), [true, false]);
+        assert_eq!(starts_in(&steps, 8), [true, false]);
+    }
+
+    #[test]
+    fn a_key_that_fails_in_any_pane_stops_the_macro() {
+        let mut desk = desk(one_tab(side_by_side(vec![
+            file_pane(1, 7),
+            file_pane(2, 8),
+        ])));
+        let (left, right) = ("a\nb\n", "x\ny\n");
+        load(&mut desk, 7, "/a.txt", left);
+        load(&mut desk, 8, "/b.txt", right);
+        let mut daemons = HashMap::from([
+            (BufferId(7), crate::editor::Daemon::new(left)),
+            (BufferId(8), crate::editor::Daemon::new(right)),
+        ]);
+        type_text(&mut desk, "qa");
+        ctrl(&mut desk, "l");
+        type_text(&mut desk, "jA!");
+        escape(&mut desk);
+        ctrl(&mut desk, "h");
+        type_text(&mut desk, "A?");
+        escape(&mut desk);
+        type_text(&mut desk, "q");
+        serve(&mut desk, &mut daemons);
+        // The j on the right's last line fails: nothing after it is typed.
+        type_text(&mut desk, "@a");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        assert_eq!(daemon_text(&daemons, 8), "x\ny!\n");
+        assert_eq!(daemon_text(&daemons, 7), "a?\nb\n");
+    }
+
+    #[test]
+    fn a_macro_that_types_itself_stops_where_a_key_fails_or_after_too_many() {
+        let mut desk = editing("/t.txt", "1\n2\n3\n4\n");
+        // Cleared first, so recording `@a` types nothing.
+        type_text(&mut desk, "qaqqaI- ");
+        escape(&mut desk);
+        type_text(&mut desk, "j@aq");
+        assert_eq!(editor_text(&desk), "- 1\n2\n3\n4\n");
+        type_text(&mut desk, "@a");
+        assert_eq!(
+            editor_text(&desk),
+            "- 1\n- 2\n- 3\n- 4\n",
+            "j on the last line stops it"
+        );
+        // A count stops too, where it fails, rather than going on with
+        // what's left of it.
+        let mut desk = editing("/t.txt", "a\nb\n");
+        type_text(&mut desk, "qbA.");
+        escape(&mut desk);
+        type_text(&mut desk, "jq5@b");
+        assert_eq!(editor_text(&desk), "a.\nb.\n");
+        // Keys that make nothing stop it, as unknown keys do in Vim.
+        let mut desk = editing("/t.txt", "x\n");
+        type_text(&mut desk, "qcA1");
+        escape(&mut desk);
+        type_text(&mut desk, "Q");
+        ctrl(&mut desk, "k");
+        type_text(&mut desk, "A2");
+        escape(&mut desk);
+        type_text(&mut desk, "q");
+        assert_eq!(editor_text(&desk), "x12\n", "recording, it goes on");
+        type_text(&mut desk, "@c");
+        assert_eq!(editor_text(&desk), "x121\n", "replaying, it stops at Q");
+        // And one that never fails is stopped after so many keys.
+        type_text(&mut desk, "qdqqd0@dq@d");
+        let said = desk.message.clone().unwrap_or_default();
+        assert!(said.contains("stopped after"), "{said}");
+        type_text(&mut desk, "x");
+        assert_eq!(editor_text(&desk), "121\n", "it's done with");
+    }
+
+    #[test]
+    fn gj_g0_and_g_dollar_are_typed_by_macros() {
+        let text = format!("{}\nshort\n", "a".repeat(400));
+        let mut desk = editing("/t.txt", &text);
+        type_text(&mut desk, "qagjq");
+        assert_eq!(register(&mut desk, 'a').as_deref(), Some("gj"));
+        let row = cursor_byte(&desk);
+        assert!(row > 1, "a row down the wrapped line: {row}");
+        type_text(&mut desk, "@a");
+        assert_eq!(cursor_byte(&desk), 2 * row);
+        type_text(&mut desk, "2@a");
+        assert_eq!(cursor_byte(&desk), 4 * row);
+        // gj that can't go on, on the last row, fails, stopping the macro;
+        // g$ and g0 never do.
+        type_text(&mut desk, "Gqbg$g0gjxq");
+        assert_eq!(editor_text(&desk).lines().nth(1), Some("hort"));
+        type_text(&mut desk, "@b");
+        assert_eq!(editor_text(&desk).lines().nth(1), Some("hort"), "no x");
+    }
+
+    #[test]
+    fn a_search_that_finds_nothing_stops_a_macro() {
+        let mut desk = editing("/t.txt", "x x x\n");
+        type_text(&mut desk, "qa/x");
+        enter(&mut desk);
+        type_text(&mut desk, "r-A!");
+        escape(&mut desk);
+        type_text(&mut desk, "q");
+        assert_eq!(register(&mut desk, 'a').as_deref(), Some("/x<CR>r-A!<Esc>"));
+        assert_eq!(editor_text(&desk), "x - x!\n");
+        type_text(&mut desk, "5@a");
+        assert_eq!(editor_text(&desk), "- - -!!!\n", "two found, then none");
+    }
+
+    #[test]
+    fn a_macro_types_into_the_finder_and_waits_for_what_it_finds() {
+        let mut desk = editing("/p/a.rs", "a\n");
+        type_text(&mut desk, "qa pfb.rs");
+        let id = finder_search(&mut desk);
+        found_a_and_b(&mut desk, id);
+        enter(&mut desk);
+        open_asked(&mut desk, 8, "/p/b.rs", "b\n");
+        type_text(&mut desk, "q");
+        assert_eq!(register(&mut desk, 'a').as_deref(), Some(" pfb.rs<CR>"));
+        command(&mut desk, "e /p/a.rs");
+        open_asked(&mut desk, 9, "/p/a.rs", "a\n");
+        // Typed again, it types into the finder at once, and Enter waits
+        // for what it finds.
+        type_text(&mut desk, "@a");
+        let id = finder_search(&mut desk);
+        assert_eq!(desk.finder.as_ref().map(Finder::query), Some("b.rs"));
+        found_a_and_b(&mut desk, id);
+        open_asked(&mut desk, 10, "/p/b.rs", "b\n");
+        assert!(!desk.finding());
+        assert_eq!(note(&desk), "b.rs  1:1");
+        // With nothing it finds picked, Enter stops the macro.
+        type_text(&mut desk, "O pfzzz<CR>A!<Esc>");
+        escape(&mut desk);
+        type_text(&mut desk, "0\"by$dd@b");
+        let id = finder_search(&mut desk);
+        found_a_and_b(&mut desk, id);
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("nothing in the finder is picked")
+        );
+        escape(&mut desk);
+        assert_eq!(editor_text(&desk), "b\n", "no A!");
+    }
+
+    #[test]
+    fn a_macro_waits_for_the_language_server_and_gives_up_on_it() {
+        let mut desk = editing("/src/a.rs", A_RS);
+        let mut daemons = daemon_of_7(A_RS);
+        // Answers gd, asked once the edits before it are made, with a
+        // place on `line`.
+        let answer = |desk: &mut Desk, daemons: &mut Daemons, line| {
+            let (_, sent) = serve(desk, daemons);
+            let id = (sent.iter()).find_map(|message| match message {
+                ClientMessage::Query { id, .. } => Some(*id),
+                _ => None,
+            });
+            let place = clackatoo_protocol::FileLocation {
+                path: "/src/a.rs".into(),
+                line,
+                col: 3,
+                offset: None,
+                text: String::new(),
+            };
+            let update = clackatoo_protocol::BufferUpdate::Answer {
+                id: id.expect("a query"),
+                version: daemons[&BufferId(7)].version(),
+                answer: clackatoo_protocol::Answer::Locations(vec![place]),
+            };
+            desk.buffer_changed(BufferId(7), update);
+            serve(desk, daemons);
+        };
+        type_text(&mut desk, "qagd");
+        answer(&mut desk, &mut daemons, 2);
+        type_text(&mut desk, "xq");
+        assert_eq!(editor_text(&desk), "fn a() {}\nfn b() {}\nfn () {}\n");
+        // The x waits for gd's answer, and goes where it went.
+        type_text(&mut desk, "gg@a");
+        assert_eq!(editor_text(&desk), "fn a() {}\nfn b() {}\nfn () {}\n");
+        answer(&mut desk, &mut daemons, 1);
+        assert_eq!(daemon_text(&daemons, 7), "fn a() {}\nfn () {}\nfn () {}\n");
+        // Esc stops a macro waiting, with the keys pressed meanwhile.
+        type_text(&mut desk, "gg@al");
+        escape(&mut desk);
+        assert_eq!(desk.message.as_deref(), Some("the macro was stopped"));
+        answer(&mut desk, &mut daemons, 0);
+        assert_eq!(cursor_byte(&desk), 3, "gd went, and no more");
+        assert_eq!(daemon_text(&daemons, 7), "fn a() {}\nfn () {}\nfn () {}\n");
+        // And it gives up after a while, if no answer comes.
+        type_text(&mut desk, "gg@a");
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        assert!(desk.editor_wakes().is_some_and(|wake| wake < later));
+        desk.tick_editors(later);
+        let said = desk.message.clone().unwrap_or_default();
+        assert_eq!(
+            said,
+            "the macro was stopped: it waited too long for the language server"
+        );
+        answer(&mut desk, &mut daemons, 0);
+        assert_eq!(daemon_text(&daemons, 7), "fn a() {}\nfn () {}\nfn () {}\n");
+    }
+
+    #[test]
+    fn q_in_a_terminal_stops_recording_as_in_an_editor() {
+        let mut desk = desk(one_tab(side_by_side(vec![file_pane(1, 7), pane(2)])));
+        load(&mut desk, 7, "/t.txt", "abc\n");
+        snapshot(&mut desk, 2);
+        type_text(&mut desk, "qa");
+        ctrl(&mut desk, "l");
+        assert_eq!(mode(&desk, 2), Mode::Normal);
+        type_text(&mut desk, "q");
+        assert_eq!(desk.recording(), None);
+        assert_eq!(register(&mut desk, 'a').as_deref(), Some("<C-l>"));
+        ctrl(&mut desk, "h");
+        type_text(&mut desk, "@a");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+    }
+
+    #[test]
+    fn a_macro_types_what_a_completion_put_in_without_asking() {
+        use clackatoo_protocol::{Answer, BufferUpdate, CompletionItem, ServerFeatures};
+
+        let mut desk = editing("/src/a.rs", "\n\n");
+        let features = ServerFeatures {
+            completion: Some(vec!['.']),
+            ..ServerFeatures::default()
+        };
+        desk.buffer_changed(BufferId(7), BufferUpdate::Features(features));
+        let mut version = 0;
+        type_text(&mut desk, "qaial");
+        serve_edits(&mut desk, &mut version);
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        desk.tick_editors(later);
+        let (id, _) = serve_edits(&mut desk, &mut version).expect("a completion asked");
+        let call = CompletionItem {
+            label: "call".into(),
+            kind: 3,
+            detail: String::new(),
+            filter: None,
+            sort: None,
+            preselect: false,
+            start: Some(0),
+            text: "call(${1:a})$0".into(),
+            snippet: true,
+            more: Vec::new(),
+        };
+        let answer = BufferUpdate::Answer {
+            id,
+            version,
+            answer: Answer::Completions {
+                items: vec![call],
+                incomplete: false,
+            },
+        };
+        desk.buffer_changed(BufferId(7), answer);
+        ctrl(&mut desk, "y");
+        escape(&mut desk);
+        type_text(&mut desk, "jq");
+        assert_eq!(editor_text(&desk), "call(a)\n\n");
+        // Not the key that accepted it, but what it put in.
+        assert_eq!(
+            register(&mut desk, 'a').as_deref(),
+            Some("ial<BS><BS>call(a)<Left><Left><Esc>j")
+        );
+        serve_edits(&mut desk, &mut version);
+        type_text(&mut desk, "@a");
+        desk.tick_editors(later);
+        assert_eq!(editor_text(&desk), "call(a)\ncall(a)\n");
+        let asked = (desk.take_outbox().into_iter())
+            .any(|message| matches!(message, ClientMessage::Query { .. }));
+        assert!(!asked, "the server isn't asked");
+    }
+
+    #[test]
+    fn a_macro_waiting_for_the_grammar_is_still_one_undo_step() {
+        let text = "fn a() {}\nfn b() {}\n";
+        let mut desk = editing("/p/a.rs", text);
+        let mut daemons = daemon_of_7(text);
+        type_text(&mut desk, "qadaf");
+        let (_, sent) = serve(&mut desk, &mut daemons);
+        let question = |sent: &[ClientMessage]| {
+            (sent.iter())
+                .find_map(|message| match message {
+                    ClientMessage::Query { id, .. } => Some(*id),
+                    _ => None,
+                })
+                .expect("a question")
+        };
+        let id = question(&sent);
+        answer_at(&mut desk, id, 0, vec![function(0, 9, None)]);
+        type_text(&mut desk, "ix");
+        escape(&mut desk);
+        type_text(&mut desk, "jq");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(daemon_text(&daemons, 7), "x\nfn b() {}\n");
+        // The x waits for the answer, and goes in after, in the same step.
+        type_text(&mut desk, "@a");
+        let (steps, sent) = serve(&mut desk, &mut daemons);
+        assert!(steps.is_empty());
+        let version = daemons[&BufferId(7)].version();
+        answer_at(
+            &mut desk,
+            question(&sent),
+            version,
+            vec![function(2, 11, None)],
+        );
+        let (steps, _) = serve(&mut desk, &mut daemons);
+        assert_eq!(daemon_text(&daemons, 7), "x\nx\n");
+        assert_eq!(steps, [(BufferId(7), true), (BufferId(7), false)]);
+        type_text(&mut desk, "u");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(
+            daemon_text(&daemons, 7),
+            "x\nfn b() {}\n",
+            "one u undoes it all"
+        );
+    }
+
+    /// The number of the last query among `sent`, which must hold one.
+    fn query_in(sent: &[ClientMessage]) -> u64 {
+        let asked = (sent.iter().rev()).find_map(|message| match message {
+            ClientMessage::Query { id, .. } => Some(*id),
+            _ => None,
+        });
+        asked.expect("a query")
+    }
+
+    /// Answers the query `id` about buffer 7 with a place on `line`, at
+    /// its fourth column, as gd's answer.
+    fn answer_gd(desk: &mut Desk, daemons: &Daemons, id: u64, path: &str, line: u64) {
+        let place = clackatoo_protocol::FileLocation {
+            path: path.into(),
+            line,
+            col: 3,
+            offset: None,
+            text: String::new(),
+        };
+        let update = clackatoo_protocol::BufferUpdate::Answer {
+            id,
+            version: daemons[&BufferId(7)].version(),
+            answer: clackatoo_protocol::Answer::Locations(vec![place]),
+        };
+        desk.buffer_changed(BufferId(7), update);
+    }
+
+    #[test]
+    fn a_binding_a_macros_last_key_sets_off_is_part_of_the_macro() {
+        let text = "abc\ndef\n";
+        let mut desk = editing("/t.txt", text);
+        let mut daemons = daemon_of_7(text);
+        desk.lua_from(r#"client.keys.map("n", "<Space>m", ":w<CR>j")"#);
+        answer_all(&mut desk);
+        type_text(&mut desk, "Ox m");
+        escape(&mut desk);
+        type_text(&mut desk, "0\"ay$dd");
+        serve(&mut desk, &mut daemons);
+        // The binding the macro's last key sets off waits, as the macro's
+        // own keys do: the j waits for the write.
+        type_text(&mut desk, "@a");
+        let (_, sent) = serve(&mut desk, &mut daemons);
+        let save = Request::Save {
+            buffer: BufferId(7),
+            force: false,
+        };
+        assert_eq!(requests(&sent), [&save]);
+        assert_eq!(
+            (editor_text(&desk).as_str(), cursor_line(&desk)),
+            ("bc\ndef\n", 0)
+        );
+        desk.answered(Response::Done);
+        assert_eq!(cursor_line(&desk), 1);
+    }
+
+    #[test]
+    fn a_macro_waiting_stops_if_the_focus_moves_but_goes_where_it_asks() {
+        let mut desk = desk(one_tab(side_by_side(vec![file_pane(1, 7), pane(2)])));
+        load(&mut desk, 7, "/src/a.rs", A_RS);
+        snapshot(&mut desk, 2);
+        let mut daemons = daemon_of_7(A_RS);
+        type_text(&mut desk, "Ogdx");
+        escape(&mut desk);
+        type_text(&mut desk, "0\"ay$dd");
+        serve(&mut desk, &mut daemons);
+        // Clicked away from while it waits for gd: it stops, and the x
+        // doesn't go to the terminal, nor anywhere.
+        type_text(&mut desk, "@a");
+        let (_, sent) = serve(&mut desk, &mut daemons);
+        desk.show_pane(PaneId(2));
+        answer_gd(&mut desk, &daemons, query_in(&sent), "/src/a.rs", 1);
+        let (_, sent) = serve(&mut desk, &mut daemons);
+        let typed = (requests(&sent).into_iter())
+            .any(|request| matches!(request, Request::SendInput { .. }));
+        assert!(!typed, "nothing for the terminal: {sent:?}");
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("the macro was stopped: the focus moved")
+        );
+        assert_eq!(daemon_text(&daemons, 7), A_RS);
+        // So too if another window closes its pane meanwhile.
+        ctrl(&mut desk, "h");
+        type_text(&mut desk, "@a");
+        serve(&mut desk, &mut daemons);
+        desk.workspaces_changed(one_tab(pane(2)));
+        desk.tick_editors(std::time::Instant::now());
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("the macro was stopped: the focus moved")
+        );
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        // But a pane the macro makes, the focus going to it, is where it
+        // goes on.
+        let mut desk = editing("/t.txt", "abc\n");
+        let mut daemons = daemon_of_7("abc\n");
+        type_text(&mut desk, "O<C-b>|<C-b>p1x");
+        escape(&mut desk);
+        type_text(&mut desk, "0\"ay$dd@a");
+        let (_, sent) = serve(&mut desk, &mut daemons);
+        assert!(matches!(requests(&sent)[..], [Request::Split { .. }]));
+        desk.workspaces_changed(one_tab(side_by_side(vec![file_pane(1, 7), pane(2)])));
+        desk.answered(Response::PaneCreated(PaneId(2)));
+        serve(&mut desk, &mut daemons);
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        assert_eq!(daemon_text(&daemons, 7), "bc\n");
+    }
+
+    #[test]
+    fn keys_held_behind_a_wait_that_fail_do_as_they_would_typed() {
+        let text = "fn a() {}\nfn b() {}\n";
+        let mut desk = editing("/p/a.rs", text);
+        let mut version = 0;
+        // Held while daf waits: a $ and an l, which fails at the line's
+        // end, then the finder's keys, which open it as typed.
+        type_keys(&mut desk, "jdaf$l pf");
+        let (id, _) = serve_edits(&mut desk, &mut version).expect("a question");
+        answer_at(&mut desk, id, version, vec![function(10, 19, None)]);
+        assert_eq!(editor_text(&desk), "fn a() {}\n\n");
+        assert!(desk.finding(), "the keys after the l");
+    }
+
+    #[test]
+    fn a_q_held_while_recording_stops_it_where_it_was_pressed() {
+        let text = "fn a() {}\nfn b() {}\n";
+        let mut desk = editing("/p/a.rs", text);
+        let mut version = 0;
+        // The q and y come while daf waits, and are held.
+        type_keys(&mut desk, "qadafqy");
+        let (id, _) = serve_edits(&mut desk, &mut version).expect("a question");
+        answer_at(&mut desk, id, version, vec![function(0, 9, None)]);
+        assert_eq!(desk.recording(), None);
+        assert_eq!(register(&mut desk, 'a').as_deref(), Some("daf"));
+    }
+
+    #[test]
+    fn a_key_a_binding_types_that_a_menu_takes_is_recorded_as_pressed() {
+        use clackatoo_protocol::{Answer, BufferUpdate, CompletionItem, ServerFeatures};
+
+        let mut desk = editing("/src/a.rs", "\n\n");
+        desk.lua_from(r#"client.keys.map("i", "<C-j>", "<C-y>")"#);
+        answer_all(&mut desk);
+        let features = ServerFeatures {
+            completion: Some(vec!['.']),
+            ..ServerFeatures::default()
+        };
+        desk.buffer_changed(BufferId(7), BufferUpdate::Features(features));
+        let mut version = 0;
+        type_text(&mut desk, "qaial");
+        serve_edits(&mut desk, &mut version);
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        desk.tick_editors(later);
+        let (id, _) = serve_edits(&mut desk, &mut version).expect("a completion asked");
+        let call = CompletionItem {
+            label: "call".into(),
+            kind: 3,
+            detail: String::new(),
+            filter: None,
+            sort: None,
+            preselect: false,
+            start: Some(0),
+            text: "call".into(),
+            snippet: false,
+            more: Vec::new(),
+        };
+        let answer = BufferUpdate::Answer {
+            id,
+            version,
+            answer: Answer::Completions {
+                items: vec![call],
+                incomplete: false,
+            },
+        };
+        desk.buffer_changed(BufferId(7), answer);
+        ctrl(&mut desk, "j");
+        escape(&mut desk);
+        type_text(&mut desk, "q");
+        assert_eq!(editor_text(&desk), "call\n\n");
+        assert_eq!(register(&mut desk, 'a').as_deref(), Some("ial<C-j><Esc>"));
+    }
+
+    #[test]
+    fn a_macro_waits_only_for_what_it_asked() {
+        let mut desk = editing("/src/a.rs", A_RS);
+        let mut daemons = daemon_of_7(A_RS);
+        type_text(&mut desk, "qaxq");
+        serve(&mut desk, &mut daemons);
+        // A gd from before the macro, never answered, isn't waited for.
+        type_text(&mut desk, "gd");
+        serve(&mut desk, &mut daemons);
+        type_text(&mut desk, "@ax");
+        assert_eq!(editor_text(&desk), "a() {}\nfn b() {}\nfn c() {}\n");
+        // Nor, once the connection's lost, is anything asked on it.
+        let waiting = |desk: &Desk| {
+            let (editor, copy) = desk.focused_editor().expect("an editor");
+            editor.waiting_for_answer(copy, 0)
+        };
+        assert!(waiting(&desk));
+        desk.lost();
+        desk.connected(one_tab(file_pane(1, 7)));
+        assert!(!waiting(&desk));
     }
 
     #[test]

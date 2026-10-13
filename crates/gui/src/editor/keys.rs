@@ -6,13 +6,10 @@
 //! `o`). A register can come before it, after `"`, with a count either
 //! side (`"a3yy`, `2"bp`). The keys are read afresh as each arrives, until
 //! they make a command or can't.
-//!
-//! Keys are written down as Vim writes them in mappings (`ihi<Esc>`), so a
-//! macro, which is the keys typed, can be kept in a register as text, put
-//! in a file with `p`, and run again after it's been changed there.
 
 use clackatoo_protocol::{Construct, Query};
 
+use crate::keymap::{Base, Chord, Named};
 use crate::motion::Motion;
 use crate::objects::Object;
 
@@ -55,12 +52,12 @@ impl Stroke {
         }
     }
 
-    /// The keys `text` writes down, as [`write`](Self::write) writes them:
-    /// a character for itself, and a key that types none by its name in
-    /// angle brackets, `<Esc>`, `<CR>` or `<C-r>`, with `<lt>` for `<`. A
-    /// `<` that starts no name is itself. Line breaks are Enter, and the
-    /// other control characters the keys that type them, as text yanked
-    /// from a file runs.
+    /// The keys `text` writes down, for tests: a character for itself,
+    /// and a key that types none by its name in angle brackets, `<Esc>`,
+    /// `<CR>` or `<C-r>`, with `<lt>` for `<`. A `<` that starts no name
+    /// is itself. Line breaks are Enter, and the other control characters
+    /// the keys that type them.
+    #[cfg(test)]
     pub(crate) fn read(text: &str) -> Vec<Self> {
         let mut strokes = Vec::with_capacity(text.len());
         let mut rest = text;
@@ -88,6 +85,7 @@ impl Stroke {
     }
 
     /// The key called `name`, between angle brackets, if it's one.
+    #[cfg(test)]
     fn named(name: &str) -> Option<Self> {
         Some(match name {
             "Esc" => Self::Escape,
@@ -117,48 +115,27 @@ impl Stroke {
         })
     }
 
-    /// `strokes` written down, as [`read`](Self::read) reads them.
-    pub(crate) fn write(strokes: &[Self]) -> String {
-        let mut text = String::with_capacity(strokes.len());
-        for stroke in strokes {
-            let name = match stroke {
-                Self::Char {
-                    ch: '<',
-                    ctrl: false,
-                } => "lt",
-                Self::Char { ch, ctrl: false } => {
-                    text.push(*ch);
-                    continue;
-                }
-                Self::Char {
-                    ch: ' ',
-                    ctrl: true,
-                } => "C-Space",
-                Self::Char { ch, ctrl: true } => {
-                    text.push_str("<C-");
-                    text.push(*ch);
-                    text.push('>');
-                    continue;
-                }
-                Self::Escape => "Esc",
-                Self::Enter => "CR",
-                Self::Tab => "Tab",
-                Self::Backspace => "BS",
-                Self::Delete => "Del",
-                Self::Left => "Left",
-                Self::Right => "Right",
-                Self::Up => "Up",
-                Self::Down => "Down",
-                Self::Home => "Home",
-                Self::End => "End",
-                Self::PageUp => "PageUp",
-                Self::PageDown => "PageDown",
-            };
-            text.push('<');
-            text.push_str(name);
-            text.push('>');
+    /// The key that types the stroke, as a macro records it: for what a
+    /// completion menu put in, which is recorded in place of the key that
+    /// took it.
+    pub(crate) fn chord(self) -> Chord {
+        let named = |named| Chord::with(Base::Named(named), false, false, false);
+        match self {
+            Self::Char { ch, ctrl } => Chord::with(Base::Char(ch), ctrl, false, false),
+            Self::Escape => named(Named::Escape),
+            Self::Enter => named(Named::Enter),
+            Self::Tab => named(Named::Tab),
+            Self::Backspace => named(Named::Backspace),
+            Self::Delete => named(Named::Delete),
+            Self::Left => named(Named::Left),
+            Self::Right => named(Named::Right),
+            Self::Up => named(Named::Up),
+            Self::Down => named(Named::Down),
+            Self::Home => named(Named::Home),
+            Self::End => named(Named::End),
+            Self::PageUp => named(Named::PageUp),
+            Self::PageDown => named(Named::PageDown),
         }
-        text
     }
 }
 
@@ -1031,23 +1008,21 @@ mod tests {
     }
 
     #[test]
-    fn keys_are_written_and_read_back_as_vim_writes_them() {
+    fn strokes_are_the_keys_that_type_them_as_vim_writes_them() {
         let strokes = [
             Stroke::char('i'),
             Stroke::char('<'),
+            Stroke::char(' '),
             Stroke::Enter,
             Stroke::ctrl('w'),
             Stroke::ctrl(' '),
             Stroke::Left,
             Stroke::Escape,
         ];
-        let written = Stroke::write(&strokes);
-        assert_eq!(written, "i<lt><CR><C-w><C-Space><Left><Esc>");
+        let chords: Vec<Chord> = strokes.iter().map(|stroke| stroke.chord()).collect();
+        let written = crate::keymap::write_macro(&chords);
+        assert_eq!(written, "i<lt> <CR><C-w><C-Space><Left><Esc>");
         assert_eq!(Stroke::read(&written), strokes);
-        // A `<` that names no key is itself, and a line break is Enter.
-        let mut expected: Vec<Stroke> = "a<b <C-ww>".chars().map(Stroke::char).collect();
-        expected.push(Stroke::Enter);
-        assert_eq!(Stroke::read("a<b <C-ww>\n"), expected);
     }
 
     #[test]

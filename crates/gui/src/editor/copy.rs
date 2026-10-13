@@ -106,6 +106,9 @@ pub(crate) struct BufferCopy {
     hunks: Hunks,
     /// What its language server does as you type.
     features: ServerFeatures,
+    /// Whether the macro being typed has edited the buffer yet, so its
+    /// first edit starts an undo step and the rest join it.
+    macro_edited: bool,
 }
 
 impl BufferCopy {
@@ -127,6 +130,7 @@ impl BufferCopy {
             diagnostics: Diagnostics::new(),
             hunks: Hunks::new(),
             features: ServerFeatures::default(),
+            macro_edited: false,
         }
     }
 
@@ -226,6 +230,25 @@ impl BufferCopy {
         }
         self.send_next();
         true
+    }
+
+    /// Whether an edit a macro makes is its first to the buffer, which
+    /// starts its undo step: the rest join it, so the macro's edits to each
+    /// file it changes are undone together, as in Vim.
+    pub(crate) fn first_macro_edit(&mut self) -> bool {
+        !std::mem::replace(&mut self.macro_edited, true)
+    }
+
+    /// The macro being typed is done: the next's first edit starts a step.
+    pub(crate) fn macro_done(&mut self) {
+        self.macro_edited = false;
+    }
+
+    /// Whether the last change asked for is an undo or redo that hasn't
+    /// been answered yet. Only the last: a macro waits for its own before
+    /// its next key, and so asks for nothing after it meanwhile.
+    pub(crate) fn reversing(&self) -> bool {
+        matches!(self.waiting.back(), Some(Waiting::Undo | Waiting::Redo))
     }
 
     /// Asks the daemon to undo the user's last step, or redo the last
@@ -609,11 +632,19 @@ impl BufferCopy {
     }
 }
 
+/// The next number for a query.
+static NEXT_QUERY: AtomicU64 = AtomicU64::new(0);
+
 /// A number for a query, counted across every copy, so a late answer to a
 /// copy since made again goes nowhere.
 fn next_query() -> u64 {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    NEXT.fetch_add(1, Ordering::Relaxed)
+    NEXT_QUERY.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The number the next query will have: every query asked since has it
+/// or a higher one.
+pub(crate) fn queries_asked() -> u64 {
+    NEXT_QUERY.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -624,13 +655,13 @@ pub(super) mod tests {
     use super::*;
 
     /// The daemon's side, as the daemon does it.
-    pub(in crate::editor) struct Daemon {
-        pub(in crate::editor) text: Rope,
+    pub(crate) struct Daemon {
+        pub(crate) text: Rope,
         history: History<Author>,
     }
 
     impl Daemon {
-        pub(in crate::editor) fn new(text: &str) -> Self {
+        pub(crate) fn new(text: &str) -> Self {
             Self {
                 text: Rope::from_str(text),
                 history: History::new(0),
@@ -638,7 +669,7 @@ pub(super) mod tests {
         }
 
         /// The text's version: how many edits have been made to it.
-        pub(in crate::editor) fn version(&self) -> u64 {
+        pub(crate) fn version(&self) -> u64 {
             self.history.version()
         }
 
@@ -653,7 +684,7 @@ pub(super) mod tests {
 
         /// Makes the change a window sent, answering it as the daemon
         /// does: to the window, and to everyone else.
-        pub(in crate::editor) fn take(
+        pub(crate) fn take(
             &mut self,
             message: ClientMessage,
         ) -> (BufferUpdate, Option<BufferUpdate>) {

@@ -248,8 +248,14 @@ impl Chord {
         ))
     }
 
+    /// A character typed with no modifiers, as text a key typed is
+    /// recorded in a macro. A space is the space key.
+    pub(crate) fn typed(ch: char) -> Self {
+        Self::with(Base::Char(ch), false, false, false)
+    }
+
     /// `base` with modifiers, Shift going into a character.
-    fn with(base: Base, ctrl: bool, alt: bool, shift: bool) -> Self {
+    pub(crate) fn with(base: Base, ctrl: bool, alt: bool, shift: bool) -> Self {
         // A space typed is the space key.
         let base = match base {
             Base::Char(' ') => Base::Named(Named::Space),
@@ -348,6 +354,57 @@ pub(crate) fn parse_keys(notation: &str) -> Result<Vec<Chord>, String> {
         return Err("a binding needs at least one key".into());
     }
     Ok(keys)
+}
+
+/// `keys`, a macro, written down as `"ap` puts it: as bindings are
+/// written, but with a space as itself.
+pub(crate) fn write_macro(keys: &[Chord]) -> String {
+    use fmt::Write as _;
+    let mut text = String::with_capacity(keys.len());
+    for key in keys {
+        if *key == Chord::typed(' ') {
+            text.push(' ');
+        } else {
+            write!(text, "{key}").expect("a String takes all that's written");
+        }
+    }
+    text
+}
+
+/// The keys `text`, a register, holds, as `@` types them. Never fails, so
+/// any text can be typed: a `<` that starts no key's name is itself, and
+/// line breaks and the other control characters are the keys that type
+/// them, so a line yanked from a file types as it reads.
+pub(crate) fn read_macro(text: &str) -> Vec<Chord> {
+    let named = |named| Chord::with(Base::Named(named), false, false, false);
+    let mut keys = Vec::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(ch) = rest.chars().next() {
+        if ch == '<'
+            && let Some(end) = rest.find('>')
+            && end > 1
+            && !rest[1..end].contains('<')
+            && let Ok(key) = parse_angled(&rest[1..end])
+        {
+            keys.push(key);
+            rest = &rest[end + 1..];
+            continue;
+        }
+        keys.push(match ch {
+            '\n' | '\r' => named(Named::Enter),
+            '\t' => named(Named::Tab),
+            '\u{1b}' => named(Named::Escape),
+            '\u{8}' | '\u{7f}' => named(Named::Backspace),
+            // Ctrl+A to Ctrl+Z.
+            '\u{1}'..='\u{1a}' => {
+                let letter = char::from(ch as u8 + b'a' - 1);
+                Chord::with(Base::Char(letter), true, false, false)
+            }
+            _ => Chord::typed(ch),
+        });
+        rest = &rest[ch.len_utf8()..];
+    }
+    keys
 }
 
 /// What's inside `<…>`.
@@ -638,6 +695,20 @@ mod tests {
         }
         assert_eq!(parse_modes("niv").unwrap().len(), 3);
         assert!(parse_modes("nx").is_err());
+    }
+
+    #[test]
+    fn macros_are_written_as_keys_and_any_text_reads_as_keys() {
+        let macro_keys = keys(":w<CR>i a<lt><Esc><C-l><Space>x<S-Tab><A-h>");
+        let written = write_macro(&macro_keys);
+        assert_eq!(written, ":w<CR>i a<lt><Esc><C-l> x<S-Tab><A-h>");
+        assert_eq!(read_macro(&written), macro_keys);
+        // A `<` that names no key is itself, and so is one before another
+        // `<`; line breaks and control characters are the keys typing them.
+        let mut expected: Vec<Chord> = "a<b <C-ww>x<<".chars().map(Chord::typed).collect();
+        expected.extend(keys("<CR><Tab><Esc><C-r>"));
+        assert_eq!(read_macro("a<b <C-ww>x<<\n\t\u{1b}\u{12}"), expected);
+        assert!(read_macro("").is_empty());
     }
 
     #[test]

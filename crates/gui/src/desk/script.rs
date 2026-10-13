@@ -52,6 +52,8 @@ impl Desk {
         // one's go nowhere.
         for asker in &mut self.asked {
             if let super::Asker::Window(Asked::Lua(_)) = asker {
+                // And no macro waits for them: they're as good as answered.
+                self.macros.request_answered(asker);
                 *asker = super::Asker::Window(Asked::Quiet);
             }
         }
@@ -231,19 +233,6 @@ impl Desk {
         pressed.push((KeptPress::of(press), chord));
         let kept: Vec<KeptPress> = pressed.into_iter().map(|(press, _)| press).collect();
         self.type_into_pane(&kept);
-    }
-
-    /// Types `keys`, as a binding to keys does: each as if pressed, so the
-    /// window's own keys do what they do (`:` opens the command line), but
-    /// the config's bindings and keypress handlers don't see them, so a
-    /// binding can't set off itself.
-    pub(super) fn type_keys(&mut self, keys: &[Chord]) {
-        let typing = std::mem::replace(&mut self.script.typing, true);
-        for chord in keys {
-            let kept = chord.kept();
-            self.key(&kept.press());
-        }
-        self.script.typing = typing;
     }
 
     /// Answers a request Lua is waiting on, telling it the world first, so

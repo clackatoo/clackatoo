@@ -202,7 +202,7 @@ fn keys_move_through_the_list_and_open_what_is_picked_where_asked() {
     assert_eq!(finder.click(0, true), opening("dddd", Place::Here));
     // Nothing to pick opens nothing.
     type_text(&mut finder, "zzz");
-    assert_eq!(named(&mut finder, NamedKey::Enter), Outcome::Nothing);
+    assert_eq!(named(&mut finder, NamedKey::Enter), Outcome::NothingPicked);
 }
 
 #[test]
