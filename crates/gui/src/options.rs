@@ -15,6 +15,8 @@
 pub(crate) enum Value {
     Bool(bool),
     Number(u32),
+    /// A number with a fraction, as an option of [`Kind::Decimal`] holds.
+    Decimal(Decimal),
     List(List),
     /// One of the words an option of [`Kind::Choice`] can be.
     Choice(&'static str),
@@ -25,12 +27,88 @@ pub(crate) enum Value {
 /// Whole numbers, as an option holds several: `colorcolumn`'s columns.
 pub(crate) type List = Vec<u32>;
 
+/// A number to two decimal places, as `fontsize`'s 10.5. It's kept in
+/// hundredths, so options still compare exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Decimal(u32);
+
+impl Decimal {
+    /// The whole number `number`.
+    pub(crate) const fn whole(number: u32) -> Self {
+        Self(number.saturating_mul(100))
+    }
+
+    /// `number`, if it's one: not negative, and to two decimal places at
+    /// most. A float only near one, as 10.1 is, counts.
+    pub(crate) fn exact(number: f64) -> Option<Self> {
+        let hundredths = (number * 100.0).round();
+        let exact = (number * 100.0 - hundredths).abs() < 1e-6;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (exact && (0.0..=f64::from(u32::MAX)).contains(&hundredths))
+            .then_some(Self(hundredths as u32))
+    }
+
+    /// The nearest to `number` from `min` to `max`, to two decimal places,
+    /// for a number from elsewhere, as the command line, that the option
+    /// must still be able to hold.
+    pub(crate) fn nearest(number: f32, min: u32, max: u32) -> Self {
+        if number.is_nan() {
+            return Self::whole(min);
+        }
+        let (min, max) = (Self::whole(min), Self::whole(max));
+        let hundredths = (f64::from(number) * 100.0).round();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Self(hundredths.clamp(f64::from(min.0), f64::from(max.0)) as u32)
+    }
+
+    /// The number, as Lua has it.
+    pub(crate) fn as_f64(self) -> f64 {
+        f64::from(self.0) / 100.0
+    }
+
+    /// The number, as fonts are sized in.
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn as_f32(self) -> f32 {
+        self.as_f64() as f32
+    }
+
+    /// Reads `text` as `:set` gives one: `12`, `10.5` or `10.25`.
+    fn parse(text: &str) -> Option<Self> {
+        let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+        let digits = |text: &str| text.bytes().all(|byte| byte.is_ascii_digit());
+        if whole.is_empty() || !digits(whole) || !digits(fraction) || fraction.len() > 2 {
+            return None;
+        }
+        let whole: u32 = whole.parse().ok()?;
+        // `.5` is 50 hundredths, and `.05` five.
+        let fraction: u32 = format!("{fraction:0<2}").parse().ok()?;
+        whole.checked_mul(100)?.checked_add(fraction).map(Self)
+    }
+}
+
+impl std::fmt::Display for Decimal {
+    /// As few decimal places as it needs: `12`, `10.5`, `10.25`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (whole, fraction) = (self.0 / 100, self.0 % 100);
+        match fraction {
+            0 => write!(f, "{whole}"),
+            _ if fraction % 10 == 0 => write!(f, "{whole}.{}", fraction / 10),
+            _ => write!(f, "{whole}.{fraction:02}"),
+        }
+    }
+}
+
 /// What an option holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Bool,
     /// A whole number from `min` to `max`.
     Number {
+        min: u32,
+        max: u32,
+    },
+    /// A number from `min` to `max`, to two decimal places.
+    Decimal {
         min: u32,
         max: u32,
     },
@@ -63,6 +141,11 @@ impl Info {
             (Kind::Number { min, max }, Value::Number(number)) if (min..=max).contains(number) => {
                 Ok(())
             }
+            (Kind::Decimal { min, max }, Value::Decimal(number))
+                if (Decimal::whole(min)..=Decimal::whole(max)).contains(number) =>
+            {
+                Ok(())
+            }
             (Kind::List { min, max }, Value::List(numbers))
                 if numbers.iter().all(|number| (min..=max).contains(number)) =>
             {
@@ -75,13 +158,16 @@ impl Info {
     }
 
     /// Reads `text` as a value for this option, as `:set` gives one after
-    /// `=`: a number, or for a list, numbers with commas between them, or
-    /// for text, the text.
+    /// `=`: a number, one with a fraction for a decimal, or for a list,
+    /// numbers with commas between them, or for text, the text.
     pub(crate) fn parse(&self, text: &str) -> Result<Value, String> {
         let number = |text: &str| text.parse::<u32>().map_err(|_| self.wants());
         let value = match self.kind {
             Kind::Bool => return Err(format!("{} is set with {0} or no{0}, not =", self.name)),
             Kind::Number { .. } => Value::Number(number(text)?),
+            Kind::Decimal { .. } => {
+                Value::Decimal(Decimal::parse(text).ok_or_else(|| self.wants())?)
+            }
             Kind::List { .. } if text.is_empty() => Value::List(List::new()),
             Kind::List { .. } => {
                 Value::List(text.split(',').map(number).collect::<Result<_, _>>()?)
@@ -102,6 +188,10 @@ impl Info {
             Kind::Number { min, max } => {
                 format!("{} is a whole number from {min} to {max}", self.name)
             }
+            Kind::Decimal { min, max } => format!(
+                "{} is a number from {min} to {max}, to two decimal places at most",
+                self.name
+            ),
             Kind::List { min, max } => format!(
                 "{} is whole numbers from {min} to {max}, with commas between them",
                 self.name
@@ -145,6 +235,19 @@ impl Held for u32 {
     fn from_value(value: Value) -> Option<Self> {
         match value {
             Value::Number(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl Held for Decimal {
+    fn value(&self) -> Value {
+        Value::Decimal(*self)
+    }
+
+    fn from_value(value: Value) -> Option<Self> {
+        match value {
+            Value::Decimal(value) => Some(value),
             _ => None,
         }
     }
@@ -213,8 +316,8 @@ macro_rules! choice {
     };
 }
 
-/// The [`Kind`] of an option of type `bool`, or `u32` or [`List`] with
-/// its range, `String`, or a [`Choice`].
+/// The [`Kind`] of an option of type `bool`, or `u32`, [`Decimal`] or
+/// [`List`] with its range, `String`, or a [`Choice`].
 macro_rules! kind {
     (bool) => {
         Kind::Bool
@@ -224,6 +327,12 @@ macro_rules! kind {
     };
     (u32 $min:literal ..= $max:literal) => {
         Kind::Number {
+            min: $min,
+            max: $max,
+        }
+    };
+    (Decimal $min:literal ..= $max:literal) => {
+        Kind::Decimal {
             min: $min,
             max: $max,
         }
@@ -467,6 +576,19 @@ options! {
     /// trip is over 30 ms or a key has just taken a long time; `always`
     /// does it even for a daemon on this machine; `never` doesn't.
     predictecho("pe"): PredictEcho = PredictEcho::Auto;
+    /// The font family terminals and editors are drawn in, by its name, as
+    /// `fc-list : family` lists them: `JetBrains Mono`, say. Empty is your
+    /// system's monospace font. In `:set`, a space is written `\ `. A
+    /// family that isn't installed is refused, and the font stays as it
+    /// was. `--font` or `$CLACKATOO_FONT` overrides what `init.lua` sets
+    /// as it runs, but not what's set after, by `:set` or a key it binds.
+    font("gfn"): String = String::new();
+    /// The size text is drawn at, in points, as 12 or 10.5. Changing it,
+    /// or `font`, keeps the window's size, and fits as many cells in as
+    /// now fit, as resizing the window does. `--font-size` or
+    /// `$CLACKATOO_FONT_SIZE` overrides what `init.lua` sets as it runs,
+    /// but not what's set after.
+    fontsize("fsz"): Decimal (4..=200) = Decimal::whole(12);
 }
 
 choice! {
@@ -615,6 +737,7 @@ impl Options {
             Value::Bool(true) => info.name.to_owned(),
             Value::Bool(false) => format!("no{}", info.name),
             Value::Number(number) => format!("{}={number}", info.name),
+            Value::Decimal(number) => format!("{}={number}", info.name),
             Value::List(numbers) => {
                 let numbers: Vec<String> = numbers.iter().map(u32::to_string).collect();
                 format!("{}={}", info.name, numbers.join(","))
@@ -626,6 +749,34 @@ impl Options {
                     .replace('\t', "\\\t");
                 format!("{}={text}", info.name)
             }
+        }
+    }
+}
+
+impl Options {
+    /// The options as a window starts, drawing text as `font` says: their
+    /// defaults, but for `font` and `fontsize`. A size `fontsize` can't
+    /// hold, as the command line can give, is brought into its range.
+    pub(crate) fn drawing_with(font: &crate::FontOptions) -> Self {
+        let Ok(Info {
+            kind: Kind::Decimal { min, max },
+            ..
+        }) = find("fontsize")
+        else {
+            unreachable!("fontsize is a decimal")
+        };
+        Self {
+            font: font.family.clone().unwrap_or_default(),
+            fontsize: Decimal::nearest(font.size, *min, *max),
+            ..Self::default()
+        }
+    }
+
+    /// What to draw text with, as `font` and `fontsize` say.
+    pub(crate) fn font_options(&self) -> crate::FontOptions {
+        crate::FontOptions {
+            family: Some(self.font.clone()).filter(|family| !family.is_empty()),
+            size: self.fontsize.as_f32(),
         }
     }
 }
@@ -865,6 +1016,90 @@ mod tests {
         );
         let err = parse_set("sbr+=x").unwrap_err();
         assert!(err.contains("aren't supported"), "{err}");
+    }
+
+    #[test]
+    fn a_decimal_is_kept_to_two_places_and_written_with_as_few_as_it_needs() {
+        let mut options = Options::default();
+        let fsz = info("fsz");
+        assert_eq!(fsz.name, "fontsize");
+        assert_eq!(options.show(fsz), "fontsize=12");
+        for (text, shown) in [
+            ("10.5", "10.5"),
+            ("10.25", "10.25"),
+            ("10.05", "10.05"),
+            ("10.50", "10.5"),
+            ("13.", "13"),
+            ("200", "200"),
+            ("4", "4"),
+        ] {
+            let value = fsz.parse(text).unwrap();
+            options.set(fsz, value).unwrap();
+            assert_eq!(options.show(fsz), format!("fontsize={shown}"), "{text}");
+        }
+        let wants = "fontsize is a number from 4 to 200, to two decimal places at most";
+        for text in [
+            "3.99", "200.01", "10.125", "", ".5", "-1", "1e2", "ten", "1,5", "+5",
+        ] {
+            assert_eq!(fsz.parse(text), Err(wants.into()), "{text}");
+        }
+        assert_eq!(
+            options.set(fsz, Value::Number(12)),
+            Err(wants.into()),
+            "a whole number isn't a decimal"
+        );
+        assert_eq!(Decimal::exact(10.1), Some(Decimal(1010)));
+        assert_eq!(Decimal::exact(10.125), None);
+        assert_eq!(Decimal::exact(-1.0), None);
+        assert_eq!(Decimal::exact(f64::NAN), None);
+        assert_eq!(Decimal::whole(u32::MAX), Decimal(u32::MAX));
+    }
+
+    #[test]
+    fn the_font_is_text_and_starts_as_the_window_was_told() {
+        let mut options = Options::default();
+        let gfn = info("gfn");
+        assert_eq!(gfn.name, "font");
+        assert_eq!(options.show(gfn), "font=");
+        assert_eq!(
+            parse_set("gfn=JetBrains\\ Mono fsz=10.5"),
+            Ok(vec![
+                Setting::To(gfn, Value::Text("JetBrains Mono".into())),
+                Setting::To(info("fontsize"), Value::Decimal(Decimal(1050))),
+            ])
+        );
+        options
+            .set(gfn, Value::Text("JetBrains Mono".into()))
+            .unwrap();
+        assert_eq!(options.show(gfn), "font=JetBrains\\ Mono");
+
+        let font = |family: Option<&str>, size| crate::FontOptions {
+            family: family.map(str::to_owned),
+            size,
+        };
+        let start = Options::drawing_with(&font(Some("Iosevka"), 13.5));
+        assert_eq!(
+            (start.font.as_str(), start.fontsize),
+            ("Iosevka", Decimal(1350))
+        );
+        let back = start.font_options();
+        assert_eq!((back.family.as_deref(), back.size), (Some("Iosevka"), 13.5));
+        // The system's font is no family; a size from the command line is
+        // brought into range.
+        let start = Options::drawing_with(&font(None, 1000.0));
+        assert_eq!(
+            (start.font.as_str(), start.fontsize),
+            ("", Decimal::whole(200))
+        );
+        assert_eq!(start.font_options().family, None);
+        for (size, kept) in [(0.5, 400), (f32::NAN, 400), (10.333, 1033)] {
+            let start = Options::drawing_with(&font(None, size));
+            assert_eq!(start.fontsize, Decimal(kept), "{size}");
+        }
+        assert_eq!(
+            Options::drawing_with(&crate::FontOptions::default()),
+            Options::default()
+        );
     }
 
     #[test]

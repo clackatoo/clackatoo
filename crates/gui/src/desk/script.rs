@@ -2,18 +2,24 @@
 //! asking it about keys, and doing what it says.
 
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{PaneId, Request};
 
 use super::{Asked, Desk};
 use crate::input::{KeptPress, KeyPress};
 use crate::keymap::{self, Chord};
-use crate::lua::{FromLua, KeyInfo, Lua, PaneInfo, Scope, ToLua, WINDOW, World};
+use crate::lua::{FromLua, INIT_TIME, KeyInfo, Lua, PaneInfo, Scope, ToLua, WINDOW, World};
+use crate::options::Options;
 
 use super::bindings::Binding;
 
-/// Starts the config's Lua, if there's a config.
-pub(crate) struct LuaStart(pub(crate) Box<dyn Fn() -> Option<Lua>>);
+/// Starts the config's Lua, if there's a config, with the options as the
+/// window's are as it starts.
+pub(crate) struct LuaStart(pub(crate) Box<StartLua>);
+
+/// What [`LuaStart`] holds.
+type StartLua = dyn Fn(&Options) -> Option<Lua>;
 
 impl fmt::Debug for LuaStart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -34,13 +40,36 @@ pub(super) struct Script {
     waiting: Vec<(KeptPress, Chord)>,
     /// Keys a binding to keys is typing are being handled.
     pub(super) typing: bool,
+    /// When `init.lua` started running, until Lua says it's finished.
+    running: Option<Instant>,
 }
+
+/// How long the window takes `init.lua` to be running, at most: as long as
+/// Lua lets it run, and a little. Past that, Lua has gone wrong, as by its
+/// thread dying, and the window stops waiting for it.
+const RUNNING_TIME: Duration = INIT_TIME.saturating_add(Duration::from_secs(1));
 
 impl Desk {
     /// Starts the config's Lua with `start`, which a reload starts again.
     pub(crate) fn start_lua(&mut self, start: LuaStart) {
-        self.script.lua = (start.0)();
+        self.script.lua = (start.0)(&self.options);
+        self.script.running = self.script.lua.as_ref().map(|_| Instant::now());
         self.script.start = Some(start);
+    }
+
+    /// Whether `init.lua` is running, on the config's first run or a
+    /// reload, at `now`.
+    pub(super) fn config_running(&self, now: Instant) -> bool {
+        (self.script.running).is_some_and(|since| now < since + RUNNING_TIME)
+    }
+
+    /// When the window stops waiting for `init.lua` to finish, if it's
+    /// running still, so it's woken then to do what waited.
+    pub(crate) fn config_ends(&self) -> Option<Instant> {
+        let now = Instant::now();
+        (self.script.running)
+            .map(|since| since + RUNNING_TIME)
+            .filter(|&ends| now < ends)
     }
 
     /// Runs the config again from the start, in a Lua of its own: what the
@@ -59,7 +88,8 @@ impl Desk {
         self.script = super::script::Script::default();
         self.keymap = super::bindings::Keys::default();
         self.reset_options();
-        self.script.lua = start.as_ref().and_then(|start| (start.0)());
+        self.script.lua = start.as_ref().and_then(|start| (start.0)(&self.options));
+        self.script.running = self.script.lua.as_ref().map(|_| Instant::now());
         self.message = Some(match &self.script.lua {
             Some(_) => "reloaded the config".into(),
             None => {
@@ -257,8 +287,12 @@ impl Desk {
     #[cfg(test)]
     pub(super) fn lua_from(&mut self, config: &str) {
         let config = config.to_owned();
-        self.start_lua(LuaStart(Box::new(move || {
-            Lua::start(crate::lua::Source::Text(config.clone()), Box::new(|| {}))
+        self.start_lua(LuaStart(Box::new(move |options| {
+            Lua::start(
+                crate::lua::Source::Text(config.clone()),
+                options.clone(),
+                Box::new(|| {}),
+            )
         })));
         self.lua_ready();
     }
@@ -271,6 +305,7 @@ impl Desk {
         for message in said {
             self.lua_says(message);
         }
+        self.lua_says(FromLua::Ready);
     }
 
     /// Does one thing Lua says.
@@ -329,12 +364,13 @@ impl Desk {
                 Ok(command) => self.run(command),
                 Err(message) => self.message = Some(message),
             },
-            FromLua::Set { option, value } => self.set_option(option, value),
+            FromLua::Set { option, value } => self.config_sets(option, value),
             FromLua::Error(text) => {
                 log::warn!("config: {text}");
                 self.message = Some(text);
             }
-            FromLua::Decided { .. } | FromLua::Ready => {}
+            FromLua::Ready => self.script.running = None,
+            FromLua::Decided { .. } => {}
         }
     }
 }

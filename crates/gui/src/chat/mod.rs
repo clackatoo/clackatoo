@@ -196,8 +196,10 @@ pub(crate) struct ChatView {
     pub(crate) title: String,
     /// The message being typed.
     editor: PlainEditor<Brush>,
-    /// The size the editor's text was last styled at.
+    /// The size the editor's text was last styled at, and the fonts'
+    /// generation it was styled in.
     editor_size: f32,
+    editor_fonts: u32,
     layout_cx: LayoutContext<Brush>,
     queued: Vec<Input>,
     /// Laid-out turns, kept while their text and the width stay the same.
@@ -298,6 +300,7 @@ impl ChatView {
             title,
             editor: PlainEditor::new(16.0),
             editor_size: 0.0,
+            editor_fonts: 0,
             layout_cx: LayoutContext::new(),
             queued: Vec::new(),
             cache: paint::Cache::default(),
@@ -1148,10 +1151,11 @@ impl ChatView {
     /// Styles the editor's text for the fonts, if they've changed.
     fn style_editor(&mut self, fonts: &Fonts) {
         let size = paint::text_size(fonts);
-        if size.to_bits() == self.editor_size.to_bits() {
+        if (size.to_bits(), fonts.generation) == (self.editor_size.to_bits(), self.editor_fonts) {
             return;
         }
         self.editor_size = size;
+        self.editor_fonts = fonts.generation;
         let styles = self.editor.edit_styles();
         for property in paint::body_style(fonts, size) {
             styles.insert(property);

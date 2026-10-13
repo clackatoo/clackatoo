@@ -76,13 +76,37 @@ pub struct Options {
     /// The shell command that runs clackatoo on another machine, for one
     /// picked.
     pub remote_command: String,
-    /// What to draw text with.
+    /// What to draw text with, until config says otherwise.
     pub font: FontOptions,
+    /// Which of `font`'s settings the command line gave, or the
+    /// environment, which config doesn't change.
+    pub font_fixed: FontFixed,
     /// The graphics API to draw with.
     pub graphics_api: GraphicsApi,
     /// clackatoo's config directory, whose `client/init.lua` configures
     /// the window, if there is one.
     pub config: Option<PathBuf>,
+}
+
+/// Which of the font's settings were given on the command line, or in the
+/// environment, and so outdo config's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FontFixed {
+    /// The family, `--font`.
+    pub family: bool,
+    /// The size, `--font-size`.
+    pub size: bool,
+}
+
+impl FontFixed {
+    /// The options these are.
+    fn options(self) -> Vec<&'static options::Info> {
+        let named = |fixed: bool, name| fixed.then(|| options::find(name).expect("an option"));
+        named(self.family, "font")
+            .into_iter()
+            .chain(named(self.size, "fontsize"))
+            .collect()
+    }
 }
 
 /// The graphics API the window draws with. If the one chosen can't draw,
@@ -107,8 +131,9 @@ pub enum GraphicsApi {
 /// the daemon fails.
 pub fn run(options: Options) -> anyhow::Result<()> {
     let started = Instant::now();
+    let start = options::Options::drawing_with(&options.font);
     let fonts = {
-        let options = options.font.clone();
+        let options = start.font_options();
         std::thread::Builder::new()
             .name("fonts".into())
             .spawn(move || {
@@ -143,12 +168,12 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     // The config runs alongside everything else starting.
     let lua_start = options.config.map(|dir| {
         let proxy = event_loop.create_proxy();
-        desk::LuaStart(Box::new(move || {
+        desk::LuaStart(Box::new(move |options| {
             let proxy = proxy.clone();
             let wake: lua::Wake = Box::new(move || {
                 let _ = proxy.send_event(session::SessionEvent::Lua);
             });
-            lua::Lua::start(lua::Source::Dir(dir.clone()), wake)
+            lua::Lua::start(lua::Source::Dir(dir.clone()), options.clone(), wake)
         }))
     });
     let proxy = event_loop.create_proxy();
@@ -159,6 +184,8 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     };
     updates::after_opening(event_loop.create_proxy());
     let mut app = app::App::new(started, fonts, gpu, session, options.remote_command);
+    // Before config runs, which starts from them.
+    app.start_options(start, options.font_fixed.options());
     if options.pick_remote {
         app.pick_machine();
     }

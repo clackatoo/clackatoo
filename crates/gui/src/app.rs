@@ -451,6 +451,9 @@ impl App {
         let join = |name| move |_| anyhow!("{name} thread panicked");
         let (mut fonts, desktop) = startup.fonts.join().map_err(join("font"))??;
         let fonts_ready = self.started.elapsed();
+        // In config's font, if it's run, so the window opens at the size
+        // that font makes.
+        self.desk.use_font(&mut fonts);
         self.buttons = desktop.buttons;
         // Fonts were loaded at one pixel per point; the window's display
         // may have more.
@@ -1009,6 +1012,16 @@ impl App {
         }
     }
 
+    /// Starts from `options`, as the command line and startup.toml set
+    /// them, before config runs. Config leaves those in `fixed` alone.
+    pub(crate) fn start_options(
+        &mut self,
+        options: crate::options::Options,
+        fixed: Vec<&'static crate::options::Info>,
+    ) {
+        self.desk.start_options(options, fixed);
+    }
+
     /// Starts the config's Lua.
     pub(crate) fn start_lua(&mut self, start: crate::desk::LuaStart) {
         self.desk.start_lua(start);
@@ -1519,6 +1532,16 @@ impl App {
 
     fn draw(&mut self) {
         let started = Instant::now();
+        // A new font, from `:set` or config, once a frame, however many
+        // times it was set since the last: one atlas thrown away, and one
+        // resize for each terminal.
+        if let Some(frame) = &mut self.frame
+            && self.desk.use_font(&mut frame.fonts)
+        {
+            frame.renderer.forget_glyphs();
+            self.fit_panes();
+            self.send_outbox();
+        }
         let Some(chrome) = self.chrome() else {
             return;
         };
@@ -2446,6 +2469,11 @@ impl ApplicationHandler<SessionEvent> for App {
         let Some(startup) = self.startup.take() else {
             return;
         };
+        // Config has nearly always run by now, as it takes a millisecond or
+        // so and fonts and the GPU take tens: what it set, the font
+        // included, is in place as the window opens. It's never waited for,
+        // so a config that takes longer changes the font after.
+        let said = self.desk.lua_said();
         match self.open(event_loop, startup) {
             Ok(frame) => {
                 // Whatever arrived while the window opened is drawn now:
@@ -2453,6 +2481,9 @@ impl ApplicationHandler<SessionEvent> for App {
                 frame.window.request_redraw();
                 self.frame = Some(frame);
                 self.fit_panes();
+                if said {
+                    self.update_title();
+                }
             }
             Err(err) => self.fail(event_loop, err),
         }
@@ -2518,6 +2549,7 @@ impl ApplicationHandler<SessionEvent> for App {
             .chain(self.desk.editor_wakes())
             .chain(self.desk.chat_wakes())
             .chain(self.desk.pane_wakes())
+            .chain(self.desk.config_ends())
             .min();
         let flow = match soonest {
             Some(wake) => ControlFlow::WaitUntil(wake),

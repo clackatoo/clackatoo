@@ -50,14 +50,16 @@ struct Cli {
 }
 
 /// The window's options. Each defaults to the setting in
-/// `client/startup.toml` (see `clackatoo config`).
+/// `client/startup.toml` (see `clackatoo config`); the font and its size,
+/// to the `font` and `fontsize` options in `client/init.lua` first.
 #[derive(Debug, Args)]
 struct WindowArgs {
-    /// The font family to draw text with. Defaults to your system's
-    /// monospace font.
+    /// The font family to draw text with, outdoing `client.opt.font` in
+    /// config. Defaults to your system's monospace font.
     #[arg(long, value_name = "FAMILY", env = "CLACKATOO_FONT")]
     font: Option<String>,
-    /// The text size, in points. Defaults to 12.
+    /// The text size, in points, outdoing `client.opt.fontsize` in config.
+    /// Defaults to 12.
     #[arg(long, value_name = "POINTS", env = "CLACKATOO_FONT_SIZE")]
     font_size: Option<f32>,
     /// The graphics API to draw with. Defaults to Vulkan.
@@ -469,18 +471,37 @@ fn agent_tools() -> Option<Vec<OsString>> {
     Some(vec![program.into_os_string(), "mcp".into()])
 }
 
+/// What the window draws text with as it opens, from the command line
+/// (or environment), else startup.toml, else the defaults; and which of
+/// those the command line gave, which `client.opt` in config doesn't
+/// change. Config's own come between: over startup.toml's, under the
+/// command line's.
+fn window_font(
+    args: &WindowArgs,
+    config: &config::ClientConfig,
+) -> (clackatoo_gui::FontOptions, clackatoo_gui::FontFixed) {
+    let font = clackatoo_gui::FontOptions {
+        family: args.font.clone().or_else(|| config.font.clone()),
+        size: args.font_size.or(config.font_size).unwrap_or(12.0),
+    };
+    let fixed = clackatoo_gui::FontFixed {
+        family: args.font.is_some(),
+        size: args.font_size.is_some(),
+    };
+    (font, fixed)
+}
+
 fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
     logs::window();
     let config = config::load();
+    let (font, font_fixed) = window_font(args, &config);
     clackatoo_gui::run(clackatoo_gui::Options {
         runtime: RuntimeDir::for_current_user(),
         remote: args.remote.remote(),
         pick_remote: args.connect_picker,
         remote_command: args.remote.remote_command.clone(),
-        font: clackatoo_gui::FontOptions {
-            family: args.font.clone().or(config.font),
-            size: args.font_size.or(config.font_size).unwrap_or(12.0),
-        },
+        font,
+        font_fixed,
         graphics_api: args
             .renderer
             .map(Into::into)
@@ -681,6 +702,69 @@ mod tests {
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn the_font_on_the_command_line_outdoes_startup_toml_and_is_fixed_for_config() {
+        use clap::CommandFactory;
+
+        // Made, not parsed, as parsing reads the environment, which may
+        // have CLACKATOO_FONT in it.
+        let window = |args: &[&str]| {
+            let (mut font, mut font_size) = (None, None);
+            for pair in args.chunks(2) {
+                match pair {
+                    ["--font", family] => font = Some((*family).to_owned()),
+                    ["--font-size", size] => font_size = Some(size.parse().unwrap()),
+                    _ => unreachable!(),
+                }
+            }
+            WindowArgs {
+                font,
+                font_size,
+                renderer: None,
+                connect_picker: false,
+                remote: RemoteArgs {
+                    remote: None,
+                    remote_command: "clackatoo".into(),
+                },
+            }
+        };
+        let file = config::ClientConfig {
+            font: Some("Iosevka".into()),
+            font_size: Some(13.5),
+            renderer: None,
+        };
+        let (font, fixed) = window_font(&window(&[]), &file);
+        assert_eq!((font.family.as_deref(), font.size), (Some("Iosevka"), 13.5));
+        assert_eq!(fixed, clackatoo_gui::FontFixed::default());
+
+        let (font, fixed) = window_font(&window(&["--font", "JetBrains Mono"]), &file);
+        assert_eq!(
+            (font.family.as_deref(), font.size),
+            (Some("JetBrains Mono"), 13.5)
+        );
+        assert!(fixed.family && !fixed.size);
+
+        let (font, fixed) = window_font(
+            &window(&["--font-size", "15"]),
+            &config::ClientConfig::default(),
+        );
+        assert_eq!((font.family, font.size), (None, 15.0));
+        assert!(!fixed.family && fixed.size);
+
+        let (font, _) = window_font(&window(&[]), &config::ClientConfig::default());
+        assert_eq!((font.family, font.size), (None, 12.0));
+
+        // The environment gives them as the flags do, so they're fixed too.
+        let command = Cli::command();
+        let env = |id: &str| {
+            let arg = command.get_arguments().find(|arg| arg.get_id() == id);
+            arg.and_then(clap::Arg::get_env)
+                .map(|env| env.to_string_lossy().into_owned())
+        };
+        assert_eq!(env("font").as_deref(), Some("CLACKATOO_FONT"));
+        assert_eq!(env("font_size").as_deref(), Some("CLACKATOO_FONT_SIZE"));
     }
 
     #[test]

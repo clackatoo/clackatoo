@@ -258,6 +258,15 @@ pub(crate) struct Desk {
     jumps: jumps::Jumps,
     /// The options, as config and `:set` have set them.
     options: Options,
+    /// The options as the window started: their defaults, but for the font
+    /// it was told to draw with. Config run again starts from these.
+    start_options: Options,
+    /// The options the command line set, or the environment, which config
+    /// doesn't change.
+    fixed: Vec<&'static crate::options::Info>,
+    /// The `font` and `fontsize` the window draws text in, as last put
+    /// into its fonts.
+    font_in_use: settings::FontInUse,
     /// The finder, while it's open.
     finder: Option<Finder>,
     /// How many searches the window has asked the daemon for, which
@@ -2730,6 +2739,239 @@ mod tests {
         assert!(desk.options.relativenumber);
         desk.lua_ready();
         assert!(!desk.options.relativenumber);
+    }
+
+    #[test]
+    fn the_command_lines_font_outdoes_configs_but_not_set() {
+        use crate::options::{self, Decimal};
+        let mut desk = three_tabs();
+        snapshot(&mut desk, 1);
+        // `--font Iosevka`, and startup.toml's size.
+        let start = Options::drawing_with(&crate::FontOptions {
+            family: Some("Iosevka".into()),
+            size: 13.0,
+        });
+        let font = options::find("font").unwrap();
+        desk.start_options(start, vec![font]);
+        desk.lua_from(
+            r#"
+            client.opt.font = "JetBrains Mono"
+            client.opt.fontsize = 15
+            client.keys.map("n", "<C-b>n", function()
+                client.opt.nu = client.opt.font == "Iosevka"
+            end)
+            "#,
+        );
+        // Config's size outdoes startup.toml's; the command line's font
+        // outdoes config's.
+        assert_eq!(desk.options.font, "Iosevka");
+        assert_eq!(desk.options.fontsize, Decimal::whole(15));
+        normal_mode(&mut desk);
+        command(&mut desk, "set nonu");
+        // Lua heard the font it set was put back.
+        ctrl_b(&mut desk, "n");
+        assert!(desk.options.number);
+        command(&mut desk, "set");
+        assert_eq!(desk.message.as_deref(), Some("fontsize=15"));
+        // `:set` is you, now, and outdoes everything.
+        command(&mut desk, "set gfn=Fira\\ Code");
+        assert_eq!(desk.options.font, "Fira Code");
+        command(&mut desk, "set");
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("font=Fira\\ Code  fontsize=15")
+        );
+        // A reload starts again from the command line's and startup.toml's.
+        command(&mut desk, "reload");
+        assert_eq!(desk.options.font, "Iosevka");
+        assert_eq!(desk.options.fontsize, Decimal::whole(13));
+        desk.lua_ready();
+        assert_eq!(desk.options.font, "Iosevka");
+        assert_eq!(desk.options.fontsize, Decimal::whole(15));
+    }
+
+    #[test]
+    fn once_config_has_run_its_handlers_change_what_the_command_line_set() {
+        use crate::options::{self, Decimal};
+        let mut desk = three_tabs();
+        snapshot(&mut desk, 1);
+        // `--font-size 14`.
+        let start = Options::drawing_with(&crate::FontOptions {
+            family: None,
+            size: 14.0,
+        });
+        desk.start_options(start, vec![options::find("fontsize").unwrap()]);
+        desk.lua_from(
+            r#"
+            client.opt.fsz = 20
+            client.keys.map("n", "<C-b>n", function()
+                client.opt.fsz = client.opt.fsz + 1
+            end)
+            "#,
+        );
+        assert_eq!(desk.options.fontsize, Decimal::whole(14));
+        normal_mode(&mut desk);
+        ctrl_b(&mut desk, "n");
+        assert_eq!(desk.options.fontsize, Decimal::whole(15));
+        ctrl_b(&mut desk, "n");
+        assert_eq!(desk.options.fontsize, Decimal::whole(16));
+    }
+
+    /// Fonts as `tests::fonts` loads them, and a desk starting in them.
+    fn desk_in_fonts(desk: &mut Desk) -> crate::fonts::Fonts {
+        let fonts = crate::tests::fonts(1.0);
+        let start = Options::drawing_with(&crate::FontOptions {
+            family: fonts.mono_family.clone(),
+            size: 12.0,
+        });
+        desk.start_options(start, Vec::new());
+        fonts
+    }
+
+    #[test]
+    fn a_reload_changes_the_font_once_config_has_run_and_only_if_it_must() {
+        use crate::options::Decimal;
+        let mut desk = three_tabs();
+        snapshot(&mut desk, 1);
+        let mut fonts = desk_in_fonts(&mut desk);
+        desk.lua_from("client.opt.fontsize = 20");
+        assert!(desk.use_font(&mut fonts));
+        let cell = fonts.cell;
+        normal_mode(&mut desk);
+        // The options go back as they started while it runs again, and
+        // the font with them, but the font doesn't change until it's run:
+        // and then, it's as it was.
+        command(&mut desk, "reload");
+        assert_eq!(desk.options.fontsize, Decimal::whole(12));
+        assert!(!desk.use_font(&mut fonts), "not while it runs");
+        desk.lua_ready();
+        assert_eq!(desk.options.fontsize, Decimal::whole(20));
+        assert!(!desk.use_font(&mut fonts), "nor after: it's as it was");
+        assert_eq!(fonts.cell, cell);
+        // A `:set` while config runs waits for it.
+        command(&mut desk, "reload");
+        command(&mut desk, "set fsz=24");
+        assert!(!desk.use_font(&mut fonts));
+        desk.lua_ready();
+        assert_eq!(
+            desk.options.fontsize,
+            Decimal::whole(20),
+            "config ran after"
+        );
+        assert!(!desk.use_font(&mut fonts));
+        // A config that no longer sets it puts the start's back, once.
+        desk.lua_from("");
+        assert!(!desk.use_font(&mut fonts), "it's not been reloaded yet");
+        command(&mut desk, "reload");
+        assert!(!desk.use_font(&mut fonts));
+        desk.lua_ready();
+        assert!(desk.use_font(&mut fonts));
+        assert!(fonts.cell.height < cell.height);
+    }
+
+    #[test]
+    fn the_font_set_several_times_between_frames_resizes_each_terminal_once() {
+        let mut desk = three_tabs();
+        for terminal in 1..=3 {
+            snapshot(&mut desk, terminal);
+        }
+        let mut fonts = desk_in_fonts(&mut desk);
+        answer_all(&mut desk);
+        // What the window does each frame.
+        let frame = |desk: &mut Desk, fonts: &mut crate::fonts::Fonts| {
+            if desk.use_font(fonts) {
+                #[allow(clippy::cast_precision_loss)]
+                let cell = [fonts.cell.width as f32, fonts.cell.height as f32];
+                desk.set_area(Some(Area {
+                    rect: crate::layout::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 810.0,
+                        height: 480.0,
+                    },
+                    cell,
+                    gap: 10.0,
+                    inset: 5.0,
+                }));
+            }
+            let resized: Vec<TerminalId> = (answer_all(desk).into_iter())
+                .filter_map(|request| match request {
+                    Request::Resize { terminal, .. } => Some(terminal),
+                    _ => None,
+                })
+                .collect();
+            resized
+        };
+        normal_mode(&mut desk);
+        for size in [14, 16, 18, 20] {
+            command(&mut desk, &format!("set fsz={size}"));
+        }
+        desk.lua_from("client.opt.fsz = 22 client.opt.fsz = 24");
+        let mut resized = frame(&mut desk, &mut fonts);
+        resized.sort_unstable();
+        assert_eq!(resized, [TerminalId(1), TerminalId(2), TerminalId(3)]);
+        assert_eq!(frame(&mut desk, &mut fonts), [], "and nothing after");
+    }
+
+    #[test]
+    fn set_font_changes_the_cell_and_a_font_not_installed_is_refused() {
+        use crate::options::Decimal;
+        let mut fonts = crate::tests::fonts(1.0);
+        let mut desk = three_tabs();
+        snapshot(&mut desk, 1);
+        let start = Options::drawing_with(&crate::FontOptions {
+            family: fonts.mono_family.clone(),
+            size: 12.0,
+        });
+        desk.start_options(start, Vec::new());
+        assert!(!desk.use_font(&mut fonts), "nothing's changed");
+        let (cell, generation) = (fonts.cell, fonts.generation);
+        let family = fonts.mono_family.clone().unwrap_or_default();
+        let set_font = |desk: &mut Desk, family: &str| {
+            command(desk, &format!("set font={}", family.replace(' ', "\\ ")));
+        };
+
+        normal_mode(&mut desk);
+        command(&mut desk, "set fontsize=24");
+        assert!(desk.use_font(&mut fonts));
+        assert!(fonts.cell.height > cell.height && fonts.cell.width > cell.width);
+        assert_eq!(fonts.generation, generation, "the same family");
+        assert!(!desk.use_font(&mut fonts), "once");
+        let big = fonts.cell;
+
+        // A family not installed is put back, and the size still changes.
+        command(&mut desk, "set font=No\\ Such\\ Font fsz=12");
+        assert!(desk.use_font(&mut fonts));
+        assert_eq!(fonts.cell, cell);
+        assert_eq!(desk.options.font, family);
+        assert_eq!(desk.options.fontsize, Decimal::whole(12));
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("there's no font called `No Such Font`, so the font stays as it was")
+        );
+        command(&mut desk, "set font=No\\ Such\\ Font");
+        assert!(!desk.use_font(&mut fonts), "nothing to change");
+        assert_eq!((fonts.cell, fonts.generation), (cell, generation));
+
+        // Another family that is installed is drawn in: the system's
+        // sans-serif, which is surely there.
+        let collection = &mut fonts.font_cx.collection;
+        let sans = (collection.generic_families(fontique::GenericFamily::SansSerif)).next();
+        let other = (sans.and_then(|id| collection.family_name(id)))
+            .expect("a sans-serif font")
+            .to_owned();
+        assert_ne!(other, family);
+        command(&mut desk, "set fsz=24");
+        set_font(&mut desk, &other);
+        assert!(desk.use_font(&mut fonts));
+        assert_eq!(fonts.mono_family.as_deref(), Some(other.as_str()));
+        assert_eq!(fonts.generation, generation + 1);
+        // And back, without loading its faces again.
+        let faces = fonts.faces();
+        set_font(&mut desk, &family);
+        assert!(desk.use_font(&mut fonts));
+        assert_eq!(fonts.cell, big);
+        assert_eq!(fonts.faces(), faces);
     }
 
     #[test]

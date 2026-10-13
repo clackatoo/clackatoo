@@ -14,6 +14,8 @@
 
 mod runtime;
 
+pub(crate) use runtime::INIT_TIME;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -24,7 +26,7 @@ use clackatoo_protocol::{PaneId, Side, TabId, Workspaces};
 use crate::command::Kind;
 use crate::desk::Shown;
 use crate::keymap::{Chord, KeyMode};
-use crate::options::{Info, Value};
+use crate::options::{Info, Options, Value};
 
 /// How long a key waits for Lua to say whether it goes on, before it goes
 /// on as if Lua had said nothing.
@@ -197,15 +199,19 @@ pub(crate) struct Lua {
 }
 
 impl Lua {
-    /// Starts running `source`'s `init.lua` on a thread of its own, or
-    /// returns `None` if there's no `init.lua`.
-    pub(crate) fn start(source: Source, wake: Wake) -> Option<Self> {
+    /// Starts running `source`'s `init.lua` on a thread of its own, with
+    /// `options` as the window's are, or returns `None` if there's no
+    /// `init.lua`.
+    pub(crate) fn start(source: Source, options: Options, wake: Wake) -> Option<Self> {
         let (path, text) = source.init()?;
         let (to, to_receiver) = mpsc::channel();
         let (from_sender, from) = mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("lua".into())
-            .spawn(move || runtime::run(&source, &path, &text, &to_receiver, from_sender, wake));
+            .spawn(move || {
+                let channels = (&to_receiver, from_sender);
+                runtime::run(&source, (&path, &text), options, channels, wake);
+            });
         if let Err(err) = spawned {
             log::warn!("couldn't start Lua: {err}");
             return None;
@@ -288,7 +294,12 @@ mod tests {
     use crate::keymap::parse_keys;
 
     fn start(config: &str) -> (Lua, Vec<FromLua>) {
-        let lua = Lua::start(Source::Text(config.into()), Box::new(|| {})).expect("Lua started");
+        let lua = Lua::start(
+            Source::Text(config.into()),
+            Options::default(),
+            Box::new(|| {}),
+        )
+        .expect("Lua started");
         let said = lua.ready();
         lua.send(ToLua::World(world(&[1, 2])));
         (lua, said)
@@ -606,6 +617,78 @@ mod tests {
     }
 
     #[test]
+    fn the_font_is_read_as_the_window_started_and_its_size_can_have_a_fraction() {
+        use crate::options::{Decimal, Options, find};
+        let options = Options::drawing_with(&crate::FontOptions {
+            family: Some("Iosevka".into()),
+            size: 13.5,
+        });
+        let lua = Lua::start(
+            Source::Text(
+                r#"
+                if client.opt.font == "Iosevka" and client.opt.fsz == 13.5 then
+                    client.opt.gfn = "JetBrains Mono"
+                end
+                client.opt.fontsize = 10.25
+                client.opt.fontsize = client.opt.fontsize + 0.25
+                client.opt.fontsize = 14
+                client.opt.fsz = "10.5"
+                client.opt.numberwidth = "6"
+                "#
+                .into(),
+            ),
+            options,
+            Box::new(|| {}),
+        )
+        .expect("Lua started");
+        let set = |name, value| FromLua::Set {
+            option: find(name).unwrap(),
+            value,
+        };
+        let size = |number: f64| Value::Decimal(Decimal::exact(number).unwrap());
+        assert_eq!(
+            lua.ready(),
+            [
+                set("font", Value::Text("JetBrains Mono".into())),
+                set("fontsize", size(10.25)),
+                set("fontsize", size(10.5)),
+                set("fontsize", size(14.0)),
+                set("fontsize", size(10.5)),
+                set("numberwidth", Value::Number(6)),
+            ]
+        );
+        let wants = "fontsize is a number from 4 to 200, to two decimal places at most";
+        for config in [
+            "client.opt.fsz = 10.125",
+            "client.opt.fsz = 3",
+            "client.opt.fsz = -12",
+            "client.opt.fsz = '12pt'",
+            "client.opt.fsz = 0/0",
+            "client.opt.fsz = 1/0",
+            "client.opt.fsz = math.huge",
+            "client.opt.fsz = -math.huge",
+        ] {
+            let (_, said) = start(config);
+            assert!(
+                matches!(&said[..], [FromLua::Error(err)] if err.ends_with(wants)),
+                "{config}: {said:?}"
+            );
+        }
+        let wants = "numberwidth is a whole number from 1 to 20";
+        for config in [
+            "client.opt.nuw = 1/0",
+            "client.opt.nuw = math.huge",
+            "client.opt.nuw = '6.5'",
+        ] {
+            let (_, said) = start(config);
+            assert!(
+                matches!(&said[..], [FromLua::Error(err)] if err.ends_with(wants)),
+                "{config}: {said:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_list_is_set_with_a_string_a_table_or_a_number() {
         use crate::options::find;
         let (mut lua, mut said) = start(
@@ -645,7 +728,7 @@ mod tests {
             ("client.opt.cc = 0", list),
             ("client.opt.cc = true", list),
             (
-                "client.opt.ts = '4'",
+                "client.opt.ts = 'four'",
                 "tabstop is a whole number from 1 to 32",
             ),
         ] {

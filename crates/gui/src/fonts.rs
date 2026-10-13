@@ -138,6 +138,9 @@ pub(crate) struct UiFont {
     bold: FaceId,
     /// The size, in points.
     points: f32,
+    /// Whether these are the terminal's faces, standing in for want of an
+    /// interface font.
+    stand_in: bool,
     /// The size glyphs are drawn at, in pixels per em.
     pub(crate) ppem: f32,
     /// From the top of a line down to the baseline.
@@ -185,10 +188,15 @@ pub(crate) struct Fonts {
     shaper: ShapeContext,
     /// The configured size, in points.
     points: f32,
+    /// Physical pixels per logical pixel, on the window's display.
+    scale: f64,
     /// The size glyphs are drawn at, in pixels per em.
     pub(crate) ppem: f32,
     pub(crate) cell: CellMetrics,
     pub(crate) ui: UiFont,
+    /// Counts changes of the terminal's family, so text laid out in the
+    /// old one is laid out again. A change of size shows in `ppem`.
+    pub(crate) generation: u32,
 }
 
 impl std::fmt::Debug for Fonts {
@@ -209,30 +217,8 @@ impl Fonts {
             collection: Collection::new(CollectionOptions::default()),
             source_cache: SourceCache::default(),
         };
-        let family = match &options.family {
-            Some(name) => QueryFamily::Named(name),
-            None => QueryFamily::Generic(GenericFamily::Monospace),
-        };
         let mut faces = Vec::new();
-        let mut primary = [FaceId(0); 4];
-        for (slot, variant) in [
-            Variant::Regular,
-            Variant::Bold,
-            Variant::Italic,
-            Variant::BoldItalic,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let face = query(
-                &mut font_cx.collection,
-                &mut font_cx.source_cache,
-                family,
-                variant,
-            )
-            .with_context(|| format!("no font found for {family:?}"))?;
-            primary[slot] = push_face(&mut faces, face);
-        }
+        let primary = primaries(&mut font_cx, &mut faces, options.family.as_deref())?;
 
         // Until an interface font is loaded, the terminal's stands in.
         let ui = UiFont {
@@ -242,6 +228,7 @@ impl Fonts {
             ppem: 0.0,
             baseline: 0.0,
             height: 1.0,
+            stand_in: true,
         };
         let mut fonts = Self {
             font_cx,
@@ -255,6 +242,7 @@ impl Fonts {
             emoji: HashMap::new(),
             shaper: ShapeContext::new(),
             points: options.size,
+            scale,
             ppem: 0.0,
             cell: CellMetrics {
                 width: 1,
@@ -264,14 +252,39 @@ impl Fonts {
                 strikeout_offset: 0.0,
                 stroke: 1.0,
             },
+            generation: 0,
         };
         fonts.set_scale(scale);
         Ok(fonts)
     }
 
+    /// Draws terminals in `family`, or the system's monospace font, at
+    /// `points`, as the `font` and `fontsize` options say, measuring the
+    /// cell again. Glyphs drawn in the old font must be thrown away. A
+    /// family that isn't installed is refused, and nothing changes.
+    pub(crate) fn set_terminal(&mut self, family: Option<&str>, points: f32) -> anyhow::Result<()> {
+        if family != self.mono_family.as_deref() {
+            let primary = primaries(&mut self.font_cx, &mut self.faces, family)?;
+            // Until an interface font is loaded, the terminal's stands in.
+            if self.ui.stand_in {
+                self.ui.regular = primary[0];
+                self.ui.bold = primary[1];
+            }
+            self.primary = primary;
+            self.mono_family = family.map(str::to_owned);
+            self.glyphs.clear();
+            self.emoji.clear();
+            self.generation = self.generation.wrapping_add(1);
+        }
+        self.points = points;
+        self.set_scale(self.scale);
+        Ok(())
+    }
+
     /// Sizes text for a display with `scale` physical pixels per logical
     /// pixel. Glyphs rasterised at the old size must be thrown away.
     pub(crate) fn set_scale(&mut self, scale: f64) {
+        self.scale = scale;
         // Points are 1/72 inch, and a logical pixel is 1/96 inch.
         #[allow(clippy::cast_possible_truncation)]
         let ppem = (f64::from(self.points) * 96.0 / 72.0 * scale) as f32;
@@ -313,6 +326,7 @@ impl Fonts {
         };
         self.ui.regular = regular;
         self.ui.bold = bold.unwrap_or(regular);
+        self.ui.stand_in = false;
         self.ui_family = family_name(family);
         self.ui.points = points;
         self.set_scale(scale);
@@ -390,6 +404,12 @@ impl Fonts {
         );
         self.laid_out.insert(key, id);
         Some(id)
+    }
+
+    /// How many faces are loaded.
+    #[cfg(test)]
+    pub(crate) fn faces(&self) -> usize {
+        self.faces.len()
     }
 
     pub(crate) fn face(&self, id: FaceId) -> &Face {
@@ -546,6 +566,58 @@ impl Face {
             embolden: font.synthesis.embolden(),
             skew: font.synthesis.skew().is_some(),
         })
+    }
+}
+
+/// The regular, bold, italic and bold italic faces of `family`, or the
+/// system's monospace font, as indices into `faces`, adding those it
+/// hasn't got.
+fn primaries(
+    font_cx: &mut parley::FontContext,
+    faces: &mut Vec<Face>,
+    family: Option<&str>,
+) -> anyhow::Result<[FaceId; 4]> {
+    let family = match family {
+        Some(name) => QueryFamily::Named(name),
+        None => QueryFamily::Generic(GenericFamily::Monospace),
+    };
+    let mut primary = [FaceId(0); 4];
+    for (slot, variant) in [
+        Variant::Regular,
+        Variant::Bold,
+        Variant::Italic,
+        Variant::BoldItalic,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let face = query(
+            &mut font_cx.collection,
+            &mut font_cx.source_cache,
+            family,
+            variant,
+        )
+        .with_context(|| match family {
+            QueryFamily::Named(name) => format!("there's no font called `{name}`"),
+            _ => "there's no monospace font".to_owned(),
+        })?;
+        primary[slot] = face_id(faces, face);
+    }
+    Ok(primary)
+}
+
+/// `face`'s index in `faces`, adding it if it isn't there, so a family
+/// chosen again doesn't add its faces again.
+fn face_id(faces: &mut Vec<Face>, face: Face) -> FaceId {
+    let same = |known: &Face| {
+        known.blob.id() == face.blob.id()
+            && known.offset_index == face.offset_index
+            && known.embolden == face.embolden
+            && known.skew == face.skew
+    };
+    match faces.iter().position(same) {
+        Some(index) => FaceId(u16::try_from(index).expect("far fewer than 65536 faces are loaded")),
+        None => push_face(faces, face),
     }
 }
 

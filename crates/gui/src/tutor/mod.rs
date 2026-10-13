@@ -37,6 +37,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("registers", include_str!("lessons/registers.md")),
     ("substitute", include_str!("lessons/substitute.md")),
     ("wrap", include_str!("lessons/wrap.md")),
+    ("font", include_str!("lessons/font.md")),
     ("indenting", include_str!("lessons/indenting.md")),
     ("snippets", include_str!("lessons/snippets.md")),
     ("explorer", include_str!("lessons/explorer.md")),

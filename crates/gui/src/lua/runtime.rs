@@ -26,7 +26,7 @@ use crate::keymap::{KeyMode, parse_keys, parse_modes};
 use crate::options::{self, Options};
 
 /// How long `init.lua` may run before it's stopped.
-const INIT_TIME: Duration = Duration::from_secs(2);
+pub(crate) const INIT_TIME: Duration = Duration::from_secs(2);
 
 /// How long a handler may run, each time it's resumed, before it's
 /// stopped. Less than the time a key waits for it.
@@ -60,19 +60,19 @@ impl State {
     }
 }
 
-/// Runs `init.lua`, then whatever the window asks, until the window lets
-/// go of its end.
+/// Runs `init.lua`, whose path and text are `init`, with `options` as the
+/// window's are, then whatever the window asks, until the window lets go
+/// of its end.
 pub(super) fn run(
     source: &Source,
-    path: &str,
-    text: &str,
-    from_window: &Receiver<ToLua>,
-    to_window: Sender<FromLua>,
+    (path, text): (&str, &str),
+    options: Options,
+    (from_window, to_window): (&Receiver<ToLua>, Sender<FromLua>),
     wake: Wake,
 ) {
     let state = Rc::new(State {
         world: RefCell::default(),
-        options: RefCell::default(),
+        options: RefCell::new(options),
         to_window,
         wake,
         bindings: RefCell::default(),
@@ -334,6 +334,7 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             Ok(match s.options.borrow().get(option) {
                 options::Value::Bool(value) => Value::Boolean(value),
                 options::Value::Number(value) => Value::Integer(value.into()),
+                options::Value::Decimal(value) => Value::Number(value.as_f64()),
                 options::Value::List(numbers) => Value::Table(lua.create_sequence_from(numbers)?),
                 options::Value::Choice(word) => Value::String(lua.create_string(word)?),
                 options::Value::Text(text) => Value::String(lua.create_string(text)?),
@@ -358,7 +359,8 @@ fn setting(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
 }
 
 /// `value`, from Lua, as a value for `option`: true or false, or a whole
-/// number. A list takes a table of numbers, a string as `:set` takes one
+/// number, or for a decimal, any number to two places, or either as a
+/// string. A list takes a table of numbers, a string as `:set` takes one
 /// (`"80,120"`), or one number alone; a choice, one of its words; text, a
 /// string.
 fn option_value(option: &options::Info, value: &Value) -> Result<options::Value, String> {
@@ -369,9 +371,23 @@ fn option_value(option: &options::Info, value: &Value) -> Result<options::Value,
         _ => None,
     };
     let list = matches!(option.kind, options::Kind::List { .. });
-    let named = matches!(option.kind, options::Kind::Choice(_) | options::Kind::Text);
+    // A number can be a string, as `:set` writes it: `"10.5"`.
+    let named = matches!(
+        option.kind,
+        options::Kind::Choice(_)
+            | options::Kind::Text
+            | options::Kind::Number { .. }
+            | options::Kind::Decimal { .. }
+    );
+    let decimal = matches!(option.kind, options::Kind::Decimal { .. });
     let value = match value {
         Value::String(text) if named => return option.parse(&text.to_string_lossy()),
+        Value::Integer(number) if decimal => u32::try_from(*number)
+            .ok()
+            .map(|number| options::Value::Decimal(options::Decimal::whole(number))),
+        Value::Number(number) if decimal => {
+            options::Decimal::exact(*number).map(options::Value::Decimal)
+        }
         Value::Boolean(value) => Some(options::Value::Bool(*value)),
         Value::Integer(_) if list => number(value).map(|number| options::Value::List(vec![number])),
         Value::Integer(_) => number(value).map(options::Value::Number),

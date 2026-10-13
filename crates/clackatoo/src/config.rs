@@ -5,6 +5,10 @@
 //! must stay quick to read. Settings given on the command line or in the
 //! environment take precedence. A mistake in the file never stops the
 //! window opening: each bad setting is reported and left at its default.
+//!
+//! The font and its size are options in `client/init.lua` too
+//! (`client.opt.font` and `client.opt.fontsize`), which outdo this file's:
+//! these are what the window starts from, before config has run.
 
 use std::path::{Path, PathBuf};
 

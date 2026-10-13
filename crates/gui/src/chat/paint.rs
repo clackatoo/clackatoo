@@ -129,6 +129,8 @@ pub(super) struct Cache {
     /// The column's width and the text's size they were laid out for.
     pub(super) width: f32,
     size: f32,
+    /// The fonts' [`generation`](Fonts::generation) they were laid out in.
+    fonts: u32,
     /// By turn, in order.
     pub(super) turns: Vec<TurnSlot>,
     /// Each turn's top and bottom, from the conversation's top, as far as
@@ -358,10 +360,11 @@ impl ChatView {
         let margin = m.em(1.5);
         let column = (size[0] - 2.0 * margin).clamp(m.em(8.0), m.em(COLUMN));
         let left = ((size[0] - column) / 2.0).max(0.0).round();
-        // Laid out for another width or size: again, as each turn comes
-        // into view. How tall each was is still the best guess.
+        // Laid out for another width, size or font: again, as each turn
+        // comes into view. How tall each was is still the best guess.
         if self.cache.width.to_bits() != column.to_bits()
             || self.cache.size.to_bits() != em.to_bits()
+            || self.cache.fonts != fonts.generation
         {
             let turns = (std::mem::take(&mut self.cache.turns).into_iter())
                 .map(|slot| TurnSlot {
@@ -372,6 +375,7 @@ impl ChatView {
             self.cache = Cache {
                 width: column,
                 size: em,
+                fonts: fonts.generation,
                 turns,
                 ..Cache::default()
             };

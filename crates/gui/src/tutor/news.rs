@@ -173,6 +173,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "With a chat's Browser setting on, its agent drives a browser you watch in a pane",
     },
+    News {
+        id: "font-option",
+        date: "2026-10-13",
+        lesson: "font",
+        what: "The font and its size as options: :set font and :set fontsize as you go, client.opt.font in config",
+    },
 ];
 
 impl News {
