@@ -107,6 +107,7 @@ enum Asked {
 mod bindings;
 mod boards;
 mod clipboard;
+mod connecting;
 mod editors;
 mod explorers;
 mod finding;
@@ -271,6 +272,9 @@ pub(crate) struct Desk {
     notice: Option<String>,
     /// `:update`, asked for and waiting for the window to carry out.
     update_asked: Option<UpdateAsked>,
+    /// Whether `:connect` asked for the picker of a machine, waiting for
+    /// the window to open it.
+    connect_asked: bool,
     /// The tutor's lessons, and the lesson open.
     tutor: lessons::Tutor,
 }
@@ -1894,6 +1898,7 @@ impl Desk {
             Command::Reload => return self.reload_lua(),
             Command::Set(words) => return self.run_set(&words),
             Command::Update(host) => return self.ask_update(host),
+            Command::Connect(host) => return self.ask_connect(host),
             _ => {}
         }
         let Some(shown) = self.shown else { return };
@@ -1982,7 +1987,7 @@ impl Desk {
             Command::AgentUndo { turn, redo, force } => self.agent_undo(turn, redo, force),
             Command::Board { place, name } => self.open_board(name, place),
             Command::Review(review) => self.run_review(review),
-            Command::Reload | Command::Set(_) | Command::Update(_) => {}
+            Command::Reload | Command::Set(_) | Command::Update(_) | Command::Connect(_) => {}
         }
     }
 
@@ -2518,7 +2523,7 @@ mod tests {
         assert!(matches!(
             desk.status(),
             Status::Tabs { note: Some(note), .. }
-                if note == "tab 1-9 c [ ] ,  pane p h j k l | - x  jump o i  agent a  workspace w"
+                if note == "tab 1-9 c [ ] ,  pane p h j k l | - x  jump o i  agent a  workspace w  connect r"
         ));
         assert!(desk.cancel_keys());
         // Panes by number, shown on screen while one is awaited.
@@ -5069,6 +5074,25 @@ mod tests {
         assert_eq!(desk.take_opened(), ["https://x.example/a"]);
         // The desktop opens it: nothing goes to the daemon.
         assert_eq!(answer_all(&mut desk), []);
+    }
+
+    #[test]
+    fn connect_and_ctrl_b_r_ask_the_window_for_the_picker_of_a_machine() {
+        let mut desk = desk(one_tab(pane(1)));
+        answer_all(&mut desk);
+        assert!(!desk.take_connect_asked());
+        normal_mode(&mut desk);
+        command(&mut desk, "connect");
+        assert!(desk.take_connect_asked());
+        assert!(!desk.take_connect_asked(), "once");
+        ctrl_b(&mut desk, "r");
+        assert!(desk.take_connect_asked());
+        // The window opens it: nothing goes to the daemon.
+        assert_eq!(answer_all(&mut desk), []);
+        // Federation isn't built, and says so.
+        command(&mut desk, "connect server");
+        assert!(!desk.take_connect_asked());
+        assert!(note(&desk).starts_with("bringing server's workspaces in here isn't built yet"));
     }
 
     #[test]

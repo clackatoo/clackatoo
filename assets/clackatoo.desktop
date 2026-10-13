@@ -10,8 +10,12 @@ Icon=clackatoo
 Terminal=false
 Categories=System;TerminalEmulator;
 StartupWMClass=clackatoo
-Actions=new-window;
+Actions=new-window;connect;
 
 [Desktop Action new-window]
 Name=New Window
 Exec=clackatoo
+
+[Desktop Action connect]
+Name=Connect to…
+Exec=clackatoo --connect-picker

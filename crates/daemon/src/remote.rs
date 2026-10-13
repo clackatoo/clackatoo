@@ -169,7 +169,7 @@ fn ssh_command(remote: &Remote, replace: bool, askpass: Option<&Path>) -> io::Re
         "ServerAliveCountMax=3",
         // Ends the options, so a host can't be taken for one.
         "--",
-        &remote.host,
+        &destination(&remote.host),
     ])
     .arg(format!(
         "{} bridge{}",
@@ -177,6 +177,24 @@ fn ssh_command(remote: &Remote, replace: bool, askpass: Option<&Path>) -> io::Re
         if replace { " --replace" } else { "" }
     ));
     Ok(ssh)
+}
+
+/// `host` as ssh's destination. ssh takes `user@host`, but a port only in
+/// a URI, so `[user@]host:port`, and an IPv6 address in brackets, become
+/// `ssh://[user@]host[:port]`. A bare IPv6 address, with colons and no
+/// brackets, has no port to find, and stays as it is.
+fn destination(host: &str) -> std::borrow::Cow<'_, str> {
+    let machine = host.rsplit_once('@').map_or(host, |(_, machine)| machine);
+    let port = |port: &str| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit());
+    let uri = machine.starts_with('[')
+        || machine
+            .split_once(':')
+            .is_some_and(|(name, after)| !name.is_empty() && port(after));
+    if uri && !host.starts_with("ssh://") {
+        format!("ssh://{host}").into()
+    } else {
+        host.into()
+    }
 }
 
 /// Connects to a daemon through `command`, which runs `clackatoo bridge`
@@ -545,6 +563,23 @@ mod tests {
         drop(askpass);
         assert!(!path.exists(), "the socket is removed");
         assert!(asked(&path, "Password: ").is_err());
+    }
+
+    #[test]
+    fn a_port_or_an_ipv6_address_goes_to_ssh_as_a_uri() {
+        for (host, destination_) in [
+            ("desktop", "desktop"),
+            ("jack@desktop", "jack@desktop"),
+            ("desktop:2222", "ssh://desktop:2222"),
+            ("jack@desktop:2222", "ssh://jack@desktop:2222"),
+            ("[fd7a::1]", "ssh://[fd7a::1]"),
+            ("jack@[fd7a::1]:22", "ssh://jack@[fd7a::1]:22"),
+            ("fd7a::1", "fd7a::1"),
+            ("desktop:ssh", "desktop:ssh"),
+            ("ssh://jack@desktop:2222", "ssh://jack@desktop:2222"),
+        ] {
+            assert_eq!(destination(host), destination_, "{host}");
+        }
     }
 
     #[test]

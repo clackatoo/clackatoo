@@ -29,6 +29,7 @@ clackatoo-update.workspace = true
 fontique.workspace = true
 log.workspace = true
 nucleo-matcher.workspace = true
+serde_json.workspace = true
 pollster.workspace = true
 swash.workspace = true
 unicode-segmentation.workspace = true
@@ -39,6 +40,7 @@ winit.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 png.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "completion"

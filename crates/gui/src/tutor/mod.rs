@@ -248,7 +248,7 @@ fn cache_dir() -> Option<PathBuf> {
 
 /// Where programs keep what they remember between runs:
 /// `$XDG_STATE_HOME`, or else `~/.local/state`.
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     xdg("XDG_STATE_HOME", ".local/state")
 }
 

@@ -12,6 +12,12 @@ terminal
 
 It runs `ssh HOST clackatoo bridge`, which starts the daemon there if it isn't running. ssh does the logging in, and the daemon only takes connections that come through it.
 
+## Picking a machine
+
+`clackatoo --connect-picker` opens the window as a picker of the machine to connect to: those you've connected to lately, newest first, those your `~/.ssh/config` names, and Tailscale's peers that are online. Type a few letters to narrow them, or a machine that isn't listed, as `jack@server:2222`, and Enter connects, as `--remote` would. If it can't, the picker opens again saying why, so you can pick another; Esc closes the window. Your app launcher runs it as "Connect to…" when you right-click clackatoo, and offers the last three machines you connected to beside it.
+
+In a window, `:connect`, or Ctrl+B r, opens the same picker over your panes, and picking a machine opens a new window on it, leaving this one as it is.
+
 ## What the other machine needs
 
 The same build of clackatoo, on the `PATH` ssh's commands get, which is often shorter than your shell's: `--remote-command` names it otherwise, as `--remote-command ~/.cargo/bin/clackatoo`. On a server nobody's logged in to, run `loginctl enable-linger` there once, so the daemon's socket stays.
@@ -24,4 +30,4 @@ When the other machine stops answering, a red notice in the top bar counts the s
 
 ## Panes from several machines
 
-`:connect HOST`, to bring another machine's workspaces into this daemon, and `:Terminal@host`, for a pane on another machine beside your own, aren't built yet, as `:Terminal@host` says. Until then, a window with `--remote` shows one machine.
+`:connect HOST`, to bring another machine's workspaces into this daemon, and `:Terminal@host`, for a pane on another machine beside your own, aren't built yet, as both say. Until then, a window shows one machine, and `:connect` alone opens a window on another.

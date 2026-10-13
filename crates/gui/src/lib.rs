@@ -9,7 +9,9 @@
 //!
 //! Starting up overlaps the slow parts: fonts load and the GPU opens on
 //! threads of their own while the event loop starts, and a third thread
-//! connects to the daemon, on this machine or, over ssh, another.
+//! connects to the daemon, on this machine or, over ssh, another. Or the
+//! window opens as the picker of a machine to connect to (see
+//! [`connect`]), and connects once one is picked.
 
 #![forbid(unsafe_code)]
 
@@ -20,6 +22,7 @@ mod chat;
 mod chrome;
 mod colors;
 mod command;
+mod connect;
 mod desk;
 mod desktop;
 mod editor;
@@ -28,6 +31,7 @@ mod finder;
 mod fonts;
 mod glyphs;
 mod history;
+pub mod hosts;
 mod ime;
 mod input;
 mod keymap;
@@ -65,6 +69,12 @@ pub struct Options {
     pub runtime: RuntimeDir,
     /// The other machine whose daemon to use instead, if any.
     pub remote: Option<Remote>,
+    /// Whether to open as the picker of a machine to connect to, as
+    /// `remote` would, rather than connect anywhere first.
+    pub pick_remote: bool,
+    /// The shell command that runs clackatoo on another machine, for one
+    /// picked.
+    pub remote_command: String,
     /// What to draw text with.
     pub font: FontOptions,
     /// The graphics API to draw with.
@@ -124,7 +134,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     // The GPU thread has finished without it if this fails.
     let _ = display.send(event_loop.owned_display_handle());
     // A small file read, and a directory or so looked at.
-    let tutor = tutor::Start::read(options.remote.is_some());
+    let tutor = tutor::Start::read(options.remote.is_some() || options.pick_remote);
     let location = match options.remote {
         Some(remote) => session::Location::Remote(remote),
         None => session::Location::Local(options.runtime.clone()),
@@ -140,9 +150,17 @@ pub fn run(options: Options) -> anyhow::Result<()> {
             lua::Lua::start(lua::Source::Dir(dir.clone()), wake)
         }))
     });
-    let session = session::Session::start(location, &options.runtime, event_loop.create_proxy());
+    let proxy = event_loop.create_proxy();
+    let session = if options.pick_remote {
+        session::Session::waiting(&options.runtime, proxy)
+    } else {
+        session::Session::start(location, &options.runtime, proxy)
+    };
     updates::after_opening(event_loop.create_proxy());
-    let mut app = app::App::new(started, fonts, gpu, session);
+    let mut app = app::App::new(started, fonts, gpu, session, options.remote_command);
+    if options.pick_remote {
+        app.pick_machine();
+    }
     if let Some(start) = lua_start {
         app.start_lua(start);
     }

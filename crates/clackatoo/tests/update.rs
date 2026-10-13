@@ -110,6 +110,9 @@ impl Installed {
             .env(verify::KEY_VAR, key.public_base64())
             .env("XDG_RUNTIME_DIR", runtime)
             .env("XDG_DATA_HOME", self.data.path())
+            // The machines connected to recently, which the entry offers:
+            // none.
+            .env("XDG_STATE_HOME", self.data.path().join("state"))
             .output()
             .unwrap()
     }

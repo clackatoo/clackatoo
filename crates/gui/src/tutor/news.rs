@@ -131,6 +131,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "Remote windows ride out bad networks, reconnect by themselves, and keep what you typed into editors",
     },
+    News {
+        id: "connect-picker",
+        date: "2026-10-13",
+        lesson: "remote",
+        what: "Connect to… in the app launcher, :connect and Ctrl+B r pick a machine to open a window on",
+    },
 ];
 
 impl News {

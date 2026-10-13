@@ -11,7 +11,8 @@
 //! window's own commands, and Vim's for files, `w`, `q`, `wq` and `e`, and
 //! for options, `set`, and for registers and marks, `registers` and
 //! `marks`, which list them, and `update`, which installs the latest
-//! release here, or named, on the daemon's machine. The finder's are capitalised too, as fzf.vim's are:
+//! release here, or named, on the daemon's machine, and `connect`, which
+//! picks a machine to open a new window on. The finder's are capitalised too, as fzf.vim's are:
 //! `Files`, `Grep` and `Buffers`, each with what to start with typed. So is
 //! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
 //! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
@@ -150,6 +151,10 @@ pub(crate) enum Command {
     /// `:update`: install the latest release of clackatoo on this machine,
     /// or with a name, on that machine, the one the window's daemon is on.
     Update(Option<String>),
+    /// `:connect`: the picker of a machine to open a new window on; or,
+    /// with a name, that machine's workspaces in this daemon's, which
+    /// isn't built yet.
+    Connect(Option<String>),
     /// `:Board`: the board with this name, made if there's none, where
     /// `place` says; or with none, the finder, to pick one.
     Board { place: Place, name: Option<String> },
@@ -205,7 +210,7 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 
 /// The window's own commands, for messages.
 const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
-                        update, w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, \
+                        update, connect, w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, \
                         Buffers, Diagnostics, Boards, Gitsigns, Explore, AgentUndo, AgentRedo, \
                         Review, ReviewKeep, ReviewReject, ReviewSend and Blame";
 
@@ -231,6 +236,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "marks" => return Ok(Command::Marks),
         "Explore" | "Ex" => return Ok(Command::Explore(argument.map(str::to_owned))),
         "update" => return Ok(Command::Update(argument.map(str::to_owned))),
+        "connect" => return Ok(Command::Connect(argument.map(str::to_owned))),
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
         _ => {}
     }
@@ -717,6 +723,15 @@ mod tests {
         assert_eq!(
             parse("update desk ").unwrap(),
             Command::Update(Some("desk".into()))
+        );
+    }
+
+    #[test]
+    fn connect_picks_a_machine_or_names_one() {
+        assert_eq!(parse("connect").unwrap(), Command::Connect(None));
+        assert_eq!(
+            parse("connect  jack@desk ").unwrap(),
+            Command::Connect(Some("jack@desk".into()))
         );
     }
 

@@ -25,8 +25,10 @@ use winit::window::{CursorIcon, ImePurpose, ResizeDirection, Window, WindowAttri
 use crate::GraphicsApi;
 use crate::chat::{ChatPaint, Pointer};
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, Status};
+use crate::connect::{self, HostPicker, Purpose};
 use crate::desk::{Desk, TextTarget};
 use crate::desktop::{Button, ButtonLayout, Desktop};
+use crate::finder::view::FinderView;
 use crate::fonts::{CellMetrics, Fonts};
 use crate::ime::{InputMethod, Preedit};
 use crate::input;
@@ -36,7 +38,7 @@ use crate::render::{
     self, CursorStyle, Fill, Highlight, PADDING, Paint, Picture, Renderer, Scene, SceneCursor,
 };
 use crate::screen::Screen;
-use crate::session::{Session, SessionEvent};
+use crate::session::{Location, Session, SessionEvent};
 use crate::updates;
 
 /// Lines scrolled per notch of a mouse wheel.
@@ -379,6 +381,15 @@ pub(crate) struct App {
     composing_in_chat: bool,
     /// New releases, and how the daemon's differs from the window's.
     updates: updates::Known,
+    /// The picker of a machine to connect to, while it's open.
+    picker: Option<HostPicker>,
+    /// How many pickers have opened, which numbers each.
+    pickers: u64,
+    /// The machine picked for this window, until it's connected to.
+    picked: Option<String>,
+    /// The shell command that runs clackatoo on another machine, for one
+    /// picked.
+    remote_command: String,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
 }
@@ -389,6 +400,7 @@ impl App {
         fonts: JoinHandle<anyhow::Result<(Fonts, Desktop)>>,
         gpu: JoinHandle<anyhow::Result<Gpu>>,
         session: Session,
+        remote_command: String,
     ) -> Self {
         Self {
             started,
@@ -420,6 +432,10 @@ impl App {
             ime_area: None,
             composing_in_chat: false,
             updates: updates::Known::new(),
+            picker: None,
+            pickers: 0,
+            picked: None,
+            remote_command,
             result: Ok(()),
         }
     }
@@ -514,6 +530,10 @@ impl App {
     fn chrome(&mut self) -> Option<Chrome> {
         let geometry = self.geometry()?;
         let rounded = self.rounded();
+        let finder = crate::finder::view::Layout::new(&geometry);
+        // The picker of a machine, over the panes or a notice, as the
+        // finder is.
+        let picker = (self.picker.as_mut()).map(|picker| picker.view((finder.rows, finder.cols)));
         let contents = if self.notice.is_some() {
             Contents {
                 workspaces: Vec::new(),
@@ -528,7 +548,7 @@ impl App {
                 menu: None,
                 alert: None,
                 rounded,
-                finder: None,
+                finder: self.composing_in(picker),
             }
         } else {
             let mut status = self.desk.status();
@@ -541,16 +561,10 @@ impl App {
             {
                 text.insert_str(caret, &preedit.text);
             }
-            let finder = crate::finder::view::Layout::new(&geometry);
-            let layout = (finder.rows, finder.cols);
-            let mut finder = self.desk.finder_view(layout, finder.preview_size);
-            // And so in the finder's query.
-            if let Some(view) = &mut finder
-                && let Some(preedit) = self.ime.preedit()
-                && let Some(caret) = view.query.rfind(CARET)
-            {
-                view.query.insert_str(caret, &preedit.text);
-            }
+            let finder = picker.or_else(|| {
+                (self.desk).finder_view((finder.rows, finder.cols), finder.preview_size)
+            });
+            let finder = self.composing_in(finder);
             Contents {
                 workspaces: self.desk.workspace_names(),
                 tabs: self.desk.tab_names(),
@@ -571,11 +585,23 @@ impl App {
         }))
     }
 
+    /// `finder`, with what the input method is composing at its query's
+    /// caret, where it'll go, until it's committed.
+    fn composing_in(&self, mut finder: Option<FinderView>) -> Option<FinderView> {
+        if let Some(view) = &mut finder
+            && let Some(preedit) = self.ime.preedit()
+            && let Some(caret) = view.query.rfind(CARET)
+        {
+            view.query.insert_str(caret, &preedit.text);
+        }
+        finder
+    }
+
     /// What the top bar says while connecting again to a daemon on another
     /// machine: since when, to the second, and why it was lost.
     fn reconnecting(&self) -> Option<String> {
         let reconnecting = self.reconnecting.as_ref()?;
-        let host = self.session.location().host().unwrap_or("the daemon");
+        let host = self.session.host().unwrap_or("the daemon");
         Some(format!(
             "Reconnecting to {host} ({} s): {}",
             reconnecting.since.elapsed().as_secs(),
@@ -632,7 +658,7 @@ impl App {
     /// contact: since when, to the second.
     fn out_of_contact(&self) -> Option<String> {
         let since = self.contact.as_ref()?.silent_since()?;
-        let host = self.session.location().host().unwrap_or("the daemon");
+        let host = self.session.host().unwrap_or("the daemon");
         Some(format!(
             "No contact with {host} for {} s",
             since.elapsed().as_secs()
@@ -785,7 +811,7 @@ impl App {
         let Some(asked) = self.desk.take_update_asked() else {
             return;
         };
-        match (asked, self.session.location().remote()) {
+        match (asked, self.session.remote()) {
             (UpdateAsked::Here, _) => match &self.updates.program {
                 Some(program) => updates::update(program.clone(), self.session.proxy()),
                 None => self
@@ -930,6 +956,11 @@ impl App {
     /// double click opens it.
     fn clicked_in_finder(&mut self, row: Option<usize>, button: MouseButton, double: bool) {
         if let Some(row) = row.filter(|_| button == MouseButton::Left) {
+            if let Some(picker) = &mut self.picker {
+                let outcome = picker.click(row, double);
+                self.picker_did(None, outcome);
+                return;
+            }
             self.desk.finder_click(row, double);
             self.send_outbox();
         }
@@ -961,7 +992,7 @@ impl App {
     fn update_title(&mut self) {
         let Some(frame) = &self.frame else { return };
         let title = self.desk.title().unwrap_or("clackatoo");
-        let title = match self.session.location().host() {
+        let title = match self.session.host() {
             Some(host) => format!("{title} — {host}"),
             None => title.to_owned(),
         };
@@ -1038,6 +1069,10 @@ impl App {
                 return;
             }
         }
+        if self.picker.is_some() {
+            self.picker_key(event_loop, event);
+            return;
+        }
         if self.notice.is_some() {
             self.notice_key(event_loop, event);
             return;
@@ -1067,9 +1102,165 @@ impl App {
         };
         self.open_links();
         self.update();
+        if self.desk.take_connect_asked() {
+            self.open_picker(Purpose::NewWindow, None);
+        }
         self.update_title();
         if redraw {
             self.request_redraw();
+        }
+    }
+
+    /// Opens the picker of a machine to connect to, for `purpose`, saying
+    /// `error`, why connecting failed, if it did. The machines come as
+    /// they're found, from a thread of their own.
+    fn open_picker(&mut self, purpose: Purpose, error: Option<String>) {
+        self.pickers += 1;
+        let case = crate::options::Case::of(self.desk.options());
+        self.picker = Some(HostPicker::new(self.pickers, purpose, case, error));
+        let proxy = self.session.proxy();
+        // The window has closed if this fails.
+        connect::gather(self.pickers, move |found| {
+            drop(proxy.send_event(SessionEvent::Hosts(found)));
+        });
+        if purpose == Purpose::ThisWindow {
+            self.notice = Some(Notice::Picking);
+        }
+        self.request_redraw();
+    }
+
+    /// Opens the window as the picker of a machine to connect to, as
+    /// `--connect-picker` asks, connecting to nothing until one's picked.
+    pub(crate) fn pick_machine(&mut self) {
+        self.open_picker(Purpose::ThisWindow, None);
+    }
+
+    /// Handles a key while the picker of a machine is open.
+    fn picker_key(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
+        let Some(picker) = &mut self.picker else {
+            return;
+        };
+        let outcome = if is_paste(&event.logical_key, self.modifiers) {
+            match paste_text(&mut self.clipboard, Copy::Clipboard) {
+                Ok(text) => picker.paste(&text),
+                Err(err) => {
+                    log::warn!("pasting failed: {err:#}");
+                    connect::Outcome::Nothing
+                }
+            }
+        } else {
+            picker.key(&input::KeyPress {
+                key: &event.logical_key,
+                text: event.text.as_deref(),
+                location: event.location,
+                code: None,
+                modifiers: self.modifiers,
+            })
+        };
+        self.picker_did(Some(event_loop), outcome);
+    }
+
+    /// Carries out what a key or click did to the picker of a machine.
+    /// Closing it closes the window too, if the window was opened as it.
+    fn picker_did(&mut self, event_loop: Option<&ActiveEventLoop>, outcome: connect::Outcome) {
+        let purpose = self.picker.as_ref().map(HostPicker::purpose);
+        match (outcome, purpose) {
+            (connect::Outcome::Nothing, _) | (_, None) => return,
+            (connect::Outcome::Changed, _) => {}
+            (connect::Outcome::Close, Some(purpose)) => {
+                self.picker = None;
+                if purpose == Purpose::ThisWindow
+                    && let Some(event_loop) = event_loop
+                {
+                    event_loop.exit();
+                }
+            }
+            (connect::Outcome::Connect(host), Some(Purpose::ThisWindow)) => {
+                self.picker = None;
+                self.notice = Some(Notice::Connecting);
+                self.picked = Some(host.clone());
+                let remote = clackatoo_daemon::remote::Remote {
+                    host,
+                    command: self.remote_command.clone(),
+                };
+                self.session.connect(Location::Remote(remote));
+            }
+            (connect::Outcome::Connect(host), Some(Purpose::NewWindow)) => {
+                self.picker = None;
+                self.open_window_on(&host);
+            }
+        }
+        self.update_title();
+        self.request_redraw();
+    }
+
+    /// Opens a new window on the daemon on `host`, as `clackatoo --remote
+    /// HOST` does, in a process of its own that outlives this window.
+    fn open_window_on(&mut self, host: &str) {
+        use std::os::unix::process::CommandExt as _;
+        let Some(program) = &self.updates.program else {
+            self.desk
+                .say("this program can't be found, to open a window with".into());
+            return;
+        };
+        let spawned = std::process::Command::new(program)
+            .args(["--remote", host, "--remote-command", &self.remote_command])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            // Not hung up with this window's terminal, if it has one.
+            .process_group(0)
+            .spawn();
+        match spawned {
+            Ok(mut child) => {
+                // Waited for, so it doesn't linger once it's closed.
+                let waited = std::thread::Builder::new()
+                    .name("window".into())
+                    .spawn(move || drop(child.wait()));
+                if let Err(err) = waited {
+                    log::warn!("nothing waits for the window on {host}: {err}");
+                }
+                self.desk.say(format!("opening a window on {host}…"));
+            }
+            Err(err) => {
+                self.desk
+                    .say(format!("couldn't open a window on {host}: {err}"));
+            }
+        }
+    }
+
+    /// Remembers `host` as connected to, newest first, for the picker and
+    /// the launcher, on a thread of its own: and if the launcher's entry
+    /// lists different machines now, asks `program` to rewrite it, if
+    /// clackatoo wrote it.
+    fn remember(&self, host: &str) {
+        let (Some(path), Some(program)) =
+            (crate::hosts::recent_path(), self.updates.program.clone())
+        else {
+            return;
+        };
+        let host = host.to_owned();
+        let spawned = std::thread::Builder::new()
+            .name("remember".into())
+            .spawn(move || {
+                let changed = match crate::hosts::record(&path, &host) {
+                    Ok(changed) => changed,
+                    Err(err) => {
+                        log::warn!("couldn't remember connecting to {host}: {err}");
+                        return;
+                    }
+                };
+                let launched = |hosts: &[String]| {
+                    hosts[..hosts.len().min(crate::hosts::LAUNCHER_HOSTS)].to_vec()
+                };
+                if let Some((before, after)) = changed
+                    && launched(&before) != launched(&after)
+                {
+                    crate::hosts::refresh_launcher(&program);
+                }
+            });
+        if let Err(err) = spawned {
+            log::warn!("no thread to remember connecting to a machine: {err}");
         }
     }
 
@@ -1094,6 +1285,10 @@ impl App {
 
     /// Types `text`, as the input method committed it, as if keyed.
     fn type_text(&mut self, text: &str) {
+        if let Some(picker) = &mut self.picker {
+            picker.paste(text);
+            return;
+        }
         if let Some(notice) = &mut self.notice {
             if let Notice::Ask { input, .. } = notice {
                 input.push(text);
@@ -1122,8 +1317,12 @@ impl App {
     /// to the input method.
     fn sync_ime(&mut self) {
         let Some(frame) = &self.frame else { return };
-        let wanted =
-            self.notice.is_none() && self.desk.options().ime && self.desk.text_goes_to().is_some();
+        // The picker of a machine takes text, over a notice or not.
+        let typing = match &self.picker {
+            Some(_) => true,
+            None => self.notice.is_none() && self.desk.text_goes_to().is_some(),
+        };
+        let wanted = typing && self.desk.options().ime;
         if let Some(allowed) = self.ime.allow(wanted) {
             frame.window.set_ime_allowed(allowed);
             self.ime_area = None;
@@ -1193,6 +1392,17 @@ impl App {
                 self.notice = Some(Notice::Connecting);
                 self.session.reconnect();
             }
+            // Not replacing the daemon on a machine picked for this window:
+            // the picker opens again, to pick another.
+            Notice::OtherDaemon { protocol } if escape && self.picked.is_some() => {
+                let why = format!(
+                    "the daemon on {} is from another build of clackatoo (protocol {protocol}, \
+                     this is {PROTOCOL_VERSION}), and was left as it is",
+                    self.picked.take().unwrap_or_default()
+                );
+                self.session.forget();
+                self.open_picker(Purpose::ThisWindow, Some(why));
+            }
             Notice::OtherDaemon { .. } | Notice::Lost { .. } | Notice::Connecting if escape => {
                 event_loop.exit();
             }
@@ -1202,7 +1412,7 @@ impl App {
     }
 
     fn wheel(&mut self, delta: MouseScrollDelta) {
-        if self.notice.is_some() {
+        if self.notice.is_some() && self.picker.is_none() {
             return;
         }
         let Some(cell_height) = self.frame.as_ref().map(|frame| frame.fonts.cell.height) else {
@@ -1219,10 +1429,23 @@ impl App {
         };
         #[allow(clippy::cast_possible_truncation)]
         let whole = whole as i64;
-        if whole != 0 && matches!(self.hit(point), Hit::Finder(_)) {
+        if whole == 0 {
+            return;
+        }
+        let over_finder = matches!(self.hit(point), Hit::Finder(_));
+        // The picker of a machine has the wheel over it, and nothing under
+        // it does.
+        if let Some(picker) = &mut self.picker {
+            if over_finder {
+                let outcome = picker.scroll(isize::try_from(-whole).unwrap_or_default());
+                self.picker_did(None, outcome);
+            }
+            return;
+        }
+        if over_finder {
             self.desk.finder_wheel(whole);
             self.request_redraw();
-        } else if whole != 0 && self.desk.wheel(point, whole, self.modifiers) {
+        } else if self.desk.wheel(point, whole, self.modifiers) {
             self.request_redraw();
         }
         self.send_outbox();
@@ -1330,7 +1553,7 @@ impl App {
         let Ok(size) = Size::new(tile.cols, tile.rows) else {
             return;
         };
-        let lines = notice.lines(self.session.location().host(), usize::from(tile.cols));
+        let lines = notice.lines(self.session.host(), usize::from(tile.cols));
         let screen = Screen::message(&lines, size);
         let rows: Vec<_> = screen.rows.iter().collect();
         let scenes = [Scene {
@@ -1848,6 +2071,9 @@ enum Notice {
     Lost { reason: String },
     /// Connecting, or trying again.
     Connecting,
+    /// Nothing to connect to yet: the picker of a machine is shown over
+    /// it.
+    Picking,
     /// ssh asks a question, such as for a password, while connecting.
     Ask {
         question: String,
@@ -1902,6 +2128,7 @@ impl Notice {
                 "  Enter  reconnect\n  Esc    quit".into(),
             ],
             Self::Connecting => vec![format!("Connecting to the daemon{on_host}…")],
+            Self::Picking => Vec::new(),
             Self::Ask {
                 question,
                 input,
@@ -2286,11 +2513,15 @@ impl App {
                 });
                 self.connected_at = Some((Instant::now(), tries));
                 self.notice = None;
+                self.picked = None;
+                if let Some(host) = self.session.host() {
+                    self.remember(host);
+                }
                 self.contact = contact;
                 self.sender = Some(sender);
-                let remote = self.session.location().host().is_some();
+                let remote = self.session.host().is_some();
                 self.desk.connected(workspaces, remote);
-                let host = self.session.location().host();
+                let host = self.session.host();
                 let news = self.updates.daemon_is(daemon_version.as_deref(), host);
                 self.tell_updates(news);
                 self.update_title();
@@ -2391,6 +2622,13 @@ impl App {
                     self.request_redraw();
                 }
             }
+            SessionEvent::Hosts(found) => {
+                if let Some(picker) = &mut self.picker
+                    && picker.found(found)
+                {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Lost(reason) => self.lost(reason),
         }
     }
@@ -2401,12 +2639,20 @@ impl App {
         let was_connected = self.sender.take().is_some();
         self.desk.lost();
         self.contact = None;
+        // A machine picked for this window that couldn't be reached: the
+        // picker opens again, saying why, to pick another.
+        if self.picked.take().is_some() {
+            self.session.forget();
+            self.update_title();
+            self.open_picker(Purpose::ThisWindow, Some(why));
+            return;
+        }
         // One on another machine is connected to again and again, keeping
         // the panes, until it answers: a network can be gone a while. A
         // daemon here still listening has just upgraded, or restarted:
         // carry on with it. Only once per connection, so one that keeps
         // hanging up is reported.
-        let remote = self.session.location().host().is_some();
+        let remote = self.session.host().is_some();
         if remote && (was_connected || self.reconnecting.is_some()) {
             self.reconnect_later(why, was_connected);
         } else if was_connected && self.session.daemon_listening() {

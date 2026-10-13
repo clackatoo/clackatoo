@@ -1,0 +1,58 @@
+{
+  "Version": "1.90.0",
+  "BackendState": "Running",
+  "TailscaleIPs": ["100.101.102.1", "fd7a:115c:a1e0::1"],
+  "Self": {
+    "HostName": "this-laptop",
+    "DNSName": "this-laptop.example-tailnet.ts.net.",
+    "OS": "linux",
+    "TailscaleIPs": ["100.101.102.1", "fd7a:115c:a1e0::1"],
+    "Online": true
+  },
+  "MagicDNSSuffix": "example-tailnet.ts.net",
+  "CurrentTailnet": {
+    "Name": "someone@example.org",
+    "MagicDNSSuffix": "example-tailnet.ts.net",
+    "MagicDNSEnabled": true
+  },
+  "Peer": {
+    "nodekey:0001": {
+      "HostName": "Studio Mac",
+      "DNSName": "studio-mac.example-tailnet.ts.net.",
+      "OS": "macOS",
+      "TailscaleIPs": ["100.101.102.3", "fd7a:115c:a1e0::3"],
+      "Online": true,
+      "Active": false
+    },
+    "nodekey:0002": {
+      "HostName": "build-server",
+      "DNSName": "build-server.example-tailnet.ts.net.",
+      "OS": "linux",
+      "TailscaleIPs": ["fd7a:115c:a1e0::2", "100.101.102.2"],
+      "Online": true,
+      "Active": true
+    },
+    "nodekey:0003": {
+      "HostName": "old-laptop",
+      "DNSName": "old-laptop.example-tailnet.ts.net.",
+      "OS": "windows",
+      "TailscaleIPs": ["100.101.102.4"],
+      "Online": false
+    },
+    "nodekey:0004": {
+      "HostName": "Someone's iPhone",
+      "DNSName": "someones-iphone.example-tailnet.ts.net.",
+      "OS": "iOS",
+      "TailscaleIPs": ["100.101.102.5"],
+      "Online": true
+    },
+    "nodekey:0005": {
+      "HostName": "no-addresses",
+      "DNSName": "no-addresses.example-tailnet.ts.net.",
+      "OS": "linux",
+      "TailscaleIPs": [],
+      "Online": true
+    }
+  },
+  "User": {}
+}

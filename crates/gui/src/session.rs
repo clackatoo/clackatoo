@@ -97,6 +97,9 @@ pub(crate) enum SessionEvent {
     /// `clackatoo update`, run by `:update`, has finished, and the bar
     /// should say this.
     Updated(Result<String, String>),
+    /// Machines to connect to, for the picker of one. Sent from a thread
+    /// finding them, not the session's (see [`crate::connect::gather`]).
+    Hosts(crate::connect::Found),
 }
 
 /// What the window tells the session thread.
@@ -109,7 +112,11 @@ enum SessionCommand {
 /// The window's side of the session thread.
 #[derive(Debug)]
 pub(crate) struct Session {
-    location: Location,
+    /// Where the daemon is, once it's known: a window opened as the
+    /// picker of a machine to connect to waits for one to be picked.
+    location: Option<Location>,
+    /// Where the socket ssh asks questions through goes.
+    runtime: RuntimeDir,
     proxy: EventLoopProxy<SessionEvent>,
     /// Answers the thread's questions. Replacing it tells the last thread
     /// to give up.
@@ -127,11 +134,33 @@ impl Session {
         runtime: &RuntimeDir,
         proxy: EventLoopProxy<SessionEvent>,
     ) -> Self {
-        let askpass = match location {
+        let mut session = Self::waiting(runtime, proxy);
+        session.connect(location);
+        session
+    }
+
+    /// A session that connects to nothing until it's told where the
+    /// daemon is, by [`connect`](Self::connect).
+    pub(crate) fn waiting(runtime: &RuntimeDir, proxy: EventLoopProxy<SessionEvent>) -> Self {
+        Self {
+            location: None,
+            runtime: runtime.clone(),
+            proxy,
+            commands: mpsc::channel().0,
+            askpass: None,
+        }
+    }
+
+    /// Starts connecting to the daemon at `location`, in place of any
+    /// before, whose thread has ended.
+    pub(crate) fn connect(&mut self, location: Location) {
+        // The last one's socket goes first: the next is at the same path.
+        self.askpass = None;
+        self.askpass = match location {
             Location::Local(_) => None,
             Location::Remote(_) => {
-                let proxy = proxy.clone();
-                let asked = Askpass::serve(runtime, move |question| {
+                let proxy = self.proxy.clone();
+                let asked = Askpass::serve(&self.runtime, move |question| {
                     let (answer, answered) = mpsc::channel();
                     proxy
                         .send_event(SessionEvent::Ask { question, answer })
@@ -144,31 +173,42 @@ impl Session {
                     .ok()
             }
         };
-        let commands = spawn(
+        self.commands = spawn(
             location.clone(),
-            askpass_path(askpass.as_ref()),
-            proxy.clone(),
+            askpass_path(self.askpass.as_ref()),
+            self.proxy.clone(),
         );
-        Self {
-            location,
-            proxy,
-            commands,
-            askpass,
-        }
+        self.location = Some(location);
     }
 
-    pub(crate) fn location(&self) -> &Location {
-        &self.location
+    /// Forgets where the daemon is, after a try at connecting to it
+    /// failed, until told again by [`connect`](Self::connect). A thread
+    /// waiting to be told whether to replace another daemon gives up,
+    /// saying nothing.
+    pub(crate) fn forget(&mut self) {
+        self.location = None;
+        self.askpass = None;
+        self.commands = mpsc::channel().0;
+    }
+
+    /// The other machine's name, if the daemon is on one.
+    pub(crate) fn host(&self) -> Option<&str> {
+        self.location.as_ref()?.host()
+    }
+
+    /// The other machine, if the daemon is on one.
+    pub(crate) fn remote(&self) -> Option<&Remote> {
+        self.location.as_ref()?.remote()
     }
 
     /// Whether a daemon on this machine is listening, as one is when the
     /// connection was lost because the daemon upgraded. Never starts one.
     pub(crate) fn daemon_listening(&self) -> bool {
         match &self.location {
-            Location::Local(runtime) => {
+            Some(Location::Local(runtime)) => {
                 std::os::unix::net::UnixStream::connect(runtime.socket_path()).is_ok()
             }
-            Location::Remote(_) => false,
+            Some(Location::Remote(_)) | None => false,
         }
     }
 
@@ -179,8 +219,11 @@ impl Session {
 
     /// Connects again after the connection was lost.
     pub(crate) fn reconnect(&mut self) {
+        let Some(location) = self.location.clone() else {
+            return;
+        };
         self.commands = spawn(
-            self.location.clone(),
+            location,
             askpass_path(self.askpass.as_ref()),
             self.proxy.clone(),
         );

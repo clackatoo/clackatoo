@@ -14,6 +14,7 @@
 //! | `o` `i` | Back and forward through the jump list, within the tab (see [`super::jumps`]) |
 //! | `a` | Opens a chat with an agent, to the right |
 //! | `w` | Picks a workspace, or makes one, in the palette |
+//! | `r` | Picks a machine to open a new window on, as `:connect` does |
 //! | Ctrl+B | Sends Ctrl+B to the program |
 //!
 //! Esc, or any other key, cancels. While Ctrl+B waits, the bottom bar says
@@ -90,6 +91,8 @@ pub(crate) enum Action {
     PickWorkspace,
     /// The command line.
     CommandLine,
+    /// The picker of a machine to open a new window on, as `:connect`.
+    Connect,
     /// The finder, for this.
     Find(finder::Kind),
     /// This, to the hunk at the focused editor's cursor.
@@ -199,6 +202,7 @@ fn defaults() -> Keymap<Binding> {
         Some("agent"),
     );
     bind("niv", "<C-b>w", Action::PickWorkspace, Some("workspace"));
+    bind("niv", "<C-b>r", Action::Connect, Some("connect"));
     bind("niv", "<C-b><C-b>", Action::SendCtrlB, None);
 
     bind("nv", ":", Action::CommandLine, None);
@@ -321,6 +325,7 @@ impl Desk {
             Action::Jump { back, within_tab } => self.jump(back, within_tab),
             Action::PickWorkspace => self.open_palette(Purpose::Workspace),
             Action::CommandLine => self.open_palette(Purpose::Command),
+            Action::Connect => self.ask_connect(None),
             Action::Find(kind) => self.open_finder(kind, String::new()),
             Action::Hunk(action) => self.editor_hunk(action),
             Action::Explore => self.toggle_explorer(),

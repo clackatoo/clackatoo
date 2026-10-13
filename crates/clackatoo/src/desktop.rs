@@ -10,14 +10,23 @@
 //! Files clackatoo writes say so: `X-Clackatoo-Managed=true` in the entry,
 //! a comment in the icon. Only those are replaced or removed without
 //! `--force`, so an entry someone wrote by hand stays theirs.
+//!
+//! The entry's actions, which launchers offer on a right click, open a new
+//! window, the picker of a machine to connect to ("Connect to…", running
+//! `--connect-picker`), and a window on each of the last few machines
+//! connected to ("Connect to desktop", running `--remote desktop`). A
+//! window rewrites the entry when the machines connected to recently
+//! change (`desktop refresh-hosts`), if clackatoo wrote it.
 
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::Context as _;
+use clackatoo_gui::hosts::{self, LAUNCHER_HOSTS};
 use clap::Subcommand;
 
 /// The desktop entry, as shipped. Its `Exec` and `TryExec` say plain
@@ -54,6 +63,11 @@ pub(crate) enum DesktopCommand {
     /// them. `clackatoo update` runs this with the build it installed.
     #[command(hide = true)]
     Refresh,
+    /// Rewrite the entry's actions for the machines connected to
+    /// recently, keeping the program it starts, if clackatoo wrote it.
+    /// Windows run this when the machines connected to recently change.
+    #[command(hide = true)]
+    RefreshHosts,
 }
 
 pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
@@ -61,10 +75,11 @@ pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
         "there's nowhere to put the launcher's entry: neither XDG_DATA_HOME nor HOME is set",
     )?;
     let paths = Paths::new(&data);
+    let hosts = hosts::recent();
     match command {
         DesktopCommand::Install { force } => {
             let program = program()?;
-            match install(&paths, &program, force)? {
+            match install(&paths, &program, &hosts, force)? {
                 Outcome::Done(_) => {
                     update_caches(&paths);
                     println!(
@@ -80,7 +95,7 @@ pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
                      replaces {}. The entry would be:\n\n{}",
                     are_not(&theirs),
                     them(&theirs),
-                    entry(&program)?.trim_end()
+                    entry(&program, &hosts)?.trim_end()
                 ),
             }
         }
@@ -109,9 +124,16 @@ pub(crate) fn run(command: DesktopCommand) -> anyhow::Result<()> {
         },
         DesktopCommand::Refresh => {
             let program = program()?;
-            if refresh(&paths, &program)? {
+            if refresh(&paths, &program, &hosts)? {
                 update_caches(&paths);
                 println!("the app launcher's entry now starts {}", program.display());
+            }
+            Ok(())
+        }
+        DesktopCommand::RefreshHosts => {
+            if refresh_hosts(&paths, &hosts)? {
+                update_caches(&paths);
+                println!("the app launcher's entry now offers the machines connected to recently");
             }
             Ok(())
         }
@@ -186,10 +208,15 @@ pub(crate) enum Outcome {
     Refused(Vec<PathBuf>),
 }
 
-/// Writes the entry, starting `program`, and the icon, unless either is
-/// there already and isn't clackatoo's, or `force`.
-fn install(paths: &Paths, program: &Path, force: bool) -> anyhow::Result<Outcome> {
-    let entry = entry(program)?;
+/// Writes the entry, starting `program` and offering `hosts`, and the
+/// icon, unless either is there already and isn't clackatoo's, or `force`.
+fn install(
+    paths: &Paths,
+    program: &Path,
+    hosts: &[String],
+    force: bool,
+) -> anyhow::Result<Outcome> {
+    let entry = entry(program, hosts)?;
     let theirs = theirs(paths)?;
     if !theirs.is_empty() && !force {
         return Ok(Outcome::Refused(theirs));
@@ -199,17 +226,48 @@ fn install(paths: &Paths, program: &Path, force: bool) -> anyhow::Result<Outcome
     Ok(Outcome::Done(vec![paths.entry(), paths.icon()]))
 }
 
-/// Rewrites the entry, starting `program`, and the icon, if clackatoo
-/// wrote the entry; says whether it did. An icon put in place of
-/// clackatoo's since is left alone.
-fn refresh(paths: &Paths, program: &Path) -> anyhow::Result<bool> {
+/// Rewrites the entry, starting `program` and offering `hosts`, and the
+/// icon, if clackatoo wrote the entry; says whether it did. An icon put in
+/// place of clackatoo's since is left alone.
+fn refresh(paths: &Paths, program: &Path, hosts: &[String]) -> anyhow::Result<bool> {
     if !installed(paths) {
         return Ok(false);
     }
-    write(&paths.entry(), &entry(program)?)?;
+    write(&paths.entry(), &entry(program, hosts)?)?;
     if found(&paths.icon(), icon_is_ours)? != Found::Theirs {
         write(&paths.icon(), &icon())?;
     }
+    Ok(true)
+}
+
+/// Rewrites the entry to offer `hosts`, if clackatoo wrote it, still
+/// starting the program it starts now, whichever build asks: a build being
+/// tried out mustn't take the launcher over by connecting to a machine.
+/// Says whether it changed anything; an entry offering them already isn't
+/// written again.
+fn refresh_hosts(paths: &Paths, hosts: &[String]) -> anyhow::Result<bool> {
+    let path = paths.entry();
+    let text = match fs::read_to_string(&path) {
+        Ok(text) if entry_is_ours(&text) => text,
+        Ok(_) => return Ok(false),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(
+                anyhow::Error::new(err).context(format!("couldn't read {}", path.display()))
+            );
+        }
+    };
+    let Some(program) = (text.lines())
+        .find_map(|line| line.strip_prefix("TryExec="))
+        .map(unescape_value)
+    else {
+        return Ok(false);
+    };
+    let rewritten = entry(Path::new(&program), hosts)?;
+    if rewritten == text {
+        return Ok(false);
+    }
+    write(&path, &rewritten)?;
     Ok(true)
 }
 
@@ -288,8 +346,10 @@ fn icon_is_ours(text: &str) -> bool {
 
 /// The desktop entry for the build at `program`: it starts that build, is
 /// hidden if the build is gone (`TryExec`), and is marked as clackatoo's,
-/// at the end of its main group.
-fn entry(program: &Path) -> anyhow::Result<String> {
+/// at the end of its main group. Its actions connect to the first few of
+/// `hosts`, the machines connected to recently, newest first, leaving out
+/// any that doesn't look like a machine.
+fn entry(program: &Path, hosts: &[String]) -> anyhow::Result<String> {
     let path = (program.to_str())
         .filter(|path| !path.contains(char::is_control))
         .with_context(|| {
@@ -300,6 +360,11 @@ fn entry(program: &Path) -> anyhow::Result<String> {
         })?;
     let exec = escape_value(&exec_argument(path));
     let try_exec = escape_value(path);
+    let hosts: Vec<&str> = (hosts.iter())
+        .map(String::as_str)
+        .filter(|host| hosts::is_host(host))
+        .take(LAUNCHER_HOSTS)
+        .collect();
     let mut text = String::with_capacity(ENTRY.len() + 2 * exec.len() + MANAGED.len());
     let mut in_main = false;
     for line in ENTRY.lines() {
@@ -309,9 +374,18 @@ fn entry(program: &Path) -> anyhow::Result<String> {
             }
             in_main = line == "[Desktop Entry]";
         }
-        if line.starts_with("Exec=") {
+        if let Some(command) = line.strip_prefix("Exec=") {
+            // The program, then what the shipped entry gives it.
+            let given = command.find(' ').map_or("", |space| &command[space..]);
             text.push_str("Exec=");
             text.push_str(&exec);
+            text.push_str(given);
+        } else if let Some(actions) = line.strip_prefix("Actions=").filter(|_| in_main) {
+            text.push_str("Actions=");
+            text.push_str(actions);
+            for number in 1..=hosts.len() {
+                let _ = write!(text, "remote-{number};");
+            }
         } else if line.starts_with("TryExec=") {
             text.push_str("TryExec=");
             text.push_str(&try_exec);
@@ -322,6 +396,16 @@ fn entry(program: &Path) -> anyhow::Result<String> {
     }
     if in_main {
         end_main(&mut text);
+    }
+    for (host, number) in hosts.iter().zip(1..) {
+        // Nothing in a machine's name needs escaping (see `is_host`), but
+        // it's escaped as anything else would be.
+        let _ = write!(
+            text,
+            "\n[Desktop Action remote-{number}]\nName=Connect to {}\nExec={exec} --remote {}\n",
+            escape_value(host),
+            escape_value(&exec_argument(host)),
+        );
     }
     Ok(text)
 }
@@ -369,6 +453,29 @@ fn exec_argument(path: &str) -> String {
 /// is written twice.
 fn escape_value(value: &str) -> String {
     value.replace('\\', "\\\\")
+}
+
+/// A desktop entry's string value as it was before it was escaped: `\s`,
+/// `\n`, `\t` and `\r` are a space, a line break, a tab and a carriage
+/// return, and `\\` a backslash.
+fn unescape_value(value: &str) -> String {
+    let mut unescaped = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            unescaped.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('s') => unescaped.push(' '),
+            Some('n') => unescaped.push('\n'),
+            Some('t') => unescaped.push('\t'),
+            Some('r') => unescaped.push('\r'),
+            Some(other) => unescaped.push(other),
+            None => unescaped.push('\\'),
+        }
+    }
+    unescaped
 }
 
 /// The icon, marked as clackatoo's. The mark goes first, or after an XML
@@ -469,7 +576,7 @@ mod tests {
     fn install_writes_an_entry_starting_the_program_and_the_icon() {
         let (data, paths) = setup();
 
-        let outcome = install(&paths, Path::new(PROGRAM), false).unwrap();
+        let outcome = install(&paths, Path::new(PROGRAM), &[], false).unwrap();
 
         let entry_path = data.path().join("applications/clackatoo.desktop");
         let icon_path = data
@@ -480,8 +587,12 @@ mod tests {
             Outcome::Done(vec![entry_path.clone(), icon_path.clone()])
         );
         let entry = read(&entry_path);
-        // The main entry and the New Window action both start it.
-        assert_eq!(values(&entry, "Exec"), [PROGRAM, PROGRAM]);
+        // The main entry and the New Window action both start it, and
+        // Connect to… starts it as the picker of a machine.
+        assert_eq!(
+            values(&entry, "Exec"),
+            [PROGRAM, PROGRAM, &format!("{PROGRAM} --connect-picker")]
+        );
         assert_eq!(values(&entry, "TryExec"), [PROGRAM]);
         assert_eq!(values(&entry, "StartupWMClass"), ["clackatoo"]);
         assert_eq!(values(&entry, "Icon"), ["clackatoo"]);
@@ -507,11 +618,11 @@ mod tests {
     fn install_replaces_what_clackatoo_wrote() {
         let (_data, paths) = setup();
         assert!(matches!(
-            install(&paths, Path::new("/old/clackatoo"), false).unwrap(),
+            install(&paths, Path::new("/old/clackatoo"), &[], false).unwrap(),
             Outcome::Done(_)
         ));
 
-        let outcome = install(&paths, Path::new(PROGRAM), false).unwrap();
+        let outcome = install(&paths, Path::new(PROGRAM), &[], false).unwrap();
 
         assert!(matches!(outcome, Outcome::Done(_)));
         assert_eq!(values(&read(&paths.entry()), "TryExec"), [PROGRAM]);
@@ -522,7 +633,7 @@ mod tests {
         let (_data, paths) = setup();
         write(&paths.entry(), HANDMADE).unwrap();
 
-        let outcome = install(&paths, Path::new(PROGRAM), false).unwrap();
+        let outcome = install(&paths, Path::new(PROGRAM), &[], false).unwrap();
 
         assert_eq!(outcome, Outcome::Refused(vec![paths.entry()]));
         assert_eq!(read(&paths.entry()), HANDMADE);
@@ -530,7 +641,7 @@ mod tests {
         assert!(!paths.icon().exists());
         assert!(!installed(&paths));
 
-        let forced = install(&paths, Path::new(PROGRAM), true).unwrap();
+        let forced = install(&paths, Path::new(PROGRAM), &[], true).unwrap();
 
         assert!(matches!(forced, Outcome::Done(_)));
         assert_eq!(values(&read(&paths.entry()), "TryExec"), [PROGRAM]);
@@ -542,14 +653,14 @@ mod tests {
         let (_data, paths) = setup();
         write(&paths.icon(), "<svg>someone's own</svg>").unwrap();
 
-        let outcome = install(&paths, Path::new(PROGRAM), false).unwrap();
+        let outcome = install(&paths, Path::new(PROGRAM), &[], false).unwrap();
 
         assert_eq!(outcome, Outcome::Refused(vec![paths.icon()]));
         assert!(!paths.entry().exists());
 
         // One copied from the repository by hand is clackatoo's.
         write(&paths.icon(), ICON).unwrap();
-        let outcome = install(&paths, Path::new(PROGRAM), false).unwrap();
+        let outcome = install(&paths, Path::new(PROGRAM), &[], false).unwrap();
         assert!(matches!(outcome, Outcome::Done(_)));
         assert!(read(&paths.icon()).starts_with(ICON_MANAGED));
     }
@@ -559,7 +670,7 @@ mod tests {
         let (_data, paths) = setup();
         assert_eq!(remove(&paths, false).unwrap(), Outcome::Done(vec![]));
         assert!(matches!(
-            install(&paths, Path::new(PROGRAM), false).unwrap(),
+            install(&paths, Path::new(PROGRAM), &[], false).unwrap(),
             Outcome::Done(_)
         ));
 
@@ -585,31 +696,34 @@ mod tests {
     fn refresh_rewrites_only_an_entry_clackatoo_wrote() {
         let (_data, paths) = setup();
         // Nothing there: nothing written.
-        assert!(!refresh(&paths, Path::new(PROGRAM)).unwrap());
+        assert!(!refresh(&paths, Path::new(PROGRAM), &[]).unwrap());
         assert!(!paths.entry().exists());
         assert!(!paths.icon().exists());
 
         // An older build's entry, at another path, with an older icon.
         assert!(matches!(
-            install(&paths, Path::new("/old/clackatoo"), false).unwrap(),
+            install(&paths, Path::new("/old/clackatoo"), &[], false).unwrap(),
             Outcome::Done(_)
         ));
         write(&paths.icon(), &format!("{ICON_MANAGED}\n<svg>old</svg>")).unwrap();
 
-        assert!(refresh(&paths, Path::new(PROGRAM)).unwrap());
+        assert!(refresh(&paths, Path::new(PROGRAM), &[]).unwrap());
 
-        assert_eq!(values(&read(&paths.entry()), "Exec"), [PROGRAM, PROGRAM]);
+        assert_eq!(
+            values(&read(&paths.entry()), "Exec"),
+            [PROGRAM, PROGRAM, &format!("{PROGRAM} --connect-picker")]
+        );
         assert_eq!(read(&paths.icon()), icon());
 
         // An icon put in place of clackatoo's since stays.
         write(&paths.icon(), "<svg>mine</svg>").unwrap();
-        assert!(refresh(&paths, Path::new(PROGRAM)).unwrap());
+        assert!(refresh(&paths, Path::new(PROGRAM), &[]).unwrap());
         assert_eq!(read(&paths.icon()), "<svg>mine</svg>");
 
         // A handmade entry, and its icon, stay as they are.
         write(&paths.entry(), HANDMADE).unwrap();
         write(&paths.icon(), ICON).unwrap();
-        assert!(!refresh(&paths, Path::new(PROGRAM)).unwrap());
+        assert!(!refresh(&paths, Path::new(PROGRAM), &[]).unwrap());
         assert_eq!(read(&paths.entry()), HANDMADE);
         assert_eq!(read(&paths.icon()), ICON);
     }
@@ -628,7 +742,7 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, &staged).unwrap();
 
         assert!(matches!(
-            install(&paths, Path::new(PROGRAM), false).unwrap(),
+            install(&paths, Path::new(PROGRAM), &[], false).unwrap(),
             Outcome::Done(_)
         ));
 
@@ -650,18 +764,157 @@ mod tests {
             r#""/x/\$\"\`\\%%/clackatoo""#
         );
         // Then the key file's own escaping doubles every backslash.
-        let written = entry(Path::new(r"/x/a\b c/clackatoo")).unwrap();
+        let written = entry(Path::new(r"/x/a\b c/clackatoo"), &[]).unwrap();
         assert_eq!(values(&written, "Exec")[0], r#""/x/a\\\\b c/clackatoo""#);
         assert_eq!(values(&written, "TryExec"), [r"/x/a\\b c/clackatoo"]);
-        assert!(entry(Path::new("/x/a\nb/clackatoo")).is_err());
+        assert!(entry(Path::new("/x/a\nb/clackatoo"), &[]).is_err());
     }
 
     #[test]
     fn the_shipped_entry_is_one_install_can_fill_in() {
         // Every line `entry` rewrites is there, once in each group.
-        assert_eq!(values(ENTRY, "Exec"), ["clackatoo", "clackatoo"]);
+        assert_eq!(
+            values(ENTRY, "Exec"),
+            ["clackatoo", "clackatoo", "clackatoo --connect-picker"]
+        );
         assert_eq!(values(ENTRY, "TryExec"), ["clackatoo"]);
         assert!(!entry_is_ours(ENTRY));
         assert!(ENTRY.starts_with("[Desktop Entry]\n"));
+        assert_eq!(values(ENTRY, "Actions"), ["new-window;connect;"]);
+    }
+
+    fn hosts(list: &[&str]) -> Vec<String> {
+        list.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn the_entry_offers_the_last_few_machines_connected_to_as_actions() {
+        let recent = hosts(&[
+            "desktop",
+            "-oProxyCommand=evil",
+            "jack@server:2222",
+            "nas",
+            "old",
+        ]);
+        let entry = entry(Path::new("/opt/my apps/clackatoo"), &recent).unwrap();
+
+        assert_eq!(
+            values(&entry, "Actions"),
+            ["new-window;connect;remote-1;remote-2;remote-3;"]
+        );
+        let quoted = r#""/opt/my apps/clackatoo""#;
+        assert_eq!(
+            values(&entry, "Exec"),
+            [
+                quoted.to_owned(),
+                quoted.to_owned(),
+                format!("{quoted} --connect-picker"),
+                format!("{quoted} --remote desktop"),
+                format!("{quoted} --remote jack@server:2222"),
+                format!("{quoted} --remote nas"),
+            ]
+        );
+        assert_eq!(
+            values(&entry, "Name"),
+            [
+                "clackatoo",
+                "New Window",
+                "Connect to…",
+                "Connect to desktop",
+                "Connect to jack@server:2222",
+                "Connect to nas"
+            ]
+        );
+        // Each in a group of its own, named by its action.
+        assert!(
+            entry.ends_with(&format!(
+                "\n\n[Desktop Action remote-3]\nName=Connect to nas\nExec={quoted} --remote nas\n"
+            )),
+            "{entry}"
+        );
+        // Still marked in the main group, not an action's.
+        let action = entry.find("[Desktop Action").unwrap();
+        assert!(
+            entry[..action].contains(&format!("\n{MANAGED}\n\n")),
+            "{entry}"
+        );
+        // Nothing odd gets in, whatever the file of machines says.
+        assert!(!entry.contains("evil"));
+        assert!(!entry.contains("old"));
+    }
+
+    #[test]
+    fn the_machines_are_rewritten_only_in_an_entry_clackatoo_wrote_keeping_its_program() {
+        let (_data, paths) = setup();
+        // Nothing there: nothing written.
+        assert!(!refresh_hosts(&paths, &hosts(&["desktop"])).unwrap());
+        assert!(!paths.entry().exists());
+
+        let installed_at = r"/opt/a\b c/clackatoo";
+        assert!(matches!(
+            install(&paths, Path::new(installed_at), &[], false).unwrap(),
+            Outcome::Done(_)
+        ));
+        assert!(refresh_hosts(&paths, &hosts(&["desktop", "nas"])).unwrap());
+        let refreshed = read(&paths.entry());
+        assert_eq!(
+            refreshed,
+            entry(Path::new(installed_at), &hosts(&["desktop", "nas"])).unwrap()
+        );
+        // The program it started stays, whichever build asks.
+        assert_eq!(values(&refreshed, "TryExec"), [r"/opt/a\\b c/clackatoo"]);
+        // The same machines again: nothing written.
+        assert!(!refresh_hosts(&paths, &hosts(&["desktop", "nas"])).unwrap());
+        // Fewer: their actions go.
+        assert!(refresh_hosts(&paths, &[]).unwrap());
+        assert_eq!(
+            values(&read(&paths.entry()), "Actions"),
+            ["new-window;connect;"]
+        );
+
+        // A handmade entry stays as it is.
+        write(&paths.entry(), HANDMADE).unwrap();
+        assert!(!refresh_hosts(&paths, &hosts(&["desktop"])).unwrap());
+        assert_eq!(read(&paths.entry()), HANDMADE);
+    }
+
+    #[test]
+    fn values_unescape_as_they_were_escaped() {
+        for value in [r"/plain", r"/a\b", "/a b\tc\nd"] {
+            assert_eq!(unescape_value(&escape_value(value)), value);
+        }
+        assert_eq!(unescape_value(r"/a\sb\\c\"), r"/a b\c\");
+    }
+
+    /// The freedesktop.org validator passes the entry, machines and all,
+    /// if it's installed.
+    #[test]
+    fn the_entry_passes_desktop_file_validate() {
+        let (_data, paths) = setup();
+        let recent = hosts(&["desktop", "jack@server:2222", "[fd7a::1]:22"]);
+        assert!(matches!(
+            install(
+                &paths,
+                Path::new("/opt/my apps/100%/clackatoo"),
+                &recent,
+                false
+            )
+            .unwrap(),
+            Outcome::Done(_)
+        ));
+        let validated = Command::new("desktop-file-validate")
+            .arg(paths.entry())
+            .output();
+        let Ok(validated) = validated else {
+            eprintln!("desktop-file-validate isn't installed: not checked");
+            return;
+        };
+        assert!(
+            validated.status.success() && validated.stdout.is_empty(),
+            "{}{}\n{}",
+            String::from_utf8_lossy(&validated.stdout),
+            String::from_utf8_lossy(&validated.stderr),
+            read(&paths.entry())
+        );
     }
 }

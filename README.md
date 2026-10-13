@@ -51,7 +51,9 @@ program it was run as, to `~/.local/share/applications`, and the icon to
 `~/.local/share/icons/hicolor`, marked as clackatoo's. It never replaces
 a launcher entry you wrote yourself: it says what it would write instead,
 and `--force` replaces it. `clackatoo desktop remove` takes them out
-again.
+again. Right-clicking clackatoo in the launcher offers a new window,
+"Connect to…", which picks a machine to open a window on, and the last
+three machines you connected to.
 
 Run `clackatoo` to open a window. It starts the daemon if it isn't
 running.

@@ -63,6 +63,12 @@ struct WindowArgs {
     /// The graphics API to draw with. Defaults to Vulkan.
     #[arg(long, value_name = "API", env = "CLACKATOO_RENDERER")]
     renderer: Option<RendererArg>,
+    /// Open as a picker of the machine to connect to, as `--remote` does:
+    /// one connected to recently, one from your ssh config, a Tailscale
+    /// peer that's online, or one typed as `user@host:port`. The app
+    /// launcher's "Connect to…" runs this.
+    #[arg(long, conflicts_with = "remote")]
+    connect_picker: bool,
     #[command(flatten)]
     remote: RemoteArgs,
 }
@@ -469,6 +475,8 @@ fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
     clackatoo_gui::run(clackatoo_gui::Options {
         runtime: RuntimeDir::for_current_user(),
         remote: args.remote.remote(),
+        pick_remote: args.connect_picker,
+        remote_command: args.remote.remote_command.clone(),
         font: clackatoo_gui::FontOptions {
             family: args.font.clone().or(config.font),
             size: args.font_size.or(config.font_size).unwrap_or(12.0),
@@ -673,5 +681,12 @@ mod tests {
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn the_connect_picker_is_a_window_option_that_names_no_machine() {
+        let cli = Cli::try_parse_from(["clackatoo", "--connect-picker"]).unwrap();
+        assert!(cli.window.connect_picker && cli.command.is_none());
+        assert!(Cli::try_parse_from(["clackatoo", "--connect-picker", "--remote", "x"]).is_err());
     }
 }
