@@ -5380,10 +5380,11 @@ mod tests {
         escape(&mut desk);
         type_text(&mut desk, "jq");
         assert_eq!(editor_text(&desk), "call(a)\n\n");
-        // Not the key that accepted it, but what it put in.
+        // Not the key that accepted it, but what it put in, with the cursor
+        // where the snippet left it.
         assert_eq!(
             register(&mut desk, 'a').as_deref(),
-            Some("ial<BS><BS>call(a)<Left><Left><Esc>j")
+            Some("ial<BS><BS>call(a)<Left><Esc>j")
         );
         serve_edits(&mut desk, &mut version);
         type_text(&mut desk, "@a");
@@ -5392,6 +5393,100 @@ mod tests {
         let asked = (desk.take_outbox().into_iter())
             .any(|message| matches!(message, ClientMessage::Query { .. }));
         assert!(!asked, "the server isn't asked");
+    }
+
+    #[test]
+    fn a_macro_types_what_a_snippet_left_rather_than_the_keys_filling_it_in() {
+        use clackatoo_protocol::{Answer, BufferUpdate, CompletionItem, ServerFeatures};
+
+        // Filled in on a line indented four...
+        let mut desk = editing("/src/a.rs", "    \n\n");
+        let features = ServerFeatures {
+            completion: Some(vec!['.']),
+            ..ServerFeatures::default()
+        };
+        desk.buffer_changed(BufferId(7), BufferUpdate::Features(features));
+        let mut version = 0;
+        type_text(&mut desk, "qaAif");
+        serve_edits(&mut desk, &mut version);
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        desk.tick_editors(later);
+        let (id, _) = serve_edits(&mut desk, &mut version).expect("a completion asked");
+        // A mirror, lines indented more and less, and a place left with
+        // the cursor in it.
+        let snippet = CompletionItem {
+            label: "if".into(),
+            kind: 15,
+            detail: String::new(),
+            filter: None,
+            sort: None,
+            preselect: false,
+            start: None,
+            text: "if ${1:x} {\n\t${2:y}($1)\n}$0".into(),
+            snippet: true,
+            more: Vec::new(),
+        };
+        let answer = BufferUpdate::Answer {
+            id,
+            version,
+            answer: Answer::Completions {
+                items: vec![snippet],
+                incomplete: false,
+            },
+        };
+        desk.buffer_changed(BufferId(7), answer);
+        ctrl(&mut desk, "y");
+        type_text(&mut desk, "a");
+        let tab = |desk: &mut Desk| {
+            press(desk, Key::Named(NamedKey::Tab), None, Modifiers::default());
+        };
+        tab(&mut desk);
+        type_text(&mut desk, "b");
+        escape(&mut desk);
+        type_text(&mut desk, "jjq");
+        let filled = "    if a {\n        b(a)\n    }\n";
+        assert_eq!(editor_text(&desk), format!("{filled}\n"));
+        assert_eq!(
+            register(&mut desk, 'a').as_deref(),
+            Some(
+                "Aif<BS><BS>if a {<CR>    b(a)<CR><BS><BS><BS><BS>}<Up><End><Left><Left><Left><Esc>jj"
+            )
+        );
+        // ...and typed again on a line indented none, by a file with no
+        // grammar to indent it.
+        serve_edits(&mut desk, &mut version);
+        type_text(&mut desk, "@a");
+        loop {
+            let messages = desk.take_outbox();
+            if messages.is_empty() {
+                break;
+            }
+            for message in messages {
+                match message {
+                    ClientMessage::Edit { seq, .. } => {
+                        version += 1;
+                        desk.buffer_changed(BufferId(7), BufferUpdate::Acked { version, seq });
+                    }
+                    ClientMessage::Query {
+                        id,
+                        query: clackatoo_protocol::Query::Indent { .. },
+                        ..
+                    } => {
+                        let answer = BufferUpdate::Answer {
+                            id,
+                            version,
+                            answer: Answer::Nothing,
+                        };
+                        desk.buffer_changed(BufferId(7), answer);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(
+            editor_text(&desk),
+            format!("{filled}if a {{\n    b(a)\n}}\n")
+        );
     }
 
     #[test]

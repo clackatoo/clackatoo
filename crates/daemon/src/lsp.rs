@@ -192,7 +192,9 @@ impl LanguageServer {
             sync: Sync::Full,
             offers: Offers::default(),
         };
-        // Completions: snippets are taken, made plain text by the window;
+        // Completions: snippets are taken, filled in place by place in the
+        // window; an item's range to insert over is used, not the one to
+        // replace, so what's after the cursor stays;
         // documentation is asked for item by item, as it's shown; the
         // edits an item needs elsewhere, such as an import, come with the
         // list, so accepting one waits for nothing.

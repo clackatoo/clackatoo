@@ -140,6 +140,8 @@ impl Editor {
             return false;
         };
         correction.answer = Some(answer.clone());
+        self.indents_by_grammar = matches!(answer, Answer::Indents(indents)
+            if indents.iter().any(|indent| indent.width.is_some()));
         true
     }
 
@@ -215,7 +217,13 @@ impl Editor {
         let cursor = edit.map(text.byte_at(self.cursor.at), Bias::After);
         let anchor = (self.anchor).map(|anchor| edit.map(text.byte_at(anchor), Bias::After));
         drop(text);
-        self.edited(&edit);
+        // In insert mode, a snippet's place the cursor's in keeps it.
+        let grows = if self.mode == Mode::Insert {
+            self.grows(copy)
+        } else {
+            super::snippet::Grows::Nothing
+        };
+        self.edited(&edit, grows);
         // A command waiting asked about the cursor, which moves so.
         self.awaiting_follows_by(&edit, Bias::After);
         // Part of the change that made the line, even after Esc: it's the

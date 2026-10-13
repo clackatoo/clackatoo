@@ -1945,7 +1945,8 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
     let text = "pub fn f() -> u32 {\n    \"not a number\"\n}\npub fn g() -> u32 {\n    f()\n}\n\
                 pub fn h(a: u32, b: u32) -> u32 {\n    a + b\n}\n\
                 pub fn k(value: u32) -> u32 {\n    h(1, val)\n}\n\
-                pub fn m() -> u32 {\n    let two = 2;\n    two\n}\n";
+                pub fn m() -> u32 {\n    let two = 2;\n    two\n}\n\
+                pub fn n() -> u32 {\n    h\n}\n";
     std::fs::write(dir.join("krate/src/lib.rs"), text).unwrap();
     let mut client = daemon.client();
     client.watch_workspaces().unwrap();
@@ -2128,6 +2129,17 @@ fn rust_analyzer_completes_and_helps(client: &mut Client, buffer: BufferId, text
     };
     assert!(label.contains("fn h(a: u32, b: u32) -> u32"), "{label}");
     assert_eq!(&label[start..end], "b: u32");
+
+    // And for `h` alone, in n, a snippet with a place for each argument.
+    let typed = text.rfind("    h\n").unwrap() + "    ".len();
+    let query = Query::Completion(Trigger::Invoked);
+    client.query(buffer, 9, (0, typed + 1), query).unwrap();
+    let (_, answer) = next_answer(client);
+    let (items, _) = completions(answer);
+    let call = items.iter().find(|item| item.label.starts_with("h("));
+    let call = call.unwrap_or_else(|| panic!("{items:?}"));
+    assert!(call.snippet, "{call:?}");
+    assert_eq!(call.text, "h(${1:a}, ${2:b})$0");
 }
 
 /// A project for the fake language server: `app/`, marked as one, with

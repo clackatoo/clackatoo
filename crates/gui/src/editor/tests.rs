@@ -17,6 +17,7 @@ use crate::pane::Selection;
 use crate::render::{HighlightKind, Ink};
 
 mod indent;
+mod snippets;
 mod substitute;
 mod wrapped;
 
@@ -1708,7 +1709,7 @@ fn accepting_makes_an_import_with_it_in_one_undo_step_and_dot_types_it_again() {
     setup.answer(setup.last_query().0, completions(vec![call], false));
     setup.keys("<C-y>");
     assert_eq!(setup.text(), "call(a)\n\n");
-    assert_eq!(setup.cursor(), (0, 5), "at the first place to type");
+    assert_eq!(setup.cursor(), (0, 6), "past the first place to type");
     setup.keys("<Esc>j.");
     assert_eq!(setup.text(), "call(a)\ncall(a)\n");
 }
@@ -1905,12 +1906,13 @@ fn dot_types_a_snippet_again_in_one_undo_step() {
     block.snippet = true;
     setup.answer(setup.last_completion().0, completions(vec![block], false));
     setup.keys("<C-y>");
-    assert_eq!(setup.text(), "x\nif {\n\t\n}\ny\n");
+    // Its tab as Tab would put it in, with `expandtab`.
+    assert_eq!(setup.text(), "x\nif {\n    \n}\ny\n");
     assert_eq!(setup.cursor(), (2, 4), "inside, past the tab");
     setup.keys("<Esc>jj0.");
-    assert_eq!(setup.text(), "x\nif {\n\t\n}\nif {\n\t\n}y\n");
+    assert_eq!(setup.text(), "x\nif {\n    \n}\nif {\n    \n}y\n");
     setup.keys("u");
-    assert_eq!(setup.text(), "x\nif {\n\t\n}\ny\n", "one step");
+    assert_eq!(setup.text(), "x\nif {\n    \n}\ny\n", "one step");
 }
 
 #[test]

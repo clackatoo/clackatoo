@@ -21,6 +21,9 @@
 //! finds in it, for text objects and motions, and [`LineIndent`]s how it
 //! says lines should be indented.
 //!
+//! A [`Snippet`] is text with places to type in it, as language servers
+//! write completions, read and written out with where those places end up.
+//!
 //! Places in a text are byte offsets into its UTF-8, as tree-sitter's are.
 //!
 //! The crate does no I/O, so a browser client compiled to WebAssembly can
@@ -36,6 +39,7 @@ mod history;
 mod hunks;
 mod indents;
 mod pieces;
+mod snippet;
 
 pub use diagnostics::{Diagnostic, Diagnostics, Severity};
 pub use edit::{Bias, Edit, EditError, Op, compose, transform};
@@ -45,3 +49,4 @@ pub use hunks::{Difference, Hunk, HunkKind, Hunks, Sign, diff, line_starts};
 pub use indents::{LineIndent, line_start_through};
 pub use pieces::{Construct, Piece};
 pub use ropey::Rope;
+pub use snippet::{Expanded, Part, Snippet, Stop};

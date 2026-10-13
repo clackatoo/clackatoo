@@ -25,7 +25,8 @@
 //! and about the call whose arguments are being typed, whose signature
 //! shows over it. Typing never waits for either: they're asked when typing
 //! pauses, and their answers are shown when they come, if they're still
-//! about where the cursor is.
+//! about where the cursor is. A completion that's a snippet is filled in
+//! place by place, with Tab going from one to the next (see [`snippet`]).
 //!
 //! `gra` asks the language server what it could do to the text at the
 //! cursor, or selected, and shows it in a menu by the cursor to pick from
@@ -51,6 +52,7 @@ mod pattern;
 mod pieces;
 mod preview;
 mod registers;
+mod snippet;
 mod substitute;
 mod text;
 mod wrap;
@@ -177,11 +179,14 @@ enum Typed {
     /// A key.
     Key(Stroke),
     /// A completion accepted: `replaced` characters before the cursor
-    /// replaced with `text`, and the cursor `offset` bytes into it.
+    /// replaced with `text`, and the cursor `offset` bytes into it. If
+    /// `indented`, it's a snippet's, whose lines after the first take the
+    /// indent of the line it's typed on.
     Accepted {
         text: String,
         offset: usize,
         replaced: usize,
+        indented: bool,
     },
 }
 
@@ -531,6 +536,25 @@ pub(crate) struct Editor {
     /// Whether a key failed since the desk last asked, as a motion that
     /// can't move does, which stops the macros being typed.
     failed: bool,
+    /// The snippet being filled in, which a completion put in.
+    snippet: Option<snippet::Session>,
+    /// Whether the snippet was put in by the key being handled, whose
+    /// edit isn't typing in it.
+    snippet_started: bool,
+    /// Whether the edit being made copies what's typed in the snippet to
+    /// its mirrors.
+    mirroring: bool,
+    /// What the snippet had left before the key being handled.
+    snippet_before: Option<snippet::Left>,
+    /// The keys that type what a snippet left, for a macro being recorded
+    /// to note before the next key.
+    snippet_keys: Option<Vec<Stroke>>,
+    /// The text of the snippet's place that's selected, lit, as last
+    /// settled.
+    snippet_lit: Option<(Point, Point)>,
+    /// Whether the grammar put the last new line's indent right, so a
+    /// snippet's keys in a macro leave indents to it.
+    indents_by_grammar: bool,
 }
 
 impl Editor {
@@ -605,6 +629,13 @@ impl Editor {
             whole: std::cell::RefCell::new(None),
             macro_asked: None,
             failed: false,
+            snippet: None,
+            snippet_started: false,
+            mirroring: false,
+            snippet_before: None,
+            snippet_keys: None,
+            snippet_lit: None,
+            indents_by_grammar: false,
         }
     }
 
@@ -777,7 +808,9 @@ impl Editor {
         self.menu_keys = None;
         self.failed = false;
         self.replaying = replaying;
+        self.snippet_before_key(copy);
         let done = self.stroke(stroke, copy, shared);
+        self.snippet_record(stroke);
         self.replaying = false;
         // Its command waits for the grammar: it's done as the macro's,
         // in its undo step, when the answer comes, and the desk types the
@@ -850,6 +883,16 @@ impl Editor {
         self.panel = None;
         self.actions = None;
         self.close_completion();
+        let edits = copy.edits_made();
+        // In place of a snippet's place's text, if it's selected.
+        let selected = self.snippet.as_mut().and_then(|session| {
+            let selected = session.selected();
+            session.selected = false;
+            selected
+        });
+        if let Some((start, end)) = selected {
+            self.delete_text(start, end, copy);
+        }
         let at = self.insert_byte(copy);
         self.new_step |= self.mode != Mode::Insert;
         self.insert_text(at, text, copy);
@@ -857,9 +900,23 @@ impl Editor {
             self.new_step = true;
             self.normal_cursor(copy);
         }
+        self.snippet_after(edits, copy);
     }
 
     fn stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
+        // Shift+Tab is Tab but in a snippet being filled in.
+        let stroke = match stroke {
+            Stroke::BackTab if self.snippet.is_none() || self.mode != Mode::Insert => Stroke::Tab,
+            stroke => stroke,
+        };
+        let edits = copy.edits_made();
+        let done = self.read_key(stroke, copy, shared);
+        self.snippet_after(edits, copy);
+        done
+    }
+
+    /// Does what `stroke` does, but for the snippet being filled in.
+    fn read_key(&mut self, stroke: Stroke, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
         if self.hold_stroke(stroke) {
             return Done::default();
         }
@@ -897,6 +954,20 @@ impl Editor {
             self.menu_keys.get_or_insert_with(Vec::new);
             self.follow(copy);
             return done;
+        }
+        if self.mode == Mode::Insert && self.prompt.is_none() {
+            // A snippet's choices go with any key their menu doesn't take.
+            if self
+                .completion
+                .as_ref()
+                .is_some_and(|completion| completion.choices)
+            {
+                self.close_completion();
+            }
+            if let Some(done) = self.snippet_stroke(stroke, copy) {
+                self.follow(copy);
+                return done;
+            }
         }
         let (mode, edits) = (self.mode, copy.edits_made());
         // A macro types on without asking the language server.
@@ -2097,6 +2168,7 @@ impl Editor {
     /// Leaves insert mode, typing what was typed again if a count asked
     /// for it more than once, as `3ix` types `xxx`.
     fn leave_insert(&mut self, copy: &mut BufferCopy) {
+        self.end_snippet(copy, false);
         self.close_completion();
         self.close_signature();
         if self.insert_times > 1
@@ -2139,7 +2211,7 @@ impl Editor {
                 self.insert_text(at, &format!("\n{indent}"), copy);
                 self.ask_indent(line + 1, copy);
             }
-            Stroke::Tab => {
+            Stroke::Tab | Stroke::BackTab => {
                 let text = self.text(copy);
                 let point = text.point_of(at);
                 let tabs = self.indent.tabs_near(&text, point.line, point.line);
@@ -2191,7 +2263,7 @@ impl Editor {
             | Stroke::End
             | Stroke::PageUp
             | Stroke::PageDown => {
-                self.moved_while_inserting();
+                self.moved_while_inserting(copy);
                 let text = self.text(copy);
                 let line = self.cursor.at.line;
                 let cells = text.laid(line).map_or(0, |laid| laid.cells());
@@ -2218,6 +2290,7 @@ impl Editor {
                 text,
                 offset,
                 replaced,
+                indented,
             } => {
                 let at = self.insert_byte(copy);
                 let start = {
@@ -2225,8 +2298,15 @@ impl Editor {
                     let char_at = rope.byte_to_char(at);
                     rope.char_to_byte(char_at.saturating_sub(*replaced))
                 };
+                // A snippet's lines after the first, indented as this one.
+                let (text, offset) = if *indented {
+                    let line = self.text(copy).line_text(self.cursor.at.line);
+                    snippet::indented(text, indent_of(&line), *offset)
+                } else {
+                    (text.clone(), *offset)
+                };
                 let removed = copy.text().byte_slice(start..at).to_string();
-                let edit = Edit::replace(copy.text().len_bytes(), start, &removed, text);
+                let edit = Edit::replace(copy.text().len_bytes(), start, &removed, &text);
                 self.make(edit, copy);
                 self.cursor = Cursor::new(self.text(copy).point_of(start + offset));
             }
@@ -2236,7 +2316,8 @@ impl Editor {
     /// The cursor moved in insert mode other than by typing: what's typed
     /// next starts a new undo step, and isn't part of what `.` makes
     /// again, as in Vim.
-    fn moved_while_inserting(&mut self) {
+    fn moved_while_inserting(&mut self, copy: &BufferCopy) {
+        self.snippet_moved(copy);
         self.new_step = true;
         if let Some(change) = self.changing.take() {
             self.last_change = Some(change);
@@ -2268,7 +2349,8 @@ impl Editor {
 
     /// Makes `edit` to the buffer, as part of the change being made.
     fn make(&mut self, edit: Edit, copy: &mut BufferCopy) {
-        self.edited(&edit);
+        let grows = self.grows(copy);
+        self.edited(&edit, grows);
         // A macro's edits to a file, however many, are one undo step, as
         // in Vim, which its first starts.
         let step = if self.replaying {
@@ -2280,10 +2362,14 @@ impl Editor {
         self.new_step = false;
     }
 
-    /// Moves the word being completed, and the places its items are at,
-    /// through `edit`, made to the text.
-    fn edited(&mut self, edit: &Edit) {
+    /// Moves the word being completed, the places its items are at, and
+    /// the snippet's places, through `edit`, made to the text, which
+    /// `grows` them as it says.
+    fn edited(&mut self, edit: &Edit, grows: snippet::Grows) {
         self.corrections_follow(edit);
+        if let Some(session) = &mut self.snippet {
+            session.edited(edit, grows);
+        }
         if let Some(completing) = &mut self.completing {
             completing.start = edit.map(completing.start, Bias::Before);
         }
@@ -2315,7 +2401,12 @@ impl Editor {
                 CompleteAccept::Picked => moved,
                 CompleteAccept::CtrlY => false,
             },
-            Stroke::Tab => self.as_you_type.tab,
+            // A snippet's choices are picked with Ctrl+Y or Enter, as Tab
+            // goes to its next place.
+            Stroke::Tab => {
+                self.as_you_type.tab
+                    && !(self.completion.as_ref()).is_some_and(|completion| completion.choices)
+            }
             _ => false,
         };
         match stroke {
@@ -2492,6 +2583,11 @@ impl Editor {
         let Some(completion) = &self.completion else {
             return;
         };
+        if completion.choices {
+            // Typing doesn't narrow a snippet's choices down: any key
+            // their menu doesn't take closes it.
+            return;
+        }
         match self.in_word(completion.start, copy) {
             // Shorter than when it was asked: the server may have left out
             // what didn't start with it, so it's asked again.
@@ -2558,7 +2654,11 @@ impl Editor {
     /// been asked, or is being.
     fn resolve_picked(&mut self, copy: &mut BufferCopy) {
         self.resolve_due = None;
-        let Some(completion) = &mut self.completion else {
+        let Some(completion) = self
+            .completion
+            .as_mut()
+            .filter(|completion| !completion.choices)
+        else {
             return;
         };
         let Some(index) = completion.picked() else {
@@ -2576,14 +2676,15 @@ impl Editor {
 
     /// Accepts the item picked: puts its text in place of the word typed,
     /// as part of the same undo step, with the edits it needs elsewhere,
-    /// and puts the cursor where its snippet says. `.` types the same text
-    /// again.
+    /// and puts the cursor where its snippet says, to fill it in from
+    /// there. `.` types the same text again.
     fn accept(&mut self, copy: &mut BufferCopy) {
         let Some(completion) = self.completion.take() else {
             return;
         };
         let at = self.insert_byte(copy);
-        let accepted = match completion.accept(copy.text(), at) {
+        let expand = |snippet: &clackatoo_text::Snippet| self.expand_snippet(snippet, at, copy);
+        let accepted = match completion.accept(copy.text(), at, expand) {
             Some(Ok(accepted)) => accepted,
             Some(Err(why)) => {
                 // The menu stays, to pick another.
@@ -2596,23 +2697,51 @@ impl Editor {
         self.completing = None;
         self.completion_due = None;
         self.resolve_due = None;
+        // A snippet with places to type finishes the one being filled in;
+        // a choice for one of its places is typing in it.
+        let starts = (accepted.stops.iter()).any(|stop| stop.number > 0);
+        if starts {
+            self.end_snippet(copy, false);
+        } else if let Some(session) = &mut self.snippet {
+            session.selected = false;
+        }
+        let typed_from = self.changing.as_ref().map(|change| change.typed.len());
+        // A snippet's lines after the first have the line's indent, which
+        // `.` gives them afresh.
+        let indented = !accepted.stops.is_empty();
+        let (text, offset) = if indented {
+            let line = self.text(copy).line_text(self.cursor.at.line);
+            snippet::unindented(&accepted.text, indent_of(&line), accepted.offset)
+        } else {
+            (accepted.text.clone(), accepted.offset)
+        };
         if let Some(change) = &mut self.changing {
             change.typed.push(Typed::Accepted {
-                text: accepted.text.clone(),
-                offset: accepted.offset,
+                text,
+                offset,
                 replaced: accepted.replaced,
+                indented,
             });
         }
-        // For a macro being recorded, the keys that type the same.
-        let mut keys = vec![Stroke::Backspace; accepted.replaced];
-        keys.extend(accepted.text.chars().map(Stroke::char));
-        let after = accepted.text[accepted.offset..].chars().count();
-        keys.extend(std::iter::repeat_n(Stroke::Left, after));
-        self.menu_keys = Some(keys);
         self.make(accepted.edit, copy);
         self.cursor = Cursor::new(self.text(copy).point_of(accepted.cursor));
+        // For a macro being recorded, the keys that type the same.
+        let mut keys = vec![Stroke::Backspace; accepted.replaced];
+        keys.extend(snippet::typing_keys(&accepted.text));
+        let end = accepted.at + accepted.text.len();
+        keys.extend(snippet::keys_back(&self.text(copy), end, accepted.cursor));
+        self.menu_keys = Some(keys);
+        // Where the first place to type starts, or else the cursor.
+        let first = (accepted.stops.iter())
+            .filter(|stop| stop.number > 0 && !stop.mirror)
+            .min_by_key(|stop| stop.number)
+            .map_or(accepted.offset, |stop| stop.start);
+        if starts {
+            let put = (accepted.at, accepted.text.len());
+            self.start_snippet(&accepted.stops, put, accepted.replaced, typed_from, copy);
+        }
         // A call it put in, such as `f(`, is asked about.
-        let before = accepted.text[..accepted.offset].chars().next_back();
+        let before = accepted.text[..first].chars().next_back();
         if let Some(ch) = before
             && self.as_you_type.signature
             && (copy.features().signature.as_ref()).is_some_and(|list| list.contains(&ch))
@@ -3203,7 +3332,7 @@ impl Editor {
     /// Moves the cursor with the text around it, through `edit`, made
     /// since [`hold`](Self::hold).
     pub(crate) fn follow_edit(&mut self, edit: &Edit, copy: &BufferCopy) {
-        self.edited(edit);
+        self.edited(edit, snippet::Grows::Nothing);
         self.awaiting_follows(edit);
         if let Some(Prompt::Confirm(confirming)) = &mut self.prompt {
             confirming.edited(edit);
@@ -3242,6 +3371,9 @@ impl Editor {
                         *cursor = at;
                     }
                     self.corrections_follow(edit);
+                    if let Some(session) = &mut self.snippet {
+                        session.edited(edit, snippet::Grows::Nothing);
+                    }
                     self.place_held(copy);
                 } else {
                     self.follow_edit(edit, copy);
@@ -3303,6 +3435,8 @@ impl Editor {
             // Others' edits may have taken the word away.
             self.check_completion(copy);
         }
+        // Or the cursor out of the snippet.
+        self.snippet_heard(matches!(heard, Heard::Replaced), copy);
         if self.mode != Mode::Insert {
             self.normal_cursor(copy);
         }
@@ -3484,8 +3618,9 @@ impl Editor {
         self.cursor = Cursor::new(self.point_at(line, col, copy));
         if self.mode == Mode::Insert {
             // It may stay past the line's end, where typing goes, and it
-            // moved, as the arrow keys move it.
-            self.moved_while_inserting();
+            // moved, as the arrow keys move it, perhaps out of a snippet.
+            self.moved_while_inserting(copy);
+            self.snippet_heard(false, copy);
         } else {
             self.normal_cursor(copy);
         }
@@ -3912,6 +4047,7 @@ impl Editor {
             None => self.text(copy),
         };
         self.clamp_top(&text);
+        self.snippet_lit = self.snippet_lit(&text);
         let width = self.text_width();
         self.shown = wrap::view(
             &text,
@@ -4191,6 +4327,11 @@ impl Editor {
             };
             self.highlight(start, last, kind, HighlightKind::Selection, &mut highlights);
         }
+        // A snippet's place gone to, whose text typing replaces.
+        if let Some((start, last)) = self.snippet_lit.filter(|_| self.mode == Mode::Insert) {
+            let kind = Selection::Characters;
+            self.highlight(start, last, kind, HighlightKind::Selection, &mut highlights);
+        }
         if let Some((start, last)) = self.found {
             self.highlight(
                 start,
@@ -4278,6 +4419,7 @@ fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
     let named = match press.key {
         Key::Named(NamedKey::Escape) => Some(Stroke::Escape),
         Key::Named(NamedKey::Enter) => Some(Stroke::Enter),
+        Key::Named(NamedKey::Tab) if modifiers.shift => Some(Stroke::BackTab),
         Key::Named(NamedKey::Tab) => Some(Stroke::Tab),
         Key::Named(NamedKey::Backspace) => Some(Stroke::Backspace),
         Key::Named(NamedKey::Delete) => Some(Stroke::Delete),

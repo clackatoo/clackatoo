@@ -9,14 +9,15 @@
 //! are kept as they came, and moved through the edits made since only for
 //! the item accepted, so typing never costs a pass over thousands of them.
 //!
-//! Snippets are made plain text: each place to type becomes the text it
-//! starts with, and the cursor goes to the first. There's no jumping from
-//! place to place.
+//! A snippet is written out as it's put in (see [`clackatoo_text::Snippet`])
+//! and the places to type in it are handed on, for the editor to go from
+//! one to the next (see [`super::snippet`]). The same menu shows a
+//! place's choices, when it has them.
 
 use std::collections::HashMap;
 
 use clackatoo_protocol::{CompletionItem, Edit};
-use clackatoo_text::{Bias, Rope};
+use clackatoo_text::{Bias, Expanded, Rope, Snippet, Stop};
 use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
 use nucleo_matcher::{Config, Matcher, Utf32String};
 
@@ -210,6 +211,9 @@ pub(crate) struct Completion {
     /// The menu's lines in view, and where it goes, as last settled.
     lines: Vec<Line>,
     placed: Option<Placed>,
+    /// Whether the items are a snippet's choices for a place, which no
+    /// server is asked about, and typing doesn't narrow down.
+    pub(crate) choices: bool,
 }
 
 /// What accepting an item does: the edit, and where the cursor goes.
@@ -224,6 +228,10 @@ pub(crate) struct Accepted {
     /// How many characters of the word typed it replaces, before the
     /// cursor.
     pub(crate) replaced: usize,
+    /// Where what's put in starts, in the text after the edit.
+    pub(crate) at: usize,
+    /// The places to type in it, if it's a snippet, from where it starts.
+    pub(crate) stops: Vec<Stop>,
 }
 
 impl Completion {
@@ -258,7 +266,31 @@ impl Completion {
             docs: None,
             lines: Vec::new(),
             placed: None,
+            choices: false,
         }
+    }
+
+    /// A snippet's `choices` for the place starting at `start`, to pick
+    /// from in its place, in the order they're written.
+    pub(crate) fn choices(start: usize, choices: &[String]) -> Self {
+        let items = (choices.iter())
+            .map(|choice| CompletionItem {
+                label: choice.clone(),
+                kind: 12,
+                detail: String::new(),
+                filter: None,
+                sort: None,
+                preselect: false,
+                start: Some(start),
+                text: choice.clone(),
+                snippet: false,
+                more: Vec::new(),
+            })
+            .collect();
+        let mut completion = Self::new(0, start, items, false);
+        completion.ranking.shown.sort_unstable();
+        completion.choices = true;
+        completion
     }
 
     /// Narrows the items down to those matching `query`, the word typed so
@@ -377,10 +409,16 @@ impl Completion {
 
     /// What accepting the item picked does, the cursor being at byte
     /// `cursor` of `text`: what's from where it starts to the cursor is
-    /// replaced with its text, as a snippet's made plain, and its edits
-    /// elsewhere are made with it, but any that would overlap that. `None`
-    /// if none is picked; an error, saying why, if its edits make no sense.
-    pub(crate) fn accept(&self, text: &Rope, cursor: usize) -> Option<Result<Accepted, String>> {
+    /// replaced with its text, a snippet's as `expand` writes it out, and
+    /// its edits elsewhere are made with it, but any that would overlap
+    /// that. `None` if none is picked; an error, saying why, if its edits
+    /// make no sense.
+    pub(crate) fn accept(
+        &self,
+        text: &Rope,
+        cursor: usize,
+        expand: impl FnOnce(&Snippet) -> Expanded,
+    ) -> Option<Result<Accepted, String>> {
         let item = self.item(self.picked()?)?;
         // Where the server said, if it's not past the cursor or on a line
         // before, or else where the word starts.
@@ -388,10 +426,19 @@ impl Completion {
         let start = (item.start.map(|start| self.now(start)))
             .filter(|&start| start <= cursor && start >= line_start)
             .unwrap_or(self.start.min(cursor));
-        let (put, offset) = if item.snippet {
-            expand(&item.text)
+        let (put, offset, stops) = if item.snippet {
+            let Expanded { text, stops } = expand(&Snippet::parse(&item.text));
+            // The cursor goes to the end of the first place to type, or
+            // else to the last, `$0`.
+            let first = (stops.iter())
+                .filter(|stop| stop.number > 0 && !stop.mirror)
+                .min_by_key(|stop| stop.number)
+                .map(|stop| stop.end);
+            let last = (stops.iter()).find(|stop| stop.number == 0 && !stop.mirror);
+            let offset = first.or(last.map(|stop| stop.start)).unwrap_or(text.len());
+            (text, offset, stops)
         } else {
-            (item.text.clone(), item.text.len())
+            (item.text.clone(), item.text.len(), Vec::new())
         };
         let mut changes = vec![Splice {
             start,
@@ -421,12 +468,15 @@ impl Completion {
             return Some(Err("the language server's edits for it don't fit".into()));
         };
         let replaced = text.byte_slice(start..cursor).chars().count();
+        let at = start.saturating_add_signed(moved);
         Some(Ok(Accepted {
-            cursor: start.saturating_add_signed(moved) + offset,
+            cursor: at + offset,
             edit,
             text: put,
             offset,
             replaced,
+            at,
+            stops,
         }))
     }
 
@@ -656,150 +706,6 @@ pub(crate) fn splice(text: &Rope, mut changes: Vec<Splice>) -> Option<Edit> {
     Some(edit)
 }
 
-/// `snippet`, as LSP writes them, made plain text: each place to type, as
-/// `$1`, `${2:name}` or `${3|a,b|}`, becomes the text it starts with, and
-/// variables the text they default to. Returns it, and the byte the cursor
-/// goes to: the first place to type, or else the last, `$0`, or else the
-/// end.
-pub(crate) fn expand(snippet: &str) -> (String, usize) {
-    let chars: Vec<char> = snippet.chars().collect();
-    let mut reading = Snippet {
-        chars: &chars,
-        at: 0,
-        text: String::new(),
-        stops: Vec::new(),
-    };
-    reading.read(false);
-    let first = (reading.stops.iter())
-        .filter(|(number, _)| *number > 0)
-        .min_by_key(|(number, _)| *number)
-        .or_else(|| reading.stops.iter().find(|(number, _)| *number == 0));
-    let cursor = first.map_or(reading.text.len(), |&(_, at)| at);
-    (reading.text, cursor)
-}
-
-/// A snippet being read.
-struct Snippet<'a> {
-    chars: &'a [char],
-    at: usize,
-    /// What it makes, so far.
-    text: String,
-    /// Each place to type, by its number, and where it starts in `text`.
-    stops: Vec<(u32, usize)>,
-}
-
-impl Snippet<'_> {
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.at).copied()
-    }
-
-    /// Reads to the end, or if `nested`, to the `}` ending what it's in.
-    fn read(&mut self, nested: bool) {
-        while let Some(ch) = self.peek() {
-            self.at += 1;
-            match ch {
-                '\\' => match self.peek() {
-                    Some(next @ ('$' | '}' | '\\' | ',' | '|')) => {
-                        self.at += 1;
-                        self.text.push(next);
-                    }
-                    _ => self.text.push('\\'),
-                },
-                '}' if nested => return,
-                '$' => self.dollar(),
-                _ => self.text.push(ch),
-            }
-        }
-    }
-
-    /// Reads what follows a `$`.
-    fn dollar(&mut self) {
-        match self.peek() {
-            Some(ch) if ch.is_ascii_digit() => {
-                let number = self.number();
-                self.stops.push((number, self.text.len()));
-            }
-            Some(ch) if ch == '_' || ch.is_ascii_alphabetic() => {
-                // A variable, which nothing here knows: nothing.
-                while self
-                    .peek()
-                    .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-                {
-                    self.at += 1;
-                }
-            }
-            Some('{') => {
-                self.at += 1;
-                if self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-                    let number = self.number();
-                    self.stops.push((number, self.text.len()));
-                } else {
-                    while self
-                        .peek()
-                        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-                    {
-                        self.at += 1;
-                    }
-                }
-                match self.peek() {
-                    // Its text, which may hold more.
-                    Some(':') => {
-                        self.at += 1;
-                        self.read(true);
-                    }
-                    Some('|') => {
-                        self.at += 1;
-                        self.choices();
-                    }
-                    Some('}') => self.at += 1,
-                    // Not a snippet's: skipped to its end.
-                    _ => {
-                        let mut text = std::mem::take(&mut self.text);
-                        self.read(true);
-                        std::mem::swap(&mut text, &mut self.text);
-                    }
-                }
-            }
-            _ => self.text.push('$'),
-        }
-    }
-
-    /// Reads digits.
-    fn number(&mut self) -> u32 {
-        let mut number: u32 = 0;
-        while let Some(digit) = self.peek().and_then(|ch| ch.to_digit(10)) {
-            number = number.saturating_mul(10).saturating_add(digit);
-            self.at += 1;
-        }
-        number
-    }
-
-    /// Reads a choice's options, `a,b|}`, keeping the first.
-    fn choices(&mut self) {
-        let mut first = true;
-        while let Some(ch) = self.peek() {
-            self.at += 1;
-            match ch {
-                '\\' => {
-                    if let Some(next) = self.peek() {
-                        self.at += 1;
-                        if first {
-                            self.text.push(next);
-                        }
-                    }
-                }
-                ',' => first = false,
-                '|' if self.peek() == Some('}') => {
-                    self.at += 1;
-                    return;
-                }
-                _ if first => self.text.push(ch),
-                _ => {}
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use clackatoo_protocol::TextChange;
@@ -881,21 +787,38 @@ mod tests {
         assert_eq!(line.text(), "var     print_line");
     }
 
+    /// `snippet` written out with no variables known, its line breaks
+    /// and tabs as they are.
+    fn plain(snippet: &Snippet) -> Expanded {
+        snippet.expand(|_| None, "\n", "\t")
+    }
+
     #[test]
-    fn snippets_are_made_plain_text() {
-        assert_eq!(expand("call(${1:a}, ${2:b})$0"), ("call(a, b)".into(), 5));
-        assert_eq!(expand("f($0)"), ("f()".into(), 2));
-        assert_eq!(expand("f($2, $1)"), ("f(, )".into(), 4));
-        assert_eq!(expand("plain"), ("plain".into(), 5));
-        // Nested, chosen, escaped, and variables.
+    fn a_snippet_puts_the_cursor_at_the_end_of_its_first_place() {
+        let snippet = |text: &str| {
+            let mut item = item("s");
+            item.text = text.into();
+            item.snippet = true;
+            item.start = None;
+            item
+        };
         assert_eq!(
-            expand("${1:outer ${2:inner}} ${3|one,two|} \\$x \\} ${TM_FILENAME} $NAME"),
-            ("outer inner one $x }  ".into(), 0)
+            accepted("|", snippet("call(${1:a}, ${2:b})$0"), 0),
+            "call(a|, b)"
         );
-        assert_eq!(expand("${VAR:default}!"), ("default!".into(), 8));
-        // Broken ones still make text.
-        assert_eq!(expand("a$"), ("a$".into(), 2));
-        assert_eq!(expand("${1:open"), ("open".into(), 0));
+        assert_eq!(accepted("|", snippet("f($2, $1)"), 0), "f(, |)");
+        assert_eq!(accepted("|", snippet("f($0)"), 0), "f(|)");
+        assert_eq!(accepted("|", snippet("plain"), 0), "plain|");
+        // Its places, from where it starts, which is past the word.
+        let completion = Completion::new(1, 2, vec![snippet("g(${1:x})")], false);
+        let accepted = (completion.accept(&Rope::from_str("> g"), 3, plain))
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.at, 2);
+        let places: Vec<_> = (accepted.stops.iter())
+            .map(|stop| (stop.number, stop.start, stop.end))
+            .collect();
+        assert_eq!(places, [(1, 2, 3), (0, 4, 4)]);
     }
 
     #[test]
@@ -913,10 +836,10 @@ mod tests {
             text: "use std::io;\n".into(),
         }];
         let completion = Completion::new(1, start, vec![println], false);
-        let accepted = completion.accept(&text, cursor).unwrap().unwrap();
+        let accepted = completion.accept(&text, cursor, plain).unwrap().unwrap();
         let after = accepted.edit.apply_to(&text.to_string()).unwrap();
         assert_eq!(after, "use std::io;\nfn main() {\n    println!(fmt)\n}\n");
-        assert_eq!(&after[accepted.cursor..], "fmt)\n}\n");
+        assert_eq!(&after[accepted.cursor..], ")\n}\n", "past its first place");
         assert_eq!(accepted.replaced, 3);
 
         // Places move through edits made since; one overlapping the word
@@ -932,7 +855,10 @@ mod tests {
         let typed = Edit::replace(text.len_bytes(), 0, "", "// \n");
         completion.edited(&typed);
         let text = Rope::from_str(&typed.apply_to(&text.to_string()).unwrap());
-        let accepted = completion.accept(&text, cursor + 4).unwrap().unwrap();
+        let accepted = completion
+            .accept(&text, cursor + 4, plain)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             accepted.edit.apply_to(&text.to_string()).unwrap(),
             "// \nfn main() {\n    x\n}\n"
@@ -952,7 +878,7 @@ mod tests {
         let cursor = text.find('|').unwrap();
         let rope = Rope::from_str(&text.replace('|', ""));
         let completion = Completion::new(1, start, vec![item], false);
-        let accepted = completion.accept(&rope, cursor).unwrap().unwrap();
+        let accepted = completion.accept(&rope, cursor, plain).unwrap().unwrap();
         let mut after = accepted.edit.apply_to(&rope.to_string()).unwrap();
         after.insert(accepted.cursor, '|');
         after

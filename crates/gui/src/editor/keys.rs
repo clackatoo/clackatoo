@@ -25,6 +25,9 @@ pub(crate) enum Stroke {
     Escape,
     Enter,
     Tab,
+    /// Shift+Tab, which goes back a place in a snippet, and is Tab
+    /// otherwise.
+    BackTab,
     Backspace,
     Delete,
     Left,
@@ -92,6 +95,7 @@ impl Stroke {
             "Esc" => Self::Escape,
             "CR" => Self::Enter,
             "Tab" => Self::Tab,
+            "S-Tab" => Self::BackTab,
             "BS" => Self::Backspace,
             "Del" => Self::Delete,
             "Left" => Self::Left,
@@ -126,6 +130,7 @@ impl Stroke {
             Self::Escape => named(Named::Escape),
             Self::Enter => named(Named::Enter),
             Self::Tab => named(Named::Tab),
+            Self::BackTab => Chord::with(Base::Named(Named::Tab), false, false, true),
             Self::Backspace => named(Named::Backspace),
             Self::Delete => named(Named::Delete),
             Self::Left => named(Named::Left),
