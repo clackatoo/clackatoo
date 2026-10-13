@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bytes::BytesMut;
 use clackatoo_protocol::frame::FrameDecoder;
@@ -19,12 +19,7 @@ use quinn_proto::{
     StreamEvent, StreamId, Transmit, VarInt, WriteError,
 };
 
-use super::{SERVER_NAME, STATS_EVERY, Way, describe};
-
-/// How long a connection whose carrier closed has to move onto UDP before
-/// it's dropped: a client that has only just found UDP gets through, and
-/// one that's gone is soon forgotten.
-const ORPHAN_GRACE: Duration = Duration::from_secs(15);
+use super::{Loss, SERVER_NAME, STATS_EVERY, Way, carrier_id, describe};
 
 /// Something the event loop must act on.
 #[derive(Debug, PartialEq, Eq)]
@@ -64,8 +59,6 @@ pub(crate) struct QuicServer {
     touched: Vec<ConnectionHandle>,
     /// Packets the endpoint answered without a connection, waiting to go.
     answers: Vec<(SocketAddr, Vec<u8>)>,
-    /// The clients of connections dropped since the last events.
-    forgotten: Vec<Token>,
     buffer: Vec<u8>,
 }
 
@@ -77,13 +70,12 @@ struct Remote {
     stream: Option<StreamId>,
     /// The client it is, once given one.
     client: Option<Token>,
-    /// The carrier it was on closed: its address, and when the connection
-    /// goes too, if it hasn't moved by then.
-    orphaned: Option<(SocketAddr, Instant)>,
     /// Where its packets last came from, as last logged.
     address: SocketAddr,
     /// When to log how it's going next.
     stats_due: Instant,
+    /// Whether its path over UDP is losing packets.
+    loss: Loss,
 }
 
 /// Setting up the endpoint failed.
@@ -124,7 +116,6 @@ impl QuicServer {
             probe_key,
             touched: Vec::new(),
             answers: Vec::new(),
-            forgotten: Vec::new(),
             buffer: Vec::new(),
         })
     }
@@ -175,9 +166,9 @@ impl QuicServer {
                                 connection,
                                 stream: None,
                                 client: None,
-                                orphaned: None,
                                 address: from,
                                 stats_due: now + STATS_EVERY,
+                                loss: Loss::new(now),
                             },
                         );
                         self.touched.push(handle);
@@ -208,17 +199,13 @@ impl QuicServer {
         self.connections
             .values_mut()
             .flat_map(|remote| {
-                let orphaned = remote.orphaned.map(|(_, until)| until);
-                (remote.connection.poll_timeout().into_iter())
-                    .chain(orphaned)
-                    .chain([remote.stats_due])
+                (remote.connection.poll_timeout().into_iter()).chain([remote.stats_due])
             })
             .min()
     }
 
     /// Lets each connection whose timer is due act on it.
     pub(crate) fn handle_timeouts(&mut self, now: Instant) {
-        let mut gone = Vec::new();
         for (&handle, remote) in &mut self.connections {
             if remote
                 .connection
@@ -237,38 +224,11 @@ impl QuicServer {
                     describe(&remote.connection)
                 );
             }
-            if let Some((address, until)) = remote.orphaned
-                && now >= until
-            {
-                remote.orphaned = None;
-                if remote.connection.remote_address() == address {
-                    gone.push(handle);
-                }
-            }
-        }
-        for handle in gone {
-            self.forget(handle);
-        }
-    }
-
-    /// Drops the connection with `handle` without a word, as it has no way
-    /// left to send one, and has its client dropped too.
-    fn forget(&mut self, handle: ConnectionHandle) {
-        if let Some(remote) = self.connections.remove(&handle) {
-            log::info!(
-                "QUIC connection {} dropped: its carrier closed, and it never moved; {}",
-                handle.0,
-                describe(&remote.connection)
-            );
-            self.forgotten.extend(remote.client);
-            self.endpoint
-                .handle_event(handle, quinn_proto::EndpointEvent::drained());
         }
     }
 
     /// Collects what the event loop must act on, since the last call.
     pub(crate) fn events(&mut self, events: &mut Vec<QuicEvent>) {
-        events.extend(self.forgotten.drain(..).map(QuicEvent::Closed));
         self.touched.sort_unstable();
         self.touched.dedup();
         for handle in std::mem::take(&mut self.touched) {
@@ -399,19 +359,32 @@ impl QuicServer {
         }
     }
 
-    /// Gives the connections on the carrier at `address`, which closed, a
-    /// while to move onto UDP, as a client may have only just started to:
-    /// those still on it after that are dropped.
-    pub(crate) fn carrier_closed(&mut self, address: SocketAddr, now: Instant) {
-        for (handle, remote) in &mut self.connections {
+    /// Notes that the carrier at `address` closed. Connections on it stay:
+    /// their clients may be on UDP already, or about to be, or opening a
+    /// new carrier with ssh, and packets from either bring them back. Until
+    /// then, what they send goes nowhere, and QUIC sends it again once
+    /// they're back. One whose client never comes back ends at the idle
+    /// timeout.
+    pub(crate) fn carrier_closed(&mut self, address: SocketAddr) {
+        for (handle, remote) in &self.connections {
             if remote.connection.remote_address() == address {
                 log::info!(
-                    "QUIC connection {} lost its carrier, and has {ORPHAN_GRACE:?} to be heard \
-                     from another way",
+                    "QUIC connection {} lost its carrier, and waits to hear from its client \
+                     another way",
                     handle.0
                 );
-                remote.orphaned = Some((address, now + ORPHAN_GRACE));
             }
+        }
+    }
+
+    /// Closes every connection, telling each client `reason`, as the
+    /// daemon stops or becomes another build: a client then knows at once,
+    /// rather than going on sending to a connection nobody knows. The
+    /// packets saying so go out with the next [`transmit`](Self::transmit).
+    pub(crate) fn close_all(&mut self, now: Instant, reason: &str) {
+        let handles: Vec<ConnectionHandle> = self.connections.keys().copied().collect();
+        for handle in handles {
+            self.close(handle, now, reason);
         }
     }
 
@@ -421,13 +394,21 @@ impl QuicServer {
             send(address, &packet);
         }
         for remote in self.connections.values_mut() {
+            remote.loss.update(&remote.connection, now);
             loop {
                 self.buffer.clear();
                 let Some(transmit) = remote.connection.poll_transmit(now, 1, &mut self.buffer)
                 else {
                     break;
                 };
-                send(transmit.destination, &self.buffer[..transmit.size]);
+                let packet = &self.buffer[..transmit.size];
+                send(transmit.destination, packet);
+                // A carrier loses nothing.
+                if carrier_id(transmit.destination).is_none()
+                    && remote.loss.twice(packet.len(), now)
+                {
+                    send(transmit.destination, packet);
+                }
             }
         }
     }
@@ -472,6 +453,8 @@ impl Remote {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use quinn_proto::ClientConfig;
 
     use super::super::{CarrierId, carrier_address, client};
@@ -558,37 +541,62 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_whose_carrier_closed_goes_if_it_never_moves() {
+    fn a_connection_whose_carrier_closed_waits_and_carries_on_through_a_new_one() {
         let start = Instant::now();
         let mut pair = Pair::connect(start);
         assert!(!pair.connection.is_handshaking(), "connected");
         let (&handle, _) = pair.server.connections.iter().next().unwrap();
         pair.server.set_client(handle, Token(7));
 
-        pair.server.carrier_closed(pair.carrier, start);
-        // Within the grace, it can still move onto UDP.
-        pair.server.handle_timeouts(start + ORPHAN_GRACE / 2);
+        pair.server.carrier_closed(pair.carrier);
+        // A minute with no word from the client, as while ssh logs in
+        // again over a bad network: it's still there.
+        let later = start + Duration::from_mins(1);
+        pair.server.handle_timeouts(later);
+        pair.server.events(&mut pair.events);
         assert_eq!(pair.server.connections.len(), 1);
-        // After it, the connection is dropped, and its client with it.
-        pair.server
-            .handle_timeouts(start + ORPHAN_GRACE + Duration::from_secs(1));
-        assert!(pair.server.connections.is_empty());
-        let mut events = Vec::new();
-        pair.server.events(&mut events);
-        assert_eq!(events, [QuicEvent::Closed(Token(7))]);
+        assert!(!pair.events.contains(&QuicEvent::Closed(Token(7))));
+
+        // Its packets now come through a new carrier, and it follows.
+        let new = carrier_address(CarrierId {
+            key: 4,
+            generation: 2,
+        });
+        pair.carrier = new;
+        pair.connection.ping();
+        pair.pump(later);
+        let remote = &pair.server.connections[&handle];
+        assert_eq!(remote.connection.remote_address(), new);
+        assert!(!pair.events.contains(&QuicEvent::Closed(Token(7))));
     }
 
     #[test]
-    fn a_connection_that_moved_stays_when_its_old_carrier_closes() {
+    fn closing_every_connection_tells_each_client_why() {
         let start = Instant::now();
         let mut pair = Pair::connect(start);
-        pair.server.carrier_closed(pair.carrier, start);
-        // Its packets now come from somewhere else, as over UDP.
-        pair.carrier = "192.0.2.7:4000".parse().unwrap();
-        pair.connection.ping();
-        pair.pump(start + Duration::from_millis(10));
+        pair.server.close_all(start, "the daemon is upgrading");
+        let mut packets = Vec::new();
         pair.server
-            .handle_timeouts(start + ORPHAN_GRACE + Duration::from_secs(1));
-        assert_eq!(pair.server.connections.len(), 1);
+            .transmit(start, |_, packet| packets.push(packet.to_vec()));
+        for packet in packets {
+            let mut response = Vec::new();
+            if let Some(DatagramEvent::ConnectionEvent(_, event)) = pair.client.handle(
+                start,
+                DAEMON,
+                None,
+                None,
+                BytesMut::from(&packet[..]),
+                &mut response,
+            ) {
+                pair.connection.handle_event(event);
+            }
+        }
+        let reason = std::iter::from_fn(|| pair.connection.poll()).find_map(|event| match event {
+            Event::ConnectionLost {
+                reason: quinn_proto::ConnectionError::ApplicationClosed(close),
+            } => Some(close.reason),
+            _ => None,
+        });
+        assert_eq!(reason.as_deref(), Some(&b"the daemon is upgrading"[..]));
     }
 }

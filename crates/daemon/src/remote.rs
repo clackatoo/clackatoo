@@ -32,8 +32,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::client::{Client, ClientError};
+use crate::client::{Client, ClientError, UdpTarget};
 use crate::launch::{self, LaunchError};
+use crate::quic::{Redial, Redialed};
 use crate::runtime::RuntimeDir;
 
 /// What the bridge sends before relaying, unlikely to begin anything a
@@ -126,6 +127,31 @@ pub fn connect(
     replace: bool,
     askpass: Option<&Path>,
 ) -> Result<Client, RemoteError> {
+    let (stream, ssh, address) = dial(ssh_command(remote, replace, askpass)?, &remote.host)?;
+    // Whenever ssh closes, as when it gives up on a network that went
+    // away, the connection carries on through a new one, which never
+    // replaces the daemon.
+    let redial: Redial = {
+        let remote = remote.clone();
+        let askpass = askpass.map(Path::to_owned);
+        Box::new(move || {
+            let command = ssh_command(&remote, false, askpass.as_deref())?;
+            let (stream, ssh, _) = dial(command, &remote.host).map_err(io::Error::other)?;
+            Ok(Redialed::keeping(stream, ssh))
+        })
+    };
+    Ok(Client::over_carrier(
+        stream,
+        address.map(UdpTarget::Host),
+        Some(ssh),
+        Some(redial),
+    )?)
+}
+
+/// The ssh command that runs the bridge on `remote`'s machine, replacing
+/// the daemon there first with `replace`, and asking for passwords through
+/// `askpass`, if given.
+fn ssh_command(remote: &Remote, replace: bool, askpass: Option<&Path>) -> io::Result<Command> {
     let mut ssh = Command::new(ssh_program());
     if let Some(socket) = askpass {
         ssh.env("SSH_ASKPASS", std::env::current_exe()?)
@@ -150,7 +176,7 @@ pub fn connect(
         remote.command,
         if replace { " --replace" } else { "" }
     ));
-    through(ssh, &remote.host)
+    Ok(ssh)
 }
 
 /// Connects to a daemon through `command`, which runs `clackatoo bridge`
@@ -160,7 +186,23 @@ pub fn connect(
 /// # Errors
 ///
 /// As [`connect`].
-pub fn through(mut command: Command, host: &str) -> Result<Client, RemoteError> {
+pub fn through(command: Command, host: &str) -> Result<Client, RemoteError> {
+    let (stream, ssh, address) = dial(command, host)?;
+    Ok(Client::over_carrier(
+        stream,
+        address.map(UdpTarget::Host),
+        Some(ssh),
+        None,
+    )?)
+}
+
+/// Runs `command`, which runs `clackatoo bridge` somewhere, and waits for
+/// the bridge to announce itself. Returns the stream to it, what keeps it
+/// running, and the address the bridge says its machine was reached at.
+fn dial(
+    mut command: Command,
+    host: &str,
+) -> Result<(UnixStream, Ssh, Option<IpAddr>), RemoteError> {
     // A socket rather than pipes, so reads can time out.
     let (stream, theirs) = UnixStream::pair()?;
     command
@@ -218,11 +260,7 @@ pub fn through(mut command: Command, host: &str) -> Result<Client, RemoteError> 
     }
     stream.set_read_timeout(None)?;
     let greeting = &greeting[..greeting.len() - ANNOUNCEMENT.len()];
-    Ok(Client::over_carrier(
-        stream,
-        announced_address(greeting).map(crate::client::UdpTarget::Host),
-        Some(ssh),
-    )?)
+    Ok((stream, ssh, announced_address(greeting)))
 }
 
 /// The address the bridge announced, at the end of `greeting`, if it did.

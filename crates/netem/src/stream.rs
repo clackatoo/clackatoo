@@ -61,16 +61,27 @@ impl StreamRelay {
     ///
     /// If the thread waiting to do it can't be started.
     pub fn kill_after(&self, after: Duration) -> io::Result<()> {
-        let client = self.client.try_clone()?;
-        let server = self.server.try_clone()?;
+        let killer = self.killer()?;
         std::thread::Builder::new()
             .name("netem-kill".into())
             .spawn(move || {
                 std::thread::sleep(after);
-                let _ = client.shutdown(Shutdown::Both);
-                let _ = server.shutdown(Shutdown::Both);
+                killer.kill();
             })?;
         Ok(())
+    }
+
+    /// A handle that cuts the stream as [`kill`](Self::kill) does, for
+    /// whoever doesn't own the relay.
+    ///
+    /// # Errors
+    ///
+    /// If the streams can't be duplicated.
+    pub fn killer(&self) -> io::Result<StreamKiller> {
+        Ok(StreamKiller {
+            client: self.client.try_clone()?,
+            server: self.server.try_clone()?,
+        })
     }
 
     /// Starts passing bytes `direction`.
@@ -117,6 +128,21 @@ impl StreamRelay {
             })?;
         self.readers.push(thread);
         Ok(())
+    }
+}
+
+/// Cuts a [`StreamRelay`]'s stream, from wherever it's held.
+#[derive(Debug)]
+pub struct StreamKiller {
+    client: UnixStream,
+    server: UnixStream,
+}
+
+impl StreamKiller {
+    /// Cuts the stream both ways, at once, as when ssh dies.
+    pub fn kill(&self) {
+        let _ = self.client.shutdown(Shutdown::Both);
+        let _ = self.server.shutdown(Shutdown::Both);
     }
 }
 

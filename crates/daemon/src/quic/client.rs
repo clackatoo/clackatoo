@@ -8,24 +8,31 @@
 //!
 //! The connection starts inside the carrier, and moves onto UDP when the
 //! daemon can be reached that way (see [`path`](super::path)).
+//!
+//! When the carrier closes, as when ssh gives up on a network that went
+//! away, the thread opens another, with ssh again, on a thread of its own,
+//! and carries on through that: the same QUIC connection, so nothing is
+//! sent again and the window keeps everything. It tries again, less and
+//! less often, until one opens. If the daemon at the other end is no
+//! longer the one the connection was made to, because it was upgraded or
+//! restarted, the connection is over, and says so.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use clackatoo_protocol::frame::{FrameDecoder, FrameError};
-use mio::{Events, Interest, Poll, Token};
+use mio::{Events, Interest, Poll, Token, Waker};
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use quinn_proto::{
-    ClientConfig, Connection, ConnectionHandle, DatagramEvent, Dir, Endpoint, EndpointConfig,
-    Event, ReadError, StreamEvent, StreamId, VarInt, WriteError,
+    ClientConfig, Connection, ConnectionError, ConnectionHandle, DatagramEvent, Dir, Endpoint,
+    EndpointConfig, Event, ReadError, StreamEvent, StreamId, VarInt, WriteError,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{self, WebPkiSupportedAlgorithms};
@@ -34,14 +41,70 @@ use rustls::{self, DigitallySignedStruct, SignatureScheme};
 
 use super::path::{Action, Path, Route, Sending};
 use super::{
-    CarrierId, KEEP_ALIVE, SERVER_NAME, STATS_EVERY, carrier_address, describe, frame_packet,
-    transport,
+    CarrierId, IDLE_TIMEOUT, KEEP_ALIVE, Loss, SERVER_NAME, STATS_EVERY, carrier_address, describe,
+    frame_packet, transport,
 };
+use crate::client::{ClientError, open_carrier};
 use crate::remote::Ssh;
 
 const CARRIER: Token = Token(0);
 const LOCAL: Token = Token(1);
 const UDP: Token = Token(2);
+/// A new carrier has opened, or failed to.
+const DIALED: Token = Token(3);
+
+/// How long after a new carrier fails to open another is tried, at first.
+/// Each failure doubles it, up to [`REDIAL_AT_MOST`].
+const REDIAL_AT_FIRST: Duration = Duration::from_secs(1);
+
+/// The longest wait between tries at a new carrier.
+const REDIAL_AT_MOST: Duration = Duration::from_secs(30);
+
+/// A new carrier: a connection to the daemon's socket that hasn't greeted
+/// it yet, through ssh, or whatever else reaches the daemon.
+pub struct Redialed {
+    pub(crate) stream: UnixStream,
+    /// Whatever carries it, such as the ssh process: kept while the
+    /// carrier is in use, and dropped, ending it, once it isn't.
+    keep: Option<Box<dyn Send>>,
+}
+
+impl Redialed {
+    /// A carrier that `stream` is, with nothing else to keep running.
+    #[must_use]
+    pub fn new(stream: UnixStream) -> Self {
+        Self { stream, keep: None }
+    }
+
+    /// A carrier that `stream` is, kept going by `keep`, which is kept
+    /// while the carrier is in use.
+    #[must_use]
+    pub fn keeping(stream: UnixStream, keep: impl Send + 'static) -> Self {
+        Self {
+            stream,
+            keep: Some(Box::new(keep)),
+        }
+    }
+}
+
+impl std::fmt::Debug for Redialed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Redialed")
+            .field("stream", &self.stream)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Opens a new carrier to the same daemon, as with ssh again, when the one
+/// a connection is using closes. It may take a while, as ssh logs in: it's
+/// called on a thread of its own.
+pub type Redial = Box<dyn FnMut() -> io::Result<Redialed> + Send>;
+
+/// What a try at a new carrier came to, with the way to try again.
+struct Dialed {
+    redial: Redial,
+    outcome: Result<(Redialed, Vec<u8>), ClientError>,
+}
 
 /// How much of the daemon's messages may wait for the client to read them
 /// before the thread stops reading more from QUIC, which in turn holds the
@@ -62,6 +125,8 @@ pub(crate) struct Carried {
     /// Whether the connection has moved onto UDP.
     on_udp: Arc<AtomicBool>,
     contact: Contact,
+    /// Why the connection ended, once it has.
+    ended: Arc<Mutex<Option<String>>>,
 }
 
 /// Whether a daemon on another machine is in contact, for a window to show
@@ -137,6 +202,14 @@ impl Carried {
             Route::Ssh
         }
     }
+
+    /// Why the connection ended, in words for whoever uses it, once it has.
+    pub(crate) fn ended(&self) -> Option<String> {
+        self.ended
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl Drop for Carried {
@@ -154,8 +227,9 @@ impl Drop for Carried {
 /// presents `certificate` on, and starts a thread relaying between it and
 /// the returned socket, for a [`Client`](crate::Client) to talk over. With
 /// `udp`, the daemon's UDP address and probe key, the connection moves
-/// there if probes get through. The thread keeps `ssh`, which carries `carrier`, until the
-/// connection ends.
+/// there if probes get through. The thread keeps `ssh`, which carries
+/// `carrier`, while the carrier is in use. With `redial`, a new carrier is
+/// opened when one closes.
 ///
 /// # Errors
 ///
@@ -165,22 +239,33 @@ pub(crate) fn carry(
     certificate: Vec<u8>,
     udp: Option<(SocketAddr, [u8; 16])>,
     ssh: Option<Ssh>,
+    redial: Option<Redial>,
 ) -> io::Result<(UnixStream, Carried)> {
     let (client, local) = UnixStream::pair()?;
     carrier.set_nonblocking(true)?;
     local.set_nonblocking(true)?;
-    let mut driver = Driver::new(carrier, local, certificate, udp)?;
+    let mut driver = Driver::new(carrier, local, certificate, udp, ssh, redial)?;
     let on_udp = Arc::clone(&driver.on_udp);
     let contact = driver.contact.clone();
-    let thread = std::thread::Builder::new()
-        .name("quic".into())
-        .spawn(move || {
-            if let Err(err) = driver.run() {
-                log::warn!("the QUIC connection failed: {err}");
-            }
-            driver.hang_up();
-            drop(ssh);
-        })?;
+    let ended = Arc::new(Mutex::new(None));
+    let thread = {
+        let ended = Arc::clone(&ended);
+        std::thread::Builder::new()
+            .name("quic".into())
+            .spawn(move || {
+                let why = match driver.run() {
+                    Ok(()) => driver.ended.take(),
+                    Err(err) => {
+                        log::warn!("the QUIC connection failed: {err}");
+                        Some(err.to_string())
+                    }
+                };
+                // Before the client hears the connection close, so it can
+                // say why.
+                *ended.lock().unwrap_or_else(PoisonError::into_inner) = why;
+                driver.hang_up();
+            })?
+    };
     let local = client.try_clone()?;
     Ok((
         client,
@@ -189,6 +274,7 @@ pub(crate) fn carry(
             thread: Some(thread),
             on_udp,
             contact,
+            ended,
         },
     ))
 }
@@ -266,7 +352,6 @@ pub(super) fn client_config(certificate: Vec<u8>) -> io::Result<ClientConfig> {
 }
 
 /// The relay between the client and the QUIC connection.
-#[derive(Debug)]
 struct Driver {
     poll: Poll,
     endpoint: Endpoint,
@@ -306,6 +391,27 @@ struct Driver {
     contact: Contact,
     /// When to log how the connection is going next.
     stats_due: Instant,
+    /// Whether the path over UDP is losing packets.
+    loss: Loss,
+    /// The certificate the daemon presented, which a new carrier must
+    /// bring again for it to be the same daemon.
+    certificate: Vec<u8>,
+    /// What carries the carrier in use, such as the ssh process.
+    keep: Option<Box<dyn Send>>,
+    /// Opens a new carrier, unless it's out doing so.
+    redial: Option<Redial>,
+    /// When to try a new carrier next, while there's none.
+    redial_at: Option<Instant>,
+    /// How long to wait after the next try fails.
+    redial_backoff: Duration,
+    /// Since when the connection has had no carrier.
+    carrier_lost_at: Option<Instant>,
+    /// Where tries at a new carrier say how they went.
+    dialed: mpsc::Receiver<Dialed>,
+    dialed_sender: mpsc::Sender<Dialed>,
+    waker: Arc<Waker>,
+    /// Why the connection ended, once it has, in words for the client.
+    ended: Option<String>,
 }
 
 /// A client's socket for UDP, and where the daemon takes packets.
@@ -324,8 +430,12 @@ impl Driver {
         local: UnixStream,
         certificate: Vec<u8>,
         udp: Option<(SocketAddr, [u8; 16])>,
+        ssh: Option<Ssh>,
+        redial: Option<Redial>,
     ) -> io::Result<Self> {
         let poll = Poll::new()?;
+        let waker = Arc::new(Waker::new(poll.registry(), DIALED)?);
+        let (dialed_sender, dialed) = mpsc::channel();
         let mut carrier = mio::net::UnixStream::from_std(carrier);
         let mut local = mio::net::UnixStream::from_std(local);
         // Edge-triggered, and everything is tried after any wakeup, so
@@ -333,19 +443,8 @@ impl Driver {
         let both = Interest::READABLE | Interest::WRITABLE;
         poll.registry().register(&mut carrier, CARRIER, both)?;
         poll.registry().register(&mut local, LOCAL, both)?;
-        // Unconnected, so each packet leaves from whatever address the
-        // network has now.
         let udp = udp.and_then(|(daemon, probe_key)| {
-            let any = match daemon.ip() {
-                IpAddr::V4(_) => IpAddr::from(Ipv4Addr::UNSPECIFIED),
-                IpAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
-            };
-            let bound = mio::net::UdpSocket::bind(SocketAddr::new(any, 0)).and_then(|mut udp| {
-                poll.registry()
-                    .register(&mut udp, UDP, Interest::READABLE)?;
-                Ok(udp)
-            });
-            bound
+            bind_udp(&poll, daemon)
                 .inspect_err(|err| log::warn!("no UDP socket for QUIC: {err}"))
                 .ok()
                 .map(|socket| UdpWay {
@@ -360,7 +459,7 @@ impl Driver {
         let (handle, connection) = endpoint
             .connect(
                 Instant::now(),
-                client_config(certificate)?,
+                client_config(certificate.clone())?,
                 carrier_address(CarrierId::default()),
                 SERVER_NAME,
             )
@@ -382,11 +481,22 @@ impl Driver {
             readable: Vec::new(),
             buffer: Vec::new(),
             read_buffer: vec![0; 64 * 1024].into_boxed_slice(),
-            path: Path::new(udp.is_some()),
+            path: Path::new(udp.is_some(), redial.is_some()),
             udp,
             on_udp: Arc::new(AtomicBool::new(false)),
             contact: Contact::default(),
             stats_due: Instant::now() + STATS_EVERY,
+            loss: Loss::new(Instant::now()),
+            certificate,
+            keep: ssh.map(|ssh| Box::new(ssh) as Box<dyn Send>),
+            redial,
+            redial_at: None,
+            redial_backoff: REDIAL_AT_FIRST,
+            carrier_lost_at: None,
+            dialed,
+            dialed_sender,
+            waker,
+            ended: None,
         })
     }
 
@@ -413,8 +523,14 @@ impl Driver {
             if self.connection.poll_timeout().is_some_and(|due| due <= now) {
                 self.connection.handle_timeout(now);
             }
+            let trying = self.path.trying();
             let action = self.path.tick(now);
+            if trying && !self.path.trying() && self.path.route() == Route::Ssh {
+                log::info!("no probe came back over UDP: staying in ssh, to try again later");
+            }
             self.act(action)?;
+            self.take_dialed(now)?;
+            self.redial(now);
             self.receive_packets(now)?;
             if !self.connection_events(now)? {
                 return Ok(());
@@ -447,9 +563,11 @@ impl Driver {
             }
 
             let next = self.connection.poll_timeout().into_iter();
+            let redial = self.redial_at.filter(|_| self.redial.is_some());
             let timeout = next
                 .chain(self.path.next_tick())
                 .chain([self.stats_due])
+                .chain(redial)
                 .min()
                 .map(|due| due.saturating_duration_since(Instant::now()));
             match self.poll.poll(&mut events, timeout) {
@@ -494,6 +612,94 @@ impl Driver {
         }
     }
 
+    /// Starts opening a new carrier, on a thread of its own, if there's
+    /// none and it's time.
+    fn redial(&mut self, now: Instant) {
+        if self.carrier.is_some() || self.redial_at.is_none_or(|at| at > now) {
+            return;
+        }
+        let Some(mut redial) = self.redial.take() else {
+            return;
+        };
+        self.redial_at = None;
+        log::info!("opening a new ssh connection to carry QUIC");
+        let sender = self.dialed_sender.clone();
+        let waker = Arc::clone(&self.waker);
+        // If it's still logging in when the connection ends, it finds
+        // nobody to tell, and what it opened closes.
+        let started = std::thread::Builder::new()
+            .name("quic-redial".into())
+            .spawn(move || {
+                let outcome = redial()
+                    .map_err(ClientError::from)
+                    .and_then(|mut redialed| {
+                        let (certificate, _) = open_carrier(&mut redialed.stream)?;
+                        Ok((redialed, certificate))
+                    });
+                if sender.send(Dialed { redial, outcome }).is_ok() {
+                    let _ = waker.wake();
+                }
+            });
+        if let Err(err) = started {
+            log::warn!("couldn't start opening a new carrier: {err}");
+            self.redial_at = Some(now + self.redial_backoff);
+        }
+    }
+
+    /// Takes on a new carrier, if one has opened, or tries again later if
+    /// it failed. The connection is over if the daemon it reaches isn't
+    /// the one it was made to.
+    fn take_dialed(&mut self, now: Instant) -> io::Result<()> {
+        let Ok(Dialed { redial, outcome }) = self.dialed.try_recv() else {
+            return Ok(());
+        };
+        self.redial = Some(redial);
+        let lost_for = self
+            .carrier_lost_at
+            .map(|at| now.saturating_duration_since(at))
+            .unwrap_or_default();
+        match outcome {
+            Ok((redialed, certificate)) if certificate == self.certificate => {
+                redialed.stream.set_nonblocking(true)?;
+                let mut carrier = mio::net::UnixStream::from_std(redialed.stream);
+                self.poll.registry().register(
+                    &mut carrier,
+                    CARRIER,
+                    Interest::READABLE | Interest::WRITABLE,
+                )?;
+                self.carrier = Some(carrier);
+                self.packets = FrameDecoder::new();
+                self.keep = redialed.keep;
+                self.redial_backoff = REDIAL_AT_FIRST;
+                self.carrier_lost_at = None;
+                log::info!(
+                    "a new ssh connection carries QUIC, {lost_for:.1?} after the last closed; {}",
+                    describe(&self.connection)
+                );
+                // Something to go through it, for the daemon to follow.
+                self.connection.ping();
+                let action = self.path.carrier_opened(now);
+                self.act(action)
+            }
+            Ok(_) => Err(io::Error::other(
+                "the daemon was restarted, or upgraded, since the connection was made",
+            )),
+            Err(ClientError::VersionMismatch { daemon, ours }) => Err(io::Error::other(format!(
+                "the daemon was upgraded, and now speaks protocol {daemon} (this speaks {ours})"
+            ))),
+            Err(err) => {
+                log::info!(
+                    "opening a new ssh connection failed, {lost_for:.0?} after the last closed: \
+                     {err}; trying again in {:?}",
+                    self.redial_backoff
+                );
+                self.redial_at = Some(now + self.redial_backoff);
+                self.redial_backoff = (self.redial_backoff * 2).min(REDIAL_AT_MOST);
+                Ok(())
+            }
+        }
+    }
+
     /// Hands the connection every packet the carrier, or UDP, has brought.
     fn receive_packets(&mut self, now: Instant) -> io::Result<()> {
         if let Some(carrier) = &mut self.carrier {
@@ -531,6 +737,7 @@ impl Driver {
                 self.carrier_closed(now, &why)?;
             }
         }
+        let mut recovered = false;
         if let Some(udp) = &self.udp {
             loop {
                 match udp.socket.recv_from(&mut self.read_buffer) {
@@ -539,7 +746,7 @@ impl Driver {
                         if from == udp.daemon
                             && super::is_probe(&self.read_buffer[..n], &udp.probe_key) =>
                     {
-                        self.path.received(true);
+                        recovered |= self.path.probe_answered();
                     }
                     // To QUIC, it's from where the daemon always is.
                     Ok((n, from)) if from == udp.daemon => {
@@ -569,7 +776,31 @@ impl Driver {
                 }
             }
         }
+        if recovered {
+            self.rebind_udp();
+        }
         Ok(())
+    }
+
+    /// Sends from a new UDP port from now on, and pings, so the daemon
+    /// sees the client move and starts the path afresh, rather than wait
+    /// out QUIC's timers after an outage: see [`Path::probe_answered`].
+    fn rebind_udp(&mut self) {
+        let Some(udp) = &mut self.udp else {
+            return;
+        };
+        match bind_udp(&self.poll, udp.daemon) {
+            Ok(socket) => {
+                udp.socket = socket;
+                log::info!(
+                    "UDP gets through again: sending from a new port, for the daemon to pick up \
+                     at once; {}",
+                    describe(&self.connection)
+                );
+            }
+            Err(err) => log::warn!("UDP gets through again, but no new port for it: {err}"),
+        }
+        self.connection.ping();
     }
 
     /// Acts on what the connection has to say. Returns whether it's still
@@ -605,6 +836,7 @@ impl Driver {
                         self.route_name(),
                         describe(&self.connection)
                     );
+                    self.ended = Some(why_lost(&reason));
                     return Ok(false);
                 }
                 _ => {}
@@ -677,6 +909,7 @@ impl Driver {
             }
             if ended {
                 if Some(id) == self.stream {
+                    self.ended = Some("the daemon ended the conversation".to_owned());
                     return Err(io::Error::other("the daemon ended the conversation"));
                 }
                 self.incoming.remove(&id);
@@ -688,6 +921,7 @@ impl Driver {
     /// Sends every packet the connection has ready, whichever way the path
     /// says.
     fn transmit(&mut self, now: Instant) -> io::Result<()> {
+        self.loss.update(&self.connection, now);
         loop {
             self.buffer.clear();
             let Some(transmit) = self.connection.poll_transmit(now, 1, &mut self.buffer) else {
@@ -701,13 +935,22 @@ impl Driver {
                         frame_packet(packet, &mut self.to_carrier);
                     }
                 }
-                (Sending::Udp, Some(udp)) => match udp.socket.send_to(packet, udp.daemon) {
-                    // No room is as good as lost, and QUIC sends it again;
-                    // nor is there while the network is down.
-                    Ok(_) => {}
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(err) => log::debug!("UDP send failed: {err}"),
-                },
+                (Sending::Udp, Some(udp)) => {
+                    let copies = if self.loss.twice(packet.len(), now) {
+                        2
+                    } else {
+                        1
+                    };
+                    for _ in 0..copies {
+                        match udp.socket.send_to(packet, udp.daemon) {
+                            // No room is as good as lost, and QUIC sends it
+                            // again; nor is there while the network is down.
+                            Ok(_) => {}
+                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
+                            Err(err) => log::debug!("UDP send failed: {err}"),
+                        }
+                    }
+                }
                 (Sending::Udp, None) => {}
             }
         }
@@ -723,11 +966,16 @@ impl Driver {
     /// if there's a way.
     fn carrier_closed(&mut self, now: Instant, why: &str) -> io::Result<()> {
         self.carrier = None;
+        self.keep = None;
         self.to_carrier.clear();
+        self.carrier_lost_at = Some(now);
         log::info!(
             "the ssh connection carrying QUIC closed: {why}; {}",
             describe(&self.connection)
         );
+        if self.redial.is_some() {
+            self.redial_at = Some(now);
+        }
         let action = self.path.carrier_closed(now);
         self.act(action)
     }
@@ -737,6 +985,38 @@ impl Driver {
     fn hang_up(&mut self) {
         let _ = write_some(&mut self.local, &mut self.to_local);
         let _ = self.local.shutdown(Shutdown::Both);
+    }
+}
+
+/// A socket to send to `daemon` from, on a port of its own, registered
+/// with `poll`. Unconnected, so each packet leaves from whatever address
+/// the network has now.
+fn bind_udp(poll: &Poll, daemon: SocketAddr) -> io::Result<mio::net::UdpSocket> {
+    let any = match daemon.ip() {
+        IpAddr::V4(_) => IpAddr::from(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
+    };
+    let mut socket = mio::net::UdpSocket::bind(SocketAddr::new(any, 0))?;
+    poll.registry()
+        .register(&mut socket, UDP, Interest::READABLE)?;
+    Ok(socket)
+}
+
+/// Why a connection was lost, in words for whoever was using it.
+fn why_lost(reason: &ConnectionError) -> String {
+    match reason {
+        ConnectionError::TimedOut => format!(
+            "nothing came back from the daemon for {} minutes",
+            IDLE_TIMEOUT.as_secs() / 60
+        ),
+        ConnectionError::ApplicationClosed(close) if !close.reason.is_empty() => {
+            String::from_utf8_lossy(&close.reason).into_owned()
+        }
+        ConnectionError::ApplicationClosed(_) => "the daemon closed the connection".to_owned(),
+        ConnectionError::Reset => {
+            "the daemon no longer knows the connection: it was restarted".to_owned()
+        }
+        other => format!("the QUIC connection failed: {other}"),
     }
 }
 

@@ -36,5 +36,5 @@ mod udp;
 
 pub use link::{Conditions, Direction, Impairment, Link, LinkStats, Stalls};
 pub use measure::Latencies;
-pub use stream::StreamRelay;
+pub use stream::{StreamKiller, StreamRelay};
 pub use udp::UdpRelay;

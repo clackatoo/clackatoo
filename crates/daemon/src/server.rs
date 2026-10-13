@@ -772,6 +772,7 @@ impl Daemon {
                 }
                 // The client that asked hears how it went: its connection
                 // closes as the new build starts, or says why it didn't.
+                self.close_remotes("the daemon is upgrading to a new build");
                 let requester = match self.sources.try_remove(token.0) {
                     Some(Source::Client(Client {
                         link: Link::Unix(mut stream),
@@ -860,6 +861,7 @@ impl Daemon {
             self.transmit_quic();
         }
         log::info!("shutting down");
+        self.close_remotes("the daemon stopped");
         self.abandon_renames();
         self.stop_boards();
         Ok(None)
@@ -2186,7 +2188,7 @@ impl Daemon {
         if let Some(why) = closed {
             self.sources.remove(token.0);
             log::info!("{} closed: {why}", quic::Way(from));
-            quic.carrier_closed(from, now);
+            quic.carrier_closed(from);
         }
     }
 
@@ -2245,6 +2247,19 @@ impl Daemon {
         }
         // Its greeting may have come with the stream.
         self.serve_client(token);
+    }
+
+    /// Closes every QUIC connection, telling its client `reason`, and sends
+    /// what says so as far as the sockets take it now: the daemon is about
+    /// to stop or become another build, and nobody would answer after.
+    /// Without it, a client on UDP would go on sending to a connection
+    /// nobody knows, out of contact, until its idle timeout.
+    fn close_remotes(&mut self, reason: &str) {
+        let Some(quic) = self.quic.as_mut() else {
+            return;
+        };
+        quic.close_all(Instant::now(), reason);
+        self.transmit_quic();
     }
 
     /// Sends the packets the QUIC endpoint has ready, each on its carrier.

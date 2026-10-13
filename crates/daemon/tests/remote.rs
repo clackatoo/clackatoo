@@ -18,10 +18,15 @@ use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use std::sync::{Arc, Mutex};
+
 use clackatoo_daemon::{
-    AgentConfig, Client, ClientError, Daemon, DaemonConfig, Route, ShutdownHandle, UdpTarget,
+    AgentConfig, Client, ClientError, Daemon, DaemonConfig, Redial, Redialed, Route,
+    ShutdownHandle, UdpTarget,
 };
-use clackatoo_netem::{Conditions, Impairment, Latencies, Link, StreamRelay, UdpRelay};
+use clackatoo_netem::{
+    Conditions, Impairment, Latencies, Link, StreamKiller, StreamRelay, UdpRelay,
+};
 use clackatoo_protocol::{Event, NewTerminal, Size, TerminalId, View, ViewUpdate};
 
 /// A daemon on its own thread, in its own directory, taking UDP on a port
@@ -126,14 +131,18 @@ fn letter(round: u64) -> char {
 /// How long to wait for any one key's echo before giving up on it.
 const ECHO_LIMIT: Duration = Duration::from_secs(150);
 
-/// A client on another machine, typing into a terminal running `cat`.
+/// A client on another machine, typing into a terminal running `cat`. When
+/// its ssh stream closes, it opens another, as a window does with ssh.
 /// When its connection is lost, it connects again, through a new ssh
 /// stream, and goes on in the same terminal, as a window does.
 struct Session<'a> {
     daemon: &'a TestDaemon,
     network: &'a Network,
     udp: UdpRelay,
+    /// The first ssh stream; the client keeps any it opens after.
     ssh: StreamRelay,
+    /// Cuts whichever ssh stream is the newest.
+    carriers: Carriers,
     client: Client,
     terminal: TerminalId,
     view: View,
@@ -146,7 +155,8 @@ struct Session<'a> {
 impl<'a> Session<'a> {
     fn open(daemon: &'a TestDaemon, network: &'a Network) -> Self {
         let udp = UdpRelay::start(daemon.udp, network.udp.clone()).expect("UDP relay");
-        let (ssh, client) = connect(daemon, network, &udp);
+        let carriers = Carriers::default();
+        let (ssh, client) = connect(daemon, network, &udp, &carriers);
         let mut client = client.expect("connect");
         let script = "stty raw -echo; printf '\\033]0;ready\\007'; exec cat";
         let terminal = client
@@ -163,6 +173,7 @@ impl<'a> Session<'a> {
             network,
             udp,
             ssh,
+            carriers,
             client,
             terminal,
             view,
@@ -175,6 +186,20 @@ impl<'a> Session<'a> {
     /// How the connection goes now.
     fn route(&self) -> Option<Route> {
         self.client.route()
+    }
+
+    /// Cuts the ssh stream in use, as when ssh dies.
+    fn kill_ssh(&self) {
+        self.carriers.kill();
+    }
+
+    /// Cuts the ssh stream in use `after` from now.
+    fn kill_ssh_after(&self, after: Duration) {
+        let carriers = self.carriers.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            carriers.kill();
+        });
     }
 
     /// Types a key, and waits for its echo: how long it took, counting
@@ -221,7 +246,7 @@ impl<'a> Session<'a> {
     fn reconnect(&mut self) {
         loop {
             self.reconnects += 1;
-            let (ssh, client) = connect(self.daemon, self.network, &self.udp);
+            let (ssh, client) = connect(self.daemon, self.network, &self.udp, &self.carriers);
             self.ssh = ssh;
             match client.and_then(|mut client| {
                 let view = attach(&mut client, self.terminal)?;
@@ -251,9 +276,11 @@ impl<'a> Session<'a> {
 
     fn report(&self, name: &str) {
         eprintln!(
-            "NETEM {name}: echoes {}; reconnects {}; route {:?}; UDP {:?}, ssh {:?}",
+            "NETEM {name}: echoes {}; reconnects {}; new ssh streams {}; route {:?}; UDP {:?}, \
+             ssh {:?}",
             self.echoes,
             self.reconnects,
+            self.carriers.redials(),
             self.route(),
             self.network.udp.stats(),
             self.network.ssh.stats(),
@@ -261,16 +288,56 @@ impl<'a> Session<'a> {
     }
 }
 
+/// The ssh streams a session has opened: a way to cut the newest, and how
+/// many were opened after the first.
+#[derive(Clone, Default)]
+struct Carriers(Arc<Mutex<(Option<StreamKiller>, u32)>>);
+
+impl Carriers {
+    fn opened(&self, relay: &StreamRelay, again: bool) {
+        let mut carriers = self.0.lock().unwrap();
+        carriers.0 = Some(relay.killer().unwrap());
+        carriers.1 += u32::from(again);
+    }
+
+    fn kill(&self) {
+        if let Some(killer) = &self.0.lock().unwrap().0 {
+            killer.kill();
+        }
+    }
+
+    fn redials(&self) -> u32 {
+        self.0.lock().unwrap().1
+    }
+}
+
 /// Opens an ssh stream through the network, and a client through it that
-/// moves onto UDP through `udp`.
+/// moves onto UDP through `udp`, and opens another ssh stream whenever the
+/// one it's using closes.
 fn connect(
     daemon: &TestDaemon,
     network: &Network,
     udp: &UdpRelay,
+    carriers: &Carriers,
 ) -> (StreamRelay, Result<Client, ClientError>) {
-    let stream = UnixStream::connect(daemon.socket()).expect("the daemon's socket");
-    let (relay, carrier) = StreamRelay::start(stream, network.ssh.clone()).expect("relay");
-    let client = Client::over_quic_to(carrier, UdpTarget::Exactly(udp.address()));
+    let open = |socket: &PathBuf, link: &Link| {
+        let stream = UnixStream::connect(socket)?;
+        StreamRelay::start(stream, link.clone())
+    };
+    let (relay, carrier) = open(&daemon.socket(), &network.ssh).expect("relay");
+    carriers.opened(&relay, false);
+    let redial: Redial = {
+        let socket = daemon.socket();
+        let link = network.ssh.clone();
+        let carriers = carriers.clone();
+        Box::new(move || {
+            let (relay, carrier) = open(&socket, &link)?;
+            carriers.opened(&relay, true);
+            Ok(Redialed::keeping(carrier, relay))
+        })
+    };
+    let udp = Some(UdpTarget::Exactly(udp.address()));
+    let client = Client::over_quic_redialing(carrier, udp, redial);
     (relay, client)
 }
 
@@ -363,10 +430,59 @@ fn ssh_dying_leaves_a_session_on_udp_working() {
     let network = Network::new(Conditions::clean());
     let mut session = Session::open(&daemon, &network);
     wait_for_route(&mut session, Route::Udp, Duration::from_secs(5));
-    session.ssh.kill();
+    session.kill_ssh();
     session.type_for(Duration::from_secs(2), TYPING);
     session.report("ssh dies");
     assert_eq!(session.reconnects, 0);
+    // A new ssh stream opens behind it, in case UDP goes too.
+    let started = Instant::now();
+    while session.carriers.redials() == 0 {
+        assert!(started.elapsed() < Duration::from_secs(5), "no new ssh");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn ssh_dying_before_udp_ever_worked_is_ridden_out_through_a_new_ssh_stream() {
+    let daemon = TestDaemon::start();
+    let network = Network::new(Conditions::clean());
+    // UDP never gets through.
+    network
+        .udp
+        .set(Conditions::lossy(1.0, Duration::ZERO, Duration::ZERO));
+    let mut session = Session::open(&daemon, &network);
+    session.type_for(Duration::from_secs(1), TYPING);
+    assert_eq!(session.route(), Some(Route::Ssh));
+    session.kill_ssh();
+    session.type_for(Duration::from_secs(2), TYPING);
+    session.report("ssh dies before UDP worked");
+    assert_eq!(session.reconnects, 0);
+    assert_eq!(session.carriers.redials(), 1);
+}
+
+#[test]
+fn a_daemon_that_stops_says_so_at_once() {
+    let daemon = TestDaemon::start();
+    let network = Network::new(Conditions::clean());
+    let mut session = Session::open(&daemon, &network);
+    wait_for_route(&mut session, Route::Udp, Duration::from_secs(5));
+    let stopped = Instant::now();
+    daemon.shutdown.shutdown();
+    let err = loop {
+        match session.client.list_terminals() {
+            Ok(_) => std::thread::sleep(Duration::from_millis(10)),
+            Err(err) => break err,
+        }
+    };
+    eprintln!(
+        "NETEM daemon stopped: the client knew after {:?}: {err}",
+        stopped.elapsed()
+    );
+    assert!(
+        matches!(&err, ClientError::Lost(reason) if reason == "the daemon stopped"),
+        "{err:?}"
+    );
+    assert!(stopped.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
@@ -413,9 +529,10 @@ fn a_tunnel_with_an_mtu_of_1280_carries_everything() {
             break;
         }
     }
+    let took = started.elapsed();
     session.type_for(Duration::from_secs(2), TYPING);
     session.report("MTU 1280");
-    eprintln!("NETEM   screen of big packets took {:?}", started.elapsed());
+    eprintln!("NETEM   screen of big packets took {took:?}");
     assert_eq!(session.reconnects, 0);
 }
 
@@ -431,7 +548,7 @@ fn recover_from(outage: Duration, ssh_dies_after: Option<Duration>) -> (Duration
     let started = Instant::now();
     // ssh gives up on a silent connection (ServerAliveInterval 5 x 3).
     if let Some(after) = ssh_dies_after {
-        session.ssh.kill_after(after).unwrap();
+        session.kill_ssh_after(after);
     }
     let echo = session.echo();
     let late = started.elapsed().saturating_sub(outage);
@@ -498,6 +615,7 @@ fn a_flood_down_a_narrow_link_skips_to_the_latest_screen() {
     wait_for_route(&mut session, Route::Udp, Duration::from_secs(5));
     // A terminal floods: the screen the client ends up on must be the
     // last one, soon after the output ends, however much came before.
+    let last = "3000000";
     let flood = session
         .client
         .new_terminal(NewTerminal {
@@ -505,38 +623,47 @@ fn a_flood_down_a_narrow_link_skips_to_the_latest_screen() {
             command: Some(vec![
                 "sh".into(),
                 "-c".into(),
-                "seq 1 300000; printf '\\033]0;done\\007'; exec cat".into(),
+                format!("read go; seq 1 {last}; printf '\\033]0;done\\007'; exec cat"),
             ]),
             cwd: None,
             record_to: None,
         })
         .unwrap();
-    let started = Instant::now();
     let mut view = attach_any(&mut session.client, flood);
+    let started = Instant::now();
+    session.client.send_input(flood, b"\r").unwrap();
     let mut updates = 0_u32;
-    let mut done_at = None;
-    loop {
-        if let Some(update) = next_update(&mut session.client, flood).unwrap() {
-            updates += 1;
-            view.apply(update);
-        }
-        if view.title == "done" && done_at.is_none() {
-            done_at = Some(started.elapsed());
-        }
-        if first_line_containing(&view, "300000") {
-            break;
-        }
+    // When the output ended, as the daemon saw it.
+    let mut output_done = None;
+    while !first_line_containing(&view, last) {
         assert!(
             started.elapsed() < Duration::from_mins(2),
             "never caught up"
         );
+        if output_done.is_none()
+            && (session.client.list_terminals().unwrap().iter())
+                .any(|terminal| terminal.id == flood && terminal.title == "done")
+        {
+            output_done = Some(started.elapsed());
+        }
+        if let Some(update) = next_update(&mut session.client, flood).unwrap() {
+            updates += 1;
+            view.apply(update);
+        }
     }
     let caught_up = started.elapsed();
+    let done_at = output_done.unwrap_or(caught_up);
     // Typing in the other terminal is still quick.
     session.type_for(Duration::from_secs(2), TYPING);
     session.report("flood at 1 Mbit/s");
     eprintln!(
-        "NETEM   flood: output done (as seen) at {done_at:?}, caught up at {caught_up:?}, in {updates} updates"
+        "NETEM   flood: output done at {done_at:?}, caught up at {caught_up:?}, {:?} later, in \
+         {updates} updates",
+        caught_up.saturating_sub(done_at)
+    );
+    assert!(
+        caught_up.saturating_sub(done_at) < Duration::from_secs(2),
+        "fell behind"
     );
 }
 

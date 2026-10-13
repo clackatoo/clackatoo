@@ -14,7 +14,7 @@ use clackatoo_protocol::{
     Workspaces,
 };
 
-use crate::quic::{self, Carried, Contact, Route};
+use crate::quic::{self, Carried, Contact, Redial, Route};
 use crate::remote::Ssh;
 
 /// How long the daemon may take to answer a new connection's hello.
@@ -95,7 +95,7 @@ impl Client {
     /// If the daemon doesn't answer, speaks another version, or the QUIC
     /// connection can't be set up.
     pub fn over_quic(stream: UnixStream) -> Result<Self, ClientError> {
-        Self::over_carrier(stream, None, None)
+        Self::over_carrier(stream, None, None, None)
     }
 
     /// As [`over_quic`](Self::over_quic), moving the connection onto UDP
@@ -105,7 +105,7 @@ impl Client {
     ///
     /// As [`over_quic`](Self::over_quic).
     pub fn over_quic_via(stream: UnixStream, daemon_ip: IpAddr) -> Result<Self, ClientError> {
-        Self::over_carrier(stream, Some(UdpTarget::Host(daemon_ip)), None)
+        Self::over_carrier(stream, Some(UdpTarget::Host(daemon_ip)), None, None)
     }
 
     /// As [`over_quic`](Self::over_quic), moving the connection onto UDP
@@ -115,15 +115,30 @@ impl Client {
     ///
     /// As [`over_quic`](Self::over_quic).
     pub fn over_quic_to(stream: UnixStream, udp: UdpTarget) -> Result<Self, ClientError> {
-        Self::over_carrier(stream, Some(udp), None)
+        Self::over_carrier(stream, Some(udp), None, None)
     }
 
-    /// As [`over_quic_to`](Self::over_quic_to), with `ssh` carrying
-    /// `stream`, kept running as long as the connection is open.
+    /// As [`over_quic_to`](Self::over_quic_to), opening a new carrier with
+    /// `redial` whenever the one in use closes, as a window does with ssh.
+    ///
+    /// # Errors
+    ///
+    /// As [`over_quic`](Self::over_quic).
+    pub fn over_quic_redialing(
+        stream: UnixStream,
+        udp: Option<UdpTarget>,
+        redial: Redial,
+    ) -> Result<Self, ClientError> {
+        Self::over_carrier(stream, udp, None, Some(redial))
+    }
+
+    /// As [`over_quic_redialing`](Self::over_quic_redialing), with `ssh`
+    /// carrying `stream`, kept running as long as it's in use.
     pub(crate) fn over_carrier(
         mut stream: UnixStream,
         udp_target: Option<UdpTarget>,
         ssh: Option<Ssh>,
+        redial: Option<Redial>,
     ) -> Result<Self, ClientError> {
         let (certificate, udp) = open_carrier(&mut stream)?;
         let udp = udp_target.zip(udp).map(|(target, udp)| {
@@ -133,7 +148,7 @@ impl Client {
             };
             (address, udp.probe_key)
         });
-        let (local, carried) = quic::carry(stream, certificate, udp, ssh)?;
+        let (local, carried) = quic::carry(stream, certificate, udp, ssh, redial)?;
         let mut client = Self::over(local)?;
         client.carried = Some(carried);
         Ok(client)
@@ -211,7 +226,7 @@ impl Client {
             stream: self.stream,
             decoder: self.decoder,
             events: self.events,
-            _carried: self.carried,
+            carried: self.carried,
         };
         Ok((sender, receiver))
     }
@@ -476,7 +491,7 @@ impl Client {
     }
 
     fn receive(&mut self) -> Result<ServerMessage, ClientError> {
-        receive(&mut self.stream, &mut self.decoder)
+        receive(&mut self.stream, &mut self.decoder).map_err(|err| why(err, self.carried.as_ref()))
     }
 
     /// Lists every terminal.
@@ -738,7 +753,7 @@ pub struct Receiver {
     /// Events that arrived before the split.
     events: VecDeque<Event>,
     /// What carries the connection to a remote daemon.
-    _carried: Option<Carried>,
+    carried: Option<Carried>,
 }
 
 impl Receiver {
@@ -751,7 +766,17 @@ impl Receiver {
         if let Some(event) = self.events.pop_front() {
             return Ok(ServerMessage::Event(event));
         }
-        receive(&mut self.stream, &mut self.decoder)
+        receive(&mut self.stream, &mut self.decoder).map_err(|err| why(err, self.carried.as_ref()))
+    }
+}
+
+/// `err`, from a connection that closed, or else why the QUIC connection
+/// under it ended, if it was one and it did.
+fn why(err: ClientError, carried: Option<&Carried>) -> ClientError {
+    let closed = matches!(&err, ClientError::Disconnected | ClientError::Io(_));
+    match carried.and_then(Carried::ended) {
+        Some(reason) if closed => ClientError::Lost(reason),
+        _ => err,
     }
 }
 
@@ -764,7 +789,7 @@ impl Receiver {
 /// build may hang up on a request it can't decode before answering a
 /// greeting that came with it, and then couldn't say which version it
 /// speaks.
-fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<Udp>), ClientError> {
+pub(crate) fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<Udp>), ClientError> {
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
     stream.write_all(&frame::encode(&ClientMessage::Hello {
         protocol_version: PROTOCOL_VERSION,
@@ -845,6 +870,10 @@ pub enum ClientError {
     /// The daemon closed the connection.
     #[error("the daemon closed the connection")]
     Disconnected,
+    /// The connection to a daemon on another machine ended, for this
+    /// reason.
+    #[error("{0}")]
+    Lost(String),
     /// Reading or writing the socket failed.
     #[error("connection to the daemon failed")]
     Io(#[from] io::Error),

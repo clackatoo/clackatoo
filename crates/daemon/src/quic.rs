@@ -31,14 +31,14 @@ mod server;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame;
 use quinn_proto::congestion::BbrConfig;
 use quinn_proto::{TransportConfig, VarInt};
 
-pub use client::Contact;
 pub(crate) use client::{Carried, carry};
+pub use client::{Contact, Redial, Redialed};
 pub use path::Route;
 pub(crate) use server::{QuicEvent, QuicServer, Received};
 
@@ -47,14 +47,32 @@ pub(crate) use server::{QuicEvent, QuicServer, Received};
 const SERVER_NAME: &str = "clackatoo";
 
 /// How long a connection may go without hearing from the other end before
-/// it ends: long enough for a laptop to change networks, or sleep briefly,
-/// and pick up where it left off. The client's keep-alives stop an idle
-/// terminal reaching it.
-const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
+/// it ends: long enough to ride out a network that goes away for a while,
+/// a laptop changing networks, or a short sleep, and pick up where it left
+/// off, as mosh does. The client's keep-alives stop an idle terminal
+/// reaching it. A client that's gone for good, without a word, costs the
+/// daemon little meanwhile: its views wait for acknowledgements that never
+/// come, so nothing is sent.
+const IDLE_TIMEOUT: Duration = Duration::from_hours(1);
 
 /// How often a client lets the daemon know it's there when nothing else is
-/// sent: often enough to keep a home router's mapping for UDP open.
-const KEEP_ALIVE: Duration = Duration::from_secs(25);
+/// sent: often enough to keep a home router's mapping for UDP open, which
+/// some forget after 30 s, and for each end to notice soon when the other
+/// goes quiet.
+const KEEP_ALIVE: Duration = Duration::from_secs(10);
+
+/// The size of every packet's UDP payload, and never more. Tunnels such as
+/// Tailscale's take IP packets of at most 1280 bytes, which leaves 1232
+/// for UDP over IPv6; QUIC can't go below 1200. So packets are never
+/// bigger than what any path QUIC can use takes, and nothing has to find
+/// out how big they may be. Searching (quinn's DPLPMTUD) would look on a
+/// carrier first, where anything fits, and the client's side never starts
+/// again when it moves onto UDP, as its QUIC never sees it move: it would
+/// go on sending 1452-byte packets into a 1280-byte tunnel, to be dropped,
+/// or, as the sockets don't forbid it, cut into two fragments, doubling
+/// the chance of losing each on a lossy link. The few percent more each
+/// packet could carry isn't worth that.
+const PACKET_SIZE: u16 = 1200;
 
 /// How often each end logs how its connection is going, while it's open.
 const STATS_EVERY: Duration = Duration::from_mins(5);
@@ -85,6 +103,79 @@ pub(crate) fn describe(connection: &quinn_proto::Connection) -> String {
     )
 }
 
+/// How often a path's loss is measured.
+const LOSS_EVERY: Duration = Duration::from_secs(1);
+
+/// Of each thousand packets, how many lost makes a path lossy.
+const LOSSY: u64 = 20;
+
+/// How long a path counts as lossy after it last lost that much: long, as
+/// sending small packets twice hides the loss it's there for.
+const LOSSY_FOR: Duration = Duration::from_mins(1);
+
+/// The largest packet sent twice on a lossy path: keys, their echoes,
+/// acknowledgements and pings, which are what typing waits on, and cost
+/// next to nothing to send twice.
+const SMALL_PACKET: usize = 600;
+
+/// Whether a connection's path over UDP has been losing packets lately, as
+/// bad Wi-Fi does, so that its small packets go twice. One lost packet
+/// costs QUIC a probe timeout to notice, at best, and it waits twice as
+/// long each time the next try is lost too: at 30% loss each way, the
+/// typing of the moment would wait seconds, now and then many. Sent twice,
+/// a packet is lost only when both copies are (9% at 30%); QUIC drops the
+/// copy that arrives second. That's mosh's answer too. Big packets, such
+/// as a screen after a flood, go once: they're most of the bytes, and
+/// congestion control looks after them.
+#[derive(Debug)]
+pub(crate) struct Loss {
+    /// The connection's counts when last measured.
+    sent: u64,
+    lost: u64,
+    measured_at: Instant,
+    /// Until when the path counts as lossy, if it has been.
+    lossy_until: Option<Instant>,
+}
+
+impl Loss {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            sent: 0,
+            lost: 0,
+            measured_at: now,
+            lossy_until: None,
+        }
+    }
+
+    /// Measures `connection`'s loss since last time, if it's time.
+    pub(crate) fn update(&mut self, connection: &quinn_proto::Connection, now: Instant) {
+        if now < self.measured_at + LOSS_EVERY {
+            return;
+        }
+        let path = connection.stats().path;
+        let sent = path.sent_packets.saturating_sub(self.sent);
+        let lost = path.lost_packets.saturating_sub(self.lost);
+        // Too few sent to say: wait for more.
+        if sent < 8 {
+            return;
+        }
+        if lost * 1000 >= sent * LOSSY {
+            if self.lossy_until.is_none_or(|until| until < now) {
+                log::info!("the path is losing packets ({lost} of {sent}): small ones go twice");
+            }
+            self.lossy_until = Some(now + LOSSY_FOR);
+        }
+        self.sent = path.sent_packets;
+        self.lost = path.lost_packets;
+        self.measured_at = now;
+    }
+
+    /// Whether a packet of `size` bytes should go twice, as of `now`.
+    pub(crate) fn twice(&self, size: usize, now: Instant) -> bool {
+        size <= SMALL_PACKET && self.lossy_until.is_some_and(|until| now < until)
+    }
+}
+
 /// How both ends' connections behave.
 fn transport() -> TransportConfig {
     let mut transport = TransportConfig::default();
@@ -100,6 +191,9 @@ fn transport() -> TransportConfig {
         .congestion_controller_factory(Arc::new(BbrConfig::default()))
         // One packet per frame on a carrier.
         .enable_segmentation_offload(false)
+        .initial_mtu(PACKET_SIZE)
+        .min_mtu(PACKET_SIZE)
+        .mtu_discovery_config(None)
         // A stream for each terminal a client follows.
         .max_concurrent_uni_streams(VarInt::from_u32(1024));
     transport

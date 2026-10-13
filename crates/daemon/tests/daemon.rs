@@ -1312,6 +1312,11 @@ fn quic_moves_onto_udp_and_outlives_its_carrier() {
     let terminal = spawn(&mut client, &["sh", "-c", "printf ready; exec cat"]);
     let mut view = attach(&mut client, terminal);
     client.frame_done(terminal).unwrap();
+    // Typed only once the shell has printed, or the echo could come first.
+    while view.grid().unwrap().lines[0].text() != "ready" {
+        view.apply(next_update(&mut client, terminal));
+        client.frame_done(terminal).unwrap();
+    }
     client.send_input(terminal, b"x").unwrap();
     while view.grid().unwrap().lines[0].text() != "readyx" {
         view.apply(next_update(&mut client, terminal));
@@ -1360,17 +1365,17 @@ fn a_daemon_that_stops_answering_is_out_of_contact_until_it_answers_again() {
         std::thread::spawn(move || {
             let mut buffer = [0; 4096];
             loop {
-                if cut.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(10));
-                    continue;
-                }
-                match from.read(&mut buffer) {
+                let n = match from.read(&mut buffer) {
                     Ok(0) | Err(_) => return,
-                    Ok(n) => {
-                        if to.write_all(&buffer[..n]).is_err() {
-                            return;
-                        }
-                    }
+                    Ok(n) => n,
+                };
+                // Held while cut, even if read just before, as TCP holds
+                // what it can't deliver.
+                while cut.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if to.write_all(&buffer[..n]).is_err() {
+                    return;
                 }
             }
         })
@@ -1395,10 +1400,11 @@ fn a_daemon_that_stops_answering_is_out_of_contact_until_it_answers_again() {
     // Something that wants an answer, without waiting for one.
     let cut_at = Instant::now();
     client.frame_done(TerminalId(1)).unwrap();
-    notified.recv_timeout(Duration::from_secs(6)).unwrap();
+    notified.recv_timeout(Duration::from_secs(10)).unwrap();
     let silent_since = contact.silent_since().expect("out of contact");
     assert!(silent_since >= cut_at);
-    assert!(cut_at.elapsed() >= Duration::from_secs(3));
+    // Not before a relay's stall of a few seconds would be over.
+    assert!(cut_at.elapsed() >= Duration::from_secs(5));
 
     cut.store(false, Ordering::Relaxed);
     notified.recv_timeout(Duration::from_secs(10)).unwrap();
