@@ -163,6 +163,7 @@ impl TestDaemon {
             mcp: None,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
+            session_wait: clackatoo_daemon::DEFAULT_SESSION_WAIT,
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             boards: None,
             browser: None,

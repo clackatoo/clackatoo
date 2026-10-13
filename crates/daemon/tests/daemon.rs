@@ -70,6 +70,7 @@ impl TestDaemon {
             server_idle: Duration::ZERO,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
+            session_wait: clackatoo_daemon::DEFAULT_SESSION_WAIT,
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             rename_gate: None,
             boards: None,
@@ -10058,9 +10059,16 @@ fn an_agent_that_wont_say_its_models_is_given_up_on_and_not_asked_again_at_once(
     let node = wait_for_chat(&mut client, chat, |node| {
         matches!(node.providers[0].models, ProviderModels::Failed(_))
     });
-    assert_eq!(
-        node.providers[0].models,
-        ProviderModels::Failed("it didn't say what models it has within 300 ms".to_owned())
+    // With what it may be waiting on, as a chat's slow session says.
+    let ProviderModels::Failed(why) = &node.providers[0].models else {
+        unreachable!()
+    };
+    assert!(
+        why.starts_with(
+            "it didn't say what models it has within 300 ms. It may be waiting on an MCP server \
+             in `~/.codex/config.toml` that needs a login"
+        ) && why.ends_with("try `codex mcp list` in a terminal."),
+        "{why}"
     );
     let deadline = Instant::now() + Duration::from_secs(5);
     while running_with(&daemon, "--mute") {
@@ -10075,6 +10083,292 @@ fn an_agent_that_wont_say_its_models_is_given_up_on_and_not_asked_again_at_once(
         chat_now(&mut client, chat).providers[0].models,
         ProviderModels::Failed(_)
     ));
+}
+
+/// A daemon whose chats talk to the fake agent run with `flags`, given
+/// the daemon's directory, as Claude Code, and say an agent is slow to
+/// open a session after `wait`.
+fn with_slow_sessions(
+    wait: Duration,
+    flags: impl FnOnce(&Path) -> Vec<std::ffi::OsString>,
+) -> TestDaemon {
+    TestDaemon::start_with(|dir, config| {
+        let mut command = vec![fake_agent().into()];
+        command.extend(flags(dir));
+        command.extend(["--log".into(), dir.join("agent.log").into()]);
+        config.agents.custom = vec![custom_agent("claude", command)];
+        config.session_wait = wait;
+    })
+}
+
+/// Opens a workspace with a chat, which isn't waited for.
+fn open_chat(client: &mut Client) -> TerminalId {
+    client.new_workspace(None, new_chat()).unwrap();
+    client.watch_workspaces().unwrap().list[0].terminals()[0]
+}
+
+/// Whether `node` says its agent is slow to open its session, offering
+/// to keep waiting, to start it again, or to stop, as the daemon asks.
+fn says_slow(node: &ChatNode) -> bool {
+    let choices: Vec<&str> = (node.question.iter())
+        .flat_map(|question| &question.choices)
+        .map(|choice| choice.id.as_str())
+        .collect();
+    (node.notice.as_deref()).is_some_and(|notice| notice.contains("hasn't opened its session"))
+        && choices == ["wait", "retry", "stop"]
+        && node.question.as_ref().is_some_and(|question| question.own)
+}
+
+#[test]
+fn a_chat_says_when_its_agent_is_slow_to_open_its_session_and_stopping_stops_waiting() {
+    let daemon = with_slow_sessions(Duration::from_millis(300), |_| vec!["--mute".into()]);
+    let mut client = daemon.client();
+    let chat = open_chat(&mut client);
+    client
+        .chat(chat, ChatAction::Send("hello".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, says_slow);
+    assert_eq!(
+        node.notice.as_deref(),
+        Some(
+            "Claude Code hasn't opened its session in 300 ms. It may be waiting on an MCP \
+             server in its settings (`~/.claude.json`, or the project's `.mcp.json`) that \
+             needs a login: try `claude mcp list` in a terminal."
+        )
+    );
+    // It's no failure: it goes on waiting, as a slow agent may answer.
+    assert_eq!(node.state, ChatState::Starting);
+    assert_eq!(last_outcome(&node), None);
+    answer(&mut client, chat, Some("stop".to_owned()));
+    let node = wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
+    assert_eq!((node.notice, node.question), (None, None));
+
+    // The next message asks again, and Stop, as Ctrl+C sends it, stops
+    // waiting just as well, with no message waiting at all.
+    client
+        .chat(chat, ChatAction::Send("again".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut client, chat, says_slow);
+    answer(&mut client, chat, Some("wait".to_owned()));
+    let node = wait_for_chat(&mut client, chat, |node| node.question.is_none());
+    assert!(node.notice.is_some(), "the notice stays while it waits");
+    client.chat(chat, ChatAction::Stop).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
+    assert_eq!((node.notice, node.question), (None, None));
+    client.new_workspace(None, new_chat()).unwrap();
+    let opened = client.watch_workspaces().unwrap().list[1].terminals()[0];
+    wait_for_chat(&mut client, opened, says_slow);
+    client.chat(opened, ChatAction::Stop).unwrap();
+    let node = wait_for_chat(&mut client, opened, |node| node.state == ChatState::Ready);
+    assert!(node.turns.is_empty());
+    assert_eq!((node.notice, node.question), (None, None));
+
+    // Kept waiting, a message sent meanwhile waits too, and the notice
+    // still says why.
+    client.new_workspace(None, new_chat()).unwrap();
+    let third = client.watch_workspaces().unwrap().list[2].terminals()[0];
+    wait_for_chat(&mut client, third, says_slow);
+    answer(&mut client, third, Some("wait".to_owned()));
+    wait_for_chat(&mut client, third, |node| node.question.is_none());
+    client
+        .chat(third, ChatAction::Send("hi".to_owned()))
+        .unwrap();
+    let node = wait_for_chat(&mut client, third, |node| node.turns.len() == 1);
+    assert!(
+        (node.notice.as_deref()).is_some_and(|notice| notice.contains("hasn't opened")),
+        "{:?}",
+        node.notice
+    );
+    assert_eq!(node.state, ChatState::Starting);
+}
+
+#[test]
+fn retry_starts_an_agent_slow_to_open_a_session_again_and_asks_again() {
+    // Stuck the first time, it ends neither when its stdin closes nor on
+    // SIGTERM, which the shell has it ignore: only SIGKILL ends it.
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let command = [
+            "/bin/sh".into(),
+            "-c".into(),
+            "trap '' TERM; exec \"$0\" \"$@\"".into(),
+            fake_agent().into_os_string(),
+            "--stubborn".into(),
+            "--mute".into(),
+            "--once".into(),
+            dir.join("started").into(),
+        ];
+        config.agents.custom = vec![custom_agent("claude", command.into())];
+        config.session_wait = Duration::from_millis(300);
+    });
+    let mut client = daemon.client();
+    let chat = open_chat(&mut client);
+    client
+        .chat(chat, ChatAction::Send("hi".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut client, chat, says_slow);
+    client.new_workspace(None, new_chat()).unwrap();
+    let other = client.watch_workspaces().unwrap().list[1].terminals()[0];
+    wait_for_chat(&mut client, other, says_slow);
+    let first = child_processes_in(daemon.dir.path());
+    assert_eq!(first.len(), 1);
+    answer(&mut client, chat, Some("retry".to_owned()));
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    assert_eq!(last_words(&node), "echo: hi\n");
+    assert_eq!((node.notice, node.question), (None, None));
+    // The other chat waiting on it asked again too, and got its session.
+    let node = wait_for_chat(&mut client, other, |node| node.state == ChatState::Ready);
+    assert_eq!((node.notice, node.question), (None, None));
+    // Another process answered, and the first has gone.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let running = child_processes_in(daemon.dir.path());
+        if running.len() == 1 && running != first {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{running:?}, first {first:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn retry_only_asks_again_while_another_chat_is_in_the_middle_of_a_turn() {
+    // Long enough to see what's said before it's slow again.
+    let daemon = with_slow_sessions(Duration::from_secs(1), |_| {
+        vec!["--mute-after".into(), "1".into()]
+    });
+    let mut client = daemon.client();
+    let busy = start_chat(&mut client);
+    client
+        .chat(busy, ChatAction::Send("wait".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut client, busy, |node| node.state == ChatState::Answering);
+    client.new_workspace(None, new_chat()).unwrap();
+    let slow = client.watch_workspaces().unwrap().list[1].terminals()[0];
+    wait_for_chat(&mut client, slow, says_slow);
+    let agent = child_processes_in(daemon.dir.path());
+    answer(&mut client, slow, Some("retry".to_owned()));
+    let node = wait_for_chat(&mut client, slow, |node| {
+        node.notice
+            .as_deref()
+            .is_some_and(|notice| notice.starts_with("Asking Claude Code again"))
+    });
+    assert_eq!(node.state, ChatState::Starting);
+    // Asked again, it's slow again: said once for each time it's asked.
+    wait_for_chat(&mut client, slow, says_slow);
+    assert_eq!(child_processes_in(daemon.dir.path()), agent);
+    assert_eq!(chat_now(&mut client, busy).state, ChatState::Answering);
+    client.chat(busy, ChatAction::Stop).unwrap();
+    let node = wait_for_chat(&mut client, busy, |node| last_outcome(node).is_some());
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
+}
+
+#[test]
+fn a_chat_moved_while_waiting_hears_its_new_agent_is_slow_whatever_the_old_one_says() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let fake = |flags: &[&str], log: &str| {
+            let mut command: Vec<std::ffi::OsString> = vec![fake_agent().into()];
+            command.extend(flags.iter().map(Into::into));
+            command.extend(["--log".into(), dir.join(log).into()]);
+            command
+        };
+        config.agents.custom = vec![
+            custom_agent("claude", fake(&["--slow-new", "300"], "claude.log")),
+            custom_agent("codex", fake(&["--codex", "--mute"], "codex.log")),
+        ];
+        config.session_wait = Duration::from_millis(800);
+    });
+    let mut client = daemon.client();
+    let chat = open_chat(&mut client);
+    let switch = ChatAction::Switch {
+        agent: "codex".into(),
+        model: None,
+        budget: 20_000,
+    };
+    client.chat(chat, switch).unwrap();
+    // Claude Code's session, too late, is never heard of (Claude Code is
+    // stopped, needed by no chat now), and the chat still waits for
+    // Codex's, which it hears is slow.
+    let node = wait_for_chat(&mut client, chat, says_slow);
+    assert!(node.notice.unwrap().starts_with("Codex hasn't opened"));
+}
+
+#[test]
+fn an_agent_that_hasnt_started_is_said_to_have_not_rather_than_blamed_on_a_login() {
+    let daemon = with_slow_sessions(Duration::from_millis(300), |_| vec!["--mute-init".into()]);
+    let mut client = daemon.client();
+    let chat = open_chat(&mut client);
+    let node = wait_for_chat(&mut client, chat, |node| node.notice.is_some());
+    assert_eq!(
+        node.notice.as_deref(),
+        Some("Claude Code hasn't started in 300 ms: it hasn't answered clackatoo at all yet.")
+    );
+    assert!(node.question.is_some_and(|question| question.own));
+}
+
+#[test]
+fn an_agent_fetched_through_npx_is_waited_for_longer_and_said_to_be_fetched() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let bin = dir.join("bin");
+        script(
+            &bin.join("npx"),
+            &format!("exec {} --mute-init", fake_agent().display()),
+        );
+        config.agents.path = Some(bin.into());
+        config.session_wait = Duration::from_millis(250);
+    });
+    let mut client = daemon.client();
+    let asked = Instant::now();
+    let chat = open_chat(&mut client);
+    let node = wait_for_chat(&mut client, chat, |node| node.notice.is_some());
+    assert!(
+        asked.elapsed() >= Duration::from_millis(900),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert_eq!(
+        node.notice.as_deref(),
+        Some(
+            "Claude Code hasn't started in 1 s. It runs through npx, which may still be fetching it."
+        )
+    );
+}
+
+#[test]
+fn a_session_that_comes_after_the_chat_stopped_waiting_is_closed_unseen() {
+    let daemon = with_slow_sessions(Duration::from_millis(200), |_| {
+        vec!["--slow-new".into(), "800".into()]
+    });
+    let mut client = daemon.client();
+    let chat = open_chat(&mut client);
+    wait_for_chat(&mut client, chat, says_slow);
+    answer(&mut client, chat, Some("stop".to_owned()));
+    wait_for_log(&daemon, "agent.log", "closed s1");
+    let node = chat_now(&mut client, chat);
+    assert_eq!(node.state, ChatState::Ready);
+    assert_eq!((node.notice, node.question), (None, None));
+    // The next message asks again, and that one's kept.
+    let node = ask(&mut client, chat, "hi");
+    assert_eq!(last_words(&node), "echo: hi\n");
+    assert_eq!(agent_log(&daemon, "agent.log").matches("closed").count(), 1);
+}
+
+#[test]
+fn a_session_that_comes_after_all_takes_away_the_notice() {
+    let daemon = with_slow_sessions(Duration::from_millis(200), |_| {
+        vec!["--slow-new".into(), "800".into()]
+    });
+    let mut client = daemon.client();
+    let chat = open_chat(&mut client);
+    client
+        .chat(chat, ChatAction::Send("hi".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut client, chat, says_slow);
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert_eq!(last_words(&node), "echo: hi\n");
+    assert_eq!((node.notice, node.question), (None, None));
 }
 
 #[test]

@@ -484,10 +484,17 @@ pub fn footer(state: &State, node: Option<&ChatNode>) -> Element {
                 })
                 .text(choice.name.clone())
         });
+        // The daemon's own question as it is; any other is about what the
+        // agent would do, however it's worded.
+        let asked = if question.own {
+            question.title.clone()
+        } else {
+            format!("Allow the agent to {}?", question.title)
+        };
         footer = footer.child(
             el("div")
                 .class("question")
-                .child(el("p").text(question.title.clone()))
+                .child(el("p").text(asked))
                 .child(el("div").class("choices").children(choices)),
         );
     }
@@ -809,6 +816,27 @@ mod tests {
     }
 
     #[test]
+    fn only_the_daemons_own_question_is_shown_as_it_is() {
+        let own = "Keep waiting for Codex, start it again and ask again, or stop?";
+        let shown = |own_question| {
+            let node = ChatNode {
+                question: Some(Question {
+                    id: 1,
+                    title: own.into(),
+                    choices: Vec::new(),
+                    own: own_question,
+                }),
+                ..ChatNode::default()
+            };
+            footer(&State::default(), Some(&node)).all_text()
+        };
+        assert!(shown(true).contains(own));
+        assert!(!shown(true).contains("Allow the agent"));
+        // Worded as the daemon's, an agent's is still the agent's.
+        assert!(shown(false).contains(&format!("Allow the agent to {own}?")));
+    }
+
+    #[test]
     fn a_question_offers_every_choice() {
         let node = ChatNode {
             question: Some(Question {
@@ -827,6 +855,7 @@ mod tests {
                         kind,
                     })
                     .collect(),
+                own: false,
             }),
             ..ChatNode::default()
         };

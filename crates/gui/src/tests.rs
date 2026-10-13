@@ -899,6 +899,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                 kind,
             })
             .into(),
+            own: false,
         }),
         settings: claude_settings(),
         usage: Some(clackatoo_protocol::Usage {

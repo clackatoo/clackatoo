@@ -907,6 +907,7 @@ pub(super) mod tests {
             server_idle: std::time::Duration::ZERO,
             prompt_wait: crate::DEFAULT_PROMPT_WAIT,
             probe_wait: crate::DEFAULT_PROBE_WAIT,
+            session_wait: crate::DEFAULT_SESSION_WAIT,
             park_after: crate::DEFAULT_PARK_AFTER,
             rename_gate: None,
             trash: Some(dir.join("Trash")),

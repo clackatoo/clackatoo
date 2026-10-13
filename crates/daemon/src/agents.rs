@@ -80,6 +80,25 @@ pub(crate) struct Known {
     pub(crate) starting_mode: Option<&'static str>,
     /// What logs in to it, to say when it isn't logged in.
     pub(crate) login: &'static str,
+    /// Where it's told which MCP servers to start, to say when a session
+    /// is slow to open.
+    pub(crate) servers: Servers,
+}
+
+/// Where an agent clackatoo knows is told which MCP servers to start with
+/// each session. A server waiting on a login is what most often keeps a
+/// session from opening: Codex waited forever on one in jack's config
+/// (CLACKA-81).
+#[derive(Debug)]
+pub(crate) struct Servers {
+    /// Where they're set, as it's shown.
+    pub(crate) set_in: &'static str,
+    /// What lists them, in a terminal, saying which can't start.
+    pub(crate) list: &'static str,
+    /// Finds the servers set that are reached over the network, which
+    /// are the ones to log in to, by name, given the home directory: for
+    /// an agent whose config can be read for them.
+    pub(crate) remote: Option<fn(&Path) -> Vec<String>>,
 }
 
 /// Known agents are the same if they have the same name.
@@ -108,6 +127,11 @@ pub(crate) const KNOWN: &[Known] = &[
         // Auto decides itself what needs asking about (jack, 2026-10-08).
         starting_mode: Some("auto"),
         login: "claude",
+        servers: Servers {
+            set_in: "its settings (`~/.claude.json`, or the project's `.mcp.json`)",
+            list: "claude mcp list",
+            remote: None,
+        },
     },
     Known {
         name: "codex",
@@ -123,6 +147,11 @@ pub(crate) const KNOWN: &[Known] = &[
         // terminal: Auto review for most.
         starting_mode: None,
         login: "codex login",
+        servers: Servers {
+            set_in: "`~/.codex/config.toml`",
+            list: "codex mcp list",
+            remote: Some(codex_remote_servers),
+        },
     },
     Known {
         name: "gemini",
@@ -136,6 +165,11 @@ pub(crate) const KNOWN: &[Known] = &[
         size: "100 MB",
         starting_mode: None,
         login: "gemini",
+        servers: Servers {
+            set_in: "`~/.gemini/settings.json`",
+            list: "gemini mcp list",
+            remote: None,
+        },
     },
 ];
 
@@ -448,6 +482,95 @@ pub(crate) fn login_command(spec: &AgentSpec, dir: Option<&Path>) -> Option<Stri
     } else {
         login.to_owned()
     })
+}
+
+/// What a session the agent called `name` is slow to open may be waiting
+/// on, to tell the user: for an agent clackatoo knows, an MCP server in
+/// its config that needs a login, naming those reached over the network
+/// where its config can be read for them (Codex's), and what lists them;
+/// for any other, something it starts with each session. `home` is the
+/// user's home directory.
+///
+/// A known agent given a command of the user's is still that agent, with
+/// the same config. Reads one small file at most.
+pub(crate) fn stuck_hint(name: &str, home: &Path) -> String {
+    /// The most servers named: plenty to go on.
+    const NAMED: usize = 3;
+    let Some(servers) = known(name).map(|known| &known.servers) else {
+        return "It may be waiting on something it starts with each session, such as an MCP \
+                server that needs a login."
+            .to_owned();
+    };
+    let remote = servers
+        .remote
+        .map(|remote| remote(home))
+        .unwrap_or_default();
+    let named = if remote.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<String> = (remote.iter().take(NAMED))
+            .map(|name| format!("`{name}`"))
+            .collect();
+        format!(" (e.g. {})", names.join(", "))
+    };
+    format!(
+        "It may be waiting on an MCP server in {} that needs a login{named}: try `{}` in a \
+         terminal.",
+        servers.set_in, servers.list
+    )
+}
+
+/// The MCP servers Codex's config sets that it reaches over the network,
+/// by name: those are the ones that may need a login (by OAuth). The
+/// config is `config.toml` in `$CODEX_HOME`, or else in `.codex` in
+/// `home`, as Codex finds it.
+fn codex_remote_servers(home: &Path) -> Vec<String> {
+    let dir = (std::env::var_os("CODEX_HOME"))
+        .filter(|dir| !dir.is_empty())
+        .map_or_else(|| home.join(".codex"), PathBuf::from);
+    codex_remote_servers_in(&dir.join("config.toml"))
+}
+
+/// The MCP servers Codex's config at `path` sets that have a `url`, and
+/// aren't turned off, by name. None if it isn't there, or isn't TOML.
+fn codex_remote_servers_in(path: &Path) -> Vec<String> {
+    /// The most of a config read: one is a few kilobytes.
+    const MOST: u64 = 1024 * 1024;
+    // Read on the event loop: a FIFO, or anything else that isn't a file,
+    // could keep it waiting.
+    let read = crate::find::open_file(path).and_then(|file| {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::Read::take(file, MOST), &mut text)?;
+        Ok(text)
+    });
+    let Some(document) = (read.ok()).and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
+    else {
+        return Vec::new();
+    };
+    let Some(servers) = (document.get("mcp_servers")).and_then(toml_edit::Item::as_table_like)
+    else {
+        return Vec::new();
+    };
+    let remote = |server: &toml_edit::Item| {
+        server.as_table_like().is_some_and(|server| {
+            server
+                .get("url")
+                .and_then(toml_edit::Item::as_str)
+                .is_some()
+                && server.get("enabled").and_then(toml_edit::Item::as_bool) != Some(false)
+        })
+    };
+    (servers.iter())
+        .filter(|(_, server)| remote(server))
+        .map(|(name, _)| name)
+        // Codex's own rule for a server's name, which keeps anything else
+        // out of what's shown.
+        .filter(|name| {
+            !name.is_empty()
+                && (name.bytes()).all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Where `known`'s adapter is installed in `dir`: in a directory named
@@ -878,5 +1001,66 @@ mod tests {
         assert!(old("1.1.0").exists(), "it's running");
         assert!(old("1.2.0").exists(), "agents.toml names it");
         assert!(dir.path().join("codex-mine").exists(), "not a version");
+    }
+
+    #[test]
+    fn codexs_remote_mcp_servers_are_found_by_their_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        assert!(codex_remote_servers_in(&config).is_empty(), "no config");
+        fs::write(
+            &config,
+            r#"
+model = "gpt-5"
+
+[mcp_servers.acta]
+url = "https://acta.peios.org/mcp"
+
+[mcp_servers.files]
+command = "npx"
+args = ["files-mcp"]
+
+[mcp_servers.linear]
+url = "https://mcp.linear.app/mcp"
+enabled = false
+
+[mcp_servers."we`ird"]
+url = "https://example.com"
+
+[mcp_servers.sentry]
+url = "https://mcp.sentry.dev/mcp"
+"#,
+        )
+        .unwrap();
+        assert_eq!(codex_remote_servers_in(&config), ["acta", "sentry"]);
+        fs::write(&config, "[mcp_servers\nurl =").unwrap();
+        assert!(codex_remote_servers_in(&config).is_empty(), "not TOML");
+        // A FIFO, which a read would wait on for a writer, is passed over
+        // at once.
+        let fifo = dir.path().join("fifo.toml");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        assert!(codex_remote_servers_in(&fifo).is_empty(), "not a file");
+    }
+
+    #[test]
+    fn a_slow_session_names_where_each_agent_is_told_its_mcp_servers() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = stuck_hint("claude", home.path());
+        assert!(claude.contains("`claude mcp list`"), "{claude}");
+        assert!(claude.contains("~/.claude.json"), "{claude}");
+        assert!(stuck_hint("gemini", home.path()).contains("`gemini mcp list`"));
+        let mine = stuck_hint("opencode", home.path());
+        assert_eq!(
+            mine,
+            "It may be waiting on something it starts with each session, such as an MCP server \
+             that needs a login."
+        );
     }
 }

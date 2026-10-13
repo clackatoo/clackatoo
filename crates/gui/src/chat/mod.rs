@@ -21,8 +21,8 @@ mod picker;
 mod read;
 
 use clackatoo_protocol::{
-    ChatAction, ChatNode, ChoiceKind, ProviderModels, Setting, SettingKind, TurnFilesState,
-    ViewUpdate,
+    ChatAction, ChatNode, ChatState, ChoiceKind, ProviderModels, Setting, SettingKind,
+    TurnFilesState, ViewUpdate,
 };
 use parley::{LayoutContext, PlainEditor};
 use winit::keyboard::{Key, NamedKey};
@@ -424,6 +424,14 @@ impl ChatView {
             .is_some_and(|turn| turn.end.is_none())
     }
 
+    /// Whether there's something for Stop to stop: the agent answering, or
+    /// starting with no message typed, as one slow to open its session
+    /// may be. A message typed while it starts goes instead, and waits.
+    fn stoppable(&self) -> bool {
+        self.busy()
+            || (self.node.state == ChatState::Starting && self.editor.raw_text().trim().is_empty())
+    }
+
     // --- Input, queued until the fonts are at hand --------------------------
 
     pub(crate) fn key(&mut self, press: &KeyPress<'_>) {
@@ -725,7 +733,7 @@ impl ChatView {
                 Some(selected) if !selected.is_empty() => {
                     settled.copied.push((selected.to_owned(), Copy::Clipboard));
                 }
-                _ if self.busy() => settled.actions.push(ChatAction::Stop),
+                _ if self.stoppable() => settled.actions.push(ChatAction::Stop),
                 _ => {
                     if let Some((start, end)) = self.picked_range() {
                         let text = self.text_between(fonts, start, end);
@@ -1403,6 +1411,39 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_stops_an_agent_starting_with_no_message_and_one_typed_goes() {
+        let mut fonts = fonts();
+        let node = ChatNode {
+            state: ChatState::Starting,
+            ..ChatNode::default()
+        };
+        let mut view = ChatView::new(String::new(), node);
+        let ctrl_c = |view: &mut ChatView| {
+            press(
+                view,
+                &Key::Character("c".into()),
+                None,
+                Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+            );
+        };
+        assert!(view.stoppable());
+        ctrl_c(&mut view);
+        assert_eq!(view.settle(&mut fonts).actions, [ChatAction::Stop]);
+        // Typed while it starts, a message goes, and waits for it.
+        typed(&mut view, "hi");
+        assert_eq!(view.settle(&mut fonts).actions, []);
+        assert!(!view.stoppable());
+        enter(&mut view, false);
+        assert_eq!(
+            view.settle(&mut fonts).actions,
+            [ChatAction::Send("hi".into())]
+        );
+    }
+
+    #[test]
     fn a_question_is_answered_by_number_or_turned_down_with_esc() {
         let mut fonts = fonts();
         let mut node = ChatNode::default();
@@ -1418,6 +1459,7 @@ mod tests {
                 choice("yes", ChoiceKind::AllowOnce),
                 choice("no", ChoiceKind::RejectOnce),
             ],
+            own: false,
         });
         let mut view = ChatView::new(String::new(), node);
         typed(&mut view, "1");

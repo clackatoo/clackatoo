@@ -234,6 +234,12 @@ pub(crate) enum Action {
     /// The chat's Browser setting went on, or off: give the agent the
     /// browser's tools, or take them away and close the chat's page.
     Browser(bool),
+    /// The chat no longer waits for the session it asked for: one made
+    /// after all is to be closed, unseen.
+    Abandon,
+    /// The agent is slow to open the chat's session: start it again, and
+    /// ask again.
+    Retry,
 }
 
 /// The answer to an install offer that installs.
@@ -301,6 +307,9 @@ pub(crate) struct HostedChat {
     link: Link,
     /// A message sent while there's no session, to go once there is.
     queued: Option<String>,
+    /// Whether the notice says the agent is slow to open the session: it
+    /// goes once the session opens, or isn't waited for.
+    slow: bool,
     node: ChatNode,
     /// The questions waiting for answers, the first shown: the agent may
     /// ask about several tools at once, and clackatoo's own tools ask
@@ -404,7 +413,21 @@ enum Asker {
     /// The daemon: whether to install the agent, which runs another way
     /// meanwhile, so nothing waits for the answer.
     Suggest,
+    /// The daemon: what to do about a session the agent is slow to open.
+    Slow,
 }
+
+/// The answers to the question asked when the agent is slow to open a
+/// chat's session: its ID, what it's called, and what it means. Keeping
+/// waiting takes the question away, and the notice stays; the session
+/// may still come. It's what Esc picks, as a refusal of this once, and
+/// none is made the one to press: Retry starts again a process every
+/// chat with the agent shares, and Stop gives up.
+const SLOW_CHOICES: [(&str, &str, ChoiceKind); 3] = [
+    ("wait", "Keep waiting", ChoiceKind::RejectOnce),
+    ("retry", "Retry", ChoiceKind::AllowOnce),
+    ("stop", "Stop", ChoiceKind::RejectAlways),
+];
 
 /// The changes made to a chat, numbered, for viewers to catch up with.
 #[derive(Debug, Default)]
@@ -468,6 +491,7 @@ impl HostedChat {
             session: None,
             link: Link::Opening,
             queued: None,
+            slow: false,
             node: ChatNode {
                 agent: agent.title.clone(),
                 settings: vec![tools_setting(tools), browser_setting(browser)],
@@ -816,7 +840,11 @@ impl HostedChat {
                     && let Some((asker, _)) = self.asking.pop_front()
                 {
                     self.show_question();
-                    actions.extend(self.answer(asker, option));
+                    if asker == Asker::Slow {
+                        self.slow_answered(option.as_deref(), &mut actions);
+                    } else {
+                        actions.extend(self.answer(asker, option));
+                    }
                 }
             }
             // The chat's own: the agent never hears of it.
@@ -898,7 +926,11 @@ impl HostedChat {
         from: Option<Sender>,
         actions: &mut Vec<Action>,
     ) {
-        self.set_notice(None);
+        // A session slow to open still is: what says so stays until it
+        // comes, or isn't waited for.
+        if !self.slow {
+            self.set_notice(None);
+        }
         self.push_turn(Turn {
             prompt: shown,
             sent: now(),
@@ -1036,9 +1068,11 @@ impl HostedChat {
     }
 
     /// Stops the agent answering, or takes back the message if it hasn't
-    /// gone yet.
+    /// gone yet, and stops waiting for a session asked for, even with no
+    /// message: one that comes after all is closed unseen, and the next
+    /// message asks again.
     fn stop(&mut self, actions: &mut Vec<Action>) {
-        if !self.answering() {
+        if !self.answering() && self.link != Link::Opening {
             return;
         }
         // Questions waiting are answered with none, as the protocol asks.
@@ -1051,6 +1085,7 @@ impl HostedChat {
                     self.link = Link::Closed;
                     self.set_state(ChatState::Ready);
                 }
+                Asker::Slow => {}
                 asker => actions.extend(self.answer(asker, None)),
             }
         }
@@ -1059,6 +1094,12 @@ impl HostedChat {
             actions.push(Action::Cancel);
         } else if self.queued.take().is_some() {
             self.end_turn(Outcome::Stopped);
+        }
+        if self.link == Link::Opening {
+            self.link = Link::Closed;
+            self.set_state(ChatState::Ready);
+            self.clear_slow();
+            actions.push(Action::Abandon);
         }
         // The user wants the agent to stop: messages from other agents
         // waiting their turn don't start it again.
@@ -1081,6 +1122,7 @@ impl HostedChat {
     /// it stopped, and a new chat asks for its starting mode.
     pub(crate) fn connected(&mut self, opened: Opened) -> Vec<Action> {
         self.link = Link::Open;
+        self.clear_slow();
         // Opening one again answers with no ID: it's the one asked for.
         let fresh = !opened.session.is_empty();
         if fresh {
@@ -1285,6 +1327,7 @@ impl HostedChat {
         });
         self.set_settings(shown);
         self.set_usage(None);
+        self.clear_slow();
         self.set_notice(None);
         self.withdraw_install();
         self.push_turn(Turn {
@@ -1477,10 +1520,89 @@ impl HostedChat {
                     kind: ChoiceKind::RejectOnce,
                 },
             ],
+            own: true,
         };
         self.next_question += 1;
         self.asking.push_back((asker, question));
         self.show_question();
+    }
+
+    /// Whether the chat waits for the session it asked for.
+    pub(crate) fn is_opening(&self) -> bool {
+        self.link == Link::Opening
+    }
+
+    /// The agent hasn't opened the session the chat asked for in a while:
+    /// says so in the notice, which `why` is, and asks whether to retry,
+    /// starting the agent again, keep waiting, or stop. It's no failure:
+    /// the session may still come, and the question goes when it does.
+    pub(crate) fn slow_to_open(&mut self, why: String) {
+        if self.link != Link::Opening {
+            return;
+        }
+        self.set_notice(Some(why));
+        self.slow = true;
+        if (self.asking.iter()).any(|(asker, _)| *asker == Asker::Slow) {
+            return;
+        }
+        let question = Question {
+            id: self.next_question,
+            title: format!(
+                "Keep waiting for {}, start it again and ask again, or stop?",
+                self.node.agent
+            ),
+            choices: (SLOW_CHOICES.iter())
+                .map(|&(id, name, kind)| Choice {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    kind,
+                })
+                .collect(),
+            own: true,
+        };
+        self.next_question += 1;
+        // First: it's why the chat is stuck, and a suggestion to install
+        // the agent, which nothing waits for, mustn't hide it.
+        self.asking.push_front((Asker::Slow, question));
+        self.show_question();
+    }
+
+    /// The user answered `option` to the question about a session the
+    /// agent is slow to open.
+    fn slow_answered(&mut self, option: Option<&str>, actions: &mut Vec<Action>) {
+        match option {
+            Some("retry") if self.link == Link::Opening => {
+                self.clear_slow();
+                self.set_notice(Some(format!("Starting {} again…", self.node.agent)));
+                self.slow = true;
+                actions.push(Action::Retry);
+            }
+            Some("stop") => self.stop(actions),
+            // Keep waiting, or no answer, or one newer than this build
+            // knows: nothing that gives up, or starts anything again.
+            _ => {}
+        }
+    }
+
+    /// The agent is asked again for the session, without being started
+    /// again, as another chat is in the middle of a turn with it.
+    pub(crate) fn asked_again(&mut self) {
+        self.set_notice(Some(format!(
+            "Asking {} again. It isn't started again, as another chat is in the middle of a \
+             turn with it.",
+            self.node.agent
+        )));
+        self.slow = true;
+    }
+
+    /// Takes away what says the agent is slow to open the session: it
+    /// came, or isn't waited for.
+    fn clear_slow(&mut self) {
+        (self.asking).retain(|(asker, _)| *asker != Asker::Slow);
+        self.show_question();
+        if std::mem::take(&mut self.slow) {
+            self.set_notice(None);
+        }
     }
 
     /// Takes back an offer to install the chat's agent, if one is asked.
@@ -1517,6 +1639,23 @@ impl HostedChat {
     pub(crate) fn parked_without_closing(&mut self) {
         if self.link == Link::Closing {
             self.link = Link::Closed;
+        }
+    }
+
+    /// Its agent is being started again. Returns whether the chat must ask
+    /// the new process for its session: it was waiting for one, or let it
+    /// go while idle with a message coming meanwhile, which waits for it
+    /// still. Any other session it had is gone, and its next message opens
+    /// it again, as after the agent stopped.
+    pub(crate) fn agent_restarted(&mut self) -> bool {
+        match self.link {
+            Link::Opening => true,
+            // The agent stopping ends the session it was letting go.
+            Link::Closing => !self.session_closed().is_empty(),
+            Link::Open | Link::Closed => {
+                self.disconnected(None);
+                false
+            }
         }
     }
 
@@ -1568,6 +1707,7 @@ impl HostedChat {
 
     /// The session couldn't be made or opened, nor the agent installed.
     pub(crate) fn failed_to_connect(&mut self, reason: &str) {
+        self.clear_slow();
         self.set_notice(None);
         self.withdraw_install();
         self.link = Link::Closed;
@@ -1583,6 +1723,7 @@ impl HostedChat {
     /// The agent has gone: it exited, or stopped answering. If it never
     /// started, `why` says why, as far as it said.
     pub(crate) fn disconnected(&mut self, why: Option<&str>) {
+        self.clear_slow();
         let was_opening = self.link == Link::Opening;
         self.link = Link::Closed;
         let queued = self.queued.take();
@@ -1711,6 +1852,7 @@ impl HostedChat {
             id: self.next_question,
             title: clean(&title),
             choices,
+            own: false,
         };
         self.next_question += 1;
         self.asking.push_back((Asker::Agent(request), question));
@@ -1757,10 +1899,12 @@ impl HostedChat {
             .collect();
         // Shown as given: its control characters are already made
         // visible, and nothing of it may go unseen.
+        // About what the agent would do: never the daemon's own.
         let question = Question {
             id: self.next_question,
             title: what.to_owned(),
             choices,
+            own: false,
         };
         self.next_question += 1;
         self.asking.push_back((Asker::Tool(call), question));
@@ -1816,7 +1960,10 @@ impl HostedChat {
                 )));
                 Some(Action::Install)
             }
-            Asker::Suggest => None,
+            // Nothing waits for a suggestion to install. A session slow
+            // to open is answered by `slow_answered`, or the question
+            // taken away.
+            Asker::Suggest | Asker::Slow => None,
         }
     }
 
@@ -2291,7 +2438,10 @@ impl HostedChat {
         }
     }
 
+    /// Says `notice` above the box, or nothing. It's no longer the one
+    /// that says the agent is slow to open the session, if that was.
     fn set_notice(&mut self, notice: Option<String>) {
+        self.slow = false;
         if self.node.notice != notice {
             self.node.notice.clone_from(&notice);
             self.journal.push(ChatPatch::Notice(notice));
@@ -3419,12 +3569,100 @@ mod tests {
     }
 
     #[test]
+    fn a_session_slow_to_open_is_asked_about_first_and_esc_keeps_waiting() {
+        let mut chat = chat();
+        chat.suggest_install("Install Claude Code's adapter for faster starts?");
+        chat.slow_to_open("slow".to_owned());
+        // Not hidden behind the suggestion, which stays after it.
+        let question = chat.node.question.clone().unwrap();
+        assert!(question.own);
+        assert_eq!(
+            (question.choices.iter())
+                .map(|choice| choice.id.as_str())
+                .collect::<Vec<_>>(),
+            ["wait", "retry", "stop"]
+        );
+        // What Esc picks, the one refusing this once, keeps waiting, as
+        // does no answer: neither gives up, nor starts anything again.
+        let refusal = (question.choices.iter())
+            .find(|choice| choice.kind == ChoiceKind::RejectOnce)
+            .unwrap();
+        assert_eq!(refusal.id, "wait");
+        let answered = chat.act(ChatAction::Answer {
+            question: question.id,
+            option: None,
+        });
+        assert_eq!(answered, []);
+        assert!(chat.is_opening());
+        assert_eq!(chat.node.notice.as_deref(), Some("slow"));
+        assert!(chat.offering_install(), "the suggestion is next");
+    }
+
+    #[test]
+    fn a_message_waiting_for_a_session_let_go_survives_the_agent_starting_again() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        assert_eq!(chat.park().as_deref(), Some("s"));
+        send(&mut chat, "later");
+        // Asks the new process for it, and the message waits for that.
+        assert!(chat.agent_restarted());
+        assert!(chat.is_opening());
+        assert_eq!(outcome(&chat.node.turns[0]), None);
+        assert_eq!(connect(&mut chat, ""), [Action::Prompt("later".into())]);
+        // Let go with nothing waiting, it's opened with the next message.
+        chat.answered(Ok(StopReason::EndTurn));
+        chat.park();
+        assert!(!chat.agent_restarted());
+        assert_eq!(send(&mut chat, "again"), [Action::Connect]);
+        // An open session is gone, and a waiting one is asked for again.
+        let mut chat = super::tests::chat();
+        assert!(chat.agent_restarted());
+        connect(&mut chat, "s");
+        assert!(!chat.agent_restarted());
+        assert!(!chat.is_connected());
+    }
+
+    #[test]
+    fn a_session_slow_to_open_is_said_once_and_goes_when_it_opens() {
+        let mut chat = chat();
+        chat.slow_to_open("slow".to_owned());
+        chat.slow_to_open("slow".to_owned());
+        assert_eq!(chat.node.notice.as_deref(), Some("slow"));
+        assert_eq!(chat.asking.len(), 1, "asked once");
+        let question = chat.node.question.clone().unwrap();
+        let retry = chat.act(ChatAction::Answer {
+            question: question.id,
+            option: Some("retry".to_owned()),
+        });
+        assert_eq!(retry, [Action::Retry]);
+        assert!(chat.node.notice.as_deref().unwrap().ends_with("again…"));
+        assert_eq!(chat.node.question, None);
+        connect(&mut chat, "s");
+        assert_eq!(
+            (chat.node.notice.clone(), chat.node.question.clone()),
+            (None, None)
+        );
+        // Open, it isn't slow.
+        chat.slow_to_open("slow".to_owned());
+        assert_eq!(chat.node.notice, None);
+
+        // A notice said since isn't the chat's to take away.
+        let mut chat = super::tests::chat();
+        chat.slow_to_open("slow".to_owned());
+        chat.notify("something else".to_owned());
+        connect(&mut chat, "s");
+        assert_eq!(chat.node.notice.as_deref(), Some("something else"));
+        assert_eq!(chat.node.question, None);
+    }
+
+    #[test]
     fn stopping_cancels_turns_down_the_question_or_takes_back_the_message() {
         let mut chat = chat();
-        // Not yet sent: taken back.
+        // Not yet sent: taken back, and the session isn't waited for.
         send(&mut chat, "hello");
-        assert_eq!(chat.act(ChatAction::Stop), []);
+        assert_eq!(chat.act(ChatAction::Stop), [Action::Abandon]);
         assert_eq!(outcome(&chat.node.turns[0]), Some(&Outcome::Stopped));
+        assert_eq!(chat.node.state, ChatState::Ready);
         // Sent, with a question waiting: none for it, and a cancel.
         connect(&mut chat, "s");
         send(&mut chat, "go");

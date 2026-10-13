@@ -47,7 +47,14 @@
 //! questions that call every change "Edit files". With `--logged-out`, it
 //! refuses sessions as Codex does when no one's logged in. With
 //! `--broken`, it says why on stderr and exits before it starts. With
-//! `--mute`, it never answers a request for a new session.
+//! `--mute`, it never answers a request for a new session; with
+//! `--mute-after N`, only the first N; with `--mute-init`, it never
+//! answers `initialize`, as one still being fetched; with `--stubborn`,
+//! it doesn't end when its stdin closes, as one stuck on a prompt to
+//! unlock the keyring. With `--once FILE`, an absolute path, those four
+//! hold only unless FILE is there, and it makes it: started again, it
+//! answers, and ends. With `--slow-new MS`, it answers a request for a
+//! new session only after MS milliseconds.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -72,15 +79,31 @@ fn main() {
         return;
     }
     let flag = |name: &str| args.iter().any(|arg| arg == name);
+    let value = |name: &str| {
+        (args.iter().position(|arg| arg == name)).and_then(|at| args.get(at + 1).cloned())
+    };
+    // Muted only the first time: the next one started finds the file.
+    let first = value("--once").is_none_or(|file| {
+        let path = std::path::Path::new(&file);
+        let first = !path.exists();
+        if first {
+            std::fs::write(path, "").unwrap();
+        }
+        first
+    });
     if flag("--broken") {
         eprintln!("npm ERR! notarget No matching version found for left-pad@^9");
         return;
     }
     let mut agent = Fake {
-        log: (args.iter().position(|arg| arg == "--log")).and_then(|at| args.get(at + 1).cloned()),
+        log: value("--log"),
         codex: flag("--codex"),
         logged_out: flag("--logged-out"),
-        mute: flag("--mute"),
+        mute_init: first && flag("--mute-init"),
+        answers: (flag("--mute").then_some(0))
+            .or_else(|| value("--mute-after").map(|most| most.parse().unwrap()))
+            .filter(|_| first),
+        slow: value("--slow-new").map(|ms| std::time::Duration::from_millis(ms.parse().unwrap())),
         sessions: BTreeMap::new(),
         settings: BTreeMap::new(),
         tools: BTreeMap::new(),
@@ -96,6 +119,13 @@ fn main() {
             break;
         }
     }
+    // Stuck, as on a prompt to unlock the keyring: its stdin closing
+    // doesn't end it.
+    if first && flag("--stubborn") {
+        loop {
+            std::thread::sleep(std::time::Duration::from_mins(1));
+        }
+    }
 }
 
 struct Fake {
@@ -104,8 +134,13 @@ struct Fake {
     codex: bool,
     /// Refuses sessions, as no one's logged in.
     logged_out: bool,
-    /// Never answers a request for a new session.
-    mute: bool,
+    /// Never answers `initialize`, as one still being fetched.
+    mute_init: bool,
+    /// The most requests for a new session it answers, if it stops.
+    answers: Option<usize>,
+    /// How long it takes to answer a request for a new session, if it's
+    /// slow to.
+    slow: Option<std::time::Duration>,
     /// Each session's working directory.
     sessions: BTreeMap<String, String>,
     /// Each session's mode and model.
@@ -266,11 +301,13 @@ impl Fake {
         let params = &message["params"];
         let session = params["sessionId"].as_str().unwrap_or_default().to_owned();
         match message.get("method").and_then(Value::as_str) {
+            Some("initialize") if self.mute_init => {}
             Some("initialize") => self.initialize(&id),
             Some("session/new" | "session/resume") if self.logged_out => send(&json!({
                 "jsonrpc": "2.0", "id": id,
                 "error": { "code": -32000, "message": "Authentication required" } })),
-            Some("session/new") if self.mute => {}
+            Some("session/new") if self.answers.is_some_and(|most| self.sessions.len() >= most) => {
+            }
             Some("session/new") => {
                 let session = format!("s{}", self.sessions.len() + 1);
                 self.sessions
@@ -281,10 +318,16 @@ impl Fake {
                 let settings = self.starting_settings();
                 let options = self.options(&settings);
                 self.settings.insert(session.clone(), settings);
-                reply(
-                    &id,
-                    &json!({ "sessionId": session, "configOptions": options }),
-                );
+                let result = json!({ "sessionId": session, "configOptions": options });
+                match self.slow {
+                    Some(slow) => {
+                        std::thread::spawn(move || {
+                            std::thread::sleep(slow);
+                            reply(&id, &result);
+                        });
+                    }
+                    None => reply(&id, &result),
+                }
             }
             // As after a crash: the settings are back where they started.
             Some("session/resume") => {

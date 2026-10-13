@@ -51,18 +51,23 @@ pub(crate) const FAILED: i64 = -32603;
 const AUTH_REQUIRED: i64 = -32000;
 
 /// What a request the daemon sent was for, so its answer can be acted on.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 enum Pending {
     Initialize,
     /// A session for the chat in this terminal: a new one or, given its
     /// ID, one it had before.
-    Session(TerminalId),
+    Session(TerminalId, Option<String>),
     /// A message from the chat in this terminal.
     Prompt(TerminalId),
     /// A change to a setting of the chat in this terminal.
     Setting(TerminalId),
     /// A session made only to learn the agent's settings.
     Probe,
+    /// A session asked for for the chat in this terminal, which stopped
+    /// waiting for it, or asked again, with the ID it asked to open again,
+    /// if it did: one made or opened after all goes to the server as
+    /// [`Incoming::Late`], to close, and the chat never hears of it.
+    Abandoned(TerminalId, Option<String>),
     /// The end of the session of the chat in this terminal, which it
     /// opens again only once the agent has answered.
     Closing(TerminalId),
@@ -91,6 +96,13 @@ pub(crate) enum Incoming {
     Update {
         session: String,
         update: Box<SessionUpdate>,
+    },
+    /// A session the chat in `terminal` stopped waiting for was made, or
+    /// opened again, after all: the server closes it, unless the chat
+    /// holds it.
+    Late {
+        terminal: TerminalId,
+        session: String,
     },
     /// The session the chat in `terminal` let go has ended, or the agent
     /// couldn't end it: either way, it can be opened again.
@@ -205,7 +217,8 @@ impl Agent {
             }
             None => "session/new",
         };
-        self.request(Pending::Session(terminal), method, &params);
+        let resumed = session.map(str::to_owned);
+        self.request(Pending::Session(terminal, resumed), method, &params);
     }
 
     /// Asks for a session in `cwd` only to learn the settings the agent
@@ -217,6 +230,20 @@ impl Agent {
             "session/new",
             &session_params(cwd, Opening::default()),
         );
+    }
+
+    /// Forgets the session asked for for the chat in `terminal`, if one
+    /// is still to come: the chat stopped waiting for it, or is asking
+    /// again. One made or opened after all comes as [`Incoming::Late`],
+    /// and the chat never hears of it.
+    pub(crate) fn abandon_session(&mut self, terminal: TerminalId) {
+        for pending in self.pending.values_mut() {
+            if let Pending::Session(asked, resumed) = pending
+                && *asked == terminal
+            {
+                *pending = Pending::Abandoned(terminal, resumed.take());
+            }
+        }
     }
 
     /// Whether it can close a session, ending the work it does for it,
@@ -455,7 +482,19 @@ impl Agent {
         result: Result<Value, RpcError>,
         incoming: &mut Vec<Incoming>,
     ) {
-        if let Pending::Session(_) | Pending::Probe = pending {
+        if let Pending::Abandoned(terminal, resumed) = pending {
+            // A session opened again is the one asked for, which the
+            // answer leaves out.
+            let session = (result.ok()).and_then(|result| {
+                let made = result.get("sessionId").and_then(Value::as_str);
+                made.map(str::to_owned).or(resumed)
+            });
+            if let Some(session) = session {
+                incoming.push(Incoming::Late { terminal, session });
+            }
+            return;
+        }
+        if let Pending::Session(..) | Pending::Probe = pending {
             // A resumed session's ID is the one asked for, which the
             // answer leaves out: the chat keeps it.
             let result = result
@@ -472,7 +511,7 @@ impl Agent {
                     message: error.message,
                 });
             incoming.push(match pending {
-                Pending::Session(terminal) => Incoming::Session { terminal, result },
+                Pending::Session(terminal, _) => Incoming::Session { terminal, result },
                 _ => Incoming::Probed { result },
             });
             return;
@@ -510,7 +549,7 @@ impl Agent {
                 }
                 incoming.push(Incoming::Closed { terminal });
             }
-            Pending::Session(_) | Pending::Probe | Pending::Ignored => {}
+            Pending::Session(..) | Pending::Probe | Pending::Abandoned(..) | Pending::Ignored => {}
         }
     }
 
@@ -530,11 +569,13 @@ impl Agent {
     /// terminals: a session, or the answer to a message.
     pub(crate) fn waiting(&self) -> impl Iterator<Item = TerminalId> + '_ {
         self.pending.values().filter_map(|pending| match pending {
-            Pending::Session(terminal)
+            Pending::Session(terminal, _)
             | Pending::Prompt(terminal)
             | Pending::Setting(terminal)
             | Pending::Closing(terminal) => Some(*terminal),
-            Pending::Initialize | Pending::Probe | Pending::Ignored => None,
+            Pending::Initialize | Pending::Probe | Pending::Abandoned(..) | Pending::Ignored => {
+                None
+            }
         })
     }
 

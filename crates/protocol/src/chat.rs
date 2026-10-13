@@ -436,9 +436,17 @@ pub struct Question {
     /// question never lands on the next.
     pub id: u64,
     /// What it wants to do, as the agent describes it: "Write notes.txt".
+    /// Or, for the daemon's own question, the whole question.
     pub title: String,
     /// The answers it offers.
     pub choices: Vec<Choice>,
+    /// Whether the daemon asks it, for itself, as whether to install the
+    /// agent, and the title is the whole question, to show as it is.
+    /// Every other question is about what the agent would do, and is
+    /// shown as asking whether to let it, however the title is worded:
+    /// an agent can word one like the daemon's.
+    #[serde(default)]
+    pub own: bool,
 }
 
 /// One answer to a question.

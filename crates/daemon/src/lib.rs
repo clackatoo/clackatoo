@@ -100,6 +100,10 @@ pub struct DaemonConfig {
     /// How long an agent asked what models it has, for a chat's model
     /// menu, has to say, before it's given up on and stopped.
     pub probe_wait: std::time::Duration,
+    /// How long an agent asked for a chat's session has to open it before
+    /// the chat says it hasn't, and what it may be waiting on, and offers
+    /// to start it again. The chat goes on waiting.
+    pub session_wait: std::time::Duration,
     /// How long a chat an agent started, in the background, keeps its
     /// session once it has finished, before letting it go until its next
     /// message.
@@ -136,6 +140,11 @@ pub const DEFAULT_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_s
 /// How long an agent asked what models it has gets to say, unless the
 /// daemon is told otherwise.
 pub const DEFAULT_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long an agent asked for a chat's session has before the chat says
+/// it's slow to open it, unless the daemon is told otherwise. Codex opens
+/// one in about a second when nothing holds it up.
+pub const DEFAULT_SESSION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How long a chat an agent started keeps its session once it has
 /// finished in the background, unless the daemon is told otherwise.
@@ -218,6 +227,7 @@ impl DaemonConfig {
             server_idle: DEFAULT_SERVER_IDLE,
             prompt_wait: DEFAULT_PROMPT_WAIT,
             probe_wait: DEFAULT_PROBE_WAIT,
+            session_wait: DEFAULT_SESSION_WAIT,
             park_after: DEFAULT_PARK_AFTER,
             rename_gate: None,
             trash: data_dir().map(|dir| dir.join("Trash")),

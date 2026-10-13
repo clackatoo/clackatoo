@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io;
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -29,6 +30,7 @@ use clackatoo_protocol::{
 };
 use mio::unix::SourceFd;
 use mio::{Interest, Token};
+use rustix::process::Signal;
 
 use super::language::Pipe;
 use super::{Daemon, Hosted, OUTPUT_BUDGET, Orphan, Slot, Source};
@@ -83,7 +85,35 @@ pub(super) struct Agents {
     /// lets its session go if it's still idle (see
     /// [`Daemon::park_idle`]).
     parking: BTreeMap<TerminalId, Instant>,
+    /// The chats whose agent has been asked for their session, and when,
+    /// until it answers, or they've been told it's slow to (see
+    /// [`Daemon::time_out_sessions`]).
+    opening: BTreeMap<TerminalId, Asked>,
+    /// The processes of agents stopped firmly, by their pidfds, and when
+    /// each is killed if it hasn't gone (see [`Daemon::kill_agent`]).
+    killing: Vec<(Instant, OwnedFd)>,
 }
+
+/// A chat's request for its session, waiting for an answer.
+#[derive(Clone, Copy, Debug)]
+struct Asked {
+    /// When it was asked for.
+    at: Instant,
+    /// When the chat is told the agent is slow to answer.
+    due: Instant,
+    /// Whether the agent hadn't started when it was asked, and runs
+    /// through `npx`, which may still be fetching it.
+    fetching: bool,
+}
+
+/// How long an agent stopped firmly has to go once sent SIGTERM, before
+/// it's sent SIGKILL.
+const KILL_AFTER: Duration = Duration::from_secs(2);
+
+/// How many times longer a chat waits for a session from an agent run
+/// through `npx` that hasn't started, before saying so: npx may be
+/// fetching it, which takes a while the first time.
+const FETCH_WAIT: u32 = 4;
 
 /// How long an agent that couldn't say what models it has isn't asked
 /// again, however often the model menu opens.
@@ -223,6 +253,14 @@ impl Daemon {
         if let Some(slot) = self.agents.running.get_mut(&agent) {
             slot.agent
                 .open_session(id, &cwd, session.as_deref(), opening);
+            let fetching = !slot.agent.started() && through_npx(&slot.command);
+            let mut wait = self.config.session_wait;
+            if fetching {
+                wait *= FETCH_WAIT;
+            }
+            let at = Instant::now();
+            let due = at + wait;
+            (self.agents.opening).insert(id, Asked { at, due, fetching });
         }
         self.flush_agent(agent);
     }
@@ -388,6 +426,20 @@ impl Daemon {
                 }
                 (Action::Permit { call, allow, pair }, _, _) => self.permitted(call, allow, pair),
                 (Action::Browser(on), _, _) => self.browser_turned(id, on),
+                (Action::Abandon, slot, _) => {
+                    if let Some(slot) = slot {
+                        slot.agent.abandon_session(id);
+                    }
+                    self.agents.opening.remove(&id);
+                    // Nor is the agent waited for, if it's being installed.
+                    for waiting in self.agents.installing.values_mut() {
+                        waiting.retain(|&waiting| waiting != id);
+                    }
+                }
+                (Action::Retry, _, _) => {
+                    self.retry_session(id);
+                    agent = self.agent_of(id);
+                }
                 // The agent has gone, which the chat has heard or will.
                 _ => {}
             }
@@ -480,6 +532,9 @@ impl Daemon {
             Incoming::Probed { result } => {
                 self.probed(agent, name, result);
                 return;
+            }
+            Incoming::Late { terminal, session } => {
+                return self.late_session((agent, name), terminal, &session);
             }
             Incoming::Settings { terminal, result } => {
                 // A chat that moved to another agent since asked its last.
@@ -577,15 +632,19 @@ impl Daemon {
         let login = (result.as_ref().err())
             .filter(|refused| refused.login)
             .and_then(|_| self.login_hint(agent));
-        let Some(chat) = self.chat(terminal).filter(|chat| chat.agent() == name) else {
+        if self.chat(terminal).is_none_or(|chat| chat.agent() != name) {
             // The chat closed while its session was being made, or moved
-            // to another agent.
+            // to another agent, whose session it may be waiting for now.
             if let (Ok(opened), Some(slot)) = (result, self.agents.running.get_mut(&agent))
                 && !opened.session.is_empty()
             {
                 slot.agent.close_session(&opened.session);
             }
             self.stop_if_unneeded(agent);
+            return false;
+        }
+        self.agents.opening.remove(&terminal);
+        let Some(chat) = self.chat(terminal) else {
             return false;
         };
         match result {
@@ -604,6 +663,32 @@ impl Daemon {
             Err(refused) => chat.failed_to_connect(&login.unwrap_or(refused.message)),
         }
         true
+    }
+
+    /// Agent `agent`, called `name`, made or opened `session` after all
+    /// for the chat in `terminal`, which stopped waiting for it, or asked
+    /// again: it's closed, unless the chat holds it, as a session it asked
+    /// to open again, and may be asking for again now. An agent that
+    /// can't close sessions keeps it until it stops: ACP has no other way
+    /// to end one.
+    fn late_session(
+        &mut self,
+        (agent, name): (AgentId, &str),
+        terminal: TerminalId,
+        session: &str,
+    ) {
+        let held = (self.chat(terminal))
+            .is_some_and(|chat| chat.agent() == name && chat.session() == Some(session));
+        if held {
+            return;
+        }
+        log::info!(
+            "chat {terminal}: closing session {session}, which came after it was given up on"
+        );
+        if let Some(slot) = self.agents.running.get_mut(&agent) {
+            slot.agent.close_session(session);
+        }
+        self.stop_if_unneeded(agent);
     }
 
     /// Answers agent `agent`'s request about a file: with its result, or
@@ -654,6 +739,7 @@ impl Daemon {
             }
         }
         for id in chats {
+            self.agents.opening.remove(&id);
             self.collect_damage(id);
         }
         // Asked for its settings, it never said.
@@ -725,8 +811,13 @@ impl Daemon {
             waiting.retain(|&waiting| waiting != id);
         }
         if let Some(agent) = self.agents.named(&old) {
-            if let (Some(session), Some(slot)) = (session, self.agents.running.get_mut(&agent)) {
-                slot.agent.close_session(&session);
+            if let Some(slot) = self.agents.running.get_mut(&agent) {
+                // A session it was still waiting for from the old agent
+                // is closed once it comes, and never heard of.
+                slot.agent.abandon_session(id);
+                if let Some(session) = session {
+                    slot.agent.close_session(&session);
+                }
             }
             self.stop_if_unneeded(agent);
         }
@@ -902,12 +993,132 @@ impl Daemon {
         self.offer_providers(None);
     }
 
-    /// Starts the agents whose installs have ended, and gives up on those
-    /// asked for their models that haven't said in time.
+    /// Starts the agents whose installs have ended, gives up on those
+    /// asked for their models that haven't said in time, tells chats whose
+    /// sessions are slow to open, lets idle sessions go, and kills agents
+    /// that didn't stop when asked.
     pub(super) fn agent_chores(&mut self) {
         self.take_agent_installs();
         self.time_out_probes();
+        self.time_out_sessions();
         self.park_idle();
+        self.kill_late();
+    }
+
+    /// When the next chat waiting for its session is to be told its agent
+    /// is slow to open it.
+    fn next_session_due(&self) -> Option<Instant> {
+        (self.agents.opening.values()).map(|asked| asked.due).min()
+    }
+
+    /// Tells each chat whose agent hasn't opened its session in a while
+    /// that it hasn't, and why it may not have, offering to start it again
+    /// or to stop. It's told once for each time it asks; it goes on
+    /// waiting, as a slow agent may still answer. Cheap when none is due.
+    fn time_out_sessions(&mut self) {
+        let now = Instant::now();
+        if self.next_session_due().is_none_or(|due| due > now) {
+            return;
+        }
+        let late: Vec<(TerminalId, Asked)> = (self.agents.opening.iter())
+            .filter(|(_, asked)| asked.due <= now)
+            .map(|(&chat, &asked)| (chat, asked))
+            .collect();
+        for (id, asked) in late {
+            self.agents.opening.remove(&id);
+            if !self.chat(id).is_some_and(|chat| chat.is_opening()) {
+                continue;
+            }
+            let why = self.why_slow(id, asked.due - asked.at, asked.fetching);
+            log::info!("chat {id}: {why}");
+            if let Some(chat) = self.chat(id) {
+                chat.slow_to_open(why);
+            }
+            self.collect_damage(id);
+        }
+    }
+
+    /// What to tell the chat in `id` whose agent hasn't opened its session
+    /// in `waited`: that it hasn't started, if it hasn't answered the
+    /// daemon at all, as through `npx`, if `fetching`, it may be fetched
+    /// still; else what it may be waiting on to open it.
+    fn why_slow(&mut self, id: TerminalId, waited: Duration, fetching: bool) -> String {
+        let started = (self.agent_of(id))
+            .and_then(|agent| self.agents.running.get(&agent))
+            .is_some_and(|slot| slot.agent.started());
+        let Some(chat) = self.chat(id) else {
+            return String::new();
+        };
+        let (name, title) = (chat.agent().to_owned(), chat.node().agent.clone());
+        let waited = took(waited);
+        if started {
+            let hint = agents::stuck_hint(&name, &self.config.home);
+            format!("{title} hasn't opened its session in {waited}. {hint}")
+        } else if fetching {
+            format!(
+                "{title} hasn't started in {waited}. It runs through npx, which may still be \
+                 fetching it."
+            )
+        } else {
+            format!("{title} hasn't started in {waited}: it hasn't answered clackatoo at all yet.")
+        }
+    }
+
+    /// Starts the agent of the chat in `id` again, and asks again for the
+    /// session the chat waits for, as its user asked, the agent being slow
+    /// to open it. The old process is stopped firmly, as one stuck may
+    /// never end by itself. Every other chat waiting for a session from it
+    /// asks again too, as does one that let its session go with a message
+    /// waiting; the rest open theirs again with their next message. If
+    /// another chat is in the middle of a turn with it, which starting it
+    /// again would cut off, it's only asked again.
+    fn retry_session(&mut self, id: TerminalId) {
+        self.agents.opening.remove(&id);
+        let Some(agent) = self.agent_of(id) else {
+            return self.connect(id);
+        };
+        let name = self.chat(id).map(|chat| chat.agent().to_owned());
+        let Some(name) = name else { return };
+        let busy = (self.terminals.iter()).any(|(&other, slot)| {
+            other != id
+                && matches!(&slot.terminal, Hosted::Chat(chat)
+                    if chat.agent() == name && chat.is_connected() && chat.is_answering())
+        });
+        let Some(slot) = self.agents.running.get_mut(&agent) else {
+            return;
+        };
+        if busy {
+            log::info!("chat {id}: asking {name} again, as another chat is busy with it");
+            slot.agent.abandon_session(id);
+            if let Some(chat) = self.chat(id) {
+                chat.asked_again();
+            }
+            self.connect(id);
+            return;
+        }
+        log::info!("chat {id}: starting {name} again, as it's slow to open a session");
+        self.kill_agent(agent);
+        // Asked for its models, it's asked again when the menu next opens.
+        if self.agents.learning.remove(&name).is_some() {
+            self.offer_providers(None);
+        }
+        // Each chat with it hears, and those that must ask for a session
+        // now do, of the new process.
+        let mut chats = Vec::new();
+        for (&chat_id, slot) in &mut self.terminals {
+            if let Some(chat) = slot.terminal.chat()
+                && chat.agent() == name
+            {
+                chats.push((chat_id, chat.agent_restarted()));
+            }
+        }
+        for (chat, ask) in chats {
+            self.agents.opening.remove(&chat);
+            if ask {
+                self.connect(chat);
+            }
+            self.collect_damage(chat);
+        }
     }
 
     /// The session the chat `terminal` let go with the agent `name` has
@@ -983,11 +1194,14 @@ impl Daemon {
     }
 
     /// When the agents next need the loop's attention: an agent asked for
-    /// its models is to have said, or a chat in the background lets its
-    /// session go.
+    /// its models is to have said, a chat in the background lets its
+    /// session go, a chat's session is slow to open, or a process sent
+    /// SIGTERM is to be killed.
     pub(super) fn next_agent_due(&self) -> Option<Instant> {
         (self.next_probe_due().into_iter())
             .chain(self.next_park_due())
+            .chain(self.next_session_due())
+            .chain(self.agents.killing.iter().map(|(due, _)| *due).min())
             .min()
     }
 
@@ -998,8 +1212,9 @@ impl Daemon {
     }
 
     /// Gives up on agents asked for their models that haven't said in
-    /// time: the menu says so, and each is stopped unless a chat talks to
-    /// it.
+    /// time: the menu says so, and what it may be waiting on, as a chat
+    /// whose session is slow to open does, and each is stopped unless a
+    /// chat talks to it.
     fn time_out_probes(&mut self) {
         let wait = self.config.probe_wait;
         let late: Vec<String> = (self.agents.learning.iter())
@@ -1010,14 +1225,21 @@ impl Daemon {
             return;
         }
         for name in late {
-            log::info!("{name} didn't say what models it has in time");
             self.agents.learning.remove(&name);
-            let within = if wait.as_secs() > 0 {
-                format!("{} s", wait.as_secs())
+            let slot = (self.agents.named(&name)).and_then(|agent| self.agents.running.get(&agent));
+            let started = slot.is_some_and(|slot| slot.agent.started());
+            let hint = if started {
+                agents::stuck_hint(&name, &self.config.home)
+            } else if slot.is_some_and(|slot| through_npx(&slot.command)) {
+                "It hasn't started: it runs through npx, which may still be fetching it.".to_owned()
             } else {
-                format!("{} ms", wait.as_millis())
+                "It hasn't started: it hasn't answered clackatoo at all yet.".to_owned()
             };
-            let why = format!("it didn't say what models it has within {within}");
+            log::info!("{name} didn't say what models it has in time. {hint}");
+            let why = format!(
+                "it didn't say what models it has within {}. {hint}",
+                took(wait)
+            );
             self.agents
                 .unlearned
                 .insert(name.clone(), (why, Instant::now()));
@@ -1039,6 +1261,7 @@ impl Daemon {
             waiting.retain(|&waiting| waiting != id);
         }
         self.agents.parking.remove(&id);
+        self.agents.opening.remove(&id);
         let Some(agent) = self.agents.named(chat.agent()) else {
             return;
         };
@@ -1064,6 +1287,20 @@ impl Daemon {
     /// Stops agent `id`, if it's running, and watches its process until it
     /// exits, to reap it.
     fn stop_agent(&mut self, id: AgentId) {
+        self.end_agent(id, false);
+    }
+
+    /// Stops agent `id` as [`stop_agent`](Self::stop_agent) does, and
+    /// makes sure its process ends: one stuck, as on a prompt to unlock
+    /// the keyring, may never read that its pipes have closed. It's sent
+    /// SIGTERM, and SIGKILL if it's still there after [`KILL_AFTER`]. Only
+    /// its own process: what it started hears its pipes close.
+    fn kill_agent(&mut self, id: AgentId) {
+        self.end_agent(id, true);
+    }
+
+    /// Stops agent `id`, firmly if `kill`: see [`kill_agent`](Self::kill_agent).
+    fn end_agent(&mut self, id: AgentId, kill: bool) {
         let Some(slot) = self.agents.running.remove(&id) else {
             return;
         };
@@ -1077,7 +1314,33 @@ impl Daemon {
         if let Err(err) = self.poll.registry().deregister(&mut SourceFd(&fd)) {
             log::warn!("agent: unwatching its process failed: {err}");
         }
+        if kill {
+            match process.pidfd() {
+                Ok(pidfd) => {
+                    // It may have gone already, which is as well.
+                    let _ = rustix::process::pidfd_send_signal(&pidfd, Signal::TERM);
+                    (self.agents.killing).push((Instant::now() + KILL_AFTER, pidfd));
+                }
+                Err(err) => log::warn!("agent: its process can't be stopped firmly: {err}"),
+            }
+        }
         self.watch_orphan(Orphan::new(process));
+    }
+
+    /// Sends SIGKILL to the agents' processes sent SIGTERM a while ago,
+    /// which may have gone, and been reaped, since: their pidfds say so,
+    /// and the signal goes nowhere. Cheap when none is due.
+    fn kill_late(&mut self) {
+        let now = Instant::now();
+        (self.agents.killing).retain(|(due, pidfd)| {
+            if *due > now {
+                return true;
+            }
+            if rustix::process::pidfd_send_signal(pidfd, Signal::KILL).is_ok() {
+                log::info!("agent: its process didn't stop when asked: killing it");
+            }
+            false
+        });
     }
 
     /// Stops every agent, for the next build to reap.
@@ -1174,6 +1437,24 @@ impl Daemon {
         }
         // It may be offered for models now.
         self.offer_providers(None);
+    }
+}
+
+/// Whether `command` runs its program through `npx`, which fetches it
+/// first if it isn't cached.
+fn through_npx(command: &[OsString]) -> bool {
+    (command.first()).is_some_and(|program| {
+        std::path::Path::new(program).file_name() == Some(std::ffi::OsStr::new("npx"))
+    })
+}
+
+/// How long `wait` is, as a notice says it: in seconds, or for the short
+/// waits tests give, milliseconds.
+fn took(wait: Duration) -> String {
+    if wait.as_secs() > 0 {
+        format!("{} s", wait.as_secs())
+    } else {
+        format!("{} ms", wait.as_millis())
     }
 }
 

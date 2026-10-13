@@ -14,6 +14,8 @@ Ctrl+B and then `a` opens a chat to the right of the focused pane; `:Agent` open
 
 A chat works in the directory a new terminal would start in. Like any pane, it opens in normal mode: `i` starts typing in its box, Enter sends, and Shift+Enter starts a new line.
 
+If the agent hasn't opened the chat's session after 30 seconds, the chat says so, and what it may be waiting on: most often an MCP server in the agent's config that needs a login. It goes on waiting, and asks whether to keep waiting, which Esc picks, Retry, which starts the agent again, or Stop. Ctrl+C stops it too.
+
 ## What it shows
 
 Below each message, what the agent did with it, in order: its words, its thinking, each tool it uses with `○` while it runs and `✓` or `✗` after, and each command it runs and change it makes, on a card of its own. Click a card to open it. While it works the turn ends with `Working…`, and Ctrl+C asks it to stop.

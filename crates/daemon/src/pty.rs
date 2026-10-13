@@ -79,6 +79,12 @@ impl Process {
         self.pid
     }
 
+    /// A copy of its pidfd, to signal it by later: through the pidfd, a
+    /// signal can never reach another process that took its pid.
+    pub(crate) fn pidfd(&self) -> io::Result<OwnedFd> {
+        self.pidfd.try_clone()
+    }
+
     /// Collects the process's exit status, if it has exited. After that the
     /// process is gone, and this mustn't be called again.
     pub(crate) fn try_wait(&self) -> io::Result<Option<WaitIdStatus>> {

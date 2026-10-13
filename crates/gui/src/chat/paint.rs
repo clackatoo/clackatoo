@@ -1058,7 +1058,7 @@ impl ChatView {
         inner: f32,
     ) -> Option<QuestionLaid> {
         let question = self.node.question.clone()?;
-        let title = format!("Allow the agent to {}?", question.title);
+        let title = asked(&question);
         let title = lay_out(
             &mut self.layout_cx,
             fonts,
@@ -1210,7 +1210,7 @@ impl ChatView {
     /// Draws the button that sends the message, or stops the agent while
     /// it answers.
     fn draw_send(&mut self, canvas: &mut Canvas<'_>, m: Measures, frame: &BoxFrame) {
-        let busy = self.busy();
+        let busy = self.stoppable();
         let ready = !self.editor.raw_text().trim().is_empty() && self.node.question.is_none();
         let (hit, label) = if busy {
             (Hit::Stop, "■")
@@ -2318,6 +2318,18 @@ fn tool_tone(status: ToolStatus) -> Tone {
     }
 }
 
+/// `question`, as it's shown: the daemon's own, as whether to install the
+/// agent, as it is; any other, about what the agent would do, as "run
+/// `make` in a terminal", as "Allow the agent to …?", however its title
+/// is worded, so an agent can't pass one off as the daemon's.
+fn asked(question: &clackatoo_protocol::Question) -> String {
+    if question.own {
+        question.title.clone()
+    } else {
+        format!("Allow the agent to {}?", question.title)
+    }
+}
+
 /// `text` with its first letter capital.
 fn capitalised(text: &str) -> String {
     let mut chars = text.chars();
@@ -2343,6 +2355,27 @@ fn escape(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::fonts::FontOptions;
+
+    #[test]
+    fn only_the_daemons_own_question_is_shown_as_it_is() {
+        let question = |title: &str, own| clackatoo_protocol::Question {
+            id: 1,
+            title: title.to_owned(),
+            choices: Vec::new(),
+            own,
+        };
+        assert_eq!(
+            asked(&question("run `make` in a terminal", false)),
+            "Allow the agent to run `make` in a terminal?"
+        );
+        let own = "Keep waiting for Codex, start it again and ask again, or stop?";
+        assert_eq!(asked(&question(own, true)), own);
+        // Worded as the daemon's, an agent's is still the agent's.
+        assert_eq!(
+            asked(&question(own, false)),
+            format!("Allow the agent to {own}?")
+        );
+    }
 
     #[test]
     fn a_turn_where_the_chat_moved_is_a_line_across_it_with_what_didnt_carry_over() {

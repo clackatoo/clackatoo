@@ -666,7 +666,7 @@ fn read_text(path: &Path, into: &mut Vec<u8>) -> Option<()> {
 /// Opens the file at `path` to read, if it's a file: not a pipe or a
 /// device, which a read might wait on for ever, or a directory. It's opened
 /// without waiting, as a pipe would have it wait for a writer.
-fn open_file(path: &Path) -> io::Result<File> {
+pub(crate) fn open_file(path: &Path) -> io::Result<File> {
     let nonblocking = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or_default();
     let file = (OpenOptions::new())
         .read(true)

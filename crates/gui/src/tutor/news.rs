@@ -191,6 +191,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "Your chats from your phone: a web app the daemon serves, with notifications, paired with :Devices",
     },
+    News {
+        id: "slow-session",
+        date: "2026-10-13",
+        lesson: "agents",
+        what: "An agent slow to open a chat's session says so after 30 s, and what it may be waiting on, with Retry and Stop",
+    },
 ];
 
 impl News {
