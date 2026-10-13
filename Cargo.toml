@@ -26,6 +26,10 @@ clackatoo-netem = { path = "crates/netem" }
 # in its own event loop. Without schemars, which only describes them.
 agent-client-protocol-schema = { version = "1.10", default-features = false }
 anyhow = "1.0"
+# Checks the web app's password against its hash, kept as Argon2id (the
+# RustCrypto implementation, pure Rust). Without its own random numbers:
+# the salt comes from ring.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 # Text only: images would pull in an image codec.
 arboard = { version = "3.6", default-features = false }
 # Decodes and encodes the clipboard text programs send with OSC 52. The
@@ -52,6 +56,10 @@ ignore = "0.4.33"
 # signs beside its lines: the histogram algorithm, as Helix uses it, and
 # fast enough to run after every pause in typing on a big file.
 imara-diff = { version = "0.2.0", default-features = false }
+# Reads the web app's HTTP requests: hyper's parser, with no dependencies
+# and no I/O of its own, so the daemon's event loop drives it, and strict
+# about what it takes.
+httparse = "1.10"
 # Says when a chat's turns were sent, in the local time zone, which it
 # reads from TZ and /etc/localtime as the C library does. Already built,
 # for env_logger's timestamps; no copy of the time zone database.
@@ -125,6 +133,9 @@ minisign = "0.10"
 png = "0.18"
 proptest = "1.11"
 tempfile = "3.27"
+# A WebSocket client for the web app's tests, so the daemon's own framing
+# is tested against someone else's.
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
@@ -148,6 +159,29 @@ codegen-units = 1
 # it; with overflow checks, debug builds and tests panic instead.
 [profile.dev.package.swash]
 overflow-checks = false
+
+# Argon2 is slow by design, and far slower unoptimised: debug builds and
+# tests check the web app's password in milliseconds, not seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+
+# The web app, compiled to WebAssembly for an optimised program (see
+# crates/clackatoo/build/web_app.rs): small, as a phone fetches it.
+[profile.web]
+inherits = "release"
+opt-level = "z"
+panic = "abort"
+lto = true
+codegen-units = 1
+
+# The web app for the rest: quicker to build.
+[profile.web-dev]
+inherits = "dev"
+opt-level = "s"
+debug = false
+panic = "abort"
 
 # An optimised build without whole-program optimisation, for trying things
 # out: much faster to build than release, a little slower to run.

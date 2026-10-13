@@ -2627,7 +2627,10 @@ impl App {
                 state: ElementState::Pressed,
                 button,
                 ..
-            } => self.clicked(event_loop, button),
+            } => {
+                self.desk.user_active();
+                self.clicked(event_loop, button);
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button,
@@ -2823,6 +2826,11 @@ impl App {
             SessionEvent::Message(ServerMessage::Event(Event::Show { pane, at })) => {
                 self.agent_shows(pane, at);
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Pairing(asking))) => {
+                if self.desk.pairing_asked(asking) {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Message(ServerMessage::Response(response)) => {
                 let redraw = self.desk.answered(response);
                 self.update_title();
@@ -2830,8 +2838,11 @@ impl App {
                     self.request_redraw();
                 }
             }
+            // The window doesn't watch the chats as a list.
             SessionEvent::Message(
-                ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. },
+                ServerMessage::Hello { .. }
+                | ServerMessage::NotUpgrading { .. }
+                | ServerMessage::Event(Event::Chats(_)),
             ) => {}
             SessionEvent::Clipboard(heard) => {
                 for (from, text) in heard {

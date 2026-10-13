@@ -912,6 +912,7 @@ pub(super) mod tests {
             trash: Some(dir.join("Trash")),
             boards: None,
             browser: None,
+            web: None,
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let id = TerminalId(1);

@@ -14,12 +14,14 @@ bench = false
 
 [dependencies]
 agent-client-protocol-schema.workspace = true
+argon2.workspace = true
 base64.workspace = true
 bytes.workspace = true
 clackatoo-protocol.workspace = true
 clackatoo-syntax.workspace = true
 clackatoo-term = { workspace = true, features = ["serde"] }
 clackatoo-text.workspace = true
+httparse.workspace = true
 ignore.workspace = true
 log.workspace = true
 memchr.workspace = true
@@ -28,6 +30,7 @@ postcard.workspace = true
 quinn-proto.workspace = true
 rcgen.workspace = true
 regex.workspace = true
+ring.workspace = true
 rustls.workspace = true
 rustix.workspace = true
 serde.workspace = true
@@ -36,10 +39,12 @@ slab.workspace = true
 thiserror.workspace = true
 toml_edit.workspace = true
 unicode-width.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 clackatoo-netem.workspace = true
 tempfile.workspace = true
+tungstenite.workspace = true
 
 [lints]
 workspace = true

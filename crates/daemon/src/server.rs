@@ -71,6 +71,7 @@ mod review;
 mod signs;
 mod tools;
 mod turn_undo;
+mod web;
 
 use buffers::{BufferSlot, WindowChange};
 use chats::AgentId;
@@ -84,6 +85,7 @@ use tools::Tools;
 const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);
 const UDP: Token = Token(usize::MAX - 2);
+const WEB: Token = Token(usize::MAX - 3);
 
 /// Bytes read per `read` call, from PTYs and clients alike.
 const READ_BUFFER_LEN: usize = 64 * 1024;
@@ -150,6 +152,8 @@ enum Source {
     Carrier(Carrier),
     /// A connection an agent's tools are served on.
     Tools(crate::mcp::Connection),
+    /// A connection to the web app, while it's HTTP.
+    Web(Box<crate::web::HttpConn>),
 }
 
 /// What a terminal is: a program on a PTY, or a chat with an agent, which
@@ -311,6 +315,12 @@ struct Client {
     /// The window the client is, as it said when attaching to a buffer:
     /// see [`Request::AttachBuffer`].
     window: Option<u64>,
+    /// Whether the client is told when the chats change.
+    watching_chats: bool,
+    /// Until when the client's user is there, as it last said.
+    present_until: Option<Instant>,
+    /// Events to queue after the answer to the request being answered.
+    later: Vec<u8>,
 }
 
 /// A stream a QUIC client is sent one terminal's view updates on.
@@ -338,6 +348,19 @@ impl Client {
             clipboard: clipboard::Unsent::default(),
             browser_frames: BTreeMap::new(),
             window: None,
+            watching_chats: false,
+            present_until: None,
+            later: Vec::new(),
+        }
+    }
+
+    /// Whether what's been queued for it is still waiting to be written:
+    /// view updates wait for it to catch up.
+    fn backlogged(&self) -> bool {
+        match &self.link {
+            Link::Unix(_) => !self.outgoing.is_empty(),
+            Link::Quic(_) => false,
+            Link::Web(link) => !self.outgoing.is_empty() || link.backlogged(),
         }
     }
 }
@@ -349,6 +372,8 @@ enum Link {
     Unix(UnixStream),
     /// Over QUIC, from another machine.
     Quic(ConnectionHandle),
+    /// Over a WebSocket, from a device paired with the web app.
+    Web(Box<crate::web::WebLink>),
 }
 
 /// A connection to the daemon's socket that carries QUIC packets for
@@ -547,6 +572,10 @@ pub struct Daemon {
     /// The arguments an upgrade runs the next build with. Without them,
     /// the daemon can't upgrade.
     upgrade_args: Vec<std::ffi::OsString>,
+    /// The web app, if it's on.
+    web: Option<crate::web::Web>,
+    /// The chats as a list, and the notifications they're to send.
+    chat_watch: web::ChatWatch,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -642,6 +671,12 @@ impl Daemon {
             buffer: vec![0; READ_BUFFER_LEN].into_boxed_slice(),
             upgrade_to: None,
             upgrade_args: Vec::new(),
+            web: None,
+            chat_watch: web::ChatWatch::default(),
+        })
+        .map(|mut daemon| {
+            daemon.start_web();
+            daemon
         })
     }
 
@@ -867,6 +902,7 @@ impl Daemon {
                         .chain(rewatch)
                         .chain(reviews)
                         .chain(self.next_agent_due())
+                        .chain(self.next_web_due())
                         .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
                         .min();
                     next.map(|due| due.saturating_duration_since(Instant::now()))
@@ -914,6 +950,7 @@ impl Daemon {
             self.time_out_tools();
             self.relay_chats();
             self.take_browser();
+            self.web_chores();
             self.send_clipboard_writes();
             self.send_browser_frames();
             self.send_reviews();
@@ -921,6 +958,7 @@ impl Daemon {
             self.transmit_quic();
         }
         log::info!("shutting down");
+        self.close_web("the daemon stopped");
         self.close_remotes("the daemon stopped");
         self.abandon_renames();
         self.stop_boards();
@@ -963,6 +1001,12 @@ impl Daemon {
             self.refuse_upgrade(token, reason);
             return Ok(None);
         }
+        // So are the devices paired with the web app.
+        if let Err(reason) = self.prepare_web_for_upgrade() {
+            log::warn!("not upgrading: {reason}");
+            self.refuse_upgrade(token, reason);
+            return Ok(None);
+        }
         // The client that asked hears how it went: its connection closes
         // as the new build starts, or says why it didn't.
         self.close_remotes("the daemon is upgrading to a new build");
@@ -1001,6 +1045,7 @@ impl Daemon {
             LISTENER => self.accept_clients(),
             WAKER => {}
             UDP => self.receive_udp(),
+            WEB => self.accept_web(),
             token => match self.sources.get(token.0) {
                 Some(Source::Output(id)) => {
                     let id = *id;
@@ -1031,6 +1076,7 @@ impl Daemon {
                 Some(Source::Client(_)) => self.serve_client(token),
                 Some(Source::Carrier(_)) => self.serve_carrier(token, event),
                 Some(Source::Tools(_)) => self.serve_tools(token, event),
+                Some(Source::Web(_)) => self.serve_web(token),
                 None => {}
             },
         }
@@ -1072,6 +1118,7 @@ impl Daemon {
         // A chat an agent started shows in that chat's card.
         let started =
             (slot.terminal.chat_ref()).is_some_and(|chat| chat.relations().parent.is_some());
+        let chat = slot.terminal.is_chat();
         self.damage.clear();
         slot.terminal.take_damage(&mut self.damage);
         // The cursor or title may have changed without damage, so viewers
@@ -1086,6 +1133,9 @@ impl Daemon {
         }
         if started {
             self.note_subagent(id);
+        }
+        if chat {
+            self.glance(id);
         }
     }
 
@@ -1104,10 +1154,10 @@ impl Daemon {
                 continue;
             };
             let quic = match client.link {
-                Link::Unix(_) => None,
+                Link::Unix(_) | Link::Web(_) => None,
                 Link::Quic(handle) => Some(handle),
             };
-            if client.finished || (quic.is_none() && !client.outgoing.is_empty()) {
+            if client.finished || client.backlogged() {
                 continue;
             }
             for (&id, subscription) in &mut client.views {
@@ -1345,6 +1395,7 @@ impl Daemon {
             Hosted::Pty(terminal) => terminal,
             Hosted::Chat(chat) => {
                 self.close_chat(id, &chat);
+                self.forget_glance(id);
                 self.agent_files.forget(id);
                 self.chat_closed_in_review(id);
                 if self.workspaces.remove_terminal(id) {
@@ -1521,6 +1572,7 @@ impl Daemon {
         // A chat agents started may have come out of the background, or
         // gone back.
         self.note_subagents();
+        self.chats_moved();
         let event = ServerMessage::Event(clackatoo_protocol::Event::Workspaces(
             self.workspaces.get().clone(),
         ));
@@ -1591,6 +1643,7 @@ impl Daemon {
 
     /// Reads whatever a client sent, answers its requests, and writes what
     /// it can of the answers.
+    #[allow(clippy::too_many_lines, reason = "one arm per message, each short")]
     fn serve_client(&mut self, token: Token) {
         let Some(messages) = self.receive_messages(token) else {
             return;
@@ -1654,6 +1707,10 @@ impl Daemon {
                     }
                     continue;
                 }
+                ClientMessage::Present { here } => {
+                    self.present(token, here);
+                    continue;
+                }
                 ClientMessage::Request(request) => {
                     ServerMessage::Response(self.respond(request, token))
                 }
@@ -1681,6 +1738,10 @@ impl Daemon {
                     log::error!("encoding a response failed: {err}");
                     client.finished = true;
                 }
+            }
+            if !client.later.is_empty() {
+                let later = std::mem::take(&mut client.later);
+                client.outgoing.extend_from_slice(&later);
             }
             if client.finished || client.carrying || client.serving_tools.is_some() {
                 break;
@@ -1786,6 +1847,11 @@ impl Daemon {
             Link::Quic(handle) => {
                 let quic = self.quic.as_mut()?;
                 if quic.read(*handle, &mut client.decoder) == Received::Ended {
+                    client.finished = true;
+                }
+            }
+            Link::Web(link) => {
+                if link.receive(&mut self.buffer, &mut client.decoder, Instant::now()) {
                     client.finished = true;
                 }
             }
@@ -1928,6 +1994,10 @@ impl Daemon {
             } => Ok(self.attach_browser(token, chat, [width, height])),
             Request::DetachBrowser { chat } => Ok(self.detach_browser(token, chat)),
             Request::Review(action) => self.serve_review(action),
+            Request::WatchChats => Ok(self.watch_chats(token)),
+            Request::Devices => Ok(self.devices()),
+            Request::RevokeDevice { device } => self.revoke_device(device),
+            Request::AnswerPairing { code } => self.answer_pairing(token, code.as_deref()),
             request @ (Request::Install { .. } | Request::Decline { .. }) => {
                 self.respond_about_installs(token, request);
                 Ok(Response::Done)
@@ -1947,6 +2017,8 @@ impl Daemon {
                 if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
                     client.watching_workspaces = true;
                 }
+                // A window opening while devices ask hears of them.
+                self.tell_of_asks(token);
                 Ok(Response::Workspaces(self.workspaces.get().clone()))
             }
             Request::NewWorkspace { name, terminal } => {
@@ -2032,10 +2104,14 @@ impl Daemon {
         if !slot.viewers.contains(&token) {
             slot.viewers.push(token);
         }
+        let chat = slot.terminal.is_chat();
         if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
             client.views.insert(id, Subscription::new());
         }
         self.views_pending = true;
+        if chat {
+            self.attached_to_chat(token, id);
+        }
         Ok(())
     }
 
@@ -2140,6 +2216,7 @@ impl Daemon {
                     Some(written)
                 })
                 .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe)),
+            Link::Web(link) => link.send(self.poll.registry(), token, &mut client.outgoing),
         };
         let written = match written {
             Ok(written) => written,
@@ -2152,7 +2229,8 @@ impl Daemon {
         // A client on another machine that has stopped reading, as one gone
         // without a word has, would hold ever more: it starts again on a
         // new connection, from a snapshot.
-        if matches!(client.link, Link::Quic(_)) && client.outgoing.len() > MOST_UNSENT {
+        let remote = matches!(client.link, Link::Quic(_) | Link::Web(_));
+        if remote && client.outgoing.len() > MOST_UNSENT {
             log::warn!(
                 "dropping a client on another machine {} B behind",
                 client.outgoing.len()
@@ -2160,7 +2238,10 @@ impl Daemon {
             self.drop_client_saying(token, "the window fell too far behind");
             return;
         }
-        let flushed = client.outgoing.is_empty();
+        let flushed = match &client.link {
+            Link::Web(link) => client.outgoing.is_empty() && !link.backlogged(),
+            _ => client.outgoing.is_empty(),
+        };
         // Writes to the clipboard, and pictures of pages, wait for a
         // client to catch up.
         if flushed && client.clipboard.any() {
@@ -2177,8 +2258,11 @@ impl Daemon {
         }
         // View updates wait for a client to catch up: on the socket, with
         // everything; over QUIC, with each terminal's stream, which may
-        // have drained even if answers are still waiting.
-        if written > 0 && !client.views.is_empty() {
+        // have drained even if answers are still waiting; over a
+        // WebSocket, with its frames, which may have drained though none
+        // of the answers were just taken.
+        let drained = written > 0 || (matches!(client.link, Link::Web(_)) && flushed);
+        if drained && !client.views.is_empty() {
             self.views_pending = true;
         }
     }
@@ -2221,6 +2305,9 @@ impl Daemon {
                 && let Some(quic) = self.quic.as_mut()
             {
                 quic.close(handle, Instant::now(), why);
+            }
+            if let Some(web) = self.web.as_mut() {
+                web.conns.retain(|&conn| conn != token);
             }
         }
     }

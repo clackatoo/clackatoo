@@ -7,6 +7,11 @@
 //! `$SOURCE_DATE_EPOCH`'s, for builds that must come out the same each
 //! time, or else today's, in UTC. Both are worked out again only when the
 //! commit changes, so they don't cost a rebuild each time.
+//!
+//! Also builds the web app into the program: see `build/web_app.rs`.
+
+#[path = "build/web_app.rs"]
+mod web_app;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -30,6 +35,7 @@ fn main() {
         });
     println!("cargo::rustc-env=CLACKATOO_GIT_HASH={hash}");
     println!("cargo::rustc-env=CLACKATOO_BUILD_DATE={}", date(seconds));
+    web_app::build();
 }
 
 /// The commit checked out, shortened, if git can say. Asks to be run again

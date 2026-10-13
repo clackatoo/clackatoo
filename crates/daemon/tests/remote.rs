@@ -66,6 +66,7 @@ impl TestDaemon {
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             boards: None,
             browser: None,
+            web: None,
         };
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
         let shutdown = daemon.shutdown_handle();

@@ -32,8 +32,12 @@
 //! packets with [`Request::CarryQuic`], and the client then opens a QUIC
 //! connection through it, whose first stream it talks over as usual.
 //!
+//! A phone, or any browser, reaches the daemon through its web app, which
+//! the daemon serves: the byte stream is then a WebSocket, each of whose
+//! binary messages carries one or more whole frames.
+//!
 //! The crate does no I/O, so a browser client compiled to WebAssembly can
-//! use it as-is.
+//! use it as-is, as the web app does.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -42,6 +46,7 @@ mod board;
 mod browser;
 mod buffer;
 mod chat;
+mod devices;
 mod files;
 mod find;
 pub mod frame;
@@ -67,14 +72,15 @@ pub use buffer::{
     FileLocation, OpenFile, Query, Resume, ServerFeatures, TextChange, Trigger,
 };
 pub use chat::{
-    ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome,
-    Provider, ProviderModels, Question, Sender, Setting, SettingChoice, SettingKind, Subagent,
-    SubagentStatus, Switch, Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles,
-    TurnFilesState, Usage, turn_number, turn_numbered,
+    ChatAction, ChatNode, ChatPatch, ChatState, ChatSummary, Choice, ChoiceKind, Diff, Item,
+    Location, Outcome, Provider, ProviderModels, Question, Sender, Setting, SettingChoice,
+    SettingKind, Subagent, SubagentStatus, Switch, Tool, ToolContent, ToolKind, ToolStatus, Turn,
+    TurnEnd, TurnFiles, TurnFilesState, Usage, turn_number, turn_numbered,
 };
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
 };
+pub use devices::{Device, PairingAsk};
 pub use files::{
     Entry, EntryKind, Expect, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
     GitMark, OpenFiles,
@@ -95,7 +101,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 68;
+pub const PROTOCOL_VERSION: u32 = 69;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -255,6 +261,16 @@ pub enum ClientMessage {
         /// What to do.
         action: BoardAction,
     },
+    /// Whether the client's user is there: a window has the focus and was
+    /// used lately, a phone shows the app. A chat followed by a client
+    /// whose user is there needs no notification when its turn ends or
+    /// it asks something. A client that never says isn't, and `here`
+    /// lasts five minutes unless it's said again, as a window says it
+    /// while it's used, about once a minute. Not answered.
+    Present {
+        /// Whether they are.
+        here: bool,
+    },
 }
 
 /// Everything the daemon sends.
@@ -389,6 +405,15 @@ pub enum Event {
         /// What.
         update: BrowserUpdate,
     },
+    /// The chats changed, for a client watching them
+    /// ([`Request::WatchChats`]): every one, in place of the last list.
+    Chats(Vec<ChatSummary>),
+    /// The devices asking to pair, waiting to be allowed, are now these,
+    /// for a window watching the workspaces: the question for its user,
+    /// answered with [`Request::AnswerPairing`]. Sent when a window starts
+    /// watching too, if any are waiting. Never sent to a device on the
+    /// web app.
+    Pairing(Vec<PairingAsk>),
 }
 
 /// A message from a client to the daemon that expects an answer.
@@ -753,6 +778,25 @@ pub enum Request {
         /// The chat.
         chat: TerminalId,
     },
+    /// Asks for every chat, summed up, and for an [`Event::Chats`] whenever
+    /// that changes. Answered with [`Response::Chats`].
+    WatchChats,
+    /// Asks for the devices paired with the daemon's web app. Answered
+    /// with [`Response::Devices`].
+    Devices,
+    /// Unpairs a device: it can't connect again, and is cut off if it's
+    /// connected. Answered with [`Response::Done`].
+    RevokeDevice {
+        /// The device's number.
+        device: u64,
+    },
+    /// Answers the devices asking to pair: allows the one showing `code`,
+    /// or with none, turns every one down. Refused from a device on the
+    /// web app. Answered with [`Response::Text`], saying what was done.
+    AnswerPairing {
+        /// The code the device shows, as the user typed it.
+        code: Option<String>,
+    },
 }
 
 /// How to start a terminal.
@@ -855,6 +899,10 @@ pub enum Response {
     },
     /// Answers [`Request::Review`]: what was done, to say in the bar.
     Reviewed(String),
+    /// Answers [`Request::WatchChats`].
+    Chats(Vec<ChatSummary>),
+    /// Answers [`Request::Devices`]: the devices, in the order they paired.
+    Devices(Vec<Device>),
 }
 
 /// Where a daemon takes QUIC packets over UDP, and how a client finds out
@@ -982,6 +1030,12 @@ pub enum Error {
     /// What was asked of reviewing couldn't be done, and why: nothing was.
     #[error("{0}")]
     Review(String),
+    /// No device paired with the web app has this number.
+    #[error("no device {0}")]
+    NoSuchDevice(u64),
+    /// An answer to devices asking to pair couldn't be given, and why.
+    #[error("{0}")]
+    Pairing(String),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while

@@ -9,6 +9,8 @@ mod logs;
 mod ping;
 mod render;
 mod update;
+mod web;
+mod web_app;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -164,6 +166,13 @@ enum Command {
     /// Put clackatoo in your desktop's app launcher, or take it out.
     #[command(subcommand)]
     Desktop(desktop::DesktopCommand),
+    /// The web app phones reach the daemon through, set up in
+    /// daemon/web.toml.
+    #[command(subcommand)]
+    Web(web::WebCommand),
+    /// List the devices paired with the web app, or allow one asking to
+    /// pair, turn them down, or unpair one.
+    Devices(web::DevicesArgs),
     /// Relay between standard input and output and the daemon, starting it
     /// if it isn't running. `--remote` runs this on the remote machine,
     /// through ssh.
@@ -367,6 +376,8 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::Edit(edit) => edit_file(edit),
         Command::Language(command) => language::run(command),
         Command::Desktop(command) => desktop::run(command),
+        Command::Web(command) => web::run(&command),
+        Command::Devices(args) => web::devices(&args),
         Command::Run(run) => {
             let mut line = run.words.join(" ").into_bytes();
             line.push(b'\r');
@@ -525,6 +536,9 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     let mut config = DaemonConfig::from_env();
     config.terminal.scrollback_compaction = args.scrollback_compaction.into();
     config.mcp = agent_tools();
+    if let Some(web) = &mut config.web {
+        web.assets = web_app::ASSETS;
+    }
     // An upgrade runs the next build with the same arguments.
     let rerun: Vec<OsString> = std::env::args_os()
         .skip(1)

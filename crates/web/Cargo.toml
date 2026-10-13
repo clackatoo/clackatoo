@@ -1,0 +1,69 @@
+[package]
+name = "clackatoo-web"
+description = "clackatoo's web app: chats and their questions from a phone, in WebAssembly, served by the daemon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# WebAssembly, for the browser: wasm-bindgen makes its JavaScript.
+crate-type = ["cdylib", "rlib"]
+# See crates/term/Cargo.toml: keeps `cargo bench -- OPTIONS` working.
+bench = false
+
+[dependencies]
+clackatoo-protocol.workspace = true
+# Reads the agents' words as Markdown, as the window does, laid out here
+# as the page's own elements, never as HTML.
+pulldown-cmark.workspace = true
+# The browser's own APIs, called straight, with no framework between: the
+# app is a few screens, and a framework's runtime and churn would cost a
+# phone more than it saves. Pinned to the wasm-bindgen-cli the build uses.
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4.79"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = [
+    "BinaryType",
+    "CloseEvent",
+    "console",
+    "CssStyleDeclaration",
+    "Document",
+    "DomTokenList",
+    "Element",
+    "Event",
+    "EventTarget",
+    "Headers",
+    "HtmlCollection",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlSelectElement",
+    "HtmlTextAreaElement",
+    "KeyboardEvent",
+    "Location",
+    "MediaQueryList",
+    "MessageEvent",
+    "Navigator",
+    "Node",
+    "Notification",
+    "NotificationPermission",
+    "PushManager",
+    "PushSubscription",
+    "PushSubscriptionJson",
+    "PushSubscriptionOptionsInit",
+    "Request",
+    "RequestCredentials",
+    "RequestInit",
+    "Response",
+    "ServiceWorkerContainer",
+    "ServiceWorkerRegistration",
+    "Text",
+    "VisibilityState",
+    "WebSocket",
+    "Window",
+] }
+
+[lints]
+workspace = true

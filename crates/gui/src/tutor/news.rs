@@ -185,6 +185,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "A chat's :Review takes in its subagents' changes, open or closed, each hunk saying whose",
     },
+    News {
+        id: "phone",
+        date: "2026-10-13",
+        lesson: "remote",
+        what: "Your chats from your phone: a web app the daemon serves, with notifications, paired with :Devices",
+    },
 ];
 
 impl News {

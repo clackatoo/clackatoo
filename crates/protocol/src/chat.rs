@@ -465,6 +465,42 @@ pub enum ChoiceKind {
     RejectAlways,
 }
 
+/// A chat as the list of chats shows it: enough to say which need the
+/// user, without each one's turns.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatSummary {
+    /// The chat.
+    pub chat: crate::TerminalId,
+    /// Its title.
+    pub title: String,
+    /// Its agent, as it's shown: "Claude Code".
+    pub agent: String,
+    /// What it's doing.
+    pub state: ChatState,
+    /// Whether its agent asks the user something, and waits.
+    pub asking: bool,
+    /// Whether a turn ended, or a question came, while no one present was
+    /// looking at it, and no one has looked since.
+    pub unseen: bool,
+    /// The chat whose agent started it, if one did.
+    pub parent: Option<crate::TerminalId>,
+    /// The workspace it's in: its pane's, or for a chat in no pane, that
+    /// of the nearest chat above it that's in one.
+    pub workspace: Option<crate::WorkspaceId>,
+    /// When something last happened in it, in milliseconds since the Unix
+    /// epoch: its last message sent, or its last turn's end.
+    pub active: u64,
+}
+
+impl ChatSummary {
+    /// Whether it needs the user: it asks something, or has something
+    /// they haven't seen.
+    #[must_use]
+    pub fn needs_you(&self) -> bool {
+        self.asking || self.unseen
+    }
+}
+
 /// One change to a chat a client already has.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatPatch {

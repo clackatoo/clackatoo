@@ -39,6 +39,7 @@ mod runtime;
 mod server;
 mod shell;
 pub mod upgrade;
+pub mod web;
 mod workspaces;
 
 use std::ffi::OsString;
@@ -119,6 +120,9 @@ pub struct DaemonConfig {
     /// The browser agents drive for chats whose Browser setting is on
     /// (see `browser`). `None` gives them none.
     pub browser: Option<BrowserConfig>,
+    /// The web app phones reach the daemon through, if it's on (see
+    /// [`web`]).
+    pub web: Option<web::WebConfig>,
 }
 
 /// How long a language server is kept with no files open in it, unless
@@ -161,7 +165,8 @@ impl DaemonConfig {
     /// or `off` for none (or else Chromium or Chrome, as found on `PATH`),
     /// with its profile in `$CLACKATOO_BROWSER_PROFILE` (or else
     /// `clackatoo/browser` in the data directory, or for a snap, in its
-    /// own folder).
+    /// own folder), and the web app as `daemon/web.toml` in [`config_dir`]
+    /// says, keeping its devices in `clackatoo/web` in the data directory.
     #[must_use]
     pub fn from_env() -> Self {
         let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
@@ -231,6 +236,9 @@ impl DaemonConfig {
                     idle: DEFAULT_BROWSER_IDLE,
                 }),
             },
+            web: config_dir().zip(data_dir()).and_then(|(config, data)| {
+                web::config::read(&config.join("daemon/web.toml"), data.join("clackatoo/web"))
+            }),
         }
     }
 }

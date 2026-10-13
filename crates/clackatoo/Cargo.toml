@@ -24,7 +24,12 @@ clackatoo-update.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true
+rustix.workspace = true
 toml_edit.workspace = true
+
+[build-dependencies]
+# Gzips the web app's files as they're built in.
+flate2.workspace = true
 
 [dev-dependencies]
 clackatoo-bench.workspace = true

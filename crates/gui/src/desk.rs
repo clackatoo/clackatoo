@@ -103,6 +103,9 @@ enum Asked {
     Lesson(lessons::Serial, lessons::LessonAsked),
     /// Something asked of reviewing, whose answer is said in the bar.
     Reviewed,
+    /// Something asked about the devices paired with the web app, whose
+    /// answer is said in the bar.
+    Devices,
 }
 
 mod bindings;
@@ -110,6 +113,7 @@ mod boards;
 mod browsers;
 mod clipboard;
 mod connecting;
+mod devices;
 mod editors;
 mod explorers;
 mod finding;
@@ -212,6 +216,12 @@ pub(crate) struct Desk {
     /// The daemon's offer to install a language, asked in the bar until
     /// the next key.
     offer: Option<offers::Offer>,
+    /// The devices asking to pair with the daemon's web app, asked about
+    /// in the bar until a window answers.
+    pairing: Vec<clackatoo_protocol::PairingAsk>,
+    /// When the daemon was last told the window's user is there, while
+    /// they are.
+    present_said: Option<std::time::Instant>,
     /// Text copied, waiting for the window to put on the clipboard or the
     /// primary selection, oldest first.
     yanked: Vec<(String, Copy)>,
@@ -568,6 +578,9 @@ impl Desk {
             };
         }
         if let Some(status) = self.offer_status() {
+            return status;
+        }
+        if let Some(status) = self.pairing_status() {
             return status;
         }
         if let Some((editor, copy)) = self.focused_editor() {
@@ -1000,6 +1013,11 @@ impl Desk {
         }
         self.workspaces_changed(workspaces);
         self.tutor_connected();
+        // A new daemon, or one that lost the last connection, doesn't know.
+        self.pairing.clear();
+        if !self.unfocused {
+            self.say_present(true);
+        }
     }
 
     /// The connection was lost: nothing is attached, and nothing asked
@@ -1110,6 +1128,7 @@ impl Desk {
 
     /// Hands the daemon's answer to whoever asked. Returns whether the
     /// window must be redrawn.
+    #[allow(clippy::too_many_lines, reason = "one arm per asker, each short")]
     fn hand_answer(&mut self, response: Response) -> bool {
         match self.asked.pop_front() {
             Some(Asker::Pane(terminal)) => {
@@ -1172,6 +1191,7 @@ impl Desk {
                 }
                 true
             }
+            Some(Asker::Window(Asked::Devices)) => self.devices_answered(response),
             Some(Asker::Window(Asked::Explorer { reveal, edit })) => {
                 match response {
                     Response::PaneCreated(pane) => self.explorer_made(pane, reveal, edit),
@@ -1270,6 +1290,7 @@ impl Desk {
         if input::is_modifier(press.key) {
             return false;
         }
+        self.user_active();
         self.record_press(press);
         let redraw = self.key_with(press, true);
         let typed = self.type_macros();
@@ -1757,6 +1778,7 @@ impl Desk {
     /// never come, as in a chat, which would scroll on by itself.
     pub(crate) fn window_focus(&mut self, focused: bool) {
         self.unfocused = !focused;
+        self.say_present(focused);
         if !focused
             && let Some((terminal, _)) = self.dragging.take()
             && let Some(pane) = self.panes.get_mut(&terminal)
@@ -2019,6 +2041,7 @@ impl Desk {
             Command::Find { kind, query } => self.open_finder(kind, query),
             Command::Hunk(action) => self.editor_hunk(action),
             Command::Registers => self.show_registers(),
+            Command::Devices(command) => self.devices_command(command),
             Command::Marks => self.open_finder(crate::finder::Kind::Marks, String::new()),
             Command::Editor(line) => self.editor_command(&line),
             Command::Explore { dir, edit } => self.open_explorer(dir, edit),
@@ -2200,6 +2223,7 @@ mod tests {
                 | ClientMessage::Board { .. }
                 | ClientMessage::FileOp { .. }
                 | ClientMessage::Hello { .. }
+                | ClientMessage::Present { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
             .collect();
@@ -3693,6 +3717,62 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn devices_asking_to_pair_are_asked_about_until_a_window_answers() {
+        let mut desk = desk(workspaces(vec![workspace(1, "w", vec![tab(1, pane(1))])]));
+        let ask = clackatoo_protocol::PairingAsk {
+            name: "iPhone".into(),
+            from: "jack@github".into(),
+            until: 0,
+        };
+        assert!(desk.pairing_asked(vec![ask.clone()]));
+        assert!(
+            !desk.pairing_asked(vec![ask]),
+            "the same again changes nothing"
+        );
+        let asked = |desk: &Desk| {
+            matches!(desk.status(), Status::Typing { text, .. }
+                if text.starts_with("iPhone (jack@github) asks to control clackatoo"))
+        };
+        assert!(asked(&desk));
+        // No key answers it: typing meant for the terminal stays the
+        // terminal's.
+        type_keys(&mut desk, "y\r");
+        assert!(asked(&desk));
+        desk.devices_command(command::DevicesCommand::Allow("0042".into()));
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::AnswerPairing {
+                code: Some("0042".into())
+            }]
+        );
+        desk.pairing_asked(Vec::new());
+        assert!(!asked(&desk));
+    }
+
+    #[test]
+    fn the_daemon_hears_whether_the_windows_user_is_there() {
+        let mut desk = desk(workspaces(vec![workspace(1, "w", vec![tab(1, pane(1))])]));
+        let present = |desk: &mut Desk| -> Vec<bool> {
+            (desk.take_outbox().into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::Present { here } => Some(here),
+                    _ => None,
+                })
+                .collect()
+        };
+        desk.window_focus(false);
+        assert_eq!(present(&mut desk), [false]);
+        // Used while it hasn't the focus, as by a click through: not said.
+        desk.user_active();
+        assert_eq!(present(&mut desk), [] as [bool; 0]);
+        desk.window_focus(true);
+        assert_eq!(present(&mut desk), [true]);
+        // Said at most once a minute while it's used.
+        desk.user_active();
+        assert_eq!(present(&mut desk), [] as [bool; 0]);
     }
 
     #[test]

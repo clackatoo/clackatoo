@@ -28,6 +28,12 @@ Once connected, the connection moves out of ssh onto UDP if it can, so it carrie
 
 When the other machine stops answering, a red notice in the top bar counts the seconds. Editors go on editing, and what you type in them is sent once the connection's back; keys for terminals are turned down, with "not connected: keys aren't sent", rather than reach a shell long after you meant them. If the connection drops, as when the daemon there is upgraded, the window connects again by itself, keeping its panes and what you typed into editors, with "Reconnecting" in the top bar meanwhile. Nothing on the other machine stops.
 
+## From your phone
+
+The daemon can serve a web app, for your phone or any browser: your chats by workspace, with those that need you first, and each chat as a window shows it, with its questions, the box to send a message, Stop, the model, mode and effort menus, and the cards of the chats its agent started. It's off until `~/.config/clackatoo/daemon/web.toml` says `mode = "tailscale"`, which listens on this machine only, for `tailscale serve --bg 8765` to give your tailnet, over HTTPS; `mode = "public"` serves it to the network, with your own certificate and a password.
+
+A phone pairs once: with the password `clackatoo web password` sets, or by asking a window. Asking shows a code on the phone, and the window's bar says a device asks; type `:Devices allow` and the code to let it in, or `:Devices deny`. `:Devices` lists what's paired, and `:Devices revoke 2` unpairs the second, cutting it off at once. Turn on notifications in the app, and the phone is told when a chat finishes, or asks you something, while no window you're using shows it. On an iPhone, add the app to the home screen first (Share, then Add to Home Screen), and pair it from there: only an app on the home screen gets notifications.
+
 ## Panes from several machines
 
 `:connect HOST`, to bring another machine's workspaces into this daemon, and `:Terminal@host`, for a pane on another machine beside your own, aren't built yet, as both say. Until then, a window shows one machine, and `:connect` alone opens a window on another.

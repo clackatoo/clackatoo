@@ -22,6 +22,9 @@
 //! undoes what a turn of the agent's changed in files, the turn's number
 //! after it, or else the last, and `AgentRedo` makes it again; with `!`,
 //! in the files that can be, though others can't.
+//! `Devices` lists the devices paired with the daemon's web app; `Devices
+//! allow CODE` allows the one asking to pair that shows `CODE`, `Devices
+//! deny` turns down those asking, and `Devices revoke N` unpairs one.
 //! `Board NAME` opens the board called that, made if there's none, in a
 //! tab or with a mark beside; `Board` alone, or `Boards`, picks one in
 //! the finder. `Browser` opens the focused chat's page in clackatoo's
@@ -162,6 +165,21 @@ pub(crate) enum Command {
     Board { place: Place, name: Option<String> },
     /// `:Browser`: the focused chat's page, where `place` says.
     Browser(Place),
+    /// `:Devices`: the devices paired with the web app, or this, to them.
+    Devices(DevicesCommand),
+}
+
+/// What `:Devices` does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DevicesCommand {
+    /// Lists them.
+    List,
+    /// `allow CODE`: allows the device asking to pair that shows `CODE`.
+    Allow(String),
+    /// `deny`: turns down every device asking to pair.
+    Deny,
+    /// `revoke N`: unpairs device `N`.
+    Revoke(u64),
 }
 
 /// Where a new pane goes.
@@ -219,7 +237,7 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
                         update, connect, w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, \
                         Buffers, Diagnostics, Boards, Browser, Gitsigns, Explore, AgentUndo, AgentRedo, \
-                        Review, ReviewKeep, ReviewReject, ReviewSend and Blame";
+                        Review, ReviewKeep, ReviewReject, ReviewSend, Blame and Devices";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -245,6 +263,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "update" => return Ok(Command::Update(argument.map(str::to_owned))),
         "connect" => return Ok(Command::Connect(argument.map(str::to_owned))),
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
+        "Devices" => return devices_command(argument).map(Command::Devices),
         _ => {}
     }
     let command = (file_command(word, argument))
@@ -312,6 +331,27 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         Err(format!(
             "no command called {name}; the commands are {COMMANDS}, and the kinds of pane {kinds}"
         ))
+    }
+}
+
+/// `:Devices`, with what to do as `argument` says.
+fn devices_command(argument: Option<&str>) -> Result<DevicesCommand, String> {
+    let usage = "Devices, then allow CODE, deny, or revoke N";
+    let Some(argument) = argument else {
+        return Ok(DevicesCommand::List);
+    };
+    let (what, rest) = match argument.split_once(char::is_whitespace) {
+        Some((what, rest)) => (what, Some(rest.trim())),
+        None => (argument, None),
+    };
+    match (what, rest) {
+        ("allow", Some(code)) => Ok(DevicesCommand::Allow(code.to_owned())),
+        ("allow", None) => Err("allow needs the code the device shows: :Devices allow CODE".into()),
+        ("deny", None) => Ok(DevicesCommand::Deny),
+        ("revoke", Some(number)) => (number.parse()).map(DevicesCommand::Revoke).map_err(|_| {
+            format!("revoke takes a device's number, as :Devices lists it, not {number}")
+        }),
+        _ => Err(format!("no such thing to do to devices: {usage}")),
     }
 }
 
@@ -715,6 +755,22 @@ mod tests {
         assert!(matches!(parse("-Terminal"), Ok(Command::Open { .. })));
         assert_eq!(parse("set nowrap"), Ok(Command::Set("nowrap".into())));
         assert_eq!(parse("marks"), Ok(Command::Marks));
+        assert_eq!(parse("Devices"), Ok(Command::Devices(DevicesCommand::List)));
+        assert_eq!(
+            parse("Devices allow 0042"),
+            Ok(Command::Devices(DevicesCommand::Allow("0042".into())))
+        );
+        assert_eq!(
+            parse("Devices deny"),
+            Ok(Command::Devices(DevicesCommand::Deny))
+        );
+        assert_eq!(
+            parse("Devices revoke 3"),
+            Ok(Command::Devices(DevicesCommand::Revoke(3)))
+        );
+        assert!(parse("Devices allow").is_err());
+        assert!(parse("Devices revoke phone").is_err());
+        assert!(parse("Devices forget").is_err());
         assert!(parse("sx").is_err());
     }
 

@@ -74,6 +74,7 @@ impl TestDaemon {
             rename_gate: None,
             boards: None,
             browser: None,
+            web: None,
             trash: Some(dir.path().join("trash")),
         };
         change(dir.path(), &mut config);
@@ -3452,7 +3453,9 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Show { .. }
             | Event::Board { .. }
             | Event::Review { .. }
-            | Event::Browser { .. }) => {
+            | Event::Browser { .. }
+            | Event::Chats(_)
+            | Event::Pairing(_)) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }
