@@ -10,8 +10,8 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 
 /// What a window logs unless `RUST_LOG` says otherwise: warnings, and how
 /// a connection to another machine is going, which is what's needed to
@@ -20,8 +20,8 @@ use std::path::PathBuf;
 const WINDOW: &str = "warn,clackatoo_daemon::quic=info,clackatoo_daemon::remote=info,\
                       clackatoo_gui::session=info";
 
-/// How big a window's log may grow before the next window to start moves
-/// it aside, to `window.log.old`, and starts another.
+/// How big a window's log may grow before it's moved aside, to
+/// `window.log.old`, and another begun.
 const WINDOW_LOG_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// A logger with `default` as its filter unless `RUST_LOG` says otherwise.
@@ -59,9 +59,12 @@ pub(crate) fn window() {
             record.args()
         )
     });
-    match open_window_log() {
-        Ok(file) => {
-            builder.target(env_logger::Target::Pipe(Box::new(Both(file))));
+    let log = window_log_path()
+        .ok_or_else(|| io::Error::other("$HOME isn't set"))
+        .and_then(|path| Both::open(path, WINDOW_LOG_LIMIT));
+    match log {
+        Ok(both) => {
+            builder.target(env_logger::Target::Pipe(Box::new(both)));
         }
         Err(err) => eprintln!("clackatoo: the window's log can't be written: {err}"),
     }
@@ -74,37 +77,87 @@ pub(crate) fn window_log_path() -> Option<PathBuf> {
     Some(clackatoo_daemon::state_dir()?.join("window.log"))
 }
 
-/// Opens the window's log to add to, moving it aside first if it has grown
-/// too big.
-fn open_window_log() -> io::Result<File> {
-    let path = window_log_path().ok_or_else(|| io::Error::other("$HOME isn't set"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+/// Writes each line both to the error output and to a log file. Each
+/// record comes in one write, and the file is opened to append, so lines
+/// from several windows don't interleave. Once the file grows past its
+/// limit, it's moved aside, to `.old` in place of the last, and another
+/// begun; a window whose file another moved aside follows it to the new
+/// one.
+struct Both {
+    file: File,
+    path: PathBuf,
+    limit: u64,
+}
+
+impl Both {
+    fn open(path: PathBuf, limit: u64) -> io::Result<Self> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let file = append(&path)?;
+        let mut both = Self { file, path, limit };
+        both.move_aside_if_full();
+        Ok(both)
     }
-    if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > WINDOW_LOG_LIMIT) {
-        std::fs::rename(&path, path.with_extension("log.old"))?;
+
+    /// Moves the file aside if it has grown past the limit, and begins
+    /// another, or follows another window that has.
+    fn move_aside_if_full(&mut self) {
+        let ours = self.file.metadata().ok().map(|meta| meta.ino());
+        let reopen = match std::fs::metadata(&self.path) {
+            Ok(meta) if meta.len() > self.limit => {
+                let _ = std::fs::rename(&self.path, self.path.with_extension("log.old"));
+                true
+            }
+            Ok(meta) => Some(meta.ino()) != ours,
+            Err(_) => true,
+        };
+        if reopen && let Ok(file) = append(&self.path) {
+            self.file = file;
+        }
     }
+}
+
+/// Opens `path` to add to, making it if it isn't there.
+fn append(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(&path)
+        .open(path)
 }
-
-/// Writes each line both to the error output and to a file. Each record
-/// comes in one write, and the file is opened to append, so lines from
-/// several windows don't interleave.
-struct Both(File);
 
 impl Write for Both {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         // A window started without a terminal may have nowhere for errors.
         let _ = io::stderr().write_all(bytes);
-        self.0.write_all(bytes)?;
+        self.move_aside_if_full();
+        self.file.write_all(bytes)?;
         Ok(bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
+        self.file.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_log_past_its_limit_is_moved_aside_while_written_and_others_follow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("window.log");
+        let mut first = Both::open(path.clone(), 100).unwrap();
+        let mut second = Both::open(path.clone(), 100).unwrap();
+        first.write_all(&[b'a'; 60]).unwrap();
+        second.write_all(&[b'b'; 60]).unwrap();
+        // Past 100: moved aside before the next line, by whichever writes.
+        first.write_all(b"after").unwrap();
+        let old = std::fs::read(path.with_extension("log.old")).unwrap();
+        assert_eq!(old.len(), 120);
+        second.write_all(b"too").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "aftertoo");
     }
 }
