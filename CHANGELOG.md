@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.10.9 (2026-10-13)
+
+### Features
+
+- **editor:** editors open folders, as oil.nvim's listings, to browse and edit (c322f23)
+
+### Fixes
+
+- **agents:** say when an agent is slow to open a chat's session, with Retry and Stop (802c6f6)
+
 ## 2026.10.8 (2026-10-13)
 
 ### Fixes
