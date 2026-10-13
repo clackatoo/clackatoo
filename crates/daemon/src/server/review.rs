@@ -1742,7 +1742,10 @@ fn nothing_to(hunks: &Hunks, verb: &str) -> String {
             format!("There's no change to {verb} there: it may have gone since.")
         }
         Hunks::Ids(_) => format!("There are no changes to {verb}: they may have gone since."),
-        Hunks::Turn { turn, .. } => format!("Turn {} has nothing to {verb}.", turn + 1),
+        Hunks::Turn { turn, .. } => {
+            // Any number a window sent, which may be the last there is.
+            format!("Turn {} has nothing to {verb}.", u64::from(*turn) + 1)
+        }
         Hunks::Chat(_) => format!("The chat has nothing to {verb}."),
     }
 }

@@ -84,7 +84,7 @@ impl Terminal {
             let end = if whole_lines || line != to.line {
                 row.width()
             } else {
-                (to.col + 1).min(row.width())
+                to.col.saturating_add(1).min(row.width())
             };
             let at = text.len();
             for col in start..end {
@@ -232,6 +232,25 @@ mod tests {
         // Blanks are text, unless only blanks follow them.
         assert_eq!(t.text(at(0, 0), at(0, 5), false), "hello ");
         assert_eq!(t.text(at(2, 0), at(2, 8), false), "second");
+    }
+
+    #[test]
+    fn places_past_the_ends_are_taken_as_the_ends() {
+        // As a client may send them.
+        let t = terminal("hello there\r\nsecond\r\nthird");
+        let far = at(u64::MAX, usize::MAX);
+        assert_eq!(t.text(at(2, 0), at(2, usize::MAX), false), "second");
+        assert_eq!(t.text(at(2, usize::MAX), at(2, usize::MAX), false), "");
+        assert_eq!(t.text(at(0, 0), far, false), "hello there\nsecond\nthird");
+        assert_eq!(t.text(far, far, true), "");
+        assert_eq!(
+            t.search("e", far, true, false).map(|m| m.start),
+            Some(at(2, 1))
+        );
+        assert_eq!(
+            t.search("t", far, false, false).map(|m| m.start),
+            Some(at(0, 6))
+        );
     }
 
     #[test]
