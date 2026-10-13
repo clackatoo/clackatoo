@@ -35,6 +35,7 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
 fi
 tag=$(git describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null) \
     || die "HEAD isn't a release: run scripts/release and push the tag first"
+head=$(git rev-parse HEAD)
 command -v gh >/dev/null || die "needs gh, to see whether $tag is published"
 
 # Published means out of draft, with the build every machine fetches.
@@ -49,6 +50,12 @@ until published; do
     echo "deploy: waiting for $tag to be published…"
     sleep 30
 done
+
+# Waiting can take a while: build only what was checked out at the start.
+[ "$(git rev-parse HEAD)" = "$head" ] \
+    || die "HEAD moved off $tag while waiting: run it again from the tag"
+[ -z "$(git status --porcelain --untracked-files=no)" ] \
+    || die "there are changes not committed now: the build wouldn't be the release"
 
 cargo build --release --locked
 target/release/clackatoo upgrade
