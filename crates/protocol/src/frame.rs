@@ -331,6 +331,108 @@ mod tests {
         assert!(read(&nested(64)).is_ok());
     }
 
+    /// Frames of messages of many kinds, to be mangled.
+    fn real_frames() -> Vec<Vec<u8>> {
+        use crate::{
+            Axis, BufferId, Change, Content, Edit, Layout, Pane, PaneId, Query, Size, Tab, TabId,
+            TerminalId, Workspace, WorkspaceId, Workspaces,
+        };
+        let client = [
+            ClientMessage::Request(Request::Resize {
+                terminal: TerminalId(1),
+                size: Size::new(80, 24).unwrap(),
+            }),
+            ClientMessage::Edit {
+                buffer: BufferId(2),
+                seq: 9,
+                change: Change::Edit {
+                    edit: Edit::replace(12, 3, "lo", "p 🦀"),
+                    base: 4,
+                    step: true,
+                },
+            },
+            ClientMessage::Query {
+                buffer: BufferId(2),
+                id: 1,
+                version: 5,
+                at: 7,
+                query: Query::CodeActions { end: 9 },
+            },
+        ];
+        let pane = |id| {
+            Layout::Pane(Pane {
+                id: PaneId(id),
+                content: Content::Terminal(TerminalId(id)),
+            })
+        };
+        let server = ServerMessage::Event(crate::Event::Workspaces(Workspaces {
+            list: vec![Workspace {
+                id: WorkspaceId(0),
+                name: "w".into(),
+                tabs: vec![Tab {
+                    id: TabId(0),
+                    layout: Layout::Split {
+                        axis: Axis::LeftToRight,
+                        parts: vec![pane(0), pane(1)],
+                        shares: vec![1, 2],
+                    },
+                    focused: PaneId(1),
+                    name: None,
+                }],
+                active_tab: TabId(0),
+            }],
+            active: None,
+        }));
+        let mut frames: Vec<_> = client.iter().map(|m| encode(m).unwrap()).collect();
+        frames.push(encode(&server).unwrap());
+        frames
+    }
+
+    /// Decodes everything in `bytes` as `T`, as far as it goes.
+    fn decode_all<T: DeserializeOwned>(bytes: &[u8]) {
+        let mut decoder = FrameDecoder::new();
+        decoder.push(bytes);
+        while let Ok(Some(_)) = decoder.decode::<T>() {}
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn any_bytes_are_decoded_or_refused(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512),
+        ) {
+            let mut framed = header(bytes.len()).to_vec();
+            framed.extend(&bytes);
+            for bytes in [&bytes, &framed] {
+                decode_all::<ClientMessage>(bytes);
+                decode_all::<ServerMessage>(bytes);
+            }
+        }
+
+        #[test]
+        fn mangled_frames_are_decoded_or_refused(
+            which in 0..4_usize,
+            changes in proptest::collection::vec(
+                (proptest::prelude::any::<usize>(), proptest::prelude::any::<u8>(), 0..4_u8),
+                1..8,
+            ),
+        ) {
+            let mut frame = real_frames().swap_remove(which);
+            for (at, byte, how) in changes {
+                // Past the header, mostly, so the frame is still whole.
+                let at = HEADER_LEN + at % (frame.len() - HEADER_LEN).max(1);
+                match how {
+                    0 => frame.insert(at.min(frame.len()), byte),
+                    1 if at < frame.len() => drop(frame.remove(at)),
+                    _ => if let Some(old) = frame.get_mut(at) { *old = byte },
+                }
+            }
+            let len = frame.len() - HEADER_LEN;
+            frame[..HEADER_LEN].copy_from_slice(&header(len));
+            decode_all::<ClientMessage>(&frame);
+            decode_all::<ServerMessage>(&frame);
+        }
+    }
+
     #[test]
     fn hello_stays_variant_zero() {
         // Version negotiation depends on this encoding never changing: it is

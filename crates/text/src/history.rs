@@ -264,6 +264,8 @@ mod tests {
     enum Who {
         You,
         Agent,
+        /// A second agent.
+        Other,
     }
 
     /// A text and its history, edited as the daemon edits them.
@@ -463,5 +465,238 @@ mod tests {
         let restored = History::restore(doc.history.snapshot());
         assert_eq!(restored.snapshot(), doc.history.snapshot());
         assert_eq!(restored.version(), 3);
+    }
+
+    /// Where in `text` a move goes: a character boundary, as a fraction
+    /// of the way through, and the boundary `delete` characters on.
+    fn place(text: &str, at: f64, delete: usize) -> (usize, usize) {
+        let chars: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let index = (at * chars.len() as f64) as usize;
+        let start = chars.get(index).copied().unwrap_or(text.len());
+        let end = chars.get(index + delete).copied().unwrap_or(text.len());
+        (start, end)
+    }
+
+    /// Edits, undos and redos by three authors, in any order: each as who,
+    /// what (0 and 1 edit, 2 undoes, 3 redoes), whether an edit starts a
+    /// step, and where and what it changes.
+    fn turns() -> impl proptest::strategy::Strategy<Value = Vec<(u8, u8, bool, f64, usize, String)>>
+    {
+        use proptest::prelude::*;
+        prop::collection::vec(
+            (
+                0..3u8,
+                0..4u8,
+                any::<bool>(),
+                0.0..1.0f64,
+                0..3usize,
+                "[ab\\né中🦀]{0,3}",
+            ),
+            1..40,
+        )
+    }
+
+    /// A window editing a copy of the text, as clackatoo's windows do: the
+    /// version its copy is of, the edit it has sent and not heard back
+    /// about, and the edits it's made since, which wait for that.
+    #[derive(Default)]
+    struct Window {
+        text: String,
+        version: u64,
+        sent: Option<Edit>,
+        waiting: Option<Edit>,
+    }
+
+    /// What the daemon tells a window: its own edit was made as `version`,
+    /// or someone else's edit was.
+    enum Told {
+        Made(u64),
+        Edited(Edit, u64),
+    }
+
+    impl Window {
+        /// Makes an edit to its copy, sending it if nothing else is sent.
+        fn edit(&mut self, edit: Edit, outbox: &mut Vec<(Edit, u64)>) {
+            self.text = edit.apply_to(&self.text).unwrap();
+            if self.sent.is_none() {
+                outbox.push((edit.clone(), self.version));
+                self.sent = Some(edit);
+            } else {
+                self.waiting = Some(match self.waiting.take() {
+                    Some(waiting) => compose(&waiting, &edit).unwrap(),
+                    None => edit,
+                });
+            }
+        }
+
+        fn hear(&mut self, told: Told, outbox: &mut Vec<(Edit, u64)>) {
+            match told {
+                Told::Made(version) => {
+                    self.version = version;
+                    self.sent = self.waiting.take();
+                    if let Some(next) = &self.sent {
+                        outbox.push((next.clone(), version));
+                    }
+                }
+                Told::Edited(mut theirs, version) => {
+                    for mine in [&mut self.sent, &mut self.waiting].into_iter().flatten() {
+                        (*mine, theirs) = transform(mine, &theirs).unwrap();
+                    }
+                    self.text = theirs.apply_to(&self.text).unwrap();
+                    self.version = version;
+                }
+            }
+        }
+    }
+
+    /// The daemon takes the next edit window `w` sent, if there is one,
+    /// brings it up to date and makes it, as `Buffer::edit` does, and
+    /// tells both windows.
+    fn daemon_takes(
+        doc: &mut Doc,
+        w: usize,
+        to_daemon: &mut [Vec<(Edit, u64)>; 2],
+        to_window: &mut [std::collections::VecDeque<Told>; 2],
+    ) -> bool {
+        if to_daemon[w].is_empty() {
+            return false;
+        }
+        let (edit, base) = to_daemon[w].remove(0);
+        let edit = doc.history.rebase(edit, base).unwrap();
+        doc.text = edit.apply_to(&doc.text).unwrap();
+        let version = doc.history.record(edit.clone(), Who::You, true).unwrap();
+        to_window[w].push_back(Told::Made(version));
+        to_window[1 - w].push_back(Told::Edited(edit, version));
+        true
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn three_authors_undo_and_redo_in_any_order(turns in turns()) {
+            let mut doc = Doc::new("start");
+            for (who, what, step, at, delete, insert) in turns {
+                let who = [Who::You, Who::Agent, Who::Other][usize::from(who)];
+                match what {
+                    0 | 1 => {
+                        let (start, end) = place(&doc.text, at, delete);
+                        let removed = doc.text[start..end].to_owned();
+                        doc.edit(who, step, start, &removed, &insert);
+                    }
+                    2 => {
+                        let before = doc.text.clone();
+                        if doc.undo(who) {
+                            // Redoing it at once puts back what it took,
+                            // and undoing again takes it away again.
+                            let undone = doc.text.clone();
+                            proptest::prop_assert!(doc.redo(who));
+                            proptest::prop_assert_eq!(&doc.text, &before);
+                            proptest::prop_assert!(doc.undo(who));
+                            proptest::prop_assert_eq!(&doc.text, &undone);
+                        } else {
+                            proptest::prop_assert_eq!(&doc.text, &before);
+                        }
+                    }
+                    _ => {
+                        doc.redo(who);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn windows_editing_old_versions_end_up_with_the_daemons_text(
+            turns in turns(),
+            deliveries in proptest::collection::vec(0..6u8, 40..120),
+        ) {
+            // Two windows, typing as the user, and an agent editing the
+            // text as it is. The daemon brings each window's edit up to
+            // date, as Buffer::edit does; each window brings what it
+            // hears past what it has sent and is waiting to send.
+            let mut doc = Doc::new("start");
+            let mut windows: [Window; 2] = Default::default();
+            for window in &mut windows {
+                window.text.clone_from(&doc.text);
+            }
+            let mut to_daemon: [Vec<(Edit, u64)>; 2] = Default::default();
+            let mut to_window: [std::collections::VecDeque<Told>; 2] = Default::default();
+            let mut turns = turns.into_iter();
+            let mut deliveries = deliveries.into_iter();
+            loop {
+                let delivery = deliveries.next();
+                let pending = to_daemon.iter().any(|queue| !queue.is_empty())
+                    || to_window.iter().any(|queue| !queue.is_empty());
+                match delivery {
+                    // A window edits, or the agent does, or the user undoes.
+                    Some(0 | 1) => {
+                        let Some((who, what, step, at, delete, insert)) = turns.next() else {
+                            continue;
+                        };
+                        let w = usize::from(who % 2);
+                        if who == 2 {
+                            let made = if what == 2 {
+                                let undo = doc.history.undo(&Who::Agent).unwrap();
+                                if let Some(undo) = &undo {
+                                    doc.text = undo.apply_to(&doc.text).unwrap();
+                                }
+                                undo
+                            } else {
+                                let (start, end) = place(&doc.text, at, delete);
+                                let removed = doc.text[start..end].to_owned();
+                                let edit = Edit::replace(doc.text.len(), start, &removed, &insert);
+                                doc.text = edit.apply_to(&doc.text).unwrap();
+                                doc.history.record(edit.clone(), Who::Agent, step).unwrap();
+                                Some(edit)
+                            };
+                            if let Some(made) = made {
+                                let version = doc.history.version();
+                                for queue in &mut to_window {
+                                    queue.push_back(Told::Edited(made.clone(), version));
+                                }
+                            }
+                        } else {
+                            let text = &windows[w].text;
+                            let (start, end) = place(text, at, delete);
+                            let removed = text[start..end].to_owned();
+                            let edit = Edit::replace(text.len(), start, &removed, &insert);
+                            windows[w].edit(edit, &mut to_daemon[w]);
+                        }
+                    }
+                    // The daemon takes a window's next edit.
+                    Some(2 | 3) => {
+                        let w = usize::from(delivery == Some(3));
+                        daemon_takes(&mut doc, w, &mut to_daemon, &mut to_window);
+                    }
+                    // A window hears the next thing the daemon told it.
+                    Some(_) => {
+                        let w = usize::from(delivery == Some(5));
+                        if let Some(told) = to_window[w].pop_front() {
+                            windows[w].hear(told, &mut to_daemon[w]);
+                        }
+                    }
+                    // Everything still on its way arrives.
+                    None if pending => {
+                        for w in 0..2 {
+                            while daemon_takes(&mut doc, w, &mut to_daemon, &mut to_window) {}
+                            while let Some(told) = to_window[w].pop_front() {
+                                windows[w].hear(told, &mut to_daemon[w]);
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+            for window in &windows {
+                proptest::prop_assert_eq!(&window.text, &doc.text);
+                proptest::prop_assert_eq!(window.version, doc.history.version());
+            }
+            // And the user can undo everything they typed, through the
+            // agent's edits, without an error.
+            while doc.undo(Who::You) {}
+        }
     }
 }

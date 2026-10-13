@@ -27,7 +27,11 @@ use clackatoo_daemon::{
 use clackatoo_netem::{
     Conditions, Impairment, Latencies, Link, StreamKiller, StreamRelay, UdpRelay,
 };
-use clackatoo_protocol::{Event, NewTerminal, Size, TerminalId, View, ViewUpdate};
+use clackatoo_protocol::{
+    BufferId, BufferUpdate, Change, Edit, Event, NewTerminal, OpenFile, PaneTerminal, Request,
+    Response, Resume, Size, TerminalId, View, ViewUpdate,
+};
+use clackatoo_text::transform;
 
 /// A daemon on its own thread, in its own directory, taking UDP on a port
 /// chosen for it.
@@ -714,4 +718,432 @@ fn attach_any(client: &mut Client, terminal: TerminalId) -> View {
 fn first_line_containing(view: &View, text: &str) -> bool {
     view.grid()
         .is_some_and(|grid| grid.lines.iter().any(|line| line.text().trim() == text))
+}
+
+/// jack's laptop on a caravan site's Wi-Fi, through a Tailscale tunnel: a
+/// round trip of 90 to 230 ms, 2% lost, and nothing over 1280 bytes. The
+/// bursts of loss and the outages are made by [`Caravan`].
+fn caravan() -> Conditions {
+    Conditions::lossy(0.02, Duration::from_millis(160), Duration::from_millis(140)).with_mtu(1280)
+}
+
+/// Makes the network worse now and then, on a thread, until dropped:
+/// every 3 to 8 s, up to a second of losing 40%; every 45 to 75 s, an
+/// outage of 5 to 10 s.
+struct Caravan {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Caravan {
+    fn start(network: &Network, seed: u64) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (udp, ssh) = (network.udp.clone(), network.ssh.clone());
+        let stopped = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let mut state = seed | 1;
+            let mut between = move |range: std::ops::Range<u64>| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                Duration::from_millis(range.start + state % (range.end - range.start))
+            };
+            let mut next_outage = Instant::now() + between(45_000..75_000);
+            let bursty = {
+                let mut conditions = caravan();
+                conditions.up.loss = 0.4;
+                conditions.down.loss = 0.4;
+                conditions
+            };
+            let pause = |duration: Duration| {
+                let until = Instant::now() + duration;
+                while Instant::now() < until {
+                    if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                true
+            };
+            loop {
+                if !pause(between(3_000..8_000)) {
+                    return;
+                }
+                if Instant::now() > next_outage {
+                    let outage = between(5_000..10_000);
+                    eprintln!("NETEM   an outage of {outage:?}");
+                    udp.black_out(outage);
+                    ssh.black_out(outage);
+                    next_outage = Instant::now() + between(45_000..75_000);
+                    continue;
+                }
+                udp.set(bursty.clone());
+                let burst = pause(between(300..1_000));
+                udp.set(caravan());
+                if !burst {
+                    return;
+                }
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Caravan {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("the caravan's thread panicked");
+        }
+    }
+}
+
+/// How long a caravan soak types for: `CLACKATOO_SOAK_SECONDS`, or two
+/// minutes.
+fn soak_length() -> Duration {
+    let seconds = std::env::var("CLACKATOO_SOAK_SECONDS")
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or(120);
+    Duration::from_secs(seconds)
+}
+
+#[test]
+#[ignore = "slow: minutes of typing over a caravan's Wi-Fi"]
+fn typing_over_a_caravan_link_keeps_the_session() {
+    let daemon = TestDaemon::start();
+    let network = Network::new(caravan());
+    let caravan = Caravan::start(&network, 7);
+    let mut session = Session::open(&daemon, &network);
+    session.type_for(soak_length(), TYPING);
+    drop(caravan);
+    session.report("caravan");
+    // Outages of 10 s are well inside the 2 minutes a connection waits.
+    assert_eq!(session.reconnects, 0);
+}
+
+/// A window's copy of a buffer, kept as a window keeps it: the text, the
+/// version of the daemon's text it's of, and the one change it has sent
+/// and not heard back about, already made to the copy.
+struct Copy {
+    buffer: BufferId,
+    window: u64,
+    daemon: u64,
+    text: String,
+    version: u64,
+    seq: u64,
+    sent: Option<(u64, Edit)>,
+}
+
+impl Copy {
+    /// Attaches to `buffer` as `window`, starting from its snapshot.
+    fn attach(client: &mut Client, buffer: BufferId, window: u64) -> Result<Self, ClientError> {
+        client.attach_buffer_as(buffer, window)?;
+        loop {
+            if let BufferUpdate::Snapshot(snapshot) = next_buffer_update(client, buffer)? {
+                return Ok(Self {
+                    buffer,
+                    window,
+                    daemon: snapshot.daemon,
+                    text: snapshot.text,
+                    version: snapshot.version,
+                    seq: 0,
+                    sent: None,
+                });
+            }
+        }
+    }
+
+    /// Sends `edit`, already made to the copy, numbered afresh.
+    fn send(&mut self, client: &mut Client, edit: Edit) -> Result<(), ClientError> {
+        self.seq += 1;
+        self.sent = Some((self.seq, edit.clone()));
+        let change = Change::Edit {
+            edit,
+            base: self.version,
+            step: true,
+        };
+        client.edit(self.buffer, self.seq, change)
+    }
+
+    /// Types `text` at byte `at` of the copy, and sends it.
+    fn type_at(&mut self, client: &mut Client, at: usize, text: &str) -> Result<(), ClientError> {
+        assert!(self.sent.is_none(), "one change at a time");
+        let edit = Edit::replace(self.text.len(), at, "", text);
+        self.text = edit.apply_to(&self.text).expect("an edit of the copy");
+        self.send(client, edit)
+    }
+
+    /// Types `text` at byte `at` of the copy as the connection is lost:
+    /// it's numbered as sent, but never arrives.
+    fn type_lost(&mut self, at: usize, text: &str) {
+        assert!(self.sent.is_none(), "one change at a time");
+        let edit = Edit::replace(self.text.len(), at, "", text);
+        self.text = edit.apply_to(&self.text).expect("an edit of the copy");
+        self.seq += 1;
+        self.sent = Some((self.seq, edit));
+    }
+
+    /// Takes in what the daemon said: its own change made, or someone
+    /// else's, which goes past the change it sent.
+    fn hear(&mut self, update: BufferUpdate) {
+        match update {
+            BufferUpdate::Acked { version, seq } => {
+                assert_eq!(self.sent.as_ref().map(|(sent, _)| *sent), Some(seq));
+                assert_eq!(version, self.version + 1, "a version skipped");
+                self.sent = None;
+                self.version = version;
+            }
+            BufferUpdate::Edited { version, edit, .. } => self.edited(&edit, version),
+            BufferUpdate::Snapshot(_) | BufferUpdate::Resumed { .. } => {
+                panic!("only sent on attaching")
+            }
+            BufferUpdate::NoChange(seq) => panic!("change {seq} changed nothing"),
+            _ => {}
+        }
+    }
+
+    fn edited(&mut self, edit: &Edit, version: u64) {
+        assert_eq!(version, self.version + 1, "a version skipped");
+        let mut theirs = edit.clone();
+        if let Some((_, mine)) = &mut self.sent {
+            (*mine, theirs) = transform(mine, &theirs).expect("edits of the same text");
+        }
+        self.text = theirs.apply_to(&self.text).expect("an edit of the copy");
+        self.version = version;
+    }
+
+    /// Attaches again, on a new connection, catching up as a window does:
+    /// the edits since what it knew, its own change among them if it was
+    /// made, and sends its change again if it never arrived.
+    fn resume(&mut self, client: &mut Client) -> Result<Resumed, ClientError> {
+        let resume = Some(Resume {
+            daemon: self.daemon,
+            version: self.version,
+        });
+        let request = Request::AttachBuffer {
+            buffer: self.buffer,
+            window: self.window,
+            resume,
+        };
+        match client.request(&request)? {
+            Response::Done => {}
+            other => panic!("attaching again: {other:?}"),
+        }
+        let sent = self.sent.as_ref().map(|(seq, _)| *seq);
+        let arrived = |applied: Option<u64>| sent.is_some_and(|sent| applied >= Some(sent));
+        loop {
+            match next_buffer_update(client, self.buffer)? {
+                BufferUpdate::Resumed {
+                    edits,
+                    applied,
+                    landed,
+                    ..
+                } => {
+                    let arrived = arrived(applied);
+                    for edit in edits {
+                        if arrived && landed == Some(self.version + 1) {
+                            // Its own, already in the copy.
+                            self.sent = None;
+                            self.version += 1;
+                        } else {
+                            self.edited(&edit, self.version + 1);
+                        }
+                    }
+                    assert!(
+                        !arrived || self.sent.is_none(),
+                        "a change that couldn't be made"
+                    );
+                    if let Some((_, edit)) = self.sent.take() {
+                        self.send(client, edit)?;
+                        return Ok(Resumed::Again);
+                    }
+                    return Ok(Resumed::Caught);
+                }
+                BufferUpdate::Snapshot(_) => panic!("the daemon kept its edits"),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// How a copy attaching again caught up.
+#[derive(Debug, PartialEq, Eq)]
+enum Resumed {
+    /// From the edits since, its change among them or none sent.
+    Caught,
+    /// From the edits since, and its change, which never arrived, sent
+    /// again.
+    Again,
+}
+
+/// The next update about `buffer`, or an error if the connection failed.
+fn next_buffer_update(client: &mut Client, buffer: BufferId) -> Result<BufferUpdate, ClientError> {
+    loop {
+        if let Event::Buffer {
+            buffer: updated,
+            update,
+        } = client.next_event()?
+            && updated == buffer
+        {
+            return Ok(update);
+        }
+    }
+}
+
+/// The buffer a new workspace's pane shows a file in.
+fn open_buffer(client: &mut Client, path: &std::path::Path) -> BufferId {
+    client.watch_workspaces().expect("watch");
+    let file = PaneTerminal::File(OpenFile {
+        path: path.display().to_string(),
+        cwd: None,
+    });
+    let pane = client.new_workspace(None, file).expect("a workspace");
+    loop {
+        if let Ok(Event::Workspaces(workspaces)) = client.next_event()
+            && let Some((_, _, pane)) = workspaces.find_pane(pane)
+        {
+            return pane.content.buffer().expect("a buffer");
+        }
+    }
+}
+
+/// Types an `L` at the start of `buffer` every 700 ms, on a thread, from a
+/// window on the daemon's own machine, until `stop`. The thread ends with
+/// its client, its copy and how many it typed.
+fn type_at_the_desk(
+    mut local: Client,
+    buffer: BufferId,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> JoinHandle<(Client, Copy, usize)> {
+    std::thread::spawn(move || {
+        local
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("a timeout");
+        let mut copy = Copy::attach(&mut local, buffer, 1).expect("attach");
+        let mut typed = 0;
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            copy.type_at(&mut local, 0, "L").expect("type");
+            typed += 1;
+            while copy.sent.is_some() {
+                copy.hear(next_buffer_update(&mut local, buffer).expect("an update"));
+            }
+            std::thread::sleep(Duration::from_millis(700));
+        }
+        (local, copy, typed)
+    })
+}
+
+#[test]
+#[ignore = "slow: minutes of typing in an editor over a caravan's Wi-Fi"]
+fn typing_in_an_editor_over_a_caravan_link_lands_once_each() {
+    let daemon = TestDaemon::start();
+    let path = daemon.dir.path().join("notes.txt");
+    std::fs::write(&path, "start\n").expect("write the file");
+    let mut local = Client::connect(&daemon.socket()).expect("connect");
+    let buffer = open_buffer(&mut local, &path);
+
+    // Someone at the desktop types at the start of the file meanwhile.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let desk = type_at_the_desk(local, buffer, Arc::clone(&stop));
+
+    // The laptop types at the end, as a window does, over the caravan's
+    // network, and now and then loses its connection with a key on its
+    // way, and attaches again on a new one.
+    let network = Network::new(caravan());
+    let caravan = Caravan::start(&network, 11);
+    let udp = UdpRelay::start(daemon.udp, network.udp.clone()).expect("UDP relay");
+    let carriers = Carriers::default();
+    let open = || loop {
+        let (relay, client) = connect(&daemon, &network, &udp, &carriers);
+        match client {
+            Ok(mut client) => {
+                client
+                    .set_read_timeout(Some(ECHO_LIMIT))
+                    .expect("a timeout");
+                break (relay, client);
+            }
+            Err(err) => {
+                eprintln!("NETEM   connecting failed: {err}");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    };
+    let (mut relay, mut client) = open();
+    let window = clackatoo_daemon::random_window();
+    let mut copy = Copy::attach(&mut client, buffer, window).expect("attach");
+    let mut typed = String::new();
+    let mut keys = Latencies::new();
+    let (mut reconnects, mut sent_again) = (0, 0);
+    let started = Instant::now();
+    let mut next_drop = started + Duration::from_secs(20);
+    for n in 0_u32.. {
+        if started.elapsed() > soak_length() {
+            break;
+        }
+        let key = char::from_digit(n % 36, 36).expect("a digit").to_string();
+        let pressed = Instant::now();
+        let at = copy.text.len();
+        typed.push_str(&key);
+        let mut result = if Instant::now() < next_drop {
+            copy.type_at(&mut client, at, &key)
+        } else {
+            // The window loses its connection with the key on its way,
+            // before it's sent or just after.
+            next_drop = Instant::now() + Duration::from_secs(20);
+            if reconnects % 2 == 0 {
+                copy.type_lost(at, &key);
+            } else {
+                copy.type_at(&mut client, at, &key).expect("sent");
+            }
+            Err(ClientError::Disconnected)
+        };
+        loop {
+            if let Err(err) = result {
+                eprintln!("NETEM   connecting again: {err}");
+                reconnects += 1;
+                (relay, client) = open();
+                match copy.resume(&mut client) {
+                    Ok(Resumed::Again) => sent_again += 1,
+                    Ok(Resumed::Caught) => {}
+                    Err(err) => {
+                        result = Err(err);
+                        continue;
+                    }
+                }
+            }
+            if copy.sent.is_none() {
+                break;
+            }
+            result = next_buffer_update(&mut client, buffer).map(|update| copy.hear(update));
+        }
+        keys.push(pressed.elapsed());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(caravan);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (mut local, mut desk_copy, desk_typed) = desk.join().expect("the desk's thread");
+
+    // Everyone ends up with the same text, each key in it once.
+    let mut check = Client::connect(&daemon.socket()).expect("connect");
+    let daemon_copy = Copy::attach(&mut check, buffer, 2).expect("attach");
+    for (client, copy) in [(&mut client, &mut copy), (&mut local, &mut desk_copy)] {
+        while copy.version < daemon_copy.version {
+            copy.hear(next_buffer_update(client, buffer).expect("an update"));
+        }
+    }
+    eprintln!(
+        "NETEM caravan editor: keys {keys}; desk keys {desk_typed}; reconnects {reconnects}, \
+         changes sent again {sent_again}; UDP {:?}, ssh {:?}",
+        network.udp.stats(),
+        network.ssh.stats(),
+    );
+    let expected = format!("{}start\n{typed}", "L".repeat(desk_typed));
+    assert_eq!(daemon_copy.text, expected);
+    assert_eq!(copy.text, expected);
+    assert_eq!(desk_copy.text, expected);
+    drop(relay);
 }

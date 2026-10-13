@@ -1777,3 +1777,209 @@ fn clearing_history_is_reported_once_and_only_when_there_was_some() {
     assert!(t.take_history_cleared());
     assert!(!t.take_history_cleared());
 }
+
+/// Output a hostile or broken program might send: counts as large as a
+/// parameter holds, scrolling regions back to front, strings that never
+/// end. None of it may panic, break the grid, or take long.
+mod hostile {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    fn size(cols: u16, rows: u16) -> Size {
+        Size::new(cols, rows).expect("test sizes are valid")
+    }
+
+    /// `output` given to terminals of a few sizes, each taking well under
+    /// a few seconds, as a count of a billion done one at a time would
+    /// not.
+    fn quickly(output: &[u8]) {
+        let limit = Duration::from_secs(5);
+        for (cols, rows) in [(1, 1), (10, 4), (80, 24)] {
+            let started = Instant::now();
+            let mut t = terminal(cols, rows);
+            t.advance(output);
+            t.assert_invariants();
+            assert!(
+                started.elapsed() < limit,
+                "{cols}x{rows}: {:?} took {:?}",
+                String::from_utf8_lossy(output),
+                started.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn huge_counts_are_capped() {
+        for action in "@ABCDEFGHIJKLMPSTXZabdefgr`".chars() {
+            for count in ["999999999", "65535", "4294967295", "99999999999999999999"] {
+                let output = format!("ab\x1b[{count}{action}cd\x1b[{count};{count}{action}e");
+                quickly(output.as_bytes());
+            }
+        }
+        // REP, after a character of each width and a combining one.
+        quickly("é\x1b[999999999b字\x1b[999999999be\u{301}\x1b[999999999b".as_bytes());
+        // Tab stops, forward and back.
+        quickly(b"\x1b[999999999I\x1b[999999999Z\x1bH\x1b[3g\x1b[999999999I");
+    }
+
+    #[test]
+    fn scrolling_regions_out_of_order_or_out_of_range_are_harmless() {
+        let regions = [
+            "5;3",
+            "0;0",
+            "1;1",
+            "2;2",
+            "999;999",
+            "0;999999999",
+            "3;",
+            ";2",
+            "4294967295;1",
+        ];
+        let thens = [
+            "\x1b[999S",
+            "\x1b[999T",
+            "\x1b[999L",
+            "\x1b[999M",
+            "\n\n\n\n\n",
+            "\x1bM\x1bM\x1bM",
+            "\x1b[?6h\x1b[999;999H\n",
+            "\x1b[?1049h\x1b[999T\x1b[?1049l",
+        ];
+        for region in regions {
+            for then in thens {
+                let output = format!("a\r\nb\r\nc\r\nd\x1b[{region}r{then}x");
+                quickly(output.as_bytes());
+                // And the screen made smaller than the region.
+                let mut t = terminal(10, 6);
+                t.advance(output.as_bytes());
+                t.resize(size(3, 2));
+                t.advance(then.as_bytes());
+                t.assert_invariants();
+            }
+        }
+    }
+
+    #[test]
+    fn strings_that_go_on_and_on_are_bounded() {
+        // A title of 8 MB, an OSC 8 link of 8 MB, and a DCS of 8 MB.
+        let long = "x".repeat(8 << 20);
+        let mut t = terminal(10, 2);
+        t.advance(format!("\x1b]2;{long}\x07").as_bytes());
+        let title = t.title().len();
+        assert!(
+            title <= crate::parser::MAX_OSC_LEN,
+            "a title of {title} bytes"
+        );
+        t.advance(format!("\x1b]8;;{long}\x1b\\link\x1b]8;;\x1b\\").as_bytes());
+        t.advance(format!("\x1bP0;1;0q{long}\x1b\\after").as_bytes());
+        t.assert_invariants();
+        assert!(t.screen_text().contains("after"), "{}", t.screen_text());
+    }
+
+    #[test]
+    fn sixel_and_device_control_noise_is_passed_over() {
+        // Noise without the bytes that would end the string early.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut noise = Vec::new();
+        while noise.len() < 20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let byte = state.to_le_bytes()[0];
+            if ![0x18, 0x1a, 0x1b, 0x9c].contains(&byte) {
+                noise.push(byte);
+            }
+        }
+        let strings = [
+            ("\x1bPq", "\x1b\\"),
+            ("\x1bP0;1;0q\"1;1;99999;99999#0;2;0;0;0", "\x1b\\"),
+            ("\x1bX", "\x1b\\"),
+            ("\x1b_", "\x1b\\"),
+        ];
+        for (start, end) in strings {
+            let mut output = start.as_bytes().to_vec();
+            output.extend(&noise);
+            output.extend(end.as_bytes());
+            output.extend(b"\x1b[0m\x1b[Hafter");
+            let mut t = terminal(10, 2);
+            t.advance(&output);
+            t.assert_invariants();
+            assert!(
+                t.screen_text().starts_with("after"),
+                "{start:?}: {}",
+                t.screen_text()
+            );
+        }
+    }
+
+    #[test]
+    fn a_cell_keeps_at_most_its_share_of_combining_marks() {
+        let mut t = terminal(10, 2);
+        t.advance(format!("e{}x", "\u{301}".repeat(100)).as_bytes());
+        t.assert_invariants();
+        let mut text = String::new();
+        t.grid().row(0).push_text(0, &mut text);
+        assert_eq!(text.chars().count(), 1 + crate::MAX_EXTRA);
+        assert_eq!(cursor(&t), (0, 2), "the marks took no room");
+        // Wide characters too, and marks with nothing before them.
+        t.advance(format!("\r\n字{}\u{301}", "\u{20DD}".repeat(40)).as_bytes());
+        t.advance("\u{301}".repeat(40).as_bytes());
+        t.assert_invariants();
+    }
+
+    proptest! {
+        #[test]
+        fn hostile_output_with_resizes_keeps_the_invariants(
+            pieces in prop::collection::vec(
+                (hostile_fragment(), 0..4_usize, 1u16..12, 1u16..6),
+                0..30,
+            ),
+        ) {
+            let mut t = terminal(8, 4);
+            for (bytes, quarter, cols, rows) in pieces {
+                // Resized part way through a sequence, sometimes.
+                let cut = bytes.len() * quarter / 4;
+                t.advance(&bytes[..cut]);
+                if cut < bytes.len() {
+                    t.resize(size(cols, rows));
+                }
+                t.advance(&bytes[cut..]);
+                t.assert_invariants();
+            }
+        }
+    }
+
+    fn hostile_fragment() -> impl Strategy<Value = Vec<u8>> {
+        let count = prop_oneof![
+            Just(String::new()),
+            "[0-9]{1,3}",
+            Just("65535".to_owned()),
+            Just("999999999".to_owned()),
+            Just("4294967296".to_owned()),
+        ];
+        let actions: Vec<char> = "@ABCDEFGHIJKLMPSTXZabdefghlmnrsu`".chars().collect();
+        let csi = (
+            prop::sample::select(vec!["", "?", ">", "!"]),
+            prop::collection::vec(count, 0..3),
+            prop::sample::select(actions),
+        )
+            .prop_map(|(intermediate, params, action)| {
+                format!("\x1b[{intermediate}{}{action}", params.join(";")).into_bytes()
+            });
+        let link = "[ -~]{0,40}"
+            .prop_map(|text| format!("\x1b]8;;{text}\x07{text}\x1b]8;;\x07").into_bytes());
+        let title = "[ -~]{0,40}".prop_map(|text| format!("\x1b]2;{text}\x1b\\").into_bytes());
+        let dcs = prop::collection::vec(any::<u8>(), 0..40)
+            .prop_map(|noise| [&b"\x1bP"[..], &noise, b"\x1b\\"].concat());
+        let marks = format!("e{}", "\u{301}".repeat(40)).into_bytes();
+        prop_oneof![
+            4 => csi,
+            2 => output_fragment(),
+            1 => link,
+            1 => title,
+            1 => dcs,
+            1 => Just(marks),
+        ]
+    }
+}
