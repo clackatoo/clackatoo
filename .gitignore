@@ -1,1 +1,24 @@
 /target
+
+# Claude Code's per-user settings, session locks and agent worktrees. Each
+# worktree has a .git of its own, so `git add -A` would stage it as an
+# embedded repository.
+/.claude/
+
+# insta snapshots waiting to be reviewed
+*.snap.new
+*.pending-snap
+
+# Profiles and crashes
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+core
+core.[0-9]*
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
