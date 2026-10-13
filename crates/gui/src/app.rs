@@ -71,6 +71,11 @@ const SLOW_GPU: Duration = Duration::from_millis(500);
 /// The grid of panes a new window is sized for.
 const INITIAL_GRID: (u16, u16) = (100, 30);
 
+/// How long what was sent to a daemon on another machine may go
+/// unanswered before keys for anything but editors are turned down, rather
+/// than sent to arrive who knows when.
+const KEYS_UNANSWERED: Duration = Duration::from_secs(3);
+
 /// The longest wait between tries at connecting again to a daemon on
 /// another machine. Each failed try doubles the wait, from a second.
 const RECONNECT_AT_MOST: Duration = Duration::from_secs(30);
@@ -586,6 +591,15 @@ impl App {
         }
     }
 
+    /// Whether keys would reach the daemon late or not at all: there's no
+    /// connection, or what was last sent has gone unanswered for a while.
+    fn out_of_touch(&self) -> bool {
+        self.sender.is_none()
+            || (self.contact.as_ref())
+                .and_then(Contact::unanswered_since)
+                .is_some_and(|since| since.elapsed() > KEYS_UNANSWERED)
+    }
+
     /// What the top bar says while a daemon on another machine is out of
     /// contact: since when, to the second.
     fn out_of_contact(&self) -> Option<String> {
@@ -1000,9 +1014,9 @@ impl App {
             self.notice_key(event_loop, event);
             return;
         }
-        // Nothing typed would reach the daemon, and editors shouldn't
-        // change what they can't send.
-        if self.reconnecting.is_some() {
+        if !self.desk.takes_keys_offline() && self.out_of_touch() {
+            self.desk.refuse_offline();
+            self.request_redraw();
             return;
         }
         let redraw = if is_paste(&event.logical_key, self.modifiers) {
@@ -1058,7 +1072,8 @@ impl App {
             }
             return;
         }
-        if self.reconnecting.is_some() {
+        if !self.desk.takes_keys_offline() && self.out_of_touch() {
+            self.desk.refuse_offline();
             return;
         }
         let key = Key::Character(text.into());

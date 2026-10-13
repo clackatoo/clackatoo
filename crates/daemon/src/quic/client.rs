@@ -137,10 +137,25 @@ pub struct Contact(Arc<ContactState>);
 #[derive(Default)]
 struct ContactState {
     silent_since: Mutex<Option<Instant>>,
+    unanswered_since: Mutex<Option<Instant>>,
     notify: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl Contact {
+    /// Since when something sent to the daemon has gone unanswered, as of
+    /// the connection's thread's last look: `None` while all is answered.
+    /// Sooner than [`silent_since`](Self::silent_since), for keys not to
+    /// be sent late: a key typed into a shell long after it was meant to
+    /// be can do harm.
+    #[must_use]
+    pub fn unanswered_since(&self) -> Option<Instant> {
+        *self
+            .0
+            .unanswered_since
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Since when the daemon has been out of contact: what was sent has
     /// gone unanswered, despite a ping, for a few seconds. `None` while it
     /// answers.
@@ -546,6 +561,8 @@ impl Driver {
                     describe(&self.connection)
                 );
             }
+            *(self.contact.0.unanswered_since.lock()).unwrap_or_else(PoisonError::into_inner) =
+                self.path.unanswered_since();
             let silent_since = self.path.silent_since();
             if self.contact.set(silent_since) {
                 match silent_since {

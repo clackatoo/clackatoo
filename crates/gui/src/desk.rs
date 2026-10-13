@@ -142,6 +142,9 @@ enum Purpose {
     Workspace,
 }
 
+/// How long a pane stays lit when it turns down a key it can't send.
+const REFUSED_FOR: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// How long a pane an agent points out stays lit.
 const POINTED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
@@ -368,6 +371,29 @@ impl Desk {
         let shown = self.shown?;
         let (_, _, pane) = self.workspaces.find_pane(shown.pane)?;
         pane.content.terminal()
+    }
+
+    /// Whether keys can be taken with no daemon to hear them: by the
+    /// command line, or an editor, which edits its copy and sends what it
+    /// did once there's a connection again (see [`BufferCopy`]). Anything
+    /// else's keys must reach the daemon at once, or not at all: a key
+    /// typed into a shell seconds after it was meant can do harm.
+    pub(crate) fn takes_keys_offline(&self) -> bool {
+        if self.input.is_some() {
+            return true;
+        }
+        (self.shown)
+            .and_then(|shown| self.workspaces.find_pane(shown.pane))
+            .is_some_and(|(_, _, pane)| matches!(pane.content, Content::Buffer(_)))
+    }
+
+    /// Turns down a key that can't reach the daemon in time: says so, and
+    /// lights the focused pane up for a moment.
+    pub(crate) fn refuse_offline(&mut self) {
+        self.message = Some("not connected: keys aren't sent".to_owned());
+        if let Some(shown) = self.shown {
+            self.pointed = Some((shown.pane, std::time::Instant::now() + REFUSED_FOR));
+        }
     }
 
     fn focused_pane(&mut self) -> Option<&mut Pane> {
@@ -3002,6 +3028,75 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn what_an_editor_types_while_disconnected_goes_once_connected_again() {
+        use clackatoo_protocol::{BufferSnapshot, BufferUpdate, Change};
+
+        let buffer = BufferId(7);
+        let layout = side_by_side(vec![
+            Layout::Pane(LayoutPane {
+                id: PaneId(1),
+                content: Content::Buffer(buffer),
+            }),
+            pane(2),
+        ]);
+        let snapshot = |text: &str, version, applied| {
+            BufferUpdate::Snapshot(BufferSnapshot {
+                path: "/notes".into(),
+                text: text.into(),
+                version,
+                modified: false,
+                applied,
+            })
+        };
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        desk.buffer_changed(buffer, snapshot("x\n", 0, None));
+        assert!(desk.takes_keys_offline(), "an editor edits its copy");
+        type_text(&mut desk, "Aa");
+        let sent = buffer_changes(&mut desk);
+        assert_eq!(sent.len(), 1, "on its way when the connection goes");
+
+        desk.lost();
+        type_text(&mut desk, "b");
+        assert_eq!(editor_text(&desk), "xab\n");
+        assert!(buffer_changes(&mut desk).is_empty(), "nowhere to send it");
+        desk.connected(list(), false);
+        let window = desk.editors.window.0;
+        assert!(answer_all(&mut desk).contains(&Request::AttachBuffer { buffer, window }));
+        // The first change never arrived; someone else's did.
+        desk.buffer_changed(buffer, snapshot("Yx\n", 1, None));
+        assert_eq!(editor_text(&desk), "Yxab\n", "both, once");
+        let resent: Vec<Change> = buffer_changes(&mut desk)
+            .into_iter()
+            .map(|(_, change)| change)
+            .collect();
+        assert!(
+            matches!(&resent[..], [Change::Edit { base: 1, .. }]),
+            "{resent:?}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_turns_down_keys_it_cant_send_and_says_so() {
+        let mut desk = Desk::default();
+        desk.connected(
+            workspaces(vec![workspace(1, "w", vec![tab(1, pane(1))])]),
+            false,
+        );
+        answer_all(&mut desk);
+        assert!(!desk.takes_keys_offline());
+        desk.refuse_offline();
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("not connected: keys aren't sent")
+        );
+        assert!(desk.flash_ends().is_some(), "the pane lights up");
+        assert!(desk.take_outbox().is_empty());
     }
 
     #[test]

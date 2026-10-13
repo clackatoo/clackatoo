@@ -247,6 +247,11 @@ impl Path {
         recovered
     }
 
+    /// Since when what was sent has gone unanswered, if it has.
+    pub(crate) fn unanswered_since(&self) -> Option<Instant> {
+        self.answers.since()
+    }
+
     /// Since when the daemon has been out of contact, as of the last
     /// [`tick`](Self::tick), if it is.
     pub(crate) fn silent_since(&self) -> Option<Instant> {
