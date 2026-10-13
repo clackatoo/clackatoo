@@ -596,7 +596,9 @@ fn random_messages_never_bring_the_daemon_down() {
         .ok()
         .and_then(|rounds| rounds.parse().ok())
         .unwrap_or(8);
+    // Both ways, so it shows wherever the run's output is kept.
     println!("seed {seed}, {rounds} rounds");
+    eprintln!("seed {seed}, {rounds} rounds");
     let mut rng = Rng(seed);
     for round in 0..rounds {
         fuzz_round(&mut rng, round);
