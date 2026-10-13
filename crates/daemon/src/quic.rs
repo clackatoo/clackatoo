@@ -153,7 +153,15 @@ impl Loss {
             return;
         }
         let path = connection.stats().path;
+        // A path the connection moved to counts from nothing: start again.
+        if path.sent_packets < self.sent || path.lost_packets < self.lost {
+            self.sent = 0;
+            self.lost = 0;
+        }
         let sent = path.sent_packets.saturating_sub(self.sent);
+        // Packets are found lost a while after they're sent, so those
+        // found lost now may have been sent before: more can be lost than
+        // were sent since last time.
         let lost = path.lost_packets.saturating_sub(self.lost);
         // Too few sent to say: wait for more.
         if sent < 8 {
@@ -161,7 +169,10 @@ impl Loss {
         }
         if lost * 1000 >= sent * LOSSY {
             if self.lossy_until.is_none_or(|until| until < now) {
-                log::info!("the path is losing packets ({lost} of {sent}): small ones go twice");
+                log::info!(
+                    "the path is losing packets ({lost} found lost while {sent} went): small \
+                     ones go twice"
+                );
             }
             self.lossy_until = Some(now + LOSSY_FOR);
         }
