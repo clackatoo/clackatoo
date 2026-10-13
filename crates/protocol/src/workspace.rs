@@ -13,7 +13,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BufferId, FilesId, NewAgent, NewTerminal, OpenFile, OpenFiles, TerminalId};
+use crate::{
+    BoardId, BufferId, FilesId, NewAgent, NewTerminal, OpenBoard, OpenFile, OpenFiles, TerminalId,
+};
 
 /// Identifies a workspace within one daemon. Never reused while it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -118,6 +120,9 @@ pub enum Content {
     Buffer(BufferId),
     /// A file explorer: a tree of a project's files. One pane shows each.
     Files(FilesId),
+    /// A board agents and the user coordinate on. Several panes can show
+    /// one.
+    Board(BoardId),
 }
 
 impl From<TerminalId> for Content {
@@ -138,13 +143,19 @@ impl From<FilesId> for Content {
     }
 }
 
+impl From<BoardId> for Content {
+    fn from(board: BoardId) -> Self {
+        Self::Board(board)
+    }
+}
+
 impl Content {
     /// The terminal it is, if it's one.
     #[must_use]
     pub fn terminal(self) -> Option<TerminalId> {
         match self {
             Self::Terminal(terminal) => Some(terminal),
-            Self::Buffer(_) | Self::Files(_) => None,
+            Self::Buffer(_) | Self::Files(_) | Self::Board(_) => None,
         }
     }
 
@@ -153,7 +164,7 @@ impl Content {
     pub fn buffer(self) -> Option<BufferId> {
         match self {
             Self::Buffer(buffer) => Some(buffer),
-            Self::Terminal(_) | Self::Files(_) => None,
+            Self::Terminal(_) | Self::Files(_) | Self::Board(_) => None,
         }
     }
 
@@ -162,7 +173,16 @@ impl Content {
     pub fn files(self) -> Option<FilesId> {
         match self {
             Self::Files(files) => Some(files),
-            Self::Terminal(_) | Self::Buffer(_) => None,
+            Self::Terminal(_) | Self::Buffer(_) | Self::Board(_) => None,
+        }
+    }
+
+    /// The board it is, if it's one.
+    #[must_use]
+    pub fn board(self) -> Option<BoardId> {
+        match self {
+            Self::Board(board) => Some(board),
+            Self::Terminal(_) | Self::Buffer(_) | Self::Files(_) => None,
         }
     }
 }
@@ -220,6 +240,8 @@ pub enum PaneTerminal {
     File(OpenFile),
     /// A file explorer.
     Files(OpenFiles),
+    /// A board.
+    Board(OpenBoard),
 }
 
 impl Workspaces {

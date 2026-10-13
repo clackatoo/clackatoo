@@ -38,6 +38,7 @@ impl DaemonProcess {
 
         let started = Instant::now();
         let child = Command::new(binary)
+            .env("CLACKATOO_BOARDS", "off")
             .arg("daemon")
             .env("XDG_RUNTIME_DIR", runtime_dir.path())
             .stdin(Stdio::null())

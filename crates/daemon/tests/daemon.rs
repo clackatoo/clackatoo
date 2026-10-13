@@ -69,6 +69,7 @@ impl TestDaemon {
             server_idle: Duration::ZERO,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
             rename_gate: None,
+            boards: None,
             trash: Some(dir.path().join("trash")),
         };
         change(dir.path(), &mut config);
@@ -3264,7 +3265,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::ClipboardAsked { .. }
             | Event::Files { .. }
             | Event::FileOp { .. }
-            | Event::Show { .. }) => {
+            | Event::Show { .. }
+            | Event::Board { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }
@@ -7182,7 +7184,20 @@ fn the_tools_speak_mcp_over_the_relays_stdio() {
             "list_panes",
             "show_pane",
             "explore",
-            "get_diagnostics"
+            "get_diagnostics",
+            "list_chats",
+            "send_to_chat",
+            "read_chat",
+            "start_chat",
+            "wait_for_chat",
+            "board_list",
+            "board_create",
+            "board_post",
+            "board_edit",
+            "board_read",
+            "board_claim",
+            "board_release",
+            "board_archive",
         ]
     );
     // A notification needs no answer: the next line answers the ping.
@@ -7887,4 +7902,857 @@ fn files_an_agent_writes_itself_while_closed_are_undone_on_disk_and_made_ones_tr
     let notice = undo_turn(&mut chatter, chat, 1, true, false);
     assert_eq!(notice, "Redid turn 2: made.txt.");
     assert_eq!(std::fs::read_to_string(&made).unwrap(), "new\n");
+}
+
+// --- Agents talking to each other -----------------------------------------
+
+/// The turn in `node` that the chat `from` sent, the last if several.
+fn turn_from(node: &ChatNode, from: TerminalId) -> Option<&clackatoo_protocol::Turn> {
+    (node.turns.iter().rev())
+        .find(|turn| turn.from.as_ref().is_some_and(|sender| sender.chat == from))
+}
+
+/// The chat `chat` as it is now.
+fn chat_now(client: &mut Client, chat: TerminalId) -> ChatNode {
+    let view = client.capture(chat).unwrap();
+    view.chat().unwrap().clone()
+}
+
+#[test]
+fn chats_list_message_read_and_wait_for_each_other() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let b = start_tooled_chat(&mut client, AgentTools::Ask);
+    let prompt = format!(
+        "mcp list_chats\n\
+         mcp send_to_chat {{\"chat\":{b},\"message\":\"hello there\"}}\n\
+         mcp wait_for_chat {{\"chat\":{b}}}\n\
+         mcp read_chat {{\"chat\":{b},\"turns\":1}}"
+    );
+    client.chat(a, ChatAction::Send(prompt)).unwrap();
+    // The other chat is the user's, in another workspace: they're asked
+    // first, in the sender's, and allowing once is for this message.
+    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
+    let question = asking.question.unwrap();
+    assert_eq!(
+        question.title,
+        format!("send `hello there` to chat {b} (Claude Code, \"Claude Code\"), which you started")
+    );
+    let names: Vec<&str> = (question.choices.iter())
+        .map(|choice| choice.name.as_str())
+        .collect();
+    assert_eq!(names, ["Allow", "Always allow for that chat", "Deny"]);
+    answer(&mut client, a, Some("allow".to_owned()));
+    let node = wait_for_chat_for(&mut client, a, Duration::from_secs(10), |node| {
+        last_outcome(node).is_some()
+    });
+    let words = last_words(&node);
+    assert!(
+        words.contains(&format!("This chat is chat {a}.")),
+        "{words}"
+    );
+    // Another workspace's chat is listed by its number and title alone.
+    assert!(
+        words.contains(&format!(
+            "- chat {b}: \"Claude Code\", in another workspace"
+        )),
+        "{words}"
+    );
+    assert!(words.contains(" (this chat)"), "{words}");
+    assert!(
+        words.contains(&format!("send_to_chat: Sent to chat {b}.")),
+        "{words}"
+    );
+    // Its answer to this chat's message can be waited for; the rest of it
+    // can't be read.
+    assert!(
+        words.contains(&format!(
+            "wait_for_chat: Chat {b}'s answer to your message, turn 1:\necho: hello there\n\
+             [finished]"
+        )),
+        "{words}"
+    );
+    assert!(
+        words.contains(&format!(
+            "read_chat: failed: chat {b} is in another workspace"
+        )),
+        "{words}"
+    );
+    // It shows in the other chat as the user's turn, marked as from the
+    // sender.
+    let other = chat_now(&mut client, b);
+    let sent = turn_from(&other, a).expect("marked as from the sender");
+    assert_eq!(sent.prompt, "hello there");
+    assert_eq!(sent.from.as_ref().unwrap().agent, "Claude Code");
+
+    // Allowed always, for that chat alone, it's messaged and read without
+    // asking; the sender's own Tools setting is as it was.
+    let again = format!(
+        "mcp send_to_chat {{\"chat\":{b},\"message\":\"again\"}}\n\
+         mcp read_chat {{\"chat\":{b},\"turns\":1}}\n\
+         mcp send_to_chat {{\"chat\":{a},\"message\":\"me\"}}\n\
+         mcp read_chat {{\"chat\":99}}"
+    );
+    client.chat(a, ChatAction::Send(again.clone())).unwrap();
+    wait_for_chat(&mut client, a, |node| node.question.is_some());
+    answer(&mut client, a, Some("pair".to_owned()));
+    let node = wait_for_chat_for(&mut client, a, Duration::from_secs(10), |node| {
+        node.turns.last().is_some_and(|turn| turn.prompt == again) && last_outcome(node).is_some()
+    });
+    let words = last_words(&node);
+    assert!(words.contains("send_to_chat: Sent"), "{words}");
+    assert!(
+        words.contains(&format!("read_chat: Chat {b} (Claude Code")),
+        "{words}"
+    );
+    assert!(
+        words.contains(&format!("send_to_chat: failed: chat {a} is this chat")),
+        "{words}"
+    );
+    assert!(
+        words.contains("read_chat: failed: there's no chat 99"),
+        "{words}"
+    );
+    let tools = (node.settings.iter()).find(|setting| setting.id == "clackatoo.tools");
+    assert_eq!(tools.map(|setting| setting.value.as_str()), Some("allow"));
+    let node = ask_for(
+        &mut client,
+        a,
+        &format!("mcp send_to_chat {{\"chat\":{b},\"message\":\"third\"}}"),
+        Duration::from_secs(10),
+    );
+    assert!(
+        last_words(&node).contains("Sent"),
+        "no question the third time"
+    );
+}
+
+#[test]
+fn a_message_to_a_busy_chat_waits_for_its_turn_to_end() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let b = start_tooled_chat(&mut client, AgentTools::Ask);
+    // The other chat's agent is busy: it waits for its user's answer.
+    let busy = "mcp run_in_terminal {\"command\":\"true\"}";
+    client.chat(b, ChatAction::Send(busy.to_owned())).unwrap();
+    wait_for_chat(&mut client, b, |node| node.question.is_some());
+    let prompt = format!(
+        "mcp send_to_chat {{\"chat\":{b},\"message\":\"hi b\"}}\n\
+         mcp wait_for_chat {{\"chat\":{b},\"timeout\":20}}"
+    );
+    client.chat(a, ChatAction::Send(prompt)).unwrap();
+    wait_for_chat(&mut client, a, |node| node.question.is_some());
+    answer(&mut client, a, Some("allow".to_owned()));
+    let words = last_words(&wait_for_chat(&mut client, a, |node| {
+        last_words(node).contains("send_to_chat")
+    }));
+    assert!(
+        words.contains(&format!(
+            "send_to_chat: Sent. Chat {b} is busy answering, so it waits its turn (1 waiting)."
+        )),
+        "{words}"
+    );
+    assert_eq!(chat_now(&mut client, b).turns.len(), 1, "it waits");
+    // Its turn ends, and the message goes, as the next.
+    answer(&mut client, b, Some("reject".to_owned()));
+    let other = wait_for_chat(&mut client, b, |node| {
+        node.turns.len() == 2 && last_outcome(node).is_some()
+    });
+    assert_eq!(turn_from(&other, a).unwrap().prompt, "hi b");
+    let node = wait_for_chat_for(&mut client, a, Duration::from_secs(10), |node| {
+        last_outcome(node).is_some()
+    });
+    let words = last_words(&node);
+    assert!(
+        words.contains(&format!(
+            "wait_for_chat: Chat {b}'s answer to your message, turn 2:\necho: hi b"
+        )),
+        "{words}"
+    );
+}
+
+#[test]
+fn starting_a_chat_asks_then_opens_it_beside_with_the_message() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Ask);
+    let prompt = "mcp start_chat {\"prompt\":\"hi kid\"}";
+    client.chat(a, ChatAction::Send(prompt.to_owned())).unwrap();
+    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
+    let title = asking.question.unwrap().title;
+    assert!(
+        title.starts_with("send `hi kid` to a new Claude Code chat it starts, in /"),
+        "{title}"
+    );
+    assert_eq!(tab_contents(&mut client).len(), 1, "nothing starts first");
+    answer(&mut client, a, Some("allow".to_owned()));
+    let node = wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+    let words = last_words(&node);
+    let contents = tab_contents(&mut client);
+    assert_eq!(contents.len(), 2, "beside the chat: {words}");
+    let kid = contents[1].terminal().unwrap();
+    assert!(
+        words.contains(&format!("start_chat: Started chat {kid} (claude) in pane ")),
+        "{words}"
+    );
+    let started = wait_for_chat(&mut client, kid, |node| last_outcome(node).is_some());
+    assert_eq!(turn_from(&started, a).unwrap().prompt, "hi kid");
+    assert_eq!(last_words(&started), "echo: hi kid\n");
+    // It's an agent's: messages to it don't ask, and it lists as started
+    // by the chat that started it.
+    let talk = format!(
+        "mcp send_to_chat {{\"chat\":{kid},\"message\":\"more\"}}\n\
+         mcp wait_for_chat {{\"chat\":{kid}}}\nmcp list_chats"
+    );
+    let node = ask_for(&mut client, a, &talk, Duration::from_secs(10));
+    let words = last_words(&node);
+    assert!(words.contains("echo: more"), "{words}");
+    assert!(words.contains(&format!("(started by chat {a})")), "{words}");
+}
+
+#[test]
+fn chats_agents_start_are_limited_in_depth_and_number() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    // The chat started starts one, which can start none.
+    let deepest = "mcp start_chat {\"prompt\":\"x\"}";
+    let middle = format!(
+        "mcp start_chat {}",
+        serde_json::json!({ "prompt": deepest })
+    );
+    let (kid, grandchild) = (a.0 + 1, a.0 + 2);
+    let prompt = format!(
+        "mcp start_chat {}\nmcp wait_for_chat {{\"chat\":{kid}}}\n\
+         mcp wait_for_chat {{\"chat\":{grandchild}}}",
+        serde_json::json!({ "prompt": middle })
+    );
+    let node = ask_for(&mut client, a, &prompt, Duration::from_secs(20));
+    let words = last_words(&node);
+    assert!(
+        words.contains(&format!("start_chat: Started chat {grandchild} (claude)")),
+        "{words}"
+    );
+    assert!(
+        words.contains(
+            "start_chat: failed: this chat was started by an agent 2 deep, which is as deep as \
+             chats go"
+        ),
+        "{words}"
+    );
+
+    // At most four chats agents started work at once: four that wait
+    // for ever are let start, and a fifth is refused.
+    let waiting = "mcp start_chat {\"prompt\":\"wait\"}";
+    let prompt = [waiting; 5].join("\n");
+    let node = ask_for(&mut client, a, &prompt, Duration::from_secs(20));
+    let words = last_words(&node);
+    assert_eq!(
+        words.matches("start_chat: Started chat").count(),
+        4,
+        "{words}"
+    );
+    assert!(
+        words.contains("start_chat: failed: 4 chats started by agents are working already"),
+        "{words}"
+    );
+}
+
+#[test]
+fn chats_answering_each_other_stop_after_six_messages() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let b = start_tooled_chat(&mut client, AgentTools::Allow);
+    let bounce = format!("mcp send_to_chat {{\"chat\":{b},\"message\":\"bounce\"}}");
+    client.chat(a, ChatAction::Send(bounce)).unwrap();
+    // Each is asked once about messaging the other, the user's.
+    wait_for_chat(&mut client, a, |node| node.question.is_some());
+    answer(&mut client, a, Some("pair".to_owned()));
+    wait_for_chat(&mut client, b, |node| node.question.is_some());
+    answer(&mut client, b, Some("pair".to_owned()));
+    let node = wait_for_chat_for(&mut client, a, Duration::from_secs(20), |node| {
+        node.turns.len() == 4 && last_outcome(node).is_some()
+    });
+    let words = last_words(&node);
+    assert!(
+        words.contains(
+            "send_to_chat: failed: this conversation between agents has gone back and forth 6 \
+             times"
+        ),
+        "{words}"
+    );
+    assert_eq!(chat_now(&mut client, b).turns.len(), 3);
+}
+
+// --- Boards ----------------------------------------------------------------
+
+impl TestDaemon {
+    /// As [`with_tools`](Self::with_tools), keeping boards in `boards`.
+    fn with_boards(boards: &Path) -> Self {
+        let boards = boards.to_owned();
+        Self::start_with(move |dir, config| {
+            config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+            config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+            config.boards = Some(boards);
+            let shell = dir.join("marking-sh");
+            std::fs::write(&shell, MARKING_SHELL).unwrap();
+            std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            config.shell = shell.into();
+        })
+    }
+}
+
+/// Has `chat`'s agent make each of `calls`, one tool call a line, and
+/// returns what it said they answered.
+fn board_calls(client: &mut Client, chat: TerminalId, calls: &[&str]) -> String {
+    let prompt = (calls.iter())
+        .map(|call| format!("mcp {call}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    last_words(&ask_for(client, chat, &prompt, Duration::from_secs(10)))
+}
+
+/// The next update about a board, skipping the rest.
+fn next_board_update(client: &mut Client) -> clackatoo_protocol::BoardUpdate {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    loop {
+        if let Event::Board { update, .. } = client.next_event().expect("a board update") {
+            return update;
+        }
+    }
+}
+
+#[test]
+fn agents_make_boards_post_claim_and_read_them() {
+    let boards = tempfile::tempdir().unwrap();
+    let daemon = TestDaemon::with_boards(boards.path());
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let b = start_tooled_chat(&mut client, AgentTools::Allow);
+    let said = board_calls(
+        &mut client,
+        a,
+        &[
+            r#"board_create {"name":"plan","purpose":"the parser rewrite","global":true}"#,
+            r#"board_create {"name":"mine"}"#,
+            r#"board_post {"board":"plan","text":"use logos","links":[{"path":"src/a.rs","line":3}]}"#,
+            r#"board_claim {"board":"plan","what":"the lexer","note":"rewriting it"}"#,
+            r#"board_read {"board":"plan"}"#,
+        ],
+    );
+    assert!(
+        said.contains("board_create: Made board \"plan\" (board 1), every workspace's."),
+        "{said}"
+    );
+    assert!(
+        said.contains("board_create: Made board \"mine\" (board 2), workspace "),
+        "{said}"
+    );
+    assert!(
+        said.contains("board_post: Posted entry 1 on board \"plan\"."),
+        "{said}"
+    );
+    assert!(
+        said.contains("board_claim: Claimed \"the lexer\" on board \"plan\" (entry 2) until "),
+        "{said}"
+    );
+    let home = daemon.dir.path().display().to_string();
+    assert!(
+        said.contains(&format!("#1 note by chat {a} (Claude Code), ")),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!("  use logos\n  → {home}/src/a.rs:3\n")),
+        "{said}"
+    );
+    assert!(said.contains("on \"the lexer\": held until "), "{said}");
+    assert!(said.contains("Cursor: 2."), "{said}");
+
+    // Another chat, in another workspace, sees the global board alone,
+    // and can't claim what's held, however it's written.
+    let said = board_calls(
+        &mut client,
+        b,
+        &[
+            "board_list {}",
+            r#"board_read {"board":"mine"}"#,
+            r#"board_claim {"board":"plan","what":"The Lexer"}"#,
+            r#"board_post {"board":"plan","kind":"result","text":"parser done"}"#,
+            r#"board_read {"board":"plan","since":2}"#,
+        ],
+    );
+    assert!(
+        said.contains(
+            "- \"plan\" (board 1, every workspace's): 2 entries, 1 claims held. the parser rewrite"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("\"mine\" (board"), "{said}");
+    assert!(
+        said.contains("board_read: failed: there's no board called \"mine\" here"),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "board_claim: failed: chat {a} (Claude Code) holds a claim on \"The Lexer\" (entry 2)"
+        )),
+        "{said}"
+    );
+    // Read since the cursor, only what's new comes.
+    assert!(
+        said.contains(&format!("#3 result by chat {b} (Claude Code)")),
+        "{said}"
+    );
+    assert!(!said.contains("#1 note"), "{said}");
+    assert!(said.contains("Cursor: 3."), "{said}");
+}
+
+#[test]
+fn a_released_claim_can_be_taken_and_an_archived_board_is_read_only() {
+    let boards = tempfile::tempdir().unwrap();
+    let daemon = TestDaemon::with_boards(boards.path());
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let b = start_tooled_chat(&mut client, AgentTools::Allow);
+    board_calls(
+        &mut client,
+        a,
+        &[
+            r#"board_create {"name":"plan","purpose":"the parser rewrite","global":true}"#,
+            r#"board_post {"board":"plan","text":"use logos"}"#,
+            r#"board_claim {"board":"plan","what":"the lexer"}"#,
+        ],
+    );
+    // Released, it can be claimed; archived, the board is read but not
+    // written on, and listed only when asked.
+    board_calls(
+        &mut client,
+        a,
+        &[r#"board_release {"board":"plan","entry":2}"#],
+    );
+    let said = board_calls(
+        &mut client,
+        b,
+        &[r#"board_claim {"board":"plan","what":"the lexer","minutes":30}"#],
+    );
+    assert!(
+        said.contains("board_claim: Claimed \"the lexer\""),
+        "{said}"
+    );
+    board_calls(&mut client, a, &[r#"board_archive {"board":"plan"}"#]);
+    let said = board_calls(
+        &mut client,
+        b,
+        &[
+            r#"board_post {"board":"plan","text":"late"}"#,
+            r#"board_read {"board":"plan","kind":"claim"}"#,
+            "board_list {}",
+            r#"board_list {"archived":true}"#,
+        ],
+    );
+    assert!(
+        said.contains("board_post: failed: board \"plan\" is archived"),
+        "{said}"
+    );
+    assert!(said.contains("archived: read only"), "{said}");
+    assert!(
+        said.contains(&format!("released by chat {a} (Claude Code)")),
+        "{said}"
+    );
+    assert!(!said.contains("use logos"), "only claims: {said}");
+    assert!(said.contains("1 archived boards aren't listed"), "{said}");
+    assert!(
+        said.contains("1 claims held, archived. the parser rewrite"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_claim_expires_and_can_be_taken() {
+    let boards = tempfile::tempdir().unwrap();
+    let daemon = TestDaemon::with_boards(boards.path());
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let b = start_tooled_chat(&mut client, AgentTools::Allow);
+    board_calls(
+        &mut client,
+        a,
+        &[
+            r#"board_create {"name":"docs","global":true}"#,
+            r#"board_claim {"board":"docs","what":"readme","minutes":0.01}"#,
+        ],
+    );
+    std::thread::sleep(Duration::from_millis(800));
+    let said = board_calls(
+        &mut client,
+        b,
+        &[
+            r#"board_claim {"board":"docs","what":"readme"}"#,
+            r#"board_read {"board":"docs"}"#,
+        ],
+    );
+    assert!(said.contains("board_claim: Claimed \"readme\""), "{said}");
+    assert!(said.contains("on \"readme\": expired"), "{said}");
+}
+
+#[test]
+fn boards_outlast_the_daemon_and_a_torn_write() {
+    let boards = tempfile::tempdir().unwrap();
+    {
+        let daemon = TestDaemon::with_boards(boards.path());
+        let mut client = daemon.client();
+        let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+        board_calls(
+            &mut client,
+            chat,
+            &[
+                r#"board_create {"name":"kept","global":true}"#,
+                r#"board_post {"board":"kept","text":"survives"}"#,
+                r#"board_claim {"board":"kept","what":"x"}"#,
+            ],
+        );
+    }
+    // The daemon has stopped, writing everything. Then a crash cuts a
+    // write in half.
+    let file = boards.path().join("1.jsonl");
+    let mut torn = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    torn.write_all(b"{\"at\":1,\"by\":\"us").unwrap();
+    drop(torn);
+    {
+        let daemon = TestDaemon::with_boards(boards.path());
+        let mut client = daemon.client();
+        let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+        let said = board_calls(
+            &mut client,
+            chat,
+            &[
+                r#"board_read {"board":"kept"}"#,
+                r#"board_post {"board":"kept","text":"after the crash"}"#,
+            ],
+        );
+        assert!(said.contains("  survives\n"), "{said}");
+        assert!(said.contains("on \"x\": held until "), "{said}");
+        assert!(said.contains("board_post: Posted entry 3"), "{said}");
+    }
+    // Every line is whole: the torn one was cut before the next was
+    // written.
+    let text = std::fs::read_to_string(&file).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "{text}");
+    for line in lines {
+        serde_json::from_str::<serde_json::Value>(line).expect(line);
+    }
+}
+
+#[test]
+fn a_second_daemon_on_the_same_boards_has_none() {
+    let boards = tempfile::tempdir().unwrap();
+    let first = TestDaemon::with_boards(boards.path());
+    let mut client = first.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    // Read and locked.
+    board_calls(&mut client, chat, &["board_list {}"]);
+    let second = TestDaemon::with_boards(boards.path());
+    let mut other = second.client();
+    let chat = start_tooled_chat(&mut other, AgentTools::Allow);
+    let said = board_calls(&mut other, chat, &["board_list {}"]);
+    assert!(
+        said.contains("board_list: failed: there are no boards: another clackatoo daemon keeps"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_board_pane_shows_the_board_live_and_posts_as_the_user() {
+    use clackatoo_protocol::{BoardAction, BoardAuthor, BoardUpdate, OpenBoard, PostKind};
+    let boards = tempfile::tempdir().unwrap();
+    let daemon = TestDaemon::with_boards(boards.path());
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let workspaces = client.watch_workspaces().unwrap();
+    let chat_pane = workspaces.pane_showing(chat).unwrap();
+    let open = |client: &mut Client| {
+        let split = Request::Split {
+            pane: chat_pane,
+            side: Side::Right,
+            terminal: PaneTerminal::Board(OpenBoard::Named("notes".into())),
+        };
+        let Response::PaneCreated(pane) = client.request(&split).unwrap() else {
+            panic!("no pane");
+        };
+        let workspaces = client.watch_workspaces().unwrap();
+        let (_, _, found) = workspaces.find_pane(pane).unwrap();
+        (pane, found.content.board().expect("a board"))
+    };
+    let (pane, board) = open(&mut client);
+    client.request(&Request::AttachBoard { board }).unwrap();
+    let BoardUpdate::Snapshot { summary, entries } = next_board_update(&mut client) else {
+        panic!("no snapshot");
+    };
+    assert_eq!(summary.name, "notes");
+    assert_eq!(
+        summary.scope,
+        clackatoo_protocol::BoardScope::Workspace(workspaces.list[0].name.clone())
+    );
+    assert!(entries.is_empty());
+
+    // The user posts; then the agent, in the same workspace, by name.
+    let post = BoardAction::Post {
+        kind: PostKind::Note,
+        text: "from the user".into(),
+    };
+    client.board(board, post).unwrap();
+    let BoardUpdate::Changed { entries, .. } = next_board_update(&mut client) else {
+        panic!("no change");
+    };
+    assert_eq!((entries[0].id, &entries[0].by), (1, &BoardAuthor::User));
+    let said = board_calls(
+        &mut client,
+        chat,
+        &[r#"board_post {"board":"notes","text":"from the agent"}"#],
+    );
+    assert!(said.contains("Posted entry 2"), "{said}");
+    let BoardUpdate::Changed { entries, summary } = next_board_update(&mut client) else {
+        panic!("no change");
+    };
+    assert_eq!(entries[0].text, "from the agent");
+    assert_eq!(summary.entries, 2);
+
+    // Archived, it says so, and refuses what's posted, saying why.
+    client.board(board, BoardAction::Archive(true)).unwrap();
+    let BoardUpdate::Changed { summary, entries } = next_board_update(&mut client) else {
+        panic!("no change");
+    };
+    assert!(summary.archived && entries.is_empty());
+    let late = BoardAction::Post {
+        kind: PostKind::Note,
+        text: "late".into(),
+    };
+    client.board(board, late).unwrap();
+    let BoardUpdate::Refused(why) = next_board_update(&mut client) else {
+        panic!("not refused");
+    };
+    assert!(why.contains("is archived"), "{why}");
+
+    // Opened by its name again, it's the same board; the finder lists it.
+    let (second, again) = open(&mut client);
+    assert_eq!(again, board);
+    client.find(7, Some(chat_pane), Search::Boards).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let listed = loop {
+        if let Event::Found {
+            id: 7,
+            found: Found::Boards(boards),
+        } = client.next_event().unwrap()
+        {
+            break boards;
+        }
+    };
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "notes");
+
+    // Closing its panes leaves the board.
+    client.request(&Request::ClosePane { pane }).unwrap();
+    client
+        .request(&Request::ClosePane { pane: second })
+        .unwrap();
+    let said = board_calls(&mut client, chat, &[r#"board_read {"board":"notes"}"#]);
+    assert!(said.contains("from the agent"), "{said}");
+}
+
+#[test]
+fn an_agent_is_told_its_chat_and_the_boards_when_it_connects() {
+    use std::io::BufRead;
+    let boards = tempfile::tempdir().unwrap();
+    let daemon = TestDaemon::with_boards(boards.path());
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    board_calls(
+        &mut client,
+        chat,
+        &[r#"board_create {"name":"plan","purpose":"who does what"}"#],
+    );
+    let mut relay = std::process::Command::new(fake_agent())
+        .args(["mcp", "--chat", &chat.0.to_string(), "--socket"])
+        .arg(daemon.socket())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = relay.stdin.take().unwrap();
+    let mut output = std::io::BufReader::new(relay.stdout.take().unwrap());
+    let started = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#;
+    writeln!(input, "{started}").unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let answer: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let told = answer["result"]["instructions"].as_str().unwrap();
+    assert!(
+        told.contains(&format!("This chat is chat {chat}")),
+        "{told}"
+    );
+    // By name alone: what an agent wrote is never among the instructions.
+    assert!(told.contains("Boards now: \"plan\"."), "{told}");
+    assert!(!told.contains("who does what"), "{told}");
+    drop(input);
+    assert!(relay.wait().unwrap().success());
+}
+
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_messages_another_chat_and_waits_for_its_answer() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::with_tools_and_agent(
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect(),
+    );
+    let mut client = daemon.client();
+    let minute = Duration::from_mins(1);
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let b = start_tooled_chat(&mut client, AgentTools::Allow);
+    let text = format!(
+        "Use the send_to_chat tool from the clackatoo MCP server to send chat {b} the message \
+         \"What is 17 + 25? Reply with just the number.\", then its wait_for_chat tool to wait \
+         for the answer, and reply with what chat {b} answered."
+    );
+    client.chat(a, ChatAction::Send(text)).unwrap();
+    // Every question is allowed: messaging the user's other chat asks.
+    let mut asked = Vec::new();
+    let node = loop {
+        let node = wait_for_chat_for(&mut client, a, 2 * minute, |node| {
+            last_outcome(node).is_some() || node.question.is_some()
+        });
+        let Some(question) = &node.question else {
+            break node;
+        };
+        asked.push(question.title.clone());
+        let allow = (question.choices.iter())
+            .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::AllowOnce)
+            .map(|choice| choice.id.clone());
+        answer(&mut client, a, allow);
+        wait_for_chat_for(&mut client, a, minute, |now| now.question != node.question);
+    };
+    assert!(
+        asked
+            .iter()
+            .any(|title| title.starts_with("send `What is 17 + 25?")),
+        "{asked:?}\n{node:#?}"
+    );
+    let other = chat_now(&mut client, b);
+    let sent = turn_from(&other, a).expect("the message, marked as from the sender");
+    assert!(sent.prompt.contains("17 + 25"), "{other:#?}");
+    assert!(last_words(&other).contains("42"), "{other:#?}");
+    assert!(last_words(&node).contains("42"), "{node:#?}");
+}
+
+#[test]
+fn two_chats_waiting_for_each_other_are_told_rather_than_left_waiting() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let kid = a.0 + 1;
+    // The chat started waits for the one that started it, which waits for
+    // it: whichever waits second is told, at once.
+    let back = format!("mcp wait_for_chat {{\"chat\":{a},\"timeout\":30}}");
+    let prompt = format!(
+        "mcp start_chat {}\nmcp wait_for_chat {{\"chat\":{kid},\"timeout\":30}}",
+        serde_json::json!({ "prompt": back })
+    );
+    let started = Instant::now();
+    let node = ask_for(&mut client, a, &prompt, Duration::from_secs(20));
+    let words = last_words(&node);
+    assert!(words.contains("is waiting for this chat"), "{words}");
+    assert!(started.elapsed() < Duration::from_secs(20));
+}
+
+/// The mode `node`'s agent is in.
+fn mode_of(node: &ChatNode) -> Option<&str> {
+    (node.settings.iter())
+        .find(|setting| setting.kind == clackatoo_protocol::SettingKind::Mode)
+        .map(|setting| setting.value.as_str())
+}
+
+/// Sets `chat`'s setting `setting` to `value`, and waits until it is.
+fn set_chat(client: &mut Client, chat: TerminalId, setting: &str, value: &str) {
+    let set = ChatAction::Set {
+        setting: setting.to_owned(),
+        value: value.to_owned(),
+    };
+    client.chat(chat, set).unwrap();
+    wait_for_chat(client, chat, |node| {
+        (node.settings.iter()).any(|known| known.id == setting && known.value == value)
+    });
+}
+
+#[test]
+fn a_chat_started_gets_its_parents_mode_and_only_its_family_goes_unasked() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    // Manual: not the Auto a new chat asks for, which the chats it starts
+    // mustn't get either.
+    set_chat(&mut client, a, "mode", "default");
+    let (first, second) = (TerminalId(a.0 + 1), TerminalId(a.0 + 2));
+    let sibling = format!("mcp send_to_chat {{\"chat\":{first},\"message\":\"hi sibling\"}}");
+    let prompt = format!(
+        "mcp start_chat {{\"prompt\":\"x\"}}\nmcp start_chat {}\n\
+         mcp wait_for_chat {{\"chat\":{second}}}\nmcp wait_for_chat {{\"chat\":{first}}}",
+        serde_json::json!({ "prompt": sibling })
+    );
+    let node = ask_for(&mut client, a, &prompt, Duration::from_secs(20));
+    let words = last_words(&node);
+    // Siblings message each other without asking.
+    assert!(words.contains("Sent to chat"), "{words}");
+    let kid = chat_now(&mut client, first);
+    assert_eq!(turn_from(&kid, second).unwrap().prompt, "hi sibling");
+    assert_eq!(mode_of(&kid), Some("default"), "its parent's mode");
+
+    // A chat in the family whose agent may do more is asked about.
+    set_chat(&mut client, a, "clackatoo.tools", "ask");
+    let looser = format!("mcp send_to_chat {{\"chat\":{first},\"message\":\"do it\"}}");
+    client.chat(a, ChatAction::Send(looser)).unwrap();
+    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
+    let title = asking.question.unwrap().title;
+    assert!(
+        title.ends_with(&format!(
+            "started by chat {a}, whose agent may do more than this one"
+        )),
+        "{title}"
+    );
+    answer(&mut client, a, Some("reject".to_owned()));
+    wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+
+    // Starting a chat outside the project asks, even when tools are
+    // allowed.
+    set_chat(&mut client, a, "clackatoo.tools", "allow");
+    client
+        .chat(
+            a,
+            ChatAction::Send("mcp start_chat {\"prompt\":\"x\",\"cwd\":\"/\"}".to_owned()),
+        )
+        .unwrap();
+    let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
+    let title = asking.question.unwrap().title;
+    assert!(
+        title.contains("in /, outside this chat's project ("),
+        "{title}"
+    );
+    answer(&mut client, a, Some("reject".to_owned()));
+    wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
 }

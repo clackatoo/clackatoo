@@ -101,6 +101,7 @@ enum Asked {
 }
 
 mod bindings;
+mod boards;
 mod clipboard;
 mod editors;
 mod explorers;
@@ -205,6 +206,8 @@ pub(crate) struct Desk {
     editors: editors::Editors,
     /// Panes showing file explorers.
     explorers: explorers::Explorers,
+    /// Panes showing boards.
+    boards: boards::Boards,
     /// The macros being typed, and what's noted of keys pressed for the
     /// one being recorded.
     macros: macros::Macros,
@@ -304,6 +307,9 @@ impl Desk {
         if let Some(explorer) = self.focused_explorer() {
             return explorer.prompting().then_some(TextTarget::Bar);
         }
+        if let Some(board) = self.focused_board() {
+            return board.prompting().then_some(TextTarget::Bar);
+        }
         let pane = self.pane(self.focused_terminal()?)?;
         if pane.prompting() {
             Some(TextTarget::Bar)
@@ -380,6 +386,9 @@ impl Desk {
         }
         if let Some(explorer) = self.focused_explorer() {
             return Some(explorer.title());
+        }
+        if let Some(board) = self.focused_board() {
+            return Some(board.title());
         }
         let terminal = self.focused_terminal()?;
         let title = self.panes.get(&terminal)?.title()?;
@@ -487,9 +496,8 @@ impl Desk {
                 panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
             };
         }
-        if let Some(explorer) = self.focused_explorer() {
-            let label = explorer.label();
-            if explorer.prompting() {
+        if let Some((label, prompting)) = self.panel_label() {
+            if prompting {
                 return Status::Typing {
                     label: None,
                     text: label,
@@ -560,6 +568,7 @@ impl Desk {
                 Content::Terminal(terminal) => self.panes.get(&terminal)?.title(),
                 Content::Buffer(_) => self.editor_title(pane.id),
                 Content::Files(_) => self.explorer(pane.id).map(crate::explorer::Explorer::title),
+                Content::Board(_) => self.board(pane.id).map(crate::board::BoardPane::title),
             })
             .map(str::trim)
             .filter(|title| !title.is_empty())
@@ -743,7 +752,8 @@ impl Desk {
         let left_editor = self
             .shown
             .and_then(|left| self.editor_in_normal_mode(left.pane));
-        let left_explorer = self.shown.is_some_and(|left| self.is_explorer(left.pane));
+        let left_explorer = (self.shown)
+            .is_some_and(|left| self.is_explorer(left.pane) || self.is_board(left.pane));
         let normal = left_editor.unwrap_or(false)
             || left_explorer
             || self.focused_pane().is_some_and(|left| {
@@ -800,6 +810,7 @@ impl Desk {
         }
         self.attach_shown_buffers();
         self.attach_shown_explorers();
+        self.attach_shown_boards();
         if !self.connected {
             return;
         }
@@ -840,6 +851,12 @@ impl Desk {
                 Content::Files(_) => {
                     if let Ok(size) = Size::new(tile.cols, tile.rows) {
                         self.fit_explorer(id, size);
+                    }
+                    continue;
+                }
+                Content::Board(_) => {
+                    if let Ok(size) = Size::new(tile.cols, tile.rows) {
+                        self.fit_board(id, size);
                     }
                     continue;
                 }
@@ -890,6 +907,7 @@ impl Desk {
         self.attached.clear();
         self.editors_reconnected();
         self.explorers_reconnected();
+        self.boards_reconnected();
         self.asked.clear();
         self.macros.requests_forgotten();
         self.outbox.clear();
@@ -1101,6 +1119,7 @@ impl Desk {
         }
         messages.extend(self.take_buffer_outbox());
         messages.extend(self.take_explorer_outbox());
+        messages.extend(self.take_board_outbox());
         messages
     }
 
@@ -1226,11 +1245,11 @@ impl Desk {
         if self.focused_editor().is_some() {
             return self.editor_key(press) || had_message;
         }
-        if self.focused_explorer().is_some() {
-            if self.stop_recording_in_explorer(press) {
+        if self.focused_explorer().is_some() || self.focused_board().is_some() {
+            if self.stop_recording_in_explorer(press) || self.stop_recording_in_board(press) {
                 return true;
             }
-            return self.explorer_key(press) || had_message;
+            return self.explorer_key(press) || self.board_key(press) || had_message;
         }
         if self.stop_recording_in_terminal(press) {
             return true;
@@ -1273,6 +1292,9 @@ impl Desk {
         if let Some((pane, _)) = self.explorer_at(point) {
             return self.explorer_wheel(pane, lines);
         }
+        if let Some((pane, _)) = self.board_at(point) {
+            return self.board_wheel(pane, lines);
+        }
         // Away from the panes, as over the bars, the focused pane scrolls.
         let Some((terminal, cell, _)) = self
             .cell_at(point, None)
@@ -1314,6 +1336,15 @@ impl Desk {
             outcome.redraw |= self.mouse_left();
             if let MouseAction::Press(MouseButton::Left) = action {
                 outcome.redraw = self.focus_at(point) | self.explorer_click(pane, cell, clicks);
+            }
+            return outcome;
+        }
+        if self.dragging.is_none()
+            && let Some((pane, cell)) = self.board_at(point)
+        {
+            outcome.redraw |= self.mouse_left();
+            if let MouseAction::Press(MouseButton::Left) = action {
+                outcome.redraw = self.focus_at(point) | self.board_click(pane, cell);
             }
             return outcome;
         }
@@ -1595,6 +1626,12 @@ impl Desk {
         self.cell_in(point, |desk, pane| desk.explorer(pane).is_some())
     }
 
+    /// The board pane at `point`, if there's one there, and the cell of it
+    /// there.
+    fn board_at(&self, point: [f32; 2]) -> Option<(PaneId, [i64; 2])> {
+        self.cell_in(point, |desk, pane| desk.board(pane).is_some())
+    }
+
     /// The pane at `point`, if `wanted` takes it, and the cell of it there,
     /// as its line and column.
     fn cell_in(
@@ -1796,6 +1833,7 @@ impl Desk {
                     self.refuse(why);
                 }
             }
+            Command::Board { place, name } => self.open_board(name, place),
             Command::Reload | Command::Set(_) | Command::Update(_) => {}
         }
     }
@@ -1963,6 +2001,7 @@ mod tests {
                 | ClientMessage::Stage { .. }
                 | ClientMessage::Clipboard { .. }
                 | ClientMessage::Files { .. }
+                | ClientMessage::Board { .. }
                 | ClientMessage::FileOp { .. }
                 | ClientMessage::Hello { .. }
                 | ClientMessage::Upgrade { .. } => None,
@@ -5180,6 +5219,7 @@ mod tests {
         let node = ChatNode {
             state: ChatState::Ready,
             turns: vec![Turn {
+                from: None,
                 prompt: "how?".into(),
                 sent: 0,
                 items: vec![Item::Words("Like this:\n\n```sh\ncargo test\n```".into())],
@@ -6463,6 +6503,139 @@ mod tests {
         // Keys in it are its own: q closes it.
         type_keys(&mut desk, "q");
         assert!(answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));
+    }
+
+    // --- Boards ----------------------------------------------------------
+
+    fn board_pane(pane: u32, board: u32) -> Layout {
+        Layout::Pane(LayoutPane {
+            id: PaneId(pane),
+            content: Content::Board(clackatoo_protocol::BoardId(board)),
+        })
+    }
+
+    #[test]
+    fn a_board_pane_shows_its_board_live_and_posts_typed_in_the_bar() {
+        use clackatoo_protocol::{
+            BoardAction, BoardEntry, BoardId, BoardScope, BoardSummary, BoardUpdate, OpenBoard,
+            PostKind,
+        };
+        let mut desk = desk(one_tab(pane(3)));
+        normal_mode(&mut desk);
+        // A kind of pane: in a tab, or with a mark, beside.
+        command(&mut desk, "Board plan");
+        command(&mut desk, "|Board plan");
+        let opened = answer_all(&mut desk);
+        assert_eq!(
+            opened,
+            [
+                Request::NewTab {
+                    workspace: WorkspaceId(1),
+                    terminal: PaneTerminal::Board(OpenBoard::Named("plan".into())),
+                },
+                Request::Split {
+                    pane: PaneId(3),
+                    side: Side::Right,
+                    terminal: PaneTerminal::Board(OpenBoard::Named("plan".into())),
+                },
+            ]
+        );
+
+        // Shown, it's attached.
+        desk.workspaces_changed(one_tab(side_by_side(vec![pane(3), board_pane(4, 9)])));
+        assert!(answer_all(&mut desk).contains(&Request::AttachBoard { board: BoardId(9) }));
+        ctrl(&mut desk, "l");
+        assert_eq!(shown_pane(&desk), PaneId(4));
+        let summary = |entries| BoardSummary {
+            id: BoardId(9),
+            name: "plan".into(),
+            purpose: String::new(),
+            scope: BoardScope::Global,
+            archived: false,
+            created: 0,
+            entries,
+        };
+        let entry = BoardEntry {
+            id: 1,
+            kind: PostKind::Note,
+            by: clackatoo_protocol::BoardAuthor::User,
+            at: 0,
+            text: "first".into(),
+            links: Vec::new(),
+            subject: None,
+            expires: None,
+            released: None,
+            edits: Vec::new(),
+        };
+        let snapshot = BoardUpdate::Snapshot {
+            summary: summary(1),
+            entries: vec![entry],
+        };
+        let event = clackatoo_protocol::Event::Board {
+            board: BoardId(9),
+            update: snapshot,
+        };
+        assert!(desk.board_event(event), "shown, so drawn again");
+        assert_eq!(desk.title(), Some("board plan"));
+        // Typed in the bar, posted as the user.
+        type_keys(&mut desk, "i");
+        assert_eq!(desk.text_goes_to(), Some(TextTarget::Bar));
+        type_keys(&mut desk, "on it");
+        enter(&mut desk);
+        let posted: Vec<ClientMessage> = (desk.take_outbox().into_iter())
+            .filter(|message| matches!(message, ClientMessage::Board { .. }))
+            .collect();
+        assert_eq!(
+            posted,
+            [ClientMessage::Board {
+                board: BoardId(9),
+                action: BoardAction::Post {
+                    kind: PostKind::Note,
+                    text: "on it".into(),
+                },
+            }]
+        );
+        // q closes the pane; the board is the daemon's to keep.
+        type_keys(&mut desk, "q");
+        assert!(answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(4) }));
+    }
+
+    #[test]
+    fn colon_boards_picks_a_board_in_the_finder_and_opens_it_beside() {
+        use clackatoo_protocol::{BoardId, BoardScope, BoardSummary, OpenBoard, Search};
+        let mut desk = desk(one_tab(pane(3)));
+        normal_mode(&mut desk);
+        command(&mut desk, "Boards");
+        let asked = (desk.take_outbox().into_iter()).find_map(|message| match message {
+            ClientMessage::Find {
+                id,
+                search: Search::Boards,
+                ..
+            } => Some(id),
+            _ => None,
+        });
+        let id = asked.expect("the boards asked for");
+        let board = |id, name: &str, archived| BoardSummary {
+            id: BoardId(id),
+            name: name.into(),
+            purpose: "for it".into(),
+            scope: BoardScope::Global,
+            archived,
+            created: 0,
+            entries: 0,
+        };
+        let boards = vec![board(2, "plan", false), board(5, "old", true)];
+        assert!(desk.found(id, clackatoo_protocol::Found::Boards(boards)));
+        type_keys(&mut desk, "old");
+        enter(&mut desk);
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::Split {
+                pane: PaneId(3),
+                side: Side::Right,
+                terminal: PaneTerminal::Board(OpenBoard::Id(BoardId(5))),
+            }]
+        );
     }
 
     #[test]

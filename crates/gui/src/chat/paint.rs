@@ -158,6 +158,8 @@ struct TurnLaid {
     note: Option<Laid>,
     /// What it changed in files, and the buttons that undo and redo it.
     files: Option<FilesLaid>,
+    /// Which chat sent its message, if another agent did.
+    badge: Option<Laid>,
     height: f32,
 }
 
@@ -597,9 +599,19 @@ impl ChatView {
             cards: HashMap::new(),
             note: None,
             files: None,
+            badge: None,
             height: 0.0,
         };
         let mut y = 0.0;
+        // Sent by another chat's agent: which, over the message.
+        if let Some(from) = &turn.from {
+            let text = format!("From chat {} · {} · {}", from.chat, from.agent, from.title);
+            let look = Look::Plain(Tone::Accent);
+            let badge = lay_out(&mut self.layout_cx, fonts, m, &text, look, column * 0.78);
+            laid.spans.push(Span::of(Piece::Badge, y, badge.height));
+            y += badge.height + m.em(0.3);
+            laid.badge = Some(badge);
+        }
         if !turn.prompt.is_empty() {
             let width = (column * 0.78 - m.em(2.0)).max(m.em(4.0));
             let old = old_pieces.remove(&PROMPT);
@@ -827,6 +839,13 @@ impl ChatView {
                 Piece::Note => {
                     if let Some(note) = &laid.note {
                         draw_laid(canvas, m, note, [origin[0], top], column);
+                    }
+                }
+                // On the right, over the message it's about.
+                Piece::Badge => {
+                    if let Some(badge) = &laid.badge {
+                        let left = origin[0] + column - badge.width;
+                        draw_laid(canvas, m, badge, [left, top], badge.width);
                     }
                 }
                 Piece::Files => {
@@ -1692,6 +1711,8 @@ enum Piece {
     Note,
     /// What it changed in files, and what undoes or redoes it.
     Files,
+    /// Which chat sent its message, if another agent did.
+    Badge,
 }
 
 impl Span {
@@ -1794,6 +1815,9 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool) -> f32 {
             .sum()
     };
     let mut height = 0.0;
+    if turn.from.is_some() {
+        height += line + m.em(0.3);
+    }
     if !turn.prompt.is_empty() {
         height += lines(&turn.prompt, column * 0.78) * line + m.em(2.2);
     }

@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use clackatoo_protocol::{Content, Event, Found, PaneId, Search, ServerMessage, frame};
+use clackatoo_protocol::{Content, Done, Event, Found, PaneId, Search, ServerMessage, frame};
 use mio::Token;
 
 use super::{Daemon, Source};
@@ -67,6 +67,32 @@ impl Daemon {
     ) {
         // Asking again under the same number stops the search before.
         self.stop_finding(token, id);
+        // The boards are at hand: no need for a thread.
+        if search == Search::Boards {
+            let found = match self.boards.ready() {
+                Ok(()) => {
+                    let workspace = pane.and_then(|pane| self.workspace_of(pane));
+                    let boards = self.board_summaries(workspace.as_deref());
+                    self.send_event(
+                        token,
+                        Event::Found {
+                            id,
+                            found: Found::Boards(boards),
+                        },
+                    );
+                    Done::All
+                }
+                Err(why) => Done::Failed(why),
+            };
+            self.send_event(
+                token,
+                Event::Found {
+                    id,
+                    found: Found::Done(found),
+                },
+            );
+            return;
+        }
         let job = match search {
             Search::Files => Job::Files(self.project(pane)),
             Search::Grep { pattern, exact } => Job::Grep {
@@ -94,6 +120,8 @@ impl Daemon {
                     .collect(),
                 elsewhere: self.servers.diagnosed_elsewhere(),
             },
+            // Answered above.
+            Search::Boards => return,
             Search::Preview { path, line, lines } => {
                 let path = self.config.home.join(path);
                 let open = (self.buffers.values())
@@ -222,7 +250,7 @@ impl Daemon {
                 let dir = pane.and_then(|pane| self.working_directory(pane));
                 Project::Dir(dir.map_or_else(|| home.clone(), PathBuf::from))
             }
-            None => Project::Dir(home.clone()),
+            Some(Content::Board(_)) | None => Project::Dir(home.clone()),
         }
     }
 }

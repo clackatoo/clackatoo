@@ -20,6 +20,9 @@
 //! undoes what a turn of the agent's changed in files, the turn's number
 //! after it, or else the last, and `AgentRedo` makes it again; with `!`,
 //! in the files that can be, though others can't.
+//! `Board NAME` opens the board called that, made if there's none, in a
+//! tab or with a mark beside; `Board` alone, or `Boards`, picks one in
+//! the finder.
 //!
 //! A command with a range of lines before it, or Vim's for lines, `s`,
 //! `&`, `~`, `g`, `v`, `d`, `y`, `m`, `t` and `normal`, is the focused
@@ -100,6 +103,9 @@ pub(crate) enum Command {
     /// `:update`: install the latest release of clackatoo on this machine,
     /// or with a name, on that machine, the one the window's daemon is on.
     Update(Option<String>),
+    /// `:Board`: the board with this name, made if there's none, where
+    /// `place` says; or with none, the finder, to pick one.
+    Board { place: Place, name: Option<String> },
 }
 
 /// Where a new pane goes.
@@ -129,12 +135,16 @@ const KINDS: [(&str, Kind); 2] = [("Terminal", Kind::Terminal), ("Agent", Kind::
 const EDITOR: &str = "Editor";
 
 /// What the finder lists, by name.
-const FINDERS: [(&str, finder::Kind); 4] = [
+const FINDERS: [(&str, finder::Kind); 5] = [
     ("Files", finder::Kind::Files),
     ("Grep", finder::Kind::Grep),
     ("Buffers", finder::Kind::Buffers),
     ("Diagnostics", finder::Kind::Diagnostics),
+    ("Boards", finder::Kind::Boards),
 ];
+
+/// The kind of pane that shows a board, which takes the board's name.
+const BOARD: &str = "Board";
 
 /// What `:Gitsigns` does to the hunk at the cursor, by gitsigns.nvim's
 /// names for it.
@@ -149,7 +159,7 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 /// The window's own commands, for messages.
 const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
                         update, w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, \
-                        Buffers, Diagnostics, Gitsigns, Explore, AgentUndo and AgentRedo";
+                        Buffers, Diagnostics, Boards, Gitsigns, Explore, AgentUndo and AgentRedo";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -182,20 +192,19 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         return Ok(Command::Editor(line.to_owned()));
     }
     if word == "Gitsigns" {
-        let names = || HUNK_ACTIONS.map(|(name, _)| name).join(", ");
-        let Some(argument) = argument else {
-            return Err(format!("Gitsigns needs what to do: {}", names()));
-        };
-        return (HUNK_ACTIONS.iter())
-            .find(|(name, _)| *name == argument)
-            .map(|&(_, action)| Command::Hunk(action))
-            .ok_or_else(|| format!("Gitsigns can't {argument:?}; it can {}", names()));
+        return hunk_command(argument);
     }
     if let Some(&(_, kind)) = FINDERS.iter().find(|(name, _)| *name == word) {
         let query = argument.unwrap_or_default().to_owned();
         return Ok(Command::Find { kind, query });
     }
     let (place, rest) = place(word);
+    if rest == BOARD {
+        return Ok(Command::Board {
+            place,
+            name: argument.map(str::to_owned),
+        });
+    }
     if rest == EDITOR {
         return argument
             .map(|path| Command::Edit {
@@ -233,7 +242,10 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             agent,
         });
     }
-    let kinds = format!("{}, {EDITOR}", KINDS.map(|(kind, _)| kind).join(", "));
+    let kinds = format!(
+        "{}, {EDITOR}, {BOARD}",
+        KINDS.map(|(kind, _)| kind).join(", ")
+    );
     if name.starts_with(char::is_uppercase) {
         Err(format!(
             "no kind of pane called {name}; the kinds are {kinds}"
@@ -247,6 +259,19 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             "no command called {name}; the commands are {COMMANDS}, and the kinds of pane {kinds}"
         ))
     }
+}
+
+/// `:Gitsigns`, with what to do to the hunk at the cursor, as `argument`
+/// names it.
+fn hunk_command(argument: Option<&str>) -> Result<Command, String> {
+    let names = || HUNK_ACTIONS.map(|(name, _)| name).join(", ");
+    let Some(argument) = argument else {
+        return Err(format!("Gitsigns needs what to do: {}", names()));
+    };
+    (HUNK_ACTIONS.iter())
+        .find(|(name, _)| *name == argument)
+        .map(|&(_, action)| Command::Hunk(action))
+        .ok_or_else(|| format!("Gitsigns can't {argument:?}; it can {}", names()))
 }
 
 /// The agent named after `word`, a kind of pane, as `rest`, without its

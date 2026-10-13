@@ -615,6 +615,7 @@ fn joined_emoji_are_shaped_into_one_glyph() {
 
 /// A chat, as a pane shows it: messages, Markdown, tool calls, and the
 /// box a message is typed in, or the agent's question.
+#[allow(clippy::too_many_lines, reason = "one conversation, whole")]
 fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
     use clackatoo_protocol::{
         ChatNode, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome, Question, Tool,
@@ -684,6 +685,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                     count: 2,
                     state: TurnFilesState::Made,
                 }),
+                from: None,
             },
             Turn {
                 prompt: "Turn on vendored and try again".into(),
@@ -691,6 +693,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                 items: vec![edit],
                 end: None,
                 files: None,
+                from: None,
             },
         ],
         state: ChatState::Answering,
@@ -1034,6 +1037,7 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
             root: Node::Chat(Box::new(ChatNode {
                 state: ChatState::Ready,
                 turns: vec![Turn {
+                    from: None,
                     prompt: "change it".into(),
                     sent: 0,
                     items: Vec::new(),

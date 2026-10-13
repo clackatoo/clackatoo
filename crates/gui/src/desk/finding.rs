@@ -53,6 +53,7 @@ impl Desk {
             Kind::Buffers => self.search(Search::Buffers),
             Kind::Grep => self.grep(),
             Kind::Diagnostics => self.search(Search::Diagnostics),
+            Kind::Boards => self.search(Search::Boards),
             // Their places are given them.
             Kind::Places | Kind::Marks => {}
         }
@@ -141,8 +142,13 @@ impl Desk {
             // Said, and a macro typing it stops, as at a key that fails.
             Outcome::NothingPicked => self.refuse("nothing in the finder is picked".into()),
             Outcome::Open(opening) => {
+                let kind = self.finder.as_ref().map(Finder::kind);
                 self.close_finder();
-                self.open_picked(opening);
+                if kind == Some(Kind::Boards) {
+                    self.open_picked_board(&opening);
+                } else {
+                    self.open_picked(opening);
+                }
             }
         }
     }
@@ -269,6 +275,21 @@ impl Desk {
             self.ask_preview();
         }
         Some(view)
+    }
+
+    /// Opens the board picked in the finder, whose ID is the path it
+    /// gave: beside the focused pane as Enter or Ctrl+V say, below for
+    /// Ctrl+X, or in a new tab for Ctrl+T.
+    fn open_picked_board(&mut self, opening: &Opening) {
+        let Ok(id) = opening.path.parse() else { return };
+        let place = match opening.place {
+            Place::Here => Place::Beside(clackatoo_protocol::Side::Right),
+            place => place,
+        };
+        self.show_board(
+            clackatoo_protocol::OpenBoard::Id(clackatoo_protocol::BoardId(id)),
+            place,
+        );
     }
 
     /// Opens what was picked in the finder.

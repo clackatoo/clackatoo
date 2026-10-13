@@ -410,6 +410,21 @@ impl Client {
         self.send(&ClientMessage::Files { files, action })
     }
 
+    /// Does `action` to the board `board`, which the client attached to
+    /// with [`Request::AttachBoard`], as the user. What comes of it comes
+    /// in [`Event::Board`]s.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn board(
+        &mut self,
+        board: clackatoo_protocol::BoardId,
+        action: clackatoo_protocol::BoardAction,
+    ) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Board { board, action })
+    }
+
     /// Asks the daemon to do `op` to files, numbered `id`. How it went
     /// comes in an [`Event::FileOp`].
     ///

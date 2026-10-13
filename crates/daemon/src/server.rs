@@ -54,6 +54,7 @@ use crate::upgrade::Upgrade;
 use crate::workspaces::WorkspaceState;
 
 mod agent_files;
+mod boards;
 mod buffers;
 mod chats;
 mod clipboard;
@@ -94,6 +95,10 @@ const OUTPUT_BUDGET: usize = 1024 * 1024;
 /// compacted: long enough that a flood never stops for it, short enough
 /// that the memory comes back soon after.
 const COMPACT_AFTER: Duration = Duration::from_millis(100);
+
+/// The longest an upgrade waits for the boards' last changes to be
+/// written, before it's refused.
+const UPGRADE_BOARDS_WAIT: Duration = Duration::from_secs(10);
 
 /// What a token refers to.
 #[derive(Debug)]
@@ -208,6 +213,14 @@ impl Hosted {
 
     fn is_chat(&self) -> bool {
         matches!(self, Self::Chat(_))
+    }
+
+    /// The chat it is, if it's one, to read.
+    fn chat_ref(&self) -> Option<&HostedChat> {
+        match self {
+            Self::Chat(chat) => Some(chat),
+            Self::Pty(_) => None,
+        }
     }
 }
 
@@ -442,6 +455,8 @@ pub struct Daemon {
     tools: Tools,
     /// File explorers, and the directories expanded in them.
     explorers: Explorers,
+    /// The boards agents and the user coordinate on.
+    boards: boards::BoardState,
     /// Buffers being compared with the files' text in their repositories,
     /// and the indexes watched.
     signs: Signs,
@@ -540,6 +555,7 @@ impl Daemon {
                 }
             })
         };
+        let boards = boards::BoardState::start(config.boards.clone(), &waker);
         Ok(Self {
             poll,
             listener,
@@ -559,6 +575,7 @@ impl Daemon {
             finds,
             tools: Tools::default(),
             explorers: Explorers::default(),
+            boards,
             signs: Signs::default(),
             piece_questions: pieces::PieceQuestions::default(),
             clipboard_asks: 0,
@@ -633,6 +650,8 @@ impl Daemon {
             daemon.disk_maybe_changed(id);
         }
         daemon.resume_files(state.next_files, explorers);
+        // Messages waiting in chats' inboxes go as their turns end.
+        daemon.resume_talk();
         daemon.agent_files.log = edit_log::EditLog::resume(edits);
         daemon.refresh_all_files();
         for orphan in &state.orphans {
@@ -686,9 +705,10 @@ impl Daemon {
         // beside the old.
         self.abandon_renames();
         // The agents and language servers stop, and the next build reaps
-        // them.
+        // them. The boards' last changes are written, for it to read.
         self.stop_agents();
         self.stop_servers();
+        self.stop_boards();
         let orphan_tokens: Vec<usize> = (self.sources.iter())
             .filter(|(_, source)| matches!(source, Source::Orphan(_)))
             .map(|(key, _)| key)
@@ -743,6 +763,13 @@ impl Daemon {
         let mut events = Events::with_capacity(256);
         while !self.shutdown.load(Ordering::Acquire) {
             if let Some((executable, token)) = self.upgrade_to.take() {
+                // Every change to the boards is on disk, and their lock let
+                // go of, before there's no way back.
+                if let Err(reason) = self.prepare_boards_for_upgrade(UPGRADE_BOARDS_WAIT) {
+                    log::warn!("not upgrading: {reason}");
+                    self.refuse_upgrade(token, reason);
+                    continue;
+                }
                 // The client that asked hears how it went: its connection
                 // closes as the new build starts, or says why it didn't.
                 let requester = match self.sources.try_remove(token.0) {
@@ -814,6 +841,9 @@ impl Daemon {
             self.take_installs();
             self.take_agent_installs();
             self.take_renames();
+            if self.take_boards() {
+                self.boards_read();
+            }
             self.ask_again();
             self.take_found();
             self.explore();
@@ -824,13 +854,28 @@ impl Daemon {
             self.compact_scrollbacks();
             self.time_out_clipboard_asks();
             self.time_out_tools();
+            self.relay_chats();
             self.send_clipboard_writes();
             self.send_view_updates();
             self.transmit_quic();
         }
         log::info!("shutting down");
         self.abandon_renames();
+        self.stop_boards();
         Ok(None)
+    }
+
+    /// Tells the client at `token`, which asked the daemon to upgrade,
+    /// that it won't, and why.
+    fn refuse_upgrade(&mut self, token: Token, reason: String) {
+        let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
+            return;
+        };
+        match frame::encode(&ServerMessage::NotUpgrading { reason }) {
+            Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
+            Err(err) => log::error!("encoding a refusal to upgrade failed: {err}"),
+        }
+        self.flush_client(token);
     }
 
     fn handle(&mut self, event: &Event) {
@@ -1241,6 +1286,9 @@ impl Daemon {
             PaneTerminal::Files(open) => {
                 return self.new_files(open, beside).map(Content::Files);
             }
+            PaneTerminal::Board(open) => {
+                return self.open_board(open, beside).map(Content::Board);
+            }
         };
         Ok(Content::Terminal(terminal))
     }
@@ -1257,6 +1305,7 @@ impl Daemon {
                 Some(dir.display().to_string())
             }
             Content::Files(files) => Some(self.files_root(files)?.display().to_string()),
+            Content::Board(_) => None,
         }
     }
 
@@ -1268,6 +1317,7 @@ impl Daemon {
                 Content::Terminal(terminal) => self.close_terminal(terminal)?,
                 Content::Buffer(buffer) => self.close_buffer_pane(pane.id, buffer),
                 Content::Files(files) => self.close_files_pane(pane.id, files),
+                Content::Board(_) => self.close_board_pane(pane.id),
             }
         }
         Ok(Response::Done)
@@ -1470,7 +1520,8 @@ impl Daemon {
                 | ClientMessage::Stage { .. }
                 | ClientMessage::Clipboard { .. }
                 | ClientMessage::Files { .. }
-                | ClientMessage::FileOp { .. }) => {
+                | ClientMessage::FileOp { .. }
+                | ClientMessage::Board { .. }) => {
                     self.serve_unanswered(token, message);
                     continue;
                 }
@@ -1533,6 +1584,7 @@ impl Daemon {
             }
             ClientMessage::Files { files, action } => self.serve_files(token, files, action),
             ClientMessage::FileOp { id, op } => self.serve_file_op(token, id, op),
+            ClientMessage::Board { board, action } => self.serve_board(token, board, action),
             other => log::error!("{other:?} is answered"),
         }
     }
@@ -1617,6 +1669,7 @@ impl Daemon {
     }
 
     /// Answers one request from the client at `token`.
+    #[allow(clippy::too_many_lines, reason = "one arm per request, each short")]
     fn respond(&mut self, request: Request, token: Token) -> Response {
         let response = match request {
             Request::Version => Ok(Response::Text(env!("CARGO_PKG_VERSION").to_owned())),
@@ -1708,6 +1761,8 @@ impl Daemon {
             Request::Save { buffer, force } => self.save_buffer(buffer, force),
             Request::AttachFiles { files } => self.attach_files(token, files),
             Request::DetachFiles { files } => Ok(self.detach_files(token, files)),
+            Request::AttachBoard { board } => self.attach_board(token, board),
+            Request::DetachBoard { board } => Ok(self.detach_board(token, board)),
             Request::Discard { buffer } => self.discard_buffer(buffer),
             Request::Reload { buffer } => self.reload_buffer(buffer),
             request @ (Request::Install { .. } | Request::Decline { .. }) => {
@@ -1759,6 +1814,10 @@ impl Daemon {
                 }
                 Content::Files(files) => {
                     self.close_files_pane(pane, files);
+                    Ok(Response::Done)
+                }
+                Content::Board(_) => {
+                    self.close_board_pane(pane);
                     Ok(Response::Done)
                 }
             },
@@ -1933,6 +1992,7 @@ impl Daemon {
             self.installs.forget(token);
             self.forget_finds(token);
             self.forget_files_viewer(token);
+            self.forget_board_viewer(token);
             self.forget_stages(token, None);
             self.forget_piece_questions(token, None);
             if let Link::Quic(handle) = client.link

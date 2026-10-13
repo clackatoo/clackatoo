@@ -27,6 +27,8 @@
 //! 11. Which agent each chat talks to.
 //! 12. The edit log: what agents changed in files, by chat and turn, so
 //!     that turns can still be undone.
+//! 13. Where each chat stands among the chats agents talk in, and panes
+//!     showing boards.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -39,10 +41,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 12;
+pub(crate) const VERSION: u32 = 13;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -81,7 +83,7 @@ impl Fds {
     }
 }
 
-/// The daemon's state, version 11.
+/// The daemon's state, version 13.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The listening socket.
@@ -202,6 +204,46 @@ pub(crate) struct Chat {
     pub(crate) chosen: Vec<(String, String)>,
     /// The agent, by its name: `claude`, `codex`…
     pub(crate) agent: String,
+    /// Where it stands among the chats agents talk in. Since version 13.
+    pub(crate) relations: ChatRelations,
+}
+
+/// Where a chat stands among the chats agents talk in: which chat's agent
+/// started it, and which messages other agents sent it.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct ChatRelations {
+    /// The chat whose agent started it, if an agent did.
+    pub(crate) parent: Option<u32>,
+    /// The chat the user started that the chats starting it go back to.
+    pub(crate) root: Option<u32>,
+    /// How many chats started by agents lead down to it.
+    pub(crate) depth: u8,
+    /// How many messages between agents led to its last turn.
+    pub(crate) hops: u8,
+    /// The user's turn its last turn came of: the chat, and the turn's
+    /// index, if a message started it.
+    pub(crate) cause: Option<(u32, u32)>,
+    /// The turns other agents sent, by index, and who sent each.
+    pub(crate) senders: Vec<(u32, ChatSender)>,
+    /// Messages from other agents waiting for its turn to end.
+    pub(crate) inbox: Vec<ChatMessage>,
+}
+
+/// The chat whose agent sent a message, as it was then.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatSender {
+    pub(crate) chat: u32,
+    pub(crate) agent: String,
+    pub(crate) title: String,
+}
+
+/// A message another chat's agent sent, waiting its turn.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatMessage {
+    pub(crate) from: ChatSender,
+    pub(crate) text: String,
+    pub(crate) hops: u8,
+    pub(crate) cause: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -360,6 +402,9 @@ pub(crate) enum Layout {
     Buffer { id: u32, buffer: u32 },
     /// A pane showing a file explorer. Since version 10.
     Files { id: u32, files: u32 },
+    /// A pane showing a board, by the board's ID, which is kept on disk
+    /// with it. Since version 13.
+    Board { id: u32, board: u32 },
 }
 
 /// A file explorer: the directory at its root. What's expanded in it is
@@ -478,6 +523,7 @@ impl State {
             9 => Ok(postcard::from_bytes::<v9::State>(body)?.into()),
             10 => Ok(postcard::from_bytes::<v10::State>(body)?.into()),
             11 => Ok(postcard::from_bytes::<v11::State>(body)?.into()),
+            12 => Ok(postcard::from_bytes::<v12::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -1109,7 +1155,8 @@ mod v9 {
 mod v11 {
     use serde::Deserialize;
 
-    use super::{Buffer, Chat, Files, Process, Terminal, Workspaces};
+    use super::v12::Chat;
+    use super::{Buffer, Files, Process, Terminal, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -1133,7 +1180,7 @@ mod v11 {
                 lock: state.lock,
                 next_terminal: state.next_terminal,
                 terminals: state.terminals,
-                chats: state.chats,
+                chats: state.chats.into_iter().map(Into::into).collect(),
                 orphans: state.orphans,
                 workspaces: state.workspaces,
                 next_buffer: state.next_buffer,
@@ -1141,6 +1188,84 @@ mod v11 {
                 next_files: state.next_files,
                 explorers: state.explorers,
                 edits: super::EditLog::default(),
+            }
+        }
+    }
+}
+
+/// Version 12, as the builds that wrote it wrote it: chats with nothing
+/// of other chats, and no panes showing boards. Version 11 shares its
+/// chats.
+mod v12 {
+    use serde::Deserialize;
+
+    use super::{Buffer, ChatSetting, ChatTurn, EditLog, Files, Process, Terminal, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct Chat {
+        id: u32,
+        cols: u16,
+        rows: u16,
+        title: String,
+        cwd: String,
+        session: Option<String>,
+        failure: Option<String>,
+        turns: Vec<ChatTurn>,
+        settings: Vec<ChatSetting>,
+        chosen: Vec<(String, String)>,
+        agent: String,
+    }
+
+    impl From<Chat> for super::Chat {
+        fn from(chat: Chat) -> Self {
+            Self {
+                id: chat.id,
+                cols: chat.cols,
+                rows: chat.rows,
+                title: chat.title,
+                cwd: chat.cwd,
+                session: chat.session,
+                failure: chat.failure,
+                turns: chat.turns,
+                settings: chat.settings,
+                chosen: chat.chosen,
+                agent: chat.agent,
+                relations: super::ChatRelations::default(),
+            }
+        }
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats.into_iter().map(Into::into).collect(),
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
             }
         }
     }
@@ -1197,6 +1322,7 @@ mod v10 {
                 settings: chat.settings,
                 chosen: chat.chosen,
                 agent: crate::agents::DEFAULT.to_owned(),
+                relations: super::ChatRelations::default(),
             }
         }
     }
@@ -1225,6 +1351,10 @@ mod v10 {
 mod tests {
     use super::*;
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one state, whole, each part of it filled"
+    )]
     fn state() -> State {
         State {
             listener: 0,
@@ -1282,6 +1412,20 @@ mod tests {
                 }],
                 chosen: vec![("model".to_owned(), "haiku".to_owned())],
                 agent: "codex".to_owned(),
+                relations: ChatRelations {
+                    parent: Some(5),
+                    root: Some(4),
+                    depth: 2,
+                    hops: 1,
+                    cause: Some((4, 7)),
+                    senders: vec![(0, sender())],
+                    inbox: vec![ChatMessage {
+                        from: sender(),
+                        text: "next".to_owned(),
+                        hops: 2,
+                        cause: Some((4, 7)),
+                    }],
+                },
             }],
             orphans: vec![Process { pid: 42, pidfd: 2 }],
             workspaces: Workspaces {
@@ -1297,8 +1441,9 @@ mod tests {
                                 Layout::Pane { id: 2, terminal: 2 },
                                 Layout::Buffer { id: 3, buffer: 1 },
                                 Layout::Files { id: 4, files: 1 },
+                                Layout::Board { id: 5, board: 3 },
                             ],
-                            shares: vec![2, 1, 1, 1],
+                            shares: vec![2, 1, 1, 1, 1],
                         },
                         focused: 2,
                         name: None,
@@ -1308,7 +1453,7 @@ mod tests {
                 active: Some(1),
                 next_workspace: 2,
                 next_tab: 2,
-                next_pane: 5,
+                next_pane: 6,
             },
             next_buffer: 2,
             buffers: vec![buffer()],
@@ -1402,6 +1547,69 @@ mod tests {
         state().write(&mut file).unwrap();
         let read = State::read(&mut file).unwrap();
         assert_eq!(format!("{read:?}"), format!("{:?}", state()));
+    }
+
+    fn sender() -> ChatSender {
+        ChatSender {
+            chat: 5,
+            agent: "Claude Code".to_owned(),
+            title: "parent".to_owned(),
+        }
+    }
+
+    /// Written by a build that wrote version 13. It must always be read.
+    #[test]
+    fn version_13_is_read_with_each_chats_relations_and_panes_showing_boards() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v13.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let relations = &state.chats[0].relations;
+        assert_eq!(
+            (
+                relations.parent,
+                relations.root,
+                relations.depth,
+                relations.hops
+            ),
+            (Some(5), Some(4), 2, 1)
+        );
+        assert_eq!(relations.cause, Some((4, 7)));
+        assert_eq!(relations.senders[0].1.title, "parent");
+        assert_eq!(relations.inbox[0].text, "next");
+        let Layout::Split { parts, .. } = &state.workspaces.list[0].tabs[0].layout else {
+            panic!("not split");
+        };
+        assert!(matches!(parts[4], Layout::Board { id: 5, board: 3 }));
+        assert_eq!(state.edits.chats[0].chat, 2);
+    }
+
+    /// Version 12 comes with chats that know nothing of other chats.
+    #[test]
+    fn version_12_comes_with_no_relations() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v12.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert!(
+            state
+                .chats
+                .iter()
+                .all(|chat| chat.relations.parent.is_none() && chat.relations.inbox.is_empty())
+        );
+    }
+
+    /// Writes the fixture for the current version: run once, with
+    /// `--ignored`, when a version is made, and never again.
+    #[test]
+    #[ignore = "writes tests/fixtures/handover-v13.bin"]
+    fn write_the_current_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/handover-v13.bin"
+        );
+        let mut file = File::create(path).unwrap();
+        state().write(&mut file).unwrap();
     }
 
     #[test]

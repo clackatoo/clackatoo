@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod board;
 mod boxdraw;
 mod chat;
 mod chrome;

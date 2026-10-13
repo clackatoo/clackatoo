@@ -1234,6 +1234,7 @@ impl App {
         let (chats, chat_paint) = self.paint_chats(chrome);
         self.desk.settle_editors();
         self.desk.settle_explorers();
+        self.desk.settle_boards();
         let geometry = &chrome.geometry;
         let desk = &self.desk;
         let shown = desk.shown()?;
@@ -1439,6 +1440,27 @@ fn drawings<'a>(
                     rows,
                     cursor,
                     highlights: explorer.highlights(),
+                    normal_mode: has_focus,
+                    focused: has_focus,
+                });
+                continue;
+            }
+            Content::Board(_) => {
+                let Some(board) = desk.board(id) else {
+                    continue;
+                };
+                let (rows, mut cursor) = board.scene();
+                if let Some(cursor) = &mut cursor
+                    && !(has_focus && window_focused)
+                {
+                    cursor.style = CursorStyle::Hollow;
+                }
+                drawings.push(Drawing {
+                    terminal: None,
+                    tile,
+                    rows,
+                    cursor,
+                    highlights: board.highlights(),
                     normal_mode: has_focus,
                     focused: has_focus,
                 });
@@ -2033,9 +2055,13 @@ impl App {
     }
 
     /// Hands the desk what the daemon says of file explorers, and of the
-    /// file operations they asked for.
+    /// file operations they asked for, or of boards.
     fn explorer_event(&mut self, event: Event) {
-        if self.desk.explorer_event(event) {
+        let redraw = match event {
+            Event::Board { .. } => self.desk.board_event(event),
+            event => self.desk.explorer_event(event),
+        };
+        if redraw {
             self.update_title();
             self.request_redraw();
         }
@@ -2145,7 +2171,7 @@ impl App {
                 event @ (Event::Clipboard { .. } | Event::ClipboardAsked { .. }),
             )) => self.clipboard_event(event),
             SessionEvent::Message(ServerMessage::Event(
-                event @ (Event::Files { .. } | Event::FileOp { .. }),
+                event @ (Event::Files { .. } | Event::FileOp { .. } | Event::Board { .. }),
             )) => self.explorer_event(event),
             SessionEvent::Message(ServerMessage::Event(Event::Workspaces(workspaces))) => {
                 self.desk.workspaces_changed(workspaces);

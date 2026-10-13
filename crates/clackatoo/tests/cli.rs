@@ -9,6 +9,7 @@ const BINARY: &str = env!("CARGO_BIN_EXE_clackatoo");
 /// Runs `clackatoo` with `args`, against the daemon in `runtime`.
 fn clackatoo(runtime: &Path, args: &[&str]) -> Output {
     Command::new(BINARY)
+        .env("CLACKATOO_BOARDS", "off")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
         .output()
@@ -24,6 +25,7 @@ fn daemon(runtime: &Path) -> Child {
 /// answers.
 fn daemon_with(runtime: &Path, args: &[&str]) -> Child {
     let child = Command::new(BINARY)
+        .env("CLACKATOO_BOARDS", "off")
         .arg("daemon")
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
@@ -116,6 +118,7 @@ fn remote(runtime: &Path, ssh: &Path, remote_command: &str, args: &[&str]) -> Ou
         None => (args, &[][..]),
     };
     Command::new(BINARY)
+        .env("CLACKATOO_BOARDS", "off")
         .args(args)
         .args(["--remote", "box", "--remote-command", remote_command])
         .args(command)
@@ -231,6 +234,7 @@ fn the_bridge_relays_over_pipes() {
     let runtime = Runtime::new();
     // sshd gives the bridge pipes, between which a careless relay stalls.
     let mut bridge = Command::new(BINARY)
+        .env("CLACKATOO_BOARDS", "off")
         .arg("bridge")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdin(std::process::Stdio::piped())
@@ -308,6 +312,7 @@ fn config_sets_shows_and_unsets_settings() {
     let home = tempfile::tempdir().unwrap();
     let config = |args: &[&str]| {
         Command::new(BINARY)
+            .env("CLACKATOO_BOARDS", "off")
             .arg("config")
             .args(args)
             .env("XDG_CONFIG_HOME", home.path())
@@ -395,6 +400,7 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
     let next = bin.path().join("clackatoo-next");
     std::fs::copy(BINARY, &next).unwrap();
     let upgraded = Command::new(&next)
+        .env("CLACKATOO_BOARDS", "off")
         .arg("upgrade")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -446,6 +452,7 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
     // refuses its own requests, sent back, and the chat says it couldn't
     // start. Enough to have an agent to hand over.
     let daemon = Command::new(BINARY)
+        .env("CLACKATOO_BOARDS", "off")
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("CLACKATOO_AGENT", "cat")
@@ -499,6 +506,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
     let runtime = Runtime::new();
     // `cat` for the agent, as above: the chat only needs to exist.
     let daemon = Command::new(BINARY)
+        .env("CLACKATOO_BOARDS", "off")
         .arg("daemon")
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env("CLACKATOO_AGENT", "cat")
@@ -519,6 +527,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
 
     let mut mcp = Command::new(BINARY)
+        .env("CLACKATOO_BOARDS", "off")
         .args(["mcp", "--chat", &chat.0.to_string()])
         .env("XDG_RUNTIME_DIR", runtime.path())
         .stdin(std::process::Stdio::piped())
@@ -543,6 +552,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
 
     // A terminal is no chat, and has no tools.
     let refused = Command::new(BINARY)
+        .env("CLACKATOO_BOARDS", "off")
         .args(["mcp", "--chat", "99"])
         .env("XDG_RUNTIME_DIR", runtime.path())
         .output()
@@ -631,7 +641,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12; rm -- "$0";; esac"#,
+        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),
@@ -666,6 +676,7 @@ impl UserShell {
 
         let runtime = Runtime::new();
         let daemon = Command::new(BINARY)
+            .env("CLACKATOO_BOARDS", "off")
             .arg("daemon")
             .env("XDG_RUNTIME_DIR", runtime.path())
             .env("SHELL", shell)

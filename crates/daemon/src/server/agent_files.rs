@@ -859,6 +859,7 @@ pub(super) mod tests {
             prompt_wait: crate::DEFAULT_PROMPT_WAIT,
             rename_gate: None,
             trash: Some(dir.join("Trash")),
+            boards: None,
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let id = TerminalId(1);

@@ -108,6 +108,21 @@ pub struct Turn {
     pub end: Option<TurnEnd>,
     /// What the agent changed in files in the turn, if it changed any.
     pub files: Option<TurnFiles>,
+    /// The chat whose agent sent the message, if another agent sent it
+    /// rather than the user: clients show it beside the message.
+    pub from: Option<Sender>,
+}
+
+/// The chat whose agent sent a message to another chat, as it was when it
+/// sent it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sender {
+    /// The chat.
+    pub chat: crate::TerminalId,
+    /// Its agent, as it's shown: "Claude Code", "Codex"…
+    pub agent: String,
+    /// Its title.
+    pub title: String,
 }
 
 /// What an agent changed in files in a turn, and whether it can be undone.
@@ -525,6 +540,7 @@ mod tests {
             items,
             end: None,
             files: None,
+            from: None,
         }
     }
 

@@ -209,6 +209,7 @@ fn startup(binary: &Path, report: &mut Report) -> anyhow::Result<()> {
     let samples = repeat(STARTUP_RUNS, || {
         let started = Instant::now();
         let status = Command::new(binary)
+            .env("CLACKATOO_BOARDS", "off")
             .arg("list")
             .arg("--socket")
             .arg(daemon.socket())

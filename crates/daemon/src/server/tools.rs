@@ -41,7 +41,11 @@ use mio::{Interest, Token};
 use serde_json::Value;
 
 use super::{Daemon, Link, Source, write_out};
+use crate::chat::Choices;
 use crate::mcp::{self, Connection, Incoming, Tool};
+
+mod boards;
+mod talk;
 
 /// How long a command waits for the first prompt of a shell that isn't
 /// known to mark them before it's typed anyway: one that marks nothing
@@ -63,6 +67,10 @@ const MAX_ASKED: usize = 2048;
 /// finish at once.
 const MAX_WAITS: usize = 32;
 
+/// How long a call waits for the boards to be read, as the daemon starts,
+/// before it's told to try again.
+const BOARDS_WAIT: Duration = Duration::from_secs(10);
+
 /// What the daemon keeps for agents' tools.
 #[derive(Debug, Default)]
 pub(super) struct Tools {
@@ -82,6 +90,8 @@ pub(super) struct Tools {
     /// The editor pane each chat last opened a file in, by chat, which
     /// the next file it opens replaces.
     editors: BTreeMap<TerminalId, PaneId>,
+    /// Agents talking to each other.
+    talk: talk::Talk,
 }
 
 /// A tool call waiting.
@@ -108,6 +118,12 @@ enum Wait {
         lines: usize,
         due: Instant,
     },
+    /// Another chat finishing answering, every message waiting for it
+    /// included, until `due`.
+    Turn { chat: TerminalId, due: Instant },
+    /// The boards being read, which takes a moment as the daemon starts:
+    /// then it's carried out, unless they aren't read by `due`.
+    Boards { tool: Tool, due: Instant },
 }
 
 /// A terminal an agent ran a command in, or typed into.
@@ -186,6 +202,7 @@ impl Daemon {
         let (Link::Unix(mut stream), Some(chat)) = (client.link, client.serving_tools) else {
             return;
         };
+        let instructions = self.tools_instructions(chat);
         let entry = self.sources.vacant_entry();
         let new = Token(entry.key());
         if let Err(err) = self
@@ -200,12 +217,24 @@ impl Daemon {
             stream,
             chat,
             client.outgoing,
+            instructions,
         )));
         log::info!("chat {chat}: its agent's tools are served");
         self.flush_tools(new);
         // The agent waits for the answer before it sends anything, but
         // anything already here is for the tools.
         self.read_tools(new);
+    }
+
+    /// What the chat `chat`'s agent is told about its tools when it
+    /// connects: what they're for, which chat it is, and the boards it
+    /// shares with other agents.
+    fn tools_instructions(&self, chat: TerminalId) -> String {
+        format!(
+            "{} This chat is chat {chat}: other agents name it by that number.{}",
+            mcp::INSTRUCTIONS,
+            self.boards_told(chat)
+        )
     }
 
     /// Reads what an agent sent its tools, and writes what it can of the
@@ -331,14 +360,23 @@ impl Daemon {
             self.answer_tool(token, &id, refused);
             return;
         }
+        // What would be refused anyway isn't asked about.
+        if let Some(why) = self.talk_refused(chat, &tool) {
+            self.answer_tool(token, &id, Err(why));
+            return;
+        }
         let Some((what, whole)) = self.question_for(chat, &tool, tools) else {
             self.carry_out(token, chat, id, tool);
             return;
         };
         let call = self.tools.next_call;
         self.tools.next_call += 1;
+        let offered = match tool {
+            Tool::SendToChat { .. } | Tool::StartChat { .. } => Choices::Talk,
+            _ => Choices::Tool,
+        };
         let asked = (self.chat(chat))
-            .is_some_and(|hosted| hosted.ask_for_tool(call, &what, whole.as_deref()));
+            .is_some_and(|hosted| hosted.ask_for_tool(call, &what, whole.as_deref(), offered));
         if !asked {
             let refused = "too many questions are waiting for the user: wait for their answers";
             self.answer_tool(token, &id, Err(refused.to_owned()));
@@ -407,6 +445,9 @@ impl Daemon {
                     (what, None)
                 })
             }
+            Tool::SendToChat { .. } | Tool::StartChat { .. } => {
+                self.talk_question(chat, tool, tools)
+            }
             _ => None,
         }
     }
@@ -433,7 +474,7 @@ impl Daemon {
 
     /// The user answered the chat's question about the call numbered
     /// `call`: it goes ahead if `allow`, and is refused if not.
-    pub(super) fn permitted(&mut self, call: u64, allow: bool) {
+    pub(super) fn permitted(&mut self, call: u64, allow: bool, pair: bool) {
         let Some(at) = (self.tools.waiting.iter()).position(
             |waiting| matches!(waiting.what, Wait::Permission { call: asked, .. } if asked == call),
         ) else {
@@ -449,6 +490,7 @@ impl Daemon {
             return;
         };
         if allow {
+            self.talk_permitted(chat, &tool, pair);
             self.carry_out(token, chat, id, tool);
         } else {
             let refused =
@@ -502,6 +544,39 @@ impl Daemon {
             Tool::ShowPane { pane } => self.show_pane(chat, pane),
             Tool::Explore { path } => self.explore_for(chat, path.as_deref()),
             Tool::GetDiagnostics { path } => Ok(self.get_diagnostics(chat, path.as_deref())),
+            tool @ (Tool::BoardCreate { .. }
+            | Tool::BoardList { .. }
+            | Tool::BoardArchive { .. }
+            | Tool::BoardPost { .. }
+            | Tool::BoardEdit { .. }
+            | Tool::BoardRead { .. }
+            | Tool::BoardClaim { .. }
+            | Tool::BoardRelease { .. }) => match self.board_tool(chat, tool) {
+                Ok(result) => result,
+                // Carried out once the boards are read.
+                Err(tool) => {
+                    let due = Instant::now() + BOARDS_WAIT;
+                    self.tools.waiting.push(Waiting {
+                        token,
+                        id,
+                        chat,
+                        what: Wait::Boards { tool, due },
+                    });
+                    return;
+                }
+            },
+            Tool::ListChats => Ok(self.list_chats(chat)),
+            Tool::SendToChat { chat: to, message } => self.send_to_chat(chat, to, message),
+            Tool::ReadChat { chat: to, turns } => self.read_chat(chat, to, turns),
+            Tool::StartChat { agent, prompt, cwd } => {
+                self.start_chat(chat, agent, prompt, cwd.as_deref())
+            }
+            Tool::WaitForChat { chat: to, timeout } => {
+                match self.wait_for_chat((token, id.clone()), chat, to, timeout) {
+                    Some(result) => result,
+                    None => return,
+                }
+            }
         };
         self.answer_tool(token, &id, result);
     }
@@ -596,6 +671,7 @@ impl Daemon {
             }
             Content::Buffer(_) => Err(format!("pane {pane} shows a file, not a terminal")),
             Content::Files(_) => Err(format!("pane {pane} is a file explorer, not a terminal")),
+            Content::Board(_) => Err(format!("pane {pane} shows a board, not a terminal")),
         }
     }
 
@@ -768,6 +844,10 @@ impl Daemon {
             Content::Files(files) => match self.files_root(files) {
                 Some(root) => format!("file explorer, at {}", shorten(root, dir)),
                 None => "file explorer".to_owned(),
+            },
+            Content::Board(board) => match self.boards.list.get(board) {
+                Some(board) => format!("board {:?}", board.summary.name),
+                None => "board".to_owned(),
             },
             Content::Terminal(terminal) => {
                 let Some(slot) = self.terminals.get(&terminal) else {
@@ -1068,6 +1148,7 @@ impl Daemon {
     /// and, for a chat, its agent's calls are refused.
     pub(super) fn tools_closed(&mut self, terminal: TerminalId) {
         self.tools.commanded.remove(&terminal);
+        self.tools.talk.forget(terminal);
         self.answer_finished(terminal, true);
         self.tools.sides.remove(&terminal);
         self.tools.editors.remove(&terminal);
@@ -1090,7 +1171,9 @@ impl Daemon {
         let typing = (self.tools.commanded.values())
             .filter_map(|commanded| commanded.typing.as_ref().map(|typing| typing.due));
         let waits = (self.tools.waiting.iter()).filter_map(|waiting| match waiting.what {
-            Wait::Finish { due, .. } => Some(due),
+            Wait::Finish { due, .. } | Wait::Turn { due, .. } | Wait::Boards { due, .. } => {
+                Some(due)
+            }
             Wait::Permission { .. } => None,
         });
         typing.chain(waits).min()
@@ -1136,14 +1219,26 @@ impl Daemon {
         }
         let (timed_out, kept) = std::mem::take(&mut self.tools.waiting)
             .into_iter()
-            .partition(|waiting| matches!(waiting.what, Wait::Finish { due, .. } if due <= now));
+            .partition(|waiting| {
+                matches!(waiting.what, Wait::Finish { due, .. } | Wait::Turn { due, .. }
+                    | Wait::Boards { due, .. } if due <= now)
+            });
         self.tools.waiting = kept;
         for waiting in timed_out {
-            let Wait::Finish {
-                terminal, lines, ..
-            } = waiting.what
-            else {
-                continue;
+            let (terminal, lines) = match waiting.what {
+                Wait::Finish {
+                    terminal, lines, ..
+                } => (terminal, lines),
+                Wait::Turn { chat, .. } => {
+                    self.chat_wait_timed_out(&waiting, chat);
+                    continue;
+                }
+                Wait::Boards { .. } => {
+                    let late = "the boards are still being read, after a while: try again soon";
+                    self.answer_tool(waiting.token, &waiting.id, Err(late.to_owned()));
+                    continue;
+                }
+                Wait::Permission { .. } => continue,
             };
             let result = match self.workspaces.get().pane_showing(terminal) {
                 Some(pane) => {

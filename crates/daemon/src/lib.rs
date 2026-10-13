@@ -14,6 +14,7 @@
 
 mod agent;
 mod agents;
+mod boards;
 mod buffer;
 mod chat;
 pub mod client;
@@ -99,6 +100,10 @@ pub struct DaemonConfig {
     /// files deleted on its file system go. `None` has none: files there
     /// can only be deleted for good.
     pub trash: Option<PathBuf>,
+    /// Where boards are kept, one file each, from one run of the daemon
+    /// to the next (see `boards::disk`). `None` keeps none: there are no
+    /// boards.
+    pub boards: Option<PathBuf>,
 }
 
 /// How long a language server is kept with no files open in it, unless
@@ -114,7 +119,9 @@ pub const DEFAULT_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_s
 pub const DEFAULT_UDP_PORTS: RangeInclusive<u16> = 60000..=61000;
 
 impl DaemonConfig {
-    /// Defaults taken from the environment: `$SHELL` (or `/bin/sh`),
+    /// Defaults taken from the environment: `$CLACKATOO_BOARDS`, where
+    /// boards are kept, or `off` for none (or else `clackatoo/boards` in
+    /// the data directory), `$SHELL` (or `/bin/sh`),
     /// `$HOME` (or `/`), `$CLACKATOO_AGENT`: the command of the agent a
     /// chat gets when it asks for none, split at spaces (or else Claude
     /// Code's adapter), `$CLACKATOO_UDP_PORTS`: a port, a range such as
@@ -173,6 +180,11 @@ impl DaemonConfig {
             prompt_wait: DEFAULT_PROMPT_WAIT,
             rename_gate: None,
             trash: data_dir().map(|dir| dir.join("Trash")),
+            boards: match non_empty("CLACKATOO_BOARDS") {
+                Some(off) if off == "off" => None,
+                Some(dir) => Some(PathBuf::from(dir)),
+                None => data_dir().map(|dir| dir.join("clackatoo/boards")),
+            },
         }
     }
 }

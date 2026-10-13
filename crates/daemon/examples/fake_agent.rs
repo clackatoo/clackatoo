@@ -18,7 +18,12 @@
 //! | `edit PATH`, a line's end, then text | As `disk`, but asks permission first, as Claude Code does in Manual mode, and writes the file only once it's allowed |
 //! | `disk-spaces PATH`, a line's end, then text | As `disk`, but says the change as Claude Code's adapter says one to a tab-indented file: each line's leading tabs as two spaces, as the tool finishes |
 //! | `run PATH`, a line's end, then text | Writes the text to the file in a command, as `sed -i` would, saying nothing of what it changed, and says `ran` |
+//! | `bounce`, from another chat | Sends that chat `bounce` back with `send_to_chat`, and says what it answered |
 //! | anything else | `echo:` and the message, in two pieces |
+//!
+//! A message from another chat's agent comes framed as clackatoo frames
+//! it, saying which chat sent it: the script is chosen by the message
+//! inside.
 //!
 //! Run as `fake_agent mcp --chat ID --socket PATH`, it relays MCP for a
 //! chat's tools, as `clackatoo mcp` does.
@@ -412,6 +417,11 @@ impl Fake {
     /// Answers a message by the script its words choose. Returns whether
     /// to carry on.
     fn prompt(&mut self, id: Value, session: String, text: &str) -> bool {
+        let (sender, text) = from_chat(text);
+        if let (Some(sender), "bounce") = (sender, text) {
+            self.bounce(id, session, sender);
+            return true;
+        }
         // How much context it uses, as the adapter says before it answers.
         if !matches!(text, "ask" | "wait" | "exit") {
             let usage = json!({ "sessionUpdate": "usage_update", "used": 1000, "size": 200_000 });
@@ -488,22 +498,7 @@ impl Fake {
                 say(&session, &format!("{tools}\n"));
                 done(&id, "end_turn");
             }
-            calls if calls.starts_with("mcp ") => {
-                let server = self
-                    .tools
-                    .get(&session)
-                    .and_then(|tools| tools.get(0))
-                    .cloned();
-                let calls: Vec<String> = calls.lines().map(str::to_owned).collect();
-                // On a thread of its own, as a call may wait for the user.
-                std::thread::spawn(move || {
-                    match server {
-                        Some(server) => call_tools(&session, &server, &calls),
-                        None => say(&session, "no tools\n"),
-                    }
-                    done(&id, "end_turn");
-                });
-            }
+            calls if calls.starts_with("mcp ") => self.call_tools(id, session, calls),
             "settings" => {
                 let (mode, model) = self.settings.get(&session).cloned().unwrap_or_default();
                 say(&session, &format!("{mode} {model}\n"));
@@ -517,6 +512,42 @@ impl Fake {
             }
         }
         true
+    }
+
+    /// Makes each of `calls`, `mcp NAME ARGS`, a line each, in turn,
+    /// answering the message `id` in `session` with what each answered.
+    fn call_tools(&self, id: Value, session: String, calls: &str) {
+        let server = self
+            .tools
+            .get(&session)
+            .and_then(|tools| tools.get(0))
+            .cloned();
+        let calls: Vec<String> = calls.lines().map(str::to_owned).collect();
+        // On a thread of its own, as a call may wait for the user.
+        std::thread::spawn(move || {
+            match server {
+                Some(server) => call_tools(&session, &server, &calls),
+                None => say(&session, "no tools\n"),
+            }
+            done(&id, "end_turn");
+        });
+    }
+
+    /// Sends the chat `sender` `bounce`, answering the message `id` in
+    /// `session`.
+    fn bounce(&self, id: Value, session: String, sender: u32) {
+        let server = self
+            .tools
+            .get(&session)
+            .and_then(|tools| tools.get(0))
+            .cloned();
+        let call = format!("mcp send_to_chat {{\"chat\":{sender},\"message\":\"bounce\"}}");
+        std::thread::spawn(move || {
+            if let Some(server) = server {
+                call_tools(&session, &server, &[call]);
+            }
+            done(&id, "end_turn");
+        });
     }
 
     /// Answers a message about a file by the script its words choose, if
@@ -668,6 +699,19 @@ impl Fake {
             done(&id, "cancelled");
         }
     }
+}
+
+/// Which chat sent `text`, if another chat's agent did, and the message,
+/// after the line clackatoo puts before it saying so.
+fn from_chat(text: &str) -> (Option<u32>, &str) {
+    let Some(rest) = text.strip_prefix("[Message from chat ") else {
+        return (None, text);
+    };
+    let sender = rest.split([' ', ':']).next().and_then(|n| n.parse().ok());
+    let body = (rest.split_once(" ---\n"))
+        .and_then(|(_, body)| body.rsplit_once("\n--- end of message "))
+        .map_or("", |(body, _)| body);
+    (sender, body)
 }
 
 /// Starts the MCP server `server`, as ACP's `mcpServers` gives it, and

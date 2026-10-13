@@ -1252,6 +1252,7 @@ mod tests {
             items: Vec::new(),
             end: None,
             files: None,
+            from: None,
         });
         let mut view = ChatView::new(String::new(), node);
         typed(&mut view, "more");
@@ -1538,6 +1539,7 @@ mod tests {
         let mut node = ChatNode::default();
         for &state in states {
             node.turns.push(Turn {
+                from: None,
                 prompt: "change it".into(),
                 sent: 0,
                 items: Vec::new(),

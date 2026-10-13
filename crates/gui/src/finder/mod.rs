@@ -49,6 +49,8 @@ pub(crate) enum Kind {
     Diagnostics,
     /// The marks the focused editor's file can go to.
     Marks,
+    /// The boards the workspace shown sees.
+    Boards,
 }
 
 impl Kind {
@@ -60,6 +62,7 @@ impl Kind {
             Self::Places => "Places",
             Self::Diagnostics => "Diagnostics",
             Self::Marks => "Marks",
+            Self::Boards => "Boards",
         }
     }
 }
@@ -208,6 +211,11 @@ impl Finder {
         &self.query
     }
 
+    /// What it lists.
+    pub(crate) fn kind(&self) -> Kind {
+        self.kind
+    }
+
     /// The daemon's search filling the list, while it goes on.
     pub(crate) fn search(&self) -> Option<u64> {
         self.search
@@ -271,6 +279,26 @@ impl Finder {
                         path_len: path.len(),
                         path,
                         at: None,
+                        matched: Vec::new(),
+                    });
+                }
+            }
+            // Each by its ID, which opening it gives back as its path.
+            Found::Boards(boards) => {
+                for board in boards {
+                    let mut text = board.name.clone();
+                    if !board.purpose.is_empty() {
+                        text.push_str(" · ");
+                        text.push_str(&board.purpose);
+                    }
+                    if board.archived {
+                        text.push_str(" (archived)");
+                    }
+                    self.items.push(&text);
+                    self.entries.push(Entry {
+                        path: board.id.to_string(),
+                        at: None,
+                        path_len: 0,
                         matched: Vec::new(),
                     });
                 }
@@ -447,6 +475,10 @@ impl Finder {
     /// The file and line the preview should show, for the thing picked, if
     /// what's shown or asked for doesn't already have it.
     pub(crate) fn preview_wanted(&mut self) -> Option<(String, u64)> {
+        // A board is no file to preview.
+        if self.kind == Kind::Boards {
+            return None;
+        }
         let entry = self.picked()?.clone();
         let (path, line) = (self.absolute(&entry), entry.at.map_or(0, |(line, _)| line));
         let has = |shown_path: &str, at: u64| shown_path == path && line.abs_diff(at) < 40;

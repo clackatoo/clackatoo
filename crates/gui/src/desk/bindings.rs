@@ -311,6 +311,9 @@ impl Desk {
         if let Some(explorer) = self.focused_explorer() {
             return explorer.pending();
         }
+        if let Some(board) = self.focused_board() {
+            return board.pending();
+        }
         (self.focused_terminal())
             .and_then(|terminal| self.panes.get(&terminal))
             .is_some_and(crate::pane::Pane::pending)
@@ -330,6 +333,13 @@ impl Desk {
         }
         if let Some(explorer) = self.focused_explorer() {
             return if explorer.prompting() {
+                KeyMode::Prompt
+            } else {
+                KeyMode::Normal
+            };
+        }
+        if let Some(board) = self.focused_board() {
+            return if board.prompting() {
                 KeyMode::Prompt
             } else {
                 KeyMode::Normal

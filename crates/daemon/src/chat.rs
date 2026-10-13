@@ -21,7 +21,7 @@ use agent_client_protocol_schema::v1::{
 };
 use clackatoo_protocol::{
     AgentTools, ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item,
-    Location, Node, Outcome, Patch, Question, Setting, SettingChoice, SettingKind, Size,
+    Location, Node, Outcome, Patch, Question, Sender, Setting, SettingChoice, SettingKind, Size,
     TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, Turn,
     TurnEnd, TurnFiles, Usage, View, ViewUpdate,
 };
@@ -30,6 +30,10 @@ use serde_json::Value;
 use crate::agent::Opened;
 use crate::agents::AgentSpec;
 use crate::handover;
+
+mod relations;
+
+pub(crate) use relations::{Cause, MAX_INBOX, Message, Relations};
 
 /// The most characters of a title the agent gives a conversation that a
 /// chat keeps, for its tab.
@@ -92,6 +96,30 @@ const TOOL_CHOICES: [(&str, &str, ChoiceKind); 3] = [
     ("reject", "Reject", ChoiceKind::RejectOnce),
 ];
 
+/// The answers to a question about the agent messaging or starting
+/// another chat. "Always" is for this chat and that one alone: it never
+/// changes the chat's Tools setting, so no chat gains, through another,
+/// what its own setting doesn't give it.
+const TALK_CHOICES: [(&str, &str, ChoiceKind); 3] = [
+    ("allow", "Allow", ChoiceKind::AllowOnce),
+    (
+        "pair",
+        "Always allow for that chat",
+        ChoiceKind::AllowAlways,
+    ),
+    ("reject", "Deny", ChoiceKind::RejectOnce),
+];
+
+/// Which answers a tool's question offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Choices {
+    /// Allow, Always allow, which lets the agent run commands in its own
+    /// terminals, and Reject.
+    Tool,
+    /// Allow, Always allow for the chat it's about, and Deny.
+    Talk,
+}
+
 /// What a chat asks the server to do.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Action {
@@ -107,8 +135,9 @@ pub(crate) enum Action {
         option: Option<String>,
     },
     /// Let a call to one of clackatoo's tools go ahead, numbered as the
-    /// server numbered it, or refuse it.
-    Permit { call: u64, allow: bool },
+    /// server numbered it, or refuse it; with `pair`, a call about another
+    /// chat goes ahead without asking from now on, for that chat.
+    Permit { call: u64, allow: bool, pair: bool },
     /// Change one of the agent's settings for the chat.
     Set { setting: String, value: String },
     /// Install the chat's agent, as the user agreed to.
@@ -193,6 +222,8 @@ pub(crate) struct HostedChat {
     /// What each tool of the turn being answered last said it changed in
     /// files, by its ID.
     diffs: Vec<(String, Vec<RawDiff>)>,
+    /// Where it stands among the chats agents talk in.
+    relations: Relations,
 }
 
 /// Who asked a question in a chat, and so gets the answer.
@@ -282,6 +313,7 @@ impl HostedChat {
             starting_mode: agent.starting_mode.clone(),
             journal: Journal::default(),
             diffs: Vec::new(),
+            relations: Relations::default(),
         }
     }
 
@@ -296,6 +328,10 @@ impl HostedChat {
             ChatState::Failed(why) => Some(why),
             _ => None,
         };
+        let senders: Vec<(usize, &Sender)> = (self.node.turns.iter().enumerate())
+            .filter_map(|(index, turn)| Some((index, turn.from.as_ref()?)))
+            .collect();
+        let relations = self.relations.hand_over(&senders);
         handover::Chat {
             id: self.id.0,
             cols: self.size.cols(),
@@ -312,6 +348,7 @@ impl HostedChat {
                 .collect(),
             chosen: self.chosen,
             agent: self.agent,
+            relations,
         }
     }
 
@@ -328,6 +365,13 @@ impl HostedChat {
             .map(setting_from_handover)
             .collect();
         resumed.chosen = chat.chosen;
+        let (relations, senders) = Relations::resume(chat.relations);
+        resumed.relations = relations;
+        for (index, sender) in senders {
+            if let Some(turn) = resumed.node.turns.get_mut(index) {
+                turn.from = Some(sender);
+            }
+        }
         (resumed.node.settings).push(tools_setting(resumed.tools()));
         resumed.starting_mode = None;
         resumed.node.state = chat.failure.map_or(ChatState::Ready, ChatState::Failed);
@@ -518,26 +562,132 @@ impl HostedChat {
         if text.trim().is_empty() || self.answering() {
             return;
         }
+        // The user's own: what agents do of it comes of this turn.
+        self.relations.hops = 0;
+        let turn = u32::try_from(self.node.turns.len()).unwrap_or(u32::MAX);
+        self.relations.cause = Some((self.id, turn));
+        self.begin(text.clone(), text, None, actions);
+    }
+
+    /// Starts a turn: shows `shown`, sent by `from` if another chat's
+    /// agent sent it, and sends the agent `prompt`.
+    fn begin(
+        &mut self,
+        shown: String,
+        prompt: String,
+        from: Option<Sender>,
+        actions: &mut Vec<Action>,
+    ) {
         self.set_notice(None);
         self.push_turn(Turn {
-            prompt: text.clone(),
+            prompt: shown,
             sent: now(),
             items: Vec::new(),
             end: None,
             files: None,
+            from,
         });
         match self.link {
             Link::Open => {
                 self.set_state(ChatState::Answering);
-                actions.push(Action::Prompt(text));
+                actions.push(Action::Prompt(prompt));
             }
-            Link::Opening => self.queued = Some(text),
+            Link::Opening => self.queued = Some(prompt),
             Link::Closed => {
-                self.queued = Some(text);
+                self.queued = Some(prompt);
                 self.link = Link::Opening;
                 self.set_state(ChatState::Starting);
                 actions.push(Action::Connect);
             }
+        }
+    }
+
+    // --- Other agents -------------------------------------------------------
+
+    /// Where the chat stands among the chats agents talk in.
+    pub(crate) fn relations(&self) -> &Relations {
+        &self.relations
+    }
+
+    /// The chat was started by the agent of the chat `parent`, which goes
+    /// back to the user's chat `root`, `depth` deep. It starts in `mode`,
+    /// the mode its parent was in, or with none, in its agent's own: never
+    /// in clackatoo's choice for a new chat, which may let it do more than
+    /// its parent can.
+    pub(crate) fn started_by(
+        &mut self,
+        parent: TerminalId,
+        root: TerminalId,
+        depth: u8,
+        mode: Option<String>,
+    ) {
+        self.relations.parent = Some(parent);
+        self.relations.root = Some(root);
+        self.relations.depth = depth;
+        self.starting_mode = mode;
+    }
+
+    /// The mode the agent is in, by its value, if it offers modes.
+    pub(crate) fn mode(&self) -> Option<&str> {
+        (self.node.settings.iter())
+            .find(|setting| setting.kind == SettingKind::Mode)
+            .map(|setting| setting.value.as_str())
+    }
+
+    /// Takes `message`, from another chat's agent: it goes at once, as a
+    /// turn of its own, unless the agent is answering. Then it waits for
+    /// the turn to end, behind any others waiting; with
+    /// [`MAX_INBOX`] waiting already, it's handed back. Returns what the
+    /// server must do to send it, if it went.
+    pub(crate) fn deliver(&mut self, message: Message) -> Result<Vec<Action>, Message> {
+        if self.answering() || !self.relations.inbox.is_empty() {
+            if self.relations.inbox.len() >= MAX_INBOX {
+                return Err(message);
+            }
+            self.relations.inbox.push_back(message);
+            return Ok(Vec::new());
+        }
+        Ok(self.begin_message(message))
+    }
+
+    /// Sends the first message waiting from another agent, if the agent
+    /// has finished answering. Returns what the server must do to send it.
+    pub(crate) fn deliver_next(&mut self) -> Vec<Action> {
+        if self.answering() {
+            return Vec::new();
+        }
+        match self.relations.inbox.pop_front() {
+            Some(message) => self.begin_message(message),
+            None => Vec::new(),
+        }
+    }
+
+    /// Starts a turn with `message`, from another agent.
+    fn begin_message(&mut self, message: Message) -> Vec<Action> {
+        let mut actions = Vec::new();
+        self.relations.hops = message.hops;
+        self.relations.cause = message.cause;
+        let prompt = relations::prompt_for(&message);
+        self.begin(message.text, prompt, Some(message.from), &mut actions);
+        actions
+    }
+
+    /// Whether a message has been sent and not yet answered.
+    pub(crate) fn is_answering(&self) -> bool {
+        self.answering()
+    }
+
+    /// The conversation as it is now.
+    pub(crate) fn node(&self) -> &ChatNode {
+        &self.node
+    }
+
+    /// The chat as other chats' agents know it.
+    pub(crate) fn sender(&self) -> Sender {
+        Sender {
+            chat: self.id,
+            agent: self.node.agent.clone(),
+            title: self.title.clone(),
         }
     }
 
@@ -565,6 +715,16 @@ impl HostedChat {
             actions.push(Action::Cancel);
         } else if self.queued.take().is_some() {
             self.end_turn(Outcome::Stopped);
+        }
+        // The user wants the agent to stop: messages from other agents
+        // waiting their turn don't start it again.
+        let dropped = std::mem::take(&mut self.relations.inbox).len();
+        if dropped > 0 {
+            let plural = if dropped == 1 { "" } else { "s" };
+            self.set_notice(Some(format!(
+                "Stopped: {dropped} message{plural} from other agents waiting their turn \
+                 weren't sent."
+            )));
         }
     }
 
@@ -836,7 +996,13 @@ impl HostedChat {
     /// what the agent would type, if it's too long for the question: it
     /// goes in the conversation, in full, for the user to read first.
     /// Returns whether it was asked: too many questions waiting refuse it.
-    pub(crate) fn ask_for_tool(&mut self, call: u64, what: &str, whole: Option<&str>) -> bool {
+    pub(crate) fn ask_for_tool(
+        &mut self,
+        call: u64,
+        what: &str,
+        whole: Option<&str>,
+        offered: Choices,
+    ) -> bool {
         if self.asking.len() >= MAX_QUESTIONS {
             return false;
         }
@@ -850,7 +1016,11 @@ impl HostedChat {
                 locations: Vec::new(),
             });
         }
-        let choices = (TOOL_CHOICES.iter())
+        let choices = match offered {
+            Choices::Tool => TOOL_CHOICES,
+            Choices::Talk => TALK_CHOICES,
+        };
+        let choices = (choices.iter())
             .map(|&(id, name, kind)| Choice {
                 id: id.to_owned(),
                 name: name.to_owned(),
@@ -880,7 +1050,8 @@ impl HostedChat {
     /// What to do about the answer `option` to `asker`'s question.
     /// "Always allow" for clackatoo's tools lets the agent run commands in
     /// its own terminals without asking from then on, until the user
-    /// changes the chat's Tools setting back.
+    /// changes the chat's Tools setting back. "Always allow for that
+    /// chat" is the server's to remember, and changes no setting.
     fn answer(&mut self, asker: Asker, option: Option<String>) -> Option<Action> {
         let install = option.as_deref() == Some(INSTALL);
         match asker {
@@ -892,7 +1063,8 @@ impl HostedChat {
                 }
                 Some(Action::Permit {
                     call,
-                    allow: matches!(option, Some("allow" | "always")),
+                    allow: matches!(option, Some("allow" | "always" | "pair")),
+                    pair: option == Some("pair"),
                 })
             }
             Asker::Install if install => {
@@ -1818,6 +1990,8 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
             },
         }),
         files: None,
+        // Put back from the chat's relations, if another agent sent it.
+        from: None,
     }
 }
 
@@ -2178,8 +2352,8 @@ mod tests {
         let tool: ToolCallUpdate =
             serde_json::from_str(r#"{"toolCallId":"t","title":"Write a"}"#).unwrap();
         chat.ask(Value::from(1), &tool, &[]);
-        chat.ask_for_tool(7, "run `make` in a terminal", None);
-        chat.ask_for_tool(8, "run `ls` in a terminal", None);
+        chat.ask_for_tool(7, "run `make` in a terminal", None, Choices::Tool);
+        chat.ask_for_tool(8, "run `ls` in a terminal", None, Choices::Tool);
         assert_eq!(chat.node.question.as_ref().unwrap().title, "Write a");
         assert_eq!(
             answer(&mut chat, Some("x".into())),
@@ -2203,7 +2377,8 @@ mod tests {
             answer(&mut chat, Some("always".into())),
             [Action::Permit {
                 call: 8,
-                allow: true
+                allow: true,
+                pair: false,
             }]
         );
         assert_eq!(
@@ -2261,8 +2436,8 @@ mod tests {
         let mut chat = chat();
         connect(&mut chat, "s");
         send(&mut chat, "go");
-        chat.ask_for_tool(1, "run `a` in a new terminal", None);
-        chat.ask_for_tool(2, "run `b` in a new terminal", None);
+        chat.ask_for_tool(1, "run `a` in a new terminal", None, Choices::Tool);
+        chat.ask_for_tool(2, "run `b` in a new terminal", None, Choices::Tool);
         let shown = chat.node.question.clone().unwrap();
         // The call is cancelled as the user answers it.
         chat.withdraw(1);
@@ -2282,7 +2457,8 @@ mod tests {
             chat.act(once.clone()),
             [Action::Permit {
                 call: 2,
-                allow: true
+                allow: true,
+                pair: false,
             }]
         );
         assert_eq!(chat.act(once), []);
@@ -2315,7 +2491,12 @@ mod tests {
         connect(&mut chat, "s");
         send(&mut chat, "go");
         let whole = "x".repeat(5000);
-        assert!(chat.ask_for_tool(0, "type 5 KB of text into pane 2", Some(&whole)));
+        assert!(chat.ask_for_tool(
+            0,
+            "type 5 KB of text into pane 2",
+            Some(&whole),
+            Choices::Tool
+        ));
         let card = (chat.node.turns[0].items.iter()).find_map(|item| match item {
             Item::Tool(tool) => Some(tool.content.clone()),
             _ => None,
@@ -2325,9 +2506,9 @@ mod tests {
             Some(vec![ToolContent::Text(format!("```\n{whole}\n```"))])
         );
         for call in 1..MAX_QUESTIONS as u64 {
-            assert!(chat.ask_for_tool(call, "run `x` in a new terminal", None));
+            assert!(chat.ask_for_tool(call, "run `x` in a new terminal", None, Choices::Tool));
         }
-        assert!(!chat.ask_for_tool(99, "run `y` in a new terminal", None));
+        assert!(!chat.ask_for_tool(99, "run `y` in a new terminal", None, Choices::Tool));
     }
 
     #[test]
@@ -2335,13 +2516,14 @@ mod tests {
         let mut chat = chat();
         connect(&mut chat, "s");
         send(&mut chat, "go");
-        chat.ask_for_tool(3, "type `y` into pane 2", None);
+        chat.ask_for_tool(3, "type `y` into pane 2", None, Choices::Tool);
         assert_eq!(
             chat.act(ChatAction::Stop),
             [
                 Action::Permit {
                     call: 3,
-                    allow: false
+                    allow: false,
+                    pair: false,
                 },
                 Action::Cancel
             ]
@@ -2429,6 +2611,121 @@ mod tests {
             Some(&Outcome::Failed("cut off by an upgrade".into()))
         );
         assert_eq!(resumed.node.state, ChatState::Ready);
+    }
+
+    /// A message from chat `from`, `hops` along a chain.
+    fn message(from: u32, text: &str, hops: u8) -> Message {
+        Message {
+            from: Sender {
+                chat: TerminalId(from),
+                agent: "Codex".into(),
+                title: "fixes".into(),
+            },
+            text: text.into(),
+            hops,
+            cause: None,
+        }
+    }
+
+    #[test]
+    fn a_message_from_another_agent_waits_for_the_turn_then_goes_marked() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        // Idle, it goes at once, as a turn marked as from the sender, the
+        // agent told who sent it.
+        let actions = chat.deliver(message(7, "hi", 1)).unwrap();
+        let [Action::Prompt(prompt)] = actions.as_slice() else {
+            panic!("{actions:?}");
+        };
+        assert!(
+            prompt.starts_with("[Message from chat 7 (Codex, \"fixes\"): another agent"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(" from chat 7 ---\nhi\n--- end of message "),
+            "{prompt}"
+        );
+        let turn = &chat.node.turns[0];
+        assert_eq!(turn.prompt, "hi");
+        assert_eq!(turn.from.as_ref().unwrap().chat, TerminalId(7));
+        assert_eq!(chat.relations().hops, 1);
+        // Answering, the next waits, up to the most kept.
+        for n in 0..MAX_INBOX {
+            assert_eq!(chat.deliver(message(7, &format!("{n}"), 1)), Ok(Vec::new()));
+        }
+        assert!(chat.deliver(message(7, "one too many", 1)).is_err());
+        assert_eq!(chat.deliver_next(), [], "not while answering");
+        chat.answered(Ok(StopReason::EndTurn));
+        let next = chat.deliver_next();
+        assert!(
+            matches!(next.as_slice(), [Action::Prompt(prompt)] if prompt.contains(" ---\n0\n--- end"))
+        );
+        assert_eq!(chat.relations().inbox.len(), MAX_INBOX - 1);
+        // The user's own message starts the chain again.
+        chat.answered(Ok(StopReason::EndTurn));
+        chat.relations.inbox.clear();
+        send(&mut chat, "mine");
+        assert_eq!(chat.relations().hops, 0);
+        assert_eq!(chat.node.turns.last().unwrap().from, None);
+    }
+
+    #[test]
+    fn always_allowing_a_message_is_for_that_chat_and_never_the_tools_setting() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "work");
+        assert!(chat.ask_for_tool(4, "send `hi` to chat 2", None, Choices::Talk));
+        let question = chat.node.question.clone().unwrap();
+        let names: Vec<&str> = (question.choices.iter())
+            .map(|choice| choice.name.as_str())
+            .collect();
+        assert_eq!(names, ["Allow", "Always allow for that chat", "Deny"]);
+        assert_eq!(
+            answer(&mut chat, Some("pair".into())),
+            [Action::Permit {
+                call: 4,
+                allow: true,
+                pair: true,
+            }]
+        );
+        assert_eq!(chat.tools(), AgentTools::Ask, "the setting is as it was");
+    }
+
+    #[test]
+    fn stopping_drops_the_messages_waiting_and_says_so() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "work");
+        chat.deliver(message(7, "later", 1)).unwrap();
+        assert_eq!(chat.act(ChatAction::Stop), [Action::Cancel]);
+        assert!(chat.relations().inbox.is_empty());
+        assert_eq!(
+            chat.node.notice.as_deref(),
+            Some("Stopped: 1 message from other agents waiting their turn weren't sent.")
+        );
+    }
+
+    #[test]
+    fn where_a_chat_stands_among_the_others_survives_an_upgrade() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        chat.started_by(TerminalId(3), TerminalId(2), 1, None);
+        chat.deliver(message(3, "do it", 2)).unwrap();
+        chat.answered(Ok(StopReason::EndTurn));
+        send(&mut chat, "and you");
+        chat.deliver(message(5, "waiting", 3)).unwrap();
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let resumed = HostedChat::resume(chat.hand_over(), &agent);
+        assert_eq!(resumed.relations().parent, Some(TerminalId(3)));
+        assert_eq!(resumed.relations().depth, 1);
+        assert_eq!(resumed.relations().inbox, [message(5, "waiting", 3)]);
+        let senders: Vec<Option<TerminalId>> = (resumed.node.turns.iter())
+            .map(|turn| turn.from.as_ref().map(|from| from.chat))
+            .collect();
+        assert_eq!(senders, [Some(TerminalId(3)), None]);
+        // It isn't one of the values the agent is asked for.
     }
 
     fn set(setting: &str, value: &str) -> Action {

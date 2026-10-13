@@ -64,6 +64,7 @@ impl Desk {
     fn options_changed(&mut self) {
         self.editors.set_options(&self.options);
         self.explorer_options();
+        self.board_options();
         for pane in self.panes.values_mut() {
             pane.set_options(&self.options);
         }

@@ -36,6 +36,9 @@ pub enum Search {
     /// in those not open that they've said of, the worst first, as lines
     /// found, each saying what's wrong.
     Diagnostics,
+    /// The boards the pane's workspace sees: its own, and those of every
+    /// workspace, archived ones included.
+    Boards,
     /// Up to `lines` lines of the file at `path`, around line `line`: a
     /// third of them before it.
     Preview {
@@ -66,6 +69,8 @@ pub enum Found {
     Lines(Vec<FoundLine>),
     /// Files open in buffers, for [`Search::Buffers`].
     Buffers(Vec<FoundBuffer>),
+    /// Boards, for [`Search::Boards`], the open ones first, each by name.
+    Boards(Vec<crate::BoardSummary>),
     /// Lines of a file, for [`Search::Preview`], from line `first`. Each is
     /// cut short if it's long.
     Preview {

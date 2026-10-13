@@ -261,6 +261,7 @@ mod tests {
             state: ChatState::Answering,
             turns: vec![
                 Turn {
+                    from: None,
                     prompt: "What's in it?".into(),
                     sent: 10_000,
                     items: vec![
@@ -275,6 +276,7 @@ mod tests {
                     files: None,
                 },
                 Turn {
+                    from: None,
                     prompt: "And the other?".into(),
                     sent: 400_000,
                     items: vec![tool("Read build.rs\nand more", ToolStatus::Running)],

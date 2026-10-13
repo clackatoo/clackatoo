@@ -31,6 +31,7 @@ pub(crate) fn talk(pairs: &[(&str, &str)]) -> ChatNode {
         state: ChatState::Ready,
         turns: (pairs.iter().enumerate())
             .map(|(index, (prompt, answer))| Turn {
+                from: None,
                 prompt: (*prompt).to_owned(),
                 sent: 1000 * index as u64,
                 items: vec![Item::Words((*answer).to_owned())],
@@ -87,6 +88,7 @@ pub(crate) fn long_chat(turns: usize) -> ChatNode {
         let sent = 1_000_000 + 600_000 * index as u64;
         let last = index + 1 == turns;
         node.turns.push(Turn {
+            from: None,
             prompt: format!(
                 "Turn {index}: why does the build fail on CI but not here? It started \
                  after the last dependency bump."

@@ -184,7 +184,7 @@ impl ChatView {
             Piece::Prompt => key.piece == PROMPT,
             Piece::Fold => key.piece == FOLD,
             Piece::Item(piece) | Piece::Card(piece) => key.piece == piece,
-            Piece::Note | Piece::Files => false,
+            Piece::Note | Piece::Files | Piece::Badge => false,
         })?;
         if key.piece == FOLD {
             let header = slot.header.as_ref()?;
@@ -249,7 +249,7 @@ impl ChatView {
                 Piece::Card(piece) => {
                     add(piece, laid.cards.get(&piece).map_or(0, CardLaid::parts));
                 }
-                Piece::Note | Piece::Files => {}
+                Piece::Note | Piece::Files | Piece::Badge => {}
             }
         }
         keys

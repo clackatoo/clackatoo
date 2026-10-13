@@ -199,6 +199,7 @@ impl Window {
         log: &str,
     ) -> anyhow::Result<Self> {
         let mut child = Command::new(binary)
+            .env("CLACKATOO_BOARDS", "off")
             .env("XDG_RUNTIME_DIR", daemon.runtime_dir())
             .envs(display.vars.iter().map(|(name, value)| (name, value)))
             .env("RUST_LOG", log)

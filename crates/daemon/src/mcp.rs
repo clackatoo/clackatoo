@@ -25,7 +25,8 @@ use std::time::Duration;
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    ClientMessage, PROTOCOL_VERSION, PaneId, Request, Response, ServerMessage, TerminalId,
+    BoardLink, ClientMessage, PROTOCOL_VERSION, PaneId, PostKind, Request, Response, ServerMessage,
+    TerminalId,
 };
 use mio::net::UnixStream;
 use serde::Deserialize;
@@ -53,9 +54,24 @@ const DEFAULT_WAIT: Duration = Duration::from_mins(1);
 const MAX_WAIT: Duration = Duration::from_mins(10);
 
 /// The most text `send_to_terminal` types at once, or a command
-/// `run_in_terminal` runs, in bytes: all of it is shown to the user
-/// before they allow it.
+/// `run_in_terminal` runs, or a message `send_to_chat` sends, in bytes:
+/// all of it is shown to the user before they allow it.
 pub(crate) const MAX_SEND: usize = 16 * 1024;
+
+/// How many of a chat's last turns `read_chat` reads unless asked for
+/// another number, and the most it reads.
+const DEFAULT_TURNS: usize = 3;
+const MAX_TURNS: usize = 20;
+
+/// How long `wait_for_chat` waits unless asked for another time, and the
+/// longest it waits: an agent's turn can take a while.
+const DEFAULT_CHAT_WAIT: Duration = Duration::from_mins(5);
+const MAX_CHAT_WAIT: Duration = Duration::from_mins(30);
+
+/// How many entries `board_read` gives unless asked for another number,
+/// and the most it gives.
+const DEFAULT_ENTRIES: usize = 50;
+const MAX_ENTRIES: usize = 200;
 
 /// The most an agent's messages are read in one go, in bytes, before the
 /// rest of the loop gets a turn.
@@ -66,13 +82,16 @@ const READ_BUDGET: usize = 1024 * 1024;
 /// ends.
 const MAX_OUTGOING: usize = 8 * 1024 * 1024;
 
-/// What the agent is told about the tools when it connects.
-const INSTRUCTIONS: &str = "clackatoo is the terminal and editor the user is \
+/// What the agent is told about the tools when it connects, before what
+/// the server adds about its chat (see [`Connection::new`]).
+pub(crate) const INSTRUCTIONS: &str = "clackatoo is the terminal and editor the user is \
     talking to you in. These tools show the user things in its window, \
     beside this chat: open a file they should look at, or run a command \
     they should see (a test run, a build, a dev server) in a terminal \
     they can watch and type into. Panes are named by numbers, as \
-    list_panes gives them.";
+    list_panes gives them. Other chats with agents the user runs are \
+    named by numbers too, as list_chats gives them: you can message \
+    them, read them, start new ones and wait for their answers.";
 
 /// A tool the agent called, with what it asked, for the server to carry
 /// out.
@@ -102,6 +121,66 @@ pub(crate) enum Tool {
     Explore { path: Option<String> },
     /// What language servers say is wrong, in one file or everywhere.
     GetDiagnostics { path: Option<String> },
+    /// List the chats with agents, in every workspace.
+    ListChats,
+    /// Send another chat a message, as if the user typed it, marked as
+    /// from this chat.
+    SendToChat { chat: TerminalId, message: String },
+    /// Read a chat's last `turns` turns.
+    ReadChat { chat: TerminalId, turns: usize },
+    /// Start a chat with `agent`, or this chat's own, beside this one,
+    /// sending it `prompt`.
+    StartChat {
+        agent: Option<String>,
+        prompt: String,
+        cwd: Option<String>,
+    },
+    /// Wait until a chat has finished answering, or `timeout` passes.
+    WaitForChat { chat: TerminalId, timeout: Duration },
+    /// Make a board called `name`, for `purpose`, in the chat's workspace,
+    /// or every workspace if `global`.
+    BoardCreate {
+        name: String,
+        purpose: String,
+        global: bool,
+    },
+    /// List the boards the chat's workspace sees, archived ones too if
+    /// `archived`.
+    BoardList { archived: bool },
+    /// Archive a board, or unarchive it.
+    BoardArchive { board: String, archived: bool },
+    /// Post an entry on a board.
+    BoardPost {
+        board: String,
+        kind: PostKind,
+        text: String,
+        /// A file's path is as the agent gave it, from the chat's working
+        /// directory if it's relative.
+        links: Vec<BoardLink>,
+    },
+    /// Change what an entry says.
+    BoardEdit {
+        board: String,
+        entry: u32,
+        text: String,
+    },
+    /// Read the entries of a board added or changed since `since`, of
+    /// `kind` if one is given, `limit` at most.
+    BoardRead {
+        board: String,
+        since: u64,
+        kind: Option<PostKind>,
+        limit: usize,
+    },
+    /// Claim a piece of work on a board, for `lasts`, or the default.
+    BoardClaim {
+        board: String,
+        what: String,
+        note: String,
+        lasts: Option<Duration>,
+    },
+    /// Release a claim.
+    BoardRelease { board: String, entry: u32 },
 }
 
 /// Something the agent sent that the server must act on.
@@ -128,12 +207,20 @@ pub(crate) struct Connection {
     /// The agent hung up, or broke the protocol: the connection ends once
     /// `outgoing` is written.
     pub(crate) finished: bool,
+    /// What the agent is told about the tools when it connects.
+    instructions: String,
 }
 
 impl Connection {
     /// Serves the chat `chat`'s tools on `stream`, starting with
     /// `outgoing`, the answer that made it one, and whatever followed it.
-    pub(crate) fn new(stream: UnixStream, chat: TerminalId, outgoing: Vec<u8>) -> Self {
+    /// The agent is told `instructions` about them.
+    pub(crate) fn new(
+        stream: UnixStream,
+        chat: TerminalId,
+        outgoing: Vec<u8>,
+        instructions: String,
+    ) -> Self {
         Self {
             stream,
             chat,
@@ -141,6 +228,7 @@ impl Connection {
             outgoing,
             wants_writable: false,
             finished: false,
+            instructions,
         }
     }
 
@@ -213,7 +301,7 @@ impl Connection {
                         "protocolVersion": version,
                         "capabilities": { "tools": {} },
                         "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-                        "instructions": INSTRUCTIONS,
+                        "instructions": self.instructions,
                     }),
                 );
             }
@@ -322,6 +410,94 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
     struct Diagnostics {
         path: Option<String>,
     }
+    #[derive(Deserialize)]
+    struct SendChat {
+        chat: u32,
+        message: String,
+    }
+    #[derive(Deserialize)]
+    struct ReadChat {
+        chat: u32,
+        turns: Option<usize>,
+    }
+    #[derive(Deserialize)]
+    struct StartChat {
+        agent: Option<String>,
+        prompt: String,
+        cwd: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct WaitChat {
+        chat: u32,
+        timeout: Option<f64>,
+    }
+    #[derive(Deserialize)]
+    struct BoardCreate {
+        name: String,
+        purpose: Option<String>,
+        global: Option<bool>,
+    }
+    #[derive(Deserialize)]
+    struct BoardList {
+        archived: Option<bool>,
+    }
+    #[derive(Deserialize)]
+    struct BoardArchive {
+        board: String,
+        archived: Option<bool>,
+    }
+    #[derive(Deserialize)]
+    struct BoardPost {
+        board: String,
+        text: String,
+        kind: Option<String>,
+        links: Option<Vec<LinkArg>>,
+    }
+    /// A link, as an entry's: a file and a line, or a chat's turn.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum LinkArg {
+        File { path: String, line: Option<u32> },
+        Turn { chat: u32, turn: u32 },
+    }
+    #[derive(Deserialize)]
+    struct BoardEdit {
+        board: String,
+        entry: u32,
+        text: String,
+    }
+    #[derive(Deserialize)]
+    struct BoardRead {
+        board: String,
+        since: Option<u64>,
+        kind: Option<String>,
+        limit: Option<usize>,
+    }
+    #[derive(Deserialize)]
+    struct BoardClaim {
+        board: String,
+        what: String,
+        note: Option<String>,
+        minutes: Option<f64>,
+    }
+    #[derive(Deserialize)]
+    struct BoardRelease {
+        board: String,
+        entry: u32,
+    }
+    /// The kind of entry `kind` names, of those `allowed`.
+    fn kind_of(kind: &str, allowed: &[PostKind]) -> Result<PostKind, Refused> {
+        let kind = match kind {
+            "note" => PostKind::Note,
+            "claim" => PostKind::Claim,
+            "result" => PostKind::Result,
+            other => return Err(Bad(format!("there's no kind of entry {other:?}"))),
+        };
+        if !allowed.contains(&kind) {
+            return Err(Bad("claims are made with board_claim".to_owned()));
+        }
+        Ok(kind)
+    }
     fn args<T: serde::de::DeserializeOwned>(arguments: &Value) -> Result<T, Refused> {
         // No arguments at all is as an empty object.
         let arguments = if arguments.is_null() {
@@ -398,8 +574,149 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
                 path: path.filter(|path| !path.trim().is_empty()),
             }
         }
+        "list_chats" => Tool::ListChats,
+        "send_to_chat" => {
+            let SendChat { chat, message } = args(arguments)?;
+            Tool::SendToChat {
+                chat: TerminalId(chat),
+                message: message_text(message)?,
+            }
+        }
+        "read_chat" => {
+            let ReadChat { chat, turns } = args(arguments)?;
+            Tool::ReadChat {
+                chat: TerminalId(chat),
+                turns: turns.unwrap_or(DEFAULT_TURNS).clamp(1, MAX_TURNS),
+            }
+        }
+        "start_chat" => {
+            let StartChat { agent, prompt, cwd } = args(arguments)?;
+            Tool::StartChat {
+                agent: agent.filter(|agent| !agent.trim().is_empty()),
+                prompt: message_text(prompt)?,
+                cwd: cwd.filter(|cwd| !cwd.trim().is_empty()),
+            }
+        }
+        "wait_for_chat" => {
+            let WaitChat { chat, timeout } = args(arguments)?;
+            let timeout = timeout.map_or(DEFAULT_CHAT_WAIT, |seconds| {
+                Duration::try_from_secs_f64(seconds.max(0.0)).unwrap_or(MAX_CHAT_WAIT)
+            });
+            Tool::WaitForChat {
+                chat: TerminalId(chat),
+                timeout: timeout.min(MAX_CHAT_WAIT),
+            }
+        }
+        "board_create" => {
+            let BoardCreate {
+                name,
+                purpose,
+                global,
+            } = args(arguments)?;
+            Tool::BoardCreate {
+                name,
+                purpose: purpose.unwrap_or_default(),
+                global: global.unwrap_or(false),
+            }
+        }
+        "board_list" => {
+            let BoardList { archived } = args(arguments)?;
+            Tool::BoardList {
+                archived: archived.unwrap_or(false),
+            }
+        }
+        "board_archive" => {
+            let BoardArchive { board, archived } = args(arguments)?;
+            Tool::BoardArchive {
+                board,
+                archived: archived.unwrap_or(true),
+            }
+        }
+        "board_post" => {
+            let BoardPost {
+                board,
+                text,
+                kind,
+                links,
+            } = args(arguments)?;
+            let kind = kind_of(
+                kind.as_deref().unwrap_or("note"),
+                &[PostKind::Note, PostKind::Result],
+            )?;
+            let links = (links.unwrap_or_default().into_iter())
+                .map(|link| match link {
+                    LinkArg::File { path, line } => BoardLink::File { path, line },
+                    LinkArg::Turn { chat, turn } => BoardLink::Turn {
+                        chat: TerminalId(chat),
+                        turn,
+                    },
+                })
+                .collect();
+            Tool::BoardPost {
+                board,
+                kind,
+                text,
+                links,
+            }
+        }
+        "board_edit" => {
+            let BoardEdit { board, entry, text } = args(arguments)?;
+            Tool::BoardEdit { board, entry, text }
+        }
+        "board_read" => {
+            let BoardRead {
+                board,
+                since,
+                kind,
+                limit,
+            } = args(arguments)?;
+            let all = [PostKind::Note, PostKind::Claim, PostKind::Result];
+            Tool::BoardRead {
+                board,
+                since: since.unwrap_or(0),
+                kind: kind
+                    .as_deref()
+                    .map(|kind| kind_of(kind, &all))
+                    .transpose()?,
+                limit: limit.unwrap_or(DEFAULT_ENTRIES).clamp(1, MAX_ENTRIES),
+            }
+        }
+        "board_claim" => {
+            let BoardClaim {
+                board,
+                what,
+                note,
+                minutes,
+            } = args(arguments)?;
+            let lasts = minutes.map(|minutes| {
+                Duration::try_from_secs_f64(minutes.max(0.0) * 60.0).unwrap_or(Duration::MAX)
+            });
+            Tool::BoardClaim {
+                board,
+                what,
+                note: note.unwrap_or_default(),
+                lasts,
+            }
+        }
+        "board_release" => {
+            let BoardRelease { board, entry } = args(arguments)?;
+            Tool::BoardRelease { board, entry }
+        }
         _ => return Err(Unknown),
     })
+}
+
+/// `text`, as a message to another chat, if it can be one.
+fn message_text(text: String) -> Result<String, Refused> {
+    if text.trim().is_empty() {
+        return Err(Bad("the message is empty".to_owned()));
+    }
+    if text.len() > MAX_SEND {
+        return Err(Bad(format!(
+            "the message is over {MAX_SEND} bytes: write it to a file and send its path"
+        )));
+    }
+    Ok(text)
 }
 
 /// Every tool, as `tools/list` describes them.
@@ -407,6 +724,12 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
 fn catalogue() -> Value {
     let pane = json!({ "type": "integer", "minimum": 0,
                        "description": "The pane's number, as list_panes and run_in_terminal give it." });
+    let chat = json!({ "type": "integer", "minimum": 0,
+                       "description": "The chat's number, as list_chats and start_chat give it." });
+    let board = json!({ "type": "string",
+                        "description": "The board, by its name, as board_list gives it." });
+    let entry = json!({ "type": "integer", "minimum": 1,
+                        "description": "The entry's number on the board, as board_read gives it." });
     json!([
         {
             "name": "open_file",
@@ -506,6 +829,173 @@ fn catalogue() -> Value {
                 "path": { "type": "string", "description": "Only this file. A relative path is from the chat's working directory." },
             } },
             "annotations": { "readOnlyHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "list_chats",
+            "title": "List chats",
+            "description": "Lists the user's chats with agents, in every workspace: each one's number, \
+                agent, title, working directory, workspace, and whether it's idle, working, or \
+                waiting for the user. This chat is among them.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "send_to_chat",
+            "title": "Message another chat",
+            "description": "Sends another chat's agent a message, as if the user typed it, marked in both \
+                chats as from this one. If that agent is busy answering, the message waits its turn. \
+                Its answer is what wait_for_chat returns. The user is asked first about a chat they \
+                started, the first time this chat messages it.",
+            "inputSchema": { "type": "object", "properties": {
+                "chat": chat,
+                "message": { "type": "string", "description": "The message." },
+            }, "required": ["chat", "message"] },
+            "annotations": { "destructiveHint": false, "openWorldHint": true },
+        },
+        {
+            "name": "read_chat",
+            "title": "Read a chat",
+            "description": "Reads another chat's last turns: each message, who sent it, what the agent \
+                said and the tools it used, and how the turn ended.",
+            "inputSchema": { "type": "object", "properties": {
+                "chat": chat,
+                "turns": { "type": "integer", "minimum": 1, "maximum": MAX_TURNS,
+                           "description": format!("How many turns, from the end. Defaults to {DEFAULT_TURNS}.") },
+            }, "required": ["chat"] },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "start_chat",
+            "title": "Start a chat",
+            "description": "Starts a new chat with an agent in a pane beside this one, and sends it a \
+                first message, marked as from this chat. Returns at once with its number: then \
+                wait_for_chat waits for its answer. Give it everything it needs to know: it sees \
+                nothing of this conversation. The user may be asked first.",
+            "inputSchema": { "type": "object", "properties": {
+                "agent": { "type": "string", "description": "The agent, by name: claude, codex, or one the user added. Defaults to this chat's own." },
+                "prompt": { "type": "string", "description": "The first message." },
+                "cwd": { "type": "string", "description": "The directory it works in, such as a git worktree. Defaults to this chat's." },
+            }, "required": ["prompt"] },
+            "annotations": { "destructiveHint": false, "openWorldHint": true },
+        },
+        {
+            "name": "wait_for_chat",
+            "title": "Wait for a chat's answer",
+            "description": "Waits until another chat's agent has finished answering, every message \
+                waiting its turn included, or the timeout passes, then returns its last answer: to \
+                this chat's last message, if it sent one. Timed out, it says how far the chat has \
+                got: call it again to wait on. If your client gives up on tools sooner, give a \
+                shorter timeout.",
+            "inputSchema": { "type": "object", "properties": {
+                "chat": chat,
+                "timeout": { "type": "number", "minimum": 0, "maximum": MAX_CHAT_WAIT.as_secs(),
+                             "description": format!("The most seconds to wait. Defaults to {}.", DEFAULT_CHAT_WAIT.as_secs()) },
+            }, "required": ["chat"] },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "board_list",
+            "title": "List boards",
+            "description": "Lists the boards this chat shares with the user and other agents: \
+                scratchpads of notes, claims on work and results, kept from one session, and \
+                one restart, to the next. Each is this workspace's or every workspace's. Look \
+                here before starting work others may be doing.",
+            "inputSchema": { "type": "object", "properties": {
+                "archived": { "type": "boolean", "description": "List archived boards too. Defaults to false." },
+            } },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "board_create",
+            "title": "Make a board",
+            "description": "Makes a board, for agents and the user to coordinate a piece of work on: \
+                who does what, and what came of it. It belongs to this workspace unless global.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "Its name, short, unique among the workspace's boards." },
+                "purpose": { "type": "string", "description": "What it's for, in a sentence." },
+                "global": { "type": "boolean", "description": "Every workspace sees it. Defaults to false." },
+            }, "required": ["name"] },
+            "annotations": { "destructiveHint": false, "openWorldHint": false },
+        },
+        {
+            "name": "board_post",
+            "title": "Post on a board",
+            "description": "Posts an entry on a board: a note others should know, or a result of a \
+                piece of work. Point it at files and lines, or chats' turns, with links.",
+            "inputSchema": { "type": "object", "properties": {
+                "board": board,
+                "text": { "type": "string", "description": "What it says." },
+                "kind": { "type": "string", "enum": ["note", "result"], "description": "Defaults to note." },
+                "links": { "type": "array", "description": "What it points to.", "items": {
+                    "type": "object", "properties": {
+                        "path": { "type": "string", "description": "A file. A relative path is from this chat's working directory." },
+                        "line": { "type": "integer", "minimum": 1, "description": "A line in the file, from 1." },
+                        "chat": { "type": "integer", "description": "A chat, with turn." },
+                        "turn": { "type": "integer", "minimum": 1, "description": "The chat's turn, from 1." },
+                    } } },
+            }, "required": ["board", "text"] },
+            "annotations": { "destructiveHint": false, "openWorldHint": false },
+        },
+        {
+            "name": "board_edit",
+            "title": "Edit a board's entry",
+            "description": "Changes what an entry this chat posted says. What it said before is kept.",
+            "inputSchema": { "type": "object", "properties": {
+                "board": board,
+                "entry": entry,
+                "text": { "type": "string", "description": "What it says now." },
+            }, "required": ["board", "entry", "text"] },
+            "annotations": { "destructiveHint": false, "openWorldHint": false },
+        },
+        {
+            "name": "board_read",
+            "title": "Read a board",
+            "description": "Reads a board's entries: who wrote each, when, what it says, and for a \
+                claim, whether it's held. Gives a cursor: read again since it for only what's new \
+                or changed.",
+            "inputSchema": { "type": "object", "properties": {
+                "board": board,
+                "since": { "type": "integer", "minimum": 0, "description": "A cursor an earlier read gave: only what's changed since. Defaults to 0, everything." },
+                "kind": { "type": "string", "enum": ["note", "claim", "result"], "description": "Only entries of this kind." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": MAX_ENTRIES,
+                           "description": format!("The most entries. Defaults to {DEFAULT_ENTRIES}.") },
+            }, "required": ["board"] },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "board_claim",
+            "title": "Claim work on a board",
+            "description": "Claims a piece of work, so other agents leave it to this chat: refused \
+                if someone else holds a claim on it. A claim lasts until released, or it expires \
+                (2 hours unless given another time, 24 at most). Claiming again renews it.",
+            "inputSchema": { "type": "object", "properties": {
+                "board": board,
+                "what": { "type": "string", "description": "The work, as others would name it: a file, a module, a task." },
+                "note": { "type": "string", "description": "What this chat is doing with it." },
+                "minutes": { "type": "number", "minimum": 0, "description": "How long it lasts. Defaults to 120." },
+            }, "required": ["board", "what"] },
+            "annotations": { "destructiveHint": false, "openWorldHint": false },
+        },
+        {
+            "name": "board_release",
+            "title": "Release a claim",
+            "description": "Releases a claim this chat holds, once its work is done or given up.",
+            "inputSchema": { "type": "object", "properties": {
+                "board": board,
+                "entry": entry,
+            }, "required": ["board", "entry"] },
+            "annotations": { "destructiveHint": false, "openWorldHint": false },
+        },
+        {
+            "name": "board_archive",
+            "title": "Archive a board",
+            "description": "Archives a board whose work is done: it can still be read, but not \
+                written on. With archived false, unarchives it.",
+            "inputSchema": { "type": "object", "properties": {
+                "board": board,
+                "archived": { "type": "boolean", "description": "Defaults to true." },
+            }, "required": ["board"] },
+            "annotations": { "destructiveHint": false, "openWorldHint": false },
         },
     ])
 }
@@ -698,7 +1188,7 @@ mod tests {
     #[test]
     fn an_agent_that_stops_reading_loses_its_connection() {
         let (ours, _theirs) = UnixStream::pair().unwrap();
-        let mut connection = Connection::new(ours, TerminalId(1), Vec::new());
+        let mut connection = Connection::new(ours, TerminalId(1), Vec::new(), String::new());
         let long = "x".repeat(1024 * 1024);
         for id in 0..8 {
             connection.answer(&json!(id), Ok(long.clone()));

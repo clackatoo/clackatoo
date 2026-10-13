@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod board;
 mod buffer;
 mod chat;
 mod files;
@@ -54,14 +55,18 @@ pub use clackatoo_term::{
 };
 use serde::{Deserialize, Serialize};
 
+pub use board::{
+    BoardAction, BoardAuthor, BoardEntry, BoardId, BoardLink, BoardScope, BoardSummary,
+    BoardUpdate, OpenBoard, PostKind,
+};
 pub use buffer::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, CodeAction, CompletionItem,
     FileLocation, OpenFile, Query, ServerFeatures, TextChange, Trigger,
 };
 pub use chat::{
     ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome,
-    Question, Setting, SettingChoice, SettingKind, Tool, ToolContent, ToolKind, ToolStatus, Turn,
-    TurnEnd, TurnFiles, TurnFilesState, Usage,
+    Question, Sender, Setting, SettingChoice, SettingKind, Tool, ToolContent, ToolKind, ToolStatus,
+    Turn, TurnEnd, TurnFiles, TurnFilesState, Usage,
 };
 pub use clackatoo_text::{
     Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
@@ -82,7 +87,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 56;
+pub const PROTOCOL_VERSION: u32 = 57;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -232,6 +237,15 @@ pub enum ClientMessage {
         /// What to do.
         op: FileOp,
     },
+    /// Does something to a board the client attached to, as the user:
+    /// posts on it, or archives it. Not answered: what comes of it comes
+    /// in [`Event::Board`]s.
+    Board {
+        /// The board.
+        board: BoardId,
+        /// What to do.
+        action: BoardAction,
+    },
 }
 
 /// Everything the daemon sends.
@@ -342,6 +356,13 @@ pub enum Event {
         pane: PaneId,
         /// Where in the pane's file to put its cursor.
         at: Option<FileLocation>,
+    },
+    /// A board the client attached to changed, or has something to say.
+    Board {
+        /// The board.
+        board: BoardId,
+        /// What.
+        update: BoardUpdate,
     },
 }
 
@@ -618,6 +639,17 @@ pub enum Request {
         /// The explorer.
         files: FilesId,
     },
+    /// Starts sending a board: the board whole, then each change to it
+    /// (see [`BoardUpdate`]). Attaching twice sends it whole again.
+    AttachBoard {
+        /// The board.
+        board: BoardId,
+    },
+    /// Stops sending a board.
+    DetachBoard {
+        /// The board.
+        board: BoardId,
+    },
     /// Puts a new pane along one edge of a tab, as long as the tab, as a
     /// file explorer goes down its left. Answered with
     /// [`Response::PaneCreated`].
@@ -852,6 +884,13 @@ pub enum Error {
     /// the connection isn't to the Unix socket.
     #[error("can't serve an agent's tools: {0}")]
     NoTools(String),
+    /// No board has this ID.
+    #[error("no board {0}")]
+    NoSuchBoard(BoardId),
+    /// The boards can't be used, as this says: they're still being read,
+    /// or another daemon keeps them, or they're turned off.
+    #[error("{0}")]
+    Boards(String),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while
