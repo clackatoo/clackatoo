@@ -2655,9 +2655,12 @@ impl App {
             SessionEvent::Updated(updated) if updated.asked == updates::Asked::ForDaemon => {
                 self.updates.running = false;
                 let why = for_daemon_failure(&updated, self.session.host());
+                if let (true, Err(after)) = (updated.installed, &updated.said) {
+                    log::warn!("clackatoo is updated, but: {after}");
+                }
                 // Installed: this window opens again as the new build, in
                 // this process, connecting where it did, even if moving this
-                // machine's daemon onto it failed, which that window says.
+                // machine's daemon onto it failed, as it may have; it's logged.
                 let why = why.unwrap_or_else(|| self.reopen_as_new_build());
                 self.notice = Some(Notice::Updating { failed: Some(why) });
                 self.request_redraw();

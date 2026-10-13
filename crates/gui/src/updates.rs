@@ -91,7 +91,7 @@ pub(crate) fn update(program: PathBuf, asked: Asked, proxy: EventLoopProxy<Sessi
                         &stdout,
                         &String::from_utf8_lossy(&output.stderr),
                     );
-                    (said, installed(&stdout))
+                    (said, installed(&stdout, clackatoo_update::CURRENT))
                 }
                 Err(err) => (
                     Err(format!("couldn't run {}: {err}", program.display())),
@@ -110,15 +110,24 @@ pub(crate) fn update(program: PathBuf, asked: Asked, proxy: EventLoopProxy<Sessi
     }
 }
 
-/// What the bar says came of `clackatoo update`, from what it printed.
-/// Whether what `clackatoo update` printed, `stdout`, says it put a new
-/// build in place.
-fn installed(stdout: &str) -> bool {
-    stdout
-        .lines()
-        .any(|line| line.starts_with("installed clackatoo "))
+/// Whether what `clackatoo update` printed, `stdout`, says a build other
+/// than this window's, `ours`, is in place of it: one it put there now, or
+/// one already there, as when this window's program was updated after it
+/// opened, by another window or `:update`, and said so as up to date.
+fn installed(stdout: &str, ours: &str) -> bool {
+    stdout.lines().any(|line| {
+        let up_to_date = (line.strip_prefix("clackatoo "))
+            .and_then(|rest| rest.strip_suffix(" is up to date"))
+            .or_else(|| {
+                line.strip_prefix("this is clackatoo ")?
+                    .strip_suffix(" already")
+            });
+        line.starts_with("installed clackatoo ")
+            || up_to_date.is_some_and(|version| version != ours)
+    })
 }
 
+/// What the bar says came of `clackatoo update`, from what it printed.
 fn outcome(succeeded: bool, stdout: &str, stderr: &str) -> Result<String, String> {
     let last = |text: &str| {
         text.lines()
@@ -260,6 +269,29 @@ pub(crate) fn skew_notice(ours: &str, theirs: &str, host: Option<&str>) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_build_is_in_place_if_one_was_put_there_or_was_already_newer_than_this_window() {
+        assert!(installed(
+            "downloading clackatoo 2026.10.5…\ninstalled clackatoo 2026.10.5 at /x\n",
+            "2026.10.4"
+        ));
+        // This window's program was updated after it opened.
+        assert!(installed(
+            "clackatoo 2026.10.5 is up to date\n",
+            "2026.10.4"
+        ));
+        assert!(installed(
+            "this is clackatoo 2026.10.5 already\n",
+            "2026.10.4"
+        ));
+        // Nothing newer than this window's own build.
+        assert!(!installed(
+            "clackatoo 2026.10.4 is up to date\n",
+            "2026.10.4"
+        ));
+        assert!(!installed("", "2026.10.4"));
+    }
 
     #[test]
     fn the_older_side_is_offered_an_update() {
