@@ -94,11 +94,15 @@ enum Asked {
     /// A new pane showing a file, to switch to once made, with its cursor
     /// put at this place once the file's text has come.
     PaneAt(Option<FileLocation>),
+    /// A new file explorer, to switch to once made, showing the file at
+    /// this path once it can.
+    Explorer(Option<String>),
 }
 
 mod bindings;
 mod clipboard;
 mod editors;
+mod explorers;
 mod finding;
 mod formatting;
 mod jumps;
@@ -192,6 +196,8 @@ pub(crate) struct Desk {
     script: script::Script,
     /// Panes editing files.
     editors: editors::Editors,
+    /// Panes showing file explorers.
+    explorers: explorers::Explorers,
     /// The macros being typed, and what's noted of keys pressed for the
     /// one being recorded.
     macros: macros::Macros,
@@ -270,6 +276,9 @@ impl Desk {
                 (editor.mode == Mode::Insert).then_some(TextTarget::Pane)
             };
         }
+        if let Some(explorer) = self.focused_explorer() {
+            return explorer.prompting().then_some(TextTarget::Bar);
+        }
         let pane = self.pane(self.focused_terminal()?)?;
         if pane.prompting() {
             Some(TextTarget::Bar)
@@ -341,6 +350,9 @@ impl Desk {
     pub(crate) fn title(&self) -> Option<&str> {
         if let Some(title) = self.shown.and_then(|shown| self.editor_title(shown.pane)) {
             return Some(title);
+        }
+        if let Some(explorer) = self.focused_explorer() {
+            return Some(explorer.title());
         }
         let terminal = self.focused_terminal()?;
         let title = self.panes.get(&terminal)?.title()?;
@@ -439,6 +451,28 @@ impl Desk {
                 panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
             };
         }
+        if let Some(explorer) = self.focused_explorer() {
+            let label = explorer.label();
+            if explorer.prompting() {
+                return Status::Typing {
+                    label: None,
+                    text: label,
+                    choices: Vec::new(),
+                };
+            }
+            let note = (self.keymap.hint())
+                .or_else(|| self.message.clone())
+                .unwrap_or(label);
+            let note = match self.recording() {
+                Some(register) => format!("recording @{register}  {note}"),
+                None => note,
+            };
+            return Status::Tabs {
+                mode: Some(ModeName::Normal),
+                note: Some(note),
+                panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
+            };
+        }
         let pane = self
             .focused_terminal()
             .and_then(|terminal| self.panes.get(&terminal));
@@ -488,6 +522,7 @@ impl Desk {
             .and_then(|(_, _, pane)| match pane.content {
                 Content::Terminal(terminal) => self.panes.get(&terminal)?.title(),
                 Content::Buffer(_) => self.editor_title(pane.id),
+                Content::Files(_) => self.explorer(pane.id).map(crate::explorer::Explorer::title),
             })
             .map(str::trim)
             .filter(|title| !title.is_empty())
@@ -645,7 +680,9 @@ impl Desk {
         let left_editor = self
             .shown
             .and_then(|left| self.editor_in_normal_mode(left.pane));
+        let left_explorer = self.shown.is_some_and(|left| self.is_explorer(left.pane));
         let normal = left_editor.unwrap_or(false)
+            || left_explorer
             || self.focused_pane().is_some_and(|left| {
                 if !unfocused {
                     left.focus_changed(false);
@@ -657,6 +694,7 @@ impl Desk {
             self.close_editor_panel(left.pane);
         }
         self.shown = Some(shown);
+        self.note_focus(pane);
         // Before the mode: a pane of another workspace may not exist yet.
         self.attach_shown();
         if normal {
@@ -698,6 +736,7 @@ impl Desk {
             });
         }
         self.attach_shown_buffers();
+        self.attach_shown_explorers();
         if !self.connected {
             return;
         }
@@ -732,6 +771,12 @@ impl Desk {
                 Content::Buffer(_) => {
                     if let Ok(size) = Size::new(tile.cols, tile.rows) {
                         self.fit_editor(id, size);
+                    }
+                    continue;
+                }
+                Content::Files(_) => {
+                    if let Ok(size) = Size::new(tile.cols, tile.rows) {
+                        self.fit_explorer(id, size);
                     }
                     continue;
                 }
@@ -781,6 +826,7 @@ impl Desk {
     fn forget_asked(&mut self) {
         self.attached.clear();
         self.editors_reconnected();
+        self.explorers_reconnected();
         self.asked.clear();
         self.macros.requests_forgotten();
         self.outbox.clear();
@@ -911,6 +957,14 @@ impl Desk {
                 }
                 true
             }
+            Some(Asker::Window(Asked::Explorer(reveal))) => {
+                match response {
+                    Response::PaneCreated(pane) => self.explorer_made(pane, reveal),
+                    Response::Error(err) => self.message = Some(err.to_string()),
+                    _ => {}
+                }
+                true
+            }
             Some(Asker::Window(Asked::OpenedHere(pane))) => {
                 let failed = match response {
                     Response::Error(err) => Some(err.to_string()),
@@ -983,6 +1037,7 @@ impl Desk {
             }
         }
         messages.extend(self.take_buffer_outbox());
+        messages.extend(self.take_explorer_outbox());
         messages
     }
 
@@ -1108,6 +1163,12 @@ impl Desk {
         if self.focused_editor().is_some() {
             return self.editor_key(press) || had_message;
         }
+        if self.focused_explorer().is_some() {
+            if self.stop_recording_in_explorer(press) {
+                return true;
+            }
+            return self.explorer_key(press) || had_message;
+        }
         if self.stop_recording_in_terminal(press) {
             return true;
         }
@@ -1146,6 +1207,9 @@ impl Desk {
         if let Some((pane, _)) = self.editor_at(point) {
             return self.editor_wheel(pane, lines);
         }
+        if let Some((pane, _)) = self.explorer_at(point) {
+            return self.explorer_wheel(pane, lines);
+        }
         // Away from the panes, as over the bars, the focused pane scrolls.
         let Some((terminal, cell, _)) = self
             .cell_at(point, None)
@@ -1178,6 +1242,15 @@ impl Desk {
             outcome.redraw |= self.mouse_left();
             if let MouseAction::Press(MouseButton::Left) = action {
                 outcome.redraw = self.focus_at(point) | self.editor_click(pane, cell);
+            }
+            return outcome;
+        }
+        if self.dragging.is_none()
+            && let Some((pane, cell)) = self.explorer_at(point)
+        {
+            outcome.redraw |= self.mouse_left();
+            if let MouseAction::Press(MouseButton::Left) = action {
+                outcome.redraw = self.focus_at(point) | self.explorer_click(pane, cell, clicks);
             }
             return outcome;
         }
@@ -1450,10 +1523,28 @@ impl Desk {
 
     /// The editor at `point`, and the cell of its view under it.
     fn editor_at(&self, point: [f32; 2]) -> Option<(PaneId, [i64; 2])> {
+        self.cell_in(point, |desk, pane| desk.editor(pane).is_some())
+    }
+
+    /// The explorer at `point`, if there's one there, and the cell of it
+    /// there, as [`editor_at`](Self::editor_at) finds an editor's.
+    fn explorer_at(&self, point: [f32; 2]) -> Option<(PaneId, [i64; 2])> {
+        self.cell_in(point, |desk, pane| desk.explorer(pane).is_some())
+    }
+
+    /// The pane at `point`, if `wanted` takes it, and the cell of it there,
+    /// as its line and column.
+    fn cell_in(
+        &self,
+        point: [f32; 2],
+        wanted: impl Fn(&Self, PaneId) -> bool,
+    ) -> Option<(PaneId, [i64; 2])> {
         let area = self.area.as_ref()?;
         let placement = self.placement()?;
         let id = placement.pane_at(point)?;
-        self.editor(id)?;
+        if !wanted(self, id) {
+            return None;
+        }
         let tile = placement.panes.iter().find(|(pane, _)| *pane == id)?.1;
         #[allow(clippy::cast_possible_truncation)]
         let cell = |offset: f32, size: f32| (offset / size).floor() as i64;
@@ -1637,6 +1728,7 @@ impl Desk {
             Command::Registers => self.show_registers(),
             Command::Marks => self.open_finder(crate::finder::Kind::Marks, String::new()),
             Command::Editor(line) => self.editor_command(&line),
+            Command::Explore(dir) => self.open_explorer(dir),
             Command::Reload | Command::Set(_) => {}
         }
     }
@@ -1783,6 +1875,8 @@ mod tests {
                 | ClientMessage::StopFinding { .. }
                 | ClientMessage::Stage { .. }
                 | ClientMessage::Clipboard { .. }
+                | ClientMessage::Files { .. }
+                | ClientMessage::FileOp { .. }
                 | ClientMessage::Hello { .. }
                 | ClientMessage::Upgrade { .. } => None,
             })
@@ -5836,5 +5930,280 @@ mod tests {
         ctrl(&mut desk, "o");
         let (editor, copy) = desk.focused_editor().expect("an editor");
         assert_eq!(editor.cursor_byte(copy), 0);
+    }
+
+    // --- File explorers ------------------------------------------------------
+
+    fn files_pane(pane: u32, files: u32) -> Layout {
+        Layout::Pane(LayoutPane {
+            id: PaneId(pane),
+            content: Content::Files(clackatoo_protocol::FilesId(files)),
+        })
+    }
+
+    fn entry(name: &str, dir: bool) -> clackatoo_protocol::Entry {
+        clackatoo_protocol::Entry {
+            name: name.into(),
+            kind: if dir {
+                clackatoo_protocol::EntryKind::Dir
+            } else {
+                clackatoo_protocol::EntryKind::File { executable: false }
+            },
+            ignored: false,
+        }
+    }
+
+    /// Gives explorer 1 the root `/p`, holding `src/` and `a.txt`, with
+    /// `src` holding `main.rs` if it's asked for, and answers what's
+    /// asked.
+    fn explore_p(desk: &mut Desk) {
+        use clackatoo_protocol::{FilesId, FilesUpdate};
+        desk.files_changed(
+            FilesId(1),
+            FilesUpdate::Root {
+                path: "/p".into(),
+                name: "~/p".into(),
+            },
+        );
+        let listed = |dir: &str, entries| FilesUpdate::Listed {
+            dir: dir.into(),
+            entries,
+            cut_short: false,
+        };
+        desk.files_changed(
+            FilesId(1),
+            listed("/p", vec![entry("src", true), entry("a.txt", false)]),
+        );
+        let src_asked = (desk.take_outbox().iter()).any(|message| {
+            matches!(message, ClientMessage::Files { action: clackatoo_protocol::FilesAction::Expand(dir), .. } if dir == "/p/src")
+        });
+        if src_asked {
+            desk.files_changed(FilesId(1), listed("/p/src", vec![entry("main.rs", false)]));
+        }
+    }
+
+    /// The file operations asked for, by their numbers.
+    fn file_ops(desk: &mut Desk) -> Vec<(u64, clackatoo_protocol::FileOp)> {
+        (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::FileOp { id, op } => Some((id, op)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn space_e_opens_an_explorer_down_the_tabs_left_at_the_editors_file_then_closes_it() {
+        use clackatoo_protocol::{FilesId, OpenFiles};
+        let mut desk = editing("/p/src/main.rs", "fn main() {}\n");
+        type_keys(&mut desk, " e");
+        let asked: Vec<Request> = (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(request) => Some(request),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            asked,
+            [Request::SplitTab {
+                tab: TabId(1),
+                side: Side::Left,
+                terminal: PaneTerminal::Files(OpenFiles { dir: None }),
+                share: Some(375),
+            }],
+            "30 of the tab's 80 columns"
+        );
+        // The daemon makes it, telling of the pane first.
+        let layout = side_by_side(vec![files_pane(2, 1), file_pane(1, 7)]);
+        desk.workspaces_changed(one_tab(layout));
+        desk.answered(Response::PaneCreated(PaneId(2)));
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        assert!(
+            answer_all(&mut desk).contains(&Request::AttachFiles { files: FilesId(1) }),
+            "attached"
+        );
+        explore_p(&mut desk);
+        assert_eq!(note(&desk), "~/p  src/main.rs", "at the editor's file");
+        assert_eq!(desk.title(), Some("~/p"));
+        type_keys(&mut desk, " e");
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::ClosePane { pane: PaneId(2) }]
+        );
+    }
+
+    #[test]
+    fn a_file_picked_opens_in_the_editor_last_focused_or_a_split_or_a_tab() {
+        use clackatoo_protocol::OpenFile;
+        let layout = side_by_side(vec![files_pane(2, 1), file_pane(1, 7), pane(3)]);
+        let mut desk = desk(one_tab(layout));
+        load(&mut desk, 7, "/p/b.txt", "b\n");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        ctrl(&mut desk, "l");
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        ctrl(&mut desk, "h");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        answer_all(&mut desk);
+        explore_p(&mut desk);
+        type_keys(&mut desk, "j");
+        enter(&mut desk);
+        let file = |path: &str| OpenFile {
+            path: path.into(),
+            cwd: None,
+        };
+        let mut asked = answer_all(&mut desk);
+        asked.retain(|request| !matches!(request, Request::Resize { .. }));
+        assert_eq!(
+            asked,
+            [
+                Request::Focus { pane: PaneId(1) },
+                Request::OpenHere {
+                    pane: PaneId(1),
+                    file: file("/p/a.txt"),
+                }
+            ]
+        );
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        ctrl(&mut desk, "h");
+        answer_all(&mut desk);
+        ctrl(&mut desk, "v");
+        ctrl(&mut desk, "t");
+        assert_eq!(
+            answer_all(&mut desk),
+            [
+                Request::Split {
+                    pane: PaneId(1),
+                    side: Side::Right,
+                    terminal: PaneTerminal::File(file("/p/a.txt")),
+                },
+                Request::NewTab {
+                    workspace: WorkspaceId(1),
+                    terminal: PaneTerminal::File(file("/p/a.txt")),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn with_no_editor_a_file_picked_opens_beside_the_explorer() {
+        use clackatoo_protocol::OpenFile;
+        let file = PaneTerminal::File(OpenFile {
+            path: "/p/a.txt".into(),
+            cwd: None,
+        });
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        type_keys(&mut desk, "j");
+        enter(&mut desk);
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::Split {
+                pane: PaneId(3),
+                side: Side::Left,
+                terminal: file.clone(),
+            }],
+            "between the explorer and the terminal"
+        );
+        // Alone, the explorer keeps its width.
+        let mut desk = super::tests::desk(one_tab(files_pane(2, 1)));
+        explore_p(&mut desk);
+        type_keys(&mut desk, "j");
+        enter(&mut desk);
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::SplitTab {
+                tab: TabId(1),
+                side: Side::Right,
+                terminal: file,
+                share: Some(625),
+            }]
+        );
+    }
+
+    #[test]
+    fn file_operations_are_asked_in_the_bar_and_what_comes_of_them_said() {
+        use clackatoo_protocol::{FileOp, FileOpError};
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        type_keys(&mut desk, "jd");
+        assert_eq!(desk.text_goes_to(), Some(TextTarget::Bar));
+        assert!(matches!(
+            desk.status(),
+            Status::Typing { text, .. } if text == "delete ~/p/a.txt, to the trash? (y/n)"
+        ));
+        type_keys(&mut desk, "y");
+        let trashed = FileOp::Delete {
+            path: "/p/a.txt".into(),
+            trash: true,
+        };
+        assert_eq!(file_ops(&mut desk), [(0, trashed)]);
+        desk.file_op_done(0, Err(FileOpError::NoTrash("no trash there".into())));
+        assert!(matches!(
+            desk.status(),
+            Status::Typing { text, .. } if text == "no trash there: delete ~/p/a.txt for good? (y/n)"
+        ));
+        type_keys(&mut desk, "y");
+        let deleted = FileOp::Delete {
+            path: "/p/a.txt".into(),
+            trash: false,
+        };
+        assert_eq!(file_ops(&mut desk), [(1, deleted)]);
+        desk.file_op_done(1, Ok(()));
+        assert_eq!(note(&desk), "deleted ~/p/a.txt for good");
+        // Cut here, put there: a move, which places in files follow.
+        type_keys(&mut desk, "xkp");
+        let moved = FileOp::Move {
+            from: "/p/a.txt".into(),
+            to: "/p/src/a.txt".into(),
+            overwrite: None,
+        };
+        assert_eq!(file_ops(&mut desk), [(2, moved)]);
+        desk.file_op_done(2, Ok(()));
+        assert_eq!(note(&desk), "moved to ~/p/src/a.txt");
+        type_keys(&mut desk, "p");
+        assert_eq!(note(&desk), "nothing's cut or copied: x or y does");
+    }
+
+    #[test]
+    fn colon_explore_opens_an_explorer_at_a_directory_or_goes_to_the_one_there() {
+        use clackatoo_protocol::OpenFiles;
+        let mut desk = desk(one_tab(pane(3)));
+        normal_mode(&mut desk);
+        command(&mut desk, "Explore ~/src");
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::SplitTab {
+                tab: TabId(1),
+                side: Side::Left,
+                terminal: PaneTerminal::Files(OpenFiles {
+                    dir: Some("~/src".into())
+                }),
+                share: Some(375),
+            }]
+        );
+        let mut desk = super::tests::desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        normal_mode(&mut desk);
+        ctrl(&mut desk, "l");
+        assert_eq!(shown_pane(&desk), PaneId(3));
+        command(&mut desk, "Ex");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        // Keys in it are its own: q closes it.
+        type_keys(&mut desk, "q");
+        assert!(answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));
+    }
+
+    #[test]
+    fn q_in_an_explorer_stops_recording_rather_than_closing_it() {
+        let layout = side_by_side(vec![files_pane(2, 1), file_pane(1, 7)]);
+        let mut desk = super::tests::desk(one_tab(layout));
+        load(&mut desk, 7, "/p/b.txt", "b\n");
+        ctrl(&mut desk, "l");
+        type_keys(&mut desk, "qa");
+        assert_eq!(desk.recording(), Some('a'));
+        ctrl(&mut desk, "h");
+        answer_all(&mut desk);
+        type_keys(&mut desk, "q");
+        assert_eq!(desk.recording(), None);
+        assert!(!answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));
     }
 }

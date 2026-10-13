@@ -23,6 +23,7 @@
 //! 8. Buffers: files being edited, with their history, and panes showing
 //!    them.
 //! 9. Each terminal's links ([`clackatoo_term::LinksSnapshot`]).
+//! 10. File explorers, and panes showing them.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -35,10 +36,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 9;
+pub(crate) const VERSION: u32 = 10;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -77,7 +78,7 @@ impl Fds {
     }
 }
 
-/// The daemon's state, version 9.
+/// The daemon's state, version 10.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The listening socket.
@@ -98,6 +99,10 @@ pub(crate) struct State {
     pub(crate) next_buffer: u32,
     /// Files being edited.
     pub(crate) buffers: Vec<Buffer>,
+    /// The ID the next file explorer gets.
+    pub(crate) next_files: u32,
+    /// File explorers.
+    pub(crate) explorers: Vec<Files>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -291,6 +296,17 @@ pub(crate) enum Layout {
     },
     /// A pane showing a buffer. Since version 8.
     Buffer { id: u32, buffer: u32 },
+    /// A pane showing a file explorer. Since version 10.
+    Files { id: u32, files: u32 },
+}
+
+/// A file explorer: the directory at its root. What's expanded in it is
+/// each window's own, and isn't handed over.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Files {
+    pub(crate) id: u32,
+    /// The directory, as bytes.
+    pub(crate) root: Vec<u8>,
 }
 
 /// A file being edited: its text, its history, and the file as it was
@@ -397,6 +413,7 @@ impl State {
             6 => Ok(v7::State::from(postcard::from_bytes::<v6::State>(body)?).into()),
             7 => Ok(postcard::from_bytes::<v7::State>(body)?.into()),
             8 => Ok(postcard::from_bytes::<v8::State>(body)?.into()),
+            9 => Ok(postcard::from_bytes::<v9::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -905,6 +922,8 @@ mod v7 {
                 workspaces: state.workspaces,
                 next_buffer: 1,
                 buffers: Vec::new(),
+                next_files: 1,
+                explorers: Vec::new(),
             }
         }
     }
@@ -971,6 +990,46 @@ mod v8 {
                 workspaces: state.workspaces,
                 next_buffer: state.next_buffer,
                 buffers: state.buffers,
+                next_files: 1,
+                explorers: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Version 9, as the builds that wrote it wrote it: no file explorers.
+mod v9 {
+    use serde::Deserialize;
+
+    use super::{Buffer, Chat, Process, Terminal, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: 1,
+                explorers: Vec::new(),
             }
         }
     }
@@ -1049,8 +1108,9 @@ mod tests {
                                 Layout::Pane { id: 1, terminal: 1 },
                                 Layout::Pane { id: 2, terminal: 2 },
                                 Layout::Buffer { id: 3, buffer: 1 },
+                                Layout::Files { id: 4, files: 1 },
                             ],
-                            shares: vec![2, 1, 1],
+                            shares: vec![2, 1, 1, 1],
                         },
                         focused: 2,
                         name: None,
@@ -1060,10 +1120,15 @@ mod tests {
                 active: Some(1),
                 next_workspace: 2,
                 next_tab: 2,
-                next_pane: 4,
+                next_pane: 5,
             },
             next_buffer: 2,
             buffers: vec![buffer()],
+            next_files: 2,
+            explorers: vec![Files {
+                id: 1,
+                root: b"/src".to_vec(),
+            }],
         }
     }
 
@@ -1311,6 +1376,7 @@ mod tests {
             .unwrap();
         let state = State::read(&mut file).unwrap();
         assert_eq!((state.next_terminal, state.orphans[0].pid), (10, 95));
+        assert_eq!((state.next_files, state.explorers.len()), (1, 0));
         let terminal = &state.terminals[0];
         let emulator = clackatoo_term::Terminal::restore_with_links(
             &terminal.screen,
@@ -1328,6 +1394,24 @@ mod tests {
         let three = emulator.grid().row(1);
         assert_eq!(uri(three).as_deref(), Some("file:///v9/three"));
         assert_eq!(uri(emulator.grid().row(2)), None);
+    }
+
+    /// Written by a build that wrote version 10. It must always be read.
+    #[test]
+    fn version_10_is_read_with_its_explorers() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v10.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!((state.next_terminal, state.orphans[0].pid), (11, 96));
+        assert_eq!(state.next_files, 2);
+        let explorer = &state.explorers[0];
+        assert_eq!((explorer.id, explorer.root.as_slice()), (1, &b"/v10"[..]));
+        let Layout::Split { parts, .. } = &state.workspaces.list[0].tabs[0].layout else {
+            panic!("not split");
+        };
+        assert!(matches!(parts[3], Layout::Files { id: 4, files: 1 }));
+        assert_eq!(state.buffers[0].text, "new");
     }
 
     #[test]

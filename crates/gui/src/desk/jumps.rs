@@ -136,6 +136,15 @@ impl Jumps {
         }
     }
 
+    /// The file or directory at `from` has moved to `to`: places in it,
+    /// or anything in it, go with it.
+    pub(super) fn moved(&mut self, from: &str, to: &str) {
+        let places = (self.list.iter_mut()).filter_map(|jump| jump.file.as_mut());
+        for place in places {
+            place.moved(from, to);
+        }
+    }
+
     fn places_in<'a>(&'a mut self, path: &'a str) -> impl Iterator<Item = &'a mut FilePlace> {
         (self.list.iter_mut())
             .filter_map(|jump| jump.file.as_mut())

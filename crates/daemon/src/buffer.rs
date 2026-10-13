@@ -46,7 +46,8 @@ pub(crate) struct DiskStamp {
 }
 
 impl DiskStamp {
-    fn of(metadata: &fs::Metadata) -> Self {
+    /// The file `metadata` is of, as it is.
+    pub(crate) fn of(metadata: &fs::Metadata) -> Self {
         Self {
             seconds: metadata.mtime(),
             nanoseconds: metadata.mtime_nsec(),
@@ -54,6 +55,21 @@ impl DiskStamp {
             inode: metadata.ino(),
             device: metadata.dev(),
         }
+    }
+
+    /// Whether `metadata` is of the file this is of, as it is now or not:
+    /// the same inode on the same device.
+    pub(crate) fn is_file(&self, metadata: &fs::Metadata) -> bool {
+        (self.inode, self.device) == (metadata.ino(), metadata.dev())
+    }
+
+    /// When the file was last written.
+    pub(crate) fn written(&self) -> std::time::SystemTime {
+        let since = std::time::Duration::new(
+            u64::try_from(self.seconds).unwrap_or(0),
+            u32::try_from(self.nanoseconds).unwrap_or(0),
+        );
+        std::time::UNIX_EPOCH + since
     }
 
     /// The file at `path` as it is now, if it exists.
@@ -64,6 +80,16 @@ impl DiskStamp {
             Err(err) => Err(err),
         }
     }
+}
+
+/// What a buffer whose file has moved knows of it on disk now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Restamp {
+    /// What it knew: the file was renamed, and is the same file.
+    Keep,
+    /// This: the file was copied from another file system, unchanged since
+    /// the buffer read it, and is a new file, or none if it's gone.
+    To(Option<DiskStamp>),
 }
 
 /// An edit made to a buffer.
@@ -108,6 +134,22 @@ impl Buffer {
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Its file has moved to `path`, as a file explorer moving it does.
+    /// Renamed, it's the same file, so what's known of it on disk still
+    /// holds; copied from another file system, it's a new one, which
+    /// `disk` says of, if it was the file last read or written.
+    pub(crate) fn moved_to(&mut self, path: PathBuf, disk: Restamp) {
+        self.path = path;
+        if let Restamp::To(disk) = disk {
+            self.disk = disk;
+        }
+    }
+
+    /// The file as last read or written, if it existed.
+    pub(crate) fn disk(&self) -> Option<DiskStamp> {
+        self.disk
     }
 
     pub(crate) fn dir(&self) -> &Path {

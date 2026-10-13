@@ -177,7 +177,8 @@ impl Daemon {
             client,
         });
         // One question per terminal waits, so one time to run out does.
-        self.clipboard_due.retain(|&(_, terminal, _)| terminal != id);
+        self.clipboard_due
+            .retain(|&(_, terminal, _)| terminal != id);
         (self.clipboard_due).push((Instant::now() + ASK_TIMEOUT, id, ask));
         let event = Event::ClipboardAsked {
             terminal: id,

@@ -8,9 +8,10 @@ use std::path::Path;
 
 use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
 use clackatoo_protocol::{
-    Block, BufferId, Change, ChatAction, ClientMessage, Error, Event, HistoryLines, NewTerminal,
-    PROTOCOL_VERSION, PaneId, PaneTerminal, Query, Request, Response, Search, ServerMessage, Side,
-    Size, TerminalId, TerminalInfo, Udp, View, Which, WorkspaceId, Workspaces,
+    Block, BufferId, Change, ChatAction, ClientMessage, Error, Event, FileOp, FilesAction, FilesId,
+    HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Query, Request, Response,
+    Search, ServerMessage, Side, Size, TerminalId, TerminalInfo, Udp, View, Which, WorkspaceId,
+    Workspaces,
 };
 
 use crate::quic::{self, Carried, Contact, Route};
@@ -396,6 +397,27 @@ impl Client {
         text: Option<String>,
     ) -> Result<(), ClientError> {
         self.send(&ClientMessage::Clipboard { terminal, id, text })
+    }
+
+    /// Asks `action` of the file explorer `files`, which the client
+    /// attached to with [`Request::AttachFiles`]. What comes of it comes in
+    /// [`Event::Files`]s.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn files(&mut self, files: FilesId, action: FilesAction) -> Result<(), ClientError> {
+        self.send(&ClientMessage::Files { files, action })
+    }
+
+    /// Asks the daemon to do `op` to files, numbered `id`. How it went
+    /// comes in an [`Event::FileOp`].
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub fn file_op(&mut self, id: u64, op: FileOp) -> Result<(), ClientError> {
+        self.send(&ClientMessage::FileOp { id, op })
     }
 
     /// Limits how long [`next_event`](Self::next_event) and requests wait.

@@ -13,7 +13,8 @@
 //! `Files`, `Grep` and `Buffers`, each with what to start with typed. So is
 //! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
 //! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
-//! `prev_hunk`.
+//! `prev_hunk`. `Explore`, or `Ex`, opens the tab's file explorer, with a
+//! directory for its root after it if wanted.
 //!
 //! A command with a range of lines before it, or Vim's for lines, `s`,
 //! `&`, `~`, `g`, `v`, `d`, `y`, `m`, `t` and `normal`, is the focused
@@ -76,6 +77,9 @@ pub(crate) enum Command {
     /// One of the focused editor's commands, for lines, as typed: `:s`,
     /// `:g`, `:d`, `:m` and their kin, with any range.
     Editor(String),
+    /// `:Explore`: the tab's file explorer, rooted at this directory if
+    /// given.
+    Explore(Option<String>),
 }
 
 /// Where a new pane goes.
@@ -125,7 +129,7 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 /// The window's own commands, for messages.
 const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
                         w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, Buffers, \
-                        Diagnostics and Gitsigns";
+                        Diagnostics, Gitsigns and Explore";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -147,6 +151,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "set" | "se" => return Ok(Command::Set(argument.unwrap_or_default().to_owned())),
         "registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
         "marks" => return Ok(Command::Marks),
+        "Explore" | "Ex" => return Ok(Command::Explore(argument.map(str::to_owned))),
         _ => {}
     }
     if let Some(command) = file_command(word, argument) {

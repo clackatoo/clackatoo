@@ -369,6 +369,10 @@ impl Desk {
                 self.jumps.replaced(copy.path(), copy.text());
                 marks.replaced(copy.path(), copy.text());
             }
+            Heard::Moved { from } => {
+                self.jumps.moved(from, copy.path());
+                marks.moved(from, copy.path());
+            }
             _ => {}
         }
         let mut opening = Vec::new();

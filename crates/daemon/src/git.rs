@@ -37,7 +37,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::Answer;
+use clackatoo_protocol::{Answer, GitMark};
 use clackatoo_text::{Difference, Hunks, Rope, diff, line_starts};
 
 /// How long edits must pause before a buffer is compared again...
@@ -481,19 +481,113 @@ fn output(command: &mut Command) -> Option<Vec<u8>> {
     }
 }
 
+/// What git printed, if it ran and succeeded within `patience`: one that
+/// takes longer, as on a hung network file system, is killed, so the
+/// thread asking goes on to what's waiting behind it.
+pub(crate) fn output_within(command: &mut Command, patience: Duration) -> Option<Vec<u8>> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| log::debug!("git didn't run: {err}"))
+        .ok()?;
+    // Read as it's written, so a lot of it never fills the pipe and holds
+    // git up.
+    let mut stdout = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut read = Vec::new();
+        std::io::Read::read_to_end(&mut stdout, &mut read).map(|_| read)
+    });
+    let deadline = Instant::now() + patience;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            Ok(None) => {
+                log::warn!("git took longer than {patience:?}: stopped");
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Err(err) => {
+                log::debug!("waiting for git failed: {err}");
+                break None;
+            }
+        }
+    };
+    let read = reader.join().ok()?.ok()?;
+    status
+        .filter(std::process::ExitStatus::success)
+        .map(|_| read)
+}
+
+/// How long git is given to say what explorers ask it: far longer than it
+/// takes in any repository on a working disk.
+const PATIENCE: Duration = Duration::from_secs(10);
+
 /// The work tree the file at `path` is in, if any: its top directory, its
 /// repository's git directory, and the file's path from the top.
 fn repository(path: &Path) -> Option<(PathBuf, PathBuf, String)> {
-    let dir = path.parent()?;
-    let printed = output(git(dir).args(["rev-parse", "--show-toplevel", "--absolute-git-dir"]))?;
-    let printed = String::from_utf8(printed).ok()?;
-    let mut lines = printed.lines();
-    let (top, git_dir) = (PathBuf::from(lines.next()?), PathBuf::from(lines.next()?));
+    let (top, git_dir) = work_tree(path.parent()?)?;
     let relative = (path.strip_prefix(&top).ok().map(Path::to_owned))
         .or_else(|| Some(path.strip_prefix(top.canonicalize().ok()?).ok()?.to_owned()))?;
     let relative = relative.to_str()?.to_owned();
     // A path with a line break can't be named to git on a line.
     (!relative.is_empty() && !relative.contains('\n')).then_some((top, git_dir, relative))
+}
+
+/// The work tree the directory `dir` is in, if any: its top directory,
+/// and its repository's git directory.
+pub(crate) fn work_tree(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let printed = output_within(
+        git(dir).args(["rev-parse", "--show-toplevel", "--absolute-git-dir"]),
+        PATIENCE,
+    )?;
+    let printed = String::from_utf8(printed).ok()?;
+    let mut lines = printed.lines();
+    Some((PathBuf::from(lines.next()?), PathBuf::from(lines.next()?)))
+}
+
+/// What git says of the files in the work tree whose top is `top`: each
+/// path it has something to say about, from the top, with its mark, in
+/// the order git gives them. A directory none of whose files git knows is
+/// one path, as `git status` shows it. `None` if git couldn't say.
+///
+/// Changes in submodules' own files aren't looked for, which would read
+/// every submodule's whole tree.
+pub(crate) fn status(top: &Path) -> Option<Vec<(String, GitMark)>> {
+    let printed = output_within(
+        git(top).args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=normal",
+            "--no-renames",
+            "--ignore-submodules=dirty",
+        ]),
+        PATIENCE,
+    )?;
+    // Each is "XY PATH": X for the index, Y for the work tree.
+    let marks = (printed.split(|&byte| byte == 0))
+        .filter_map(|entry| {
+            let (xy, path) = (entry.get(..2)?, entry.get(3..)?);
+            let path = std::str::from_utf8(path).ok()?.trim_end_matches('/');
+            (!path.is_empty()).then(|| (path.to_owned(), mark(xy[0], xy[1])))
+        })
+        .collect();
+    Some(marks)
+}
+
+/// The mark for a file `git status` says `XY` of: what its index has
+/// against `HEAD`, then what its work tree has against the index.
+fn mark(x: u8, y: u8) -> GitMark {
+    match (x, y) {
+        (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D') => GitMark::Conflicted,
+        (b'?', _) => GitMark::Untracked,
+        (b'D', _) | (_, b'D') => GitMark::Deleted,
+        (b'A', b' ') => GitMark::Added,
+        _ => GitMark::Modified,
+    }
 }
 
 /// The base of the file at `path` from `top`, as git's index has it, if
@@ -772,6 +866,30 @@ mod tests {
                 "+++ \"b/x\\ty\""
             ]
         );
+    }
+
+    #[test]
+    fn a_command_that_takes_too_long_is_stopped() {
+        let started = Instant::now();
+        let mut slow = Command::new("sleep");
+        slow.arg("5");
+        assert_eq!(output_within(&mut slow, Duration::from_millis(100)), None);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let mut quick = Command::new("echo");
+        quick.arg("hi");
+        let said = output_within(&mut quick, Duration::from_secs(5));
+        assert_eq!(said.as_deref(), Some(&b"hi\n"[..]));
+    }
+
+    #[test]
+    fn marks_say_what_matters_most_of_both_sides() {
+        assert_eq!(mark(b'?', b'?'), GitMark::Untracked);
+        assert_eq!(mark(b'A', b' '), GitMark::Added);
+        assert_eq!(mark(b'A', b'M'), GitMark::Modified);
+        assert_eq!(mark(b' ', b'M'), GitMark::Modified);
+        assert_eq!(mark(b'M', b'D'), GitMark::Deleted);
+        assert_eq!(mark(b'U', b'U'), GitMark::Conflicted);
+        assert_eq!(mark(b'A', b'A'), GitMark::Conflicted);
     }
 
     #[test]

@@ -6,8 +6,8 @@
 //! makes the change, which can't fail.
 
 use clackatoo_protocol::{
-    Axis, BufferId, Content, Error, Layout, Pane, PaneId, Side, Tab, TabId, TerminalId, Workspace,
-    WorkspaceId, Workspaces,
+    Axis, BufferId, Content, Error, FilesId, Layout, Pane, PaneId, Side, Tab, TabId, TerminalId,
+    Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::handover::{self, HandoverError};
@@ -43,6 +43,10 @@ impl WorkspaceState {
                     Content::Buffer(buffer) => handover::Layout::Buffer {
                         id: pane.id.0,
                         buffer: buffer.0,
+                    },
+                    Content::Files(files) => handover::Layout::Files {
+                        id: pane.id.0,
+                        files: files.0,
                     },
                 },
                 Layout::Split {
@@ -90,6 +94,10 @@ impl WorkspaceState {
                 handover::Layout::Buffer { id, buffer } => Layout::Pane(Pane {
                     id: PaneId(*id),
                     content: Content::Buffer(BufferId(*buffer)),
+                }),
+                handover::Layout::Files { id, files } => Layout::Pane(Pane {
+                    id: PaneId(*id),
+                    content: Content::Files(FilesId(*files)),
                 }),
                 handover::Layout::Split {
                     left_to_right,
@@ -235,6 +243,35 @@ impl WorkspaceState {
         new.id
     }
 
+    /// Puts a pane showing `content` along `side` of `tab`, which
+    /// [`check_tab`](Self::check_tab) checked, as long as the tab, with
+    /// `share` thousandths of its space, or as much as each part beside it
+    /// if `None`.
+    pub(crate) fn split_tab(
+        &mut self,
+        tab: TabId,
+        side: Side,
+        content: impl Into<Content>,
+        share: Option<u16>,
+    ) -> PaneId {
+        let new = self.pane(content.into());
+        let tab = (self.workspaces.list.iter_mut())
+            .flat_map(|workspace| &mut workspace.tabs)
+            .find(|candidate| candidate.id == tab)
+            .expect("the tab was checked");
+        split_edge(&mut tab.layout, side, new, share);
+        tab.focused = new.id;
+        new.id
+    }
+
+    /// Checks that `tab` exists.
+    pub(crate) fn check_tab(&self, tab: TabId) -> Result<(), Error> {
+        self.workspaces
+            .find_tab(tab)
+            .map(|_| ())
+            .ok_or(Error::NoSuchTab(tab))
+    }
+
     /// The focused pane of `workspace`'s active tab.
     pub(crate) fn focused_pane(&self, workspace: WorkspaceId) -> Option<PaneId> {
         let workspace = self.workspaces.get(workspace)?;
@@ -281,6 +318,27 @@ impl WorkspaceState {
             .find_map(|tab| pane_mut(&mut tab.layout, pane))
             .ok_or(Error::NoSuchPane(pane))?;
         Ok(std::mem::replace(&mut found.content, content))
+    }
+
+    /// Has every pane showing buffer `old` show buffer `new`. Returns
+    /// whether any did.
+    pub(crate) fn show_instead(&mut self, old: BufferId, new: BufferId) -> bool {
+        fn swap(layout: &mut Layout, old: BufferId, new: BufferId) -> bool {
+            match layout {
+                Layout::Pane(pane) if pane.content == Content::Buffer(old) => {
+                    pane.content = Content::Buffer(new);
+                    true
+                }
+                Layout::Pane(_) => false,
+                Layout::Split { parts, .. } => (parts.iter_mut())
+                    .map(|part| swap(part, old, new))
+                    .fold(false, |any, swapped| any | swapped),
+            }
+        }
+        (self.workspaces.list.iter_mut())
+            .flat_map(|workspace| &mut workspace.tabs)
+            .map(|tab| swap(&mut tab.layout, old, new))
+            .fold(false, |any, swapped| any | swapped)
     }
 
     /// Whether any pane shows `buffer`.
@@ -529,6 +587,61 @@ fn split(layout: &mut Layout, target: PaneId, side: Side, new: Pane) {
     }
 }
 
+/// Puts `new` along `side` of the whole of `layout`, with `share`
+/// thousandths of its space, or the average share if `None`. In a split
+/// along the same axis, it joins that split as its first or last part.
+fn split_edge(layout: &mut Layout, side: Side, new: Pane, share: Option<u16>) {
+    let axis = side.axis();
+    let new = Layout::Pane(new);
+    if let Layout::Split {
+        axis: split_axis,
+        parts,
+        shares,
+    } = layout
+        && *split_axis == axis
+    {
+        // In thousandths of what they were, so a small share of a split
+        // whose shares are small, such as 1 and 1, isn't rounded away.
+        let wide: Vec<u64> = shares
+            .iter()
+            .map(|&share| u64::from(share) * 1000)
+            .collect();
+        let total: u64 = wide.iter().sum();
+        let added = match share {
+            // The others keep their part of what's left.
+            Some(share) => {
+                let share = u64::from(share.clamp(1, 999));
+                total * share / (1000 - share)
+            }
+            None => total / wide.len() as u64,
+        };
+        let at = if side.before() { 0 } else { parts.len() };
+        parts.insert(at, new);
+        let mut wide = wide;
+        wide.insert(at, added);
+        *shares = normalized(&wide);
+        return;
+    }
+    let old = std::mem::replace(
+        layout,
+        Layout::Pane(Pane {
+            id: PaneId(0),
+            content: Content::Terminal(TerminalId(0)),
+        }),
+    );
+    let (parts, shares) = match share.map(|share| u32::from(share.clamp(1, 999))) {
+        Some(share) if side.before() => (vec![new, old], vec![share, 1000 - share]),
+        Some(share) => (vec![old, new], vec![1000 - share, share]),
+        None if side.before() => (vec![new, old], vec![1, 1]),
+        None => (vec![old, new], vec![1, 1]),
+    };
+    *layout = Layout::Split {
+        axis,
+        parts,
+        shares,
+    };
+}
+
 /// `pane`, if it's in `layout`.
 fn pane_mut(layout: &mut Layout, pane: PaneId) -> Option<&mut Pane> {
     match layout {
@@ -719,6 +832,25 @@ mod tests {
             .iter()
             .map(|&share| u64::from(share) * 100 / total)
             .collect()
+    }
+
+    #[test]
+    fn a_pane_down_a_tabs_edge_takes_its_share_of_the_whole_tab() {
+        let mut state = WorkspaceState::new();
+        state.new_workspace("work".into(), TerminalId(1));
+        let tab = only_tab(&state).id;
+        state.split_tab(tab, Side::Left, TerminalId(2), Some(250));
+        assert_eq!(shape(&only_tab(&state).layout), "(2 | 1)");
+        assert_eq!(percents(&state, &[]), [25, 75]);
+        // Joining a split along the same axis, the others keep their part
+        // of what's left.
+        state.split_tab(tab, Side::Right, TerminalId(3), Some(500));
+        assert_eq!(percents(&state, &[]), [12, 37, 50]);
+        // Across it, it goes round the whole tab.
+        state.split_tab(tab, Side::Below, TerminalId(4), None);
+        assert_eq!(shape(&only_tab(&state).layout), "((2 | 1 | 3) / 4)");
+        assert_eq!(percents(&state, &[]), [50, 50]);
+        assert_eq!(only_tab(&state).focused.0, 4);
     }
 
     #[test]

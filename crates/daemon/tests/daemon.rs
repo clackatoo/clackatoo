@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
@@ -12,8 +13,9 @@ use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode,
     ChatState, ClientMessage, CompletionItem, Construct, Diff, Done, Edit, Error, Event,
-    FileLocation, Found, FoundBuffer, FoundLine, Item, Kind, Location, NewAgent, NewTerminal,
-    OpenFile, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Query, Request,
+    FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate, Found,
+    FoundBuffer, FoundLine, GitMark, Item, Kind, Location, NewAgent, NewTerminal, OpenFile,
+    OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Query, Request,
     Response, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span, TerminalId,
     TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, View, ViewUpdate,
     Workspaces,
@@ -61,6 +63,7 @@ impl TestDaemon {
             // Stopped with their last file, unless a test says otherwise.
             server_idle: Duration::ZERO,
             rename_gate: None,
+            trash: Some(dir.path().join("trash")),
         };
         change(dir.path(), &mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
@@ -1798,7 +1801,9 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Installed { .. }
             | Event::Found { .. }
             | Event::Clipboard { .. }
-            | Event::ClipboardAsked { .. }) => {
+            | Event::ClipboardAsked { .. }
+            | Event::Files { .. }
+            | Event::FileOp { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }
@@ -5044,4 +5049,529 @@ fn files_kept_with_crlf_are_compared_by_lines_and_not_staged_by_hunks() {
         )
     );
     assert_eq!(run_git(&repo, &["show", ":a.txt"]), "a\r\nb\r\n");
+}
+
+// --- File explorers ----------------------------------------------------------
+
+/// A new workspace showing an explorer rooted at `root`, attached, with its
+/// root's name, as the daemon writes it.
+fn explore(client: &mut Client, root: &Path) -> (FilesId, String) {
+    client.watch_workspaces().unwrap();
+    let open = OpenFiles {
+        dir: Some(root.display().to_string()),
+    };
+    let pane = match client.request(&Request::NewWorkspace {
+        name: None,
+        terminal: PaneTerminal::Files(open),
+    }) {
+        Ok(Response::PaneCreated(pane)) => pane,
+        other => panic!("no explorer: {other:?}"),
+    };
+    let files = loop {
+        let workspaces = next_workspaces(client);
+        if let Some((_, _, pane)) = workspaces.find_pane(pane) {
+            break pane.content.files().expect("an explorer");
+        }
+    };
+    let attached = client.request(&Request::AttachFiles { files });
+    assert!(matches!(attached, Ok(Response::Done)), "{attached:?}");
+    match next_files_update(client) {
+        FilesUpdate::Root { path, name } => {
+            assert_eq!(path, root.display().to_string());
+            (files, name)
+        }
+        other => panic!("expected the root, got {other:?}"),
+    }
+}
+
+/// The next update about an explorer, skipping the rest.
+fn next_files_update(client: &mut Client) -> FilesUpdate {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    loop {
+        if let Event::Files { update, .. } = client.next_event().expect("an explorer update") {
+            return update;
+        }
+    }
+}
+
+/// The names in the next listing of `dir`, skipping the rest, and whether
+/// each is ignored.
+fn next_listing(client: &mut Client, dir: &Path) -> Vec<(String, bool)> {
+    loop {
+        if let FilesUpdate::Listed {
+            dir: listed,
+            entries,
+            ..
+        } = next_files_update(client)
+            && listed == dir.display().to_string()
+        {
+            return (entries.into_iter())
+                .map(|entry| (entry.name, entry.ignored))
+                .collect();
+        }
+    }
+}
+
+fn names(listing: &[(String, bool)]) -> Vec<&str> {
+    listing.iter().map(|(name, _)| name.as_str()).collect()
+}
+
+fn files_action(client: &mut Client, files: FilesId, action: FilesAction) {
+    client.files(files, action).unwrap();
+}
+
+/// Does `op`, numbered `id`, and returns how it went, skipping the rest.
+fn file_op(client: &mut Client, id: u64, op: FileOp) -> Result<(), FileOpError> {
+    client.file_op(id, op).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    loop {
+        if let Event::FileOp { id: of, outcome } = client.next_event().expect("an answer")
+            && of == id
+        {
+            return outcome;
+        }
+    }
+}
+
+/// What tells the file at `path`, as it is now, from any other, to write
+/// over it with.
+fn stamp_of(path: &Path) -> FileStamp {
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    FileStamp {
+        device: meta.dev(),
+        inode: meta.ino(),
+        len: meta.len(),
+        seconds: meta.mtime(),
+        nanoseconds: meta.mtime_nsec(),
+    }
+}
+
+/// A project in `dir/p`: `a.txt`, `b/c.txt` and `.hidden`.
+fn project(dir: &Path) -> PathBuf {
+    let root = dir.join("p");
+    std::fs::create_dir_all(root.join("b")).unwrap();
+    std::fs::write(root.join("a.txt"), "a\n").unwrap();
+    std::fs::write(root.join("b/c.txt"), "c\n").unwrap();
+    std::fs::write(root.join(".hidden"), "").unwrap();
+    root.canonicalize().unwrap()
+}
+
+#[test]
+fn an_explorer_lists_what_is_expanded_and_shows_files_made_and_deleted_there() {
+    let daemon = TestDaemon::start();
+    let root = project(daemon.dir.path());
+    let mut client = daemon.client();
+    let (files, _) = explore(&mut client, &root);
+    let expand = |dir: &Path| FilesAction::Expand(dir.display().to_string());
+    files_action(&mut client, files, expand(&root));
+    let listing = next_listing(&mut client, &root);
+    assert_eq!(names(&listing), ["b", ".hidden", "a.txt"]);
+    let dir = root.join("b");
+    files_action(&mut client, files, expand(&dir));
+    assert_eq!(names(&next_listing(&mut client, &dir)), ["c.txt"]);
+
+    // Made and deleted by anyone, as a terminal would.
+    std::fs::write(dir.join("d.txt"), "").unwrap();
+    assert_eq!(names(&next_listing(&mut client, &dir)), ["c.txt", "d.txt"]);
+    std::fs::remove_file(dir.join("c.txt")).unwrap();
+    assert_eq!(names(&next_listing(&mut client, &dir)), ["d.txt"]);
+
+    // A second client expanding it gets what's known at once.
+    let mut other = daemon.client();
+    let attached = other.request(&Request::AttachFiles { files });
+    assert!(matches!(attached, Ok(Response::Done)), "{attached:?}");
+    files_action(&mut other, files, expand(&dir));
+    assert_eq!(names(&next_listing(&mut other, &dir)), ["d.txt"]);
+
+    // Collapsed, it's no longer sent: the next listing is the root's.
+    let collapse = FilesAction::Collapse(dir.display().to_string());
+    files_action(&mut client, files, collapse);
+    std::fs::write(dir.join("e.txt"), "").unwrap();
+    assert_eq!(names(&next_listing(&mut other, &dir)), ["d.txt", "e.txt"]);
+    std::fs::write(root.join("f.txt"), "").unwrap();
+    match next_files_update(&mut client) {
+        FilesUpdate::Listed { dir: listed, .. } => {
+            assert_eq!(listed, root.display().to_string());
+        }
+        other => panic!("expected the root's listing, got {other:?}"),
+    }
+
+    // A directory deleted is unlisted.
+    std::fs::remove_dir_all(&dir).unwrap();
+    loop {
+        match next_files_update(&mut other) {
+            FilesUpdate::Unlisted { dir: gone, .. } => {
+                assert_eq!(gone, dir.display().to_string());
+                break;
+            }
+            FilesUpdate::Listed { .. } => {}
+            update => panic!("expected the directory gone, got {update:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_explorer_with_no_directory_goes_down_the_tabs_edge_rooted_at_its_project() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let repo = repo_with(dir, "a\n", "a\n");
+    std::fs::create_dir(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/main.rs"), "").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = match client.request(&Request::NewWorkspace {
+        name: None,
+        terminal: open_file(dir, "repo/src/main.rs"),
+    }) {
+        Ok(Response::PaneCreated(pane)) => pane,
+        other => panic!("no editor: {other:?}"),
+    };
+    let tab = next_workspaces(&mut client).find_pane(pane).unwrap().1.id;
+    let made = client.request(&Request::SplitTab {
+        tab,
+        side: Side::Left,
+        terminal: PaneTerminal::Files(OpenFiles { dir: None }),
+        share: Some(250),
+    });
+    let Ok(Response::PaneCreated(explorer)) = made else {
+        panic!("no explorer: {made:?}");
+    };
+    let workspaces = next_workspaces(&mut client);
+    let tab = &workspaces.list[0].tabs[0];
+    match &tab.layout {
+        clackatoo_protocol::Layout::Split { parts, shares, .. } => {
+            assert_eq!(parts.len(), 2);
+            assert_eq!(shares, &[250, 750], "a quarter of the tab, on its left");
+        }
+        other @ clackatoo_protocol::Layout::Pane(_) => panic!("not split: {other:?}"),
+    }
+    assert_eq!(
+        (tab.layout.panes()[0].id, tab.focused),
+        (explorer, explorer)
+    );
+    let files = tab.layout.panes()[0].content.files().unwrap();
+    let attached = client.request(&Request::AttachFiles { files });
+    assert!(matches!(attached, Ok(Response::Done)), "{attached:?}");
+    match next_files_update(&mut client) {
+        FilesUpdate::Root { path, name } => {
+            assert_eq!(path, repo.canonicalize().unwrap().display().to_string());
+            assert_eq!(name, "~/repo");
+        }
+        other => panic!("expected the root, got {other:?}"),
+    }
+    let closed = client.request(&Request::ClosePane { pane: explorer });
+    assert!(matches!(closed, Ok(Response::Done)), "{closed:?}");
+    let again = client.request(&Request::AttachFiles { files });
+    assert!(
+        matches!(again, Ok(Response::Error(Error::NoSuchFiles(_)))),
+        "{again:?}"
+    );
+}
+
+#[test]
+fn an_explorer_says_what_git_says_and_what_it_ignores() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let repo = repo_with(dir, "a\n", "a\n");
+    run_git(&repo, &["commit", "-q", "-m", "a"]);
+    std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+    std::fs::write(repo.join("new.txt"), "").unwrap();
+    std::fs::write(repo.join(".gitignore"), "*.log\n").unwrap();
+    std::fs::write(repo.join("x.log"), "").unwrap();
+    let repo = repo.canonicalize().unwrap();
+    let mut client = daemon.client();
+    let (files, _) = explore(&mut client, &repo);
+    let expand = FilesAction::Expand(repo.display().to_string());
+    files_action(&mut client, files, expand);
+    let mut listing = None;
+    let mut marks = None;
+    while listing.is_none() || marks.is_none() {
+        match next_files_update(&mut client) {
+            FilesUpdate::Listed { entries, .. } => listing = Some(entries),
+            FilesUpdate::Git(said) => marks = Some(said),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let ignored: Vec<(String, bool)> = (listing.unwrap().into_iter())
+        .map(|entry| (entry.name, entry.ignored))
+        .collect();
+    let named = |name: &str, ignored| (name.to_owned(), ignored);
+    assert_eq!(
+        ignored,
+        [
+            named(".git", true),
+            named(".gitignore", false),
+            named("a.txt", false),
+            named("new.txt", false),
+            named("x.log", true),
+        ]
+    );
+    let path = |name: &str| repo.join(name).display().to_string();
+    assert_eq!(
+        marks.unwrap(),
+        [
+            (path(".gitignore"), GitMark::Untracked),
+            (path("a.txt"), GitMark::Modified),
+            (path("new.txt"), GitMark::Untracked),
+        ]
+    );
+    // Staging from a terminal changes the index, which is watched.
+    run_git(&repo, &["add", "a.txt", "new.txt", ".gitignore"]);
+    loop {
+        if let FilesUpdate::Git(said) = next_files_update(&mut client)
+            && said.iter().all(|(_, mark)| *mark != GitMark::Untracked)
+        {
+            assert!(
+                said.contains(&(path("new.txt"), GitMark::Added)),
+                "{said:?}"
+            );
+            break;
+        }
+    }
+}
+
+#[test]
+fn moving_a_file_or_its_directory_takes_buffers_open_on_it_along() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let root = project(dir);
+    let mut client = daemon.client();
+    let buffer = open_attached(&mut client, dir, "p/b/c.txt");
+    let path = |name: &str| root.join(name).display().to_string();
+    let moving = |from: &str, to: &str| FileOp::Move {
+        from: path(from),
+        to: path(to),
+        overwrite: None,
+    };
+    // Nothing is written over unless asked to.
+    assert_eq!(
+        file_op(&mut client, 1, moving("a.txt", "b/c.txt")),
+        Err(FileOpError::Exists {
+            path: path("b/c.txt"),
+            what: "a file of 2 bytes".into(),
+            stamp: stamp_of(&root.join("b/c.txt")),
+        })
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("b/c.txt")).unwrap(),
+        "c\n"
+    );
+
+    let op = moving("b", "moved/b2");
+    client.file_op(2, op).unwrap();
+    // The buffer is told before the answer comes.
+    let mut moved = None;
+    loop {
+        match client.next_event().expect("an event") {
+            Event::Buffer {
+                update: BufferUpdate::Moved(to),
+                ..
+            } => moved = Some(to),
+            Event::FileOp { id: 2, outcome } => {
+                assert_eq!(outcome, Ok(()));
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(moved, Some(path("moved/b2/c.txt")));
+    send_change(&mut client, buffer, 0, insert(2, 0, "x", 0));
+    let saved = client.request(&Request::Save {
+        buffer,
+        force: false,
+    });
+    assert!(matches!(saved, Ok(Response::Done)), "{saved:?}");
+    let text = std::fs::read_to_string(root.join("moved/b2/c.txt")).unwrap();
+    assert_eq!(text, "xc\n");
+    assert!(!root.join("b").exists());
+
+    // Opened again by its new path, it's the same buffer.
+    let again = open_attached(&mut client, dir, "p/moved/b2/c.txt");
+    assert_eq!(again, buffer);
+}
+
+#[test]
+fn deleting_moves_to_the_trash_and_files_are_made_and_copied() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let root = project(dir);
+    let mut client = daemon.client();
+    let path = |name: &str| root.join(name).display().to_string();
+    let create = FileOp::Create {
+        path: path("new/deep.txt"),
+        dir: false,
+    };
+    assert_eq!(file_op(&mut client, 1, create), Ok(()));
+    assert!(root.join("new/deep.txt").is_file());
+    let copy = FileOp::Copy {
+        from: path("b"),
+        to: path("b2"),
+        overwrite: None,
+    };
+    assert_eq!(file_op(&mut client, 2, copy), Ok(()));
+    let copied = std::fs::read_to_string(root.join("b2/c.txt")).unwrap();
+    assert_eq!(copied, "c\n");
+    let trash = FileOp::Delete {
+        path: path("a.txt"),
+        trash: true,
+    };
+    assert_eq!(file_op(&mut client, 3, trash), Ok(()));
+    assert!(!root.join("a.txt").exists());
+    let trash = dir.join("trash");
+    let trashed = std::fs::read_to_string(trash.join("files/a.txt")).unwrap();
+    assert_eq!(trashed, "a\n");
+    let info = std::fs::read_to_string(trash.join("info/a.txt.trashinfo")).unwrap();
+    assert!(
+        info.contains(&format!("Path={}\n", path("a.txt"))),
+        "{info}"
+    );
+    let delete = FileOp::Delete {
+        path: path("b"),
+        trash: false,
+    };
+    assert_eq!(file_op(&mut client, 4, delete), Ok(()));
+    assert!(!root.join("b").exists());
+}
+
+#[test]
+fn a_file_moved_over_one_open_takes_its_panes_and_one_with_changes_is_never_written_over() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let root = project(dir);
+    let mut client = daemon.client();
+    let over = open_attached(&mut client, dir, "p/b/c.txt");
+    let moving = open_attached(&mut client, dir, "p/a.txt");
+    let path = |name: &str| root.join(name).display().to_string();
+    // Written over only as it is when it's asked.
+    let over_it = || FileOp::Move {
+        from: path("a.txt"),
+        to: path("b/c.txt"),
+        overwrite: Some(stamp_of(&root.join("b/c.txt"))),
+    };
+    // With changes not written, it's refused, whatever's asked.
+    send_change(&mut client, over, 0, insert(2, 0, "x", 0));
+    let refused = file_op(&mut client, 1, over_it()).unwrap_err().to_string();
+    assert!(
+        refused.contains("is open with changes not written"),
+        "{refused}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("b/c.txt")).unwrap(),
+        "c\n"
+    );
+    let saved = client.request(&Request::Save {
+        buffer: over,
+        force: false,
+    });
+    assert!(matches!(saved, Ok(Response::Done)), "{saved:?}");
+    // Written, it's written over, and its pane shows the one moved there.
+    assert_eq!(file_op(&mut client, 2, over_it()), Ok(()));
+    let workspaces = client.watch_workspaces().unwrap();
+    let shown: Vec<BufferId> = (workspaces.list.iter())
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.layout.panes())
+        .filter_map(|pane| pane.content.buffer())
+        .collect();
+    assert_eq!(shown, [moving, moving]);
+    let gone = client.request(&Request::AttachBuffer { buffer: over });
+    assert!(
+        matches!(gone, Ok(Response::Error(Error::NoSuchBuffer(_)))),
+        "{gone:?}"
+    );
+    let snapshot = attach_buffer(&mut client, moving);
+    assert_eq!(
+        (snapshot.path, snapshot.text),
+        (path("b/c.txt"), "a\n".to_owned())
+    );
+}
+
+#[test]
+fn a_file_copied_over_one_open_is_read_again() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let root = project(dir);
+    let mut client = daemon.client();
+    let open = open_attached(&mut client, dir, "p/b/c.txt");
+    let path = |name: &str| root.join(name).display().to_string();
+    let copy = FileOp::Copy {
+        from: path("a.txt"),
+        to: path("b/c.txt"),
+        overwrite: Some(stamp_of(&root.join("b/c.txt"))),
+    };
+    assert_eq!(file_op(&mut client, 1, copy), Ok(()));
+    assert_eq!(attach_buffer(&mut client, open).text, "a\n");
+    // It's the file's text now, so it saves without being refused.
+    let saved = client.request(&Request::Save {
+        buffer: open,
+        force: false,
+    });
+    assert!(matches!(saved, Ok(Response::Done)), "{saved:?}");
+}
+
+#[test]
+fn a_buffer_moved_to_another_file_system_saves_there() {
+    // Only where /tmp is another file system than the daemon's directory.
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let Ok(away) = tempfile::tempdir_in("/tmp") else {
+        return;
+    };
+    let device = |path: &Path| std::fs::metadata(path).unwrap().dev();
+    if device(dir) == device(away.path()) {
+        return;
+    }
+    let root = project(dir);
+    let mut client = daemon.client();
+    let buffer = open_attached(&mut client, dir, "p/a.txt");
+    let to = away.path().canonicalize().unwrap().join("a.txt");
+    let op = FileOp::Move {
+        from: root.join("a.txt").display().to_string(),
+        to: to.display().to_string(),
+        overwrite: None,
+    };
+    assert_eq!(file_op(&mut client, 1, op), Ok(()));
+    send_change(&mut client, buffer, 0, insert(2, 0, "x", 0));
+    let saved = client.request(&Request::Save {
+        buffer,
+        force: false,
+    });
+    assert!(matches!(saved, Ok(Response::Done)), "{saved:?}");
+    assert_eq!(std::fs::read_to_string(&to).unwrap(), "xa\n");
+}
+
+#[test]
+fn a_directory_deleted_and_made_again_is_watched_again() {
+    let daemon = TestDaemon::start();
+    let root = project(daemon.dir.path());
+    let mut client = daemon.client();
+    let (files, _) = explore(&mut client, &root);
+    let dir = root.join("b");
+    let expand = || FilesAction::Expand(dir.display().to_string());
+    files_action(&mut client, files, expand());
+    assert_eq!(names(&next_listing(&mut client, &dir)), ["c.txt"]);
+    // Gone and back at once, its watch gone with it.
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::create_dir(&dir).unwrap();
+    loop {
+        match next_files_update(&mut client) {
+            FilesUpdate::Listed {
+                dir: listed,
+                entries,
+                ..
+            } if listed == dir.display().to_string() && entries.is_empty() => {
+                break;
+            }
+            // Listed only once it had gone: expanded again.
+            FilesUpdate::Unlisted { .. } => {
+                files_action(&mut client, files, expand());
+            }
+            _ => {}
+        }
+    }
+    std::fs::write(dir.join("new.txt"), "").unwrap();
+    assert_eq!(names(&next_listing(&mut client, &dir)), ["new.txt"]);
 }

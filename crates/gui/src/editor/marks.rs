@@ -44,6 +44,16 @@ impl FilePlace {
         place
     }
 
+    /// The file or directory at `from` has moved to `to`: if the place is
+    /// in it, or anything in it, it goes with it.
+    pub(crate) fn moved(&mut self, from: &str, to: &str) {
+        let rest =
+            (self.path.strip_prefix(from)).filter(|rest| rest.is_empty() || rest.starts_with('/'));
+        if let Some(rest) = rest {
+            self.path = format!("{to}{rest}");
+        }
+    }
+
     /// The place on `line`, `col` bytes into it, of the file at `path`,
     /// kept within its `text` if the window has it. If not, its byte is
     /// worked out when the file's text comes.
@@ -153,6 +163,14 @@ impl Marks {
         }
         for (_, place) in self.list.iter_mut().filter(|(_, at)| at.path == path) {
             place.edited(edits, text);
+        }
+    }
+
+    /// The file or directory at `from` has moved to `to`: marks in it, or
+    /// anything in it, go with it.
+    pub(crate) fn moved(&mut self, from: &str, to: &str) {
+        for (_, place) in &mut self.list {
+            place.moved(from, to);
         }
     }
 

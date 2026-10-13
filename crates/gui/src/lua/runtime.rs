@@ -590,6 +590,7 @@ fn info(lua: &Lua, world: &World, kind: &str, id: u32) -> mlua::Result<Option<Ta
             let known = world.panes.get(&pane.id);
             let kind = match pane.content {
                 Content::Buffer(_) => "editor",
+                Content::Files(_) => "explorer",
                 Content::Terminal(_) if known.is_some_and(|known| known.chat) => "chat",
                 Content::Terminal(_) => "terminal",
             };

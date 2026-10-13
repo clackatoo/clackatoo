@@ -318,6 +318,13 @@ options! {
     /// gitsigns.nvim shows them. Kept for every file while it's on, so the
     /// text doesn't move when the first change comes.
     gitsigns("gs"): bool = true;
+    /// How wide a file explorer down the tab's left opens, in cells, as
+    /// `<Space>e` and `:Explore` open it. It keeps its share of the tab as
+    /// the window resizes.
+    explorerwidth("ew"): u32 (10..=200) = 30;
+    /// File explorers show hidden files, those whose names start with `.`,
+    /// as they open. `.` shows or hides them in each.
+    explorerhidden("eh"): bool = false;
     /// The fewest lines kept in view above and below the cursor, so what's
     /// around it shows as it moves. Half the pane or more keeps the
     /// cursor's line in the middle.

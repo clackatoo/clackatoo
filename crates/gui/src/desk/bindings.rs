@@ -25,7 +25,9 @@
 //! file (see [`crate::finder`]). And in an editor, the keys for the hunk
 //! at the cursor, as gitsigns.nvim suggests them: `<Space>hp` shows it,
 //! `<Space>hr` puts its lines back as they are in git's index, and
-//! `<Space>hs` stages it.
+//! `<Space>hs` stages it. `<Space>e` opens the tab's file explorer down
+//! its left, goes to it, or closes it if it has the focus (see
+//! [`super::explorers`]).
 //!
 //! In normal and visual mode, `:` opens the command line, Ctrl with `h`,
 //! `j`, `k` or `l` moves to the pane that way, Alt with them moves the
@@ -89,6 +91,9 @@ pub(crate) enum Action {
     Find(finder::Kind),
     /// This, to the hunk at the focused editor's cursor.
     Hunk(HunkAction),
+    /// The tab's file explorer: opened down its left, gone to, or closed
+    /// if it has the focus.
+    Explore,
     /// Sends Ctrl+B to the focused pane's program.
     SendCtrlB,
 }
@@ -195,6 +200,8 @@ fn defaults() -> Keymap<Binding> {
     bind("nv", "<Space>hp", Action::Hunk(HunkAction::Preview), hunk);
     bind("nv", "<Space>hr", Action::Hunk(HunkAction::Reset), hunk);
     bind("nv", "<Space>hs", Action::Hunk(HunkAction::Stage), hunk);
+    // As nvim-tree's and neo-tree's are often bound.
+    bind("nv", "<Space>e", Action::Explore, Some("explorer"));
     for (letter, direction) in DIRECTIONS {
         bind(
             "nv",
@@ -272,6 +279,7 @@ impl Desk {
             Action::CommandLine => self.open_palette(Purpose::Command),
             Action::Find(kind) => self.open_finder(kind, String::new()),
             Action::Hunk(action) => self.editor_hunk(action),
+            Action::Explore => self.toggle_explorer(),
             Action::SendCtrlB => {
                 if let Some(pane) = self.focused_pane() {
                     pane.send_bytes(vec![0x02]);
@@ -299,6 +307,9 @@ impl Desk {
         if let Some((editor, _)) = self.focused_editor() {
             return editor.pending();
         }
+        if let Some(explorer) = self.focused_explorer() {
+            return explorer.pending();
+        }
         (self.focused_terminal())
             .and_then(|terminal| self.panes.get(&terminal))
             .is_some_and(crate::pane::Pane::pending)
@@ -314,6 +325,13 @@ impl Desk {
                 crate::pane::Mode::Insert => KeyMode::Insert,
                 crate::pane::Mode::Normal => KeyMode::Normal,
                 crate::pane::Mode::Visual(_) => KeyMode::Visual,
+            };
+        }
+        if let Some(explorer) = self.focused_explorer() {
+            return if explorer.prompting() {
+                KeyMode::Prompt
+            } else {
+                KeyMode::Normal
             };
         }
         let Some(pane) = self

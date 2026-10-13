@@ -1779,3 +1779,122 @@ fn grep_finder_view(layout: &crate::finder::view::Layout) -> crate::finder::view
     finder.preview_found(Found::Preview { first: 0, lines });
     finder.view((layout.rows, layout.cols), layout.preview_size)
 }
+
+#[test]
+// It shows everything an explorer draws.
+#[allow(clippy::too_many_lines)]
+fn renders_an_explorer_pane() {
+    use clackatoo_protocol::{Entry, EntryKind, FilesId, FilesUpdate, GitMark};
+
+    use crate::editor::Stroke;
+    use crate::explorer::Explorer;
+
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let (cols, rows) = (24u16, 6u16);
+    let mut explorer = Explorer::new(FilesId(1), &crate::options::Options::default());
+    explorer.resize(Size::new(cols, rows).unwrap());
+    let entry = |name: &str, kind, ignored| Entry {
+        name: name.into(),
+        kind,
+        ignored,
+    };
+    let file = EntryKind::File { executable: false };
+    explorer.update(FilesUpdate::Root {
+        path: "/p".into(),
+        name: "~/p".into(),
+    });
+    explorer.update(FilesUpdate::Listed {
+        dir: "/p".into(),
+        entries: vec![
+            entry("src", EntryKind::Dir, false),
+            entry("target", EntryKind::Dir, true),
+            entry("build.sh", EntryKind::File { executable: true }, false),
+            entry("README.md", file, false),
+        ],
+        cut_short: false,
+    });
+    explorer.stroke(Stroke::char('l'));
+    explorer.update(FilesUpdate::Listed {
+        dir: "/p/src".into(),
+        entries: vec![entry("main.rs", file, false)],
+        cut_short: false,
+    });
+    explorer.update(FilesUpdate::Git(vec![(
+        "/p/src/main.rs".into(),
+        GitMark::Modified,
+    )]));
+    explorer.stroke(Stroke::char('j'));
+    explorer.settle();
+    let (lines, cursor) = explorer.scene();
+    let mut fonts = fonts(2.0);
+    let padding = 4;
+    let size = [
+        u32::from(cols) * fonts.cell.width + 2 * padding,
+        u32::from(rows) * fonts.cell.height + 2 * padding,
+    ];
+    #[allow(clippy::cast_precision_loss)]
+    let scene = Scene {
+        origin: [padding as f32; 2],
+        size: [
+            (size[0] - 2 * padding) as f32,
+            (size[1] - 2 * padding) as f32,
+        ],
+        rows: &lines,
+        cursor,
+        normal_mode: true,
+        highlights: &explorer.highlights(),
+    };
+    let picture = Picture {
+        scenes: &[scene],
+        fills: &[],
+        over: &[],
+        texts: &[],
+        glyphs: &[],
+        over_glyphs: &[],
+        transparent: false,
+    };
+    let pixels = draw(&gpu, size, &picture, &mut fonts);
+    save("explorer", size, &pixels);
+    let text: Vec<String> = lines.iter().map(|row| row.text()).collect();
+    assert_eq!(
+        text,
+        [
+            "~/p",
+            "M ▾ src",
+            "M │   main.rs",
+            "  ▸ target",
+            "    build.sh",
+            "    README.md"
+        ]
+    );
+    let fg = |row: &clackatoo_term::Row, col: usize| row.style(row.cells()[col]).fg;
+    assert_eq!(
+        fg(lines[2], 0),
+        crate::colors::git_mark(GitMark::Modified).1.fg
+    );
+    assert_eq!(
+        fg(lines[1], 4),
+        clackatoo_protocol::Color::Indexed(4),
+        "a directory"
+    );
+    assert_eq!(
+        fg(lines[4], 4),
+        clackatoo_protocol::Color::Indexed(2),
+        "a program"
+    );
+    let background = &pixels[..4];
+    // The middle of the cell at `line` and `col`.
+    let at = |line: u32, col: u32| {
+        let x = padding + col * fonts.cell.width + fonts.cell.width / 2;
+        let y = padding + line * fonts.cell.height + fonts.cell.height / 2;
+        let start = ((y * size[0] + x) * 4) as usize;
+        &pixels[start..start + 4]
+    };
+    // The cursor's line is lit across the pane, and nothing past it.
+    assert_ne!(at(2, 20), background, "the cursor's line");
+    assert_eq!(at(5, 20), background);
+    assert_ne!(at(2, 0), background, "the mark");
+}

@@ -202,10 +202,13 @@ impl Daemon {
     pub(super) fn save_buffer(&mut self, id: BufferId, force: bool) -> Result<Response, Error> {
         self.forget_formats(id);
         let slot = self.buffers.get_mut(&id).ok_or(Error::NoSuchBuffer(id))?;
-        if let Some(modified) = slot.buffer.save(force)? {
+        let saved = slot.buffer.save(force)?;
+        let path = slot.buffer.path().to_owned();
+        if let Some(modified) = saved {
             self.tell_viewers(id, None, &BufferUpdate::Modified(modified));
         }
         log::info!("buffer {id} saved");
+        self.files_written(&path);
         self.saved_in_server(id);
         Ok(Response::Done)
     }
@@ -270,6 +273,87 @@ impl Daemon {
             self.close_if_unwanted(old);
         }
         Ok(Response::Done)
+    }
+
+    /// Has buffer `id` follow its file, which has moved to `to`, as a file
+    /// explorer moves it: it's closed in its language server, parser and
+    /// git, and opened in them again at its new path, as its language may
+    /// have changed with its name, and every client following it told.
+    pub(super) fn move_buffer(&mut self, id: BufferId, to: PathBuf, disk: crate::buffer::Restamp) {
+        let Some(slot) = self.buffers.get_mut(&id) else {
+            return;
+        };
+        let from = slot.buffer.path().to_owned();
+        let shown = to.display().to_string();
+        log::info!("buffer {id}: moved to {shown}");
+        slot.buffer.moved_to(to, disk);
+        let server = slot.server.take();
+        let git_dir = slot.git_dir.take();
+        let parsed = std::mem::take(&mut slot.parsed);
+        slot.compared = false;
+        slot.hunks = Hunks::new();
+        slot.highlights = Highlights::new();
+        let version = slot.buffer.version();
+        let end = slot.buffer.text().len_bytes();
+        if parsed && let Some(syntax) = &self.syntax {
+            syntax.close(key(id));
+        }
+        self.closed_in_server(&from, server);
+        self.closed_in_git(id, git_dir);
+        // What was said of it at its old path is unsaid, until it's said
+        // again at its new one.
+        let unsaid = [
+            BufferUpdate::Highlights {
+                version,
+                start: 0,
+                end,
+                spans: Vec::new(),
+            },
+            BufferUpdate::Diagnostics {
+                version,
+                diagnostics: Vec::new(),
+            },
+            BufferUpdate::Hunks {
+                version,
+                hunks: Vec::new(),
+            },
+            BufferUpdate::Moved(shown),
+        ];
+        for update in &unsaid {
+            self.tell_viewers(id, None, update);
+        }
+        self.parse_buffer(id);
+        self.open_in_server(id);
+        self.compare_buffer(id);
+    }
+
+    /// Has the panes showing buffer `old`, whose file buffer `new` has just
+    /// been moved over, show `new` instead, and closes `old`: in its
+    /// language server, parser and git too. One that got changes not
+    /// written meanwhile is kept, unseen, as `:q` keeps one, with its save
+    /// refused, its file having changed.
+    pub(super) fn replace_buffer(&mut self, old: BufferId, new: BufferId) {
+        if (self.buffers.get(&old)).is_some_and(|slot| slot.buffer.modified()) {
+            log::warn!("buffer {old}: written over with changes not written; kept");
+            return;
+        }
+        if self.workspaces.show_instead(old, new) {
+            self.workspaces_changed();
+        }
+        self.close_if_unwanted(old);
+    }
+
+    /// Has buffer `id`, whose file has been written over, read it again,
+    /// as an edit by the user, which can be undone. One with changes not
+    /// written is left as it is, its save refused, its file having
+    /// changed.
+    pub(super) fn reread_buffer(&mut self, id: BufferId) {
+        if (self.buffers.get(&id)).is_none_or(|slot| slot.buffer.modified()) {
+            return;
+        }
+        if let Err(err) = self.discard_buffer(id) {
+            log::warn!("buffer {id}: its file was written over and couldn't be read: {err}");
+        }
     }
 
     /// Closes `buffer` if no pane shows it and it has no changes to save.

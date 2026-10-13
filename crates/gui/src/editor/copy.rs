@@ -82,6 +82,8 @@ pub(crate) enum Heard {
     NothingToReverse { undo: bool },
     /// The language server answered the query numbered `id`.
     Answer { id: u64, answer: Answer },
+    /// Its file has moved, from the path it had.
+    Moved { from: String },
 }
 
 /// A window's copy of a buffer.
@@ -489,6 +491,9 @@ impl BufferCopy {
                 self.take_hunks(version, hunks);
                 Heard::Nothing
             }
+            BufferUpdate::Moved(path) => Heard::Moved {
+                from: std::mem::replace(&mut self.path, path),
+            },
         }
     }
 

@@ -94,7 +94,7 @@ impl Project {
     /// roots, short of the home directory itself. Outside the home
     /// directory, only a repository or a language server's project is: a
     /// directory such as `/` or `/proc` is no project to walk, and says so.
-    fn root(&self, home: &Path) -> Result<PathBuf, String> {
+    pub(crate) fn root(&self, home: &Path) -> Result<PathBuf, String> {
         let root = match self {
             Self::Root(root) if root.parent().is_some() => return Ok(root.clone()),
             Self::Root(root) => return Err(nowhere(root)),

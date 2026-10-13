@@ -22,6 +22,7 @@ mod command;
 mod desk;
 mod desktop;
 mod editor;
+mod explorer;
 mod finder;
 mod fonts;
 mod glyphs;

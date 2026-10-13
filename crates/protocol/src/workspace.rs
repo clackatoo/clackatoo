@@ -13,7 +13,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BufferId, NewAgent, NewTerminal, OpenFile, TerminalId};
+use crate::{BufferId, FilesId, NewAgent, NewTerminal, OpenFile, OpenFiles, TerminalId};
 
 /// Identifies a workspace within one daemon. Never reused while it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -116,6 +116,8 @@ pub enum Content {
     Terminal(TerminalId),
     /// A buffer: a file being edited. Several panes can show one.
     Buffer(BufferId),
+    /// A file explorer: a tree of a project's files. One pane shows each.
+    Files(FilesId),
 }
 
 impl From<TerminalId> for Content {
@@ -130,13 +132,19 @@ impl From<BufferId> for Content {
     }
 }
 
+impl From<FilesId> for Content {
+    fn from(files: FilesId) -> Self {
+        Self::Files(files)
+    }
+}
+
 impl Content {
     /// The terminal it is, if it's one.
     #[must_use]
     pub fn terminal(self) -> Option<TerminalId> {
         match self {
             Self::Terminal(terminal) => Some(terminal),
-            Self::Buffer(_) => None,
+            Self::Buffer(_) | Self::Files(_) => None,
         }
     }
 
@@ -145,7 +153,16 @@ impl Content {
     pub fn buffer(self) -> Option<BufferId> {
         match self {
             Self::Buffer(buffer) => Some(buffer),
-            Self::Terminal(_) => None,
+            Self::Terminal(_) | Self::Files(_) => None,
+        }
+    }
+
+    /// The file explorer it is, if it's one.
+    #[must_use]
+    pub fn files(self) -> Option<FilesId> {
+        match self {
+            Self::Files(files) => Some(files),
+            Self::Terminal(_) | Self::Buffer(_) => None,
         }
     }
 }
@@ -201,6 +218,8 @@ pub enum PaneTerminal {
     Agent(NewAgent),
     /// A file to edit.
     File(OpenFile),
+    /// A file explorer.
+    Files(OpenFiles),
 }
 
 impl Workspaces {

@@ -204,6 +204,27 @@ pub(crate) const fn sign(sign: Sign) -> (&'static str, Style) {
     (text, style)
 }
 
+/// The mark beside a file in an explorer git says something of, and how
+/// it's drawn: its letter, as `git status` writes it, in the colours of
+/// the signs beside lines, green for what's new, blue for what's changed
+/// and red for what's gone or in conflict.
+#[must_use]
+pub(crate) const fn git_mark(mark: clackatoo_protocol::GitMark) -> (&'static str, Style) {
+    use clackatoo_protocol::GitMark;
+    let (text, colour) = match mark {
+        GitMark::Modified => ("M", 4),
+        GitMark::Added => ("A", 2),
+        GitMark::Untracked => ("?", 2),
+        GitMark::Deleted => ("D", 1),
+        GitMark::Conflicted => ("!", 1),
+    };
+    let style = Style {
+        fg: Color::Indexed(colour),
+        ..Style::DEFAULT
+    };
+    (text, style)
+}
+
 /// How an editor's line numbers are drawn: faint, but the cursor's line in
 /// clackatoo's accent, so the eye finds it.
 #[must_use]

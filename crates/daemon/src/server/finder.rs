@@ -197,7 +197,7 @@ impl Daemon {
     /// Where a search from `pane` looks: the project of the file it shows,
     /// as its language server sees it, or else of its program's working
     /// directory, or the home directory.
-    fn project(&mut self, pane: Option<PaneId>) -> Project {
+    pub(super) fn project(&mut self, pane: Option<PaneId>) -> Project {
         let home = &self.config.home;
         let content = pane.and_then(|pane| self.workspaces.check_pane(pane).ok());
         match content {
@@ -214,6 +214,10 @@ impl Daemon {
                     .and_then(|pack| pack.server.clone());
                 Project::File { path, server }
             }
+            Some(Content::Files(files)) => match self.files_root(files) {
+                Some(root) => Project::Root(root.to_owned()),
+                None => Project::Dir(home.clone()),
+            },
             Some(Content::Terminal(_)) => {
                 let dir = pane.and_then(|pane| self.working_directory(pane));
                 Project::Dir(dir.map_or_else(|| home.clone(), PathBuf::from))

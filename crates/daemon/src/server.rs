@@ -31,8 +31,8 @@ use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine, HistoryLines,
     Line, LinkTarget, NewAgent, NodeId, PROTOCOL_VERSION, Pane, PaneId, PaneTerminal, Patch,
-    Request, Response, ServerMessage, Side, Size, TerminalId, TerminalInfo, TerminalStatus, Udp,
-    View, ViewUpdate, WorkspaceId,
+    Request, Response, ServerMessage, Side, Size, TabId, TerminalId, TerminalInfo, TerminalStatus,
+    Udp, View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_syntax::{Languages, Syntax};
 use clackatoo_term::{Damage, Terminal};
@@ -56,6 +56,7 @@ use crate::workspaces::WorkspaceState;
 
 mod buffers;
 mod clipboard;
+mod explorers;
 mod finder;
 mod language;
 mod offers;
@@ -64,6 +65,7 @@ mod rename;
 mod signs;
 
 use buffers::BufferSlot;
+use explorers::Explorers;
 use finder::Finds;
 use language::{Pipe, ServerId, Servers};
 use offers::Installs;
@@ -107,6 +109,8 @@ enum Source {
     Server(ServerId, Pipe),
     /// The inotify instance watching repositories' indexes.
     Index,
+    /// The inotify instance watching the directories explorers show.
+    Files,
     Client(Client),
     Carrier(Carrier),
 }
@@ -421,6 +425,8 @@ pub struct Daemon {
     renames: rename::Renames,
     /// The finder's searches going on.
     finds: Finds,
+    /// File explorers, and the directories expanded in them.
+    explorers: Explorers,
     /// Buffers being compared with the files' text in their repositories,
     /// and the indexes watched.
     signs: Signs,
@@ -542,6 +548,7 @@ impl Daemon {
             installs: Installs::new(config.declined.as_deref()),
             renames: rename::Renames::default(),
             finds,
+            explorers: Explorers::default(),
             signs: Signs::default(),
             piece_questions: pieces::PieceQuestions::default(),
             clipboard_asks: 0,
@@ -578,6 +585,7 @@ impl Daemon {
     ) -> Result<Self, HandoverError> {
         let chats = std::mem::take(&mut handover.state.chats);
         let buffers = std::mem::take(&mut handover.state.buffers);
+        let explorers = std::mem::take(&mut handover.state.explorers);
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
@@ -608,6 +616,7 @@ impl Daemon {
             daemon.buffers.insert(id, slot);
             daemon.parse_buffer(id);
         }
+        daemon.resume_files(state.next_files, explorers);
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
                 Ok(orphan) => daemon.watch_orphan(orphan),
@@ -672,6 +681,7 @@ impl Daemon {
                 _ => None,
             })
             .collect();
+        let (next_files, explorers) = self.hand_over_files();
         Ok(Handover {
             state: handover::State {
                 listener,
@@ -685,6 +695,8 @@ impl Daemon {
                 buffers: (self.buffers.iter())
                     .map(|(id, slot)| slot.buffer.hand_over(id.0))
                     .collect(),
+                next_files,
+                explorers,
             },
             fds,
         })
@@ -741,8 +753,11 @@ impl Daemon {
                 let idle = self.next_idle_stop();
                 let retry = self.next_retry();
                 let clipboard = self.next_clipboard_timeout();
-                let next = (compaction.into_iter().chain(quic).chain(idle).chain(retry))
+                let explore = self.next_explore();
+                let next = (compaction.into_iter().chain(quic).chain(idle))
+                    .chain(retry)
                     .chain(clipboard)
+                    .chain(explore)
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
             } else {
@@ -772,6 +787,7 @@ impl Daemon {
             self.take_renames();
             self.ask_again();
             self.take_found();
+            self.explore();
             self.stop_idle_servers();
             self.compact_scrollbacks();
             self.time_out_clipboard_asks();
@@ -826,6 +842,7 @@ impl Daemon {
                     }
                 },
                 Some(Source::Index) => self.read_index_changes(),
+                Some(Source::Files) => self.read_files_changes(),
                 Some(Source::Client(_)) => self.serve_client(token),
                 Some(Source::Carrier(_)) => self.serve_carrier(token, event),
                 None => {}
@@ -1195,6 +1212,9 @@ impl Daemon {
             PaneTerminal::File(file) => {
                 return self.open_buffer(file, beside).map(Content::Buffer);
             }
+            PaneTerminal::Files(open) => {
+                return self.new_files(open, beside).map(Content::Files);
+            }
         };
         Ok(Content::Terminal(terminal))
     }
@@ -1210,6 +1230,7 @@ impl Daemon {
                 let dir = self.buffers.get(&buffer)?.buffer.dir();
                 Some(dir.display().to_string())
             }
+            Content::Files(files) => Some(self.files_root(files)?.display().to_string()),
         }
     }
 
@@ -1220,6 +1241,7 @@ impl Daemon {
             match pane.content {
                 Content::Terminal(terminal) => self.close_terminal(terminal)?,
                 Content::Buffer(buffer) => self.close_buffer_pane(pane.id, buffer),
+                Content::Files(files) => self.close_files_pane(pane.id, files),
             }
         }
         Ok(Response::Done)
@@ -1248,6 +1270,21 @@ impl Daemon {
         let pane = self.workspaces.new_tab(workspace, content);
         self.workspaces_changed();
         Ok(Response::PaneCreated(pane))
+    }
+
+    fn split_tab(
+        &mut self,
+        tab: TabId,
+        side: Side,
+        terminal: PaneTerminal,
+        share: Option<u16>,
+    ) -> Result<Response, Error> {
+        self.workspaces.check_tab(tab)?;
+        let beside = (self.workspaces.get().find_tab(tab)).map(|(_, tab)| tab.focused);
+        let content = self.pane_content(terminal, beside)?;
+        let new = self.workspaces.split_tab(tab, side, content, share);
+        self.workspaces_changed();
+        Ok(Response::PaneCreated(new))
     }
 
     fn split(
@@ -1692,7 +1729,9 @@ impl Daemon {
                 | ClientMessage::Find { .. }
                 | ClientMessage::StopFinding { .. }
                 | ClientMessage::Stage { .. }
-                | ClientMessage::Clipboard { .. }) => {
+                | ClientMessage::Clipboard { .. }
+                | ClientMessage::Files { .. }
+                | ClientMessage::FileOp { .. }) => {
                     self.serve_unanswered(token, message);
                     continue;
                 }
@@ -1751,6 +1790,8 @@ impl Daemon {
             ClientMessage::Clipboard { terminal, id, text } => {
                 self.clipboard_answered(token, terminal, id, text.as_deref());
             }
+            ClientMessage::Files { files, action } => self.serve_files(token, files, action),
+            ClientMessage::FileOp { id, op } => self.serve_file_op(token, id, op),
             other => log::error!("{other:?} is answered"),
         }
     }
@@ -1910,7 +1951,8 @@ impl Daemon {
             | Request::CloseTab { .. }
             | Request::CloseWorkspace { .. }
             | Request::ResizeSplit { .. }
-            | Request::OpenHere { .. }) => self.respond_about_workspaces(request, token),
+            | Request::OpenHere { .. }
+            | Request::SplitTab { .. }) => self.respond_about_workspaces(request, token),
             Request::CarryQuic => self.carry_quic(token),
             Request::AttachBuffer { buffer } => {
                 self.attach_buffer(token, buffer).map(|()| Response::Done)
@@ -1920,6 +1962,8 @@ impl Daemon {
                 Ok(Response::Done)
             }
             Request::Save { buffer, force } => self.save_buffer(buffer, force),
+            Request::AttachFiles { files } => self.attach_files(token, files),
+            Request::DetachFiles { files } => Ok(self.detach_files(token, files)),
             Request::Discard { buffer } => self.discard_buffer(buffer),
             request @ (Request::Install { .. } | Request::Decline { .. }) => {
                 self.respond_about_installs(token, request);
@@ -1954,12 +1998,22 @@ impl Daemon {
                 side,
                 terminal,
             } => self.split(pane, side, terminal),
+            Request::SplitTab {
+                tab,
+                side,
+                terminal,
+                share,
+            } => self.split_tab(tab, side, terminal, share),
             Request::ClosePane { pane } => match self.workspaces.check_pane(pane)? {
                 Content::Terminal(terminal) => {
                     self.close_terminal(terminal).map(|()| Response::Done)
                 }
                 Content::Buffer(buffer) => {
                     self.close_buffer_pane(pane, buffer);
+                    Ok(Response::Done)
+                }
+                Content::Files(files) => {
+                    self.close_files_pane(pane, files);
                     Ok(Response::Done)
                 }
             },
@@ -2126,6 +2180,7 @@ impl Daemon {
             self.forget_queries(token, None);
             self.installs.forget(token);
             self.forget_finds(token);
+            self.forget_files_viewer(token);
             self.forget_stages(token, None);
             self.forget_piece_questions(token, None);
             if let Link::Quic(handle) = client.link

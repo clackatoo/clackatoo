@@ -200,6 +200,10 @@ pub enum BufferUpdate {
     /// ready, after a snapshot, and with nothing in it once the server
     /// stops.
     Features(ServerFeatures),
+    /// The buffer's file has moved to this path, made absolute, as a file
+    /// explorer moving it, or a directory it's in, does. Its text and
+    /// history are as they were.
+    Moved(String),
 }
 
 /// What a buffer's language server does as you type, as it said when it

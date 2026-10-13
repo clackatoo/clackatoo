@@ -16,6 +16,7 @@ mod agent;
 mod buffer;
 mod chat;
 pub mod client;
+mod explorer;
 mod find;
 mod git;
 mod handover;
@@ -82,6 +83,10 @@ pub struct DaemonConfig {
     /// in place, so a test can act while it's under way. `None`, but in
     /// tests.
     pub rename_gate: Option<PathBuf>,
+    /// The home trash, as the freedesktop.org trash spec has it, where
+    /// files deleted on its file system go. `None` has none: files there
+    /// can only be deleted for good.
+    pub trash: Option<PathBuf>,
 }
 
 /// How long a language server is kept with no files open in it, unless
@@ -149,6 +154,7 @@ impl DaemonConfig {
             declined: languages_dir().map(|dir| dir.with_file_name("declined")),
             server_idle: DEFAULT_SERVER_IDLE,
             rename_gate: None,
+            trash: data_dir().map(|dir| dir.join("Trash")),
         }
     }
 }
@@ -158,11 +164,16 @@ impl DaemonConfig {
 /// installed beside it, in `servers`.
 #[must_use]
 pub fn languages_dir() -> Option<PathBuf> {
+    Some(data_dir()?.join("clackatoo/languages"))
+}
+
+/// Where programs keep their data: `$XDG_DATA_HOME`, or else
+/// `~/.local/share`.
+fn data_dir() -> Option<PathBuf> {
     let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-    let data = non_empty("XDG_DATA_HOME")
+    non_empty("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
-    Some(data.join("clackatoo/languages"))
+        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".local/share")))
 }
 
 /// A port, or a range of them.

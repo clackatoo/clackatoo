@@ -40,6 +40,7 @@
 
 mod buffer;
 mod chat;
+mod files;
 mod find;
 pub mod frame;
 mod view;
@@ -65,6 +66,10 @@ pub use chat::{
 pub use clackatoo_text::{
     Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
 };
+pub use files::{
+    Entry, EntryKind, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate, GitMark,
+    OpenFiles,
+};
 pub use find::{Done, Found, FoundBuffer, FoundLine, Search};
 pub use view::{
     CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, LinkTarget, Links, Node,
@@ -77,7 +82,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 43;
+pub const PROTOCOL_VERSION: u32 = 44;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -209,6 +214,24 @@ pub enum ClientMessage {
         /// What's on the clipboard.
         text: Option<String>,
     },
+    /// Asks something of a file explorer the client attached to, such as
+    /// to list a directory. Not answered: what comes of it comes in
+    /// [`Event::Files`]s.
+    Files {
+        /// The explorer.
+        files: FilesId,
+        /// What to do.
+        action: FilesAction,
+    },
+    /// Asks the daemon to make, move, copy or delete files. Not answered
+    /// as a request is, since it may take a while: how it went comes as
+    /// an [`Event::FileOp`] numbered `id`.
+    FileOp {
+        /// The client's number for it, which the answer gives back.
+        id: u64,
+        /// What to do.
+        op: FileOp,
+    },
 }
 
 /// Everything the daemon sends.
@@ -293,6 +316,21 @@ pub enum Event {
         id: u64,
         /// Which clipboard.
         selection: Selection,
+    },
+    /// A file explorer the client attached to has something to show.
+    Files {
+        /// The explorer.
+        files: FilesId,
+        /// What.
+        update: FilesUpdate,
+    },
+    /// The client's [`ClientMessage::FileOp`] numbered `id` is done, or
+    /// wasn't, saying why.
+    FileOp {
+        /// Its number.
+        id: u64,
+        /// How it went.
+        outcome: Result<(), FileOpError>,
     },
 }
 
@@ -545,6 +583,34 @@ pub enum Request {
         /// working directory.
         file: OpenFile,
     },
+    /// Starts sending a file explorer: its [`FilesUpdate::Root`], then what
+    /// the client asks for with [`ClientMessage::Files`]. Attaching twice
+    /// sends the root again.
+    AttachFiles {
+        /// The explorer.
+        files: FilesId,
+    },
+    /// Stops sending a file explorer, collapsing everything the client
+    /// expanded in it.
+    DetachFiles {
+        /// The explorer.
+        files: FilesId,
+    },
+    /// Puts a new pane along one edge of a tab, as long as the tab, as a
+    /// file explorer goes down its left. Answered with
+    /// [`Response::PaneCreated`].
+    SplitTab {
+        /// The tab.
+        tab: TabId,
+        /// Which edge.
+        side: Side,
+        /// What the new pane shows.
+        terminal: PaneTerminal,
+        /// Its share of the tab's width or height, in thousandths, from 1
+        /// to 999. `None` gives it as much as each of the parts beside it
+        /// has, as a split does.
+        share: Option<u16>,
+    },
 }
 
 /// How to start a terminal.
@@ -720,6 +786,9 @@ pub enum Error {
     /// The pane doesn't show a file.
     #[error("pane {0} shows no file")]
     NotAFile(PaneId),
+    /// No file explorer has this ID. It may have been closed.
+    #[error("no file explorer {0}")]
+    NoSuchFiles(FilesId),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while

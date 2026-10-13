@@ -80,7 +80,7 @@ pub(crate) use marks::{FilePlace, Marks};
 pub(crate) use panel::Line as PanelLine;
 use panel::Panel;
 pub(crate) use panel::PanelView;
-use pattern::{Matching, Pattern};
+pub(crate) use pattern::{Matching, Pattern};
 pub(crate) use pieces::GiveUp;
 use preview::Preview;
 use registers::Wrote;
@@ -3422,7 +3422,7 @@ impl Editor {
                     self.signed(answer);
                 }
             }
-            Heard::Nothing => {}
+            Heard::Nothing | Heard::Moved { .. } => {}
         }
         // A new text, or the window's own undo, closes the panel, as an
         // edit typed does, and the menu.
@@ -4408,7 +4408,7 @@ impl Editor {
 
 /// The strokes `press` makes: the text it types, in insert mode or a
 /// search, or the key.
-fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
+pub(crate) fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
     if enters_normal_mode(press) {
         return vec![Stroke::Escape];
     }
