@@ -304,19 +304,19 @@ fn the_window_looks_for_a_release_at_most_once_a_day() {
     );
 
     // A newer release, found the next day.
-    releases.publish(&Fake::new("2026.10.2", &key), true);
+    releases.publish(&Fake::new("9999.2.0", &key), true);
     let next_day = tomorrow + Duration::from_hours(25);
     assert_eq!(
         newer(&releases.source(), next_day).unwrap(),
-        Some("2026.10.2".parse().unwrap())
+        Some("9999.2.0".parse().unwrap())
     );
 
     // A clock put back asks again rather than trusting a look "from the
     // future".
-    releases.publish(&Fake::new("2026.10.3", &key), true);
+    releases.publish(&Fake::new("9999.3.0", &key), true);
     assert_eq!(
         newer(&releases.source(), now).unwrap(),
-        Some("2026.10.3".parse().unwrap())
+        Some("9999.3.0".parse().unwrap())
     );
 }
 
