@@ -63,6 +63,9 @@ enum Pending {
     Setting(TerminalId),
     /// A session made only to learn the agent's settings.
     Probe,
+    /// The end of the session of the chat in this terminal, which it
+    /// opens again only once the agent has answered.
+    Closing(TerminalId),
     /// Nothing waits for the answer.
     Ignored,
 }
@@ -89,6 +92,9 @@ pub(crate) enum Incoming {
         session: String,
         update: Box<SessionUpdate>,
     },
+    /// The session the chat in `terminal` let go has ended, or the agent
+    /// couldn't end it: either way, it can be opened again.
+    Closed { terminal: TerminalId },
     /// The chat in `terminal` finished answering a message.
     Answered {
         terminal: TerminalId,
@@ -269,6 +275,21 @@ impl Agent {
                 &json!({ "sessionId": session }),
             );
         }
+    }
+
+    /// Ends `session`, which the chat in `terminal` lets go while it's
+    /// idle, as [`close_session`](Self::close_session) does. Says whether
+    /// it asked: the chat waits for the answer (see [`Incoming::Closed`])
+    /// before opening it again.
+    pub(crate) fn park_session(&mut self, terminal: TerminalId, session: &str) -> bool {
+        if self.can_close {
+            self.request(
+                Pending::Closing(terminal),
+                "session/close",
+                &json!({ "sessionId": session }),
+            );
+        }
+        self.can_close
     }
 
     /// Answers a [`Incoming::Permission`]: the option picked, or `None`
@@ -483,6 +504,12 @@ impl Agent {
                         .map_err(|err| format!("the agent's answer made no sense: {err}"))
                 }),
             }),
+            Pending::Closing(terminal) => {
+                if let Err(err) = &result {
+                    log::warn!("agent: chat {terminal}'s session couldn't be ended: {err}");
+                }
+                incoming.push(Incoming::Closed { terminal });
+            }
             Pending::Session(_) | Pending::Probe | Pending::Ignored => {}
         }
     }
@@ -503,9 +530,10 @@ impl Agent {
     /// terminals: a session, or the answer to a message.
     pub(crate) fn waiting(&self) -> impl Iterator<Item = TerminalId> + '_ {
         self.pending.values().filter_map(|pending| match pending {
-            Pending::Session(terminal) | Pending::Prompt(terminal) | Pending::Setting(terminal) => {
-                Some(*terminal)
-            }
+            Pending::Session(terminal)
+            | Pending::Prompt(terminal)
+            | Pending::Setting(terminal)
+            | Pending::Closing(terminal) => Some(*terminal),
             Pending::Initialize | Pending::Probe | Pending::Ignored => None,
         })
     }
@@ -559,8 +587,9 @@ impl Default for Opening {
 /// asking it: those that need the user's say ask in the chat themselves.
 /// Without `task`, Claude Code is told not to use its Task tool, under
 /// both its names: `Agent`, as Claude Code calls it now, and `Task`, as
-/// it was called before, which Claude Code still reads as `Agent`. The
-/// tools the chat's limits rule out are taken away too. Other agents
+/// it was called before, which Claude Code still reads as `Agent`. A chat
+/// with limits is given only the built-in tools they leave, and no MCP
+/// servers but clackatoo's; those they rule out are taken away too. Other agents
 /// ignore what's said to Claude Code.
 fn session_params(cwd: &str, opening: Opening) -> Value {
     let Opening {
@@ -579,6 +608,12 @@ fn session_params(cwd: &str, opening: Opening) -> Value {
     }
     if !disallowed.is_empty() {
         options.insert("disallowedTools".to_owned(), json!(disallowed));
+    }
+    if let Some(allowed) = limits.claude_allowed() {
+        options.insert("tools".to_owned(), json!(allowed));
+        // No MCP servers from the user's settings, which could do what
+        // the chat can't: only clackatoo's, given with the session.
+        options.insert("strictMcpConfig".to_owned(), json!(true));
     }
     let mut params = json!({ "cwd": cwd, "mcpServers": Vec::from_iter(tools) });
     if !options.is_empty() {

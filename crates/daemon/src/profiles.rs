@@ -34,11 +34,13 @@ use clackatoo_protocol::SettingChoice;
 ///
 /// Where they hold:
 ///
-/// - Claude Code is told, as its session opens, that the tools they rule
-///   out don't exist (`disallowedTools`): that holds.
-/// - Codex starts read-only chats in its Read-only mode, whose sandbox
-///   holds; it has no mode without commands, so `NoCommands` is only
-///   asked of it.
+/// - Claude Code is given, as its session opens, only the built-in tools
+///   they leave (`tools`), with those they rule out taken away as well
+///   (`disallowedTools`), and no MCP servers but clackatoo's
+///   (`strictMcpConfig`): that holds.
+/// - Codex starts chats with either in its Read-only mode, whose sandbox
+///   holds: it has no mode that edits without running commands, and in
+///   its others, sandboxed commands run without asking.
 /// - For every agent, clackatoo refuses writes through ACP's file system,
 ///   refuses its own tools that run or type commands, and turns down the
 ///   agent's questions about tools that would edit or run, which is
@@ -82,24 +84,71 @@ impl Limits {
         self == Self::ReadOnly
     }
 
-    /// Claude Code's tools it rules out, by their names: its Task tool
-    /// too, under both its names, as its helpers could do what the chat
-    /// can't.
+    /// Claude Code's built-in tools it leaves, by their names, if it
+    /// rules any out: an allow-list, so a tool newer than this build
+    /// (such as one that runs a command for it to watch) is ruled out
+    /// too. `None` leaves them all.
+    pub(crate) fn claude_allowed(self) -> Option<&'static [&'static str]> {
+        const READING: [&str; 6] = ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite"];
+        const EDITING: [&str; 10] = [
+            "Read",
+            "Glob",
+            "Grep",
+            "WebFetch",
+            "WebSearch",
+            "TodoWrite",
+            "Edit",
+            "MultiEdit",
+            "Write",
+            "NotebookEdit",
+        ];
+        match self {
+            Self::None => None,
+            Self::NoCommands => Some(&EDITING),
+            Self::ReadOnly => Some(&READING),
+        }
+    }
+
+    /// Claude Code's tools it rules out, by their names, as well as
+    /// leaving only [`claude_allowed`](Self::claude_allowed): its Task
+    /// tool too, under both its names, as its helpers could do what the
+    /// chat can't, and the tools that run commands or other agents for it.
     pub(crate) fn claude_tools(self) -> &'static [&'static str] {
+        const COMMANDS: [&str; 11] = [
+            "Bash",
+            "BashOutput",
+            "KillShell",
+            "Monitor",
+            "PowerShell",
+            "Agent",
+            "Task",
+            "Workflow",
+            "CronCreate",
+            "ScheduleWakeup",
+            "EnterWorktree",
+        ];
+        const CHANGES: [&str; 16] = [
+            "Bash",
+            "BashOutput",
+            "KillShell",
+            "Monitor",
+            "PowerShell",
+            "Agent",
+            "Task",
+            "Workflow",
+            "CronCreate",
+            "ScheduleWakeup",
+            "EnterWorktree",
+            "ExitWorktree",
+            "Edit",
+            "MultiEdit",
+            "Write",
+            "NotebookEdit",
+        ];
         match self {
             Self::None => &[],
-            Self::NoCommands => &["Bash", "BashOutput", "KillShell", "Agent", "Task"],
-            Self::ReadOnly => &[
-                "Bash",
-                "BashOutput",
-                "KillShell",
-                "Agent",
-                "Task",
-                "Edit",
-                "MultiEdit",
-                "Write",
-                "NotebookEdit",
-            ],
+            Self::NoCommands => &COMMANDS,
+            Self::ReadOnly => &CHANGES,
         }
     }
 
@@ -295,19 +344,25 @@ pub(crate) fn parse(
     Ok(())
 }
 
-/// The choice among `choices` that `wanted` names: by its value, or else
-/// its name, or else the first whose value or name has it in, ignoring
-/// case, so `haiku` picks "Haiku 5.5" and `luna` picks `gpt-6-luna`.
+/// The choice `wanted` names, among `choices`: by its value, or else its
+/// name, or else the one choice whose value or name has it in, ignoring
+/// case. With several that have it in, as `opus` in "Opus" and "Opus
+/// (1M context)", or none, it's none: the agent's own choice stands,
+/// rather than one that may cost more than the profile meant.
 pub(crate) fn pick<'a>(choices: &'a [SettingChoice], wanted: &str) -> Option<&'a SettingChoice> {
     let lower = wanted.to_lowercase();
-    (choices.iter().find(|choice| choice.value == wanted))
+    if let Some(exact) = (choices.iter().find(|choice| choice.value == wanted))
         .or_else(|| (choices.iter()).find(|choice| choice.name.eq_ignore_ascii_case(wanted)))
-        .or_else(|| {
-            (choices.iter()).find(|choice| {
-                choice.value.to_lowercase().contains(&lower)
-                    || choice.name.to_lowercase().contains(&lower)
-            })
-        })
+    {
+        return Some(exact);
+    }
+    let mut partly = (choices.iter()).filter(|choice| {
+        choice.value.to_lowercase().contains(&lower) || choice.name.to_lowercase().contains(&lower)
+    });
+    match (partly.next(), partly.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -334,6 +389,16 @@ mod tests {
         assert_eq!(pick(&choices, "opus 5.5").unwrap().value, "default");
         assert_eq!(pick(&choices, "luna").unwrap().value, "gpt-6-luna");
         assert_eq!(pick(&choices, "sonnet"), None);
+        // Two with it in: neither, rather than one that may cost more.
+        let opus = [
+            choice("opus", "Opus"),
+            choice("opus[1m]", "Opus (1M context)"),
+        ];
+        assert_eq!(pick(&opus, "opus").unwrap().value, "opus");
+        assert_eq!(pick(&opus, "OPUS").unwrap().value, "opus");
+        assert_eq!(pick(&opus, "op"), None);
+        let efforts = [choice("high", "High"), choice("xhigh", "Extra high")];
+        assert_eq!(pick(&efforts, "high").unwrap().value, "high");
     }
 
     #[test]
@@ -344,6 +409,21 @@ mod tests {
         assert!(Limits::ReadOnly.claude_tools().contains(&"Write"));
         assert!(Limits::NoCommands.claude_tools().contains(&"Bash"));
         assert!(Limits::None.claude_tools().is_empty());
+        assert_eq!(Limits::None.claude_allowed(), None);
+        let reading = Limits::ReadOnly.claude_allowed().unwrap();
+        assert!(reading.contains(&"Read") && !reading.contains(&"Write"));
+        assert!(
+            !reading
+                .iter()
+                .any(|tool| Limits::ReadOnly.claude_tools().contains(tool))
+        );
+        let editing = Limits::NoCommands.claude_allowed().unwrap();
+        assert!(editing.contains(&"Write") && !editing.contains(&"Bash"));
+        assert!(
+            !editing
+                .iter()
+                .any(|tool| Limits::NoCommands.claude_tools().contains(tool))
+        );
         for limits in [Limits::None, Limits::NoCommands, Limits::ReadOnly] {
             assert_eq!(Limits::named(limits.name()), Some(limits));
         }

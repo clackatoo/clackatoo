@@ -8662,8 +8662,14 @@ fn a_profile_gives_a_chat_its_role_model_and_limits_and_agents_toml_adds_profile
     );
     assert!(
         words.contains(
-            r#""disallowedTools":["Bash","BashOutput","KillShell","Agent","Task","Edit""#
+            r#""disallowedTools":["Bash","BashOutput","KillShell","Monitor","PowerShell","Agent","Task","#
         ),
+        "{words}"
+    );
+    // Only reading tools, and no MCP servers but clackatoo's.
+    assert!(words.contains(r#""strictMcpConfig":true"#), "{words}");
+    assert!(
+        words.contains(r#""tools":["Read","Glob","Grep","WebFetch","WebSearch","TodoWrite"]"#),
         "{words}"
     );
     let file = daemon.dir.path().join("notes.txt");

@@ -493,6 +493,7 @@ impl Daemon {
                 self.write_for_agent((agent, name), &session, &request, &path, &content);
                 return;
             }
+            Incoming::Closed { terminal } => return self.parked_session_ended(terminal, name),
             Incoming::Answered { terminal, result } => {
                 let Some(chat) = self.chat(terminal) else {
                     return;
@@ -518,11 +519,11 @@ impl Daemon {
                     }
                     return;
                 };
-                // About clackatoo's own tools, which ask the user
-                // themselves, or ruled out by the chat's limits: answered
-                // at once.
-                let answered = (chat.about_own_tools(&tool, &options))
-                    .or_else(|| chat.turned_down(&tool, &options));
+                // Ruled out by the chat's limits, or about clackatoo's own
+                // tools, which ask the user themselves: answered at once.
+                // Limits first, so nothing passing as ours gets past them.
+                let answered = (chat.turned_down(&tool, &options))
+                    .or_else(|| chat.about_own_tools(&tool, &options));
                 if let Some(option) = answered {
                     if let Some(slot) = self.agents.running.get_mut(&agent) {
                         slot.agent.answer_permission(&request, Some(&option));
@@ -884,6 +885,18 @@ impl Daemon {
         self.park_idle();
     }
 
+    /// The session the chat `terminal` let go with the agent `name` has
+    /// ended: it opens it again if a message came meanwhile.
+    /// A chat that moved to another agent since isn't waiting.
+    fn parked_session_ended(&mut self, terminal: TerminalId, name: &str) {
+        let Some(chat) = self.chat(terminal).filter(|chat| chat.agent() == name) else {
+            return;
+        };
+        let actions = chat.session_closed();
+        self.act(terminal, actions);
+        self.collect_damage(terminal);
+    }
+
     /// The chat `chat`, an agent's, lets its session go in a while if
     /// `idle`, having finished in the background; or else keeps it.
     pub(super) fn park_later(&mut self, chat: TerminalId, idle: bool) {
@@ -923,11 +936,22 @@ impl Daemon {
                 continue;
             }
             let Some(session) = self.chat(chat).and_then(HostedChat::park) else {
+                // Still open, kept by something waiting on it, as a
+                // suggestion to install: it's let go once that's done, or
+                // tried again in a while if nothing says so.
+                let open = (self
+                    .terminals
+                    .get(&chat)
+                    .and_then(|slot| slot.terminal.chat_ref()))
+                .is_some_and(HostedChat::is_connected);
+                self.park_later(chat, open);
                 continue;
             };
             log::info!("chat {chat}: its session is let go while it's idle in the background");
-            if let Some(slot) = self.agents.running.get_mut(&agent) {
-                slot.agent.close_session(&session);
+            let asked = (self.agents.running.get_mut(&agent))
+                .is_some_and(|slot| slot.agent.park_session(chat, &session));
+            if !asked && let Some(parked) = self.chat(chat) {
+                parked.parked_without_closing();
             }
             self.flush_agent(agent);
         }

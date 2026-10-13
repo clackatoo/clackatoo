@@ -426,6 +426,18 @@ impl Daemon {
         self.review_stale(&chats, false);
     }
 
+    /// Whether chat `chat`'s agent changed lines the user hasn't reviewed,
+    /// in a file open or not, or has comments waiting for it: closing it
+    /// would lose what reviewing them needs.
+    pub(super) fn awaits_review(&self, chat: TerminalId) -> bool {
+        let unreviewed = |hunks: &AgentHunks| {
+            (hunks.all().iter()).any(|hunk| hunk.chat == chat.0 && !hunk.reviewed)
+        };
+        (self.buffers.values()).any(|slot| unreviewed(&slot.agents))
+            || (self.reviews.closed.values()).any(|closed| unreviewed(&closed.hunks))
+            || (self.reviews.comments.get(&chat)).is_some_and(|comments| !comments.is_empty())
+    }
+
     /// Forgets the comments waiting for chat `chat`, which has closed,
     /// noting how many weren't sent, for its reviews to say.
     pub(super) fn chat_closed_in_review(&mut self, chat: TerminalId) {

@@ -225,8 +225,8 @@ impl Daemon {
                  lead to {MAX_CAUSED}: start fewer"
             ));
         }
-        if starts.is_empty() {
-            return None;
+        if let Tool::SendToChat { chat: to, .. } = tool {
+            return self.wakes_too_many(*to);
         }
         if own.relations().depth >= MAX_DEPTH {
             return Some(format!(
@@ -268,6 +268,28 @@ impl Daemon {
             ));
         }
         self.unstartable(own.agent(), starts)
+    }
+
+    /// Why a message can't go to the chat `to`, if it can't: it would wake
+    /// an idle chat an agent started, which counts towards those working
+    /// at once, as a new one would, with as many working already.
+    fn wakes_too_many(&self, to: TerminalId) -> Option<String> {
+        let wakes = (self.chat_ref(to)).is_some_and(|target| {
+            target.relations().parent.is_some()
+                && !target.is_answering()
+                && target.relations().inbox.is_empty()
+        });
+        let working = (self.terminals.values())
+            .filter_map(|slot| slot.terminal.chat_ref())
+            .filter(|other| other.relations().parent.is_some())
+            .filter(|other| other.is_answering() || !other.relations().inbox.is_empty())
+            .count();
+        (wakes && working >= MAX_STARTED).then(|| {
+            format!(
+                "{MAX_STARTED} chats started by agents are working already: wait for one with \
+                 wait_for_chat before messaging another"
+            )
+        })
     }
 
     /// Why one of `starts`, chats a chat whose agent is `own` asks to
@@ -341,18 +363,27 @@ impl Daemon {
                 Some(asked("send", &new.prompt, &then))
             }
             Tool::StartChats(news) => {
+                // What each chat is, and where, goes outside what the agent
+                // wrote, which is quoted, so no message can pass for
+                // another chat: messages only say which chat they're for.
                 let mut outside = false;
                 let mut each = String::new();
+                let mut places = Vec::new();
                 for (number, new) in news.iter().enumerate() {
                     let (title, dir, out) = self.start_place(chat, new)?;
                     outside |= out;
                     let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
+                    places.push(format!(
+                        "{}. {title}, as {}, in {}",
+                        number + 1,
+                        visible(profile),
+                        visible(&dir.display().to_string())
+                    ));
                     let _ = write!(
                         each,
-                        "{}{}. {title}, as {profile}, in {}: {}",
+                        "{}[to {}] {}",
                         if number == 0 { "" } else { "\n" },
                         number + 1,
-                        dir.display(),
                         new.prompt
                     );
                 }
@@ -360,7 +391,11 @@ impl Daemon {
                     return None;
                 }
                 let root = self.project_root(chat)?;
-                let mut then = format!("to {} new chats it starts", news.len());
+                let mut then = format!(
+                    "to {} new chats it starts ({})",
+                    news.len(),
+                    places.join("; ")
+                );
                 if outside {
                     let _ = write!(
                         then,
@@ -572,6 +607,9 @@ impl Daemon {
             let _ = writeln!(text, "[{first} earlier turns left out]");
         }
         text.push_str(&tail(&body, MAX_READ));
+        if target.relations().parent == Some(chat) && idle(target) {
+            target.told_parent(node.turns.len());
+        }
         if !target.relations().inbox.is_empty() {
             let _ = writeln!(
                 text,
@@ -696,6 +734,9 @@ impl Daemon {
         } else {
             "its last message"
         };
+        if !late && target.relations().parent == Some(chat) {
+            target.told_parent(index + 1);
+        }
         let number = clackatoo_protocol::turn_number(turns, index).unwrap_or(index + 1);
         let _ = writeln!(text, "Chat {to}'s answer to {whose}, turn {number}:");
         text.push_str(&head(&final_words(turn), MAX_READ));
@@ -968,6 +1009,76 @@ mod tests {
         // Closing one makes room.
         daemon.terminals.remove(&TerminalId(2));
         assert_eq!(daemon.talk_refused(a, &start), None);
+    }
+
+    /// A chat, `id`, that the chat `parent`, under the user's `root`, `depth`
+    /// deep, started, which has answered one message.
+    fn answered_chat(
+        daemon: &mut Daemon,
+        id: u32,
+        (parent, root, depth): (TerminalId, TerminalId, u8),
+    ) -> TerminalId {
+        let kid = idle_chat(daemon, id);
+        let chat = daemon.chat(kid).unwrap();
+        chat.started_by(parent, root, depth, None);
+        drop(chat.deliver(message(parent.0, "go")).unwrap());
+        chat.answered(Ok(agent_client_protocol_schema::v1::StopReason::EndTurn));
+        kid
+    }
+
+    #[test]
+    fn only_a_chat_whose_answer_was_had_with_nothing_hanging_on_it_closes_to_make_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = answered_chat(&mut daemon, 2, (a, a, 1));
+        // Its answer hasn't been had: it stays.
+        assert_eq!(daemon.closable(a), []);
+        drop(daemon.summary(a, &[b]));
+        assert_eq!(daemon.closable(a), [b]);
+        // One with a chat of its own going stays, and so does that one.
+        let c = idle_chat(&mut daemon, 3);
+        let kid = daemon.chat(c).unwrap();
+        kid.started_by(b, a, 2, None);
+        drop(kid.deliver(message(b.0, "dig")).unwrap());
+        assert_eq!(daemon.closable(a), []);
+        // Read in full by its parent, a chat's answer has been had too.
+        daemon.terminals.remove(&c);
+        let d = answered_chat(&mut daemon, 4, (a, a, 1));
+        daemon.read_chat(a, d, 5).unwrap();
+        assert_eq!(daemon.closable(a), [b, d]);
+    }
+
+    #[test]
+    fn a_chat_still_going_goes_to_the_chat_above_as_the_one_that_started_it_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let b = answered_chat(&mut daemon, 2, (a, a, 1));
+        let going = idle_chat(&mut daemon, 3);
+        let kid = daemon.chat(going).unwrap();
+        kid.started_by(b, a, 2, None);
+        drop(kid.deliver(message(b.0, "dig")).unwrap());
+        let done = answered_chat(&mut daemon, 4, (b, a, 2));
+        daemon.subagent_closed(b, Some(a));
+        assert_eq!(daemon.chat_ref(going).unwrap().relations().parent, Some(a));
+        assert!(daemon.chat_ref(a).unwrap().subagent(going).is_some());
+        assert!(daemon.chat_ref(done).is_none());
+    }
+
+    #[test]
+    fn a_message_waking_a_chat_an_agent_started_counts_towards_those_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        for id in 2..2 + u32::try_from(MAX_STARTED).unwrap() {
+            let kid = idle_chat(&mut daemon, id);
+            let chat = daemon.chat(kid).unwrap();
+            chat.started_by(a, a, 1, None);
+            drop(chat.deliver(message(a.0, "go")).unwrap());
+        }
+        let idle = answered_chat(&mut daemon, 9, (a, a, 1));
+        let refused = daemon.talk_refused(a, &send(idle)).unwrap();
+        assert!(refused.contains("are working already"), "{refused}");
+        // One already working takes more without waking.
+        assert_eq!(daemon.talk_refused(a, &send(TerminalId(2))), None);
     }
 
     #[test]

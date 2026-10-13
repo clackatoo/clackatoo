@@ -134,7 +134,23 @@ impl Daemon {
             })
             .map(|(&id, _)| id)
             .collect();
+        // One still going, or with changes waiting for review, goes to the
+        // chat above, if there is one, rather than lose its work: the
+        // user's own chat closing ends everything under it.
+        let above = parent.filter(|&parent| self.chat_ref(parent).is_some());
         for child in background {
+            let going = (self.chat_ref(child)).is_some_and(|kid| !super::talk::idle(kid));
+            if let Some(above) = above
+                && (going || self.awaits_review(child))
+                && let Some(kid) = self.chat(child)
+            {
+                log::info!(
+                    "chat {child} goes to chat {above}, as chat {chat}, which started it, closed"
+                );
+                kid.adopted_by(above);
+                self.note_subagent(child);
+                continue;
+            }
             log::info!("chat {child} closes with chat {chat}, which started it");
             if let Err(err) = self.close_terminal(child) {
                 log::warn!("chat {child} couldn't be closed: {err}");
@@ -161,21 +177,31 @@ impl Daemon {
     }
 
     /// The chats under the user's chat `root` that can close to make room
-    /// for new ones: in the background, finished, and asking nothing,
-    /// oldest first.
+    /// for new ones, oldest first: in the background, finished, asking
+    /// nothing, with no chats of their own, their answers had by the chat
+    /// that started them, and none of their changes waiting for review.
+    /// Closing one loses nothing anyone is waiting on.
     pub(super) fn closable(&self, root: TerminalId) -> Vec<TerminalId> {
         let workspaces = self.workspaces.get();
+        let parents: std::collections::HashSet<TerminalId> = (self.terminals.values())
+            .filter_map(|slot| slot.terminal.chat_ref()?.relations().parent)
+            .collect();
         let mut found: Vec<(u64, TerminalId)> = (self.terminals.iter())
             .filter_map(|(&id, slot)| {
                 let chat = slot.terminal.chat_ref()?;
                 let ours = chat.relations().root == Some(root) && chat.relations().parent.is_some();
                 let done = !chat.node().turns.is_empty()
+                    && super::talk::idle(chat)
                     && matches!(
                         chat.subagent_status(),
                         SubagentStatus::Done | SubagentStatus::Failed(_)
                     );
+                let spent = done
+                    && chat.parent_has_heard()
+                    && !parents.contains(&id)
+                    && !self.awaits_review(id);
                 let started = chat.node().turns.first().map_or(0, |turn| turn.sent);
-                (ours && done && workspaces.pane_showing(id).is_none()).then_some((started, id))
+                (ours && spent && workspaces.pane_showing(id).is_none()).then_some((started, id))
             })
             .collect();
         found.sort_unstable();
@@ -241,7 +267,7 @@ impl Daemon {
                     started += 1;
                     text.push_str(&said);
                 }
-                Err(why) if started == 0 && number == 0 => return Err(why),
+                Err(why) if started == 0 && number == 0 => return Err(format!("{text}{why}")),
                 Err(why) => {
                     let _ = write!(text, "Chat {} of these couldn't start: {why}", number + 1);
                 }
@@ -272,9 +298,13 @@ impl Daemon {
         let name =
             (new.agent.or_else(|| profile.agent.clone())).unwrap_or_else(|| own.agent().to_owned());
         let same = name == own.agent();
-        // It may do what the chat that starts it may, and no more.
+        // It may do what the chat that starts it may, and no more: with
+        // the same agent, it starts in the same mode; with another, in
+        // that agent's safest (see `HostedChat::connected`), and what the
+        // parent's mode rules out, such as Codex's Read-only or Claude
+        // Code's planning, holds as limits of its own.
         let mode = same.then(|| own.mode().map(str::to_owned)).flatten();
-        let limits = profile.limits.max(own.limits());
+        let limits = (profile.limits).max(own.limits()).max(own.mode_limits());
         let inherited = |kind| {
             (same && profile.inherit_model)
                 .then(|| own.setting_value(kind).map(str::to_owned))
@@ -287,7 +317,7 @@ impl Daemon {
             .or_else(|| inherited(SettingKind::Model)),
             effort: (profile.effort_for(&name).map(str::to_owned))
                 .or_else(|| inherited(SettingKind::Effort)),
-            read_only: limits.read_only(),
+            read_only: limits.no_commands(),
         };
         let role = role_for(&profile.name, &profile.prompt, limits);
         let (root, depth) = (own.relations().root.unwrap_or(chat), own.relations().depth);
@@ -456,6 +486,9 @@ impl Daemon {
             return text;
         }
         let answer = (turns.iter()).rfind(|turn| turn.switch.is_none() && turn.end.is_some());
+        if other.relations().parent == Some(chat) {
+            other.told_parent(turns.len());
+        }
         match answer.map(final_words) {
             Some(words) if !words.is_empty() => {
                 text.push_str(&head(&words, share));

@@ -222,6 +222,10 @@ enum Link {
     /// The server has been asked to open it.
     Opening,
     Open,
+    /// It was let go while idle, and the agent hasn't said it has ended:
+    /// a message waits for that before it's opened again, so the end
+    /// can't come after, and take the session it opened with it.
+    Closing,
 }
 
 /// A chat with an agent.
@@ -287,6 +291,17 @@ pub(crate) struct HostedChat {
     /// The settings it was started wanting, to choose as its first
     /// session opens.
     wanted: Option<Wanted>,
+    /// How many of its turns the chat that started it has had the answer
+    /// to, through `wait_for_chat(s)` or `read_chat`: a chat whose last
+    /// answer nobody has had is never closed to make room. Kept through
+    /// `&self`, as answers are read; not handed over, so after an upgrade
+    /// it's none, which errs on keeping chats.
+    told_parent: std::cell::Cell<usize>,
+    /// The tool calls whose input named clackatoo's MCP server as they
+    /// began, the latest few: a question about one is about our own tool,
+    /// whatever it's titled, and the agent can't make a command's input
+    /// say so.
+    own_tools: VecDeque<String>,
 }
 
 /// A session a chat had with another agent, which it can go back to.
@@ -423,6 +438,8 @@ impl HostedChat {
             heard: None,
             role: None,
             wanted: None,
+            told_parent: std::cell::Cell::new(0),
+            own_tools: VecDeque::new(),
         }
     }
 
@@ -802,6 +819,10 @@ impl HostedChat {
                 actions.push(self.prompt(prompt));
             }
             Link::Opening => self.queued = Some(prompt),
+            Link::Closing => {
+                self.queued = Some(prompt);
+                self.set_state(ChatState::Starting);
+            }
             Link::Closed => {
                 self.queued = Some(prompt);
                 self.link = Link::Opening;
@@ -834,6 +855,13 @@ impl HostedChat {
         self.relations.root = Some(root);
         self.relations.depth = depth;
         self.starting_mode = mode;
+    }
+
+    /// The chat that started it has closed, and `parent`, which started
+    /// that one, takes it on: its card is there now, and its tools reach
+    /// from there.
+    pub(crate) fn adopted_by(&mut self, parent: TerminalId) {
+        self.relations.parent = Some(parent);
     }
 
     /// The mode the agent is in, by its value, if it offers modes.
@@ -879,6 +907,18 @@ impl HostedChat {
         let prompt = relations::prompt_for(&message);
         self.begin(message.text, prompt, Some(message.from), &mut actions);
         actions
+    }
+
+    /// The chat that started it has had the answers to its first `turns`
+    /// turns.
+    pub(crate) fn told_parent(&self, turns: usize) {
+        self.told_parent.set(self.told_parent.get().max(turns));
+    }
+
+    /// Whether the chat that started it has had the answer to every turn
+    /// it has finished.
+    pub(crate) fn parent_has_heard(&self) -> bool {
+        self.told_parent.get() >= self.node.turns.len()
     }
 
     /// Whether a message has been sent and not yet answered.
@@ -947,7 +987,8 @@ impl HostedChat {
     pub(crate) fn connected(&mut self, opened: Opened) -> Vec<Action> {
         self.link = Link::Open;
         // Opening one again answers with no ID: it's the one asked for.
-        if !opened.session.is_empty() {
+        let fresh = !opened.session.is_empty();
+        if fresh {
             self.session = Some(opened.session);
         }
         if let Some(options) = &opened.settings {
@@ -956,7 +997,8 @@ impl HostedChat {
         if let Some(carry) = self.carry.take() {
             self.carry_settings(carry);
         }
-        if let Some(mode) = self.starting_mode.take()
+        let starting = self.starting_mode.take();
+        if let Some(mode) = starting.clone()
             && let Some(setting) = (self.node.settings.iter()).find(|setting| {
                 setting.kind == SettingKind::Mode
                     && setting.choices.iter().any(|choice| choice.value == mode)
@@ -964,10 +1006,26 @@ impl HostedChat {
             && !self.chosen.iter().any(|(id, _)| *id == setting.id)
         {
             self.chosen.push((setting.id.clone(), mode));
+        } else if starting.is_none()
+            && fresh
+            && self.relations.parent.is_some()
+            && let Some(setting) = self.setting_of(SettingKind::Mode)
+            && !self.chosen.iter().any(|(id, _)| *id == setting.id)
+            && let Some(safest) = setting.choices.first()
+        {
+            // A chat an agent started, with no mode of its parent's to
+            // start in, as with another agent: never the agent's own
+            // choice, which may let it do more than its parent could, but
+            // its safest, the first it offers, as Manual or Read-only.
+            let safest = (setting.id.clone(), safest.value.clone());
+            self.chosen.push(safest);
         }
-        if let Some(wanted) = self.wanted.take() {
-            self.choose_wanted(wanted);
-        }
+        // A chat that may run no commands opens each new session in its
+        // agent's read-only mode, where it has one, whether or not what it
+        // was started wanting came through an upgrade.
+        let mut wanted = self.wanted.take().unwrap_or_default();
+        wanted.read_only |= fresh && self.limits().no_commands();
+        self.choose_wanted(wanted);
         let mut actions = Vec::new();
         for (setting, value) in self.chosen.clone() {
             if chat_wide(&setting) {
@@ -1355,8 +1413,31 @@ impl HostedChat {
         if self.link != Link::Open || !idle {
             return None;
         }
-        self.link = Link::Closed;
+        self.link = Link::Closing;
         self.session.clone()
+    }
+
+    /// The agent wasn't asked to end the session [`park`](Self::park)
+    /// let go after all, as it can't: nothing to wait for.
+    pub(crate) fn parked_without_closing(&mut self) {
+        if self.link == Link::Closing {
+            self.link = Link::Closed;
+        }
+    }
+
+    /// The session [`park`](Self::park) let go has ended. Returns what
+    /// opens it again, if a message came meanwhile.
+    pub(crate) fn session_closed(&mut self) -> Vec<Action> {
+        if self.link != Link::Closing {
+            return Vec::new();
+        }
+        if self.queued.is_some() {
+            self.link = Link::Opening;
+            vec![Action::Connect]
+        } else {
+            self.link = Link::Closed;
+            Vec::new()
+        }
     }
 
     /// The chat's agent runs, but not from where clackatoo installs it:
@@ -1458,6 +1539,19 @@ impl HostedChat {
     /// at once, and the user isn't asked twice. Codex asks about every
     /// MCP tool call, as a call titled `mcp.clackatoo.TOOL`, with the
     /// server in its input; Claude Code is told not to ask.
+    /// Notes the tool call `id` as one of clackatoo's own if its `input`
+    /// names clackatoo's MCP server.
+    fn note_own_tool(&mut self, id: &str, input: Option<&Value>) {
+        /// How many are kept: more than run at once.
+        const KEPT: usize = 64;
+        if names_our_server(input) && !self.own_tools.iter().any(|own| own == id) {
+            if self.own_tools.len() == KEPT {
+                self.own_tools.pop_front();
+            }
+            self.own_tools.push_back(id.to_owned());
+        }
+    }
+
     pub(crate) fn about_own_tools(
         &self,
         tool: &ToolCallUpdate,
@@ -1467,14 +1561,22 @@ impl HostedChat {
         let title = (self.tool(&id).map(|tool| tool.title.clone()))
             .or_else(|| tool.fields.title.clone())
             .unwrap_or_default();
-        let input = tool.fields.raw_input.as_ref();
-        let server = input
-            .and_then(|input| input.get("server").or_else(|| input.get("serverName")))
-            .and_then(Value::as_str);
         let name = crate::mcp::SERVER_NAME;
-        let ours = server == Some(name)
-            || title.starts_with(&format!("mcp.{name}."))
-            || title.starts_with(&format!("mcp__{name}__"));
+        // A title is the agent's to word: Codex titles a command with the
+        // command itself. Only a tool that edits or runs nothing is known
+        // as ours by its title alone; one naming its server is ours.
+        let kind = (self.tool(&id).map(|tool| tool.kind))
+            .or_else(|| tool.fields.kind.map(tool_kind))
+            .unwrap_or_default();
+        let harmless = !matches!(
+            kind,
+            ToolKind::Edit | ToolKind::Delete | ToolKind::Move | ToolKind::Execute
+        );
+        let ours = names_our_server(tool.fields.raw_input.as_ref())
+            || self.own_tools.iter().any(|own| *own == id)
+            || harmless
+                && (title.starts_with(&format!("mcp.{name}."))
+                    || title.starts_with(&format!("mcp__{name}__")));
         if !ours || self.tools() == AgentTools::Off {
             return None;
         }
@@ -1633,6 +1735,7 @@ impl HostedChat {
             SessionUpdate::AgentThoughtChunk(chunk) => self.write(&chunk.content, true),
             SessionUpdate::ToolCall(call) => {
                 self.note_diffs(&call.tool_call_id.0, &call.content);
+                self.note_own_tool(&call.tool_call_id.0, call.raw_input.as_ref());
                 let tool = Tool {
                     id: call.tool_call_id.0.to_string(),
                     title: clean(&call.title),
@@ -1650,6 +1753,7 @@ impl HostedChat {
                 if let Some(content) = &update.fields.content {
                     self.note_diffs(&update.tool_call_id.0, content);
                 }
+                self.note_own_tool(&update.tool_call_id.0, update.fields.raw_input.as_ref());
                 let id = update.tool_call_id.0.to_string();
                 let known = self.tool(&id).cloned();
                 let mut tool = known.clone().unwrap_or(Tool {
@@ -2306,6 +2410,15 @@ fn writes_files(kind: ToolKind) -> bool {
         kind,
         ToolKind::Edit | ToolKind::Execute | ToolKind::Delete | ToolKind::Move | ToolKind::Other
     )
+}
+
+/// Whether a tool's `input` names clackatoo's MCP server, as an MCP tool
+/// call's does.
+fn names_our_server(input: Option<&Value>) -> bool {
+    input
+        .and_then(|input| input.get("server").or_else(|| input.get("serverName")))
+        .and_then(Value::as_str)
+        == Some(crate::mcp::SERVER_NAME)
 }
 
 fn tool_kind(kind: agent_client_protocol_schema::v1::ToolKind) -> ToolKind {
@@ -3013,6 +3126,23 @@ mod tests {
             chat.about_own_tools(&theirs.tool_call, &theirs.options),
             None
         );
+        // A command titled as one of ours, as Codex titles a command with
+        // its text, is still a command, and the user's to answer.
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"c",
+                "title":"mcp__clackatoo__list_terminals && rm -rf ~",
+                "kind":"execute","status":"pending","rawInput":{"command":["sh"]}}"#,
+        );
+        let posing: RequestPermissionRequest = serde_json::from_str(
+            r#"{"sessionId":"s","toolCall":{"toolCallId":"c","kind":"execute"},
+                "options":[{"optionId":"approved","name":"Allow","kind":"allow_once"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            chat.about_own_tools(&posing.tool_call, &posing.options),
+            None
+        );
     }
 
     #[test]
@@ -3417,6 +3547,94 @@ mod tests {
         let mut chat = super::tests::chat();
         moved_to_codex(&mut chat);
         assert_eq!(chat.setting_of(SettingKind::Mode).unwrap().value, "agent");
+    }
+
+    #[test]
+    fn a_parents_read_only_mode_holds_as_limits_and_a_chat_with_no_mode_to_start_in_starts_safest()
+    {
+        use crate::profiles::Limits;
+        let codex_in = |mode: &str| {
+            let mut settings = codex_settings();
+            settings[0] = serde_json::from_str(&format!(
+                r#"{{"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":"{mode}",
+                     "options":[{{"value":"read-only","name":"Read-only"}},{{"value":"agent","name":"Auto review"}}]}}"#
+            ))
+            .unwrap();
+            settings
+        };
+        let mut parent = chat_with("codex");
+        parent.connected(Opened {
+            session: "p".into(),
+            settings: Some(codex_in("read-only")),
+        });
+        assert_eq!(parent.mode_limits(), Limits::ReadOnly);
+        let mut parent = chat_with("codex");
+        parent.connected(Opened {
+            session: "p".into(),
+            settings: Some(codex_in("agent")),
+        });
+        assert_eq!(parent.mode_limits(), Limits::None);
+        // Claude Code's planning changes nothing either.
+        let mut planning = chat();
+        planning.connected(Opened {
+            session: "p".into(),
+            settings: Some(
+                serde_json::from_str(
+                    r#"[{"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":"plan",
+                         "options":[{"value":"default","name":"Manual"},{"value":"plan","name":"Plan"}]}]"#,
+                )
+                .unwrap(),
+            ),
+        });
+        assert_eq!(planning.mode_limits(), Limits::ReadOnly);
+
+        // Started by an agent, with no mode of its parent's to start in,
+        // as with another agent: its agent's safest, never its own choice.
+        let mut kid = chat_with("codex");
+        kid.started_by(TerminalId(7), TerminalId(7), 1, None);
+        let actions = kid.connected(Opened {
+            session: "k".into(),
+            settings: Some(codex_settings()),
+        });
+        let read_only = Action::Set {
+            setting: "mode".into(),
+            value: "read-only".into(),
+        };
+        assert!(actions.contains(&read_only), "{actions:?}");
+        // One that may run no commands opens every new session read-only,
+        // as Codex runs sandboxed commands without asking otherwise.
+        let mut kid = chat_with("codex");
+        kid.started_by(TerminalId(7), TerminalId(7), 1, Some("agent".into()));
+        kid.start_as("x", Limits::NoCommands, None, Wanted::default());
+        kid.wanted = None;
+        let actions = kid.connected(Opened {
+            session: "k".into(),
+            settings: Some(codex_settings()),
+        });
+        assert!(actions.contains(&read_only), "{actions:?}");
+    }
+
+    #[test]
+    fn a_session_let_go_is_opened_again_only_once_the_agent_has_ended_it() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        assert_eq!(chat.park().as_deref(), Some("s"));
+        // A message meanwhile waits: opening it now could cross the end.
+        assert_eq!(send(&mut chat, "more"), []);
+        assert_eq!(chat.session_closed(), [Action::Connect]);
+        assert_eq!(chat.session_closed(), []);
+        // With none meanwhile, the next message opens it.
+        let mut chat = super::tests::chat();
+        connect(&mut chat, "s");
+        chat.park();
+        assert_eq!(chat.session_closed(), []);
+        assert_eq!(send(&mut chat, "later"), [Action::Connect]);
+        // An agent that can't end sessions has nothing to wait for.
+        let mut chat = super::tests::chat();
+        connect(&mut chat, "s");
+        chat.park();
+        chat.parked_without_closing();
+        assert_eq!(send(&mut chat, "now"), [Action::Connect]);
     }
 
     #[test]

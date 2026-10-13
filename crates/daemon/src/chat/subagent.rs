@@ -30,7 +30,9 @@ pub(crate) struct Wanted {
     pub(crate) model: Option<String>,
     /// How hard it thinks.
     pub(crate) effort: Option<String>,
-    /// A mode called read-only, as Codex's is, if the agent has one.
+    /// A mode called read-only, as Codex's is, if the agent has one: for
+    /// a chat that may run no commands, as an agent whose commands run
+    /// without asking in a sandbox, as Codex's, has no mode between.
     pub(crate) read_only: bool,
 }
 
@@ -48,6 +50,30 @@ impl HostedChat {
             .find(|(id, _)| id == LIMITS_SETTING)
             .and_then(|(_, value)| Limits::named(value))
             .unwrap_or_default()
+    }
+
+    /// What its agent's mode rules out, as limits: a read-only mode, as
+    /// Codex's, or a planning one, as Claude Code's, changes nothing. A
+    /// chat it starts, which may have another agent and so not its mode,
+    /// keeps these as limits of its own.
+    pub(crate) fn mode_limits(&self) -> Limits {
+        let Some(setting) = self.setting_of(SettingKind::Mode) else {
+            return Limits::None;
+        };
+        let changes_nothing = |text: &str| {
+            matches!(
+                text.to_lowercase().replace([' ', '_'], "-").as_str(),
+                "read-only" | "readonly" | "plan"
+            )
+        };
+        let name = (setting.choices.iter())
+            .find(|choice| choice.value == setting.value)
+            .map_or("", |choice| choice.name.as_str());
+        if changes_nothing(&setting.value) || changes_nothing(name) {
+            Limits::ReadOnly
+        } else {
+            Limits::None
+        }
     }
 
     /// It's started as the profile `profile`, with `limits`: `role` goes
@@ -68,11 +94,11 @@ impl HostedChat {
         self.wanted = Some(wanted);
     }
 
-    /// A read-only chat moving to an agent it hasn't had a session with
-    /// is read-only there too, in its mode as well where it has one, as
-    /// Codex has.
+    /// A chat that may run no commands, moving to an agent it hasn't had
+    /// a session with, starts in that agent's read-only mode, where it has
+    /// one, as Codex has.
     pub(super) fn keep_read_only(&mut self) {
-        if self.limits().read_only() {
+        if self.limits().no_commands() {
             self.wanted = Some(Wanted {
                 read_only: true,
                 ..Wanted::default()
@@ -85,16 +111,28 @@ impl HostedChat {
     /// it, as a Claude model is to Codex.
     pub(super) fn choose_wanted(&mut self, wanted: Wanted) {
         let mut chosen = Vec::new();
+        let mut missing = Vec::new();
         for (kind, want) in [
             (SettingKind::Model, wanted.model),
             (SettingKind::Effort, wanted.effort),
         ] {
-            if let Some(want) = want
-                && let Some(setting) = self.setting_of(kind)
-                && let Some(choice) = profiles::pick(&setting.choices, &want)
-            {
-                chosen.push((setting.id.clone(), choice.value.clone()));
+            let Some(want) = want else { continue };
+            let Some(setting) = self.setting_of(kind) else {
+                continue;
+            };
+            match profiles::pick(&setting.choices, &want) {
+                Some(choice) => chosen.push((setting.id.clone(), choice.value.clone())),
+                None => missing.push(format!("{} {want:?}", setting.name.to_lowercase())),
             }
+        }
+        // Said, so the user sees why it's on the agent's own choice, which
+        // may cost more than the profile meant.
+        if !missing.is_empty() {
+            self.set_notice(Some(format!(
+                "{} offers no single {}, so it's on its own choice",
+                self.node.agent,
+                missing.join(" or ")
+            )));
         }
         if wanted.read_only
             && let Some(setting) = self.setting_of(SettingKind::Mode)
