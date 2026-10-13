@@ -407,6 +407,15 @@ pub(crate) struct Editor {
     virtual_text: bool,
     /// A column of signs says which lines have changed (`gitsigns`).
     signs: bool,
+    /// A column of its own colours the lines agents changed and haven't
+    /// been reviewed (`agentsigns`).
+    agent_signs: bool,
+    /// Who changed each line agents changed is written after it
+    /// (`:Blame`).
+    blame: bool,
+    /// The agents' column is shown, as of the last settle: while the file
+    /// has lines not reviewed, or under `:Blame`.
+    agent_column: bool,
     /// The columns marked down the pane, counting from 0 (`colorcolumn`).
     columns: Vec<usize>,
     /// How long lines wrap.
@@ -591,6 +600,9 @@ impl Editor {
             cursorline: options.cursorline,
             virtual_text: options.virtualtext,
             signs: options.gitsigns,
+            agent_signs: options.agentsigns,
+            blame: false,
+            agent_column: false,
             columns: columns(options),
             wrapping: Wrapping::of(options),
             case: Case::of(options),
@@ -745,6 +757,7 @@ impl Editor {
         self.cursorline = options.cursorline;
         self.virtual_text = options.virtualtext;
         self.signs = options.gitsigns;
+        self.agent_signs = options.agentsigns;
         self.columns = columns(options);
         let wrapping = Wrapping::of(options);
         if wrapping.on != self.wrapping.on {
@@ -3911,7 +3924,7 @@ impl Editor {
     fn follow(&mut self, copy: &BufferCopy) {
         self.resized = false;
         // The gutter first: the rows' width depends on it.
-        self.gutter = self.gutter_for(self.text(copy).lines());
+        self.place_gutter(copy);
         let text = self.text(copy);
         self.clamp_top(&text);
         let top = self.top.row(&text);
@@ -4011,7 +4024,7 @@ impl Editor {
         self.panel = None;
         self.actions = None;
         self.close_completion();
-        self.gutter = self.gutter_for(self.text(copy).lines());
+        self.place_gutter(copy);
         let text = self.text(copy);
         self.clamp_top(&text);
         let shown = wrap::view(
@@ -4061,10 +4074,46 @@ impl Editor {
         }
     }
 
-    /// The cells the signs take, left of the line numbers: one, while
-    /// they're on.
+    /// Works out the cells the signs and line numbers take now: with the
+    /// agents' column while the file has lines not reviewed, or under
+    /// `:Blame`.
+    fn place_gutter(&mut self, copy: &BufferCopy) {
+        self.agent_column = self.agent_signs && (self.blame || copy.agents().unreviewed());
+        self.gutter = self.gutter_for(self.text(copy).lines());
+    }
+
+    /// The cells the signs take, left of the line numbers: one for git's,
+    /// while they're on, and one for the agents', while it's shown.
     fn sign_cells(&self) -> usize {
-        usize::from(self.signs)
+        usize::from(self.signs) + usize::from(self.agent_column)
+    }
+
+    /// Writes who changed each line agents changed after it, or stops, as
+    /// `:Blame` toggles. Says which in the bar.
+    pub(crate) fn toggle_blame(&mut self) -> Done {
+        self.blame = !self.blame;
+        self.status = Some(if self.blame { "blame on" } else { "blame off" }.into());
+        Done::REDRAW
+    }
+
+    /// The agent hunk at the cursor's line, if any.
+    pub(crate) fn agent_hunk_here<'c>(
+        &self,
+        copy: &'c BufferCopy,
+    ) -> Option<&'c clackatoo_text::AgentHunk> {
+        copy.agent_at(usize::try_from(self.cursor.at.line).ok()?)
+    }
+
+    /// The cursor's line, counting from 0, and where it starts in the
+    /// text, for a comment on it.
+    pub(crate) fn line_here(&self, copy: &BufferCopy) -> (u64, usize) {
+        let line = self.cursor.at.line;
+        let text = copy.text();
+        let at = usize::try_from(line)
+            .ok()
+            .filter(|&line| line < text.len_lines())
+            .map_or(text.len_bytes(), |line| text.line_to_byte(line));
+        (line, at)
     }
 
     /// The cells line numbers take for a text of `lines` lines: the widest
@@ -4100,7 +4149,7 @@ impl Editor {
         if self.resized {
             self.follow(copy);
         }
-        self.gutter = self.gutter_for(self.text(copy).lines());
+        self.place_gutter(copy);
         // A preview's text, if one's shown, in place of the buffer's.
         let previewed = (self.preview.as_ref()).and_then(|preview| preview.text.clone());
         let text = match &previewed {
@@ -4171,20 +4220,9 @@ impl Editor {
                 None => copy.highlights().within(start, end),
             };
             laid.show(&mut builder, shown.start, cells, spans, diagnostics, start);
-            if let Some(diagnostic) = worst.filter(|_| self.virtual_text && shown.next.is_none()) {
-                // Two cells after the line's end, as much as fits:
-                // nothing, past the pane's edge.
-                let room = self.width.saturating_sub(builder.filled());
-                let text_end = laid.cells().saturating_sub(shown.start);
-                let gap =
-                    (self.gutter + shown.indent + text_end + 2).saturating_sub(builder.filled());
-                if gap < room {
-                    builder.push(&" ".repeat(gap), &Style::DEFAULT, true);
-                    let style = colors::virtual_text(diagnostic.severity);
-                    let message = diagnostic.message.lines().next().unwrap_or_default();
-                    builder.push("■ ", &style, true);
-                    builder.push(message, &style, true);
-                }
+            if shown.next.is_none() {
+                let end = self.gutter + shown.indent + laid.cells().saturating_sub(shown.start);
+                self.write_after_line(&mut builder, end, (line, *worst), copy);
             }
             rows.push(builder.finish(false));
         }
@@ -4260,6 +4298,21 @@ impl Editor {
             match copy.hunks().sign(text.rope(), at) {
                 Some(sign) => {
                     let (sign, style) = colors::sign(sign);
+                    builder.push(sign, &style, true);
+                }
+                None => builder.push(" ", &Style::DEFAULT, true),
+            }
+        }
+        if self.gutter > 0 && self.agent_column {
+            let at = usize::try_from(line).unwrap_or(usize::MAX);
+            match copy
+                .agent_at(at)
+                .filter(|hunk| self.blame || !hunk.reviewed)
+            {
+                Some(hunk) => {
+                    let top = at == 0 && hunk.start == 0;
+                    let (sign, style) =
+                        colors::agent_sign(hunk.chat, hunk.deleted(), top, hunk.reviewed);
                     builder.push(sign, &style, true);
                 }
                 None => builder.push(" ", &Style::DEFAULT, true),
@@ -4488,6 +4541,54 @@ impl Editor {
 
 /// The strokes `press` makes: the text it types, in insert mode or a
 /// search, or the key.
+impl Editor {
+    /// Writes after line `line`, whose last row ends at cell `end`, what's
+    /// wrong with it, the `worst` (`virtualtext`), or else under `:Blame`,
+    /// which chat's agent changed it, in which turn.
+    fn write_after_line(
+        &self,
+        builder: &mut RowBuilder,
+        end: usize,
+        (line, worst): (u64, Option<&Diagnostic>),
+        copy: &BufferCopy,
+    ) {
+        if let Some(diagnostic) = worst.filter(|_| self.virtual_text) {
+            let style = colors::virtual_text(diagnostic.severity);
+            let message = diagnostic.message.lines().next().unwrap_or_default();
+            after_line(builder, end, self.width, &[("■ ", style), (message, style)]);
+        } else if self.blame
+            && let Some(hunk) = copy.agent_at(usize::try_from(line).unwrap_or(usize::MAX))
+        {
+            let name = copy.chat_name(hunk.chat).unwrap_or("an agent");
+            let what = if hunk.deleted() {
+                "lines deleted by "
+            } else {
+                ""
+            };
+            let said = format!("{what}{name}, turn {}", hunk.turn + 1);
+            after_line(
+                builder,
+                end,
+                self.width,
+                &[(&said, colors::blame(hunk.chat))],
+            );
+        }
+    }
+}
+
+/// Writes `said` two cells after a line's end at cell `end` of a row
+/// `width` cells wide, as much as fits: nothing, past the pane's edge.
+fn after_line(builder: &mut RowBuilder, end: usize, width: usize, said: &[(&str, Style)]) {
+    let room = width.saturating_sub(builder.filled());
+    let gap = (end + 2).saturating_sub(builder.filled());
+    if gap < room {
+        builder.push(&" ".repeat(gap), &Style::DEFAULT, true);
+        for (text, style) in said {
+            builder.push(text, style, true);
+        }
+    }
+}
+
 pub(crate) fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
     if enters_normal_mode(press) {
         return vec![Stroke::Escape];

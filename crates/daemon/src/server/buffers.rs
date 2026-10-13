@@ -11,7 +11,7 @@ use clackatoo_protocol::{
     PaneId, Response, Resume, ServerMessage, frame,
 };
 use clackatoo_syntax::{Found, Highlighted, Syntax};
-use clackatoo_text::{Highlights, Hunks};
+use clackatoo_text::{AgentHunks, Highlights, Hunks, Maker};
 use mio::Token;
 
 use super::language::Opened;
@@ -39,6 +39,9 @@ pub(super) struct BufferSlot {
     /// the index, as of the last comparison, moved along with each edit
     /// since.
     pub(super) hunks: Hunks,
+    /// The lines agents have changed, and whether they've been reviewed,
+    /// moved along with each edit.
+    pub(super) agents: AgentHunks,
     /// Whether the directory its file is in is watched for changes.
     pub(super) watched: bool,
     /// Whether something other than an agent has changed its file on
@@ -85,6 +88,7 @@ impl BufferSlot {
             compared: false,
             git_dir: None,
             hunks: Hunks::new(),
+            agents: AgentHunks::new(),
             watched: false,
             outside: None,
             unreadable: None,
@@ -135,6 +139,7 @@ impl Daemon {
         self.next_buffer += 1;
         log::info!("buffer {id}: {}", buffer.path().display());
         self.buffers.insert(id, BufferSlot::new(buffer));
+        self.opened_in_review(id);
         self.parse_buffer(id);
         self.open_in_server(id);
         self.compare_buffer(id);
@@ -217,9 +222,21 @@ impl Daemon {
                 diagnostics: opened.diagnostics.all().to_vec(),
             });
         let features = self.server_features(id).map(BufferUpdate::Features);
+        // A window catching up may still have hunks gone meanwhile.
+        let resumed = matches!(snapshot, BufferUpdate::Resumed { .. });
         self.tell(token, id, snapshot);
         let hunks = self.hunks_update(id);
-        let after = (highlights.into_iter()).chain(diagnostics).chain(hunks);
+        let agents = self.agents_update(id).or_else(|| {
+            resumed.then_some(BufferUpdate::Agents {
+                version,
+                hunks: Vec::new(),
+                chats: Vec::new(),
+            })
+        });
+        let after = (highlights.into_iter())
+            .chain(diagnostics)
+            .chain(hunks)
+            .chain(agents);
         for update in after.chain(features) {
             self.tell(token, id, update);
         }
@@ -293,7 +310,7 @@ impl Daemon {
                 {
                     change.landed = Some(version);
                 }
-                self.edited(id, version, &edit);
+                self.edited(id, version, &edit, None);
                 let answer = if acked {
                     BufferUpdate::Acked { version, seq }
                 } else {
@@ -370,7 +387,21 @@ impl Daemon {
     /// Passes on an edit `author` made to buffer `id` in the daemon, as
     /// [`made_for_user`](Self::made_for_user) does.
     pub(super) fn made_by(&mut self, id: BufferId, made: Made, author: Author) {
-        self.edited(id, made.version, &made.edit);
+        self.pass_on(id, made, author, None);
+    }
+
+    /// Passes on an agent's own change to buffer `id`, by `maker`, as
+    /// [`made_by`](Self::made_by) does: the lines it changed become agent
+    /// hunks, which every window following the buffer is sent.
+    pub(super) fn made_by_agent(&mut self, id: BufferId, made: Made, maker: Maker) {
+        let author = Author::Agent(clackatoo_protocol::TerminalId(maker.chat));
+        self.pass_on(id, made, author, Some(maker));
+    }
+
+    /// Passes on an edit `author` made to buffer `id`, an agent's own
+    /// change if `agent` says who made it.
+    fn pass_on(&mut self, id: BufferId, made: Made, author: Author, agent: Option<Maker>) {
+        self.edited(id, made.version, &made.edit, agent);
         let update = BufferUpdate::Edited {
             version: made.version,
             edit: made.edit,
@@ -378,6 +409,9 @@ impl Daemon {
             answers: None,
         };
         self.tell_viewers(id, None, &update);
+        if agent.is_some() {
+            self.tell_agents(id);
+        }
         self.note_modified(id);
     }
 
@@ -497,8 +531,10 @@ impl Daemon {
         let unwanted = !self.workspaces.shows(buffer)
             && (self.buffers.get(&buffer)).is_some_and(|slot| !slot.buffer.modified());
         if unwanted {
-            // What agents changed in it outlives it, in the log.
+            // What agents changed in it outlives it, in the log, and its
+            // agent hunks in the reviews.
             self.buffer_closing(buffer);
+            self.closing_in_review(buffer);
         }
         if unwanted && let Some(slot) = self.buffers.remove(&buffer) {
             log::info!("buffer {buffer} closed: {}", slot.buffer.path().display());
@@ -549,10 +585,15 @@ impl Daemon {
 
     /// Tells buffer `id`'s server about `edit`, which made `version`, and
     /// moves its highlights and hunks along with it, having it parsed and
-    /// compared again.
-    fn edited(&mut self, id: BufferId, version: u64, edit: &Edit) {
+    /// compared again. An agent's own change, as `agent` says, makes agent
+    /// hunks; any other edit moves them.
+    fn edited(&mut self, id: BufferId, version: u64, edit: &Edit, agent: Option<Maker>) {
         self.edited_in_server(id, version, edit);
         self.edited_in_git(id, edit);
+        match agent {
+            Some(maker) => self.agent_edited(id, edit, maker),
+            None => self.edited_in_review(id, edit),
+        }
         let Some(slot) = self.buffers.get_mut(&id) else {
             return;
         };

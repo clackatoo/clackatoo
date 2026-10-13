@@ -25,14 +25,55 @@
 //! tab or with a mark beside; `Board` alone, or `Boards`, picks one in
 //! the finder.
 //!
+//! `Review` opens a review of what agents changed: of the chat's whole
+//! work (`chat`, the default), a turn (`turn`, the last, or `turn N`), or
+//! everything since the branch's base (`base`). `ReviewKeep` and
+//! `ReviewReject` keep or reject the agent's change at the cursor, or
+//! every one of its `file`, of a `turn` (its, or `turn N`), or `all`;
+//! `ReviewReject!` rejects what it can though some can't be. `ReviewSend`
+//! sends the comments waiting to the chat, and `Blame` writes who changed
+//! each line agents changed after it, or stops.
+//!
 //! A command with a range of lines before it, or Vim's for lines, `s`,
 //! `&`, `~`, `g`, `v`, `d`, `y`, `m`, `t` and `normal`, is the focused
 //! editor's (see `editor::ex`).
 
-use clackatoo_protocol::Side;
+use clackatoo_protocol::{ReviewScope, Side};
 
 use crate::editor::HunkAction;
 use crate::finder;
+
+/// A command about reviewing what agents changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewCommand {
+    /// `:Review`: a review of what agents changed, of this.
+    Open(ReviewScope),
+    /// `:ReviewKeep` or, unless `keep`, `:ReviewReject`, `force`d with
+    /// `!`: to the agent's changes `which` names.
+    Act {
+        keep: bool,
+        force: bool,
+        which: ReviewWhich,
+    },
+    /// `:ReviewSend`: the comments waiting go to the chat.
+    Send,
+    /// `:Blame`: who changed each line agents changed, after it, or not.
+    Blame,
+}
+
+/// Which of the agents' changes `:ReviewKeep` and `:ReviewReject` act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewWhich {
+    /// The one at the cursor.
+    Here,
+    /// Every one of the file at the cursor.
+    File,
+    /// Every one of this turn, from 0, or the turn of the one at the
+    /// cursor.
+    Turn(Option<u32>),
+    /// Every one in the focused review, or of the chat.
+    All,
+}
 
 /// What a command line asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +130,8 @@ pub(crate) enum Command {
     /// One of the focused editor's commands, for lines, as typed: `:s`,
     /// `:g`, `:d`, `:m` and their kin, with any range.
     Editor(String),
+    /// Reviewing what agents changed.
+    Review(ReviewCommand),
     /// `:Explore`: the tab's file explorer, rooted at this directory if
     /// given.
     Explore(Option<String>),
@@ -163,7 +206,8 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 /// The window's own commands, for messages.
 const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
                         update, w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, \
-                        Buffers, Diagnostics, Boards, Gitsigns, Explore, AgentUndo and AgentRedo";
+                        Buffers, Diagnostics, Boards, Gitsigns, Explore, AgentUndo, AgentRedo, \
+                        Review, ReviewKeep, ReviewReject, ReviewSend and Blame";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -190,7 +234,10 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
         _ => {}
     }
-    if let Some(command) = file_command(word, argument).or_else(|| agent_undo(word, argument)) {
+    let command = (file_command(word, argument))
+        .or_else(|| agent_undo(word, argument))
+        .or_else(|| review_command(word, argument));
+    if let Some(command) = command {
         return command;
     }
     if crate::editor::is_editor_command(line) {
@@ -361,6 +408,61 @@ fn place(word: &str) -> (Place, &str) {
         (Place::Beside(Side::Below), rest)
     } else {
         (Place::Tab, word)
+    }
+}
+
+/// A command about reviewing, if `word` is one, with `argument` after it,
+/// or why it means nothing.
+fn review_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
+    let command = match word {
+        "Review" => review_scope(argument).map(ReviewCommand::Open),
+        "ReviewSend" => Ok(ReviewCommand::Send),
+        "Blame" => Ok(ReviewCommand::Blame),
+        "ReviewKeep" | "ReviewReject" | "ReviewReject!" => {
+            review_which(argument).map(|which| ReviewCommand::Act {
+                keep: word == "ReviewKeep",
+                force: word.ends_with('!'),
+                which,
+            })
+        }
+        _ => return None,
+    };
+    Some(command.map(Command::Review))
+}
+
+/// What `:Review`'s `argument` asks to review.
+fn review_scope(argument: Option<&str>) -> Result<ReviewScope, String> {
+    let words: Vec<&str> = argument.unwrap_or_default().split_whitespace().collect();
+    match words[..] {
+        [] | ["chat"] => Ok(ReviewScope::Chat),
+        ["base"] => Ok(ReviewScope::Base),
+        ["turn"] => Ok(ReviewScope::Turn(None)),
+        ["turn", number] => Ok(ReviewScope::Turn(Some(turn_number(number)?))),
+        _ => Err("Review takes chat, turn, turn N or base".to_owned()),
+    }
+}
+
+/// Which of the agents' changes `:ReviewKeep` and `:ReviewReject`'s
+/// `argument` names.
+fn review_which(argument: Option<&str>) -> Result<ReviewWhich, String> {
+    let words: Vec<&str> = argument.unwrap_or_default().split_whitespace().collect();
+    match words[..] {
+        [] => Ok(ReviewWhich::Here),
+        ["file"] => Ok(ReviewWhich::File),
+        ["all"] => Ok(ReviewWhich::All),
+        ["turn"] => Ok(ReviewWhich::Turn(None)),
+        ["turn", number] => Ok(ReviewWhich::Turn(Some(turn_number(number)?))),
+        _ => Err("it takes file, turn, turn N or all".to_owned()),
+    }
+}
+
+/// A turn's number, counting from 1, as its index, from 0.
+fn turn_number(number: &str) -> Result<u32, String> {
+    match number.parse::<u32>() {
+        Ok(number) if number > 0 => Ok(number - 1),
+        _ => Err(format!(
+            "{number:?} isn't a turn's number, which counts from 1"
+        )),
     }
 }
 
@@ -615,6 +717,53 @@ mod tests {
         assert_eq!(
             parse("update desk ").unwrap(),
             Command::Update(Some("desk".into()))
+        );
+    }
+
+    #[test]
+    fn review_commands_name_a_scope_or_which_changes() {
+        assert_eq!(
+            parse("Review").unwrap(),
+            Command::Review(ReviewCommand::Open(ReviewScope::Chat))
+        );
+        assert_eq!(
+            parse("Review base").unwrap(),
+            Command::Review(ReviewCommand::Open(ReviewScope::Base))
+        );
+        assert_eq!(
+            parse("Review turn 2").unwrap(),
+            Command::Review(ReviewCommand::Open(ReviewScope::Turn(Some(1))))
+        );
+        assert_eq!(
+            parse("Review turn").unwrap(),
+            Command::Review(ReviewCommand::Open(ReviewScope::Turn(None)))
+        );
+        assert!(parse("Review everything").is_err());
+        let act = |keep, force, which| Command::Review(ReviewCommand::Act { keep, force, which });
+        assert_eq!(
+            parse("ReviewKeep").unwrap(),
+            act(true, false, ReviewWhich::Here)
+        );
+        assert_eq!(
+            parse("ReviewKeep file").unwrap(),
+            act(true, false, ReviewWhich::File)
+        );
+        assert_eq!(
+            parse("ReviewReject! turn 3").unwrap(),
+            act(false, true, ReviewWhich::Turn(Some(2)))
+        );
+        assert_eq!(
+            parse("ReviewReject all").unwrap(),
+            act(false, false, ReviewWhich::All)
+        );
+        assert!(parse("ReviewKeep turn 0").is_err());
+        assert_eq!(
+            parse("ReviewSend").unwrap(),
+            Command::Review(ReviewCommand::Send)
+        );
+        assert_eq!(
+            parse("Blame").unwrap(),
+            Command::Review(ReviewCommand::Blame)
         );
     }
 }

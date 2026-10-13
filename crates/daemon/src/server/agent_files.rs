@@ -322,6 +322,13 @@ impl Daemon {
             let after = file.saved().to_string();
             let dropped =
                 (self.agent_files.log).note_text(&maker, &path, before.as_deref(), Some(&after));
+            let written = file.disk();
+            self.agent_changed_file(
+                &path,
+                (before.as_deref(), Some(&after)),
+                maker.hunks(),
+                written,
+            );
             self.refresh_files(chat, dropped.into_iter().chain([turn]));
         }
         self.agent_files
@@ -565,8 +572,12 @@ impl Daemon {
                 Seen::Absent => Some(None),
                 Seen::Unreadable => None,
             });
+        let mut read_as = None;
         let disk = match buffer::read(path) {
-            Ok((text, _)) => Some(buffer::lf(text)),
+            Ok((text, stamp)) => {
+                read_as = Some(stamp);
+                Some(buffer::lf(text))
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
             // Not to be taken for gone: if it can't be read by the turn's
             // end, what was done to it isn't known.
@@ -605,6 +616,8 @@ impl Daemon {
                     before.as_deref(),
                     disk.as_deref(),
                 );
+                let texts = (before.as_deref(), disk.as_deref());
+                self.agent_changed_file(path, texts, maker.hunks(), read_as);
                 if let Some(capture) = (self.agent_files.captures.iter_mut())
                     .find(|capture| capture.chat == chat && capture.path == path)
                 {
@@ -674,7 +687,7 @@ impl Daemon {
         };
         let change = (id, made.version, edit_bytes(&made.edit));
         let dropped = (self.agent_files.log).note_buffer(maker, path, change, existed);
-        self.made_by(id, made, Author::Agent(maker.chat));
+        self.made_by_agent(id, made, maker.hunks());
         self.refresh_files(maker.chat, dropped.into_iter().chain([maker.turn]));
     }
 

@@ -318,6 +318,11 @@ options! {
     /// gitsigns.nvim shows them. Kept for every file while it's on, so the
     /// text doesn't move when the first change comes.
     gitsigns("gs"): bool = true;
+    /// A column of its own, right of git's signs, colouring the lines an
+    /// agent changed that you haven't reviewed, in a colour for each
+    /// chat. It shows only while a file has such lines, or `:Blame` is
+    /// on.
+    agentsigns("as"): bool = true;
     /// How wide a file explorer down the tab's left opens, in cells, as
     /// `<Space>e` and `:Explore` open it. It keeps its share of the tab as
     /// the window resizes.

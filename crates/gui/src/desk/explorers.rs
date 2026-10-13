@@ -151,7 +151,8 @@ impl Desk {
         }
     }
 
-    /// Lays out the rows of the explorers in the tab shown.
+    /// Lays out the rows of the explorers in the tab shown, and of the
+    /// reviews.
     pub(crate) fn settle_explorers(&mut self) {
         let Some(tab) = self.shown_tab() else { return };
         let shown: Vec<PaneId> = tab.layout.panes().iter().map(|pane| pane.id).collect();
@@ -160,6 +161,7 @@ impl Desk {
                 explorer.settle();
             }
         }
+        self.settle_reviews();
     }
 
     /// Forgets what was attached and asked, as a new connection does.
@@ -287,6 +289,20 @@ impl Desk {
             self.explorer_asked(pane, ask);
         }
         redraw
+    }
+
+    /// Stops the macro being recorded, if `press` is `q` in the focused
+    /// review and one is, as in an explorer. Returns whether it did.
+    pub(super) fn stop_recording_in_review(&mut self, press: &KeyPress<'_>) -> bool {
+        let quiet = self
+            .focused_review()
+            .is_some_and(|review| !review.pending());
+        let q = crate::keymap::Chord::of(press) == Some(crate::keymap::Chord::typed('q'));
+        if quiet && q && self.recording().is_some() {
+            self.shared_mut().registers.stop_recording();
+            return true;
+        }
+        false
     }
 
     /// Stops the macro being recorded, if `press` is `q` in the focused
@@ -461,7 +477,7 @@ impl Desk {
 
     /// The pane of the tab `beside` is in that last had the focus and that
     /// `wanted` takes, if any.
-    fn recent_in_tab(
+    pub(super) fn recent_in_tab(
         &self,
         beside: PaneId,
         wanted: impl Fn(&Self, PaneId) -> bool,

@@ -455,7 +455,7 @@ fn base_text(tracked: &Tracked) -> Option<&str> {
 /// git, to run in `dir`, reading nothing, seeing no repository but the
 /// one `dir` is in, and taking none of the locks it can do without, so
 /// reading never writes the index it's watched for.
-fn git(dir: &Path) -> Command {
+pub(crate) fn git(dir: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .current_dir(dir)
@@ -515,6 +515,52 @@ pub(crate) fn output_within(command: &mut Command, patience: Duration) -> Option
             }
         }
     };
+    let read = reader.join().ok()?.ok()?;
+    status
+        .filter(std::process::ExitStatus::success)
+        .map(|_| read)
+}
+
+/// What git printed, given `input` on its standard input, if it ran and
+/// succeeded within `patience`, as [`output_within`] has it.
+pub(crate) fn output_fed(
+    command: &mut Command,
+    input: Vec<u8>,
+    patience: Duration,
+) -> Option<Vec<u8>> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| log::debug!("git didn't run: {err}"))
+        .ok()?;
+    // Written and read at once, so neither pipe fills and holds git up.
+    let mut stdin = child.stdin.take()?;
+    let writer = thread::spawn(move || std::io::Write::write_all(&mut stdin, &input));
+    let mut stdout = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut read = Vec::new();
+        std::io::Read::read_to_end(&mut stdout, &mut read).map(|_| read)
+    });
+    let deadline = Instant::now() + patience;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            Ok(None) => {
+                log::warn!("git took longer than {patience:?}: stopped");
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Err(err) => {
+                log::debug!("waiting for git failed: {err}");
+                break None;
+            }
+        }
+    };
+    let _ = writer.join();
     let read = reader.join().ok()?.ok()?;
     status
         .filter(std::process::ExitStatus::success)

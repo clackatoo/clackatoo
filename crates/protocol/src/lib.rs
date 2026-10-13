@@ -44,6 +44,7 @@ mod chat;
 mod files;
 mod find;
 pub mod frame;
+mod review;
 mod view;
 mod workspace;
 
@@ -69,13 +70,17 @@ pub use chat::{
     Turn, TurnEnd, TurnFiles, TurnFilesState, Usage,
 };
 pub use clackatoo_text::{
-    Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
+    AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
 };
 pub use files::{
     Entry, EntryKind, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate, GitMark,
     OpenFiles,
 };
 pub use find::{Done, Found, FoundBuffer, FoundLine, Search};
+pub use review::{
+    ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewComment, ReviewFile,
+    ReviewHunk, ReviewId, ReviewList, ReviewScope,
+};
 pub use view::{
     CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, LinkTarget, Links, Node,
     NodeId, Patch, Run, View, ViewUpdate,
@@ -87,7 +92,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 61;
+pub const PROTOCOL_VERSION: u32 = 62;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -364,6 +369,14 @@ pub enum Event {
         board: BoardId,
         /// What.
         update: BoardUpdate,
+    },
+    /// A review the client attached to has a new list: all of it, in
+    /// place of the last.
+    Review {
+        /// The review.
+        review: ReviewId,
+        /// What it lists.
+        list: ReviewList,
     },
 }
 
@@ -694,6 +707,22 @@ pub enum Request {
     /// so a window on another machine can say when the two differ.
     /// Answered with [`Response::Text`].
     Version,
+    /// Starts sending a review: its list, then the list again whenever it
+    /// changes, in [`Event::Review`]s. Attaching twice sends it again.
+    AttachReview {
+        /// The review.
+        review: ReviewId,
+    },
+    /// Stops sending a review.
+    DetachReview {
+        /// The review.
+        review: ReviewId,
+    },
+    /// Keeps or rejects what agents changed, or comments on it for the
+    /// agent (see [`ReviewAction`]). Answered with [`Response::Reviewed`],
+    /// saying how it went, or an [`Error::Review`] saying why nothing was
+    /// done.
+    Review(ReviewAction),
 }
 
 /// How to start a terminal.
@@ -790,6 +819,8 @@ pub enum Response {
         /// changing. New connections only ever come through a carrier.
         udp: Option<Udp>,
     },
+    /// Answers [`Request::Review`]: what was done, to say in the bar.
+    Reviewed(String),
 }
 
 /// Where a daemon takes QUIC packets over UDP, and how a client finds out
@@ -911,6 +942,12 @@ pub enum Error {
     /// or another daemon keeps them, or they're turned off.
     #[error("{0}")]
     Boards(String),
+    /// No review has this ID. It may have been closed.
+    #[error("no review {0}")]
+    NoSuchReview(ReviewId),
+    /// What was asked of reviewing couldn't be done, and why: nothing was.
+    #[error("{0}")]
+    Review(String),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while

@@ -100,6 +100,8 @@ enum Asked {
     Explorer(Option<String>),
     /// Something for the tutor's lesson.
     Lesson(lessons::Serial, lessons::LessonAsked),
+    /// Something asked of reviewing, whose answer is said in the bar.
+    Reviewed,
 }
 
 mod bindings;
@@ -114,6 +116,7 @@ mod lessons;
 mod links;
 mod macros;
 mod offers;
+mod reviews;
 mod script;
 mod settings;
 mod updating;
@@ -130,7 +133,7 @@ struct Input {
 }
 
 /// What's typed in the palette is for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Purpose {
     /// A command, after `:`.
     Command,
@@ -140,6 +143,29 @@ enum Purpose {
     RenameTab(TabId),
     /// A workspace to switch to, or the name of one to make.
     Workspace,
+    /// A comment on a line, for the agent of chat `chat`.
+    Comment {
+        chat: TerminalId,
+        place: clackatoo_protocol::CommentPlace,
+    },
+}
+
+impl Purpose {
+    /// What the palette says it's for, above what's typed, and the
+    /// prefix written before it.
+    fn label(&self) -> (Option<String>, &'static str) {
+        let label = match self {
+            Self::Command => return (None, ":"),
+            Self::RenameWorkspace(_) => "Rename workspace".to_owned(),
+            Self::RenameTab(_) => "Rename tab".to_owned(),
+            Self::Workspace => "Workspace".to_owned(),
+            Self::Comment { place, .. } => {
+                let file = place.path.rsplit('/').next().unwrap_or(&place.path);
+                format!("Comment on {file}:{}", place.line)
+            }
+        };
+        (Some(label), "")
+    }
 }
 
 /// How long a pane stays lit when it turns down a key it can't send.
@@ -218,6 +244,8 @@ pub(crate) struct Desk {
     explorers: explorers::Explorers,
     /// Panes showing boards.
     boards: boards::Boards,
+    /// Reviews of what agents changed.
+    reviews: reviews::Reviews,
     /// The macros being typed, and what's noted of keys pressed for the
     /// one being recorded.
     macros: macros::Macros,
@@ -437,6 +465,9 @@ impl Desk {
         if let Some(board) = self.focused_board() {
             return Some(board.title());
         }
+        if let Some(review) = self.focused_review() {
+            return Some(review.title());
+        }
         let terminal = self.focused_terminal()?;
         let title = self.panes.get(&terminal)?.title()?;
         (!title.is_empty()).then_some(title)
@@ -490,12 +521,7 @@ impl Desk {
     /// and scroll position.
     pub(crate) fn status(&self) -> Status {
         if let Some(input) = &self.input {
-            let (label, prefix) = match input.purpose {
-                Purpose::Command => (None, ":"),
-                Purpose::RenameWorkspace(_) => (Some("Rename workspace"), ""),
-                Purpose::RenameTab(_) => (Some("Rename tab"), ""),
-                Purpose::Workspace => (Some("Workspace"), ""),
-            };
+            let (label, prefix) = input.purpose.label();
             let choices = match input.purpose {
                 Purpose::Workspace => {
                     let mut choices: Vec<(String, bool)> = self
@@ -513,7 +539,7 @@ impl Desk {
                 _ => Vec::new(),
             };
             return Status::Typing {
-                label: label.map(str::to_owned),
+                label,
                 text: format!("{prefix}{}▏", input.text),
                 choices,
             };
@@ -616,6 +642,7 @@ impl Desk {
                 Content::Buffer(_) => self.editor_title(pane.id),
                 Content::Files(_) => self.explorer(pane.id).map(crate::explorer::Explorer::title),
                 Content::Board(_) => self.board(pane.id).map(crate::board::BoardPane::title),
+                Content::Review(_) => self.review(pane.id).map(crate::review::Review::title),
             })
             .map(str::trim)
             .filter(|title| !title.is_empty())
@@ -799,8 +826,9 @@ impl Desk {
         let left_editor = self
             .shown
             .and_then(|left| self.editor_in_normal_mode(left.pane));
-        let left_explorer = (self.shown)
-            .is_some_and(|left| self.is_explorer(left.pane) || self.is_board(left.pane));
+        let left_explorer = (self.shown).is_some_and(|left| {
+            self.is_explorer(left.pane) || self.is_board(left.pane) || self.is_review(left.pane)
+        });
         let normal = left_editor.unwrap_or(false)
             || left_explorer
             || self.focused_pane().is_some_and(|left| {
@@ -859,6 +887,7 @@ impl Desk {
         self.attach_shown_buffers();
         self.attach_shown_explorers();
         self.attach_shown_boards();
+        self.attach_shown_reviews();
         if !self.connected {
             return;
         }
@@ -905,6 +934,12 @@ impl Desk {
                 Content::Board(_) => {
                     if let Ok(size) = Size::new(tile.cols, tile.rows) {
                         self.fit_board(id, size);
+                    }
+                    continue;
+                }
+                Content::Review(_) => {
+                    if let Ok(size) = Size::new(tile.cols, tile.rows) {
+                        self.fit_review(id, size);
                     }
                     continue;
                 }
@@ -960,6 +995,7 @@ impl Desk {
         self.editors_reconnected();
         self.explorers_reconnected();
         self.boards_reconnected();
+        self.reviews_reconnected();
         self.asked.clear();
         self.macros.requests_forgotten();
         self.outbox.clear();
@@ -1091,6 +1127,14 @@ impl Desk {
                             self.land_at(pane, landing);
                         }
                     }
+                    Response::Error(err) => self.message = Some(err.to_string()),
+                    _ => {}
+                }
+                true
+            }
+            Some(Asker::Window(Asked::Reviewed)) => {
+                match response {
+                    Response::Reviewed(said) if !said.is_empty() => self.message = Some(said),
                     Response::Error(err) => self.message = Some(err.to_string()),
                     _ => {}
                 }
@@ -1311,11 +1355,8 @@ impl Desk {
         if self.focused_editor().is_some() {
             return self.editor_key(press) || had_message;
         }
-        if self.focused_explorer().is_some() || self.focused_board().is_some() {
-            if self.stop_recording_in_explorer(press) || self.stop_recording_in_board(press) {
-                return true;
-            }
-            return self.explorer_key(press) || self.board_key(press) || had_message;
+        if let Some(redraw) = self.list_key(press) {
+            return redraw || had_message;
         }
         if self.stop_recording_in_terminal(press) {
             return true;
@@ -1325,6 +1366,34 @@ impl Desk {
             self.open_pane_link(terminal);
         }
         redraw || had_message
+    }
+
+    /// `:AgentUndo` and `:AgentRedo`: the focused chat undoes turn `turn`,
+    /// or redoes it if `redo`, `force`d with `!`.
+    fn agent_undo(&mut self, turn: Option<usize>, redo: bool, force: bool) {
+        let asked = (self.focused_pane()).map_or_else(
+            || Err("that's for a chat with an agent".to_owned()),
+            |pane| pane.undo_turn(turn, redo, force),
+        );
+        if let Err(why) = asked {
+            self.refuse(why);
+        }
+    }
+
+    /// Hands `press` to the focused explorer, board or review, unless it
+    /// stops a macro being recorded. Returns whether the window must be
+    /// redrawn, or `None` if the focused pane is none of them.
+    fn list_key(&mut self, press: &KeyPress<'_>) -> Option<bool> {
+        if self.focused_explorer().is_some() || self.focused_board().is_some() {
+            if self.stop_recording_in_explorer(press) || self.stop_recording_in_board(press) {
+                return Some(true);
+            }
+            return Some(self.explorer_key(press) || self.board_key(press));
+        }
+        if self.focused_review().is_some() {
+            return Some(self.stop_recording_in_review(press) || self.review_key(press));
+        }
+        None
     }
 
     /// Pastes `text` into the command line, if it's open, or else the
@@ -1360,6 +1429,9 @@ impl Desk {
         }
         if let Some((pane, _)) = self.board_at(point) {
             return self.board_wheel(pane, lines);
+        }
+        if let Some((pane, _)) = self.review_at(point) {
+            return self.review_wheel(pane, lines);
         }
         // Away from the panes, as over the bars, the focused pane scrolls.
         let Some((terminal, cell, _)) = self
@@ -1411,6 +1483,15 @@ impl Desk {
             outcome.redraw |= self.mouse_left();
             if let MouseAction::Press(MouseButton::Left) = action {
                 outcome.redraw = self.focus_at(point) | self.board_click(pane, cell);
+            }
+            return outcome;
+        }
+        if self.dragging.is_none()
+            && let Some((pane, cell)) = self.review_at(point)
+        {
+            outcome.redraw |= self.mouse_left();
+            if let MouseAction::Press(MouseButton::Left) = action {
+                outcome.redraw = self.focus_at(point) | self.review_click(pane, cell, clicks);
             }
             return outcome;
         }
@@ -1692,6 +1773,12 @@ impl Desk {
         self.cell_in(point, |desk, pane| desk.explorer(pane).is_some())
     }
 
+    /// The review at `point`, if there's one there, and the cell of it
+    /// there.
+    fn review_at(&self, point: [f32; 2]) -> Option<(PaneId, [i64; 2])> {
+        self.cell_in(point, |desk, pane| desk.review(pane).is_some())
+    }
+
     /// The board pane at `point`, if there's one there, and the cell of it
     /// there.
     fn board_at(&self, point: [f32; 2]) -> Option<(PaneId, [i64; 2])> {
@@ -1779,6 +1866,7 @@ impl Desk {
                         self.request(Request::RenameTab { tab, name: text }, Asked::Command);
                     }
                     Purpose::Workspace => self.pick_workspace(&text, selected),
+                    Purpose::Comment { chat, place } => self.send_comment(chat, place, text),
                 }
             }
             Key::Named(NamedKey::Backspace) => {
@@ -1891,16 +1979,9 @@ impl Desk {
             Command::Marks => self.open_finder(crate::finder::Kind::Marks, String::new()),
             Command::Editor(line) => self.editor_command(&line),
             Command::Explore(dir) => self.open_explorer(dir),
-            Command::AgentUndo { turn, redo, force } => {
-                let asked = (self.focused_pane()).map_or_else(
-                    || Err("that's for a chat with an agent".to_owned()),
-                    |pane| pane.undo_turn(turn, redo, force),
-                );
-                if let Err(why) = asked {
-                    self.refuse(why);
-                }
-            }
+            Command::AgentUndo { turn, redo, force } => self.agent_undo(turn, redo, force),
             Command::Board { place, name } => self.open_board(name, place),
+            Command::Review(review) => self.run_review(review),
             Command::Reload | Command::Set(_) | Command::Update(_) => {}
         }
     }
@@ -6993,5 +7074,215 @@ mod tests {
         assert!(task(&options));
         options.claudetask = false;
         assert!(!task(&options));
+    }
+
+    // --- Reviews of what agents changed ---------------------------------------
+
+    /// The requests waiting, unanswered.
+    fn asked_of(desk: &mut Desk) -> Vec<Request> {
+        (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(request) => Some(request),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An editor of `/p/a.rs`, whose second line chat 3's agent changed
+    /// in its first turn, as agent hunk 5.
+    fn editing_agents_change() -> Desk {
+        use clackatoo_protocol::{AgentHunk, BufferUpdate, ChatName};
+        let mut desk = editing("/p/a.rs", "a\nB\nc\n");
+        let hunk = AgentHunk {
+            id: 5,
+            start: 2,
+            end: 4,
+            base: "b\n".into(),
+            chat: 3,
+            turn: 0,
+            reviewed: false,
+        };
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Agents {
+                version: 0,
+                hunks: vec![hunk],
+                chats: vec![ChatName {
+                    chat: TerminalId(3),
+                    name: "Claude Code".into(),
+                }],
+            },
+        );
+        desk
+    }
+
+    #[test]
+    fn space_g_keeps_or_rejects_the_agents_change_at_the_cursor() {
+        use clackatoo_protocol::{Hunks, ReviewAction};
+        let mut desk = editing_agents_change();
+        // Not on it, there's nothing to keep.
+        type_keys(&mut desk, " ga");
+        assert!(asked_of(&mut desk).is_empty());
+        assert_eq!(note(&desk), "there's no change of an agent's here");
+        type_keys(&mut desk, "j ga");
+        assert_eq!(
+            asked_of(&mut desk),
+            [Request::Review(ReviewAction::Keep(Hunks::Ids(vec![5])))]
+        );
+        desk.answered(Response::Reviewed("Kept 1 hunk.".into()));
+        assert_eq!(note(&desk), "Kept 1 hunk.");
+        type_keys(&mut desk, " gx");
+        assert_eq!(
+            asked_of(&mut desk),
+            [Request::Review(ReviewAction::Reject {
+                hunks: Hunks::Ids(vec![5]),
+                force: false
+            })]
+        );
+        desk.answered(Response::Error(clackatoo_protocol::Error::Review(
+            "Couldn't reject, so nothing was: in a.rs, line 2 has changed since.".into(),
+        )));
+        assert_eq!(
+            note(&desk),
+            "Couldn't reject, so nothing was: in a.rs, line 2 has changed since."
+        );
+        // A whole turn, of the chat that made the line at the cursor.
+        command(&mut desk, "ReviewReject! turn");
+        assert_eq!(
+            asked_of(&mut desk),
+            [Request::Review(ReviewAction::Reject {
+                hunks: Hunks::Turn {
+                    chat: TerminalId(3),
+                    turn: 0
+                },
+                force: true
+            })]
+        );
+    }
+
+    #[test]
+    fn space_c_comments_on_the_line_for_the_agent_and_review_send_sends_them() {
+        use clackatoo_protocol::{CommentPlace, ReviewAction};
+        let mut desk = editing_agents_change();
+        type_keys(&mut desk, "j c");
+        assert!(asked_of(&mut desk).is_empty(), "the palette asks first");
+        let Status::Typing { label, .. } = desk.status() else {
+            panic!("the palette");
+        };
+        assert_eq!(label.as_deref(), Some("Comment on a.rs:2"));
+        type_keys(&mut desk, "why capitals?");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(
+            asked_of(&mut desk),
+            [Request::Review(ReviewAction::Comment {
+                chat: TerminalId(3),
+                place: CommentPlace {
+                    path: "/p/a.rs".into(),
+                    line: 2,
+                    at: Some((BufferId(7), 0, 2)),
+                },
+                text: "why capitals?".into(),
+            })]
+        );
+        command(&mut desk, "ReviewSend");
+        assert_eq!(
+            asked_of(&mut desk),
+            [Request::Review(ReviewAction::Send(TerminalId(3)))]
+        );
+    }
+
+    #[test]
+    fn colon_review_opens_a_review_beside_the_editor_whose_keys_ask_the_daemon() {
+        use clackatoo_protocol::{
+            Hunks, Made, NewReview, ReviewAction, ReviewFile, ReviewHunk, ReviewId, ReviewList,
+            ReviewScope,
+        };
+        let mut desk = editing_agents_change();
+        type_keys(&mut desk, "j");
+        command(&mut desk, "Review turn 1");
+        assert_eq!(
+            asked_of(&mut desk),
+            [Request::Split {
+                pane: PaneId(1),
+                side: Side::Right,
+                terminal: PaneTerminal::Review(NewReview {
+                    chat: Some(TerminalId(3)),
+                    scope: ReviewScope::Turn(Some(0)),
+                    cwd: Some("/p".into()),
+                }),
+            }]
+        );
+        let layout = side_by_side(vec![
+            file_pane(1, 7),
+            Layout::Pane(LayoutPane {
+                id: PaneId(2),
+                content: Content::Review(ReviewId(1)),
+            }),
+        ]);
+        desk.workspaces_changed(one_tab(layout));
+        desk.answered(Response::PaneCreated(PaneId(2)));
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        assert!(
+            answer_all(&mut desk).contains(&Request::AttachReview {
+                review: ReviewId(1)
+            }),
+            "attached"
+        );
+        let list = ReviewList {
+            chat: Some(TerminalId(3)),
+            chat_name: "Claude Code".into(),
+            scope: Some(ReviewScope::Turn(Some(0))),
+            files: vec![ReviewFile {
+                path: "/p/a.rs".into(),
+                shown: "a.rs".into(),
+                buffer: Some(BufferId(7)),
+                hunks: vec![ReviewHunk {
+                    line: 2,
+                    before: vec!["a".into()],
+                    base: "b\n".into(),
+                    text: "B\n".into(),
+                    after: vec!["c".into()],
+                    agents: vec![5],
+                    by: Some(Made {
+                        chat: TerminalId(3),
+                        turn: 0,
+                    }),
+                    reviewed: false,
+                }],
+            }],
+            comments: Vec::new(),
+            note: None,
+        };
+        assert!(desk.review_event(clackatoo_protocol::Event::Review {
+            review: ReviewId(1),
+            list,
+        }));
+        assert_eq!(desk.title(), Some("Review of turn 1"));
+        assert_eq!(note(&desk), "a.rs  hunk 1 of 1");
+        type_keys(&mut desk, "a");
+        assert_eq!(
+            asked_of(&mut desk),
+            [Request::Review(ReviewAction::Keep(Hunks::Ids(vec![5])))]
+        );
+        // Enter goes to the line in the editor beside it.
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        let (editor, copy) = desk.focused_editor().unwrap();
+        assert_eq!(editor.cursor_byte(copy), 2, "on the agent's line");
+        // `<Space>gr` goes back to it, and from it, closes it.
+        type_keys(&mut desk, " gr");
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        type_keys(&mut desk, " gr");
+        assert!(answer_all(&mut desk).ends_with(&[Request::ClosePane { pane: PaneId(2) }]));
     }
 }

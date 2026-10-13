@@ -1521,6 +1521,30 @@ impl App {
     }
 }
 
+/// What a pane always in normal mode draws, such as a board or a review,
+/// in `tile`: `rows`, with its cursor hollow unless it `has_focus` in a
+/// `window_focused`, and `highlights`.
+fn list_drawing(
+    tile: Tile,
+    ((rows, mut cursor), highlights): ((Vec<&Row>, Option<SceneCursor>), Vec<Highlight>),
+    (has_focus, window_focused): (bool, bool),
+) -> Drawing<'_> {
+    if let Some(cursor) = &mut cursor
+        && !(has_focus && window_focused)
+    {
+        cursor.style = CursorStyle::Hollow;
+    }
+    Drawing {
+        terminal: None,
+        tile,
+        rows,
+        cursor,
+        highlights,
+        normal_mode: has_focus,
+        focused: has_focus,
+    }
+}
+
 /// What each of the shown tab's terminals draws, as `placement` lays out
 /// `panes`, `focused` having the focus, and the window having it if
 /// `window_focused`.
@@ -1582,24 +1606,17 @@ fn drawings<'a>(
                 continue;
             }
             Content::Board(_) => {
-                let Some(board) = desk.board(id) else {
-                    continue;
-                };
-                let (rows, mut cursor) = board.scene();
-                if let Some(cursor) = &mut cursor
-                    && !(has_focus && window_focused)
-                {
-                    cursor.style = CursorStyle::Hollow;
+                if let Some(board) = desk.board(id) {
+                    let shown = (board.scene(), board.highlights());
+                    drawings.push(list_drawing(tile, shown, (has_focus, window_focused)));
                 }
-                drawings.push(Drawing {
-                    terminal: None,
-                    tile,
-                    rows,
-                    cursor,
-                    highlights: board.highlights(),
-                    normal_mode: has_focus,
-                    focused: has_focus,
-                });
+                continue;
+            }
+            Content::Review(_) => {
+                if let Some(review) = desk.review(id) {
+                    let shown = (review.scene(), review.highlights());
+                    drawings.push(list_drawing(tile, shown, (has_focus, window_focused)));
+                }
                 continue;
             }
         };
@@ -2212,10 +2229,11 @@ impl App {
     }
 
     /// Hands the desk what the daemon says of file explorers, and of the
-    /// file operations they asked for, or of boards.
+    /// file operations they asked for, or of boards and reviews.
     fn explorer_event(&mut self, event: Event) {
         let redraw = match event {
             Event::Board { .. } => self.desk.board_event(event),
+            Event::Review { .. } => self.desk.review_event(event),
             event => self.desk.explorer_event(event),
         };
         if redraw {
@@ -2339,7 +2357,10 @@ impl App {
                 event @ (Event::Clipboard { .. } | Event::ClipboardAsked { .. }),
             )) => self.clipboard_event(event),
             SessionEvent::Message(ServerMessage::Event(
-                event @ (Event::Files { .. } | Event::FileOp { .. } | Event::Board { .. }),
+                event @ (Event::Files { .. }
+                | Event::FileOp { .. }
+                | Event::Board { .. }
+                | Event::Review { .. }),
             )) => self.explorer_event(event),
             SessionEvent::Message(ServerMessage::Event(Event::Workspaces(workspaces))) => {
                 self.desk.workspaces_changed(workspaces);

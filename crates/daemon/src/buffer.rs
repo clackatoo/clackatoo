@@ -64,6 +64,28 @@ impl DiskStamp {
         (self.inode, self.device) == (metadata.ino(), metadata.dev())
     }
 
+    /// The stamp, for the next build.
+    pub(crate) fn hand_over(self) -> handover::DiskStamp {
+        handover::DiskStamp {
+            seconds: self.seconds,
+            nanoseconds: self.nanoseconds,
+            len: self.len,
+            inode: self.inode,
+            device: self.device,
+        }
+    }
+
+    /// A stamp the last build handed over.
+    pub(crate) fn resume(handed: handover::DiskStamp) -> Self {
+        Self {
+            seconds: handed.seconds,
+            nanoseconds: handed.nanoseconds,
+            len: handed.len,
+            inode: handed.inode,
+            device: handed.device,
+        }
+    }
+
     /// How long the file is, in bytes.
     pub(crate) fn len(&self) -> u64 {
         self.len
@@ -509,13 +531,7 @@ impl Buffer {
             dir: self.dir.as_os_str().as_bytes().to_vec(),
             text: self.text.to_string(),
             saved: self.modified.then(|| self.saved.to_string()),
-            disk: self.disk.map(|disk| handover::DiskStamp {
-                seconds: disk.seconds,
-                nanoseconds: disk.nanoseconds,
-                len: disk.len,
-                inode: disk.inode,
-                device: disk.device,
-            }),
+            disk: self.disk.map(DiskStamp::hand_over),
             history: handover::BufferHistory {
                 first: snapshot.first,
                 edits: (snapshot.edits.into_iter())
@@ -561,13 +577,7 @@ impl Buffer {
             }),
             saved,
             modified: false,
-            disk: handed.disk.map(|disk| DiskStamp {
-                seconds: disk.seconds,
-                nanoseconds: disk.nanoseconds,
-                len: disk.len,
-                inode: disk.inode,
-                device: disk.device,
-            }),
+            disk: handed.disk.map(DiskStamp::resume),
         };
         buffer.check_modified();
         buffer

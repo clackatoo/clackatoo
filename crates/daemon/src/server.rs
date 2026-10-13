@@ -66,6 +66,7 @@ mod language;
 mod offers;
 mod pieces;
 mod rename;
+mod review;
 mod signs;
 mod tools;
 mod turn_undo;
@@ -490,6 +491,8 @@ pub struct Daemon {
     agent_files: agent_files::AgentFiles,
     /// Buffers' files changed on disk, waiting to be looked at.
     disk: disk::Disk,
+    /// What agents changed and the user hasn't reviewed, and reviews.
+    reviews: review::Reviews,
     /// The QUIC endpoint, set up when a connection first carries QUIC.
     quic: Option<QuicServer>,
     /// What the QUIC endpoint last asked to be acted on.
@@ -596,6 +599,7 @@ impl Daemon {
             agents: chats::Agents::default(),
             agent_files: agent_files::AgentFiles::default(),
             disk: disk::Disk::default(),
+            reviews: review::Reviews::default(),
             quic: None,
             quic_events: Vec::new(),
             carriers_made: 0,
@@ -627,6 +631,7 @@ impl Daemon {
         let buffers = std::mem::take(&mut handover.state.buffers);
         let explorers = std::mem::take(&mut handover.state.explorers);
         let edits = std::mem::take(&mut handover.state.edits);
+        let reviews = std::mem::take(&mut handover.state.reviews);
         let state = &handover.state;
         let fds = &mut handover.fds;
         let listener = std::os::unix::net::UnixListener::from(fds.take(state.listener)?);
@@ -679,6 +684,7 @@ impl Daemon {
         // Messages waiting in chats' inboxes go as their turns end.
         daemon.resume_talk();
         daemon.agent_files.log = edit_log::EditLog::resume(edits);
+        daemon.resume_reviews(reviews);
         daemon.refresh_all_files();
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
@@ -773,6 +779,7 @@ impl Daemon {
                     })
                     .collect(),
                 daemon: self.id,
+                reviews: self.hand_over_reviews(),
             },
             fds,
         })
@@ -842,12 +849,14 @@ impl Daemon {
                     let explore = self.next_explore();
                     let tools = self.next_tool_due();
                     let rewatch = self.next_rewatch();
+                    let reviews = self.next_review_due();
                     let next = (compaction.into_iter().chain(quic).chain(idle))
                         .chain(retry)
                         .chain(clipboard)
                         .chain(explore)
                         .chain(tools)
                         .chain(rewatch)
+                        .chain(reviews)
                         .min();
                     next.map(|due| due.saturating_duration_since(Instant::now()))
                 } else {
@@ -894,6 +903,7 @@ impl Daemon {
             self.time_out_tools();
             self.relay_chats();
             self.send_clipboard_writes();
+            self.send_reviews();
             self.send_view_updates();
             self.transmit_quic();
         }
@@ -1261,6 +1271,7 @@ impl Daemon {
             Hosted::Chat(chat) => {
                 self.close_chat(id, &chat);
                 self.agent_files.forget(id);
+                self.chat_closed_in_review(id);
                 if self.workspaces.remove_terminal(id) {
                     self.workspaces_changed();
                 }
@@ -1328,6 +1339,9 @@ impl Daemon {
             PaneTerminal::Board(open) => {
                 return self.open_board(open, beside).map(Content::Board);
             }
+            PaneTerminal::Review(new) => {
+                return self.new_review(new, beside).map(Content::Review);
+            }
         };
         Ok(Content::Terminal(terminal))
     }
@@ -1345,6 +1359,7 @@ impl Daemon {
             }
             Content::Files(files) => Some(self.files_root(files)?.display().to_string()),
             Content::Board(_) => None,
+            Content::Review(review) => Some(self.review_root_of(review)?.display().to_string()),
         }
     }
 
@@ -1357,6 +1372,7 @@ impl Daemon {
                 Content::Buffer(buffer) => self.close_buffer_pane(pane.id, buffer),
                 Content::Files(files) => self.close_files_pane(pane.id, files),
                 Content::Board(_) => self.close_board_pane(pane.id),
+                Content::Review(review) => self.close_review_pane(pane.id, review),
             }
         }
         Ok(Response::Done)
@@ -1813,6 +1829,9 @@ impl Daemon {
             Request::DetachBoard { board } => Ok(self.detach_board(token, board)),
             Request::Discard { buffer } => self.discard_buffer(buffer),
             Request::Reload { buffer } => self.reload_buffer(buffer),
+            Request::AttachReview { review } => self.attach_review(token, review),
+            Request::DetachReview { review } => Ok(self.detach_review(token, review)),
+            Request::Review(action) => self.serve_review(action),
             request @ (Request::Install { .. } | Request::Decline { .. }) => {
                 self.respond_about_installs(token, request);
                 Ok(Response::Done)
@@ -1866,6 +1885,10 @@ impl Daemon {
                 }
                 Content::Board(_) => {
                     self.close_board_pane(pane);
+                    Ok(Response::Done)
+                }
+                Content::Review(review) => {
+                    self.close_review_pane(pane, review);
                     Ok(Response::Done)
                 }
             },
@@ -2058,6 +2081,7 @@ impl Daemon {
             self.forget_finds(token);
             self.forget_files_viewer(token);
             self.forget_board_viewer(token);
+            self.forget_review_viewer(token);
             self.forget_stages(token, None);
             self.forget_piece_questions(token, None);
             if let Link::Quic(handle) = client.link

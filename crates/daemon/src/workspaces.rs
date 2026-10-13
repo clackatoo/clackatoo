@@ -6,8 +6,8 @@
 //! makes the change, which can't fail.
 
 use clackatoo_protocol::{
-    Axis, BoardId, BufferId, Content, Error, FilesId, Layout, Pane, PaneId, Side, Tab, TabId,
-    TerminalId, Workspace, WorkspaceId, Workspaces,
+    Axis, BoardId, BufferId, Content, Error, FilesId, Layout, Pane, PaneId, ReviewId, Side, Tab,
+    TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::handover::{self, HandoverError};
@@ -51,6 +51,10 @@ impl WorkspaceState {
                     Content::Board(board) => handover::Layout::Board {
                         id: pane.id.0,
                         board: board.0,
+                    },
+                    Content::Review(review) => handover::Layout::Review {
+                        id: pane.id.0,
+                        review: review.0,
                     },
                 },
                 Layout::Split {
@@ -106,6 +110,10 @@ impl WorkspaceState {
                 handover::Layout::Board { id, board } => Layout::Pane(Pane {
                     id: PaneId(*id),
                     content: Content::Board(BoardId(*board)),
+                }),
+                handover::Layout::Review { id, review } => Layout::Pane(Pane {
+                    id: PaneId(*id),
+                    content: Content::Review(ReviewId(*review)),
                 }),
                 handover::Layout::Split {
                     left_to_right,

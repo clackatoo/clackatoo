@@ -16,6 +16,7 @@ mod agent;
 mod agents;
 mod boards;
 mod buffer;
+mod changes;
 mod chat;
 pub mod client;
 mod explorer;

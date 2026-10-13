@@ -592,6 +592,7 @@ fn info(lua: &Lua, world: &World, kind: &str, id: u32) -> mlua::Result<Option<Ta
                 Content::Buffer(_) => "editor",
                 Content::Files(_) => "explorer",
                 Content::Board(_) => "board",
+                Content::Review(_) => "review",
                 Content::Terminal(_) if known.is_some_and(|known| known.chat) => "chat",
                 Content::Terminal(_) => "terminal",
             };

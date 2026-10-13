@@ -1404,6 +1404,85 @@ fn signs_are_drawn_left_of_the_numbers_and_can_be_turned_off() {
     assert_eq!(cursor.unwrap().col, 4 + 2, "on the p of top");
 }
 
+/// The copy given the agent hunks of chat 3's change from `base` to the
+/// text now, in turn 1, as the daemon would send them: without their
+/// bases.
+fn agents_against(setup: &mut Setup, base: &str) {
+    let text = setup.copy.text().to_string();
+    let mut hunks = clackatoo_text::AgentHunks::new();
+    let maker = clackatoo_text::Maker { chat: 3, turn: 1 };
+    let edit = clackatoo_text::Edit::between(base, &text);
+    hunks.add(&edit, (base, &text), (maker, &|_| true), &mut 1);
+    let hunks = (hunks.all().iter())
+        .map(|hunk| clackatoo_text::AgentHunk {
+            base: String::new(),
+            ..hunk.clone()
+        })
+        .collect();
+    setup.copy.update(BufferUpdate::Agents {
+        version: setup.daemon.version(),
+        hunks,
+        chats: vec![clackatoo_protocol::ChatName {
+            chat: clackatoo_protocol::TerminalId(3),
+            name: "Claude Code".into(),
+        }],
+    });
+}
+
+#[test]
+fn an_agents_lines_not_reviewed_are_coloured_in_a_column_of_their_own() {
+    let base = "a\nb\nc\nd\n";
+    let mut setup = Setup::new("a\nB\nc\nd\n");
+    setup.hunks_against(base);
+    setup.editor.settle(&setup.copy);
+    let (rows, _) = setup.editor.scene();
+    assert_eq!(
+        rows[1].text(),
+        "▎  1 B",
+        "no agents' column with no agents' lines"
+    );
+    agents_against(&mut setup, base);
+    setup.editor.settle(&setup.copy);
+    let (rows, cursor) = setup.editor.scene();
+    // Right of git's sign, in the chat's colour.
+    assert_eq!(rows[1].text(), "▎▍  1 B");
+    assert_eq!(rows[0].text(), "    1 a");
+    let cell = rows[1].cells()[1];
+    assert_eq!(rows[1].style(cell).fg, crate::colors::agent(3));
+    assert_eq!(cursor.unwrap().col, 6);
+    // It moves with typing, and stays until the daemon says it's gone.
+    setup.keys("ggOtop<Esc>");
+    setup.editor.settle(&setup.copy);
+    assert!(setup.editor.scene().0[2].text().starts_with("▎▍"));
+    setup.copy.update(BufferUpdate::Agents {
+        version: setup.daemon.version(),
+        hunks: Vec::new(),
+        chats: Vec::new(),
+    });
+    setup.editor.settle(&setup.copy);
+    assert!(!setup.editor.scene().0[2].text().contains('▍'));
+    // Turned off, there's no column.
+    setup.keys("ggdd");
+    agents_against(&mut setup, base);
+    setup.set(|options| options.agentsigns = false);
+    setup.editor.settle(&setup.copy);
+    assert!(!setup.editor.scene().0[1].text().contains('▍'));
+}
+
+#[test]
+fn blame_says_which_chat_and_turn_made_each_line() {
+    let mut setup = Setup::new("a\nB\nc\n");
+    agents_against(&mut setup, "a\nb\nc\n");
+    setup.editor.toggle_blame();
+    setup.editor.settle(&setup.copy);
+    let (rows, _) = setup.editor.scene();
+    assert_eq!(rows[1].text(), "▍  1 B  Claude Code, turn 2");
+    assert_eq!(rows[0].text(), "   1 a");
+    setup.editor.toggle_blame();
+    setup.editor.settle(&setup.copy);
+    assert_eq!(setup.editor.scene().0[1].text(), "▍  1 B");
+}
+
 #[test]
 fn brackets_and_c_go_round_the_hunks_as_jumps() {
     let base = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n";

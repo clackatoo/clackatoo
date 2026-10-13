@@ -20,7 +20,8 @@
 //! grammar reads it, for colouring it; they move along with edits, as
 //! [`Diagnostics`] do: what a language server says is wrong with it, and
 //! [`Hunks`]: what's changed in it since a base, such as the file's text
-//! in git. [`Piece`]s are the functions, classes and arguments a grammar
+//! in git; and [`AgentHunks`]: the lines agents have changed, by whom,
+//! and whether the user has reviewed them. [`Piece`]s are the functions, classes and arguments a grammar
 //! finds in it, for text objects and motions, and [`LineIndent`]s how it
 //! says lines should be indented.
 //!
@@ -35,6 +36,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod agents;
 mod diagnostics;
 mod edit;
 mod highlights;
@@ -45,6 +47,7 @@ mod merge;
 mod pieces;
 mod snippet;
 
+pub use agents::{Added, AgentHunk, AgentHunks, Maker};
 pub use diagnostics::{Diagnostic, Diagnostics, Severity};
 pub use edit::{Bias, Edit, EditError, Op, compose, transform};
 pub use highlights::{Highlights, Kind, Span};

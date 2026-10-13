@@ -128,6 +128,16 @@ pub(super) struct Maker {
     pub(super) tool: Option<String>,
 }
 
+impl Maker {
+    /// Who made it, as agent hunks say.
+    pub(super) fn hunks(&self) -> clackatoo_text::Maker {
+        clackatoo_text::Maker {
+            chat: self.chat.0,
+            turn: u32::try_from(self.turn).unwrap_or(u32::MAX),
+        }
+    }
+}
+
 impl ChatEdits {
     fn bytes(&self) -> usize {
         (self.turns.iter())

@@ -31,6 +31,9 @@
 //!     showing boards.
 //! 14. The last change each window sent each buffer, so a window that lost
 //!     its connection as the daemon upgraded knows which arrived.
+//! 15. What agents changed and the user hasn't reviewed: each agent hunk,
+//!     open or not, the comments waiting to go to chats, and reviews, and
+//!     panes showing them.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -43,10 +46,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 14;
+pub(crate) const VERSION: u32 = 15;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -85,7 +88,7 @@ impl Fds {
     }
 }
 
-/// The daemon's state, version 14.
+/// The daemon's state, version 15.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The listening socket.
@@ -118,6 +121,85 @@ pub(crate) struct State {
     /// see [`BufferSnapshot::daemon`](clackatoo_protocol::BufferSnapshot).
     /// Since version 14; 0 before, for the build reading it to choose one.
     pub(crate) daemon: u64,
+    /// What agents changed that the user hasn't reviewed, and reviews.
+    pub(crate) reviews: Reviews,
+}
+
+/// What agents changed in files, hunk by hunk, whether the user has
+/// reviewed it, the comments waiting to go to chats, and reviews. Since
+/// version 15.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct Reviews {
+    /// The number the next hunk gets.
+    pub(crate) next_hunk: u64,
+    /// The agent hunks of each open buffer, by its ID.
+    pub(crate) buffers: Vec<(u32, Vec<AgentHunk>)>,
+    /// The agent hunks of files not open.
+    pub(crate) closed: Vec<ClosedHunks>,
+    /// What the agent made each hunk's lines into, by its number.
+    pub(crate) made: Vec<(u64, String)>,
+    /// The number the next comment gets.
+    pub(crate) next_comment: u64,
+    pub(crate) comments: Vec<Comment>,
+    /// The ID the next review gets.
+    pub(crate) next_review: u32,
+    pub(crate) list: Vec<Review>,
+    /// The chat whose agent last changed a file.
+    pub(crate) last_chat: Option<u32>,
+}
+
+/// Lines an agent changed: bytes `start` to `end` of the text, which were
+/// `base`.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AgentHunk {
+    pub(crate) id: u64,
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+    pub(crate) base: String,
+    pub(crate) chat: u32,
+    pub(crate) turn: u32,
+    pub(crate) reviewed: bool,
+}
+
+/// The agent hunks of a file not open, which fit its text as it was when
+/// its stamp was `stamp`.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ClosedHunks {
+    /// The file's path, as bytes.
+    pub(crate) path: Vec<u8>,
+    pub(crate) stamp: Option<DiskStamp>,
+    pub(crate) hunks: Vec<AgentHunk>,
+}
+
+/// A comment waiting to go to chat `chat`.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Comment {
+    pub(crate) chat: u32,
+    pub(crate) id: u64,
+    /// The file's path, as bytes.
+    pub(crate) path: Vec<u8>,
+    /// The line, from 1, as it was when it was made.
+    pub(crate) line: u32,
+    /// The buffer it's in, and where, while that's open.
+    pub(crate) at: Option<(u32, u64)>,
+    pub(crate) text: String,
+}
+
+/// A review: what it lists, of which chat, from which directory.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Review {
+    pub(crate) id: u32,
+    pub(crate) chat: Option<u32>,
+    pub(crate) scope: ReviewScope,
+    /// The project's directory, as bytes.
+    pub(crate) root: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) enum ReviewScope {
+    Turn(u32),
+    Chat,
+    Base,
 }
 
 /// The number of the last change window `window` sent buffer `buffer`
@@ -424,6 +506,8 @@ pub(crate) enum Layout {
     /// A pane showing a board, by the board's ID, which is kept on disk
     /// with it. Since version 13.
     Board { id: u32, board: u32 },
+    /// A pane showing a review. Since version 15.
+    Review { id: u32, review: u32 },
 }
 
 /// A file explorer: the directory at its root. What's expanded in it is
@@ -544,6 +628,7 @@ impl State {
             11 => Ok(postcard::from_bytes::<v11::State>(body)?.into()),
             12 => Ok(postcard::from_bytes::<v12::State>(body)?.into()),
             13 => Ok(postcard::from_bytes::<v13::State>(body)?.into()),
+            14 => Ok(postcard::from_bytes::<v14::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -1058,6 +1143,7 @@ mod v7 {
                 edits: super::EditLog::default(),
                 applied: Vec::new(),
                 daemon: 0,
+                reviews: super::Reviews::default(),
             }
         }
     }
@@ -1130,6 +1216,7 @@ mod v8 {
                 edits: super::EditLog::default(),
                 applied: Vec::new(),
                 daemon: 0,
+                reviews: super::Reviews::default(),
             }
         }
     }
@@ -1172,6 +1259,7 @@ mod v9 {
                 edits: super::EditLog::default(),
                 applied: Vec::new(),
                 daemon: 0,
+                reviews: super::Reviews::default(),
             }
         }
     }
@@ -1216,6 +1304,54 @@ mod v11 {
                 edits: super::EditLog::default(),
                 applied: Vec::new(),
                 daemon: 0,
+                reviews: super::Reviews::default(),
+            }
+        }
+    }
+}
+
+/// Version 14, as the builds that wrote it wrote it: no reviews.
+mod v14 {
+    use serde::Deserialize;
+
+    use super::{Applied, Buffer, Chat, EditLog, Files, Process, Terminal, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: super::Reviews::default(),
             }
         }
     }
@@ -1260,6 +1396,7 @@ mod v13 {
                 edits: state.edits,
                 applied: Vec::new(),
                 daemon: 0,
+                reviews: super::Reviews::default(),
             }
         }
     }
@@ -1340,6 +1477,7 @@ mod v12 {
                 edits: state.edits,
                 applied: Vec::new(),
                 daemon: 0,
+                reviews: super::Reviews::default(),
             }
         }
     }
@@ -1418,6 +1556,7 @@ mod v10 {
                 edits: super::EditLog::default(),
                 applied: Vec::new(),
                 daemon: 0,
+                reviews: super::Reviews::default(),
             }
         }
     }
@@ -1518,8 +1657,9 @@ mod tests {
                                 Layout::Buffer { id: 3, buffer: 1 },
                                 Layout::Files { id: 4, files: 1 },
                                 Layout::Board { id: 5, board: 3 },
+                                Layout::Review { id: 6, review: 1 },
                             ],
-                            shares: vec![2, 1, 1, 1, 1],
+                            shares: vec![2, 1, 1, 1, 1, 1],
                         },
                         focused: 2,
                         name: None,
@@ -1529,7 +1669,7 @@ mod tests {
                 active: Some(1),
                 next_workspace: 2,
                 next_tab: 2,
-                next_pane: 6,
+                next_pane: 7,
             },
             next_buffer: 2,
             buffers: vec![buffer()],
@@ -1546,6 +1686,52 @@ mod tests {
                 landed: Some(3),
             }],
             daemon: 0xd43,
+            reviews: reviews(),
+        }
+    }
+
+    fn reviews() -> Reviews {
+        let hunk = |id, reviewed| AgentHunk {
+            id,
+            start: 0,
+            end: 4,
+            base: "old\n".to_owned(),
+            chat: 2,
+            turn: 0,
+            reviewed,
+        };
+        Reviews {
+            next_hunk: 3,
+            buffers: vec![(1, vec![hunk(1, false)])],
+            closed: vec![ClosedHunks {
+                path: b"/src/b".to_vec(),
+                stamp: Some(DiskStamp {
+                    seconds: 6,
+                    nanoseconds: 7,
+                    len: 8,
+                    inode: 9,
+                    device: 10,
+                }),
+                hunks: vec![hunk(2, true)],
+            }],
+            made: vec![(1, "new\n".to_owned()), (2, "made\n".to_owned())],
+            next_comment: 1,
+            comments: vec![Comment {
+                chat: 2,
+                id: 0,
+                path: b"/src/a".to_vec(),
+                line: 1,
+                at: Some((1, 0)),
+                text: "why?".to_owned(),
+            }],
+            next_review: 2,
+            list: vec![Review {
+                id: 1,
+                chat: Some(2),
+                scope: ReviewScope::Turn(0),
+                root: b"/src".to_vec(),
+            }],
+            last_chat: Some(2),
         }
     }
 
@@ -1665,6 +1851,49 @@ mod tests {
         };
         assert!(matches!(parts[4], Layout::Board { id: 5, board: 3 }));
         assert_eq!(state.edits.chats[0].chat, 2);
+    }
+
+    /// Written by a build that wrote version 15. It must always be read.
+    #[test]
+    fn version_15_is_read_with_the_reviews() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v15.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let reviews = &state.reviews;
+        assert_eq!(reviews.next_hunk, 3);
+        let (buffer, hunks) = &reviews.buffers[0];
+        assert_eq!((*buffer, hunks[0].id, hunks[0].reviewed), (1, 1, false));
+        assert_eq!(hunks[0].base, "old\n");
+        let closed = &reviews.closed[0];
+        assert_eq!(closed.path, b"/src/b");
+        assert!(closed.hunks[0].reviewed);
+        assert_eq!(reviews.made[1], (2, "made\n".to_owned()));
+        assert_eq!(reviews.comments[0].text, "why?");
+        assert!(matches!(
+            reviews.list[0],
+            Review {
+                id: 1,
+                chat: Some(2),
+                scope: ReviewScope::Turn(0),
+                ..
+            }
+        ));
+        let Layout::Split { parts, .. } = &state.workspaces.list[0].tabs[0].layout else {
+            panic!("not split");
+        };
+        assert!(matches!(parts[5], Layout::Review { id: 6, review: 1 }));
+        assert_eq!(state.edits.chats[0].chat, 2);
+    }
+
+    /// Versions before 15 come with no reviews.
+    #[test]
+    fn version_14_comes_with_no_reviews() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v14.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert!(state.reviews.buffers.is_empty() && state.reviews.list.is_empty());
     }
 
     /// Version 12 comes with chats that know nothing of other chats.

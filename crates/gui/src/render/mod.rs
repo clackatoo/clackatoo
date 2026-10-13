@@ -267,6 +267,11 @@ pub(crate) enum HighlightKind {
     LessonStep,
     /// It's a step of a lesson that's done.
     LessonDone,
+    /// It's a line added, as a review shows a change: on the faint green
+    /// the chat's cards show one on.
+    Added,
+    /// It's a line removed: on faint red.
+    Removed,
 }
 
 impl HighlightKind {
@@ -275,7 +280,12 @@ impl HighlightKind {
     fn behind(self) -> bool {
         matches!(
             self,
-            Self::CursorLine | Self::ColorColumn | Self::LessonStep | Self::LessonDone
+            Self::CursorLine
+                | Self::ColorColumn
+                | Self::LessonStep
+                | Self::LessonDone
+                | Self::Added
+                | Self::Removed
         )
     }
 }

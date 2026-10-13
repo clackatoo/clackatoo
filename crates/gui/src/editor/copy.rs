@@ -23,12 +23,12 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{
-    Answer, BufferId, BufferSnapshot, BufferUpdate, Change, ClientMessage, Edit, Query, Resume,
-    ServerFeatures,
+    Answer, BufferId, BufferSnapshot, BufferUpdate, Change, ChatName, ClientMessage, Edit, Query,
+    Resume, ServerFeatures,
 };
 use clackatoo_text::{
-    Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span, compose,
-    line_start_through, transform,
+    AgentHunk, AgentHunks, Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span,
+    compose, line_start_through, transform,
 };
 
 /// The most pieces an edit waiting to be sent grows to by joining the
@@ -154,6 +154,10 @@ pub(crate) struct BufferCopy {
     diagnostics: Diagnostics,
     /// What it's added, changed and deleted since its file's text in git.
     hunks: Hunks,
+    /// The lines agents have changed, and whether they've been reviewed.
+    agents: AgentHunks,
+    /// The names of the chats whose agents made them.
+    chats: Vec<ChatName>,
     /// What its language server does as you type.
     features: ServerFeatures,
     /// Whether the macro being typed has edited the buffer yet, so its
@@ -193,6 +197,8 @@ impl BufferCopy {
             highlights: Highlights::new(),
             diagnostics: Diagnostics::new(),
             hunks: Hunks::new(),
+            agents: AgentHunks::new(),
+            chats: Vec::new(),
             features: ServerFeatures::default(),
             macro_edited: false,
             steps: 0,
@@ -240,6 +246,33 @@ impl BufferCopy {
         &self.hunks
     }
 
+    /// The lines agents have changed, by whom, and whether they've been
+    /// reviewed.
+    pub(crate) fn agents(&self) -> &AgentHunks {
+        &self.agents
+    }
+
+    /// Byte `at` of the text, as the daemon would count it now: in its
+    /// version the copy is made from, if the window has no changes on
+    /// their way, which the daemon hasn't counted yet.
+    pub(crate) fn place_now(&self, at: usize) -> Option<(BufferId, u64, usize)> {
+        self.waiting
+            .is_empty()
+            .then_some((self.id, self.version, at))
+    }
+
+    /// The agent hunk at `line` of the text, if any.
+    pub(crate) fn agent_at(&self, line: usize) -> Option<&AgentHunk> {
+        self.agents.at_line(&self.text, line)
+    }
+
+    /// What the chat `chat` is called, as the daemon said with the hunks.
+    pub(crate) fn chat_name(&self, chat: u32) -> Option<&str> {
+        (self.chats.iter())
+            .find(|name| name.chat.0 == chat)
+            .map(|name| name.name.as_str())
+    }
+
     /// Forgets the hunk at `index` in [`hunks`](Self::hunks), whose lines
     /// are about to be put back as they were.
     pub(crate) fn forget_hunk(&mut self, index: usize) {
@@ -277,6 +310,9 @@ impl BufferCopy {
         self.highlights.map(edit);
         self.diagnostics.map(edit);
         self.hunks.map(edit);
+        // Without their bases, which the daemon keeps: it says when one
+        // goes.
+        self.agents.map(edit, None);
         true
     }
 
@@ -376,6 +412,7 @@ impl BufferCopy {
         self.highlights.map(&edit);
         self.diagnostics.map(&edit);
         self.hunks.map(&edit);
+        self.agents.map(&edit, None);
         self.steps += u64::from(step);
         let edit = Rc::new(edit);
         self.made.push(Rc::clone(&edit));
@@ -489,6 +526,7 @@ impl BufferCopy {
         self.highlights.clear();
         self.diagnostics = Diagnostics::new();
         self.hunks = Hunks::new();
+        self.agents = AgentHunks::new();
         // Told again after the snapshot, if there's a server.
         self.features = ServerFeatures::default();
         Heard::Replaced
@@ -836,6 +874,7 @@ impl BufferCopy {
                 self.take_hunks(version, hunks);
                 Heard::Nothing
             }
+            update @ BufferUpdate::Agents { .. } => self.take_agents(update),
             BufferUpdate::Moved(path) => Heard::Moved {
                 from: std::mem::replace(&mut self.path, path),
             },
@@ -951,6 +990,31 @@ impl BufferCopy {
                 self.hunks.map(edit);
             }
         }
+    }
+
+    /// Takes `update`, the agent hunks for the daemon's text at its
+    /// version, moving them past the window's edits waiting.
+    fn take_agents(&mut self, update: BufferUpdate) -> Heard {
+        let BufferUpdate::Agents {
+            version,
+            hunks,
+            chats,
+        } = update
+        else {
+            return Heard::Nothing;
+        };
+        if version != self.version && !hunks.is_empty() {
+            log::debug!("buffer {}: agent hunks for version {version}", self.id);
+            return Heard::Nothing;
+        }
+        self.agents = AgentHunks::of(hunks);
+        self.chats = chats;
+        for waiting in &self.waiting {
+            if let Waiting::Edit { edit, .. } = waiting {
+                self.agents.map(edit, None);
+            }
+        }
+        Heard::Nothing
     }
 
     /// Takes highlights for bytes `start` to `end` of the daemon's text at

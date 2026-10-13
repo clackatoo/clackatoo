@@ -32,17 +32,17 @@ use crate::buffer::{Buffer, DiskStamp, Staged};
 
 /// What undoing a turn does to one file, worked out before anything's
 /// done.
-struct Plan {
+pub(super) struct Plan {
     /// The file's index among the turn's.
-    index: usize,
-    path: PathBuf,
-    target: Target,
+    pub(super) index: usize,
+    pub(super) path: PathBuf,
+    pub(super) target: Target,
     /// What becomes of the file on disk.
-    disk: Disk,
+    pub(super) disk: Disk,
 }
 
 /// Where a file's text is.
-enum Target {
+pub(super) enum Target {
     /// In buffer `id`, open: `edit` takes the turn out of its text.
     Buffer { id: BufferId, edit: Edit },
     /// On disk alone, as `file`, opened for the moment, holds it: `text`
@@ -51,7 +51,7 @@ enum Target {
 }
 
 /// What becomes of a file on disk.
-enum Disk {
+pub(super) enum Disk {
     /// It's left as it is.
     Keep,
     /// It's given this text, made if it isn't there.
@@ -61,7 +61,7 @@ enum Disk {
 }
 
 /// A file put right, for the log.
-struct Done {
+pub(super) struct Done {
     index: usize,
     /// Whether the file was there before, and is after.
     existed: bool,
@@ -173,7 +173,8 @@ impl Daemon {
             );
         }
         let names: Vec<String> = (plans.iter()).map(|plan| shown(&plan.path, &cwd)).collect();
-        let made = match self.carry_out_undo(chat, plans) {
+        let remakes = redo.then_some(turn);
+        let made = match self.carry_out_undo(chat, plans, remakes) {
             Ok(made) => made,
             Err(why) => return format!("Couldn't {undo} turn {number}, so nothing was: {why}."),
         };
@@ -302,21 +303,29 @@ impl Daemon {
         &mut self,
         chat: TerminalId,
         plans: Vec<Plan>,
+        remakes: Option<usize>,
     ) -> Result<Vec<Result<Done, String>>, String> {
         let staged = self.stage_plans(&plans)?;
-        Ok(self.put_in_place(chat, plans, staged))
+        Ok(self.put_in_place(chat, plans, staged, remakes))
     }
 
     /// Puts each of `plans`' new texts, `staged`, in place, or its file in
     /// the trash, and edits the buffers. A file found changed since it was
     /// read, as by a command or another editor while the others were being
-    /// written, is left as it is, its new text thrown away.
-    fn put_in_place(
+    /// written, is left as it is, its new text thrown away. With
+    /// `remakes`, a turn being redone, the changes are that turn's of the
+    /// agent's again, for reviewing.
+    pub(super) fn put_in_place(
         &mut self,
         chat: TerminalId,
         plans: Vec<Plan>,
         staged: Vec<Option<(Staged, Rope)>>,
+        remakes: Option<usize>,
     ) -> Vec<Result<Done, String>> {
+        let maker = remakes.map(|turn| clackatoo_text::Maker {
+            chat: chat.0,
+            turn: u32::try_from(turn).unwrap_or(u32::MAX),
+        });
         let author = Author::Agent(chat);
         let trash = self.config.trash.clone();
         let mut made = Vec::with_capacity(plans.len());
@@ -363,47 +372,23 @@ impl Daemon {
             }
             let changes = match plan.target {
                 Target::Buffer { id, edit } => {
-                    let slot = self
-                        .buffers
-                        .get_mut(&id)
-                        .expect("planned on an open buffer");
-                    let saved = slot.buffer.saved().clone();
-                    if let Some((text, stamp)) = written {
-                        slot.buffer.written(text, stamp);
-                    }
-                    let mut changes = Vec::new();
-                    // Only the file changed, as the buffer had lost the
-                    // turn's change already: the file's change is what
-                    // redoing takes out.
-                    if edit.is_noop() && *slot.buffer.saved() != saved {
-                        let after = slot.buffer.saved().clone();
-                        changes.push(Change::Text {
-                            edit: Edit::between(&saved.to_string(), &after.to_string()),
-                            after,
-                        });
-                    }
-                    if !edit.is_noop() {
-                        let version = slot.buffer.version();
-                        match slot.buffer.edit(edit, version, true, author) {
-                            Ok(one) => {
-                                let bytes = edit_bytes(&one.edit);
-                                changes.push(Change::Buffer {
-                                    buffer: id,
-                                    version: one.version,
-                                    bytes,
-                                });
-                                self.made_by(id, one, author);
-                            }
-                            Err(err) => log::warn!("buffer {id}: {err}"),
-                        }
-                    }
-                    self.note_modified(id);
-                    self.saved_in_server(id);
-                    changes
+                    self.put_buffer_in_place(id, edit, written, (author, maker))
                 }
                 Target::File { file, text } => {
                     let before = file.text().to_string();
                     let after = if exists { text } else { String::new() };
+                    let stamp = written.and_then(|(_, stamp)| stamp);
+                    match maker {
+                        Some(maker) => self.agent_changed_file(
+                            &plan.path,
+                            (Some(&before), exists.then_some(after.as_str())),
+                            maker,
+                            stamp,
+                        ),
+                        None => {
+                            self.file_changed_in_review(&plan.path, (&before, &after), stamp);
+                        }
+                    }
                     vec![Change::Text {
                         edit: Edit::between(&before, &after),
                         after: Rope::from_str(&after),
@@ -420,9 +405,63 @@ impl Daemon {
         made
     }
 
+    /// Edits buffer `id` with `edit`, as `author`, an agent's own change
+    /// again if `maker` says whose, and takes `written`, the text and stamp
+    /// its file was given, if it was. Returns the changes, for the log.
+    fn put_buffer_in_place(
+        &mut self,
+        id: BufferId,
+        edit: Edit,
+        written: Option<(Rope, Option<DiskStamp>)>,
+        (author, maker): (Author, Option<clackatoo_text::Maker>),
+    ) -> Vec<Change> {
+        let slot = self
+            .buffers
+            .get_mut(&id)
+            .expect("planned on an open buffer");
+        let saved = slot.buffer.saved().clone();
+        if let Some((text, stamp)) = written {
+            slot.buffer.written(text, stamp);
+        }
+        let mut changes = Vec::new();
+        // Only the file changed, as the buffer had lost the turn's change
+        // already: the file's change is what redoing takes out.
+        if edit.is_noop() && *slot.buffer.saved() != saved {
+            let after = slot.buffer.saved().clone();
+            changes.push(Change::Text {
+                edit: Edit::between(&saved.to_string(), &after.to_string()),
+                after,
+            });
+        }
+        if !edit.is_noop() {
+            let version = slot.buffer.version();
+            match slot.buffer.edit(edit, version, true, author) {
+                Ok(one) => {
+                    let bytes = edit_bytes(&one.edit);
+                    changes.push(Change::Buffer {
+                        buffer: id,
+                        version: one.version,
+                        bytes,
+                    });
+                    match maker {
+                        Some(maker) => self.made_by_agent(id, one, maker),
+                        None => self.made_by(id, one, author),
+                    }
+                }
+                Err(err) => log::warn!("buffer {id}: {err}"),
+            }
+        }
+        self.note_modified(id);
+        self.saved_in_server(id);
+        changes
+    }
+
     /// Writes each of `plans`' new texts beside its file, checking the
     /// file is as it was when it was read, and the text it is, if any.
-    fn stage_plans(&self, plans: &[Plan]) -> Result<Vec<Option<(Staged, Rope)>>, String> {
+    pub(super) fn stage_plans(
+        &self,
+        plans: &[Plan],
+    ) -> Result<Vec<Option<(Staged, Rope)>>, String> {
         let mut staged: Vec<Option<(Staged, Rope)>> = Vec::with_capacity(plans.len());
         for plan in plans {
             let failed = |err: clackatoo_protocol::Error| format!("{}: {err}", plan.path.display());
@@ -549,7 +588,7 @@ fn pairs(buffer: Option<(BufferId, &Buffer)>, changes: &[Change]) -> Option<Vec<
 /// what `now` has become. Returns the text made and the edit that makes
 /// it of `now`, or says which lines have changed since, if a change
 /// touches lines changed since it was made.
-fn take_out(pairs: &[(String, String)], now: &str) -> Result<(String, Edit), String> {
+pub(super) fn take_out(pairs: &[(String, String)], now: &str) -> Result<(String, Edit), String> {
     let mut text = now.to_owned();
     let mut whole = Edit::keep(now.len());
     for (after, before) in pairs.iter().rev() {
@@ -581,12 +620,12 @@ fn take_out(pairs: &[(String, String)], now: &str) -> Result<(String, Edit), Str
 
 /// `path` as the chat shows it: from its working directory, if it's in
 /// it.
-fn shown(path: &Path, cwd: &Path) -> String {
+pub(super) fn shown(path: &Path, cwd: &Path) -> String {
     path.strip_prefix(cwd).unwrap_or(path).display().to_string()
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::server) mod tests {
     use agent_client_protocol_schema::v1::StopReason;
     use clackatoo_protocol::{ChatAction, Node, OpenFile, TurnFiles};
     use serde_json::json;
@@ -597,20 +636,20 @@ mod tests {
     use crate::server::agent_files::{Capture, Seen};
     use crate::server::chats::AgentId;
 
-    const AGENT: (AgentId, &str) = (AgentId(0), "claude");
+    pub(in crate::server) const AGENT: (AgentId, &str) = (AgentId(0), "claude");
 
     /// A daemon with a chat answering its first message, in a directory of
     /// its own.
-    struct World {
+    pub(in crate::server) struct World {
         _dir: tempfile::TempDir,
-        root: PathBuf,
-        daemon: Daemon,
-        chat: TerminalId,
+        pub(in crate::server) root: PathBuf,
+        pub(in crate::server) daemon: Daemon,
+        pub(in crate::server) chat: TerminalId,
         tools: usize,
     }
 
     impl World {
-        fn new() -> Self {
+        pub(in crate::server) fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().canonicalize().unwrap();
             let (daemon, chat) = daemon_with_chat(&root);
@@ -623,11 +662,11 @@ mod tests {
             }
         }
 
-        fn path(&self, name: &str) -> PathBuf {
+        pub(in crate::server) fn path(&self, name: &str) -> PathBuf {
             self.root.join(name)
         }
 
-        fn open(&mut self, name: &str) -> BufferId {
+        pub(in crate::server) fn open(&mut self, name: &str) -> BufferId {
             let file = OpenFile {
                 path: self.path(name).display().to_string(),
                 cwd: None,
@@ -635,17 +674,17 @@ mod tests {
             self.daemon.open_buffer(file, None).unwrap()
         }
 
-        fn text(&self, id: BufferId) -> String {
+        pub(in crate::server) fn text(&self, id: BufferId) -> String {
             self.daemon.buffers[&id].buffer.text().to_string()
         }
 
-        fn disk(&self, name: &str) -> Option<String> {
+        pub(in crate::server) fn disk(&self, name: &str) -> Option<String> {
             std::fs::read_to_string(self.path(name)).ok()
         }
 
         /// The agent writes `text` to `name` through the daemon, in a tool
         /// call of its own.
-        fn write(&mut self, name: &str, text: &str) {
+        pub(in crate::server) fn write(&mut self, name: &str, text: &str) {
             self.tools += 1;
             start_tool(&mut self.daemon, self.chat, &format!("w{}", self.tools));
             let path = self.path(name);
@@ -653,33 +692,40 @@ mod tests {
         }
 
         /// Ends the turn being answered.
-        fn end_turn(&mut self) {
+        pub(in crate::server) fn end_turn(&mut self) {
             let chat = self.daemon.chat(self.chat).unwrap();
             chat.answered(Ok(StopReason::EndTurn));
             self.daemon.settle_turn(self.chat);
         }
 
         /// Starts another turn.
-        fn next_turn(&mut self) {
+        pub(in crate::server) fn next_turn(&mut self) {
             let chat = self.daemon.chat(self.chat).unwrap();
             chat.act(ChatAction::Send("more".into()));
         }
 
         /// The user types `inserted` over `removed` at `at` in buffer `id`.
-        fn type_in(&mut self, id: BufferId, at: usize, removed: &str, inserted: &str) {
+        pub(in crate::server) fn type_in(
+            &mut self,
+            id: BufferId,
+            at: usize,
+            removed: &str,
+            inserted: &str,
+        ) {
             let buffer = &mut self.daemon.buffers.get_mut(&id).unwrap().buffer;
             let edit = Edit::replace(buffer.text().len_bytes(), at, removed, inserted);
             let version = buffer.version();
-            buffer.edit(edit, version, true, Author::User).unwrap();
+            let made = buffer.edit(edit, version, true, Author::User).unwrap();
+            self.daemon.made_for_user(id, made);
         }
 
         /// Undoes or redoes turn `turn`, and returns what the chat says.
-        fn undo(&mut self, turn: usize, redo: bool, force: bool) -> String {
+        pub(in crate::server) fn undo(&mut self, turn: usize, redo: bool, force: bool) -> String {
             self.daemon.undo_turn(self.chat, turn, redo, force);
             self.chat_node().notice.unwrap_or_default()
         }
 
-        fn chat_node(&mut self) -> clackatoo_protocol::ChatNode {
+        pub(in crate::server) fn chat_node(&mut self) -> clackatoo_protocol::ChatNode {
             let Node::Chat(chat) = self.daemon.chat(self.chat).unwrap().view().root else {
                 panic!("not a chat");
             };
@@ -687,11 +733,11 @@ mod tests {
         }
 
         /// What the chat shows turn `turn` changed in files.
-        fn files(&mut self, turn: usize) -> Option<TurnFiles> {
+        pub(in crate::server) fn files(&mut self, turn: usize) -> Option<TurnFiles> {
             self.chat_node().turns[turn].files
         }
 
-        fn state(&mut self, turn: usize) -> Option<TurnFilesState> {
+        pub(in crate::server) fn state(&mut self, turn: usize) -> Option<TurnFilesState> {
             self.files(turn).map(|files| files.state)
         }
     }
@@ -932,7 +978,7 @@ mod tests {
         let staged = world.daemon.stage_plans(&plans).unwrap();
         // Written by something else as the undo's new texts were synced.
         std::fs::write(world.path("b.txt"), "theirs\n").unwrap();
-        let made = world.daemon.put_in_place(world.chat, plans, staged);
+        let made = world.daemon.put_in_place(world.chat, plans, staged, None);
         assert!(made[0].is_ok());
         let skipped = format!("{}, which changed meanwhile", world.path("b.txt").display());
         assert_eq!(made[1].as_ref().err(), Some(&skipped));

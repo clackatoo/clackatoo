@@ -32,6 +32,10 @@
 //! lines added, changed and deleted, for the signs beside them. The window
 //! moves them along with each edit too.
 //!
+//! The lines agents have changed, and whether the user has reviewed them,
+//! are sent as [`BufferUpdate::Agents`] whenever an agent changes the
+//! buffer, or a hunk is kept or rejected (see [`crate::ReviewAction`]).
+//!
 //! A window asks where the functions, classes and arguments around a place
 //! are, for text objects such as `af`, or where the next one starts, for
 //! motions such as `]f`, as it asks a language server about a place: with
@@ -41,10 +45,10 @@
 
 use std::fmt;
 
-use clackatoo_text::{Construct, Diagnostic, Edit, Hunk, LineIndent, Piece, Span};
+use clackatoo_text::{AgentHunk, Construct, Diagnostic, Edit, Hunk, LineIndent, Piece, Span};
 use serde::{Deserialize, Serialize};
 
-use crate::TerminalId;
+use crate::{ChatName, TerminalId};
 
 /// Identifies a buffer within one daemon. Never reused while it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -259,6 +263,19 @@ pub enum BufferUpdate {
     /// [`Request::Reload`](crate::Request::Reload), or says so, as its
     /// `autoread` says. Sent again to a client attaching while it's so.
     ChangedOnDisk,
+    /// The lines of the text at `version` that agents changed: every
+    /// agent hunk, in place of those before, kept or not, with the names
+    /// of the chats that made them. Sent after the edit that made
+    /// `version`, after a snapshot, and whenever one's made, kept or
+    /// rejected; the window moves them along with each edit meanwhile.
+    Agents {
+        /// The version of the text they're for.
+        version: u64,
+        /// The hunks, in order.
+        hunks: Vec<AgentHunk>,
+        /// The names of the chats that made them.
+        chats: Vec<ChatName>,
+    },
 }
 
 /// What a buffer's language server does as you type, as it said when it

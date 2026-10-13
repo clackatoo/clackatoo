@@ -204,6 +204,59 @@ pub(crate) const fn sign(sign: Sign) -> (&'static str, Style) {
     (text, style)
 }
 
+/// The colours agents' changes are drawn in, a chat each, in turn: the
+/// palette's magenta, cyan and blue, and their bright kinds, which git's
+/// green, blue and red signs beside them don't use as they are.
+const AGENT_COLOURS: [u8; 6] = [5, 6, 13, 14, 12, 4];
+
+/// The colour of the changes chat `chat`'s agent made, from the palette,
+/// so it follows the theme.
+#[must_use]
+pub(crate) const fn agent(chat: u32) -> Color {
+    Color::Indexed(AGENT_COLOURS[chat as usize % AGENT_COLOURS.len()])
+}
+
+/// The sign beside a line an agent changed and you haven't reviewed, and
+/// how it's drawn: a bar down the line in its chat's colour, or for lines
+/// it deleted, a line along the foot of the line above, or the head of
+/// the first, as git's signs are drawn. Kept, under `:Blame`, it's a
+/// faint dot.
+#[must_use]
+pub(crate) const fn agent_sign(
+    chat: u32,
+    deleted: bool,
+    top: bool,
+    kept: bool,
+) -> (&'static str, Style) {
+    let text = match (kept, deleted, top) {
+        (true, ..) => "·",
+        (false, true, true) => "▔",
+        (false, true, false) => "▁",
+        (false, false, _) => "▍",
+    };
+    let style = Style {
+        fg: agent(chat),
+        attributes: if kept {
+            Attributes::DIM
+        } else {
+            Attributes::empty()
+        },
+        ..Style::DEFAULT
+    };
+    (text, style)
+}
+
+/// How who changed a line is written after its end under `:Blame`: in
+/// the chat's colour, dimmed, as diagnostics are.
+#[must_use]
+pub(crate) const fn blame(chat: u32) -> Style {
+    Style {
+        fg: agent(chat),
+        attributes: Attributes::DIM,
+        ..Style::DEFAULT
+    }
+}
+
 /// The mark beside a file in an explorer git says something of, and how
 /// it's drawn: its letter, as `git status` writes it, in the colours of
 /// the signs beside lines, green for what's new, blue for what's changed
@@ -284,6 +337,8 @@ impl Theme {
             HighlightKind::Match | HighlightKind::Copied => faint(self.accent, 0.6),
             // Only just there: they say where things are, not what they are.
             HighlightKind::CursorLine => white(0.035),
+            HighlightKind::Added => faint(self.added, 0.13),
+            HighlightKind::Removed => faint(self.removed, 0.13),
             HighlightKind::ColorColumn => white(0.05),
             HighlightKind::Link => self.accent,
             HighlightKind::LessonStep => white(0.04),

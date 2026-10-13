@@ -14,7 +14,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BoardId, BufferId, FilesId, NewAgent, NewTerminal, OpenBoard, OpenFile, OpenFiles, TerminalId,
+    BoardId, BufferId, FilesId, NewAgent, NewReview, NewTerminal, OpenBoard, OpenFile, OpenFiles,
+    ReviewId, TerminalId,
 };
 
 /// Identifies a workspace within one daemon. Never reused while it runs.
@@ -123,6 +124,8 @@ pub enum Content {
     /// A board agents and the user coordinate on. Several panes can show
     /// one.
     Board(BoardId),
+    /// A review of what agents changed. One pane shows each.
+    Review(ReviewId),
 }
 
 impl From<TerminalId> for Content {
@@ -143,6 +146,12 @@ impl From<FilesId> for Content {
     }
 }
 
+impl From<ReviewId> for Content {
+    fn from(review: ReviewId) -> Self {
+        Self::Review(review)
+    }
+}
+
 impl From<BoardId> for Content {
     fn from(board: BoardId) -> Self {
         Self::Board(board)
@@ -155,7 +164,7 @@ impl Content {
     pub fn terminal(self) -> Option<TerminalId> {
         match self {
             Self::Terminal(terminal) => Some(terminal),
-            Self::Buffer(_) | Self::Files(_) | Self::Board(_) => None,
+            Self::Buffer(_) | Self::Files(_) | Self::Board(_) | Self::Review(_) => None,
         }
     }
 
@@ -164,7 +173,7 @@ impl Content {
     pub fn buffer(self) -> Option<BufferId> {
         match self {
             Self::Buffer(buffer) => Some(buffer),
-            Self::Terminal(_) | Self::Files(_) | Self::Board(_) => None,
+            Self::Terminal(_) | Self::Files(_) | Self::Board(_) | Self::Review(_) => None,
         }
     }
 
@@ -173,7 +182,7 @@ impl Content {
     pub fn files(self) -> Option<FilesId> {
         match self {
             Self::Files(files) => Some(files),
-            Self::Terminal(_) | Self::Buffer(_) | Self::Board(_) => None,
+            Self::Terminal(_) | Self::Buffer(_) | Self::Board(_) | Self::Review(_) => None,
         }
     }
 
@@ -182,7 +191,16 @@ impl Content {
     pub fn board(self) -> Option<BoardId> {
         match self {
             Self::Board(board) => Some(board),
-            Self::Terminal(_) | Self::Buffer(_) | Self::Files(_) => None,
+            Self::Terminal(_) | Self::Buffer(_) | Self::Files(_) | Self::Review(_) => None,
+        }
+    }
+
+    /// The review it is, if it's one.
+    #[must_use]
+    pub fn review(self) -> Option<ReviewId> {
+        match self {
+            Self::Review(review) => Some(review),
+            Self::Terminal(_) | Self::Buffer(_) | Self::Files(_) | Self::Board(_) => None,
         }
     }
 }
@@ -242,6 +260,8 @@ pub enum PaneTerminal {
     Files(OpenFiles),
     /// A board.
     Board(OpenBoard),
+    /// A review of what agents changed.
+    Review(NewReview),
 }
 
 impl Workspaces {

@@ -344,6 +344,93 @@ fn guesses_at_the_echo_of_what_is_typed_are_drawn_underlined() {
     }
 }
 
+#[test]
+fn a_review_draws_old_lines_on_red_and_new_on_green() {
+    use clackatoo_protocol::{
+        Made, ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope, TerminalId,
+    };
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let mut review = crate::review::Review::new(ReviewId(1), &crate::options::Options::default());
+    let (cols, rows) = (48_u16, 12_u16);
+    review.resize(Size::new(cols, rows).unwrap());
+    review.update(ReviewList {
+        chat: Some(TerminalId(3)),
+        chat_name: "Claude Code".into(),
+        scope: Some(ReviewScope::Turn(Some(1))),
+        files: vec![ReviewFile {
+            path: "/src/main.rs".into(),
+            shown: "src/main.rs".into(),
+            buffer: None,
+            hunks: vec![ReviewHunk {
+                line: 2,
+                before: vec!["fn main() {".into()],
+                base: "    println!(\"old\");\n".into(),
+                text: "    println!(\"new\");\n    done();\n".into(),
+                after: vec!["}".into()],
+                agents: vec![1],
+                by: Some(Made {
+                    chat: TerminalId(3),
+                    turn: 1,
+                }),
+                reviewed: false,
+            }],
+        }],
+        comments: Vec::new(),
+        note: None,
+    });
+    review.settle();
+    let (shown, cursor) = review.scene();
+    let highlights = review.highlights();
+    let mut fonts = fonts(2.0);
+    let padding = 4;
+    let size = [
+        u32::from(cols) * fonts.cell.width + 2 * padding,
+        u32::from(rows) * fonts.cell.height + 2 * padding,
+    ];
+    #[allow(clippy::cast_precision_loss)]
+    let scene = Scene {
+        origin: [padding as f32; 2],
+        size: [
+            (size[0] - 2 * padding) as f32,
+            (size[1] - 2 * padding) as f32,
+        ],
+        rows: &shown,
+        cursor,
+        normal_mode: true,
+        highlights: &highlights,
+    };
+    let picture = Picture {
+        scenes: &[scene],
+        fills: &[],
+        over: &[],
+        texts: &[],
+        glyphs: &[],
+        over_glyphs: &[],
+        transparent: false,
+    };
+    let pixels = draw(&gpu, size, &picture, &mut fonts);
+    save("review", size, &pixels);
+    // The pixel at the right end of each row, where no text is: how the
+    // row is lit.
+    let lit = |kind: HighlightKind| -> [u8; 4] {
+        let line = highlights
+            .iter()
+            .find(|highlight| highlight.kind == kind)
+            .expect("lit")
+            .line;
+        let y = padding + u32::try_from(line).unwrap() * fonts.cell.height + fonts.cell.height / 2;
+        let x = size[0] - padding - 2;
+        let at = usize::try_from((y * size[0] + x) * 4).unwrap();
+        pixels[at..at + 4].try_into().unwrap()
+    };
+    let (removed, added) = (lit(HighlightKind::Removed), lit(HighlightKind::Added));
+    assert!(removed[0] > removed[1], "red: {removed:?}");
+    assert!(added[1] > added[0], "green: {added:?}");
+}
+
 /// A window with room for two tiles of 20 x 4 cells side by side, with
 /// its frame laid out and its tiles placed.
 #[allow(

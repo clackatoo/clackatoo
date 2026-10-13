@@ -820,7 +820,7 @@ impl Desk {
     /// the cursors of the other editors of its buffer with any edits it
     /// makes. Returns whether the window must be redrawn, or `None` if the
     /// focused pane isn't an editor.
-    fn in_focused_editor(
+    pub(super) fn in_focused_editor(
         &mut self,
         act: impl FnOnce(&mut Editor, &mut BufferCopy, &mut Shared) -> Done,
     ) -> Option<bool> {

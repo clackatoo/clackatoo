@@ -39,6 +39,7 @@ mod objects;
 mod options;
 mod pane;
 mod render;
+mod review;
 mod screen;
 mod session;
 mod tutor;

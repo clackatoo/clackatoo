@@ -3440,7 +3440,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Files { .. }
             | Event::FileOp { .. }
             | Event::Show { .. }
-            | Event::Board { .. }) => {
+            | Event::Board { .. }
+            | Event::Review { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }

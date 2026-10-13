@@ -27,7 +27,10 @@
 //! `<Space>hr` puts its lines back as they are in git's index, and
 //! `<Space>hs` stages it. `<Space>e` opens the tab's file explorer down
 //! its left, goes to it, or closes it if it has the focus (see
-//! [`super::explorers`]).
+//! [`super::explorers`]). `<Space>gr` opens a review of what agents
+//! changed, `<Space>ga` keeps the agent's change at the cursor and
+//! `<Space>gx` rejects it, and `<Space>c` comments on the cursor's line
+//! for the agent (see [`super::reviews`]).
 //!
 //! In normal and visual mode, `:` opens the command line, Ctrl with `h`,
 //! `j`, `k` or `l` moves to the pane that way, Alt with them moves the
@@ -39,7 +42,7 @@
 use clackatoo_protocol::{Side, WorkspaceId};
 
 use super::{Desk, Input, Purpose};
-use crate::command::{Command, Kind, Place};
+use crate::command::{Command, Kind, Place, ReviewWhich};
 use crate::editor::HunkAction;
 use crate::finder;
 use crate::keymap::{KeyMode, Keymap, parse_keys, parse_modes};
@@ -94,8 +97,23 @@ pub(crate) enum Action {
     /// The tab's file explorer: opened down its left, gone to, or closed
     /// if it has the focus.
     Explore,
+    /// Reviewing what agents changed (see [`super::reviews`]).
+    Review(ReviewKey),
     /// Sends Ctrl+B to the focused pane's program.
     SendCtrlB,
+}
+
+/// What a key does in reviewing what agents changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewKey {
+    /// The tab's review: opened, gone to, or closed if it has the focus.
+    Open,
+    /// Keep the agent's change at the cursor.
+    Keep,
+    /// Reject it.
+    Reject,
+    /// Comment on the cursor's line, for the agent.
+    Comment,
 }
 
 /// The window's keymap, which starts with its own keys bound.
@@ -227,8 +245,33 @@ fn defaults() -> Keymap<Binding> {
         };
         bind("nivc", keys, action, None);
     }
+    bind_review_keys(&mut map);
     map
 }
+
+/// Binds the keys for reviewing what agents changed in `map`.
+fn bind_review_keys(map: &mut Keymap<Binding>) {
+    let modes = parse_modes("nv").expect("the defaults' modes are valid");
+    for (keys, key, label) in REVIEW_KEYS {
+        let keys = parse_keys(keys).expect("the defaults' keys are valid");
+        map.bind(
+            &modes,
+            &keys,
+            Binding::Window(Action::Review(key)),
+            Some(label),
+        );
+    }
+}
+
+/// The keys for reviewing what agents changed, beside git's hunk keys:
+/// `g` for the agents' changes, as `h` is for git's hunks, then `r`eview,
+/// `a`ccept and `x`, Vim's delete; and `c` to comment.
+const REVIEW_KEYS: [(&str, ReviewKey, &str); 4] = [
+    ("<Space>gr", ReviewKey::Open, "review"),
+    ("<Space>ga", ReviewKey::Keep, "review"),
+    ("<Space>gx", ReviewKey::Reject, "review"),
+    ("<Space>c", ReviewKey::Comment, "comment"),
+];
 
 /// Vim's letters for the four ways.
 const DIRECTIONS: [(char, Direction); 4] = [
@@ -281,6 +324,12 @@ impl Desk {
             Action::Find(kind) => self.open_finder(kind, String::new()),
             Action::Hunk(action) => self.editor_hunk(action),
             Action::Explore => self.toggle_explorer(),
+            Action::Review(key) => match key {
+                ReviewKey::Open => self.toggle_review(),
+                ReviewKey::Keep => self.review_act(true, false, ReviewWhich::Here),
+                ReviewKey::Reject => self.review_act(false, false, ReviewWhich::Here),
+                ReviewKey::Comment => self.comment_here(),
+            },
             Action::SendCtrlB => {
                 if let Some(pane) = self.focused_pane() {
                     pane.send_bytes(vec![0x02]);
@@ -291,7 +340,7 @@ impl Desk {
 
     fn open_palette(&mut self, purpose: Purpose) {
         // From a selection in an editor, a command starts with its lines.
-        let text = match purpose {
+        let text = match &purpose {
             Purpose::Command => self.editor_command_line(),
             _ => String::new(),
         };
@@ -313,6 +362,9 @@ impl Desk {
         }
         if let Some(board) = self.focused_board() {
             return board.pending();
+        }
+        if let Some(review) = self.focused_review() {
+            return review.pending();
         }
         (self.focused_terminal())
             .and_then(|terminal| self.panes.get(&terminal))

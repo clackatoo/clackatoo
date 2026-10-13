@@ -680,6 +680,7 @@ impl Daemon {
             Content::Buffer(_) => Err(format!("pane {pane} shows a file, not a terminal")),
             Content::Files(_) => Err(format!("pane {pane} is a file explorer, not a terminal")),
             Content::Board(_) => Err(format!("pane {pane} shows a board, not a terminal")),
+            Content::Review(_) => Err(format!("pane {pane} is a review, not a terminal")),
         }
     }
 
@@ -857,6 +858,7 @@ impl Daemon {
                 Some(board) => format!("board {:?}", board.summary.name),
                 None => "board".to_owned(),
             },
+            Content::Review(_) => "review of what agents changed".to_owned(),
             Content::Terminal(terminal) => {
                 let Some(slot) = self.terminals.get(&terminal) else {
                     return "terminal".to_owned();
