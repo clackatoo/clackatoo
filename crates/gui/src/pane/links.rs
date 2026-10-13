@@ -61,6 +61,12 @@ impl Pane {
     /// Notes where the mouse is and the keys held, for the link under it.
     /// Returns whether that changes what's underlined.
     pub(crate) fn hover(&mut self, hover: Option<(i64, i64, Modifiers)>) -> bool {
+        // Gone from a chat, the mouse takes away what it showed there.
+        if hover.is_none()
+            && let Some(chat) = &mut self.chat
+        {
+            return chat.unhover();
+        }
         let before = self.hovered_link();
         self.hovered = hover.map(|(line, col, modifiers)| Hover {
             line,

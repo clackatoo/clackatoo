@@ -4,7 +4,8 @@
 
 use clackatoo_protocol::{Tool, ToolStatus};
 
-use super::{Canvas, Laid, Look, Measures, draw_laid, lay_out};
+use super::select::TextKey;
+use super::{Canvas, Drawn, Laid, Look, Measures, draw_laid, intersection, lay_out};
 use crate::chat::card::{Card, FileChange, Sign};
 use crate::chat::{ChatView, Hit, Tone};
 use crate::fonts::Fonts;
@@ -32,10 +33,45 @@ pub(super) struct CardLaid {
     /// What goes before a change's lines.
     gutter: Option<Gutter>,
     body: Vec<Section>,
+    /// Where each of `body` starts, from the card's top.
+    tops: Vec<f32>,
     /// What clicking it does, if it has more to show, or less.
     footer: Option<Laid>,
     head_height: f32,
     pub(super) height: f32,
+}
+
+impl CardLaid {
+    /// Part `part` of its text, and where it's drawn from the card's top
+    /// left: 0 is its head, and what it shows follows, a part to a line
+    /// of a change, or to a command's output.
+    pub(in crate::chat) fn part(&self, m: Measures, part: usize) -> Option<(&Laid, [f32; 2])> {
+        if part == 0 {
+            let x = m.em(PAD) + self.mark.width + m.em(0.6);
+            return Some((&self.head, [x, (self.head_height - self.head.height) / 2.0]));
+        }
+        let (section, top) = (self.body.get(part - 1)?, self.tops.get(part - 1)?);
+        let (laid, x, down) = match section {
+            Section::Text(laid) | Section::More(laid) => (laid, m.em(PAD), 0.0),
+            Section::Path(laid) => (laid, m.em(PAD), m.em(0.15)),
+            Section::Line(_, _, laid) => {
+                let gutter = self.gutter.as_ref().map_or(0.0, |gutter| gutter.width(m));
+                (laid, m.em(PAD) + gutter, 0.0)
+            }
+        };
+        Some((laid, [x, top + down]))
+    }
+
+    /// The first of `body` that reaches `y` from the card's top, or past
+    /// it: what's in view starts there.
+    fn first_reaching(&self, y: f32) -> usize {
+        self.tops.partition_point(|&top| top < y).saturating_sub(1)
+    }
+
+    /// How many parts of text it has: its head and its sections.
+    pub(in crate::chat) fn parts(&self) -> usize {
+        1 + self.body.len()
+    }
 }
 
 /// A piece of what a card shows.
@@ -81,28 +117,22 @@ impl Section {
 }
 
 impl ChatView {
-    /// The card for `tool`, piece `key` of the conversation, laid out
-    /// `width` wide, from the cache if neither it nor whether it's open
-    /// changed. Returns its height.
+    /// The card for `tool`, laid out `width` wide: `old`, if neither the
+    /// tool nor whether its card is open has changed since it was laid
+    /// out.
     pub(super) fn card(
         &mut self,
         fonts: &mut Fonts,
         m: Measures,
-        key: (usize, usize),
+        old: Option<CardLaid>,
         tool: &Tool,
         width: f32,
-    ) -> f32 {
+    ) -> CardLaid {
         let open = self.open_cards.contains(&tool.id);
-        if let Some(laid) = self.cache.cards.get(&key)
-            && laid.open == open
-            && laid.tool == *tool
-        {
-            return laid.height;
+        match old {
+            Some(laid) if laid.open == open && laid.tool == *tool => laid,
+            _ => self.lay_out_card(fonts, m, tool, open, width),
         }
-        let laid = self.lay_out_card(fonts, m, tool, open, width);
-        let height = laid.height;
-        self.cache.cards.insert(key, laid);
-        height
     }
 
     fn lay_out_card(
@@ -166,6 +196,14 @@ impl ChatView {
             w.text(&says, Look::Plain(Tone::Muted), inner)
         });
         let head_height = mark.height.max(head.height) + 2.0 * m.em(0.55);
+        let mut top = head_height + 1.0 + m.em(0.45);
+        let tops = (body.iter())
+            .map(|section| {
+                let this = top;
+                top += section.height(m);
+                this
+            })
+            .collect();
         let mut height = head_height;
         if !body.is_empty() {
             height +=
@@ -182,6 +220,7 @@ impl ChatView {
             counts,
             gutter,
             body,
+            tops,
             footer,
             head_height,
             height,
@@ -310,16 +349,18 @@ impl Writer<'_> {
     }
 }
 
-/// Draws `card` with its top left at `origin`, `width` wide, and if it
-/// folds, says where it can be clicked: `hits` gets the part of it in
-/// view, from `pane`, the pane's top left.
+/// Draws `card`, text `key`'s card, with its top left at `origin`,
+/// `width` wide, noting its text in `drawn`, and if it folds, where it
+/// can be clicked: its head and its foot, where they're in view. Its
+/// text, between, is for selecting.
 pub(super) fn draw_card(
     canvas: &mut Canvas<'_>,
     m: Measures,
     card: &CardLaid,
+    key: TextKey,
     origin: [f32; 2],
     width: f32,
-    (pane, hits): ([f32; 2], &mut Vec<(Hit, [f32; 4])>),
+    drawn: &mut Drawn<'_>,
 ) {
     let rect = [origin[0], origin[1], width, card.height];
     canvas.fill(Fill::rounded(rect, Paint::Code, m.em(0.6)).bordered(1.0, Paint::RaisedEdge));
@@ -350,10 +391,16 @@ pub(super) fn draw_card(
     }
     let mut y = origin[1] + card.head_height;
 
+    // Only what's in view, of what may be a thousand lines.
+    let [view_top, view_bottom] = [view[1], view[1] + view[3]];
+    let first = card.first_reaching(view_top - origin[1]);
     if !card.body.is_empty() {
         divider(canvas, y);
-        y += 1.0 + m.em(0.45);
-        for section in &card.body {
+        for (section, &top) in card.body[first..].iter().zip(&card.tops[first..]) {
+            let y = origin[1] + top;
+            if y > view_bottom {
+                break;
+            }
             match section {
                 Section::Text(laid) | Section::More(laid) => {
                     draw_laid(canvas, m, laid, [x, y], inner);
@@ -370,9 +417,9 @@ pub(super) fn draw_card(
                     );
                 }
             }
-            y += section.height(m);
         }
-        y += m.em(0.45);
+        y = origin[1] + card.tops.last().copied().unwrap_or(0.0);
+        y += card.body.last().map_or(0.0, |section| section.height(m)) + m.em(0.45);
     }
 
     if let Some(footer) = &card.footer {
@@ -386,24 +433,35 @@ pub(super) fn draw_card(
             inner,
         );
         // Only what's in view takes a click: the rest is under the box.
-        let [left, top, wide, high] = intersection(view, rect);
-        if wide > 0.0 && high > 0.0 {
-            hits.push((
-                Hit::Card(card.tool.id.clone()),
-                [left - pane[0], top - pane[1], wide, high],
-            ));
+        let pane = drawn.pane;
+        let head = [rect[0], rect[1], rect[2], card.head_height];
+        let foot = [rect[0], y, rect[2], rect[1] + rect[3] - y];
+        for part in [head, foot] {
+            let [left, top, wide, high] = intersection(view, part);
+            if wide > 0.0 && high > 0.0 {
+                drawn.hits.push((
+                    Hit::Card(key.turn, card.tool.id.clone()),
+                    [left - pane[0], top - pane[1], wide, high],
+                ));
+            }
         }
     }
     canvas.clip = view;
-}
-
-/// Where rectangles `a` and `b` overlap: nothing wide or high, if they
-/// don't.
-pub(super) fn intersection(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-    let (left, top) = (a[0].max(b[0]), a[1].max(b[1]));
-    let right = (a[0] + a[2]).min(b[0] + b[2]);
-    let bottom = (a[1] + a[3]).min(b[1] + b[3]);
-    [left, top, (right - left).max(0.0), (bottom - top).max(0.0)]
+    let parts = std::iter::once(0).chain(first + 1..card.parts());
+    for part in parts {
+        let Some((laid, [x, y])) = card.part(m, part) else {
+            continue;
+        };
+        if origin[1] + y > view_bottom {
+            break;
+        }
+        if let Some(block) = laid.blocks.first()
+            && origin[1] + y + laid.height >= view_top
+        {
+            let at = [origin[0] + x + block.left, origin[1] + y + block.top];
+            drawn.note_text(TextKey { part, ..key }, at, &block.layout, false);
+        }
+    }
 }
 
 /// Draws a line of a change at `at`: on green or red if it's added or

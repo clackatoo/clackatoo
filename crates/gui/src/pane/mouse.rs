@@ -82,6 +82,11 @@ impl Pane {
             match event.action {
                 MouseAction::Press(MouseButton::Left) => {
                     chat.press(event.pixel, event.clicks, event.modifiers.shift);
+                    // The mouse selects in its own way: visual mode's
+                    // selection goes.
+                    if matches!(self.mode, Mode::Visual(_)) {
+                        self.mode = Mode::Normal;
+                    }
                 }
                 MouseAction::Motion(Some(MouseButton::Left)) => chat.drag(event.pixel),
                 MouseAction::Motion(None) => return chat.hover(event.pixel),

@@ -28,6 +28,7 @@ log.workspace = true
 nucleo-matcher.workspace = true
 pollster.workspace = true
 swash.workspace = true
+unicode-segmentation.workspace = true
 unicode-width.workspace = true
 wgpu.workspace = true
 winit.workspace = true

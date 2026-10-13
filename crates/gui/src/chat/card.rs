@@ -100,6 +100,39 @@ impl Card {
         })
     }
 
+    /// The card as text, to copy: a command and its output, or each
+    /// file's path over its lines, marked as a diff marks them.
+    pub(super) fn text(&self) -> String {
+        match self {
+            Self::Command {
+                command, output, ..
+            } => {
+                let mut text = format!("$ {command}");
+                for line in output {
+                    text.push('\n');
+                    text.push_str(line);
+                }
+                text
+            }
+            Self::Change(files) => (files.iter())
+                .map(|file| {
+                    let mut text = file.path.clone();
+                    for line in &file.lines {
+                        text.push('\n');
+                        text.push(match line.sign {
+                            Sign::Kept => ' ',
+                            Sign::Added => '+',
+                            Sign::Removed => '-',
+                        });
+                        text.push_str(&line.text);
+                    }
+                    text
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        }
+    }
+
     /// How many lines added and removed it has, if it's a change.
     pub(super) fn counts(&self) -> Option<(usize, usize)> {
         let Self::Change(files) = self else {

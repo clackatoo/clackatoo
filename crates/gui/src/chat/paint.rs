@@ -3,10 +3,12 @@
 //!
 //! Every size is a multiple of the terminal font's size, so a chat grows
 //! and shrinks with the text around it. Turns are laid out once for a
-//! width, and again only when their text changes, as the turn being
-//! answered does.
+//! width, as they come into view, and again only when they change, as
+//! the turn being answered does, or are opened or folded.
 
 mod cards;
+mod fold;
+mod select;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -26,6 +28,9 @@ use super::picker::{self, ChoiceRow, Row, SliderRow, Spot};
 use super::{Brush, ChatView, Hit, Menu, Tone};
 use crate::fonts::Fonts;
 use crate::render::{Fill, Ink, Paint, PlacedGlyph};
+pub(super) use select::{
+    How, Picked, Position, Shown, TextKey, after, before, line_middle, line_of, within, x_of,
+};
 
 /// The widest the column of turns gets, in ems.
 const COLUMN: f32 = 46.0;
@@ -94,20 +99,74 @@ pub(super) fn body_style(fonts: &Fonts, size: f32) -> Vec<StyleProperty<'static,
     ]
 }
 
-/// A turn's pieces, laid out for one width, kept while their text stays
-/// the same.
+/// A turn's message is its piece 0.
+pub(super) const PROMPT: usize = 0;
+/// The line its work folds under is its piece 1.
+pub(super) const FOLD: usize = 1;
+/// Item `i` of a turn is its piece `ITEMS + i`.
+pub(super) const ITEMS: usize = 2;
+
+/// The turns, laid out for one width, kept while they stay the same.
+///
+/// Only turns in view, or near it, are laid out: the rest are taken to be
+/// as tall as they were when last laid out, or until they have been, as
+/// tall as a guess from their text. A long chat opens, and scrolls, at the
+/// cost of what's on the screen.
 #[derive(Default)]
 pub(super) struct Cache {
     /// The column's width and the text's size they were laid out for.
-    width: f32,
+    pub(super) width: f32,
     size: f32,
-    /// By turn, then by piece: 0 is the message, and the agent's items
-    /// follow.
-    pieces: HashMap<(usize, usize), Laid>,
-    /// Text of the chat's own, such as "Working…", by what it says.
+    /// By turn, in order.
+    pub(super) turns: Vec<TurnSlot>,
+    /// Each turn's top and bottom, from the conversation's top, as far as
+    /// `bounded` turns: from there on, they're worked out again when next
+    /// asked for, as a turn's height has changed.
+    bounds: Vec<[f32; 2]>,
+    bounded: usize,
+    /// The turns laid out, to drop again once far from the view.
+    laid: Vec<usize>,
+    /// Text of the chat's own, such as "Starting Claude Code…", by what it
+    /// says.
     notes: HashMap<(String, Tone), Laid>,
-    /// Tools shown as cards, by turn and piece.
-    cards: HashMap<(usize, usize), cards::CardLaid>,
+}
+
+/// What's kept of one turn between frames.
+#[derive(Default)]
+pub(super) struct TurnSlot {
+    /// The turn, as it was laid out when last it was.
+    laid: Option<TurnLaid>,
+    /// The turn has changed since, or how it's shown has.
+    pub(super) stale: bool,
+    /// How tall it is: as laid out, or until it has been, a guess. `None`
+    /// until guessed.
+    height: Option<f32>,
+    /// The line its work folds under, laid out: what it says changes as
+    /// the turn goes on.
+    header: Option<Laid>,
+}
+
+/// A turn, laid out.
+struct TurnLaid {
+    /// Its pieces, top to bottom, from the turn's top.
+    spans: Vec<Span>,
+    /// Its message and the agent's items, by piece.
+    pieces: HashMap<usize, Laid>,
+    /// Tools shown as cards, by piece.
+    cards: HashMap<usize, cards::CardLaid>,
+    /// What's said under it, as how it ended.
+    note: Option<Laid>,
+    /// What it changed in files, and the buttons that undo and redo it.
+    files: Option<FilesLaid>,
+    height: f32,
+}
+
+/// What a turn changed in files, laid out: "2 files changed", and its
+/// buttons, "Undo" or "Redo", each with what clicking it does.
+struct FilesLaid {
+    label: Laid,
+    buttons: Vec<(Hit, Laid)>,
+    height: f32,
 }
 
 /// Something laid out: the text it was laid out from, and its blocks.
@@ -122,6 +181,8 @@ struct Laid {
 /// One block, placed within what it belongs to.
 struct LaidBlock {
     layout: Layout<Brush>,
+    /// The text it shows, without its Markdown.
+    text: String,
     kind: BlockKind,
     /// From the left of the column.
     left: f32,
@@ -255,8 +316,9 @@ impl Canvas<'_> {
 
 impl ChatView {
     /// Lays the chat out in a pane `size` pixels, whose top left is at
-    /// `origin`, and says what to draw. `caret` draws the cursor in the
-    /// message being typed.
+    /// `origin`, and says what to draw. `caret` says the pane has the
+    /// keyboard: the cursor is drawn in the message being typed, or in
+    /// normal mode, in the conversation.
     pub(crate) fn paint(
         &mut self,
         fonts: &mut Fonts,
@@ -271,19 +333,28 @@ impl ChatView {
         let margin = m.em(1.5);
         let column = (size[0] - 2.0 * margin).clamp(m.em(8.0), m.em(COLUMN));
         let left = ((size[0] - column) / 2.0).max(0.0).round();
-        // Laid out for another width or size: again.
+        // Laid out for another width or size: again, as each turn comes
+        // into view. How tall each was is still the best guess.
         if self.cache.width.to_bits() != column.to_bits()
             || self.cache.size.to_bits() != em.to_bits()
         {
+            let turns = (std::mem::take(&mut self.cache.turns).into_iter())
+                .map(|slot| TurnSlot {
+                    height: slot.height,
+                    ..TurnSlot::default()
+                })
+                .collect();
             self.cache = Cache {
                 width: column,
                 size: em,
+                turns,
                 ..Cache::default()
             };
         }
 
         let mut paint = ChatPaint::default();
         self.hits.clear();
+        self.shown.clear();
 
         // The box below, first, as the conversation gets what's left.
         let place = Place {
@@ -292,7 +363,7 @@ impl ChatView {
             left,
             column,
         };
-        let box_height = self.paint_box(fonts, &mut paint, m, place, caret);
+        let box_height = self.paint_box(fonts, &mut paint, m, place, caret && !self.reading);
         let status = self.status();
         let status_height = if status.is_some() { m.em(1.8) } else { 0.0 };
         let view_height = (size[1] - box_height - status_height - m.em(1.0)).max(0.0);
@@ -313,15 +384,11 @@ impl ChatView {
             self.cache.notes.insert((text, tone), laid);
         }
 
-        // The conversation, laid out from the top.
-        let spans = self.lay_out_turns(fonts, m, column);
-        let content_height = spans.last().map_or(0.0, |span| span.bottom) + m.em(1.5);
+        // The conversation: the turns in view are laid out, and drawn.
         self.view_height = view_height;
-        self.max_scroll = (content_height - view_height).max(0.0);
-        if self.follow {
-            self.scroll = self.max_scroll;
-        }
-        self.scroll = self.scroll.clamp(0.0, self.max_scroll);
+        self.arrange(fonts, m, column);
+        let shown = in_view(&self.cache.bounds, self.scroll, self.scroll + view_height);
+        self.label_folds(fonts, m, self.near());
         let clip = [origin[0], origin[1], size[0], view_height];
         let top = origin[1] - self.scroll;
         let mut canvas = Canvas {
@@ -331,21 +398,24 @@ impl ChatView {
             em,
             over: false,
         };
-        let mut hits = Vec::new();
-        for span in &spans {
-            // Out of view: nothing to draw.
-            if top + span.bottom < origin[1] || top + span.top > origin[1] + view_height {
-                continue;
-            }
-            self.draw_span(
-                &mut canvas,
-                m,
-                span,
-                ([origin[0] + left, top], column),
-                (origin, &mut hits),
-            );
+        let (mut hits, mut texts) = (Vec::new(), Vec::new());
+        let mut drawn = Drawn {
+            pane: origin,
+            hits: &mut hits,
+            texts: &mut texts,
+        };
+        for index in shown {
+            let at = [origin[0] + left, top + self.cache.bounds[index][0]];
+            self.draw_turn(&mut canvas, m, index, at, &mut drawn);
         }
         self.hits.extend(hits);
+        self.shown = texts;
+        self.note_live();
+        self.column_right = left + column;
+        self.cursor_onto_text();
+        self.cursor_into_view();
+        let label = self.copy_label(canvas.fonts, m);
+        self.draw_reading(&mut canvas, m, origin, (caret, label));
         if self.node.turns.is_empty() && matches!(self.node.state, ChatState::Ready) {
             let laid = self.note(canvas.fonts, m, EMPTY, Tone::Muted, column);
             let x = origin[0] + left + (column - laid.width) / 2.0;
@@ -366,7 +436,7 @@ impl ChatView {
 
     /// The agent, as the chat names it: "Codex", or "the agent" for a
     /// chat from before chats said which.
-    fn agent(&self) -> &str {
+    pub(super) fn agent(&self) -> &str {
         if self.node.agent.is_empty() {
             "the agent"
         } else {
@@ -391,185 +461,299 @@ impl ChatView {
         }
     }
 
-    /// Lays out every turn, as needed, and says where each piece goes.
-    fn lay_out_turns(&mut self, fonts: &mut Fonts, m: Measures, column: f32) -> Vec<Span> {
+    /// Works out where each turn goes, from the conversation's top, laying
+    /// out the turns in view, or near it, that need it, and scrolls: to
+    /// the end, if following it, or else so what's at the top of the view
+    /// stays where it is as the turns above it find their heights. Turns
+    /// far from the view are let go of. What it costs depends on what's
+    /// near the view, not on how long the chat is.
+    fn arrange(&mut self, fonts: &mut Fonts, m: Measures, column: f32) {
         // Out while they're laid out, which changes the cache, and back
         // after: not copied, as a long chat is a lot to copy every frame.
         let turns = std::mem::take(&mut self.node.turns);
-        let spans = self.place_turns(fonts, m, column, &turns);
+        let had = self.cache.turns.len();
+        self.cache.turns.resize_with(turns.len(), TurnSlot::default);
+        self.cache.bounded = self.cache.bounded.min(turns.len());
+        // New turns, guessed at until they're laid out.
+        for (index, turn) in turns.iter().enumerate().skip(had) {
+            let open = self.shape(index, turn).open;
+            self.set_height(index, guess(m, column, turn, open));
+        }
+        loop {
+            self.update_bounds(m);
+            let content = (self.cache.bounds.last()).map_or(0.0, |bound| bound[1]) + m.em(1.5);
+            self.max_scroll = (content - self.view_height).max(0.0);
+            if self.follow {
+                self.scroll = self.max_scroll;
+            }
+            self.reveal_cursor();
+            self.scroll = self.scroll.clamp(0.0, self.max_scroll);
+            let stale: Vec<usize> = (self.near())
+                .filter(|&index| !self.cache.turns[index].current())
+                .collect();
+            if stale.is_empty() {
+                break;
+            }
+            // What's at the top of the view stays there.
+            let anchor = (!self.follow).then(|| {
+                let index = in_view(&self.cache.bounds, self.scroll, self.scroll).start;
+                let top = (self.cache.bounds.get(index)).map_or(0.0, |bound| bound[0]);
+                (index, self.scroll - top)
+            });
+            for index in stale {
+                self.lay_out_turn(fonts, m, column, index, &turns[index]);
+            }
+            self.update_bounds(m);
+            if let Some((index, offset)) = anchor
+                && let Some(bound) = self.cache.bounds.get(index)
+            {
+                self.scroll = bound[0] + offset;
+            }
+        }
+        self.let_go_far();
+        self.reveal = false;
         self.node.turns = turns;
-        spans
     }
 
-    fn place_turns(
+    /// Lets go of the layouts of turns far from the view, a few views'
+    /// heights away, keeping how tall they are: a long chat read from end
+    /// to end keeps only what's near where it's read.
+    fn let_go_far(&mut self) {
+        let keep = in_view(
+            &self.cache.bounds,
+            self.scroll - 4.0 * self.view_height,
+            self.scroll + 5.0 * self.view_height,
+        );
+        let cache = &mut self.cache;
+        cache.laid.retain(|&index| {
+            let near = keep.contains(&index);
+            if !near && let Some(slot) = cache.turns.get_mut(index) {
+                slot.laid = None;
+                slot.header = None;
+            }
+            near
+        });
+    }
+
+    /// The turns near enough the view to be laid out: in it, and within a
+    /// view's height above it or below, so scrolling a little, or moving
+    /// the cursor, finds them ready.
+    fn near(&self) -> std::ops::Range<usize> {
+        in_view(
+            &self.cache.bounds,
+            self.scroll - self.view_height,
+            self.scroll + 2.0 * self.view_height,
+        )
+    }
+
+    /// Turn `index` is `height` tall: where the turns after it go is
+    /// worked out again when next it's needed.
+    fn set_height(&mut self, index: usize, height: f32) {
+        if let Some(slot) = self.cache.turns.get_mut(index) {
+            slot.height = Some(height);
+            self.cache.bounded = self.cache.bounded.min(index);
+        }
+    }
+
+    /// Works out each turn's top and bottom, from the conversation's top,
+    /// from the first whose height changed on.
+    fn update_bounds(&mut self, m: Measures) {
+        let cache = &mut self.cache;
+        let count = cache.turns.len();
+        cache.bounds.resize(count, [0.0; 2]);
+        let from = cache.bounded.min(count);
+        let mut y = match from.checked_sub(1) {
+            Some(before) => cache.bounds[before][1] + m.em(2.0),
+            None => m.em(1.5),
+        };
+        for index in from..count {
+            let top = y;
+            let bottom = top + cache.turns[index].height.unwrap_or(0.0);
+            cache.bounds[index] = [top, bottom];
+            y = bottom + m.em(2.0);
+        }
+        cache.bounded = count;
+    }
+
+    /// Lays out turn `index`, `turn`, keeping what of it was laid out
+    /// already and hasn't changed, as the words of an answer before more
+    /// came.
+    fn lay_out_turn(
         &mut self,
         fonts: &mut Fonts,
         m: Measures,
         column: f32,
-        turns: &[Turn],
-    ) -> Vec<Span> {
-        let mut spans = Vec::new();
-        let mut y = m.em(1.5);
-        let last = turns.len().checked_sub(1);
-        for (index, turn) in turns.iter().enumerate() {
-            if index > 0 {
-                y += m.em(2.0);
-            }
-            if !turn.prompt.is_empty() {
-                let laid = self.piece(
-                    fonts,
-                    m,
-                    (index, 0),
-                    &turn.prompt,
-                    Look::Plain(Tone::Plain),
-                    (column * 0.78 - m.em(2.0)).max(m.em(4.0)),
-                );
-                let height = laid.height + m.em(1.2);
-                spans.push(Span {
-                    piece: Piece::Prompt(index),
-                    top: y,
-                    bottom: y + height,
-                });
-                y += height + m.em(1.0);
-            }
-            for (item_index, item) in turn.items.iter().enumerate() {
-                let key = (index, item_index + 1);
-                let follows = spans.last().is_some_and(|span: &Span| {
-                    matches!(span.piece, Piece::Item(..) | Piece::Card(..))
-                        && span.turn() == Some(index)
-                });
-                if let Item::Tool(tool) = item
-                    && Card::shows(tool)
-                {
-                    if follows {
-                        y += m.em(0.6);
-                    }
-                    let height = self.card(fonts, m, key, tool, column);
-                    spans.push(Span {
-                        piece: Piece::Card(index, item_index + 1),
-                        top: y,
-                        bottom: y + height,
-                    });
-                    y += height;
-                    continue;
-                }
-                let (text, look) = match item {
-                    Item::Words(words) => (words.clone(), Look::Words),
-                    Item::Thought(words) => (words.clone(), Look::Thought),
-                    Item::Tool(tool) => (
-                        tool_text(tool.status, &tool.title),
-                        Look::Plain(tool_tone(tool.status)),
-                    ),
-                };
-                if text.trim().is_empty() {
-                    continue;
-                }
-                let laid = self.piece(fonts, m, key, &text, look, column);
-                let after_card = spans
-                    .last()
-                    .is_some_and(|span| matches!(span.piece, Piece::Card(..)));
-                let gap = match item {
-                    _ if after_card => m.em(0.6),
-                    Item::Tool(_) => m.em(0.35),
-                    _ => m.em(0.75),
-                };
-                if follows {
-                    y += gap;
-                }
-                spans.push(Span {
-                    piece: Piece::Item(index, item_index + 1),
-                    top: y,
-                    bottom: y + laid.height,
-                });
-                y += laid.height;
-            }
-            if let Some((text, tone)) = self.turn_note(turn, Some(index) == last) {
-                y += m.em(0.75);
-                let laid = self.note(fonts, m, &text, tone, column);
-                spans.push(Span {
-                    piece: Piece::Note(text.clone(), tone),
-                    top: y,
-                    bottom: y + laid.height,
-                });
-                y += laid.height;
-                self.cache.notes.insert((text, tone), laid);
-            }
-            // What it changed in files, once it's done, and the buttons
-            // that undo and redo it.
-            if let (Some(files), Some(_)) = (turn.files, &turn.end) {
-                y += m.em(0.75);
-                let height = self.lay_out_files(fonts, m, column, (index, files));
-                spans.push(Span {
-                    piece: Piece::Files(index),
-                    top: y,
-                    bottom: y + height,
-                });
-                y += height;
-            }
+        index: usize,
+        turn: &Turn,
+    ) {
+        let shape = self.shape(index, turn);
+        let old = self.cache.turns[index].laid.take();
+        let (mut old_pieces, mut old_cards) = old
+            .map(|laid| (laid.pieces, laid.cards))
+            .unwrap_or_default();
+        let mut laid = TurnLaid {
+            spans: Vec::new(),
+            pieces: HashMap::new(),
+            cards: HashMap::new(),
+            note: None,
+            files: None,
+            height: 0.0,
+        };
+        let mut y = 0.0;
+        if !turn.prompt.is_empty() {
+            let width = (column * 0.78 - m.em(2.0)).max(m.em(4.0));
+            let old = old_pieces.remove(&PROMPT);
+            let piece = self.reuse(fonts, m, old, &turn.prompt, Look::Plain(Tone::Plain), width);
+            let height = piece.height + m.em(1.2);
+            laid.spans.push(Span::of(Piece::Prompt, y, height));
+            laid.pieces.insert(PROMPT, piece);
+            y += height + m.em(1.0);
         }
-        spans
+        if shape.fold {
+            let height = fold::height(m);
+            laid.spans.push(Span::of(Piece::Fold, y, height));
+            y += height;
+        }
+        for (item_index, item) in turn.items.iter().enumerate() {
+            // Folded, only the answer shows.
+            if item_index < shape.answer && !shape.open {
+                continue;
+            }
+            let key = ITEMS + item_index;
+            let last = laid.spans.last().map(|span| span.piece);
+            let follows = last.is_some_and(|piece| piece != Piece::Prompt);
+            if let Item::Tool(tool) = item
+                && Card::shows(tool)
+            {
+                if follows {
+                    y += m.em(0.6);
+                }
+                let card = self.card(fonts, m, old_cards.remove(&key), tool, column);
+                let height = card.height;
+                laid.spans.push(Span::of(Piece::Card(key), y, height));
+                laid.cards.insert(key, card);
+                y += height;
+                continue;
+            }
+            let (text, look) = match item {
+                Item::Words(words) => (Cow::Borrowed(words.as_str()), Look::Words),
+                Item::Thought(words) => (Cow::Borrowed(words.as_str()), Look::Thought),
+                Item::Tool(tool) => (
+                    Cow::Owned(tool_text(tool.status, &tool.title)),
+                    Look::Plain(tool_tone(tool.status)),
+                ),
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let piece = self.reuse(fonts, m, old_pieces.remove(&key), &text, look, column);
+            let gap = match item {
+                _ if matches!(last, Some(Piece::Card(_) | Piece::Fold)) => m.em(0.6),
+                Item::Tool(_) => m.em(0.35),
+                _ => m.em(0.75),
+            };
+            if follows {
+                y += gap;
+            }
+            laid.spans.push(Span::of(Piece::Item(key), y, piece.height));
+            y += piece.height;
+            laid.pieces.insert(key, piece);
+        }
+        y = self.lay_out_ending(fonts, (m, column), (index, turn), &mut laid, y);
+        laid.height = y;
+        let slot = &mut self.cache.turns[index];
+        if slot.laid.is_none() {
+            self.cache.laid.push(index);
+        }
+        slot.stale = false;
+        slot.laid = Some(laid);
+        self.set_height(index, y);
     }
 
-    /// Lays out what turn `turn` changed in files, `files`, and its
-    /// buttons, and returns the height of the line they make.
+    /// Lays out what goes under turn `index`, `turn`, into `laid`, from
+    /// `y` down: how it ended, if not well, and what it changed in files.
+    /// Returns where that ends.
+    fn lay_out_ending(
+        &mut self,
+        fonts: &mut Fonts,
+        (m, column): (Measures, f32),
+        (index, turn): (usize, &Turn),
+        laid: &mut TurnLaid,
+        mut y: f32,
+    ) -> f32 {
+        if let Some((text, tone)) = turn_note(turn) {
+            y += m.em(0.75);
+            let note = lay_out(
+                &mut self.layout_cx,
+                fonts,
+                m,
+                &text,
+                Look::Plain(tone),
+                column,
+            );
+            laid.spans.push(Span::of(Piece::Note, y, note.height));
+            y += note.height;
+            laid.note = Some(note);
+        }
+        // What it changed in files, once it's done, and the buttons that
+        // undo and redo it: under its answer, folded or not.
+        if let (Some(files), Some(_)) = (turn.files, &turn.end) {
+            y += m.em(0.75);
+            let files = self.lay_out_files(fonts, m, column, (index, files));
+            laid.spans.push(Span::of(Piece::Files, y, files.height));
+            y += files.height;
+            laid.files = Some(files);
+        }
+        y
+    }
+
+    /// Lays out what turn `turn` changed in files, `files`, and the
+    /// buttons beside it.
     fn lay_out_files(
         &mut self,
         fonts: &mut Fonts,
         m: Measures,
         column: f32,
         (turn, files): (usize, TurnFiles),
-    ) -> f32 {
+    ) -> FilesLaid {
         let (label, buttons) = files_line(turn, files);
-        let texts = std::iter::once((label, Tone::Muted))
-            .chain((buttons.into_iter()).map(|(_, text)| (text.to_owned(), Tone::Accent)));
-        let mut height = 0.0_f32;
-        for (text, tone) in texts {
-            let laid = self.note(fonts, m, &text, tone, column);
-            height = height.max(laid.height);
-            self.cache.notes.insert((text, tone), laid);
-        }
-        height
-    }
-
-    /// What's said under a turn: how it ended, or that it's still going,
-    /// if it's the `last`.
-    fn turn_note(&self, turn: &Turn, last: bool) -> Option<(String, Tone)> {
-        match (&turn.end, last, &self.node.state) {
-            (Some(end), _, _) => match &end.outcome {
-                Outcome::Done => None,
-                Outcome::Stopped => Some(("Stopped.".to_owned(), Tone::Muted)),
-                Outcome::Failed(why) => Some((format!("⚠ {}", capitalised(why)), Tone::Warning)),
-            },
-            (None, true, ChatState::Starting) => {
-                Some((format!("Starting {}…", self.agent()), Tone::Muted))
-            }
-            (None, true, _) if self.node.question.is_none() => {
-                Some(("Working…".to_owned(), Tone::Muted))
-            }
-            _ => None,
+        let mut text = |text: &str, tone| {
+            lay_out(
+                &mut self.layout_cx,
+                fonts,
+                m,
+                text,
+                Look::Plain(tone),
+                column,
+            )
+        };
+        let label = text(&label, Tone::Muted);
+        let buttons: Vec<(Hit, Laid)> = (buttons.into_iter())
+            .map(|(hit, name)| (hit, text(name, Tone::Accent)))
+            .collect();
+        let height = (buttons.iter().map(|(_, laid)| laid.height)).fold(label.height, f32::max);
+        FilesLaid {
+            label,
+            buttons,
+            height,
         }
     }
 
-    /// A turn's piece, laid out, from the cache if its text is the same.
-    fn piece(
+    /// `old`, if it was laid out from `text`, or else `text` laid out
+    /// afresh.
+    fn reuse(
         &mut self,
         fonts: &mut Fonts,
         m: Measures,
-        key: (usize, usize),
+        old: Option<Laid>,
         text: &str,
         look: Look,
         width: f32,
-    ) -> &Laid {
-        let fresh = self
-            .cache
-            .pieces
-            .get(&key)
-            .is_none_or(|laid| laid.source != text);
-        if fresh {
-            let laid = lay_out(&mut self.layout_cx, fonts, m, text, look, width);
-            self.cache.pieces.insert(key, laid);
+    ) -> Laid {
+        match old {
+            Some(laid) if laid.source == text => laid,
+            _ => lay_out(&mut self.layout_cx, fonts, m, text, look, width),
         }
-        &self.cache.pieces[&key]
     }
 
     /// Text of the chat's own, laid out.
@@ -587,76 +771,68 @@ impl ChatView {
         }
     }
 
-    /// Draws one piece of the conversation, the column's left at
-    /// `origin[0]`, the conversation's top at `origin[1]`. What can be
-    /// clicked goes in `hits`, from `pane`, the pane's top left.
-    fn draw_span(
+    /// Draws turn `index` with the column's left and the turn's top at
+    /// `origin`: what of it is in view.
+    fn draw_turn(
         &self,
         canvas: &mut Canvas<'_>,
         m: Measures,
-        span: &Span,
-        (origin, column): ([f32; 2], f32),
-        hits: ([f32; 2], &mut Vec<(Hit, [f32; 4])>),
+        index: usize,
+        origin: [f32; 2],
+        drawn: &mut Drawn<'_>,
     ) {
-        let top = origin[1] + span.top;
-        match &span.piece {
-            Piece::Card(turn, piece) => {
-                if let Some(card) = self.cache.cards.get(&(*turn, *piece)) {
-                    cards::draw_card(canvas, m, card, [origin[0], top], column, hits);
-                }
+        let Some(laid) = (self.cache.turns.get(index)).and_then(|slot| slot.laid.as_ref()) else {
+            return;
+        };
+        let column = self.cache.width;
+        let [view_top, view_height] = [canvas.clip[1], canvas.clip[3]];
+        for span in &laid.spans {
+            let top = origin[1] + span.top;
+            // Out of view: nothing to draw.
+            if origin[1] + span.bottom < view_top || top > view_top + view_height {
+                continue;
             }
-            Piece::Prompt(turn) => {
-                let Some(laid) = self.cache.pieces.get(&(*turn, 0)) else {
-                    return;
-                };
-                let (pad_x, pad_y) = (m.em(1.0), m.em(0.6));
-                let width = laid.width + 2.0 * pad_x;
-                let left = origin[0] + column - width;
-                canvas.fill(Fill::rounded(
-                    [left, top, width, span.bottom - span.top],
-                    Paint::Raised,
-                    m.em(1.1),
-                ));
-                for block in &laid.blocks {
-                    canvas.text(
-                        &block.layout,
-                        [left + pad_x + block.left, top + pad_y + block.top],
-                    );
+            match span.piece {
+                Piece::Card(piece) => {
+                    if let Some(card) = laid.cards.get(&piece) {
+                        let key = TextKey {
+                            turn: index,
+                            piece,
+                            part: 0,
+                        };
+                        cards::draw_card(canvas, m, card, key, [origin[0], top], column, drawn);
+                    }
                 }
-            }
-            Piece::Item(turn, piece) => {
-                if let Some(laid) = self.cache.pieces.get(&(*turn, *piece)) {
-                    draw_laid(canvas, m, laid, [origin[0], top], column);
-                }
-            }
-            Piece::Note(text, tone) => {
-                if let Some(laid) = self.cache.notes.get(&(text.clone(), *tone)) {
-                    draw_laid(canvas, m, laid, [origin[0], top], column);
-                }
-            }
-            Piece::Files(turn) => {
-                let Some(files) = self.node.turns.get(*turn).and_then(|turn| turn.files) else {
-                    return;
-                };
-                let (label, buttons) = files_line(*turn, files);
-                let Some(laid) = self.cache.notes.get(&(label, Tone::Muted)) else {
-                    return;
-                };
-                draw_laid(canvas, m, laid, [origin[0], top], column);
-                let mut x = origin[0] + laid.width + m.em(0.8);
-                let (pane, hits) = hits;
-                for (hit, text) in buttons {
-                    let Some(laid) = self.cache.notes.get(&(text.to_owned(), Tone::Accent)) else {
+                Piece::Prompt => {
+                    let Some(prompt) = laid.pieces.get(&PROMPT) else {
                         continue;
                     };
-                    draw_laid(canvas, m, laid, [x, top], column);
-                    // Only what's in view takes a click.
-                    let rect = [x, top, laid.width, laid.height];
-                    let [left, top, wide, high] = cards::intersection(canvas.clip, rect);
-                    if wide > 0.0 && high > 0.0 {
-                        hits.push((hit, [left - pane[0], top - pane[1], wide, high]));
+                    let left = origin[0] + bubble_left(m, prompt, column);
+                    canvas.fill(Fill::rounded(
+                        [left, top, bubble_width(m, prompt), span.bottom - span.top],
+                        Paint::Raised,
+                        m.em(1.1),
+                    ));
+                    let at = [left + m.em(1.0), top + m.em(0.6)];
+                    draw_laid(canvas, m, prompt, at, column);
+                    drawn.note_laid(prompt, at, (index, PROMPT));
+                }
+                Piece::Fold => self.draw_fold(canvas, m, index, [origin[0], top], drawn),
+                Piece::Item(piece) => {
+                    if let Some(item) = laid.pieces.get(&piece) {
+                        draw_laid(canvas, m, item, [origin[0], top], column);
+                        drawn.note_laid(item, [origin[0], top], (index, piece));
                     }
-                    x += laid.width + m.em(0.8);
+                }
+                Piece::Note => {
+                    if let Some(note) = &laid.note {
+                        draw_laid(canvas, m, note, [origin[0], top], column);
+                    }
+                }
+                Piece::Files => {
+                    if let Some(files) = &laid.files {
+                        draw_files(canvas, m, files, [origin[0], top], drawn);
+                    }
                 }
             }
         }
@@ -1494,37 +1670,195 @@ fn rect_at(bounds: parley::BoundingBox, origin: [f32; 2]) -> [f32; 4] {
     ]
 }
 
-/// One piece of the conversation and where it goes, from the top.
+/// One piece of a turn and where it goes, from the turn's top.
 struct Span {
     piece: Piece,
     top: f32,
     bottom: f32,
 }
 
+/// What a piece of a turn is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Piece {
+    /// Its message, as a bubble.
+    Prompt,
+    /// The line its work folds under.
+    Fold,
+    /// What the agent did, by piece.
+    Item(usize),
+    /// A tool it used, as a card, by piece.
+    Card(usize),
+    /// How it ended, if not well.
+    Note,
+    /// What it changed in files, and what undoes or redoes it.
+    Files,
+}
+
 impl Span {
-    fn turn(&self) -> Option<usize> {
-        match self.piece {
-            Piece::Prompt(turn)
-            | Piece::Item(turn, _)
-            | Piece::Card(turn, _)
-            | Piece::Files(turn) => Some(turn),
-            Piece::Note(..) => None,
+    /// `piece`, from `top` down, `height` tall.
+    fn of(piece: Piece, top: f32, height: f32) -> Self {
+        Self {
+            piece,
+            top,
+            bottom: top + height,
         }
     }
 }
 
-enum Piece {
-    /// A turn's message, as a bubble.
-    Prompt(usize),
-    /// What the agent did, by turn and piece.
-    Item(usize, usize),
-    /// A tool it used, as a card, by turn and piece.
-    Card(usize, usize),
-    /// Text of the chat's own.
-    Note(String, Tone),
-    /// What a turn changed in files, and what undoes or redoes it, by
-    /// turn.
-    Files(usize),
+impl TurnSlot {
+    /// Whether it's laid out as it is now.
+    pub(super) fn current(&self) -> bool {
+        self.laid.is_some() && !self.stale
+    }
+
+    /// Whether it's been laid out, as it is now or as it was.
+    pub(super) fn laid_out(&self) -> bool {
+        self.laid.is_some()
+    }
+}
+
+/// What a frame notes of what it drew, and where, from the pane's top
+/// left: what takes a click, and the text, for the mouse to select.
+struct Drawn<'a> {
+    /// The pane's top left.
+    pane: [f32; 2],
+    hits: &'a mut Vec<(Hit, [f32; 4])>,
+    texts: &'a mut Vec<Shown>,
+}
+
+impl Drawn<'_> {
+    /// Notes `laid`'s blocks, drawn with the column's left at
+    /// `origin[0]` and its top at `origin[1]`, as `piece` of `turn`.
+    fn note_laid(&mut self, laid: &Laid, origin: [f32; 2], (turn, piece): (usize, usize)) {
+        for (part, block) in laid.blocks.iter().enumerate() {
+            let at = [origin[0] + block.left, origin[1] + block.top];
+            self.note_text(
+                TextKey { turn, piece, part },
+                at,
+                &block.layout,
+                block.kind == BlockKind::Code,
+            );
+        }
+    }
+
+    /// Notes text `key`, laid out as `layout`, drawn with its top left at
+    /// `at`; `code` if it's a block of code.
+    fn note_text(&mut self, key: TextKey, at: [f32; 2], layout: &Layout<Brush>, code: bool) {
+        self.texts.push(Shown {
+            key,
+            at: [at[0] - self.pane[0], at[1] - self.pane[1]],
+            size: [layout.width(), layout.height()],
+            code,
+        });
+    }
+}
+
+/// A message's bubble's width, for `laid`, its text.
+fn bubble_width(m: Measures, laid: &Laid) -> f32 {
+    laid.width + 2.0 * m.em(1.0)
+}
+
+/// Where a message's bubble starts, from the column's left: it's on the
+/// right.
+fn bubble_left(m: Measures, laid: &Laid, column: f32) -> f32 {
+    column - bubble_width(m, laid)
+}
+
+/// Where a message's text starts, from the column's left and the turn's
+/// top, `laid` being it laid out.
+fn prompt_origin(m: Measures, laid: &Laid, column: f32) -> [f32; 2] {
+    [bubble_left(m, laid, column) + m.em(1.0), m.em(0.6)]
+}
+
+/// The turns whose `bounds` reach between `from` and `to`, from the
+/// conversation's top.
+fn in_view(bounds: &[[f32; 2]], from: f32, to: f32) -> std::ops::Range<usize> {
+    let start = bounds.partition_point(|bound| bound[1] < from);
+    let end = bounds.partition_point(|bound| bound[0] <= to);
+    start..end.max(start)
+}
+
+/// How tall `turn` looks to be, `column` wide, before it's laid out:
+/// near enough to scroll by, from how much text it has.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a guess, from counts far inside f32's range"
+)]
+fn guess(m: Measures, column: f32, turn: &Turn, open: bool) -> f32 {
+    let line = m.em * LINE;
+    // About two characters to an em.
+    let lines = |text: &str, wide: f32| -> f32 {
+        let per_line = (wide / (m.em * 0.5)).max(1.0);
+        (text.lines())
+            .map(|line| (line.chars().count() as f32 / per_line).ceil().max(1.0))
+            .sum()
+    };
+    let mut height = 0.0;
+    if !turn.prompt.is_empty() {
+        height += lines(&turn.prompt, column * 0.78) * line + m.em(2.2);
+    }
+    let answer = fold::answer_start(turn);
+    if answer > 0 || turn.end.is_none() {
+        height += fold::height(m) + m.em(0.6);
+    }
+    for (index, item) in turn.items.iter().enumerate() {
+        if index < answer && !open {
+            continue;
+        }
+        height += match item {
+            Item::Words(text) | Item::Thought(text) => lines(text, column) * line + m.em(0.75),
+            Item::Tool(tool) if Card::shows(tool) => 12.0 * line,
+            Item::Tool(_) => line + m.em(0.35),
+        };
+    }
+    if turn.files.is_some() && turn.end.is_some() {
+        height += line + m.em(0.75);
+    }
+    height
+}
+
+/// What's said under a turn: how it ended, if not well.
+fn turn_note(turn: &Turn) -> Option<(String, Tone)> {
+    match &turn.end.as_ref()?.outcome {
+        Outcome::Done => None,
+        Outcome::Stopped => Some(("Stopped.".to_owned(), Tone::Muted)),
+        Outcome::Failed(why) => Some((format!("⚠ {}", capitalised(why)), Tone::Warning)),
+    }
+}
+
+/// Where rectangles `a` and `b` overlap: nothing wide or high, if they
+/// don't.
+fn intersection(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let (left, top) = (a[0].max(b[0]), a[1].max(b[1]));
+    let right = (a[0] + a[2]).min(b[0] + b[2]);
+    let bottom = (a[1] + a[3]).min(b[1] + b[3]);
+    [left, top, (right - left).max(0.0), (bottom - top).max(0.0)]
+}
+
+/// Draws what a turn changed in files, `files`, with the column's left
+/// and its top at `origin`, and notes where its buttons can be clicked,
+/// where they're in view.
+fn draw_files(
+    canvas: &mut Canvas<'_>,
+    m: Measures,
+    files: &FilesLaid,
+    origin: [f32; 2],
+    drawn: &mut Drawn<'_>,
+) {
+    draw_laid(canvas, m, &files.label, origin, files.label.width);
+    let mut x = origin[0] + files.label.width + m.em(0.8);
+    for (hit, laid) in &files.buttons {
+        draw_laid(canvas, m, laid, [x, origin[1]], laid.width);
+        let rect = [x, origin[1], laid.width, laid.height];
+        let [left, top, wide, high] = intersection(canvas.clip, rect);
+        if wide > 0.0 && high > 0.0 {
+            let pane = drawn.pane;
+            drawn
+                .hits
+                .push((hit.clone(), [left - pane[0], top - pane[1], wide, high]));
+        }
+        x += laid.width + m.em(0.8);
+    }
 }
 
 /// Draws `laid` with the column's left at `origin[0]`, its top at
@@ -1633,6 +1967,7 @@ fn lay_out(
         laid.width = laid.width.max(layout.width() + indent);
         laid.blocks.push(LaidBlock {
             layout,
+            text: block.text,
             kind: block.kind,
             left: indent,
             top: laid.height,
@@ -1738,7 +2073,6 @@ fn lay_out_marker(
     layout
 }
 
-/// A tool call's line: a mark for how it's going, and its title.
 /// What's said of what a turn changed in files, as `files` says, and the
 /// buttons beside it: "2 files changed", then "Undo".
 fn files_line(turn: usize, files: TurnFiles) -> (String, Vec<(Hit, &'static str)>) {
@@ -1758,6 +2092,7 @@ fn files_line(turn: usize, files: TurnFiles) -> (String, Vec<(Hit, &'static str)
     (label, buttons)
 }
 
+/// A tool call's line: a mark for how it's going, and its title.
 fn tool_text(status: ToolStatus, title: &str) -> String {
     let mark = match status {
         ToolStatus::Running => "○",
@@ -1826,5 +2161,160 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_long_chat_lays_out_only_what_is_near_the_view_and_not_folded_work() {
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let mut chat = ChatView::new("chat".into(), crate::chat::fixtures::long_chat(500));
+        chat.paint(&mut fonts, [0.0; 2], [900.0, 1000.0], true);
+        let laid: Vec<usize> = (chat.cache.turns.iter().enumerate())
+            .filter(|(_, slot)| slot.laid.is_some())
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!laid.is_empty() && laid.len() < 10, "{laid:?}");
+        assert!(laid.contains(&499));
+        // A folded turn's work isn't laid out: its message and answer are.
+        let folded = laid[0];
+        let turn = &chat.node.turns[folded];
+        let answer = fold::answer_start(turn);
+        let pieces = &chat.cache.turns[folded].laid.as_ref().unwrap().pieces;
+        assert!(pieces.contains_key(&PROMPT));
+        assert!(pieces.contains_key(&(ITEMS + answer)));
+        assert!((ITEMS..ITEMS + answer).all(|piece| !pieces.contains_key(&piece)));
+        assert!(
+            chat.cache.turns[folded]
+                .laid
+                .as_ref()
+                .unwrap()
+                .cards
+                .is_empty()
+        );
+        // At the top, the first turns are laid out, and the last aren't
+        // laid out again.
+        chat.scroll_lines(f32::INFINITY);
+        chat.paint(&mut fonts, [0.0; 2], [900.0, 1000.0], true);
+        assert!(chat.cache.turns[0].laid.is_some());
+        assert!(chat.cache.turns[250].laid.is_none());
+    }
+
+    #[test]
+    fn turns_far_from_the_view_are_let_go_of_and_bounds_kept_up() {
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let mut chat = ChatView::new("chat".into(), crate::chat::fixtures::long_chat(300));
+        let size = [900.0, 1000.0];
+        chat.paint(&mut fonts, [0.0; 2], size, true);
+        assert!(chat.cache.turns[299].laid.is_some());
+        // Read up to the top a half view at a time: what's left behind is
+        // let go of, and only what's near is kept.
+        while chat.scroll_half(true) {
+            chat.paint(&mut fonts, [0.0; 2], size, true);
+        }
+        assert!(chat.cache.turns[0].laid.is_some());
+        assert!(chat.cache.turns[299].laid.is_none());
+        assert!(chat.cache.laid.len() < 20, "{}", chat.cache.laid.len());
+        assert!(chat.cache.turns[299].height.is_some());
+        // The bounds kept up are those worked out afresh.
+        let m = Measures::of(chat.cache.size);
+        let kept = chat.cache.bounds.clone();
+        chat.cache.bounded = 0;
+        chat.update_bounds(m);
+        assert_eq!(kept, chat.cache.bounds);
+    }
+
+    #[test]
+    fn an_open_card_notes_only_its_lines_in_view() {
+        use clackatoo_protocol::{Item, Tool, ToolContent, ToolKind, ToolStatus};
+
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let output = (0..900).fold(String::new(), |output, line| {
+            output + &format!("line {line}\n")
+        });
+        let mut node = crate::chat::fixtures::talk(&[("run it", "Done.")]);
+        node.turns[0].items.insert(
+            0,
+            Item::Tool(Tool {
+                id: "run".into(),
+                title: "make".into(),
+                status: ToolStatus::Done,
+                kind: ToolKind::Execute,
+                content: vec![ToolContent::Output(output)],
+                locations: Vec::new(),
+            }),
+        );
+        let mut chat = ChatView::new("chat".into(), node);
+        chat.open_fold(0);
+        chat.open_card("run");
+        chat.paint(&mut fonts, [0.0; 2], [900.0, 1000.0], true);
+        let parts = (chat.shown.iter())
+            .filter(|shown| shown.key.piece == ITEMS)
+            .count();
+        assert!(parts > 0 && parts < 60, "{parts}");
+    }
+
+    /// What drawing a long chat costs a frame: the first, which lays it
+    /// out, then each one after at the end, in the middle, and while the
+    /// agent streams its answer. Prints the times; it asserts nothing.
+    #[test]
+    #[ignore = "a measurement: run with --release --ignored --nocapture"]
+    fn frame_time_on_a_long_chat() {
+        use std::time::Instant;
+
+        use clackatoo_protocol::{ChatPatch, Patch, ViewUpdate};
+
+        let mut fonts = Fonts::load(&FontOptions::default(), 1.0).expect("a font");
+        let node = crate::chat::fixtures::long_chat(500);
+        let mut chat = ChatView::new("chat".into(), node);
+        let size = [900.0, 1000.0];
+        let frames = 200;
+        let time = |chat: &mut ChatView, fonts: &mut Fonts, what: &str, frames: u32| {
+            let start = Instant::now();
+            for _ in 0..frames {
+                std::hint::black_box(chat.paint(fonts, [0.0; 2], size, true));
+            }
+            let each = start.elapsed() / frames;
+            println!("{what}: {each:?} a frame");
+        };
+        time(&mut chat, &mut fonts, "first frame", 1);
+        // Again, with the fonts' caches warm, as opening a second chat is.
+        let mut again = ChatView::new("chat".into(), chat.node.clone());
+        time(&mut again, &mut fonts, "first frame, fonts warm", 1);
+        time(&mut chat, &mut fonts, "at the end", frames);
+        chat.scroll_lines(f32::INFINITY);
+        chat.scroll_half(false);
+        for _ in 0..200 {
+            chat.scroll_half(false);
+            chat.paint(&mut fonts, [0.0; 2], size, true);
+        }
+        time(&mut chat, &mut fonts, "in the middle", frames);
+        chat.scroll_lines(f32::NEG_INFINITY);
+        let last = u32::try_from(chat.node.turns.len() - 1).unwrap();
+        let item = u32::try_from(chat.node.turns.last().unwrap().items.len() - 1).unwrap();
+        let start = Instant::now();
+        for _ in 0..frames {
+            chat.apply(&ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Append {
+                turn: last,
+                item,
+                text: " More words, streamed.".into(),
+            })]));
+            std::hint::black_box(chat.paint(&mut fonts, [0.0; 2], size, true));
+        }
+        println!("streaming: {:?} a frame", start.elapsed() / frames);
+
+        // A chat of 10,000 turns: a frame costs what's near the view.
+        let pairs: Vec<(String, String)> = (0..10_000)
+            .map(|turn| {
+                (
+                    format!("question {turn}"),
+                    format!("Answer {turn}, with **some** words."),
+                )
+            })
+            .collect();
+        let pairs: Vec<(&str, &str)> = (pairs.iter())
+            .map(|(prompt, answer)| (prompt.as_str(), answer.as_str()))
+            .collect();
+        let mut huge = ChatView::new("chat".into(), crate::chat::fixtures::talk(&pairs));
+        time(&mut huge, &mut fonts, "10,000 turns, first frame", 1);
+        time(&mut huge, &mut fonts, "10,000 turns, at the end", frames);
     }
 }

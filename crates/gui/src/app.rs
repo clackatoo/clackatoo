@@ -818,18 +818,18 @@ impl App {
     /// what's changed.
     fn send_outbox(&mut self) {
         self.desk.sync_lua();
+        // What was typed or clicked in a chat goes first, as it needs the
+        // fonts, which the desk hasn't got, and may copy.
+        if let Some(frame) = &mut self.frame
+            && self.desk.settle_chats(&mut frame.fonts)
+        {
+            frame.window.request_redraw();
+        }
         // Text copied, by a key, a click or an answer from the daemon.
         for (text, to) in self.desk.take_yanked() {
             if let Err(err) = copy_text(&mut self.clipboard, text, to) {
                 log::warn!("copying failed: {err:#}");
             }
-        }
-        // What was typed or clicked in a chat goes first, as it needs the
-        // fonts, which the desk hasn't got.
-        if let Some(frame) = &mut self.frame
-            && self.desk.settle_chats(&mut frame.fonts)
-        {
-            frame.window.request_redraw();
         }
         let messages = self.desk.take_outbox();
         let Some(sender) = &mut self.sender else {
@@ -1319,7 +1319,9 @@ impl App {
             let Some(pane) = self.desk.pane_mut(terminal).filter(|pane| pane.is_chat()) else {
                 continue;
             };
-            let caret = focused && self.focused && pane.mode == Mode::Insert;
+            // In insert mode, the cursor is in the box; in normal mode, in
+            // the conversation.
+            let caret = focused && self.focused;
             let size = tile.cells_size(cell);
             if let Some(paint) = pane.paint_chat(&mut frame.fonts, tile.origin, size, caret) {
                 all.fills.extend(paint.fills);
@@ -1863,8 +1865,9 @@ impl ApplicationHandler<SessionEvent> for App {
             self.request_redraw();
         }
         // While the daemon is out of contact, the top bar counts the
-        // seconds, a highlight on text just copied goes after a moment, and
-        // an editor asks its language server once typing pauses; otherwise,
+        // seconds, a highlight on text just copied goes after a moment, an
+        // editor asks its language server once typing pauses, and a chat
+        // counts the seconds its agent has been working; otherwise,
         // nothing wakes the window but events.
         let counting = self
             .contact
@@ -1876,6 +1879,7 @@ impl ApplicationHandler<SessionEvent> for App {
             .chain(self.desk.grep_at())
             .chain(self.desk.format_at())
             .chain(self.desk.editor_wakes())
+            .chain(self.desk.chat_wakes())
             .min();
         let flow = match soonest {
             Some(wake) => ControlFlow::WaitUntil(wake),

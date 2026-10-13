@@ -13,9 +13,12 @@
 //! anything to the daemon and before drawing.
 
 mod card;
+#[cfg(test)]
+pub(crate) mod fixtures;
 mod markdown;
 mod paint;
 mod picker;
+mod read;
 
 use clackatoo_protocol::{
     ChatAction, ChatNode, ChoiceKind, Setting, SettingKind, TurnFilesState, ViewUpdate,
@@ -25,6 +28,8 @@ use winit::keyboard::{Key, NamedKey};
 
 use crate::fonts::Fonts;
 use crate::input::{KeyPress, Modifiers};
+use crate::pane::Copy;
+use paint::{How, Picked, Position, Shown, TextKey};
 use picker::{Row, Spot};
 
 pub(crate) use paint::ChatPaint;
@@ -75,6 +80,12 @@ enum Input {
     /// The input method is composing this text, with its cursor over this
     /// stretch of it, or has stopped.
     Compose(Option<(String, Option<(usize, usize)>)>),
+    /// Copies the conversation's text from one place to another.
+    CopyRange(Position, Position, Copy),
+    /// Copies this to the clipboard.
+    CopyText(String),
+    /// Asks this of the daemon.
+    Act(ChatAction),
 }
 
 /// What settling the chat's queue came to.
@@ -84,8 +95,9 @@ pub(crate) struct Settled {
     pub(crate) redraw: bool,
     /// Asks for the daemon.
     pub(crate) actions: Vec<ChatAction>,
-    /// Text to put on the clipboard.
-    pub(crate) copied: Option<String>,
+    /// Text to put on the clipboard, or the primary selection, oldest
+    /// first.
+    pub(crate) copied: Vec<(String, Copy)>,
 }
 
 /// Something in the chat that does something when clicked.
@@ -117,12 +129,18 @@ enum Hit {
         setting: String,
         value: String,
     },
-    /// A tool's card, which opens and folds, by the tool's ID.
-    Card(String),
+    /// A tool's card, which opens and folds, by the turn it's in and the
+    /// tool's ID.
+    Card(usize, String),
     /// The button that undoes what a turn changed in files, by the turn.
     Undo(usize),
     /// The button that redoes it, once undone.
     Redo(usize),
+    /// The line a turn's work folds under, which opens and folds it, by
+    /// the turn.
+    Fold(usize),
+    /// The button that copies a block of code.
+    CopyCode(TextKey),
 }
 
 /// What the mouse pointer looks like over a chat.
@@ -161,6 +179,10 @@ impl Menu {
 }
 
 /// The window's side of a chat.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent states of what the pane shows"
+)]
 pub(crate) struct ChatView {
     pub(crate) node: ChatNode,
     pub(crate) title: String,
@@ -202,6 +224,40 @@ pub(crate) struct ChatView {
     /// What the window says about the chat in the bottom bar, until the
     /// next key, such as that there's nothing to undo.
     said: Option<String>,
+    /// The turns whose work was opened or folded, by their index, and
+    /// which. A turn not here is open while it's going, and folded once
+    /// it's done.
+    folds: std::collections::HashMap<usize, bool>,
+    /// The time, as turns count it, if it's not the clock's, as for tests.
+    clock: Option<u64>,
+    /// When the next turn still going counts on to the next second, if one
+    /// was drawn.
+    live: Option<std::time::Instant>,
+    /// The text drawn last, top to bottom, and where.
+    shown: Vec<Shown>,
+    /// Text selected in the conversation.
+    picked: Option<Picked>,
+    /// A drag that started on the conversation's text selects as it goes.
+    picking: bool,
+    /// Whether the pane is in normal or visual mode, reading the chat
+    /// rather than typing in it.
+    pub(crate) reading: bool,
+    /// The cursor in the conversation, in normal mode.
+    cursor: Option<Position>,
+    /// How far across the column `j` and `k` keep the cursor.
+    goal: Option<f32>,
+    /// The cursor moved: the view goes to it.
+    reveal: bool,
+    /// The view scrolled: the cursor stays in it.
+    keep_cursor: bool,
+    /// The first key of a two-key command in normal mode.
+    read_prefix: Option<read::Prefix>,
+    /// The block of code under the mouse, which shows a button to copy it.
+    hovered_code: Option<TextKey>,
+    /// The block of code just copied with its button, which says so.
+    copied_code: Option<TextKey>,
+    /// The column's right edge, from the pane's left, when last drawn.
+    column_right: f32,
 }
 
 impl std::fmt::Debug for ChatView {
@@ -238,6 +294,21 @@ impl ChatView {
             menu_anchor: None,
             open_cards: std::collections::HashSet::new(),
             said: None,
+            folds: std::collections::HashMap::new(),
+            clock: None,
+            live: None,
+            shown: Vec::new(),
+            picked: None,
+            picking: false,
+            reading: false,
+            cursor: None,
+            goal: None,
+            reveal: false,
+            keep_cursor: false,
+            read_prefix: None,
+            hovered_code: None,
+            copied_code: None,
+            column_right: 0.0,
         }
     }
 
@@ -249,6 +320,9 @@ impl ChatView {
                     chat.clone_into(&mut self.node);
                 }
                 view.title.clone_into(&mut self.title);
+                for slot in &mut self.cache.turns {
+                    slot.stale = true;
+                }
             }
             ViewUpdate::Patch(patches) => {
                 for patch in patches {
@@ -256,7 +330,12 @@ impl ChatView {
                         clackatoo_protocol::Patch::Title(title) => {
                             title.clone_into(&mut self.title);
                         }
-                        clackatoo_protocol::Patch::Chat(patch) => self.node.apply(patch.clone()),
+                        clackatoo_protocol::Patch::Chat(patch) => {
+                            if let Some(turn) = touches(patch) {
+                                self.restyled(turn);
+                            }
+                            self.node.apply(patch.clone());
+                        }
                         clackatoo_protocol::Patch::Grid { .. }
                         | clackatoo_protocol::Patch::Cwd(_) => {}
                     }
@@ -271,6 +350,20 @@ impl ChatView {
         {
             menu.held = None;
         }
+    }
+
+    /// Turn `index` must be laid out again, as it's changed, or how it's
+    /// shown has.
+    fn restyled(&mut self, index: usize) {
+        if let Some(slot) = self.cache.turns.get_mut(index) {
+            slot.stale = true;
+        }
+    }
+
+    /// When the chat must be drawn again for a turn still going to count
+    /// on a second, if it showed one when last drawn.
+    pub(crate) fn live(&self) -> Option<std::time::Instant> {
+        self.live
     }
 
     /// Whether the agent is answering, or starting to.
@@ -325,6 +418,7 @@ impl ChatView {
         match hit {
             Some(Hit::Editor) => Pointer::Text,
             Some(_) => Pointer::Hand,
+            None if self.over_text(at) => Pointer::Text,
             None => Pointer::Arrow,
         }
     }
@@ -333,6 +427,27 @@ impl ChatView {
     /// choice or slider there lights up. Returns whether the chat must be
     /// redrawn.
     pub(crate) fn hover(&mut self, at: [f32; 2]) -> bool {
+        // A block of code under the mouse shows a button to copy it.
+        let code = self.code_at(at).filter(|_| self.menu.is_none());
+        let mut redraw = code != self.hovered_code;
+        if redraw {
+            self.hovered_code = code;
+            self.copied_code = None;
+        }
+        redraw |= self.hover_menu(at);
+        redraw
+    }
+
+    /// The mouse left the pane: the button that copies a block of code
+    /// goes. Returns whether the chat must be redrawn.
+    pub(crate) fn unhover(&mut self) -> bool {
+        self.copied_code = None;
+        self.hovered_code.take().is_some()
+    }
+
+    /// The mouse moved to `at` with no button held, over the menu, if
+    /// it's open. Returns whether it must be redrawn.
+    fn hover_menu(&mut self, at: [f32; 2]) -> bool {
         let Some(menu) = &mut self.menu else {
             return false;
         };
@@ -371,8 +486,10 @@ impl ChatView {
         self.style_editor(fonts);
         for input in std::mem::take(&mut self.queued) {
             // A drag that started nothing changes nothing.
-            settled.redraw |=
-                !matches!(input, Input::Drag(_)) || self.selecting || self.sliding.is_some();
+            settled.redraw |= !matches!(input, Input::Drag(_))
+                || self.selecting
+                || self.sliding.is_some()
+                || self.picking;
             match input {
                 Input::Key {
                     key,
@@ -394,11 +511,35 @@ impl ChatView {
                     let [x, y] = self.in_editor(at);
                     self.drive(fonts, |driver| driver.extend_selection_to_point(x, y));
                 }
+                Input::Drag(at) if self.picking => {
+                    let head = self.spot_at(at, true);
+                    if let (Some(picked), Some(head)) = (self.picked.as_mut(), head) {
+                        picked.head = head;
+                    }
+                }
                 Input::Drag(_) => {}
                 Input::Release => {
                     self.selecting = false;
                     self.sliding = None;
+                    // Text selected with the mouse goes to the primary
+                    // selection, as elsewhere on Linux.
+                    if std::mem::take(&mut self.picking) {
+                        match self.picked_range() {
+                            Some((start, end)) => {
+                                let text = self.text_between(fonts, start, end);
+                                settled.copied.push((text, Copy::Primary));
+                            }
+                            // A click selects nothing.
+                            None => self.picked = None,
+                        }
+                    }
                 }
+                Input::CopyRange(start, end, to) => {
+                    let text = self.text_between(fonts, start, end);
+                    settled.copied.push((text, to));
+                }
+                Input::CopyText(text) => settled.copied.push((text, Copy::Clipboard)),
+                Input::Act(action) => settled.actions.push(action),
                 Input::Compose(Some((text, cursor))) => {
                     self.drive(fonts, |driver| driver.set_compose(&text, cursor));
                 }
@@ -506,12 +647,22 @@ impl ChatView {
             }),
             // Ctrl+C copies what's selected, or else stops the agent, as
             // in a terminal.
+            // Ctrl+C copies what's selected in the message, or else stops
+            // the agent, as in a terminal; with the agent idle, it copies
+            // what's selected in the conversation. Text left selected
+            // there never keeps Ctrl+C from stopping it.
             (_, Some("c" | "C")) if ctrl => match self.editor.selected_text() {
                 Some(selected) if !selected.is_empty() => {
-                    settled.copied = Some(selected.to_owned());
+                    settled.copied.push((selected.to_owned(), Copy::Clipboard));
                 }
                 _ if self.busy() => settled.actions.push(ChatAction::Stop),
-                _ => {}
+                _ => {
+                    if let Some((start, end)) = self.picked_range() {
+                        let text = self.text_between(fonts, start, end);
+                        settled.copied.push((text, Copy::Clipboard));
+                        self.picked = None;
+                    }
+                }
             },
             _ if ctrl || modifiers.alt => {}
             _ => {
@@ -531,6 +682,7 @@ impl ChatView {
         }
         self.editor.set_text("");
         self.follow = true;
+        self.picked = None;
         settled.actions.push(ChatAction::Send(text));
     }
 
@@ -801,7 +953,8 @@ impl ChatView {
                 self.menu = None;
                 settled.actions.push(ChatAction::Set { setting, value });
             }
-            Some(Hit::Card(tool)) => {
+            Some(Hit::Card(turn, tool)) => {
+                self.restyled(turn);
                 if !self.open_cards.remove(&tool) {
                     self.open_cards.insert(tool);
                 }
@@ -814,6 +967,13 @@ impl ChatView {
                 turn: u32::try_from(turn).unwrap_or(u32::MAX),
                 force: false,
             }),
+            Some(Hit::Fold(turn)) => self.toggle_fold(turn),
+            Some(Hit::CopyCode(key)) => {
+                if let Some(text) = self.text(key) {
+                    settled.copied.push((text.text.to_owned(), Copy::Clipboard));
+                    self.copied_code = Some(key);
+                }
+            }
             Some(Hit::Send) => self.send(settled),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
             Some(Hit::Choice(id)) => {
@@ -836,8 +996,34 @@ impl ChatView {
                     _ => driver.move_to_point(x, y),
                 });
             }
-            None => {}
+            None => self.press_text(at, clicks, shift),
         }
+    }
+
+    /// A mouse button went down at `at`, on no button: on the
+    /// conversation's text, it starts selecting, a character, word or line
+    /// at a time as `clicks` says, or with `shift`, goes on with the
+    /// selection there is; and the cursor goes there. Anywhere else, what
+    /// was selected isn't.
+    fn press_text(&mut self, at: [f32; 2], clicks: u8, shift: bool) {
+        let Some(spot) = self.spot_at(at, false) else {
+            self.picked = None;
+            return;
+        };
+        let (anchor, head) = match (clicks, self.picked) {
+            (_, Some(picked)) if shift => (picked.anchor, spot),
+            (2, _) => self.word_at(at, false).unwrap_or((spot, spot)),
+            (3.., _) => self.word_at(at, true).unwrap_or((spot, spot)),
+            _ => (spot, spot),
+        };
+        self.picked = Some(Picked {
+            anchor,
+            head,
+            how: How::Mouse,
+        });
+        self.picking = true;
+        self.cursor = Some(spot);
+        self.goal = None;
     }
 
     /// The setting with `id`, if the agent offers it.
@@ -877,15 +1063,6 @@ impl ChatView {
         self.scroll_by(if up { -half } else { half })
     }
 
-    /// Scrolls to the start, or the end.
-    pub(crate) fn scroll_to_end(&mut self, end: bool) -> bool {
-        self.scroll_by(if end {
-            f32::INFINITY
-        } else {
-            f32::NEG_INFINITY
-        })
-    }
-
     fn scroll_by(&mut self, pixels: f32) -> bool {
         let old = self.scroll;
         self.scroll = (self.scroll + pixels).clamp(0.0, self.max_scroll);
@@ -918,27 +1095,51 @@ impl ChatView {
     /// steps through its undo: the last whose changes to files are made,
     /// or the first of those undone. `None` if there's none.
     pub(crate) fn turn_to_undo(&self, redo: bool) -> Option<usize> {
-        let undoable = |turn: &&clackatoo_protocol::Turn| {
-            turn.end.is_some()
-                && turn.files.is_some_and(|files| match files.state {
-                    TurnFilesState::Made => !redo,
-                    TurnFilesState::Undone => redo,
-                    TurnFilesState::Partly => true,
-                    TurnFilesState::TooOld => false,
-                })
-        };
         let mut turns = self.node.turns.iter().enumerate();
         let found = if redo {
-            turns.find(|(_, turn)| undoable(turn))
+            turns.find(|(_, turn)| undoable(turn, redo))
         } else {
-            turns.rfind(|(_, turn)| undoable(turn))
+            turns.rfind(|(_, turn)| undoable(turn, redo))
         };
         found.map(|(at, _)| at)
     }
 }
 
+/// Whether what `turn` changed in files can be undone, or with `redo`,
+/// made again.
+fn undoable(turn: &clackatoo_protocol::Turn, redo: bool) -> bool {
+    turn.end.is_some()
+        && turn.files.is_some_and(|files| match files.state {
+            TurnFilesState::Made => !redo,
+            TurnFilesState::Undone => redo,
+            TurnFilesState::Partly => true,
+            TurnFilesState::TooOld => false,
+        })
+}
+
 #[cfg(test)]
 impl ChatView {
+    /// Stops the clock at `now`, in milliseconds since the Unix epoch, for
+    /// what turns still going say to stay the same.
+    pub(crate) fn set_clock(&mut self, now: u64) {
+        self.clock = Some(now);
+    }
+
+    /// Opens turn `turn`'s work, as clicking the line it folds under does.
+    pub(crate) fn open_fold(&mut self, turn: usize) {
+        self.set_fold(turn, true);
+    }
+
+    /// Shows the button that copies the first block of code drawn, as
+    /// the mouse over it does.
+    pub(crate) fn hover_first_code(&mut self) {
+        self.hovered_code = self
+            .shown
+            .iter()
+            .find(|shown| shown.code)
+            .map(|shown| shown.key);
+    }
+
     /// Opens the card of the tool with `id`, as clicking it does.
     pub(crate) fn open_card(&mut self, id: &str) {
         self.open_cards.insert(id.to_owned());
@@ -956,6 +1157,23 @@ impl ChatView {
             .map(|setting| setting.id.clone())
             .collect();
         self.toggle_menu(ids);
+    }
+}
+
+/// The turn `patch` changes, if it changes one.
+fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
+    use clackatoo_protocol::ChatPatch;
+    match patch {
+        ChatPatch::Turn { index: turn, .. }
+        | ChatPatch::Item { turn, .. }
+        | ChatPatch::Append { turn, .. }
+        | ChatPatch::Output { turn, .. }
+        | ChatPatch::Files { turn, .. } => usize::try_from(*turn).ok(),
+        ChatPatch::State(_)
+        | ChatPatch::Question(_)
+        | ChatPatch::Notice(_)
+        | ChatPatch::Settings(_)
+        | ChatPatch::Usage(_) => None,
     }
 }
 
@@ -1304,7 +1522,7 @@ mod tests {
     fn clicking_a_card_opens_it_and_clicking_again_folds_it() {
         let mut fonts = fonts();
         let mut view = with_settings();
-        view.hits = vec![(Hit::Card("t".into()), [0.0, 0.0, 100.0, 50.0])];
+        view.hits = vec![(Hit::Card(0, "t".into()), [0.0, 0.0, 100.0, 50.0])];
         assert_eq!(view.pointer([10.0, 10.0]), Pointer::Hand);
         view.press([10.0, 10.0], 1, false);
         view.settle(&mut fonts);
@@ -1378,7 +1596,7 @@ mod tests {
         let mut view = with_settings();
         view.open_menu(&[SettingKind::Model]);
         view.hits = vec![
-            (Hit::Card("t".into()), [0.0, 0.0, 100.0, 100.0]),
+            (Hit::Card(0, "t".into()), [0.0, 0.0, 100.0, 100.0]),
             (
                 Hit::Pick {
                     setting: "model".into(),

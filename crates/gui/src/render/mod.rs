@@ -164,6 +164,8 @@ pub(crate) enum Paint {
     Added,
     /// ...and one removed, faintly red.
     Removed,
+    /// Behind text selected, in a chat, as a terminal's selection is.
+    Selected,
 }
 
 /// A line of text of the window's own.

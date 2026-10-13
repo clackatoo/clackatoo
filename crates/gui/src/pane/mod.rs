@@ -138,6 +138,8 @@ pub(crate) struct Pane {
     status: Option<String>,
     /// Text copied, and where the window is to put it.
     yanked: Option<(String, Copy)>,
+    /// Text the chat it shows copied, and where to put it, oldest first.
+    chat_copies: Vec<(String, Copy)>,
     /// Text selected with the mouse.
     mouse_selection: Option<mouse::MouseSelection>,
     /// Text just copied to the clipboard.
@@ -177,6 +179,7 @@ impl Pane {
             found: None,
             status: None,
             yanked: None,
+            chat_copies: Vec::new(),
             mouse_selection: None,
             flash: None,
             pending: VecDeque::new(),
@@ -256,7 +259,9 @@ impl Pane {
     ) -> Option<ChatPaint> {
         self.chat.as_ref()?;
         self.settle_chat(fonts);
+        let reading = self.mode != Mode::Insert;
         let chat = self.chat.as_mut()?;
+        chat.reading = reading;
         Some(chat.paint(fonts, origin, size, caret))
     }
 
@@ -277,10 +282,22 @@ impl Pane {
                 Pending::Other,
             );
         }
-        if let Some(copied) = settled.copied {
-            self.yanked = Some((copied, Copy::Clipboard));
-        }
+        self.chat_copies.extend(settled.copied);
         settled.redraw
+    }
+
+    /// Takes what the chat it shows copied, oldest first.
+    pub(crate) fn take_chat_copies(&mut self) -> Vec<(String, Copy)> {
+        std::mem::take(&mut self.chat_copies)
+    }
+
+    /// When the chat it shows must be drawn again, for a turn still going
+    /// to count on a second.
+    pub(crate) fn chat_live(&self) -> Option<Instant> {
+        self.chat
+            .as_ref()?
+            .live()
+            .filter(|&live| live > Instant::now())
     }
 
     /// How the mouse pointer looks at `at`, from the pane's top left, if it
@@ -305,13 +322,13 @@ impl Pane {
     }
 
     /// A key in a chat: in insert mode, it edits the message, and in
-    /// normal mode, it scrolls. Esc goes to normal mode, as there's no
+    /// normal or visual mode, it reads the conversation (see
+    /// [`ChatView::read_key`]). Esc goes to normal mode, as there's no
     /// program to need it, unless the agent is asking something.
     fn chat_key(&mut self, press: &KeyPress<'_>) -> bool {
         let Some(chat) = self.chat.as_mut() else {
             return false;
         };
-        let modifiers = press.modifiers;
         let escape = *press.key == Key::Named(NamedKey::Escape);
         if self.mode == Mode::Insert {
             if enters_normal_mode(press) || (escape && chat.node.question.is_none()) {
@@ -321,50 +338,15 @@ impl Pane {
             chat.key(press);
             return true;
         }
-        let prefix = self.prefix.take();
-        // What the window said of the chat lasts until the next key.
-        let unsaid = chat.unsay();
-        let character = match press.key {
-            Key::Character(text) => text.chars().next(),
-            _ => None,
+        let (redraw, insert) = chat.read_key(press);
+        let mode = if insert {
+            Mode::Insert
+        } else {
+            chat.visual().map_or(Mode::Normal, Mode::Visual)
         };
-        let redraw = match (modifiers.ctrl, character, press.key) {
-            (false, Some('i' | 'a' | 'I' | 'A' | 'o'), _)
-            | (false, _, Key::Named(NamedKey::Enter)) => {
-                self.mode = Mode::Insert;
-                true
-            }
-            (false, Some('j'), _) | (false, _, Key::Named(NamedKey::ArrowDown)) => {
-                chat.scroll_lines(-1.0)
-            }
-            (false, Some('k'), _) | (false, _, Key::Named(NamedKey::ArrowUp)) => {
-                chat.scroll_lines(1.0)
-            }
-            (true, Some('e'), _) => chat.scroll_lines(-1.0),
-            (true, Some('y'), _) => chat.scroll_lines(1.0),
-            (true, Some('d'), _) | (false, _, Key::Named(NamedKey::PageDown)) => {
-                chat.scroll_half(false)
-            }
-            (true, Some('u'), _) | (false, _, Key::Named(NamedKey::PageUp)) => {
-                chat.scroll_half(true)
-            }
-            (false, Some('g'), _) if prefix == Some(Prefix::G) => chat.scroll_to_end(false),
-            (false, Some('g'), _) => {
-                self.prefix = Some(Prefix::G);
-                false
-            }
-            (false, Some('G'), _) => chat.scroll_to_end(true),
-            // What the last turn changed in files, undone, as Vim's `u`
-            // undoes, and made again, as its Ctrl+R redoes.
-            (false, Some('u'), _) | (true, Some('r'), _) => {
-                let Err(why) = self.undo_turn(None, modifiers.ctrl, false) else {
-                    return unsaid;
-                };
-                self.chat.as_mut().is_some_and(|chat| chat.say(why))
-            }
-            _ => false,
-        };
-        redraw || unsaid
+        let changed = mode != self.mode;
+        self.mode = mode;
+        redraw || changed
     }
 
     /// Whether a search is being typed, which takes every key.
@@ -378,6 +360,7 @@ impl Pane {
     pub(crate) fn pending(&self) -> bool {
         self.prefix
             .is_some_and(|prefix| prefix != Prefix::CtrlBackslash)
+            || self.chat.as_ref().is_some_and(|chat| chat.pending())
     }
 
     /// Switches to normal mode, if in insert mode, as when the focus

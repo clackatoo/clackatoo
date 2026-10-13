@@ -259,13 +259,26 @@ impl Desk {
     }
 
     /// Carries out what was typed or clicked in chats, which needs the
-    /// fonts. Returns whether the window must be redrawn.
+    /// fonts, and takes what they copied, as other copies are taken: `"+`
+    /// or `"*` holds it, and the window puts it on the clipboard. Returns
+    /// whether the window must be redrawn.
     pub(crate) fn settle_chats(&mut self, fonts: &mut crate::fonts::Fonts) -> bool {
         let mut redraw = false;
+        let mut copied = Vec::new();
         for pane in self.panes.values_mut() {
             redraw |= pane.settle_chat(fonts);
+            copied.extend(pane.take_chat_copies());
+        }
+        for (text, to) in copied {
+            self.copied(text, to);
         }
         redraw
+    }
+
+    /// When a chat must be drawn again, for a turn still going to count on
+    /// a second: the soonest.
+    pub(crate) fn chat_wakes(&self) -> Option<std::time::Instant> {
+        self.panes.values().filter_map(Pane::chat_live).min()
     }
 
     /// Where typed text goes now, if keys type text rather than being
@@ -5118,6 +5131,59 @@ mod tests {
         command(&mut desk, "set clipboard=none");
         type_text(&mut desk, "dd");
         assert!(desk.take_yanked().is_empty());
+    }
+
+    #[test]
+    fn what_a_chat_copies_goes_to_the_clipboard_and_plus_holds_it() {
+        use clackatoo_protocol::{ChatNode, ChatState, Item, Node, Outcome, Turn, TurnEnd};
+
+        let mut desk = desk(two_side_by_side());
+        let node = ChatNode {
+            state: ChatState::Ready,
+            turns: vec![Turn {
+                prompt: "how?".into(),
+                sent: 0,
+                items: vec![Item::Words("Like this:\n\n```sh\ncargo test\n```".into())],
+                end: Some(TurnEnd {
+                    at: 1,
+                    outcome: Outcome::Done,
+                }),
+                files: None,
+            }],
+            ..ChatNode::default()
+        };
+        desk.view_changed(
+            TerminalId(1),
+            &ViewUpdate::Snapshot(View {
+                title: "chat".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(node)),
+            }),
+        );
+        let mut fonts = crate::chat::fixtures::fonts();
+        let paint = |desk: &mut Desk, fonts: &mut crate::fonts::Fonts| {
+            let pane = desk.pane_mut(TerminalId(1)).expect("the chat's pane");
+            pane.paint_chat(fonts, [0.0; 2], [900.0, 1000.0], true);
+        };
+        paint(&mut desk, &mut fonts);
+        // In the box: what's typed, selected and copied.
+        desk.paste("draft");
+        press(&mut desk, Key::Character("a".into()), None, CTRL);
+        press(&mut desk, Key::Character("c".into()), None, CTRL);
+        desk.settle_chats(&mut fonts);
+        assert_eq!(register(&mut desk, '+').as_deref(), Some("draft"));
+        assert_eq!(desk.take_yanked(), [("draft".to_owned(), Copy::Clipboard)]);
+        // In normal mode, `y` on a block of code: the cursor starts on the
+        // last line in view, which is the code's.
+        normal_mode(&mut desk);
+        paint(&mut desk, &mut fonts);
+        type_text(&mut desk, "y");
+        desk.settle_chats(&mut fonts);
+        assert_eq!(register(&mut desk, '+').as_deref(), Some("cargo test"));
+        assert_eq!(
+            desk.take_yanked(),
+            [("cargo test".to_owned(), Copy::Clipboard)]
+        );
     }
 
     #[test]

@@ -834,7 +834,7 @@ fn render_chat_with(
     scale: f64,
     then: impl FnOnce(&mut crate::chat::ChatView),
 ) -> Option<Vec<u8>> {
-    render_chat_in(name, node, typed, (scale, None), then)
+    render_chat_in(name, node, typed, (scale, None), |chat, _| then(chat))
 }
 
 /// As [`render_chat_with`], with the interface font `ui`, if given.
@@ -843,7 +843,7 @@ fn render_chat_in(
     node: clackatoo_protocol::ChatNode,
     typed: &str,
     (scale, ui): (f64, Option<&str>),
-    then: impl FnOnce(&mut crate::chat::ChatView),
+    then: impl FnOnce(&mut crate::chat::ChatView, &mut crate::fonts::Fonts),
 ) -> Option<Vec<u8>> {
     let gpu = gpu()?;
     let mut fonts = fonts(scale);
@@ -853,11 +853,13 @@ fn render_chat_in(
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let size = [(720.0 * scale) as u32, (640.0 * scale) as u32];
     let mut chat = crate::chat::ChatView::new("chat".into(), node);
+    // The turn going has been going 12 seconds.
+    chat.set_clock(12_002);
     if !typed.is_empty() {
         chat.paste(typed);
         chat.settle(&mut fonts);
     }
-    then(&mut chat);
+    then(&mut chat, &mut fonts);
     #[allow(clippy::cast_precision_loss)]
     let paint = chat.paint(&mut fonts, [0.0; 2], [size[0] as f32, size[1] as f32], true);
     let mut fills = vec![crate::render::Fill::solid(
@@ -895,18 +897,22 @@ fn renders_a_chat_with_its_box_and_question() {
         chat_node(false),
         "",
         (1.0, Some("Noto Sans")),
-        |_| {},
+        |_, _| {},
     );
     render_chat_with("chat-menu", chat_node(false), "", 1.0, |chat| {
         use clackatoo_protocol::SettingKind;
         chat.open_menu(&[SettingKind::Model, SettingKind::Effort]);
     });
-    // A command's card, folded to its output's last lines, and open.
+    // A command's card, folded to its output's last lines, and open, in
+    // the turn's work, opened.
     let mut first = chat_node(false);
     first.turns.truncate(1);
     first.turns[0].items.truncate(2);
-    render_chat("chat-cards", first.clone(), "", 1.0);
+    render_chat_with("chat-cards", first.clone(), "", 1.0, |chat| {
+        chat.open_fold(0);
+    });
     render_chat_with("chat-cards-open", first, "", 1.0, |chat| {
+        chat.open_fold(0);
         chat.open_card("build");
     });
     // A pinned version: its family's versions are shown.
@@ -916,6 +922,39 @@ fn renders_a_chat_with_its_box_and_question() {
         use clackatoo_protocol::SettingKind;
         chat.open_menu(&[SettingKind::Model, SettingKind::Effort]);
     });
+}
+
+#[test]
+fn renders_a_folded_turn_and_a_diff_card() {
+    // The first turn, done, folds its work under how long it took; the
+    // second, going, shows its work, a change to a file among it.
+    let mut node = chat_node(false);
+    node.turns[0].items[2] = clackatoo_protocol::Item::Words(
+        "The linker can't find **libssl**: turn on `vendored`.".into(),
+    );
+    let Some(folded) = render_chat("chat-folded", node.clone(), "", 1.0) else {
+        return;
+    };
+    let opened = render_chat_with("chat-unfolded", node, "", 1.0, |chat| {
+        chat.open_fold(0);
+    })
+    .expect("drawn");
+    assert!(folded != opened, "opening the work shows it");
+    // In normal mode: the cursor, text selected, and the button that
+    // copies a block of code, under the mouse.
+    render_chat_in(
+        "chat-reading",
+        chat_node(false),
+        "",
+        (1.0, None),
+        |chat, fonts| {
+            chat.reading = true;
+            chat.paint(fonts, [0.0; 2], [720.0, 640.0], true);
+            crate::chat::fixtures::read(chat, "G{{{{wvkkll");
+            chat.paint(fonts, [0.0; 2], [720.0, 640.0], true);
+            chat.hover_first_code();
+        },
+    );
 }
 
 #[test]
@@ -1024,6 +1063,8 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
     };
     pane.view_changed(&chat(Some(made)));
     press(&mut pane, "u");
+    // It goes once the chat's settled, with the fonts.
+    pane.settle_chat(&mut fonts(1.0));
     let undo = ClientMessage::Request(Request::Chat {
         terminal: TerminalId(3),
         action: ChatAction::Undo {
