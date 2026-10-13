@@ -2853,6 +2853,9 @@ impl App {
             SessionEvent::Message(ServerMessage::Event(Event::Show { pane, at })) => {
                 self.agent_shows(pane, at);
             }
+            SessionEvent::Message(ServerMessage::Event(Event::Exited { terminal })) => {
+                self.desk.terminal_exited(terminal, Instant::now());
+            }
             SessionEvent::Message(ServerMessage::Event(Event::Pairing(asking))) => {
                 if self.desk.pairing_asked(asking) {
                     self.request_redraw();

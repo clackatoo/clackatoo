@@ -68,6 +68,14 @@ impl ChatView {
         self.read_prefix.is_some()
     }
 
+    /// Ends what was half done in reading as the focus leaves the chat: a
+    /// visual selection, and a two-key command half typed. The cursor
+    /// stays where it is.
+    pub(crate) fn leave(&mut self) {
+        self.leave_visual();
+        self.read_prefix = None;
+    }
+
     /// A key in normal or visual mode. Returns whether the chat must be
     /// redrawn, and whether the key goes to insert mode, to type a
     /// message.

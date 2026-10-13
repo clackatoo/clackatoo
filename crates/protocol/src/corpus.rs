@@ -26,7 +26,7 @@ use clackatoo_text::{
 };
 
 use crate::frame::{self, FrameDecoder, FrameError};
-use crate::wire::FALLBACKS;
+use crate::wire::{EXITED, FALLBACKS};
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
     Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
@@ -594,6 +594,11 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             )))),
         ),
     ]);
+    // A terminal's program ended, said before its pane closes.
+    samples.push((
+        EXITED,
+        Server(ServerMessage::Event(Event::Exited { terminal })),
+    ));
     samples
 }
 

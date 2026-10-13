@@ -206,11 +206,6 @@ impl Desk {
         (self.boards.panes.get_mut(&pane)).is_some_and(|board| board.scroll(lines))
     }
 
-    /// Whether `pane` is a board pane, which is always in normal mode.
-    pub(super) fn is_board(&self, pane: PaneId) -> bool {
-        self.boards.panes.contains_key(&pane)
-    }
-
     /// `:Board NAME`: opens the board called `name`, as the workspace shown
     /// sees it, where `place` says, or beside the focused pane; with no
     /// name, picks one in the finder.

@@ -582,6 +582,45 @@ fn a_client_of_an_older_version_in_the_window_is_talked_to_at_its_own() {
 }
 
 #[test]
+fn a_client_from_before_exits_were_said_never_hears_of_one() {
+    let daemon = TestDaemon::start();
+    let old = wire::EXITED - 1;
+    let mut raw = Raw::open(&daemon, old);
+    raw.hello(old);
+    assert_eq!(raw.next(), Some(hello(old)));
+    raw.request(Request::WatchWorkspaces);
+    raw.request(Request::NewWorkspace {
+        name: None,
+        terminal: new_pane(&["sh", "-c", "read line"]),
+    });
+    let terminal = loop {
+        match raw.next().expect("the workspaces") {
+            ServerMessage::Event(Event::Workspaces(workspaces)) if !workspaces.list.is_empty() => {
+                break workspaces.list[0].terminals()[0];
+            }
+            _ => {}
+        }
+    };
+    raw.request(Request::Attach { terminal });
+    raw.request(Request::SendInput {
+        terminal,
+        bytes: b"\r".to_vec(),
+    });
+    // Its pane closes, unannounced.
+    loop {
+        match raw.next().expect("the pane closing") {
+            ServerMessage::Event(Event::Workspaces(workspaces)) if workspaces.list.is_empty() => {
+                break;
+            }
+            ServerMessage::Event(Event::Exited { .. }) => {
+                panic!("protocol {old} has no Exited to read")
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
 fn a_request_the_daemon_cant_read_is_answered_and_the_rest_go_on() {
     let daemon = TestDaemon::start();
     let mut raw = Raw::open(&daemon, PROTOCOL_VERSION);
@@ -1257,6 +1296,47 @@ fn a_pane_closes_when_its_program_exits_taking_its_tab_and_workspace() {
     client.send_input(terminal, b"\r").unwrap();
     assert_eq!(next_workspaces(&mut client), Workspaces::default());
     assert!(client.list_terminals().unwrap().is_empty());
+}
+
+/// The next event that isn't a terminal's view.
+fn next_beside_views(client: &mut Client) -> Event {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    loop {
+        match client.next_event().expect("an event") {
+            Event::View { .. } => {}
+            other => return other,
+        }
+    }
+}
+
+#[test]
+fn those_attached_hear_a_program_ended_before_its_pane_closes_but_not_a_pane_closed() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    client
+        .new_workspace(None, new_pane(&["sh", "-c", "read line"]))
+        .unwrap();
+    let terminal = next_workspaces(&mut client).list[0].terminals()[0];
+    client.attach(terminal).unwrap();
+    client.send_input(terminal, b"\r").unwrap();
+    assert_eq!(next_beside_views(&mut client), Event::Exited { terminal });
+    assert_eq!(next_workspaces(&mut client), Workspaces::default());
+
+    // A pane closed by a client, its program still running, says nothing
+    // of its program.
+    let pane = client
+        .new_workspace(None, new_pane(&["sh", "-c", "read line"]))
+        .unwrap();
+    let terminal = next_workspaces(&mut client).list[0].terminals()[0];
+    client.attach(terminal).unwrap();
+    client.close_pane(pane).unwrap();
+    assert_eq!(
+        next_beside_views(&mut client),
+        Event::Workspaces(Workspaces::default())
+    );
 }
 
 #[test]
@@ -3715,7 +3795,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Browser { .. }
             | Event::Chats(_)
             | Event::Pairing(_)
-            | Event::Sessions { .. }) => {
+            | Event::Sessions { .. }
+            | Event::Exited { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }

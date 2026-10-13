@@ -115,6 +115,9 @@ gates! {
     /// Renumbered with the protocol version it lands in, if that changes
     /// on a rebase, and `MIN_DAEMON` with it: never below it.
     FALLBACKS = 73,
+    /// `Event::Exited`: a terminal's program ended, said before its pane
+    /// closes, so a window can tell that from a pane closed elsewhere.
+    EXITED = 74,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -347,6 +350,7 @@ impl Since for Event {
             | Self::Chats(_)
             | Self::Pairing(_)
             | Self::Sessions { .. } => EARLIER,
+            Self::Exited { .. } => EXITED,
         }
     }
 }
@@ -524,13 +528,15 @@ impl Downgrade for ServerMessage {
     /// chat item or tool content becomes its `Other`; a new chat patch
     /// becomes a fresh snapshot of the chat; something only informative,
     /// such as a new buffer update, is dropped; a new error becomes
-    /// `Error::Other(err.to_string())`. None is newer than the fallbacks
-    /// yet.
+    /// `Error::Other(err.to_string())`. `Event::Exited` is dropped: a
+    /// window that never hears a program ended takes its pane closing as
+    /// someone else's doing, and goes on in normal mode, the safe side.
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
         }
         match self {
+            Self::Event(Event::Exited { .. }) => Downgraded::Dropped,
             Self::Response(_) => Downgraded::Refused,
             _ if wire < FALLBACKS => Downgraded::Dropped,
             // What's newer than the fallbacks has no arm yet, so nothing is.
@@ -702,8 +708,9 @@ mod tests {
     /// nothing in place of, as they're only informative: each added here
     /// on purpose, beside the downgrade arm that drops it.
     fn droppable(message: &ServerMessage) -> bool {
-        let _ = message;
-        false
+        // Only ever a reason to keep the mode as a pane closes: without
+        // it, a window goes on in normal mode, which sends nothing typed.
+        matches!(message, ServerMessage::Event(Event::Exited { .. }))
     }
 
     #[test]
@@ -803,6 +810,10 @@ mod tests {
         assert_eq!(BufferUpdate::ChangedOnDisk.since(), EARLIER);
         assert_eq!(FilesUpdate::NoGit(String::new()).since(), EARLIER);
         assert_eq!(SettingKind::Browser.since(), EARLIER);
+        let exited = Event::Exited {
+            terminal: crate::TerminalId(1),
+        };
+        assert_eq!(exited.since(), EXITED);
     }
 
     #[test]

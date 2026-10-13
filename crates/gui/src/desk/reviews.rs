@@ -459,9 +459,4 @@ impl Desk {
             self.message = Some("this pane has no file".into());
         }
     }
-
-    /// Whether `pane` is a review, which is always in normal mode.
-    pub(super) fn is_review(&self, pane: PaneId) -> bool {
-        self.reviews.panes.contains_key(&pane)
-    }
 }

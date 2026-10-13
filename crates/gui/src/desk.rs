@@ -7,10 +7,10 @@
 //! tabs not shown: each sends one update, which waits undrawn and
 //! unacknowledged, so the daemon sends no more until the tab is shown, and
 //! then it shows at once. Panes of other workspaces keep their state, such
-//! as their mode and scroll, for when their workspace is shown again.
+//! as their scroll, for when their workspace is shown again.
 //!
-//! The mode follows the focus around: moving from a pane in normal mode to
-//! another, or opening one, arrives in normal mode too.
+//! The window has one mode, which every pane it arrives at takes (see
+//! [`mode`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -147,6 +147,7 @@ mod jumps;
 mod lessons;
 mod links;
 mod macros;
+mod mode;
 mod offers;
 mod reviews;
 mod script;
@@ -154,6 +155,7 @@ mod settings;
 mod starting;
 mod updating;
 
+pub(crate) use mode::WindowMode;
 pub(crate) use script::LuaStart;
 
 /// Something being typed in the palette.
@@ -342,6 +344,35 @@ pub(crate) struct Desk {
     connect_asked: bool,
     /// The tutor's lessons, and the lesson open.
     tutor: lessons::Tutor,
+    /// The window's mode, as last taken from a pane that has one (see
+    /// [`mode`]).
+    mode: WindowMode,
+    /// The pane the focus last arrived at, and what it showed then.
+    arrived: Option<(PaneId, Content)>,
+    /// Panes this window asked the daemon to close, until they have.
+    closing: HashSet<PaneId>,
+    /// The focused editor, arrived at in insert mode before its text
+    /// came, which goes to insert mode once it has, and when the focus
+    /// arrived.
+    insert_on_load: Option<(PaneId, std::time::Instant)>,
+    /// The editor the keys held are for, held for its text to come, which
+    /// they may only ever reach.
+    held_for: Option<PaneId>,
+    /// Terminals whose program the daemon said has ended.
+    exited: HashSet<TerminalId>,
+    /// Whether a key or a click is being had as the focused pane's own
+    /// doing, as Enter in an explorer is.
+    acting: bool,
+    /// How many requests have been sent on this connection, and answered,
+    /// which numbers them.
+    asks_sent: u64,
+    asks_heard: u64,
+    /// The panes each close this window asked for closes, by the number
+    /// of its request, until it's answered.
+    closes_asked: VecDeque<(u64, Vec<PaneId>)>,
+    /// The focused chat, arrived at in insert mode as it asked something,
+    /// and so kept in normal mode, while it's left so.
+    held_normal: Option<PaneId>,
 }
 
 impl Desk {
@@ -881,8 +912,8 @@ impl Desk {
         (std::time::Instant::now() < until).then_some(pane)
     }
 
-    /// Switches to `pane`, wherever it is. From a pane in normal mode, it
-    /// arrives in normal mode too. The pane left stays as it was.
+    /// Switches to `pane`, wherever it is, which takes the window's mode.
+    /// The pane left keeps its place, but not what was half done in it.
     fn show_pane(&mut self, pane: PaneId) {
         self.move_focus(pane, true);
     }
@@ -905,38 +936,20 @@ impl Desk {
             self.record_jump(left.pane, None);
         }
         let unfocused = self.unfocused;
-        let left_editor = self
-            .shown
-            .and_then(|left| self.editor_in_normal_mode(left.pane));
-        let left_explorer = (self.shown).is_some_and(|left| {
-            self.is_explorer(left.pane) || self.is_board(left.pane) || self.is_review(left.pane)
-        });
-        let normal = left_editor.unwrap_or(false)
-            || left_explorer
-            || self.focused_pane().is_some_and(|left| {
-                if !unfocused {
-                    left.focus_changed(false);
-                }
-                left.mode != Mode::Insert
-            });
-        // A panel by the cursor goes with the focus.
+        self.remember_mode();
+        if !unfocused && let Some(left) = self.focused_pane() {
+            left.focus_changed(false);
+        }
         if let Some(left) = self.shown {
-            self.close_editor_panel(left.pane);
+            self.leave_pane(left.pane);
         }
         self.shown = Some(shown);
         self.note_focus(pane);
         // Before the mode: a pane of another workspace may not exist yet.
         self.attach_shown();
-        if normal {
-            self.editor_to_normal_mode(pane);
-        }
-        if let Some(arrived) = self.focused_pane() {
-            if normal {
-                arrived.enter_normal_mode();
-            }
-            if !unfocused {
-                arrived.focus_changed(true);
-            }
+        self.arrive();
+        if !unfocused && let Some(arrived) = self.focused_pane() {
+            arrived.focus_changed(true);
         }
         self.request(Request::Focus { pane }, Asked::Quiet);
         self.fit_panes();
@@ -1131,6 +1144,8 @@ impl Desk {
         self.reviews_reconnected();
         self.browsers_reconnected();
         self.asked.clear();
+        self.asks_heard = self.asks_sent;
+        self.closes_asked.clear();
         self.macros.requests_forgotten();
         self.outbox.clear();
         self.formatting.clear();
@@ -1144,6 +1159,9 @@ impl Desk {
 
     /// Takes the daemon's workspaces, as they are now.
     pub(crate) fn workspaces_changed(&mut self, workspaces: Workspaces) {
+        // The focused pane may close, or show something else.
+        self.remember_mode();
+        let ended = self.focused_exited();
         self.workspaces = workspaces;
         if self.workspaces.list.is_empty() {
             // Every pane closed, as when the last shell exits.
@@ -1159,6 +1177,7 @@ impl Desk {
             self.macro_follows_focus();
         }
         self.attach_shown();
+        self.arrive_if_moved(ended);
         self.fit_panes();
         self.forget_gone_handlers();
         self.close_leftovers();
@@ -1271,6 +1290,10 @@ impl Desk {
     /// window must be redrawn.
     #[allow(clippy::too_many_lines, reason = "one arm per asker, each short")]
     fn hand_answer(&mut self, response: Response) -> bool {
+        if !self.asked.is_empty() {
+            self.heard_back(self.asks_heard, matches!(response, Response::Error(_)));
+            self.asks_heard += 1;
+        }
         match self.asked.pop_front() {
             Some(Asker::Pane(terminal)) => {
                 let Some(pane) = self.panes.get_mut(&terminal) else {
@@ -1411,9 +1434,11 @@ impl Desk {
     /// Queues a request of the window's own.
     fn request(&mut self, request: Request, asked: Asked) {
         if self.connected {
+            self.sending(&request, &asked);
             let window = Asker::Window(asked);
             self.macros.requested(&window);
             self.asked.push_back(window);
+            self.asks_sent += 1;
             self.outbox.push(ClientMessage::Request(request));
         }
     }
@@ -1429,6 +1454,7 @@ impl Desk {
                 }
                 if matches!(message, ClientMessage::Request(_)) {
                     self.asked.push_back(Asker::Pane(terminal));
+                    self.asks_sent += 1;
                 }
                 messages.push(message);
             }
@@ -1450,6 +1476,7 @@ impl Desk {
             return false;
         }
         self.user_active();
+        self.key_coming();
         self.record_press(press);
         let redraw = self.key_with(press, true);
         let typed = self.type_macros();
@@ -1563,11 +1590,14 @@ impl Desk {
                 Pressed::Unbound => {}
             }
         }
+        if pane::enters_normal_mode(press) {
+            self.normal_mode_asked();
+        }
         let had_message = self.message.take().is_some() || asked;
         if self.focused_editor().is_some() {
             return self.listing_key(press) || self.editor_key(press) || had_message;
         }
-        if let Some(redraw) = self.list_key(press) {
+        if let Some(redraw) = self.acting_from_list(|desk| desk.list_key(press)) {
             return redraw || had_message;
         }
         if self.stop_recording_in_terminal(press) {
@@ -1674,6 +1704,11 @@ impl Desk {
         modifiers: Modifiers,
     ) -> MouseOutcome {
         let mut outcome = MouseOutcome::default();
+        // A click gives up waiting for an editor's text, as any key but
+        // those insert mode types does.
+        if let MouseAction::Press(_) = action {
+            self.stop_waiting_to_insert(None);
+        }
         if self.dragging.is_none()
             && let Some((pane, cell)) = self.editor_at(point)
         {
@@ -1688,7 +1723,9 @@ impl Desk {
         {
             outcome.redraw |= self.mouse_left();
             if let MouseAction::Press(MouseButton::Left) = action {
-                outcome.redraw = self.focus_at(point) | self.explorer_click(pane, cell, clicks);
+                let focused = self.focus_at(point);
+                let clicked = self.acting_from_list(|desk| desk.explorer_click(pane, cell, clicks));
+                outcome.redraw = focused | clicked;
             }
             return outcome;
         }
@@ -1697,7 +1734,9 @@ impl Desk {
         {
             outcome.redraw |= self.mouse_left();
             if let MouseAction::Press(MouseButton::Left) = action {
-                outcome.redraw = self.focus_at(point) | self.board_click(pane, cell);
+                let focused = self.focus_at(point);
+                let clicked = self.acting_from_list(|desk| desk.board_click(pane, cell));
+                outcome.redraw = focused | clicked;
             }
             return outcome;
         }
@@ -1706,7 +1745,9 @@ impl Desk {
         {
             outcome.redraw |= self.mouse_left();
             if let MouseAction::Press(MouseButton::Left) = action {
-                outcome.redraw = self.focus_at(point) | self.review_click(pane, cell, clicks);
+                let focused = self.focus_at(point);
+                let clicked = self.acting_from_list(|desk| desk.review_click(pane, cell, clicks));
+                outcome.redraw = focused | clicked;
             }
             return outcome;
         }
@@ -2306,6 +2347,7 @@ fn mode_name(mode: Mode) -> ModeName {
 mod tests {
     mod folders;
     mod lessons;
+    mod mode;
 
     use clackatoo_protocol::{Layout, Pane as LayoutPane, View, Workspace};
     use clackatoo_term::mouse::{MouseAction, MouseButton};

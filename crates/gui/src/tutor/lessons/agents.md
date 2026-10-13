@@ -12,7 +12,7 @@ Notes for the agents lesson.
 
 `:Agent codex` or `:Agent gemini` opens a chat with that agent in a new tab, at once; `:|Agent codex` opens it beside the focused pane.
 
-A chat works in the directory a new terminal would start in. Like any pane, it opens in normal mode: `i` starts typing in its box, Enter sends, and Shift+Enter starts a new line.
+A chat works in the directory a new terminal would start in. Like any pane, it opens in the window's mode, so after `:Agent` it's in normal mode: `i` starts typing in its box, Enter sends, and Shift+Enter starts a new line.
 
 If the agent hasn't opened the chat's session after 30 seconds, the chat says so, and what it may be waiting on: most often an MCP server in the agent's config that needs a login. It goes on waiting, and asks whether to keep waiting, which Esc picks, Retry, which starts the agent again, or Stop. Ctrl+C stops it too.
 

@@ -1427,6 +1427,13 @@ impl Daemon {
             slot.exit = None;
             self.sources.remove(token.0);
             // A pane closes when its program exits, as in other terminals.
+            // Those watching it hear first that its program ended, so a
+            // window can tell that from the pane closed by someone else.
+            let viewers =
+                (self.terminals.get(&id)).map_or_else(Vec::new, |slot| slot.viewers.clone());
+            for token in viewers {
+                self.send_event(token, clackatoo_protocol::Event::Exited { terminal: id });
+            }
             if self.workspaces.get().pane_showing(id).is_some()
                 && let Err(err) = self.close_terminal(id)
             {

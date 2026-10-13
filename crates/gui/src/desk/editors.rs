@@ -26,7 +26,7 @@ use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Marks, 
 use crate::explorer::Explorer;
 use crate::input::{KeptPress, KeyPress};
 use crate::options::Options;
-use crate::pane::{Copy, Mode};
+use crate::pane::Copy;
 
 /// The editors, by the pane each is, and the buffers they show.
 #[derive(Debug, Default)]
@@ -646,6 +646,17 @@ impl Desk {
         if self.give_up_off_focus() {
             return None;
         }
+        // Keys insert mode types, typed for an editor arrived at in insert
+        // mode, wait for its text; any other gives up waiting.
+        let mut unmade = Some(held);
+        let mut given_back = None;
+        if self.waits_to_insert() {
+            let held = unmade.take().map(|make| make()).expect("not made yet");
+            match self.hold_for_insert(held) {
+                Some(held) => given_back = Some(held),
+                None => return Some(false),
+            }
+        }
         let now = std::time::Instant::now();
         if let Some(editor) =
             (self.editors.panes.values_mut()).find(|editor| editor.waiting_for_grammar())
@@ -674,8 +685,30 @@ impl Desk {
                 return Some(true);
             }
         }
-        self.editors.held.push_back(held());
+        let held = given_back.or_else(|| unmade.map(|make| make()));
+        self.editors.held.extend(held);
         Some(false)
+    }
+
+    /// Holds `held` until what waits is done.
+    pub(super) fn hold(&mut self, held: Held) {
+        self.editors.held.push_back(held);
+    }
+
+    /// Has the editor `pane` say `text` in the bar until the key after
+    /// the next. Returns whether there's an editor there to.
+    pub(super) fn say_past_key(&mut self, pane: PaneId, text: &str) -> bool {
+        let Some(editor) = self.editors.panes.get_mut(&pane) else {
+            return false;
+        };
+        editor.say(text);
+        editor.keep_status();
+        true
+    }
+
+    /// Whether any keys or pastes are held.
+    pub(super) fn holding(&self) -> bool {
+        !self.editors.held.is_empty()
     }
 
     /// What an editor's command waited for was given up on: what's held
@@ -988,10 +1021,13 @@ impl Desk {
     }
 
     /// Shows `editor`, of `copy`, a folder's listing, in the explorer
-    /// `pane`.
+    /// `pane`, in the window's mode if the pane has the focus.
     pub(super) fn put_listing_editor(&mut self, pane: PaneId, editor: Editor, copy: BufferCopy) {
         self.editors.buffers.insert(copy.buffer(), copy);
         self.editors.panes.insert(pane, editor);
+        if self.shown.is_some_and(|shown| shown.pane == pane) {
+            self.editor_to_mode(pane, self.mode == super::WindowMode::Insert);
+        }
     }
 
     /// Takes the editor of a folder's listing the explorer `pane` shows,
@@ -1004,6 +1040,8 @@ impl Desk {
         }
         let editor = editors.panes.remove(&pane)?;
         let copy = editors.buffers.remove(&buffer)?;
+        // The pane stays, with no editor: the window keeps its mode.
+        self.remember_mode_of(pane, editor.mode);
         Some((editor, copy))
     }
 
@@ -1134,13 +1172,17 @@ impl Desk {
         true
     }
 
-    /// Puts the focused editor in normal mode, as arriving from a pane in
-    /// normal mode does.
-    pub(super) fn editor_to_normal_mode(&mut self, pane: PaneId) {
+    /// Puts the editor `pane`, if it's one, in insert mode if `insert`,
+    /// or else normal mode, as the focus arriving at it does.
+    pub(super) fn editor_to_mode(&mut self, pane: PaneId, insert: bool) {
         let editors = &mut self.editors;
         if let Some(editor) = editors.panes.get_mut(&pane)
             && let Some(copy) = editors.buffers.get_mut(&editor.buffer())
         {
+            if insert {
+                editor.enter_insert_mode();
+                return;
+            }
             editor.enter_normal_mode(copy);
             let made = copy.take_made();
             follow_places(
@@ -1160,12 +1202,26 @@ impl Desk {
         }
     }
 
-    /// Whether `pane` is an editor in a mode other than insert.
-    pub(super) fn editor_in_normal_mode(&self, pane: PaneId) -> Option<bool> {
-        self.editors
-            .panes
-            .get(&pane)
-            .map(|editor| editor.mode != Mode::Insert)
+    /// Whether `pane` is an editor whose file's text hasn't come yet.
+    pub(super) fn editor_unloaded(&self, pane: PaneId) -> bool {
+        (self.editors.panes.get(&pane))
+            .and_then(|editor| self.editors.buffers.get(&editor.buffer()))
+            .is_some_and(|copy| !copy.loaded())
+    }
+
+    /// Whether this window has asked the daemon to show a file or a
+    /// folder in `pane` in place of what it shows, as `:e` does, and
+    /// hasn't heard back.
+    pub(super) fn opening_here(&self, pane: PaneId) -> bool {
+        self.editors.opening.contains_key(&pane)
+    }
+
+    /// Ends what was half done in the editor `pane`, if it's one, as the
+    /// focus leaves it.
+    pub(super) fn editor_leaves(&mut self, pane: PaneId) {
+        if let Some(editor) = self.editors.panes.get_mut(&pane) {
+            editor.leave();
+        }
     }
 
     /// Scrolls the editor `pane` by `lines`, as the wheel does.
@@ -1277,6 +1333,7 @@ impl Desk {
         // A macro goes on once what it waited for is done, as after
         // anything the daemon says, or gives up if it's waited too long.
         asked |= self.macro_patience(now);
+        asked |= self.insert_patience(now);
         asked | self.type_macros()
     }
 
@@ -1286,6 +1343,7 @@ impl Desk {
     pub(crate) fn editor_wakes(&self) -> Option<std::time::Instant> {
         (self.editors.panes.values().filter_map(Editor::wakes))
             .chain(self.macro_gives_up())
+            .chain(self.insert_gives_up())
             .min()
     }
 

@@ -243,8 +243,13 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     assert_eq!(shown_pane(&desk), PaneId(4));
     ctrl(&mut desk, "h");
     assert_eq!(step(&desk), 6);
-    ctrl(&mut desk, "l");
-    command(&mut desk, "close");
+    // Back to the new pane in insert mode, which it arrives in.
+    type_keys(&mut desk, "i");
+    assert_eq!(step(&desk), 6, "the practice terminal doesn't count");
+    ctrl_b(&mut desk, "l");
+    assert_eq!(mode(&desk, 4), Mode::Insert);
+    assert_eq!(step(&desk), 7);
+    ctrl_b(&mut desk, "x");
     let asked = take_requests(&mut desk);
     assert!(
         asked.contains(&Request::ClosePane { pane: PaneId(4) }),
@@ -256,9 +261,15 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     let two = side_by_side(vec![file_pane(3, 8), pane(2)]);
     desk.workspaces_changed(workspaces(vec![with_lesson(two.clone(), vec![], 2)]));
     answer_all(&mut desk);
-    assert_eq!(step(&desk), 7);
+    assert_eq!(step(&desk), 8);
+    assert_eq!(
+        mode(&desk, 2),
+        Mode::Insert,
+        "the practice terminal took the mode"
+    );
 
     // A tab of its own, and back.
+    normal_mode(&mut desk);
     command(&mut desk, "Terminal");
     assert!(matches!(
         take_requests(&mut desk)[..],
@@ -272,10 +283,10 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     desk.answered(Response::PaneCreated(PaneId(5)));
     answer_all(&mut desk);
     snapshot(&mut desk, 5);
-    assert_eq!(step(&desk), 8);
+    assert_eq!(step(&desk), 9);
     command(&mut desk, "2");
     answer_all(&mut desk);
-    assert_eq!(step(&desk), 9);
+    assert_eq!(step(&desk), 10);
 
     // A workspace of its own, and back.
     command(&mut desk, "ws tutor");
@@ -291,17 +302,17 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     desk.answered(Response::PaneCreated(PaneId(6)));
     answer_all(&mut desk);
     snapshot(&mut desk, 6);
-    assert_eq!(step(&desk), 10);
+    assert_eq!(step(&desk), 11);
     ctrl_b(&mut desk, "w");
     type_text(&mut desk, "w");
     enter(&mut desk);
     answer_all(&mut desk);
     assert_eq!(desk.shown().unwrap().tab, TabId(2));
-    assert_eq!(step(&desk), 11);
+    assert_eq!(step(&desk), 12);
 
     // The last step is to read: `]s` goes on, to the end.
     let lesson = tutor::lesson("basics").unwrap();
-    assert!(lesson.steps[11].checks.is_empty());
+    assert!(lesson.steps[12].checks.is_empty());
     ctrl(&mut desk, "l");
     assert_eq!(shown_pane(&desk), PaneId(2));
     type_keys(&mut desk, "]s");
@@ -334,6 +345,26 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     let io = desk.take_tutor_io();
     assert!(io.contains(&Io::Remove("/scratch/1/basics".into())));
     assert!(io.contains(&Io::Remove("/scratch/1/basics.txt".into())));
+}
+
+#[test]
+fn the_lesson_pane_has_no_insert_mode_so_brackets_step_through_it_from_insert_mode() {
+    let mut desk = one_terminal(Some(seen_everything()));
+    open(&mut desk, "basics", pane(2));
+    snapshot(&mut desk, 2);
+    type_keys(&mut desk, "i");
+    assert_eq!(step(&desk), 1);
+    // To the lesson in insert mode: it stays in normal mode, and shows it.
+    ctrl_b(&mut desk, "h");
+    assert_eq!(shown_pane(&desk), PaneId(3));
+    let (editor, _) = desk.focused_editor().expect("the lesson");
+    assert_eq!(editor.mode, Mode::Normal);
+    assert_eq!(desk.mode(), WindowMode::Insert);
+    type_keys(&mut desk, "]s");
+    assert_eq!(step(&desk), 2);
+    // And back to the practice terminal, in insert mode still.
+    ctrl_b(&mut desk, "l");
+    assert_eq!(mode(&desk, 2), Mode::Insert);
 }
 
 // --- Text objects, with the grammar played by the test ----------------------

@@ -333,6 +333,8 @@ impl Desk {
         if self.macros.handing.is_some() {
             return false;
         }
+        // An editor's text come, the keys held for it go in insert mode.
+        self.insert_once_loaded();
         // Not if the focus has left the pane it waited in.
         let mut redraw = self.give_up_off_focus();
         self.macros.handing = Some(Handing::Held);
@@ -343,7 +345,10 @@ impl Desk {
             }
             if self.macros.frames.is_empty() {
                 self.macro_done();
-                if self.have_held() {
+                // Held for an editor's text, they wait for it, and go only
+                // to it.
+                self.keep_held_with_their_editor();
+                if !self.waits_to_insert() && self.have_held() {
                     redraw = true;
                     continue;
                 }

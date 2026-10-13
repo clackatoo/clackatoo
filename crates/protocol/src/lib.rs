@@ -113,7 +113,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 73;
+pub const PROTOCOL_VERSION: u32 = 74;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -448,6 +448,14 @@ pub enum Event {
         id: u64,
         /// The sessions, or why there are none.
         sessions: Result<Vec<AgentSession>, String>,
+    },
+    /// The program of a terminal the client is attached to has ended, so
+    /// its pane is about to close, in the workspaces sent after this. A
+    /// window keeps its mode for the pane it goes on to, as the user's own
+    /// doing, as after `exit`; a pane closed by anyone else isn't.
+    Exited {
+        /// The terminal.
+        terminal: TerminalId,
     },
 }
 

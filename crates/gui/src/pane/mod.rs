@@ -179,6 +179,9 @@ pub(crate) struct Pane {
     predictor: Predictor,
     /// The guesses to draw, if any.
     overlay: Option<Overlay>,
+    /// When a key typed in this window last reached the program, as
+    /// `exit` and Enter, or Ctrl+D, would.
+    keyed: Option<Instant>,
 }
 
 impl Pane {
@@ -213,6 +216,7 @@ impl Pane {
             links_kept: links::KEPT_LINKS,
             predictor: Predictor::new(),
             overlay: None,
+            keyed: None,
         }
     }
 
@@ -440,11 +444,48 @@ impl Pane {
     }
 
     /// Switches to normal mode, if in insert mode, as when the focus
-    /// arrives from a pane in normal mode.
+    /// arrives while the window is in normal mode.
     pub(crate) fn enter_normal_mode(&mut self) {
         if self.mode == Mode::Insert {
             self.enter_normal();
         }
+    }
+
+    /// Whether it shows a chat whose agent is asking something, which
+    /// keys in insert mode would answer.
+    pub(crate) fn asking(&self) -> bool {
+        (self.chat.as_ref()).is_some_and(|chat| chat.node.question.is_some())
+    }
+
+    /// Switches to insert mode, if it's not in it, as when the focus
+    /// arrives while the window is in insert mode: a terminal goes back to
+    /// the live screen, as `i` does, and a chat to the message being
+    /// typed. A terminal in insert mode already stays where the wheel
+    /// scrolled it, until a key is typed.
+    pub(crate) fn enter_insert_mode(&mut self) {
+        if self.mode == Mode::Insert {
+            return;
+        }
+        if self.chat.is_some() {
+            self.mode = Mode::Insert;
+            return;
+        }
+        self.insert();
+    }
+
+    /// Ends what was half done here as the focus leaves: a visual
+    /// selection, which leaves normal mode, a two-key command half typed,
+    /// or a search being typed. Where the view and the cursor are stays.
+    pub(crate) fn leave(&mut self) {
+        if let Some(chat) = &mut self.chat {
+            chat.leave();
+        }
+        if matches!(self.mode, Mode::Visual(_)) {
+            self.mode = Mode::Normal;
+        }
+        self.anchor = None;
+        self.prefix = None;
+        self.prompt = None;
     }
 
     /// Starts over on a new connection to the daemon, which sends a fresh
@@ -633,7 +674,7 @@ impl Pane {
                 .type_key(press)
                 .is_some_and(|guessed| std::mem::replace(&mut self.scroll, 0) > 0 || guessed),
             _ if ctrl_backslash && prefix == Some(Prefix::CtrlBackslash) => {
-                self.send_input(vec![0x1c]);
+                self.send_keyed(vec![0x1c]);
                 self.insert()
             }
             // From anywhere else, too: a selection or a search being typed
@@ -668,7 +709,7 @@ impl Pane {
             // Without bracketing, newlines must look like Enter.
             bytes.extend_from_slice(text.replace("\r\n", "\r").replace('\n', "\r").as_bytes());
         }
-        self.send_input(bytes);
+        self.send_keyed(bytes);
         self.scroll = 0;
     }
 
@@ -920,7 +961,20 @@ impl Pane {
         if bytes.is_empty() {
             return None;
         }
+        self.keyed = Some(Instant::now());
         Some(self.send_typed(bytes, predict::Input::of(press)))
+    }
+
+    /// Sends `bytes`, typed or pasted in this window, to the program.
+    fn send_keyed(&mut self, bytes: Vec<u8>) {
+        self.keyed = Some(Instant::now());
+        self.send_input(bytes);
+    }
+
+    /// Whether a key typed or pasted in this window reached the program
+    /// at `since` or later.
+    pub(crate) fn keyed_since(&self, since: Instant) -> bool {
+        self.keyed.is_some_and(|keyed| keyed >= since)
     }
 
     fn scroll_by(&mut self, lines: i64) -> bool {
@@ -1448,6 +1502,58 @@ mod tests {
         keys(&mut pane, "i");
         assert_eq!(pane.mode, Mode::Insert);
         assert_eq!(pane.label(), None);
+    }
+
+    #[test]
+    fn arriving_in_insert_mode_returns_to_the_live_screen_and_in_normal_mode_stays() {
+        let output = numbered_lines("");
+        let terminal = terminal(&output);
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg");
+        // Left and arrived at again in normal mode, it's where it was.
+        pane.leave();
+        pane.enter_normal_mode();
+        assert_eq!(pane.mode, Mode::Normal);
+        assert!(pane.label().is_some_and(|label| label.contains('↑')));
+        pane.enter_insert_mode();
+        assert_eq!(pane.mode, Mode::Insert);
+        assert_eq!(pane.label(), None, "back at the live screen");
+    }
+
+    #[test]
+    fn leaving_ends_a_selection_a_half_typed_command_and_a_search_but_not_the_place() {
+        let output = numbered_lines("line ");
+        let terminal = terminal(&output);
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "kkv");
+        assert_eq!(pane.mode, Mode::Visual(Selection::Characters));
+        pane.leave();
+        assert_eq!(pane.mode, Mode::Normal);
+        assert!(pane.highlights(5).is_empty(), "nothing's selected");
+        let at = cursor(&pane);
+        keys(&mut pane, "y");
+        assert!(pane.pending());
+        pane.leave();
+        assert!(!pane.pending());
+        keys(&mut pane, "/line");
+        assert!(pane.prompting());
+        pane.leave();
+        assert!(!pane.prompting());
+        assert_eq!(pane.mode, Mode::Normal);
+        assert_eq!(cursor(&pane), at, "the cursor stays");
+        // Ctrl+\ waiting to be pressed again is forgotten too.
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        let mut pane = self::pane(&terminal);
+        press(&mut pane, Key::Character("\\".into()), ctrl);
+        pane.leave();
+        pane.enter_normal_mode();
+        press(&mut pane, Key::Character("\\".into()), ctrl);
+        assert_eq!(pane.mode, Mode::Normal, "not sent to the program");
     }
 
     fn named(pane: &mut Pane, key: NamedKey) {

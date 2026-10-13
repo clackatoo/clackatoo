@@ -84,7 +84,7 @@ pub(crate) use panel::Line as PanelLine;
 use panel::Panel;
 pub(crate) use panel::PanelView;
 pub(crate) use pattern::{Matching, Pattern};
-pub(crate) use pieces::GiveUp;
+pub(crate) use pieces::{GiveUp, PATIENCE};
 use preview::Preview;
 use registers::Wrote;
 pub(crate) use registers::{Register, Registers};
@@ -803,12 +803,41 @@ impl Editor {
         self.kept = Kept::default();
     }
 
-    /// Enters normal mode, as moving the focus here from a pane in normal
-    /// mode does.
+    /// Enters normal mode, as the focus arriving here does while the
+    /// window is in normal mode.
     pub(crate) fn enter_normal_mode(&mut self, copy: &mut BufferCopy) {
         if self.mode == Mode::Insert {
             self.leave_insert(copy);
         }
+    }
+
+    /// Enters insert mode at the cursor, as `i` does, as the focus
+    /// arriving here does while the window is in insert mode. What's typed
+    /// is a new undo step, but not a change `.` does again: no key here
+    /// asked for it.
+    pub(crate) fn enter_insert_mode(&mut self) {
+        if self.mode == Mode::Insert {
+            return;
+        }
+        self.leave_visual();
+        self.typed.clear();
+        self.prompt = None;
+        self.new_step = true;
+        self.enter_insert(1);
+    }
+
+    /// Ends what was half done here as the focus leaves: a visual
+    /// selection, a command half typed, a search or a name being typed,
+    /// and the menus of code actions and completions and the signature
+    /// shown. The cursor stays where it is, and insert mode stays insert
+    /// mode.
+    pub(crate) fn leave(&mut self) {
+        self.leave_visual();
+        self.typed.clear();
+        self.prompt = None;
+        self.actions = None;
+        self.close_completion();
+        self.close_signature();
     }
 
     /// What the bar says: a search or a name being typed, a message, or

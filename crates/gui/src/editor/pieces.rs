@@ -32,7 +32,7 @@ use crate::objects::Object;
 use crate::pane::{Mode, Selection};
 
 /// How long a command waits for its answer before it's given up on.
-const PATIENCE: Duration = Duration::from_secs(1);
+pub(crate) const PATIENCE: Duration = Duration::from_secs(1);
 
 /// Why a command waiting for the grammar was given up on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,6 +224,11 @@ impl Editor {
     /// saying so in the bar.
     pub(crate) fn give_up(&mut self, why: GiveUp) {
         self.give_up_saying(why.said());
+    }
+
+    /// Says `text` in the bar, until the next key.
+    pub(crate) fn say(&mut self, text: &str) {
+        self.status = Some(text.to_owned());
     }
 
     /// Keeps what the bar says through the next key, as for one that came

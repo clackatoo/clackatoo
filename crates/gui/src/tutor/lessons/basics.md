@@ -6,11 +6,11 @@ How clackatoo is laid out, and how to get around it: modes, the command line, pa
 terminal
 ```
 
-The pane on the right is a terminal, running your shell in a scratch directory. Like Vim, each pane has a mode: insert mode, where keys go to the program, and normal mode, where they drive clackatoo. The bottom bar starts with the focused pane's mode: `INSERT` on lilac, or `NORMAL` on gold.
+The pane on the right is a terminal, running your shell in a scratch directory. Like Vim, the window has a mode: insert mode, where keys go to the program, and normal mode, where they drive clackatoo. The bottom bar starts with it: `INSERT` on lilac, or `NORMAL` on gold.
 
 ## Type into the terminal
 
-You stay in normal mode as you move, so the pane `:Tutor` just opened is in normal mode too. Press `i` to go to insert mode, where what you type goes to the shell.
+The mode is the window's, not each pane's, so wherever you go, you arrive in it. You typed `:Tutor` in normal mode, so the pane it just opened is in normal mode too. Press `i` to go to insert mode, where what you type goes to the shell.
 
 ```check
 focused practice
@@ -64,9 +64,21 @@ Go back to the practice terminal, the one you split.
 focused practice
 ```
 
+## One mode everywhere
+
+The mode goes with you: every pane you arrive at, in this tab or another tab or workspace, is in the window's mode. Arriving in insert mode, a terminal shows its live screen, ready to type into; an editor types at its cursor.
+
+Press `i`, then Ctrl+B and `l` to go back to the new pane: it's in insert mode too. A pane with no insert mode, such as the file explorer, shows `NORMAL`, and leaves the mode as it was for the next pane; a file you open from it opens in normal mode. If another window or an agent moves the focus, you arrive in normal mode, so nothing you type goes where you didn't choose.
+
+```check
+not focused practice
+focused terminal
+mode insert
+```
+
 ## Close the new pane
 
-Go to the new pane, and close it with `:close`, or Ctrl+B and then `x`. Closing a pane hangs up its program.
+Close the new pane, where you are, with Ctrl+B and then `x`, or `:close` from normal mode. Closing a pane hangs up its program.
 
 Close the new one, not the practice terminal: closing that ends the lesson.
 

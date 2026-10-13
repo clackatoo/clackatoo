@@ -215,6 +215,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "Windows and daemons a release or so apart work together: your laptop needn't update first",
     },
+    News {
+        id: "onemode",
+        date: "2026-10-14",
+        lesson: "basics",
+        what: "One mode for the whole window: every pane, tab and workspace you go to is in insert or normal mode as you were",
+    },
 ];
 
 impl News {

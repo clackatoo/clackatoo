@@ -49,7 +49,7 @@ impl Pane {
             (_, Some('C')) if ctrl => return self.yank_selection(),
             // Ctrl+C always reaches the program.
             (_, Some('c')) if ctrl => {
-                self.send_input(vec![0x03]);
+                self.send_keyed(vec![0x03]);
                 return false;
             }
             (Key::Named(NamedKey::Escape), _) => {
