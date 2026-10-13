@@ -6700,6 +6700,7 @@ mod tests {
                 clackatoo_protocol::EntryKind::File { executable: false }
             },
             ignored: false,
+            stamp: None,
         }
     }
 
@@ -6885,6 +6886,7 @@ mod tests {
         let trashed = FileOp::Delete {
             path: "/p/a.txt".into(),
             trash: true,
+            expect: None,
         };
         assert_eq!(file_ops(&mut desk), [(0, trashed)]);
         desk.file_op_done(0, Err(FileOpError::NoTrash("no trash there".into())));
@@ -6896,6 +6898,7 @@ mod tests {
         let deleted = FileOp::Delete {
             path: "/p/a.txt".into(),
             trash: false,
+            expect: None,
         };
         assert_eq!(file_ops(&mut desk), [(1, deleted)]);
         desk.file_op_done(1, Ok(()));
@@ -6906,6 +6909,7 @@ mod tests {
             from: "/p/a.txt".into(),
             to: "/p/src/a.txt".into(),
             overwrite: None,
+            expect: None,
         };
         assert_eq!(file_ops(&mut desk), [(2, moved)]);
         desk.file_op_done(2, Ok(()));
@@ -7092,6 +7096,186 @@ mod tests {
 
     // --- Folders edited as text --------------------------------------------
 
+    /// What a step on a file listed with no stamp expects.
+    fn file_expected() -> clackatoo_protocol::Expect {
+        clackatoo_protocol::Expect {
+            kind: clackatoo_protocol::EntryKind::File { executable: false },
+            stamp: None,
+        }
+    }
+
+    /// Gives explorer 1 the root `/p`, holding `entries`.
+    fn explore_with(desk: &mut Desk, entries: Vec<clackatoo_protocol::Entry>) {
+        use clackatoo_protocol::{FilesId, FilesUpdate};
+        desk.files_changed(
+            FilesId(1),
+            FilesUpdate::Root {
+                path: "/p".into(),
+                name: "~/p".into(),
+            },
+        );
+        let listed = FilesUpdate::Listed {
+            dir: "/p".into(),
+            entries,
+            cut_short: false,
+        };
+        desk.files_changed(FilesId(1), listed);
+        answer_all(desk);
+    }
+
+    /// A file's stamp, told apart by `len`.
+    fn stamped(name: &str, len: u64) -> clackatoo_protocol::Entry {
+        clackatoo_protocol::Entry {
+            stamp: Some(clackatoo_protocol::FileStamp {
+                device: 1,
+                inode: 2,
+                len,
+                seconds: 3,
+                nanoseconds: 4,
+            }),
+            ..entry(name, false)
+        }
+    }
+
+    #[test]
+    fn a_folder_changed_since_its_listing_was_made_is_refused_and_steps_expect_what_was_listed() {
+        use clackatoo_protocol::{EntryKind, Expect, FileOp};
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_with(&mut desk, vec![stamped("a.txt", 1), stamped("b.txt", 1)]);
+        type_keys(&mut desk, "edd");
+        command(&mut desk, "w");
+        assert_eq!(note(&desk), "make this change? (y/n)");
+        // a.txt is written meanwhile.
+        explore_with(&mut desk, vec![stamped("a.txt", 2), stamped("b.txt", 1)]);
+        type_keys(&mut desk, "y");
+        assert_eq!(file_ops(&mut desk), [], "nothing done");
+        assert_eq!(
+            note(&desk),
+            "nothing was done: a folder has changed since its listing was made. :q! and e again \
+             shows it as it is"
+        );
+        assert_eq!(listing_shown(&desk), ["b.txt"], "back to the text");
+        command(&mut desk, "q!");
+        type_keys(&mut desk, "edd");
+        command(&mut desk, "w");
+        type_keys(&mut desk, "y");
+        let expected = Expect {
+            kind: EntryKind::File { executable: false },
+            stamp: stamped("a.txt", 2).stamp,
+        };
+        let trashed = FileOp::Delete {
+            path: "/p/a.txt".into(),
+            trash: true,
+            expect: Some(expected),
+        };
+        assert_eq!(file_ops(&mut desk), [(0, trashed)], "as it is now");
+    }
+
+    #[test]
+    fn a_folder_made_again_under_its_name_is_refused_and_a_folders_steps_expect_it() {
+        use clackatoo_protocol::{EntryKind, Expect, FileOp, FileStamp};
+        let folder = |inode| clackatoo_protocol::Entry {
+            stamp: Some(FileStamp {
+                device: 1,
+                inode,
+                len: 0,
+                seconds: 0,
+                nanoseconds: 0,
+            }),
+            ..entry("src", true)
+        };
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_with(&mut desk, vec![folder(7), entry("a.txt", false)]);
+        type_keys(&mut desk, "edd");
+        command(&mut desk, "w");
+        // Deleted and made again meanwhile: another folder.
+        explore_with(&mut desk, vec![folder(8), entry("a.txt", false)]);
+        type_keys(&mut desk, "y");
+        assert_eq!(file_ops(&mut desk), [], "nothing done");
+        command(&mut desk, "q!");
+        type_keys(&mut desk, "edd");
+        command(&mut desk, "w");
+        type_keys(&mut desk, "y");
+        let trashed = FileOp::Delete {
+            path: "/p/src".into(),
+            trash: true,
+            expect: Some(Expect {
+                kind: EntryKind::Dir,
+                stamp: folder(8).stamp,
+            }),
+        };
+        assert_eq!(file_ops(&mut desk), [(0, trashed)]);
+    }
+
+    #[test]
+    fn names_no_line_can_say_are_left_out_and_left_alone() {
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        let entries = vec![
+            entry("ok.txt", false),
+            entry("two\nlines", false),
+            entry("\u{10FFFD}marked", false),
+        ];
+        explore_with(&mut desk, entries);
+        type_keys(&mut desk, "e");
+        assert_eq!(listing_shown(&desk), ["ok.txt"]);
+        assert_eq!(
+            note(&desk),
+            "2 names with line breaks or stray marks in them are left out, and left alone"
+        );
+        type_keys(&mut desk, "dd");
+        command(&mut desk, "w");
+        assert_eq!(
+            explorer_rows(&mut desk),
+            ["to do (2 names left out)", "  delete ok.txt, to the trash"]
+        );
+    }
+
+    #[test]
+    fn an_answer_to_another_operation_doesnt_count_as_a_step() {
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        // A delete from the tree, not yet answered.
+        type_keys(&mut desk, "jdy");
+        assert_eq!(file_ops(&mut desk).len(), 1);
+        type_keys(&mut desk, "eOx");
+        escape(&mut desk);
+        command(&mut desk, "w");
+        type_keys(&mut desk, "y");
+        assert_eq!(file_ops(&mut desk).len(), 1);
+        desk.file_op_done(0, Ok(()));
+        assert_eq!(note(&desk), "making change 1 of 1: Esc stops after it");
+        assert!(desk.explorer(PaneId(2)).unwrap().editing());
+        desk.file_op_done(1, Ok(()));
+        assert_eq!(note(&desk), "made the change");
+    }
+
+    #[test]
+    fn a_stop_after_setting_something_aside_says_where_it_is() {
+        use clackatoo_protocol::FileOpError;
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_with(
+            &mut desk,
+            vec![entry("a.txt", false), entry("b.txt", false)],
+        );
+        type_keys(&mut desk, "ecwb");
+        escape(&mut desk);
+        type_keys(&mut desk, "jcwa");
+        escape(&mut desk);
+        assert_eq!(listing_shown(&desk), ["b.txt", "a.txt"]);
+        command(&mut desk, "w");
+        type_keys(&mut desk, "y");
+        assert_eq!(file_ops(&mut desk).len(), 1);
+        desk.file_op_done(0, Ok(()));
+        assert_eq!(file_ops(&mut desk).len(), 1);
+        desk.file_op_done(1, Err(FileOpError::Failed("the disk is full".into())));
+        assert_eq!(
+            note(&desk),
+            "stopped after 1 of 3: the disk is full. a.txt is set aside as a.txt.moving: put it \
+             back by hand. q goes back to the tree"
+        );
+    }
+
     /// What the listing in the focused explorer's editor shows, a line
     /// each, its marks hidden.
     fn listing_shown(desk: &Desk) -> Vec<String> {
@@ -7172,6 +7356,7 @@ mod tests {
             from: "/p/a.txt".into(),
             to: "/p/b.txt".into(),
             overwrite: None,
+            expect: Some(file_expected()),
         };
         assert_eq!(file_ops(&mut desk), [(1, moved)], "one at a time");
         assert_eq!(explorer_rows(&mut desk)[1], "✓ make   new/");
@@ -7206,6 +7391,7 @@ mod tests {
         let trashed = FileOp::Delete {
             path: "/p/a.txt".into(),
             trash: true,
+            expect: Some(file_expected()),
         };
         let ops = file_ops(&mut desk);
         assert_eq!(ops[0].1, trashed);
@@ -7282,6 +7468,7 @@ mod tests {
             from: "/p/src/main.rs".into(),
             to: "/p/main.rs".into(),
             overwrite: None,
+            expect: Some(file_expected()),
         };
         assert_eq!(file_ops(&mut desk), [(0, moved)]);
         // Enter on a file's line opens it beside, as in the tree.

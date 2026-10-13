@@ -279,7 +279,7 @@ impl Desk {
             }
         }
         if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
-            explorer.answered(op, outcome);
+            explorer.answered(id, op, outcome);
             // The next of the steps a listing's edits come to.
             let asks = explorer.take_asks();
             for ask in asks {
@@ -382,6 +382,15 @@ impl Desk {
         match ask {
             Ask::Open { path, how } => self.open_from_explorer(pane, path, how),
             Ask::Op(op) => self.file_op(pane, op),
+            Ask::Step(op) => {
+                let sent = self.send_file_op(pane, op);
+                if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+                    match sent {
+                        Ok(id) => explorer.step_sent(id),
+                        Err(why) => explorer.step_unsent(why),
+                    }
+                }
+            }
             Ask::Keep { path, cut } => self.explorers.clipped = Some((path, cut)),
             Ask::Paste { dir } => {
                 let Some((from, cut)) = self.explorers.clipped.clone() else {
@@ -401,12 +410,14 @@ impl Desk {
                         from,
                         to,
                         overwrite: None,
+                        expect: None,
                     }
                 } else {
                     FileOp::Copy {
                         from,
                         to,
                         overwrite: None,
+                        expect: None,
                     }
                 };
                 self.file_op(pane, op);
@@ -470,6 +481,12 @@ impl Desk {
         };
         if let Some(size) = size {
             editor.resize(size);
+        }
+        // What the explorer says of the listing, as of names left out.
+        if let Some(message) =
+            (self.explorers.panes.get_mut(&pane)).and_then(Explorer::take_message)
+        {
+            self.message = Some(message);
         }
         if let Some(at) = at {
             let text = copy.text();
@@ -643,30 +660,37 @@ impl Desk {
         true
     }
 
-    /// Asks the daemon to do `op`, for the explorer `pane`.
+    /// Asks the daemon to do `op`, for the explorer `pane`, or says why
+    /// it can't.
     pub(super) fn file_op(&mut self, pane: PaneId, op: FileOp) {
+        if let Err(why) = self.send_file_op(pane, op)
+            && let Some(explorer) = self.explorers.panes.get_mut(&pane)
+        {
+            explorer.say(why);
+        }
+    }
+
+    /// Sends the daemon `op`, for the explorer `pane`: its number, which
+    /// the answer comes with, or why it can't be sent.
+    fn send_file_op(&mut self, pane: PaneId, op: FileOp) -> Result<u64, String> {
         if !self.connected {
-            if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
-                let why = "not connected: nothing was done".to_owned();
-                explorer.answered(op, Err(FileOpError::Failed(why)));
-            }
-            return;
+            return Err("not connected: nothing was done".to_owned());
         }
         // A lesson's explorer touches nothing outside the lesson's folder.
-        if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+        if let Some(explorer) = self.explorers.panes.get(&pane) {
             let paths: Vec<&str> = match &op {
                 FileOp::Create { path, .. } | FileOp::Delete { path, .. } => vec![path],
                 FileOp::Move { from, to, .. } | FileOp::Copy { from, to, .. } => vec![from, to],
             };
             if paths.iter().any(|path| explorer.fenced_out(path)) {
-                explorer.say(crate::explorer::FENCED.to_owned());
-                return;
+                return Err(crate::explorer::FENCED.to_owned());
             }
         }
         let id = self.explorers.next_op;
         self.explorers.next_op += 1;
         self.explorers.ops.insert(id, (pane, op.clone()));
         self.outbox.push(ClientMessage::FileOp { id, op });
+        Ok(id)
     }
 
     /// Opens the file at `path`, picked in the explorer `explorer`, as

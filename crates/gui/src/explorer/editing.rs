@@ -17,7 +17,7 @@
 //! folder to edit that isn't listed yet is expanded, or gone up to, and
 //! shown once the daemon has listed it.
 
-use clackatoo_protocol::{Attributes, Color, Entry, EntryKind, FileOpError, Style};
+use clackatoo_protocol::{Attributes, Color, Entry, EntryKind, Expect, FileOp, FileOpError, Style};
 use clackatoo_term::RowBuilder;
 
 use super::listing::{self, Folder, Original, Problem, Step};
@@ -28,6 +28,9 @@ use crate::editor::Stroke;
 /// Folders' listings being edited as text, by the explorer's pane.
 #[derive(Debug)]
 pub(super) struct Editing {
+    /// The session's number, picked at random, which its lines' marks
+    /// name, so a line from another session's listing is told apart.
+    session: u32,
     /// Each folder whose listing was made, in the order they were.
     folders: Vec<Edited>,
     /// The listing shown.
@@ -46,6 +49,9 @@ struct Edited {
     entries: Vec<Entry>,
     /// The listing's text, as it was made.
     text: String,
+    /// How many of its entries were left out, as no line can say their
+    /// names.
+    left_out: usize,
 }
 
 /// What listings' edits come to, shown in the pane in place of the tree.
@@ -59,6 +65,9 @@ struct Plan {
     top: usize,
     /// A folder edited has changed on disk since its listing was made.
     changed: bool,
+    /// The number of the file operation on its way, for the step after
+    /// those done, once it's been sent.
+    waiting: Option<u64>,
 }
 
 /// How doing a plan goes.
@@ -212,6 +221,7 @@ impl Explorer {
             return self.say(FENCED.to_owned());
         }
         let editing = self.editing.get_or_insert_with(|| Editing {
+            session: new_session(),
             folders: Vec::new(),
             shown: 0,
             originals: Vec::new(),
@@ -220,7 +230,7 @@ impl Explorer {
         let mark = |editing: &Editing| {
             let at = at?;
             let id = (editing.originals.iter()).position(|original| original.path == at)?;
-            Some(listing::mark(id))
+            Some(listing::mark(editing.session, id))
         };
         if let Some(index) = editing.folders.iter().position(|folder| folder.dir == dir) {
             editing.shown = index;
@@ -263,17 +273,32 @@ impl Explorer {
         };
         let editing = self.editing.as_mut().expect("made above");
         let mut text = String::new();
+        let mut left_out = 0;
         for entry in &listing.entries {
             if !self.view.hidden && entry.name.starts_with('.') {
                 continue;
             }
+            // A name no line can say: one with a line break, or a mark's
+            // characters, or bytes that aren't UTF-8, whose path the
+            // window doesn't have. It's left out, and so left alone.
+            let unsayable = |ch: char| ch == '\n' || ch == '\u{fffd}' || listing::in_marks(ch);
+            if entry.name.chars().any(unsayable) {
+                left_out += 1;
+                continue;
+            }
             let id = editing.originals.len();
             let path = join(&dir, &entry.name);
-            text.push_str(&listing::line_of(id, &entry.name, entry.kind));
+            text.push_str(&listing::line_of(
+                editing.session,
+                id,
+                &entry.name,
+                entry.kind,
+            ));
             text.push('\n');
             editing.originals.push(Original {
                 path,
                 kind: entry.kind,
+                stamp: entry.stamp,
             });
         }
         editing.shown = editing.folders.len();
@@ -281,7 +306,11 @@ impl Explorer {
             dir,
             entries: listing.entries.clone(),
             text: text.clone(),
+            left_out,
         });
+        if left_out > 0 {
+            self.message = Some(left_out_said(left_out));
+        }
         let at = mark(editing);
         self.asks.push(Ask::Edit {
             listing: editing.shown,
@@ -314,7 +343,7 @@ impl Explorer {
         let text = line.trim_start_matches([' ', '\t']);
         let mark = listing::mark_len(text);
         let original = (mark > 0)
-            .then(|| listing::id_of(text))
+            .then(|| listing::id_of(editing.session, text))
             .flatten()
             .and_then(|id| editing.originals.get(id));
         match original {
@@ -370,7 +399,7 @@ impl Explorer {
                 text,
             })
             .collect();
-        let steps = match listing::plan(&editing.originals, &folders) {
+        let steps = match listing::plan(editing.session, &editing.originals, &folders) {
             Ok(steps) => steps,
             Err(Problem { at, why }) => return Planned::Refused { at, why },
         };
@@ -400,8 +429,64 @@ impl Explorer {
             stage: Stage::Asking,
             top: 0,
             changed,
+            waiting: None,
         });
         Planned::Asking
+    }
+
+    /// Whether a folder being edited has changed since its listing was
+    /// made, as its listing says now: its entries, or a file's stamp. One
+    /// no longer listed may have.
+    fn listings_changed(&self) -> bool {
+        let Some(editing) = &self.editing else {
+            return false;
+        };
+        (editing.folders.iter()).any(|folder| {
+            (self.listings.get(&folder.dir)).is_none_or(|now| now.entries != folder.entries)
+        })
+    }
+
+    /// The file operation for step `index` of the plan, expecting what it
+    /// starts from to be as it was listed: what was set aside, for a step
+    /// that puts it back.
+    fn step_op(&self, index: usize) -> Option<FileOp> {
+        let editing = self.editing.as_ref()?;
+        let plan = editing.plan.as_ref()?;
+        let step = plan.steps.get(index)?;
+        let mut source = step.source();
+        if let Step::Move { from, .. } = step {
+            let aside = (plan.steps[..index].iter()).find_map(|before| match before {
+                Step::Move {
+                    from: was,
+                    to,
+                    aside: true,
+                } if to == from => Some(was.as_str()),
+                _ => None,
+            });
+            source = aside.or(source);
+        }
+        let expect: Option<Expect> = source.and_then(|source| {
+            (editing.originals.iter())
+                .find(|original| original.path == source)
+                .map(Original::expect)
+        });
+        Some(step.op(expect))
+    }
+
+    /// Step after those done has been sent, numbered `id`.
+    pub(crate) fn step_sent(&mut self, id: u64) {
+        if let Some(plan) = (self.editing.as_mut()).and_then(|editing| editing.plan.as_mut()) {
+            plan.waiting = Some(id);
+        }
+    }
+
+    /// Step after those done couldn't be sent, as `why` says.
+    pub(crate) fn step_unsent(&mut self, why: String) {
+        if let Some(plan) = (self.editing.as_mut()).and_then(|editing| editing.plan.as_mut())
+            && matches!(plan.stage, Stage::Doing { .. })
+        {
+            plan.stage = Stage::Stopped(why);
+        }
     }
 
     /// A key while what the listings' edits come to is shown: `y` does it,
@@ -410,6 +495,7 @@ impl Explorer {
     /// stopped, any other key goes back to the tree.
     pub(super) fn plan_stroke(&mut self, stroke: Stroke) {
         let height = self.list_height();
+        let changed = self.listings_changed();
         let Some(editing) = &mut self.editing else {
             return;
         };
@@ -469,10 +555,22 @@ impl Explorer {
             } | Stroke::Escape
         );
         match plan.stage {
+            // Nothing's done to a folder changed since its listing was
+            // made: what the steps say may not be what's there.
+            Stage::Asking if yes && changed => {
+                editing.plan = None;
+                self.message = Some(
+                    "nothing was done: a folder has changed since its listing was made. \
+                     :q! and e again shows it as it is"
+                        .to_owned(),
+                );
+                self.asks.push(Ask::BackToText);
+            }
             Stage::Asking if yes => {
                 plan.stage = Stage::Doing { stopping: false };
-                let op = plan.steps[0].op();
-                self.asks.push(Ask::Op(op));
+                if let Some(op) = self.step_op(0) {
+                    self.asks.push(Ask::Step(op));
+                }
             }
             Stage::Asking if no => {
                 editing.plan = None;
@@ -487,9 +585,10 @@ impl Explorer {
         }
     }
 
-    /// Takes how a step of the plan being done went, `outcome`, and asks
-    /// for the next, or stops. Returns whether one was being done.
-    pub(super) fn step_done(&mut self, outcome: &Result<(), FileOpError>) -> bool {
+    /// Takes how the file operation numbered `id` went, `outcome`, if
+    /// it's the step of the plan on its way, and asks for the next, or
+    /// stops. Returns whether it was.
+    pub(super) fn step_done(&mut self, id: u64, outcome: &Result<(), FileOpError>) -> bool {
         let why = match outcome {
             Ok(()) => None,
             Err(FileOpError::Exists { path, what, .. }) => {
@@ -506,6 +605,10 @@ impl Explorer {
         let Stage::Doing { stopping } = plan.stage else {
             return false;
         };
+        if plan.waiting != Some(id) {
+            return false;
+        }
+        plan.waiting = None;
         match why.map_or(Ok(()), Err) {
             Ok(()) => {
                 plan.done += 1;
@@ -520,9 +623,8 @@ impl Explorer {
                 }
                 if stopping {
                     plan.stage = Stage::Stopped("stopped with Esc".to_owned());
-                } else {
-                    let op = plan.steps[plan.done].op();
-                    self.asks.push(Ask::Op(op));
+                } else if let Some(op) = self.step_op(self.plan_done()) {
+                    self.asks.push(Ask::Step(op));
                 }
             }
             Err(why) => plan.stage = Stage::Stopped(why),
@@ -540,6 +642,35 @@ impl Explorer {
                 "the connection was lost: the step on its way may or may not be done".to_owned(),
             );
         }
+    }
+
+    /// How many steps of the plan are done.
+    fn plan_done(&self) -> usize {
+        (self.editing.as_ref())
+            .and_then(|editing| editing.plan.as_ref())
+            .map_or(0, |plan| plan.done)
+    }
+
+    /// What was set aside by the steps done and not yet put back, as a
+    /// stop leaves it: each thing's path, and where it is.
+    fn left_aside(&self) -> Vec<(String, String)> {
+        let Some(plan) = (self.editing.as_ref()).and_then(|editing| editing.plan.as_ref()) else {
+            return Vec::new();
+        };
+        let done = &plan.steps[..plan.done];
+        (done.iter())
+            .filter_map(|step| match step {
+                Step::Move {
+                    from,
+                    to,
+                    aside: true,
+                } => Some((from.clone(), to.clone())),
+                _ => None,
+            })
+            .filter(|(_, to)| {
+                !(done.iter()).any(|step| matches!(step, Step::Move { from, .. } if from == to))
+            })
+            .collect()
     }
 
     /// Done with the listings: back to the tree.
@@ -566,10 +697,19 @@ impl Explorer {
             Stage::Doing { stopping: true } => {
                 format!("stopping after change {} of {count}", plan.done + 1)
             }
-            Stage::Stopped(why) => format!(
-                "stopped after {} of {count}: {why}. q goes back to the tree",
-                plan.done
-            ),
+            Stage::Stopped(why) => {
+                let mut aside = String::new();
+                for (from, to) in self.left_aside() {
+                    let (from, to) = (self.relative(&from), self.relative(&to));
+                    for part in [". ", from, " is set aside as ", to, ": put it back by hand"] {
+                        aside.push_str(part);
+                    }
+                }
+                format!(
+                    "stopped after {} of {count}: {why}{aside}. q goes back to the tree",
+                    plan.done
+                )
+            }
         })
     }
 
@@ -590,7 +730,7 @@ impl Explorer {
             attributes: Attributes::BOLD,
             ..colors::line_number(true)
         };
-        let title = match &plan.stage {
+        let stage = match &plan.stage {
             Stage::Asking if plan.changed => {
                 "to do (a folder has changed since its listing was made)"
             }
@@ -598,7 +738,16 @@ impl Explorer {
             Stage::Doing { .. } => "doing",
             Stage::Stopped(_) => "stopped",
         };
-        header.push(title, &heading, true);
+        let left_out: usize = (self.editing.iter())
+            .flat_map(|editing| &editing.folders)
+            .map(|folder| folder.left_out)
+            .sum();
+        let title = match left_out {
+            0 => stage.to_owned(),
+            1 => format!("{stage} (1 name left out)"),
+            count => format!("{stage} ({count} names left out)"),
+        };
+        header.push(&title, &heading, true);
         rows.push(header.finish(false));
         let failed = matches!(plan.stage, Stage::Stopped(_));
         let doing = matches!(plan.stage, Stage::Doing { .. });
@@ -676,5 +825,36 @@ fn colour(index: u8) -> Style {
     Style {
         fg: Color::Indexed(index),
         ..Style::DEFAULT
+    }
+}
+
+/// A number for a new editing session, picked at random, so two
+/// sessions, in this window or another, all but never share one.
+fn new_session() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs()),
+    );
+    // The hash's low half: as random as the rest.
+    #[allow(clippy::cast_possible_truncation)]
+    let session = hasher.finish() as u32;
+    session
+}
+
+/// What's said of `count` entries left out of listings, as no line can
+/// say their names.
+fn left_out_said(count: usize) -> String {
+    match count {
+        1 => {
+            "a name with a line break or a stray mark in it is left out, and left alone".to_owned()
+        }
+        count => {
+            format!(
+                "{count} names with line breaks or stray marks in them are left out, and left alone"
+            )
+        }
     }
 }

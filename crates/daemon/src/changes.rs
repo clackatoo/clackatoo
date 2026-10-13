@@ -200,7 +200,17 @@ fn changed_paths(
 ) -> Result<Vec<(PathBuf, String)>, String> {
     let mut paths = BTreeSet::new();
     let changed = output_within(
-        git(top).args(["diff", "--name-only", "-z", "--no-renames", base, "--"]),
+        git(top).args([
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            // Nor any differ or converter a repository names.
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            "--",
+        ]),
         PATIENCE,
     )
     .ok_or("git couldn't say what's changed since the base")?;

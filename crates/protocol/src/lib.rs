@@ -74,8 +74,8 @@ pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
 };
 pub use files::{
-    Entry, EntryKind, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate, GitMark,
-    OpenFiles,
+    Entry, EntryKind, Expect, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
+    GitMark, OpenFiles,
 };
 pub use find::{Done, Found, FoundBuffer, FoundLine, Search};
 pub use review::{
@@ -93,7 +93,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 64;
+pub const PROTOCOL_VERSION: u32 = 65;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

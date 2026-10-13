@@ -61,6 +61,9 @@ pub(crate) enum Ask {
     Open { path: String, how: Opening },
     /// Do this to files.
     Op(FileOp),
+    /// Do this to files, as the next step of what listings' edits come
+    /// to, telling the explorer the number it's sent with.
+    Step(FileOp),
     /// Keep what's at this path to paste, to move it if `cut`, or copy it.
     Keep { path: String, cut: bool },
     /// Paste what's kept into this directory.
@@ -489,10 +492,10 @@ impl Explorer {
     /// Takes how `op`, which it asked for, went: says so, or asks whether
     /// to write over what's there, or to delete for good what can't go to
     /// the trash.
-    pub(crate) fn answered(&mut self, op: FileOp, outcome: Result<(), FileOpError>) {
+    pub(crate) fn answered(&mut self, id: u64, op: FileOp, outcome: Result<(), FileOpError>) {
         // A step of listings' edits goes on to the next, or stops: it
         // never asks to write over, or delete for good.
-        if self.step_done(&outcome) {
+        if self.step_done(id, &outcome) {
             return;
         }
         match (outcome, op) {
@@ -508,7 +511,7 @@ impl Explorer {
                 self.message = Some(format!("copied to {}", self.shown(&to)));
                 self.reveal(to);
             }
-            (Ok(()), FileOp::Delete { path, trash }) => {
+            (Ok(()), FileOp::Delete { path, trash, .. }) => {
                 let gone = if trash { "to the trash" } else { "for good" };
                 self.message = Some(format!("deleted {} {gone}", self.shown(&path)));
             }
@@ -516,15 +519,21 @@ impl Explorer {
                 // Only the file described is written over: one changed
                 // since is described again.
                 let op = match op {
-                    FileOp::Move { from, to, .. } => Some(FileOp::Move {
+                    FileOp::Move {
+                        from, to, expect, ..
+                    } => Some(FileOp::Move {
                         from,
                         to,
                         overwrite: Some(stamp),
+                        expect,
                     }),
-                    FileOp::Copy { from, to, .. } => Some(FileOp::Copy {
+                    FileOp::Copy {
+                        from, to, expect, ..
+                    } => Some(FileOp::Copy {
                         from,
                         to,
                         overwrite: Some(stamp),
+                        expect,
                     }),
                     FileOp::Create { .. } | FileOp::Delete { .. } => None,
                 };
@@ -539,13 +548,17 @@ impl Explorer {
                     None => self.message = Some(format!("{shown} is already there, {what}")),
                 }
             }
-            (Err(FileOpError::NoTrash(why)), FileOp::Delete { path, .. }) => {
+            (Err(FileOpError::NoTrash(why)), FileOp::Delete { path, expect, .. }) => {
                 let question = format!(
                     "{why}: delete {}{} for good? (y/n)",
                     self.shown(&path),
                     self.what_else(&path)
                 );
-                let op = FileOp::Delete { path, trash: false };
+                let op = FileOp::Delete {
+                    path,
+                    trash: false,
+                    expect,
+                };
                 self.prompt = Some(Prompt::Confirm { question, op });
             }
             (Err(err), _) => self.message = Some(err.to_string()),
@@ -932,6 +945,7 @@ impl Explorer {
                         from,
                         to,
                         overwrite: None,
+                        expect: None,
                     };
                     self.asks.push(Ask::Op(op));
                 }
@@ -1155,7 +1169,11 @@ impl Explorer {
             let path = line.path();
             let what = self.what_else(&path);
             let question = format!("delete {}{what}, to the trash? (y/n)", self.shown(&path));
-            let op = FileOp::Delete { path, trash: true };
+            let op = FileOp::Delete {
+                path,
+                trash: true,
+                expect: None,
+            };
             self.prompt = Some(Prompt::Confirm { question, op });
         }
     }

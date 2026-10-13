@@ -2154,6 +2154,7 @@ fn renders_an_explorer_pane() {
         name: name.into(),
         kind,
         ignored,
+        stamp: None,
     };
     let file = EntryKind::File { executable: false };
     explorer.update(FilesUpdate::Root {

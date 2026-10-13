@@ -31,6 +31,7 @@ fn moving(dir: &Path, from: &str, to: &str, overwrite: bool) -> FileOp {
         from: path(dir, from),
         to: path(dir, to),
         overwrite: stamp(&dir.join(to)).filter(|_| overwrite),
+        expect: None,
     }
 }
 
@@ -39,6 +40,7 @@ fn copying(dir: &Path, from: &str, to: &str, overwrite: bool) -> FileOp {
         from: path(dir, from),
         to: path(dir, to),
         overwrite: stamp(&dir.join(to)).filter(|_| overwrite),
+        expect: None,
     }
 }
 
@@ -117,6 +119,7 @@ fn files_are_made_moved_copied_and_deleted_and_nothing_is_written_over() {
         op(FileOp::Delete {
             path: path(dir, name),
             trash: false,
+            expect: None,
         })
     };
     delete("g").unwrap();
@@ -435,6 +438,7 @@ fn a_file_is_written_over_only_as_it_was_when_it_was_described() {
         from: path(dir, "a.txt"),
         to: path(dir, "b.txt"),
         overwrite: Some(stamp),
+        expect: None,
     };
     op(again).unwrap();
     assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "a");
@@ -501,6 +505,7 @@ fn a_move_to_another_file_system_really_goes_there() {
         from: from.display().to_string(),
         to: to.display().to_string(),
         overwrite: None,
+        expect: None,
     };
     op(asked).unwrap();
     assert!(!from.exists());
@@ -519,4 +524,155 @@ fn a_file_just_written_moves_between_file_systems_whole() {
         fs::read_to_string(dir.join("moved.txt")).unwrap(),
         "just now"
     );
+}
+
+#[test]
+fn what_isnt_as_it_was_listed_is_left_alone() {
+    let (_dir, dir) = temp();
+    fs::write(dir.join("a.txt"), "a").unwrap();
+    let file = EntryKind::File { executable: false };
+    let listed = Expect {
+        kind: file,
+        stamp: stamp(&dir.join("a.txt")),
+    };
+    let moving = |expect: Expect| FileOp::Move {
+        from: path(&dir, "a.txt"),
+        to: path(&dir, "b.txt"),
+        overwrite: None,
+        expect: Some(expect),
+    };
+    // Written since it was listed: not moved.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    fs::write(dir.join("a.txt"), "longer").unwrap();
+    let Err(FileOpError::Failed(why)) = op(moving(listed)) else {
+        panic!("moved");
+    };
+    assert!(
+        why.ends_with("a.txt has changed since it was listed"),
+        "{why}"
+    );
+    assert_eq!(names(&dir), ["a.txt"]);
+    // As it is now, it is.
+    let now = Expect {
+        kind: file,
+        stamp: stamp(&dir.join("a.txt")),
+    };
+    op(moving(now)).unwrap();
+    assert_eq!(names(&dir), ["b.txt"]);
+    // A folder where a file was listed: not deleted.
+    fs::remove_file(dir.join("b.txt")).unwrap();
+    fs::create_dir(dir.join("b.txt")).unwrap();
+    let delete = FileOp::Delete {
+        path: path(&dir, "b.txt"),
+        trash: false,
+        expect: Some(now),
+    };
+    let Err(FileOpError::Failed(why)) = op(delete) else {
+        panic!("deleted");
+    };
+    assert!(
+        why.ends_with("b.txt is a folder now, not a file: it's changed since it was listed"),
+        "{why}"
+    );
+    assert_eq!(names(&dir), ["b.txt"]);
+}
+
+#[test]
+fn what_was_listed_is_checked_last_just_before_its_done() {
+    let (_dir, dir) = temp();
+    fs::write(dir.join("a.txt"), "a").unwrap();
+    fs::write(dir.join("b.txt"), "b").unwrap();
+    // Expecting a folder where a file is: refused, but only once all else
+    // has been looked at, so the target being taken is said first.
+    let wrong = Expect {
+        kind: EntryKind::Dir,
+        stamp: None,
+    };
+    let moved = op(FileOp::Move {
+        from: path(&dir, "a.txt"),
+        to: path(&dir, "b.txt"),
+        overwrite: None,
+        expect: Some(wrong),
+    });
+    assert!(
+        matches!(moved, Err(FileOpError::Exists { .. })),
+        "{moved:?}"
+    );
+    let copied = op(FileOp::Copy {
+        from: path(&dir, "a.txt"),
+        to: path(&dir, "b.txt"),
+        overwrite: None,
+        expect: Some(wrong),
+    });
+    assert!(
+        matches!(copied, Err(FileOpError::Exists { .. })),
+        "{copied:?}"
+    );
+    // A delete looks for mounts first.
+    let file = Expect {
+        kind: EntryKind::File { executable: false },
+        stamp: None,
+    };
+    let deleted = op(FileOp::Delete {
+        path: "/proc".into(),
+        trash: false,
+        expect: Some(file),
+    });
+    let Err(FileOpError::Failed(why)) = deleted else {
+        panic!("{deleted:?}");
+    };
+    assert!(
+        why.contains("another file system is mounted at /proc"),
+        "{why}"
+    );
+    // With nothing else in the way, the expectation refuses it.
+    let moved = op(FileOp::Move {
+        from: path(&dir, "a.txt"),
+        to: path(&dir, "c.txt"),
+        overwrite: None,
+        expect: Some(wrong),
+    });
+    assert!(matches!(moved, Err(FileOpError::Failed(_))), "{moved:?}");
+    assert_eq!(names(&dir), ["a.txt", "b.txt"]);
+}
+
+#[test]
+fn a_folder_deleted_and_made_again_under_its_name_isnt_the_one_listed() {
+    let (_dir, dir) = temp();
+    fs::create_dir(dir.join("d")).unwrap();
+    fs::write(dir.join("d/keep.txt"), "").unwrap();
+    let listed = Expect {
+        kind: EntryKind::Dir,
+        stamp: Some(folder_stamp(&fs::symlink_metadata(dir.join("d")).unwrap())),
+    };
+    // What's in it changing doesn't make it another.
+    fs::write(dir.join("d/new.txt"), "").unwrap();
+    let moving = |to: &str| FileOp::Move {
+        from: path(&dir, "d"),
+        to: path(&dir, to),
+        overwrite: None,
+        expect: Some(listed),
+    };
+    op(moving("e")).unwrap();
+    // Made again under the name: another folder.
+    let listed = Expect {
+        kind: EntryKind::Dir,
+        stamp: Some(folder_stamp(&fs::symlink_metadata(dir.join("e")).unwrap())),
+    };
+    // The old one kept elsewhere, so the new one can't have its inode.
+    fs::rename(dir.join("e"), dir.join("old")).unwrap();
+    fs::create_dir(dir.join("e")).unwrap();
+    let deleted = op(FileOp::Delete {
+        path: path(&dir, "e"),
+        trash: false,
+        expect: Some(listed),
+    });
+    let Err(FileOpError::Failed(why)) = deleted else {
+        panic!("{deleted:?}");
+    };
+    assert!(
+        why.ends_with("e was deleted and made again since it was listed"),
+        "{why}"
+    );
+    assert_eq!(names(&dir), ["e", "old"]);
 }

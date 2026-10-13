@@ -1052,6 +1052,7 @@ fn a_lessons_explorer_stays_in_the_lessons_folder() {
         FileOp::Delete {
             path: "/home/me/notes.txt".into(),
             trash: true,
+            expect: None,
         },
     );
     assert!(desk.take_outbox().is_empty());
@@ -1065,6 +1066,7 @@ fn a_lessons_explorer_stays_in_the_lessons_folder() {
         FileOp::Delete {
             path: format!("{dir}/plans.txt"),
             trash: true,
+            expect: None,
         },
     );
     assert!(matches!(

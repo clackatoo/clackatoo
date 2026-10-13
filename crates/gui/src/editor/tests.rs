@@ -2593,7 +2593,7 @@ fn ctrl_w_and_backspace_at_a_lines_start_join_it_to_the_line_before() {
 #[test]
 fn hidden_starts_are_never_drawn_nor_gone_to_and_changing_a_line_keeps_them() {
     use crate::explorer::listing::{mark, mark_len};
-    let (one, two) = (mark(0), mark(1));
+    let (one, two) = (mark(1, 0), mark(1, 1));
     let mut setup = Setup::new(&format!("{one}alpha\n{two}beta/\n"));
     setup.set(|options| {
         options.number = false;

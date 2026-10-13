@@ -458,6 +458,10 @@ fn base_text(tracked: &Tracked) -> Option<&str> {
 pub(crate) fn git(dir: &Path) -> Command {
     let mut command = Command::new("git");
     command
+        // A repository's own config can name a command for git to run as
+        // it looks at the work tree: `core.fsmonitor`. Opening a folder
+        // cloned from anyone must never run it.
+        .args(["-c", "core.fsmonitor=false"])
         .current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
         // Paths are paths, never patterns.
@@ -858,6 +862,42 @@ fn apply(top: &Path, patch: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repositorys_own_fsmonitor_command_is_never_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path();
+        let run = |args: &[&str]| {
+            let done = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(top)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(done.status.success(), "{args:?}: {done:?}");
+        };
+        run(&["init", "-q"]);
+        std::fs::write(top.join("a.txt"), "a\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "a"]);
+        // As a cloned repository could have it.
+        let outside = tempfile::tempdir().unwrap();
+        let ran = outside.path().join("ran");
+        let hook = outside.path().join("hook.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        run(&["config", "core.fsmonitor", &hook.display().to_string()]);
+        std::fs::write(top.join("a.txt"), "changed\n").unwrap();
+        let marks = status(top).expect("git says");
+        assert_eq!(marks, [("a.txt".to_owned(), GitMark::Modified)]);
+        assert!(!ran.exists(), "the repository's command ran");
+        // Nor as the index is listed and read, as signs and reviews do.
+        assert!(list_index(top, &["a.txt"]).contains_key("a.txt"));
+        assert!(!ran.exists(), "the repository's command ran");
+    }
 
     fn patch_for(base: &str, text: &str, index: usize) -> String {
         let differences = diff(base, text);

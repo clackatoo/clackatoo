@@ -13,6 +13,7 @@ fn file(name: &str) -> Entry {
         name: name.into(),
         kind: EntryKind::File { executable: false },
         ignored: false,
+        stamp: None,
     }
 }
 
@@ -21,6 +22,7 @@ fn dir(name: &str) -> Entry {
         name: name.into(),
         kind: EntryKind::Dir,
         ignored: false,
+        stamp: None,
     }
 }
 
@@ -334,6 +336,7 @@ fn files_are_opened_and_operated_on_as_asked() {
         from: "/p/a.txt".into(),
         to: "/p/a.md".into(),
         overwrite: None,
+        expect: None,
     };
     assert_eq!(explorer.take_asks(), [Ask::Op(moved.clone())]);
     // Something there is written over only if the answer is yes.
@@ -349,7 +352,7 @@ fn files_are_opened_and_operated_on_as_asked() {
         what: "a file of 3 KB".into(),
         stamp,
     };
-    explorer.answered(moved, Err(there));
+    explorer.answered(0, moved, Err(there));
     assert_eq!(
         explorer.label(),
         "~/p/a.md is already there, a file of 3 KB: write over it, losing it? (y/n)"
@@ -361,6 +364,7 @@ fn files_are_opened_and_operated_on_as_asked() {
             from: "/p/a.txt".into(),
             to: "/p/a.md".into(),
             overwrite: Some(stamp),
+            expect: None,
         })]
     );
     // d asks first, and deletes for good only if asked again.
@@ -371,9 +375,14 @@ fn files_are_opened_and_operated_on_as_asked() {
     let trashed = FileOp::Delete {
         path: "/p/a.txt".into(),
         trash: true,
+        expect: None,
     };
     assert_eq!(explorer.take_asks(), [Ask::Op(trashed.clone())]);
-    explorer.answered(trashed, Err(FileOpError::NoTrash("no trash there".into())));
+    explorer.answered(
+        1,
+        trashed,
+        Err(FileOpError::NoTrash("no trash there".into())),
+    );
     assert_eq!(
         explorer.label(),
         "no trash there: delete ~/p/a.txt for good? (y/n)"
@@ -383,7 +392,8 @@ fn files_are_opened_and_operated_on_as_asked() {
         explorer.take_asks(),
         [Ask::Op(FileOp::Delete {
             path: "/p/a.txt".into(),
-            trash: false
+            trash: false,
+            expect: None
         })]
     );
     // x and y keep what's at the cursor; p puts it where the cursor is.
@@ -604,6 +614,7 @@ fn deleting_a_folder_for_good_says_it_deletes_everything_in_it() {
         name: "linked".into(),
         kind: EntryKind::Link { dir: true },
         ignored: false,
+        stamp: None,
     };
     rooted(&mut explorer, vec![dir("src"), link]);
     keys(&mut explorer, "d");
@@ -616,6 +627,7 @@ fn deleting_a_folder_for_good_says_it_deletes_everything_in_it() {
         panic!("no delete asked");
     };
     explorer.answered(
+        0,
         trashed.clone(),
         Err(FileOpError::NoTrash("no trash there".into())),
     );

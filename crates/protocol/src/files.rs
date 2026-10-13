@@ -123,6 +123,11 @@ pub struct Entry {
     pub kind: EntryKind,
     /// `.gitignore`, or git's other excludes, leave it out.
     pub ignored: bool,
+    /// What tells it, as it was when listed, from itself changed since,
+    /// for a file operation to expect it (see [`Expect`]): a file's whole
+    /// stamp, and a folder's device and inode alone, its size and time
+    /// being 0, as they change with what's in it. None for the rest.
+    pub stamp: Option<FileStamp>,
 }
 
 /// What a thing in a directory is.
@@ -194,6 +199,8 @@ pub enum FileOp {
         /// one [`FileOpError::Exists`] described. One changed since is
         /// described again instead.
         overwrite: Option<FileStamp>,
+        /// What's to be at `from`, if the asker knows: refused if it isn't.
+        expect: Option<Expect>,
     },
     /// Copies what's at `from` to `to`, a directory with everything in it.
     /// Refused as a move is. Pipes, sockets and devices aren't copied: a
@@ -205,6 +212,8 @@ pub enum FileOp {
         to: String,
         /// Replace the file at `to`, as for a move.
         overwrite: Option<FileStamp>,
+        /// What's to be at `from`, as for a move.
+        expect: Option<Expect>,
     },
     /// Deletes what's at `path`, a directory with everything in it: to the
     /// trash, as the freedesktop.org spec says, if `trash`, or else for
@@ -217,7 +226,20 @@ pub enum FileOp {
         /// [`FileOpError::NoTrash`] if there's no trash on its file
         /// system.
         trash: bool,
+        /// What's to be at `path`, as for a move.
+        expect: Option<Expect>,
     },
+}
+
+/// What a file operation expects to find where it starts, as its asker
+/// last saw it listed: it's refused if something else is there now, as a
+/// folder where a file was, or the file changed since.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Expect {
+    /// What it was.
+    pub kind: EntryKind,
+    /// Which file it was, as it was, if it was a file and that was known.
+    pub stamp: Option<FileStamp>,
 }
 
 /// What tells one file, as it is, from another, or from itself changed,

@@ -1211,6 +1211,7 @@ mod tests {
                 name: name.to_owned(),
                 kind: EntryKind::File { executable: false },
                 ignored,
+                stamp: None,
             })
             .collect();
         Dir {

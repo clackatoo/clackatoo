@@ -229,11 +229,19 @@ pub(crate) fn list(dir: &Path) -> Result<Listing, String> {
         } else {
             EntryKind::Other
         };
+        // A file's, from the `stat` already made for it; a folder's, by
+        // where it is on disk.
+        let stamp = match kind {
+            EntryKind::File { .. } => entry.metadata().ok().map(|meta| ops::file_stamp(&meta)),
+            EntryKind::Dir => entry.metadata().ok().map(|meta| ops::folder_stamp(&meta)),
+            _ => None,
+        };
         let ignored = rules.ignored(&entry.path(), &name, kind.expands());
         entries.push(Entry {
             name,
             kind,
             ignored,
+            stamp,
         });
     }
     entries.sort_by_cached_key(|entry| (!entry.kind.expands(), name_order(&entry.name)));
@@ -269,8 +277,12 @@ impl Ignores {
                 file.is_file().then(|| one_file(ancestor, &file))
             })
             .collect();
-        if let Some(exclude) = exclude_file(top).filter(|exclude| exclude.is_file()) {
-            files.push(one_file(top, &exclude));
+        // Read as the files naming git directories are: a regular file,
+        // never followed nor waited on, and not too big.
+        let exclude = exclude_file(top);
+        let read = (exclude.as_deref()).and_then(|exclude| read_regular(exclude, MOST_EXCLUDE));
+        if let (Some(exclude), Some(text)) = (exclude, read) {
+            files.push(lines_of(top, &exclude, &text));
         }
         files.push(global().clone());
         Self { files }
@@ -295,22 +307,68 @@ impl Ignores {
 /// and a submodule's, is a file naming its git directory, and a linked
 /// worktree's git directory has a `commondir` naming the directory it
 /// shares with the main work tree, which holds `info`, as git reads it.
+///
+/// Only regular files are read for the names, as git writes them, and
+/// only their first few KiB: a link, a pipe or a huge file put there by a
+/// folder from anyone is passed over, never followed, waited on or read
+/// whole.
 fn exclude_file(top: &Path) -> Option<PathBuf> {
     let dot_git = top.join(".git");
-    let git_dir = if dot_git.is_dir() {
+    let git_dir = if fs::symlink_metadata(&dot_git).ok()?.is_dir() {
         dot_git
     } else {
-        let named = fs::read_to_string(&dot_git).ok()?;
+        let named = read_pointer(&dot_git)?;
         let named = named
             .lines()
             .find_map(|line| line.strip_prefix("gitdir:"))?;
         top.join(named.trim())
     };
-    let common = match fs::read_to_string(git_dir.join("commondir")) {
-        Ok(common) => git_dir.join(common.trim()),
-        Err(_) => git_dir,
+    let common = match read_pointer(&git_dir.join("commondir")) {
+        Some(common) => git_dir.join(common.trim()),
+        None => git_dir,
     };
     Some(common.join("info/exclude"))
+}
+
+/// The most of a file naming a git directory that's read.
+const MOST_POINTER: u64 = 4096;
+
+/// The most of a repository's own excludes that's read: far more than
+/// anyone writes.
+const MOST_EXCLUDE: u64 = 64 << 10;
+
+/// The text of the file at `path`, if it's a regular file, not a link,
+/// of no more than [`MOST_POINTER`] bytes.
+fn read_pointer(path: &Path) -> Option<String> {
+    read_regular(path, MOST_POINTER)
+}
+
+/// The text of the file at `path`, if it's a regular file, not a link,
+/// of no more than `most` bytes.
+fn read_regular(path: &Path, most: u64) -> Option<String> {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read;
+    // Not followed if it's a link, nor waited on if it's a pipe.
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = fs::File::from(rustix::fs::open(path, flags, Mode::empty()).ok()?);
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > most {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(most).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// The ignore file `file`, read as `text`, whose patterns are from `dir`.
+fn lines_of(dir: &Path, file: &Path, text: &str) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(dir);
+    for line in text.lines() {
+        if let Err(err) = builder.add_line(Some(file.to_owned()), line) {
+            log::debug!("{} has a pattern that can't be read: {err}", file.display());
+        }
+    }
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
 /// The ignore file `file`, whose patterns are from `dir`.
@@ -393,6 +451,18 @@ mod tests {
             ]
         );
         assert_eq!(listing.entries[1].kind, EntryKind::Link { dir: true });
+        // A file's stamp, for a file operation to expect it as listed.
+        let stamp = |name: &str| {
+            (listing.entries.iter())
+                .find(|entry| entry.name == name)
+                .unwrap()
+                .stamp
+        };
+        let meta = fs::symlink_metadata(root.join("Cargo.toml")).unwrap();
+        assert_eq!(stamp("Cargo.toml"), Some(ops::file_stamp(&meta)));
+        let meta = fs::symlink_metadata(root.join("src")).unwrap();
+        assert_eq!(stamp("src"), Some(ops::folder_stamp(&meta)), "where it is");
+        assert_eq!(stamp("link"), None, "a link has none");
         let src = list(&root.join("src")).unwrap();
         let gen_rs = src.entries.iter().find(|entry| entry.name == "gen.rs");
         assert!(gen_rs.unwrap().ignored, "by the directory's own file");
@@ -438,6 +508,75 @@ mod tests {
         fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
         fs::write(sub.join("x.tmp"), "").unwrap();
         assert!(ignored(&sub, "x.tmp"));
+    }
+
+    #[test]
+    fn a_dot_git_thats_a_link_a_pipe_or_huge_is_never_followed_waited_on_or_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        fs::create_dir_all(main.join(".git/info")).unwrap();
+        fs::write(main.join(".git/info/exclude"), "secret.txt\n").unwrap();
+        let pointer = dir.path().join("pointer");
+        fs::write(
+            &pointer,
+            format!("gitdir: {}\n", main.join(".git").display()),
+        )
+        .unwrap();
+        let tree = dir.path().join("tree");
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("secret.txt"), "").unwrap();
+        // A link to a file naming the git directory: not followed.
+        std::os::unix::fs::symlink(&pointer, tree.join(".git")).unwrap();
+        assert!(!ignored(&tree, "secret.txt"));
+        // A huge one: not read.
+        fs::remove_file(tree.join(".git")).unwrap();
+        let huge = format!(
+            "{}gitdir: {}\n",
+            " ".repeat(8192),
+            main.join(".git").display()
+        );
+        fs::write(tree.join(".git"), huge).unwrap();
+        assert!(!ignored(&tree, "secret.txt"));
+        // A pipe: not waited on.
+        fs::remove_file(tree.join(".git")).unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            tree.join(".git"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from(0o600),
+            0,
+        )
+        .unwrap();
+        let (send, listed) = std::sync::mpsc::channel();
+        let listing = tree.clone();
+        std::thread::spawn(move || send.send(list(&listing).is_ok()).unwrap());
+        let listed = listed.recv_timeout(std::time::Duration::from_secs(10));
+        assert_eq!(listed, Ok(true), "listed without waiting on the pipe");
+        // A plain file, as git writes it, is read.
+        fs::remove_file(tree.join(".git")).unwrap();
+        fs::copy(&pointer, tree.join(".git")).unwrap();
+        assert!(ignored(&tree, "secret.txt"));
+    }
+
+    #[test]
+    fn a_repositorys_own_excludes_are_read_only_from_a_regular_file_not_too_big() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("repo");
+        fs::create_dir_all(top.join(".git/info")).unwrap();
+        fs::write(top.join("secret.txt"), "").unwrap();
+        let patterns = dir.path().join("patterns");
+        fs::write(&patterns, "secret.txt\n").unwrap();
+        let exclude = top.join(".git/info/exclude");
+        // A link to patterns: not followed.
+        std::os::unix::fs::symlink(&patterns, &exclude).unwrap();
+        assert!(!ignored(&top, "secret.txt"));
+        // Too big: not read.
+        fs::remove_file(&exclude).unwrap();
+        fs::write(&exclude, format!("{}\nsecret.txt\n", "#".repeat(70_000))).unwrap();
+        assert!(!ignored(&top, "secret.txt"));
+        // As git writes it: read.
+        fs::write(&exclude, "secret.txt\n").unwrap();
+        assert!(ignored(&top, "secret.txt"));
     }
 
     #[test]

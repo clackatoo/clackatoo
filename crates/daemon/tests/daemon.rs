@@ -7085,6 +7085,7 @@ fn moving_a_file_or_its_directory_takes_buffers_open_on_it_along() {
         from: path(from),
         to: path(to),
         overwrite: None,
+        expect: None,
     };
     // Nothing is written over unless asked to.
     assert_eq!(
@@ -7150,6 +7151,7 @@ fn deleting_moves_to_the_trash_and_files_are_made_and_copied() {
         from: path("b"),
         to: path("b2"),
         overwrite: None,
+        expect: None,
     };
     assert_eq!(file_op(&mut client, 2, copy), Ok(()));
     let copied = std::fs::read_to_string(root.join("b2/c.txt")).unwrap();
@@ -7157,6 +7159,7 @@ fn deleting_moves_to_the_trash_and_files_are_made_and_copied() {
     let trash = FileOp::Delete {
         path: path("a.txt"),
         trash: true,
+        expect: None,
     };
     assert_eq!(file_op(&mut client, 3, trash), Ok(()));
     assert!(!root.join("a.txt").exists());
@@ -7171,6 +7174,7 @@ fn deleting_moves_to_the_trash_and_files_are_made_and_copied() {
     let delete = FileOp::Delete {
         path: path("b"),
         trash: false,
+        expect: None,
     };
     assert_eq!(file_op(&mut client, 4, delete), Ok(()));
     assert!(!root.join("b").exists());
@@ -7190,6 +7194,7 @@ fn a_file_moved_over_one_open_takes_its_panes_and_one_with_changes_is_never_writ
         from: path("a.txt"),
         to: path("b/c.txt"),
         overwrite: Some(stamp_of(&root.join("b/c.txt"))),
+        expect: None,
     };
     // With changes not written, it's refused, whatever's asked.
     send_change(&mut client, over, 0, insert(2, 0, "x", 0));
@@ -7244,6 +7249,7 @@ fn a_file_copied_over_one_open_is_read_again() {
         from: path("a.txt"),
         to: path("b/c.txt"),
         overwrite: Some(stamp_of(&root.join("b/c.txt"))),
+        expect: None,
     };
     assert_eq!(file_op(&mut client, 1, copy), Ok(()));
     assert_eq!(attach_buffer(&mut client, open).text, "a\n");
@@ -7275,6 +7281,7 @@ fn a_buffer_moved_to_another_file_system_saves_there() {
         from: root.join("a.txt").display().to_string(),
         to: to.display().to_string(),
         overwrite: None,
+        expect: None,
     };
     assert_eq!(file_op(&mut client, 1, op), Ok(()));
     send_change(&mut client, buffer, 0, insert(2, 0, "x", 0));

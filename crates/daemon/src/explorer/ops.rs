@@ -34,7 +34,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clackatoo_protocol::{FileOp, FileOpError, FileStamp};
+use clackatoo_protocol::{EntryKind, Expect, FileOp, FileOpError, FileStamp};
 use rustix::fs::{CWD, RenameFlags};
 use rustix::io::Errno;
 
@@ -69,32 +69,112 @@ pub(super) fn run(
             from,
             to,
             overwrite,
+            expect,
         } => absolute(&from).and_then(|from| {
             let to = absolute(&to)?;
-            move_to(&from, &to, overwrite, open, &mut changed)
+            move_to(&from, &to, overwrite, expect.as_ref(), open, &mut changed)
         }),
         FileOp::Copy {
             from,
             to,
             overwrite,
+            expect,
         } => absolute(&from).and_then(|from| {
             let to = absolute(&to)?;
-            copy(&from, &to, overwrite, open, &mut changed)
+            copy(&from, &to, overwrite, expect.as_ref(), open, &mut changed)
         }),
-        FileOp::Delete { path, trash: true } => absolute(&path).and_then(|path| {
+        FileOp::Delete {
+            path,
+            trash: true,
+            expect,
+        } => absolute(&path).and_then(|path| {
             exists(&path)?;
             not_a_mount(&path)?;
             no_mounts_in(&path)?;
+            // Last, just before it's done, as what's there may have
+            // changed while the rest was looked at.
+            as_expected(&path, expect.as_ref())?;
             trash::put(&path, trash)
         }),
-        FileOp::Delete { path, trash: false } => absolute(&path).and_then(|path| {
+        FileOp::Delete {
+            path,
+            trash: false,
+            expect,
+        } => absolute(&path).and_then(|path| {
             exists(&path)?;
             not_a_mount(&path)?;
             no_mounts_in(&path)?;
+            as_expected(&path, expect.as_ref())?;
             remove_tree(&path)
         }),
     };
     (changed, outcome)
+}
+
+/// Fails unless what's at `path` is what `expect` says, if it says: the
+/// same kind of thing, and if it says which file, that file, unchanged.
+fn as_expected(path: &Path, expect: Option<&Expect>) -> Result<(), FileOpError> {
+    let Some(expect) = expect else {
+        return Ok(());
+    };
+    let meta = fs::symlink_metadata(path).map_err(|err| failed(path, &err))?;
+    let kind = meta.file_type();
+    let (now, was) = (what_kind(&meta), what(expect.kind));
+    let same = match expect.kind {
+        EntryKind::Dir => kind.is_dir(),
+        EntryKind::File { .. } => kind.is_file(),
+        EntryKind::Link { .. } => kind.is_symlink(),
+        EntryKind::Other => !kind.is_dir() && !kind.is_file() && !kind.is_symlink(),
+    };
+    if !same {
+        return Err(FileOpError::Failed(format!(
+            "{} is {now} now, not {was}: it's changed since it was listed",
+            path.display()
+        )));
+    }
+    // A folder is told by where it is on disk; a file by that, and its
+    // size and time too.
+    let changed = match (expect.stamp, kind.is_dir()) {
+        (Some(stamp), true) => stamp != folder_stamp(&meta),
+        (Some(stamp), false) => stamp != file_stamp(&meta),
+        (None, _) => false,
+    };
+    if changed {
+        let what = if kind.is_dir() {
+            "was deleted and made again"
+        } else {
+            "has changed"
+        };
+        return Err(FileOpError::Failed(format!(
+            "{} {what} since it was listed",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// What `meta` says is there, as people say it.
+fn what_kind(meta: &fs::Metadata) -> &'static str {
+    let kind = meta.file_type();
+    if kind.is_symlink() {
+        "a link"
+    } else if kind.is_dir() {
+        "a folder"
+    } else if kind.is_file() {
+        "a file"
+    } else {
+        "a pipe, socket or device"
+    }
+}
+
+/// What `kind` is, as people say it.
+fn what(kind: EntryKind) -> &'static str {
+    match kind {
+        EntryKind::Link { .. } => "a link",
+        EntryKind::Dir => "a folder",
+        EntryKind::File { .. } => "a file",
+        EntryKind::Other => "a pipe, socket or device",
+    }
 }
 
 /// `path`, if it's absolute, as every path in a file operation must be.
@@ -132,6 +212,7 @@ fn move_to(
     from: &Path,
     to: &Path,
     overwrite: Option<FileStamp>,
+    expect: Option<&Expect>,
     open: &[Open],
     changed: &mut Changed,
 ) -> Result<(), FileOpError> {
@@ -143,6 +224,8 @@ fn move_to(
     apart(from, to)?;
     let replacing = check_target(to, overwrite, open)?;
     make_parent(to)?;
+    // Last, just before it's done.
+    as_expected(from, expect)?;
     let renamed = if replacing {
         fs::rename(from, to).map_err(|err| Errno::from_io_error(&err))
     } else {
@@ -273,6 +356,7 @@ fn copy(
     from: &Path,
     to: &Path,
     overwrite: Option<FileStamp>,
+    expect: Option<&Expect>,
     open: &[Open],
     changed: &mut Changed,
 ) -> Result<(), FileOpError> {
@@ -286,6 +370,8 @@ fn copy(
     apart(from, to)?;
     let replacing = check_target(to, overwrite, open)?;
     no_specials_in(from)?;
+    // Last, just before it's done.
+    as_expected(from, expect)?;
     copy_in_place(from, to, replacing)?;
     if replacing {
         changed.replaced = Some(real(to));
@@ -641,8 +727,21 @@ fn items(count: usize) -> String {
     }
 }
 
+/// What tells the folder `meta` is of from any other, even one made again
+/// under its name: only where it is on disk, as its size and time change
+/// with what's in it.
+pub(crate) fn folder_stamp(meta: &fs::Metadata) -> FileStamp {
+    FileStamp {
+        device: meta.dev(),
+        inode: meta.ino(),
+        len: 0,
+        seconds: 0,
+        nanoseconds: 0,
+    }
+}
+
 /// What tells the file `meta` is of, as it is, from any other.
-fn file_stamp(meta: &fs::Metadata) -> FileStamp {
+pub(crate) fn file_stamp(meta: &fs::Metadata) -> FileStamp {
     FileStamp {
         device: meta.dev(),
         inode: meta.ino(),

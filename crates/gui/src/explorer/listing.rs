@@ -8,7 +8,9 @@
 //! a move. The mark is made of characters from Unicode's last private-use
 //! plane, which no file name has and no key types: `:s` on names, digits
 //! or spaces never touches one, and a mark damaged is always refused,
-//! never read as another.
+//! never read as another. It names the editing session too, a number
+//! picked at random, so a line pasted from another session's listing is
+//! refused rather than read as one of this one's entries.
 //!
 //! What the lines mean, against the entries the listings were made of:
 //!
@@ -32,7 +34,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
-use clackatoo_protocol::{Entry, EntryKind, FileOp};
+use clackatoo_protocol::{Entry, EntryKind, Expect, FileOp, FileStamp};
 
 #[cfg(test)]
 mod tests;
@@ -40,8 +42,15 @@ mod tests;
 /// The first character of a mark...
 const MARK_START: char = '\u{10FFFD}';
 
-/// ...and its last. Between them, the entry's number, in hexadecimal.
+/// ...the one between the session's number and the entry's, both in
+/// hexadecimal...
+const MARK_SPLIT: char = '\u{10FFFB}';
+
+/// ...and its last.
 const MARK_END: char = '\u{10FFFC}';
+
+/// The most digits a mark's session number has.
+const SESSION_DIGITS: usize = 8;
 
 /// The character for hexadecimal digit 0, the next fifteen being 1 to F.
 const DIGIT_ZERO: u32 = 0x10_0000;
@@ -55,6 +64,18 @@ pub(crate) struct Original {
     /// Its path.
     pub(crate) path: String,
     pub(crate) kind: EntryKind,
+    /// Which file it was, as it was, if it's a file.
+    pub(crate) stamp: Option<FileStamp>,
+}
+
+impl Original {
+    /// What a file operation on it expects to find.
+    pub(crate) fn expect(&self) -> Expect {
+        Expect {
+            kind: self.kind,
+            stamp: self.stamp,
+        }
+    }
 }
 
 /// One folder's listing, as edited.
@@ -95,8 +116,9 @@ pub(crate) enum Step {
 }
 
 impl Step {
-    /// The file operation that does it, which never writes over anything.
-    pub(crate) fn op(&self) -> FileOp {
+    /// The file operation that does it, which never writes over anything,
+    /// and is refused if what it starts from isn't as `expect` says.
+    pub(crate) fn op(&self, expect: Option<Expect>) -> FileOp {
         match self {
             Self::Create { path, dir } => FileOp::Create {
                 path: path.clone(),
@@ -106,16 +128,28 @@ impl Step {
                 from: from.clone(),
                 to: to.clone(),
                 overwrite: None,
+                expect,
             },
             Self::Move { from, to, .. } => FileOp::Move {
                 from: from.clone(),
                 to: to.clone(),
                 overwrite: None,
+                expect,
             },
             Self::Delete { path, .. } => FileOp::Delete {
                 path: path.clone(),
                 trash: true,
+                expect,
             },
+        }
+    }
+
+    /// The path it starts from, if it starts from one.
+    pub(crate) fn source(&self) -> Option<&str> {
+        match self {
+            Self::Create { .. } => None,
+            Self::Copy { from, .. } | Self::Move { from, .. } => Some(from),
+            Self::Delete { path, .. } => Some(path),
         }
     }
 }
@@ -128,20 +162,30 @@ pub(crate) struct Problem {
     pub(crate) why: String,
 }
 
-/// The mark that starts the line of entry `id`.
-pub(crate) fn mark(id: usize) -> String {
+/// The mark that starts the line of entry `id` in session `session`.
+pub(crate) fn mark(session: u32, id: usize) -> String {
     let mut mark = String::from(MARK_START);
-    for digit in format!("{id:x}").chars() {
-        let value = digit.to_digit(16).expect("a hexadecimal digit");
-        mark.push(char::from_u32(DIGIT_ZERO + value).expect("a private-use character"));
-    }
+    push_digits(&mut mark, &format!("{session:x}"));
+    mark.push(MARK_SPLIT);
+    push_digits(&mut mark, &format!("{id:x}"));
     mark.push(MARK_END);
     mark
 }
 
-/// The entry `line`'s mark names, if it starts with a whole one.
-pub(crate) fn id_of(line: &str) -> Option<usize> {
-    read_mark(line).map(|(id, _)| id)
+/// Pushes the characters for the hexadecimal digits `hex` on `mark`.
+fn push_digits(mark: &mut String, hex: &str) {
+    for digit in hex.chars() {
+        let value = digit.to_digit(16).expect("a hexadecimal digit");
+        mark.push(char::from_u32(DIGIT_ZERO + value).expect("a private-use character"));
+    }
+}
+
+/// The entry of session `session` that `line`'s mark names, if it starts
+/// with a whole one of that session's.
+pub(crate) fn id_of(session: u32, line: &str) -> Option<usize> {
+    read_mark(line)
+        .filter(|&(of, _, _)| of == session)
+        .map(|(_, id, _)| id)
 }
 
 /// How many bytes of `line` its mark takes, if it starts with one, for an
@@ -150,38 +194,48 @@ pub(crate) fn mark_len(line: &str) -> usize {
     if !line.starts_with(MARK_START) {
         return 0;
     }
-    read_mark(line).map_or(0, |(_, rest)| line.len() - rest.len())
+    read_mark(line).map_or(0, |(_, _, rest)| line.len() - rest.len())
 }
 
-/// The entry `line`'s mark names, and the rest of the line, if it starts
-/// with a whole mark.
-fn read_mark(line: &str) -> Option<(usize, &str)> {
+/// The session and entry `line`'s mark names, and the rest of the line,
+/// if it starts with a whole mark.
+fn read_mark(line: &str) -> Option<(u32, usize, &str)> {
     let rest = line.strip_prefix(MARK_START)?;
-    let mut id: usize = 0;
-    for (count, (at, ch)) in rest.char_indices().enumerate() {
-        if ch == MARK_END {
-            return (count > 0).then(|| (id, &rest[at + ch.len_utf8()..]));
+    let (session, rest) = read_digits(rest, MARK_SPLIT, SESSION_DIGITS)?;
+    let (id, rest) = read_digits(rest, MARK_END, MOST_DIGITS)?;
+    Some((u32::try_from(session).ok()?, id, rest))
+}
+
+/// The number written in digits at the start of `text`, up to `end`, of
+/// no more than `most` digits, and what's after `end`.
+fn read_digits(text: &str, end: char, most: usize) -> Option<(usize, &str)> {
+    let mut number: usize = 0;
+    for (count, (at, ch)) in text.char_indices().enumerate() {
+        if ch == end {
+            return (count > 0).then(|| (number, &text[at + ch.len_utf8()..]));
         }
         let digit = u32::from(ch)
             .checked_sub(DIGIT_ZERO)
             .filter(|&digit| digit < 16)?;
-        if count == MOST_DIGITS {
+        if count == most {
             return None;
         }
-        id = id * 16 + digit as usize;
+        number = number * 16 + digit as usize;
     }
     None
 }
 
 /// Whether `ch` is one marks are made of.
-fn in_marks(ch: char) -> bool {
-    ch == MARK_START || ch == MARK_END || (DIGIT_ZERO..DIGIT_ZERO + 16).contains(&u32::from(ch))
+pub(crate) fn in_marks(ch: char) -> bool {
+    matches!(ch, MARK_START | MARK_SPLIT | MARK_END)
+        || (DIGIT_ZERO..DIGIT_ZERO + 16).contains(&u32::from(ch))
 }
 
-/// The line for entry `id`, called `name`: its mark, then its name, with
-/// a `/` after if it's a folder, or a link to one.
-pub(crate) fn line_of(id: usize, name: &str, kind: EntryKind) -> String {
-    format!("{}{}", mark(id), shown_name(name, kind))
+/// The line for entry `id` of session `session`, called `name`: its
+/// mark, then its name, with a `/` after if it's a folder, or a link to
+/// one.
+pub(crate) fn line_of(session: u32, id: usize, name: &str, kind: EntryKind) -> String {
+    format!("{}{}", mark(session, id), shown_name(name, kind))
 }
 
 /// `name`, as a listing shows it.
@@ -226,8 +280,12 @@ impl Read {
 /// moves, and moves and deletes free a name before anything takes it.
 /// Deletes come last, unless a name they free is wanted. Names that swap,
 /// or go round, go aside first.
-pub(crate) fn plan(originals: &[Original], folders: &[Folder<'_>]) -> Result<Vec<Step>, Problem> {
-    let lines = read_all(originals, folders)?;
+pub(crate) fn plan(
+    session: u32,
+    originals: &[Original],
+    folders: &[Folder<'_>],
+) -> Result<Vec<Step>, Problem> {
+    let lines = read_all(session, originals, folders)?;
     let contents = Contents::of(folders);
     // The line naming each path.
     let mut taken: HashMap<&str, usize> = HashMap::new();
@@ -303,15 +361,20 @@ pub(crate) fn plan(originals: &[Original], folders: &[Folder<'_>]) -> Result<Vec
     for index in steps.iter().filter_map(|(_, index)| *index) {
         check_room(&lines[index], &contents, &freed, &taken, &lines)?;
     }
+    check_going(&steps, folders, &lines)?;
     order(steps, &contents, &taken, &lines)
 }
 
 /// Reads every line of `folders`' listings, but blank ones.
-fn read_all(originals: &[Original], folders: &[Folder<'_>]) -> Result<Vec<Read>, Problem> {
+fn read_all(
+    session: u32,
+    originals: &[Original],
+    folders: &[Folder<'_>],
+) -> Result<Vec<Read>, Problem> {
     let mut lines = Vec::new();
     for (folder, listing) in folders.iter().enumerate() {
         for (line, text) in (0u64..).zip(listing.text.split('\n')) {
-            if let Some(read) = read_line(originals, listing.dir, folder, line, text)? {
+            if let Some(read) = read_line(session, originals, listing.dir, folder, line, text)? {
                 lines.push(read);
             }
         }
@@ -322,6 +385,7 @@ fn read_all(originals: &[Original], folders: &[Folder<'_>]) -> Result<Vec<Read>,
 /// Reads `text`, line `line` of listing `folder`, of the folder `dir`:
 /// `None` if it's blank.
 fn read_line(
+    session: u32,
     originals: &[Original],
     dir: &str,
     folder: usize,
@@ -335,7 +399,13 @@ fn read_line(
     // A line indented, as `>>` does, is read as if it weren't.
     let text = text.trim_start_matches([' ', '\t']);
     let (id, rest) = match read_mark(text) {
-        Some((id, rest)) => (Some(id), rest),
+        Some((of, id, rest)) if of == session => (Some(id), rest),
+        Some(_) => {
+            return Err(problem(
+                "this line came from another listing: type its name on a new line instead"
+                    .to_owned(),
+            ));
+        }
         None => (None, text),
     };
     if rest.chars().any(in_marks) {
@@ -482,6 +552,84 @@ impl<'a> Contents<'a> {
     }
 }
 
+/// Checks nothing's said to stay in a folder being deleted, as a line of
+/// its own listing left as it was says; and nothing's put in a folder
+/// where one is moving or being copied to, whose contents, coming with
+/// it, aren't known to have room.
+fn check_going(
+    steps: &[(Step, Option<usize>)],
+    folders: &[Folder<'_>],
+    lines: &[Read],
+) -> Result<(), Problem> {
+    let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
+    for (step, _) in steps {
+        let Step::Delete { path, .. } = step else {
+            continue;
+        };
+        let Some(folder) = folders.iter().position(|folder| folder.dir == path) else {
+            continue;
+        };
+        if let Some(line) = (lines.iter()).find(|line| line.folder == folder && line.stays) {
+            return Err(line.problem(format!(
+                "{} is being deleted, but this line keeps {} in it: delete the line too, \
+                 or keep {}",
+                name(path),
+                line.typed,
+                name(path)
+            )));
+        }
+    }
+    // Folders moving or copied, by where they're going.
+    let going: HashMap<&str, &str> = (steps.iter())
+        .filter_map(|(step, index)| match (step, index) {
+            (Step::Move { from, to, .. } | Step::Copy { from, to }, Some(index))
+                if lines[*index].dir =>
+            {
+                Some((to.as_str(), from.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    for (step, index) in steps {
+        let (Some(to), Some(index)) = (step_takes(step), index) else {
+            continue;
+        };
+        let line = &lines[*index];
+        let mut above = parent_of(to);
+        while above != "/" {
+            if let Some(&folder) = going.get(above) {
+                let why = match step.source() {
+                    Some(from) if inside(folder, from).is_some() => format!(
+                        "{} goes along with {}, which moves to {}: leave its line as it was",
+                        line.typed,
+                        name(folder),
+                        name(above)
+                    ),
+                    _ => format!(
+                        "{} would go in {}, which {} is going to: put it there in a write of \
+                         its own",
+                        line.typed,
+                        name(above),
+                        name(folder)
+                    ),
+                };
+                return Err(line.problem(why));
+            }
+            above = parent_of(above);
+        }
+    }
+    Ok(())
+}
+
+/// The path `step` puts something at, if it puts something somewhere.
+fn step_takes(step: &Step) -> Option<&str> {
+    match step {
+        Step::Create { path, .. } => Some(path),
+        Step::Copy { to, .. } | Step::Move { to, .. } => Some(to),
+        Step::Delete { .. } => None,
+    }
+}
+
 /// Why one step must wait for another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Wait {
@@ -588,23 +736,25 @@ impl Waits {
         }
     }
 
-    /// Step `first` is done, as far as what waits for it for `why` is
-    /// concerned, or for anything if `why` is `None`: returns those no
-    /// longer waiting for anything.
-    fn done(&mut self, first: usize, why: Option<Wait>) -> Vec<usize> {
+    /// Step `first` is done, as far as what waits for it for any of
+    /// `why` is concerned: returns those no longer waiting for anything,
+    /// and how many waits it ended.
+    fn done(&mut self, first: usize, why: &[Wait]) -> (Vec<usize>, usize) {
         let mut ready = Vec::new();
+        let mut ended = 0;
         let waits = std::mem::take(&mut self.after[first]);
         for (then, wait) in waits {
-            if why.is_some_and(|why| why != wait) {
+            if !why.contains(&wait) {
                 self.after[first].push((then, wait));
                 continue;
             }
+            ended += 1;
             self.waiting[then][wait as usize] -= 1;
             if self.waiting[then] == [0; 3] {
                 ready.push(then);
             }
         }
-        ready
+        (ready, ended)
     }
 }
 
@@ -617,6 +767,10 @@ fn order(
     lines: &[Read],
 ) -> Result<Vec<Step>, Problem> {
     let parts: Vec<Parts> = steps.iter().map(|(step, _)| Parts::of(step)).collect();
+    let freed: HashSet<&str> = parts
+        .iter()
+        .filter_map(|parts| parts.frees.as_deref())
+        .collect();
     let mut waits = Waits::of(&parts);
     let soon = |index: usize| Reverse((parts[index].soon, index));
     let mut ready: BinaryHeap<Reverse<(u8, usize)>> = (0..steps.len())
@@ -627,38 +781,50 @@ fn order(
     let mut left = steps.len();
     let mut ordered = Vec::with_capacity(steps.len());
     let mut asides: HashSet<String> = HashSet::new();
+    // Every path a line names, and the folders it's in, which putting
+    // something there makes if they aren't there.
+    let mut wanted: HashSet<&str> = HashSet::new();
+    for &path in taken.keys() {
+        let mut at = path;
+        while at != "/" && wanted.insert(at) {
+            at = parent_of(at);
+        }
+    }
+    let mut set_aside: HashSet<usize> = HashSet::new();
+    // Each step once, and each move aside at most once more: never more.
+    let most = 2 * steps.len();
     loop {
         while let Some(Reverse((_, index))) = ready.pop() {
             done[index] = true;
             left -= 1;
             ordered.push(steps[index].0.clone());
-            ready.extend(waits.done(index, None).into_iter().map(soon));
+            let (now, _) = waits.done(index, &[Wait::Frees, Wait::Reads, Wait::Holds]);
+            ready.extend(now.into_iter().map(soon));
         }
         if left == 0 {
             return Ok(ordered);
         }
-        // What's left goes round: names swapping, or moving in a ring. A
-        // move nothing need read first goes aside, freeing its name.
+        let stuck = (0..steps.len()).find(|&index| !done[index]);
+        if ordered.len() >= most {
+            return Err(tangled(&steps, lines, stuck));
+        }
+        // What's left goes round: names swapping, or moving in a ring, or
+        // out of a folder to where the folder is. A move nothing need read
+        // first goes aside, once, out of every folder that's going.
         let aside = (0..steps.len()).find(|&index| {
             !done[index]
+                && !set_aside.contains(&index)
                 && matches!(steps[index].0, Step::Move { .. })
                 && waits.waiting[index][Wait::Reads as usize] == 0
         });
         let Some(index) = aside else {
-            let line = (0..steps.len())
-                .find(|&index| !done[index])
-                .and_then(|index| steps[index].1);
-            return Err(Problem {
-                at: line.map(|line| (lines[line].folder, lines[line].line)),
-                why: "these changes go round in a ring with a copy: make the copy in a \
-                      write of its own"
-                    .to_owned(),
-            });
+            return Err(tangled(&steps, lines, stuck));
         };
+        set_aside.insert(index);
         let Step::Move { from, to, .. } = steps[index].0.clone() else {
             unreachable!("a move");
         };
-        let spare = spare_name(&from, contents, taken, &asides);
+        let spare = spare_name(&from, &freed, contents, &wanted, &asides);
         asides.insert(spare.clone());
         ordered.push(Step::Move {
             from,
@@ -670,24 +836,51 @@ fn order(
             to,
             aside: false,
         };
-        // Its name is free now.
-        ready.extend(waits.done(index, Some(Wait::Frees)).into_iter().map(soon));
+        // Its name is free now, and the folders that are going no longer
+        // hold it.
+        let (now, ended) = waits.done(index, &[Wait::Frees, Wait::Reads]);
+        if ended == 0 {
+            return Err(tangled(&steps, lines, Some(index)));
+        }
+        ready.extend(now.into_iter().map(soon));
     }
 }
 
-/// A name beside `path` for it to go aside to: one nothing in its folder
-/// has, nor will have.
+/// Why steps can't be ordered: they're tangled, at step `index`'s line,
+/// if it has one.
+fn tangled(steps: &[(Step, Option<usize>)], lines: &[Read], index: Option<usize>) -> Problem {
+    let line = index.and_then(|index| steps[index].1);
+    Problem {
+        at: line.map(|line| (lines[line].folder, lines[line].line)),
+        why: "these changes are tangled together: make some of them in a write of their own"
+            .to_owned(),
+    }
+}
+
+/// A name for what's at `path` to go aside to: beside it, or beside the
+/// outermost folder it's in that's going, as `freed` says, so it's out of
+/// every one; and one nothing in that folder has, nor will have, as
+/// `wanted`, the paths lines name and the folders they're in, says.
 fn spare_name(
     path: &str,
+    freed: &HashSet<&str>,
     contents: &Contents<'_>,
-    taken: &HashMap<&str, usize>,
+    wanted: &HashSet<&str>,
     asides: &HashSet<String>,
 ) -> String {
-    let dir = parent_of(path);
+    let mut outermost = path;
+    let mut above = parent_of(path);
+    while above != "/" {
+        if freed.contains(above) {
+            outermost = above;
+        }
+        above = parent_of(above);
+    }
+    let dir = parent_of(outermost);
     let name = path.rsplit('/').next().unwrap_or_default();
     let names = (contents.folders.iter()).find(|(folder, _)| *folder == dir);
     // One of this many is free, as no more can be had.
-    let had = names.map_or(0, |(_, names)| names.len()) + taken.len() + asides.len();
+    let had = names.map_or(0, |(_, names)| names.len()) + wanted.len() + asides.len();
     (1..=had + 1)
         .map(|count| match count {
             1 => join(dir, &format!("{name}.moving")),
@@ -696,7 +889,7 @@ fn spare_name(
         .find(|spare| {
             let spare_name = spare.rsplit('/').next().unwrap_or_default();
             !names.is_some_and(|(_, names)| names.contains_key(spare_name))
-                && !taken.contains_key(spare.as_str())
+                && !wanted.contains(spare.as_str())
                 && !asides.contains(spare)
         })
         .expect("a name no one has")
