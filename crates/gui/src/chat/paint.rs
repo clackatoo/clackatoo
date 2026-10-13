@@ -864,9 +864,10 @@ impl ChatView {
 }
 
 impl ChatView {
-    /// Draws the box's controls along its bottom: the mode on the left,
-    /// and on the right, by the send button, how much context the chat
-    /// fills and the model and effort.
+    /// Draws the box's controls along its bottom: the mode and what the
+    /// agent may do with clackatoo's tools on the left, and on the right,
+    /// by the send button, how much context the chat fills and the model
+    /// and effort.
     fn draw_controls(&mut self, canvas: &mut Canvas<'_>, m: Measures, frame: &BoxFrame) {
         let size = m.em(2.0);
         let top = frame.top + frame.height - m.em(0.5) - size;
@@ -876,10 +877,11 @@ impl ChatView {
                 .find(|setting| setting.kind == kind)
                 .cloned()
         };
-        let (mode, model, effort) = (
+        let (mode, model, effort, tools) = (
             of(SettingKind::Mode),
             of(SettingKind::Model),
             of(SettingKind::Effort),
+            of(SettingKind::Tools),
         );
 
         let picked: Vec<Setting> = model.into_iter().chain(effort).collect();
@@ -916,8 +918,12 @@ impl ChatView {
             let at = [right - laid.width, top + (size - laid.height) / 2.0];
             draw_laid(canvas, m, &laid, at, laid.width);
         }
-        if let Some(mode) = mode {
-            let label = format!("{}  ▾", chosen_name(&mode));
+        let mut left = frame.left + frame.pad * 0.4;
+        let chips = [
+            mode.map(|mode| (format!("{}  ▾", chosen_name(&mode)), mode.id)),
+            tools.map(|tools| (format!("Tools: {}  ▾", chosen_name(&tools)), tools.id)),
+        ];
+        for (label, id) in chips.into_iter().flatten() {
             let laid = lay_out(
                 &mut self.layout_cx,
                 canvas.fonts,
@@ -927,8 +933,9 @@ impl ChatView {
                 frame.inner,
             );
             let width = laid.width + m.em(1.2);
-            let rect = [frame.left + frame.pad * 0.4, top, width, size];
-            self.draw_chip(canvas, m, frame, rect, &laid, vec![mode.id]);
+            let rect = [left, top, width, size];
+            self.draw_chip(canvas, m, frame, rect, &laid, vec![id]);
+            left += width + m.em(0.6);
         }
     }
 

@@ -683,11 +683,13 @@ mod tests {
             home: dir.to_owned(),
             shell_integration: None,
             agents: crate::AgentConfig::default(),
+            mcp: None,
             udp_ports: None,
             languages: None,
             servers: None,
             declined: None,
             server_idle: std::time::Duration::ZERO,
+            prompt_wait: crate::DEFAULT_PROMPT_WAIT,
             rename_gate: None,
             trash: None,
         };
@@ -695,7 +697,8 @@ mod tests {
         let id = TerminalId(1);
         let agent = crate::AgentConfig::default().find("claude").unwrap();
         let cwd = dir.display().to_string();
-        let mut chat = HostedChat::new(id, Size::new(40, 10).unwrap(), cwd, &agent);
+        let tools = clackatoo_protocol::AgentTools::Ask;
+        let mut chat = HostedChat::new(id, Size::new(40, 10).unwrap(), cwd, &agent, tools);
         chat.connected(Opened {
             session: "s1".into(),
             settings: None,

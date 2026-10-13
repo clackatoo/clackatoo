@@ -24,6 +24,7 @@ mod handover;
 mod hosted;
 pub mod launch;
 mod lsp;
+pub mod mcp;
 mod memory;
 mod pty;
 mod quic;
@@ -61,6 +62,11 @@ pub struct DaemonConfig {
     /// The agents chats can talk to: programs speaking ACP, the Agent
     /// Client Protocol, on their stdin and stdout.
     pub agents: AgentConfig,
+    /// The program, and its arguments, that agents start to reach the
+    /// tools clackatoo gives them (see [`mcp`]): `clackatoo mcp`, which
+    /// is given `--chat ID --socket PATH` after them. `None` gives agents
+    /// no tools.
+    pub mcp: Option<Vec<OsString>>,
     /// The UDP ports clients on other machines may move their QUIC
     /// connections onto: the first free one is taken, when the first
     /// connection over SSH arrives. 0 means any port. `None` keeps every
@@ -80,6 +86,10 @@ pub struct DaemonConfig {
     /// How long a language server is kept with no files open in it, so
     /// coming back to its project soon doesn't start it again.
     pub server_idle: std::time::Duration,
+    /// How long a command an agent runs waits for its shell's first
+    /// prompt, when the shell marks its prompts, before the agent is told
+    /// the shell never became ready.
+    pub prompt_wait: std::time::Duration,
     /// For tests: a file a rename's thread waits for once it has written
     /// the new text of the files not open beside them, before they're put
     /// in place, so a test can act while it's under way. `None`, but in
@@ -94,6 +104,10 @@ pub struct DaemonConfig {
 /// How long a language server is kept with no files open in it, unless
 /// told otherwise.
 pub const DEFAULT_SERVER_IDLE: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// How long a command an agent runs waits for its shell's first prompt,
+/// unless told otherwise: zsh with plugins can take seconds to start.
+pub const DEFAULT_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The UDP ports a daemon uses unless told otherwise: mosh's, so a
 /// firewall opened for mosh lets clackatoo through too.
@@ -139,6 +153,8 @@ impl DaemonConfig {
                 dir: languages_dir().map(|dir| dir.with_file_name("agents")),
                 path: None,
             },
+            // Only the `clackatoo` program knows it can relay them.
+            mcp: None,
             udp_ports: match non_empty("CLACKATOO_UDP_PORTS") {
                 None => Some(DEFAULT_UDP_PORTS),
                 Some(ports) if ports == "off" => None,
@@ -154,6 +170,7 @@ impl DaemonConfig {
             servers: languages_dir().map(|dir| dir.with_file_name("servers")),
             declined: languages_dir().map(|dir| dir.with_file_name("declined")),
             server_idle: DEFAULT_SERVER_IDLE,
+            prompt_wait: DEFAULT_PROMPT_WAIT,
             rename_gate: None,
             trash: data_dir().map(|dir| dir.join("Trash")),
         }

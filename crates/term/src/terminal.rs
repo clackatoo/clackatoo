@@ -231,6 +231,11 @@ impl Terminal {
         self.emulator.blocks.get(block)
     }
 
+    /// The blocks the shell has marked.
+    pub(crate) fn emulator_blocks(&self) -> &Blocks {
+        &self.emulator.blocks
+    }
+
     /// The terminal's whole state, to carry into another process, but its
     /// links. See [`Snapshot`] for what isn't kept.
     #[must_use]

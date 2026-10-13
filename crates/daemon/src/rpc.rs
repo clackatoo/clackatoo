@@ -1,7 +1,8 @@
 //! A program the daemon runs as its child and exchanges JSON-RPC messages
 //! with over its stdin and stdout: the agent, which writes a message per
 //! line, and language servers, which put a `Content-Length` header before
-//! each.
+//! each. The framing is shared with the connections agents' tools are
+//! served on (see [`crate::mcp`]).
 //!
 //! This only moves messages. It frames them, unframes what comes back,
 //! and keeps what the program writes to stderr for the log. What the
@@ -130,18 +131,7 @@ impl Peer {
 
     /// Queues `message`, framed.
     pub(crate) fn send(&mut self, message: &Value) {
-        let body = message.to_string();
-        match self.framing {
-            Framing::Lines => {
-                self.outgoing.extend_from_slice(body.as_bytes());
-                self.outgoing.push(b'\n');
-            }
-            Framing::Headers => {
-                let header = format!("Content-Length: {}\r\n\r\n", body.len());
-                self.outgoing.extend_from_slice(header.as_bytes());
-                self.outgoing.extend_from_slice(body.as_bytes());
-            }
-        }
+        frame(self.framing, message, &mut self.outgoing);
     }
 
     /// Writes queued messages until the pipe is full. An error means the
@@ -184,7 +174,7 @@ impl Peer {
                 Ok(n) => {
                     total += n;
                     self.incoming.extend_from_slice(&buffer[..n]);
-                    self.unframe(messages)?;
+                    unframe(&self.name, self.framing, &mut self.incoming, messages)?;
                     if total >= budget {
                         return Ok(true);
                     }
@@ -194,42 +184,6 @@ impl Peer {
                 Err(err) => return Err(err),
             }
         }
-    }
-
-    /// Takes the whole messages read so far, leaving the rest.
-    /// An error if the stream is broken past finding where the next
-    /// message starts, as a header with no length leaves it.
-    fn unframe(&mut self, messages: &mut Vec<Message>) -> io::Result<()> {
-        let mut start = 0;
-        let broken = loop {
-            match next_body(self.framing, &self.incoming[start..]) {
-                Ok(Some((body, end))) => {
-                    let body = &self.incoming[start + body.start..start + body.end];
-                    messages.extend(parse(&self.name, body));
-                    start += end;
-                }
-                Ok(None) => break None,
-                Err(broken) => break Some(broken),
-            }
-        };
-        self.incoming.drain(..start);
-        if let Some(broken) = broken {
-            log::warn!("{}: {broken}, so no more can be read", self.name);
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        if self.incoming.len() > MAX_MESSAGE {
-            if self.framing == Framing::Headers {
-                log::warn!("{}: a header never ended", self.name);
-                return Err(io::ErrorKind::InvalidData.into());
-            }
-            // The next line break starts the next message.
-            log::warn!(
-                "{}: dropping a message longer than {MAX_MESSAGE} bytes",
-                self.name
-            );
-            self.incoming.clear();
-        }
-        Ok(())
     }
 
     /// Reads what the program wrote to stderr, and logs it at debug level.
@@ -294,6 +248,60 @@ impl Peer {
         log::info!("{} stopped", self.name);
         self.process
     }
+}
+
+/// Queues `message` onto `outgoing`, framed as `framing` says.
+pub(crate) fn frame(framing: Framing, message: &Value, outgoing: &mut Vec<u8>) {
+    let body = message.to_string();
+    match framing {
+        Framing::Lines => {
+            outgoing.extend_from_slice(body.as_bytes());
+            outgoing.push(b'\n');
+        }
+        Framing::Headers => {
+            let header = format!("Content-Length: {}\r\n\r\n", body.len());
+            outgoing.extend_from_slice(header.as_bytes());
+            outgoing.extend_from_slice(body.as_bytes());
+        }
+    }
+}
+
+/// Takes the whole messages read so far into `incoming`, from `name`,
+/// leaving the rest. An error if the stream is broken past finding where
+/// the next message starts, as a header with no length leaves it.
+pub(crate) fn unframe(
+    name: &str,
+    framing: Framing,
+    incoming: &mut Vec<u8>,
+    messages: &mut Vec<Message>,
+) -> io::Result<()> {
+    let mut start = 0;
+    let broken = loop {
+        match next_body(framing, &incoming[start..]) {
+            Ok(Some((body, end))) => {
+                let body = &incoming[start + body.start..start + body.end];
+                messages.extend(parse(name, body));
+                start += end;
+            }
+            Ok(None) => break None,
+            Err(broken) => break Some(broken),
+        }
+    };
+    incoming.drain(..start);
+    if let Some(broken) = broken {
+        log::warn!("{name}: {broken}, so no more can be read");
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    if incoming.len() > MAX_MESSAGE {
+        if framing == Framing::Headers {
+            log::warn!("{name}: a header never ended");
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // The next line break starts the next message.
+        log::warn!("{name}: dropping a message longer than {MAX_MESSAGE} bytes");
+        incoming.clear();
+    }
+    Ok(())
 }
 
 /// The bytes of a message, and where what follows it starts.

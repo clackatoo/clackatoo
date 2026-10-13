@@ -419,6 +419,14 @@ options! {
     /// `claude`, `codex`, `gemini`, or one the daemon's `agents.toml`
     /// adds. Empty is the daemon's default, Claude Code.
     agent("ag"): String = "claude".to_owned();
+    /// What a new chat's agent may do with clackatoo's own tools, which
+    /// show you things beside the chat: open files, run commands in
+    /// terminals you can watch, and read them. `ask` asks in the chat
+    /// before it runs a command, types into a terminal, or shows what's
+    /// outside the chat's project; `allow` runs commands in its own
+    /// terminals without asking, but asks the rest; `off` gives it no
+    /// tools. The chat's Tools setting changes it later.
+    agenttools("agt"): AgentTools = AgentTools::Ask;
 }
 
 choice! {
@@ -480,6 +488,29 @@ impl Osc52 {
     /// Whether programs may read what's on the clipboard.
     pub(crate) fn pastes(self) -> bool {
         matches!(self, Self::Paste | Self::CopyPaste)
+    }
+}
+
+choice! {
+    /// What `agenttools` lets a new chat's agent do.
+    AgentTools {
+        /// Use the tools, asking first to run a command or type.
+        Ask = "ask",
+        /// Run commands in its own terminals without asking.
+        Allow = "allow",
+        /// Nothing: it gets none.
+        Off = "off",
+    }
+}
+
+impl AgentTools {
+    /// As a new chat asks for it.
+    pub(crate) fn asked(self) -> clackatoo_protocol::AgentTools {
+        match self {
+            Self::Ask => clackatoo_protocol::AgentTools::Ask,
+            Self::Allow => clackatoo_protocol::AgentTools::Allow,
+            Self::Off => clackatoo_protocol::AgentTools::Off,
+        }
     }
 }
 

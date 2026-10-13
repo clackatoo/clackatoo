@@ -1238,11 +1238,13 @@ pub(crate) fn paint_panel<'a>(
 
 /// The panes of `placement`: each one's background, side by side, with
 /// lines between them and the bars, and round `focused`, if there are
-/// others to tell it from, a line in clackatoo's colour.
+/// others to tell it from, a line in clackatoo's colour. Round
+/// `pointed`, a pane an agent points out, a line in the picked colour.
 pub(crate) fn paint_panes(
     geometry: &Geometry,
     placement: &Placement,
     focused: Option<PaneId>,
+    pointed: Option<PaneId>,
 ) -> Vec<Fill> {
     let line = geometry.edge;
     let area = geometry.area.rect;
@@ -1270,6 +1272,22 @@ pub(crate) fn paint_panes(
                 Paint::Clear,
             )
             .bordered(line, Paint::FocusEdge),
+        );
+    }
+    if let Some(tile) = pointed.and_then(|pane| placement.tile(pane)) {
+        let rect = tile.rect;
+        let width = 2.0 * line;
+        fills.push(
+            Fill::solid(
+                [
+                    rect.x - width,
+                    rect.y - width,
+                    rect.width + 2.0 * width,
+                    rect.height + 2.0 * width,
+                ],
+                Paint::Clear,
+            )
+            .bordered(width, Paint::PickedEdge),
         );
     }
     fills

@@ -86,7 +86,8 @@ impl Daemon {
             .or_else(|| beside.and_then(|pane| self.working_directory(pane)))
             .unwrap_or_else(|| self.config.home.to_string_lossy().into_owned());
         let name = request.agent.as_deref().unwrap_or(agents::DEFAULT);
-        let chat = HostedChat::new(id, request.size, cwd, &self.agent_spec(name));
+        let spec = self.agent_spec(name);
+        let chat = HostedChat::new(id, request.size, cwd, &spec, request.tools);
         log::info!("chat {id} started, with {name}");
         self.add_chat(chat);
         self.connect(id);
@@ -159,8 +160,9 @@ impl Daemon {
             chat.working_directory().to_owned(),
             chat.session().map(str::to_owned),
         );
+        let tools = self.tools_server(id);
         if let Some(slot) = self.agents.running.get_mut(&agent) {
-            slot.agent.open_session(id, &cwd, session.as_deref());
+            slot.agent.open_session(id, &cwd, session.as_deref(), tools);
         }
         self.flush_agent(agent);
     }
@@ -310,6 +312,7 @@ impl Daemon {
                 (Action::Answer { request, option }, Some(slot), _) => {
                     slot.agent.answer_permission(&request, option.as_deref());
                 }
+                (Action::Permit { call, allow }, _, _) => self.permitted(call, allow),
                 // The agent has gone, which the chat has heard or will.
                 _ => {}
             }
@@ -444,6 +447,14 @@ impl Daemon {
                     }
                     return;
                 };
+                // About clackatoo's own tools, which ask the user
+                // themselves.
+                if let Some(allow) = chat.about_own_tools(&tool, &options) {
+                    if let Some(slot) = self.agents.running.get_mut(&agent) {
+                        slot.agent.answer_permission(&request, Some(&allow));
+                    }
+                    return;
+                }
                 chat.ask(request, &tool, &options);
                 id
             }

@@ -64,6 +64,7 @@ mod offers;
 mod pieces;
 mod rename;
 mod signs;
+mod tools;
 
 use buffers::BufferSlot;
 use chats::AgentId;
@@ -72,6 +73,7 @@ use finder::Finds;
 use language::{Pipe, ServerId, Servers};
 use offers::Installs;
 use signs::Signs;
+use tools::Tools;
 
 const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);
@@ -109,6 +111,8 @@ enum Source {
     Files,
     Client(Client),
     Carrier(Carrier),
+    /// A connection an agent's tools are served on.
+    Tools(crate::mcp::Connection),
 }
 
 /// What a terminal is: a program on a PTY, or a chat with an agent, which
@@ -240,6 +244,9 @@ struct Client {
     watching_workspaces: bool,
     /// The connection is to become a carrier, once its answer is queued.
     carrying: bool,
+    /// The connection is to serve this chat's agent's tools, once its
+    /// answer is queued.
+    serving_tools: Option<TerminalId>,
     /// Over QUIC, the stream each terminal's view updates go on, so one
     /// terminal's never wait behind another's, or behind answers. Kept
     /// while the terminal lives, even when the client stops following it:
@@ -271,6 +278,7 @@ impl Client {
             views: BTreeMap::new(),
             watching_workspaces: false,
             carrying: false,
+            serving_tools: None,
             streams: BTreeMap::new(),
             clipboard: clipboard::Unsent::default(),
         }
@@ -421,6 +429,9 @@ pub struct Daemon {
     renames: rename::Renames,
     /// The finder's searches going on.
     finds: Finds,
+    /// What agents' tools are waiting for, and the panes and terminals
+    /// they opened.
+    tools: Tools,
     /// File explorers, and the directories expanded in them.
     explorers: Explorers,
     /// Buffers being compared with the files' text in their repositories,
@@ -536,6 +547,7 @@ impl Daemon {
             installs: Installs::new(config.declined.as_deref()),
             renames: rename::Renames::default(),
             finds,
+            tools: Tools::default(),
             explorers: Explorers::default(),
             signs: Signs::default(),
             piece_questions: pieces::PieceQuestions::default(),
@@ -736,22 +748,26 @@ impl Daemon {
             // next compaction or QUIC timer, if there is one.
             let agent_unread = self.agents.unread();
             let servers_unread = self.servers_unread();
-            let timeout = if self.unread.is_empty() && !agent_unread && !servers_unread {
-                let compaction = self.compactions.values().min().copied();
-                let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
-                let idle = self.next_idle_stop();
-                let retry = self.next_retry();
-                let clipboard = self.next_clipboard_timeout();
-                let explore = self.next_explore();
-                let next = (compaction.into_iter().chain(quic).chain(idle))
-                    .chain(retry)
-                    .chain(clipboard)
-                    .chain(explore)
-                    .min();
-                next.map(|due| due.saturating_duration_since(Instant::now()))
-            } else {
-                Some(Duration::ZERO)
-            };
+            let tools_unread = self.tools_unread();
+            let timeout =
+                if self.unread.is_empty() && !agent_unread && !servers_unread && !tools_unread {
+                    let compaction = self.compactions.values().min().copied();
+                    let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
+                    let idle = self.next_idle_stop();
+                    let retry = self.next_retry();
+                    let clipboard = self.next_clipboard_timeout();
+                    let explore = self.next_explore();
+                    let tools = self.next_tool_due();
+                    let next = (compaction.into_iter().chain(quic).chain(idle))
+                        .chain(retry)
+                        .chain(clipboard)
+                        .chain(explore)
+                        .chain(tools)
+                        .min();
+                    next.map(|due| due.saturating_duration_since(Instant::now()))
+                } else {
+                    Some(Duration::ZERO)
+                };
             match self.poll.poll(&mut events, timeout) {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -770,6 +786,9 @@ impl Daemon {
             if servers_unread {
                 self.read_servers_unread();
             }
+            if tools_unread {
+                self.read_tools_unread();
+            }
             self.take_highlights();
             self.take_signs();
             self.take_installs();
@@ -781,6 +800,7 @@ impl Daemon {
             self.stop_idle_servers();
             self.compact_scrollbacks();
             self.time_out_clipboard_asks();
+            self.time_out_tools();
             self.send_clipboard_writes();
             self.send_view_updates();
             self.transmit_quic();
@@ -824,6 +844,7 @@ impl Daemon {
                 Some(Source::Files) => self.read_files_changes(),
                 Some(Source::Client(_)) => self.serve_client(token),
                 Some(Source::Carrier(_)) => self.serve_carrier(token, event),
+                Some(Source::Tools(_)) => self.serve_tools(token, event),
                 None => {}
             },
         }
@@ -854,6 +875,7 @@ impl Daemon {
         self.serve_clipboard(id);
         self.schedule_compaction(id);
         self.collect_damage(id);
+        self.terminal_moved_on(id);
     }
 
     /// Hands the lines the terminal changed to each client following it.
@@ -1105,6 +1127,7 @@ impl Daemon {
             .terminals
             .remove(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
+        self.tools_closed(id);
         self.unread.retain(|&unread| unread != id);
         self.compactions.remove(&id);
         for token in &slot.viewers {
@@ -1440,14 +1463,16 @@ impl Daemon {
                     client.finished = true;
                 }
             }
-            if client.finished || client.carrying {
+            if client.finished || client.carrying || client.serving_tools.is_some() {
                 break;
             }
         }
-        if matches!(self.sources.get(token.0), Some(Source::Client(client)) if client.carrying) {
-            self.become_carrier(token);
-        } else {
-            self.flush_client(token);
+        match self.sources.get(token.0) {
+            Some(Source::Client(client)) if client.carrying => self.become_carrier(token),
+            Some(Source::Client(client)) if client.serving_tools.is_some() => {
+                self.become_tools(token);
+            }
+            _ => self.flush_client(token),
         }
     }
 
@@ -1646,7 +1671,7 @@ impl Daemon {
             | Request::ResizeSplit { .. }
             | Request::OpenHere { .. }
             | Request::SplitTab { .. }) => self.respond_about_workspaces(request, token),
-            Request::CarryQuic => self.carry_quic(token),
+            asked @ (Request::CarryQuic | Request::CarryMcp { .. }) => self.carry(token, &asked),
             Request::AttachBuffer { buffer } => {
                 self.attach_buffer(token, buffer).map(|()| Response::Done)
             }
@@ -1898,6 +1923,16 @@ impl Daemon {
     }
 
     // --- QUIC -------------------------------------------------------------
+
+    /// Answers a request from the client at `token` to turn its connection
+    /// into something else: a carrier of QUIC packets, or a connection an
+    /// agent's tools are served on.
+    fn carry(&mut self, token: Token, request: &Request) -> Result<Response, Error> {
+        match request {
+            &Request::CarryMcp { chat } => self.carry_mcp(token, chat),
+            _ => self.carry_quic(token),
+        }
+    }
 
     /// Answers [`Request::CarryQuic`] from the client at `token`, setting up
     /// the QUIC endpoint if this is the first carrier.

@@ -549,8 +549,11 @@ impl ChatView {
                 .and_then(|index| question.choices.get(index))
                 .map(|choice| Some(choice.id.clone())),
         };
-        if let Some(choice) = picked {
-            settled.actions.push(ChatAction::Answer(choice));
+        if let Some(option) = picked {
+            settled.actions.push(ChatAction::Answer {
+                question: question.id,
+                option,
+            });
         }
     }
 
@@ -794,7 +797,16 @@ impl ChatView {
             }
             Some(Hit::Send) => self.send(settled),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
-            Some(Hit::Choice(id)) => settled.actions.push(ChatAction::Answer(Some(id))),
+            Some(Hit::Choice(id)) => {
+                // The question the button was drawn for, which may have
+                // been answered since.
+                if let Some(question) = &self.node.question {
+                    settled.actions.push(ChatAction::Answer {
+                        question: question.id,
+                        option: Some(id),
+                    });
+                }
+            }
             Some(Hit::Editor) => {
                 let [x, y] = self.in_editor(at);
                 self.selecting = true;
@@ -991,6 +1003,7 @@ mod tests {
             kind,
         };
         node.question = Some(Question {
+            id: 4,
             title: "run ls".into(),
             choices: vec![
                 choice("yes", ChoiceKind::AllowOnce),
@@ -1009,8 +1022,14 @@ mod tests {
         assert_eq!(
             view.settle(&mut fonts).actions,
             [
-                ChatAction::Answer(Some("yes".into())),
-                ChatAction::Answer(Some("no".into())),
+                ChatAction::Answer {
+                    question: 4,
+                    option: Some("yes".into()),
+                },
+                ChatAction::Answer {
+                    question: 4,
+                    option: Some("no".into()),
+                },
             ]
         );
         // Typing went to the answer, not the message.

@@ -463,6 +463,7 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
                 size: clackatoo_protocol::Size::new(60, 10).unwrap(),
                 cwd: None,
                 agent: None,
+                tools: clackatoo_protocol::AgentTools::Ask,
             }),
         )
         .unwrap();
@@ -484,6 +485,69 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
     eventually("the old agent is reaped", || {
         !Path::new(&format!("/proc/{}", agent[0])).exists()
     });
+    drop(runtime);
+    wait(daemon);
+}
+
+#[test]
+fn mcp_serves_a_chats_tools_on_stdio() {
+    use std::io::{BufRead, BufReader, Write};
+
+    use clackatoo_daemon::Client;
+    use clackatoo_protocol::{AgentTools, NewAgent, PaneTerminal};
+
+    let runtime = Runtime::new();
+    // `cat` for the agent, as above: the chat only needs to exist.
+    let daemon = Command::new(BINARY)
+        .arg("daemon")
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("CLACKATOO_AGENT", "cat")
+        .spawn()
+        .unwrap();
+    eventually("the daemon answers", || {
+        clackatoo(runtime.path(), &["list"]).status.success()
+    });
+    let socket = runtime.path().join("clackatoo/daemon.sock");
+    let mut client = Client::connect(&socket).unwrap();
+    let chat = PaneTerminal::Agent(NewAgent {
+        size: clackatoo_protocol::Size::new(60, 10).unwrap(),
+        cwd: None,
+        agent: None,
+        tools: AgentTools::Ask,
+    });
+    client.new_workspace(None, chat).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+
+    let mut mcp = Command::new(BINARY)
+        .args(["mcp", "--chat", &chat.0.to_string()])
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = mcp.stdin.take().unwrap();
+    let mut output = BufReader::new(mcp.stdout.take().unwrap());
+    let mut ask = |message: &str| {
+        writeln!(input, "{message}").unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        line
+    };
+    let started = ask(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+    assert!(started.contains(r#""name":"clackatoo""#), "{started}");
+    let listed =
+        ask(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_panes"}}"#);
+    assert!(listed.contains("pane 1: this chat"), "{listed}");
+    drop(input);
+    assert!(mcp.wait().unwrap().success());
+
+    // A terminal is no chat, and has no tools.
+    let refused = Command::new(BINARY)
+        .args(["mcp", "--chat", "99"])
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
     drop(runtime);
     wait(daemon);
 }

@@ -9,6 +9,7 @@ mod render;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -138,6 +139,20 @@ enum Command {
     /// if it isn't running. `--remote` runs this on the remote machine,
     /// through ssh.
     Bridge(BridgeArgs),
+    /// Serve a chat's tools to its agent, as an MCP server on standard
+    /// input and output. The agent runs this itself.
+    #[command(hide = true)]
+    Mcp(McpArgs),
+}
+
+#[derive(Debug, Args)]
+struct McpArgs {
+    /// The chat whose agent the tools are for.
+    #[arg(long, value_name = "ID")]
+    chat: u32,
+    /// The daemon's socket. Defaults to the one in your runtime directory.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -384,7 +399,29 @@ fn run(command: Command) -> anyhow::Result<()> {
             remote::bridge(&RuntimeDir::for_current_user(), args.replace)?;
             Ok(())
         }
+        Command::Mcp(args) => {
+            let socket =
+                (args.socket).unwrap_or_else(|| RuntimeDir::for_current_user().socket_path());
+            // The raw descriptors: the standard library's stdout holds
+            // bytes back until a newline.
+            let input = std::fs::File::from(io::stdin().as_fd().try_clone_to_owned()?);
+            let output = std::fs::File::from(io::stdout().as_fd().try_clone_to_owned()?);
+            clackatoo_daemon::mcp::relay(&socket, TerminalId(args.chat), input, output)?;
+            Ok(())
+        }
     }
+}
+
+/// The command agents start to reach the tools clackatoo gives them: this
+/// program's `mcp`, unless `$CLACKATOO_AGENT_TOOLS` is `off`.
+fn agent_tools() -> Option<Vec<OsString>> {
+    if std::env::var_os("CLACKATOO_AGENT_TOOLS").is_some_and(|tools| tools == "off") {
+        return None;
+    }
+    let program = std::env::current_exe()
+        .inspect_err(|err| log::warn!("agents get no tools: this program can't be found: {err}"))
+        .ok()?;
+    Some(vec![program.into_os_string(), "mcp".into()])
 }
 
 fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
@@ -419,6 +456,7 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     let runtime = RuntimeDir::for_current_user();
     let mut config = DaemonConfig::from_env();
     config.terminal.scrollback_compaction = args.scrollback_compaction.into();
+    config.mcp = agent_tools();
     // An upgrade runs the next build with the same arguments.
     let rerun: Vec<OsString> = std::env::args_os()
         .skip(1)

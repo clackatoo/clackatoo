@@ -20,10 +20,10 @@ use agent_client_protocol_schema::v1::{
     ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
 };
 use clackatoo_protocol::{
-    ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Location, Node,
-    Outcome, Patch, Question, Setting, SettingChoice, SettingKind, Size, TerminalId, TerminalInfo,
-    TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, Usage, View,
-    ViewUpdate,
+    AgentTools, ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item,
+    Location, Node, Outcome, Patch, Question, Setting, SettingChoice, SettingKind, Size,
+    TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, Turn,
+    TurnEnd, Usage, View, ViewUpdate,
 };
 use serde_json::Value;
 
@@ -51,6 +51,47 @@ const TOOL_TEXT: usize = 32 * 1024;
 /// the start of it.
 const DIFF_TEXT: usize = 256 * 1024;
 
+/// The ID of the chat's own setting for what its agent may do with
+/// clackatoo's tools. It's shown with the agent's settings, and kept
+/// with the values the user gave them, through upgrades, but never sent
+/// to the agent, which has no such setting.
+const TOOLS_SETTING: &str = "clackatoo.tools";
+
+/// The values the tools setting takes: each one's ID, what it's called,
+/// and what it means.
+const TOOLS_VALUES: [(AgentTools, &str, &str, &str); 3] = [
+    (
+        AgentTools::Ask,
+        "ask",
+        "Ask",
+        "Asks before it runs a command or types into a terminal",
+    ),
+    (
+        AgentTools::Allow,
+        "allow",
+        "Allow",
+        "Runs commands in its own terminals without asking",
+    ),
+    (
+        AgentTools::Off,
+        "off",
+        "Off",
+        "None of clackatoo's tools, from the next session on",
+    ),
+];
+
+/// The most questions a chat keeps waiting. Past it, a tool's question is
+/// refused rather than queued.
+pub(crate) const MAX_QUESTIONS: usize = 16;
+
+/// The answers to a question about one of clackatoo's tools: its ID, what
+/// it's called, and what it means.
+const TOOL_CHOICES: [(&str, &str, ChoiceKind); 3] = [
+    ("allow", "Allow", ChoiceKind::AllowOnce),
+    ("always", "Always allow", ChoiceKind::AllowAlways),
+    ("reject", "Reject", ChoiceKind::RejectOnce),
+];
+
 /// What a chat asks the server to do.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Action {
@@ -65,6 +106,9 @@ pub(crate) enum Action {
         request: Value,
         option: Option<String>,
     },
+    /// Let a call to one of clackatoo's tools go ahead, numbered as the
+    /// server numbered it, or refuse it.
+    Permit { call: u64, allow: bool },
     /// Change one of the agent's settings for the chat.
     Set { setting: String, value: String },
     /// Install the chat's agent, as the user agreed to.
@@ -73,19 +117,6 @@ pub(crate) enum Action {
 
 /// The answer to an install offer that installs.
 pub(crate) const INSTALL: &str = "install";
-
-/// What the chat's question is.
-#[derive(Debug)]
-enum Asking {
-    /// The agent's, in the request with this JSON-RPC ID.
-    Agent(Value),
-    /// The daemon's: whether to install the agent, which the chat waits
-    /// for.
-    Install,
-    /// The daemon's: whether to install the agent, which runs another way
-    /// meanwhile, so nothing waits for the answer.
-    Suggest,
-}
 
 /// Files a tool changed on disk itself, as the agent says once it has.
 #[derive(Debug, PartialEq, Eq)]
@@ -142,8 +173,12 @@ pub(crate) struct HostedChat {
     /// A message sent while there's no session, to go once there is.
     queued: Option<String>,
     node: ChatNode,
-    /// What the question waiting for an answer is.
-    asking: Option<Asking>,
+    /// The questions waiting for answers, the first shown: the agent may
+    /// ask about several tools at once, and clackatoo's own tools ask
+    /// too.
+    asking: VecDeque<(Asker, Question)>,
+    /// The number the next question gets.
+    next_question: u64,
     /// The values the user gave settings, by their IDs, which the chat
     /// asks for again whenever its session opens: the agent forgets them
     /// when it stops.
@@ -154,6 +189,22 @@ pub(crate) struct HostedChat {
     /// What each tool of the turn being answered last said it changed in
     /// files, by its ID.
     diffs: Vec<(String, Vec<RawDiff>)>,
+}
+
+/// Who asked a question in a chat, and so gets the answer.
+#[derive(Clone, Debug, PartialEq)]
+enum Asker {
+    /// The agent, in the request with this JSON-RPC ID.
+    Agent(Value),
+    /// One of clackatoo's tools the agent called, by the server's number
+    /// for the call.
+    Tool(u64),
+    /// The daemon: whether to install the agent, which the chat waits
+    /// for.
+    Install,
+    /// The daemon: whether to install the agent, which runs another way
+    /// meanwhile, so nothing waits for the answer.
+    Suggest,
 }
 
 /// The changes made to a chat, numbered, for viewers to catch up with.
@@ -198,8 +249,15 @@ pub(crate) struct ChatSent {
 impl HostedChat {
     /// A chat with `agent`, in `cwd`, not yet with a session: the server
     /// is to get it one. It's named after the agent until the agent names
-    /// the conversation.
-    pub(crate) fn new(id: TerminalId, size: Size, cwd: String, agent: &AgentSpec) -> Self {
+    /// the conversation. Its agent may do what `tools` says with
+    /// clackatoo's tools.
+    pub(crate) fn new(
+        id: TerminalId,
+        size: Size,
+        cwd: String,
+        agent: &AgentSpec,
+        tools: AgentTools,
+    ) -> Self {
         Self {
             id,
             size,
@@ -211,10 +269,12 @@ impl HostedChat {
             queued: None,
             node: ChatNode {
                 agent: agent.title.clone(),
+                settings: vec![tools_setting(tools)],
                 ..ChatNode::default()
             },
-            asking: None,
-            chosen: Vec::new(),
+            asking: VecDeque::new(),
+            next_question: 0,
+            chosen: vec![(TOOLS_SETTING.to_owned(), tools_value(tools).to_owned())],
             starting_mode: agent.starting_mode.clone(),
             journal: Journal::default(),
             diffs: Vec::new(),
@@ -241,7 +301,9 @@ impl HostedChat {
             session: self.session,
             failure,
             turns: self.node.turns.into_iter().map(turn_to_handover).collect(),
+            // The chat's own setting is kept with the values chosen.
             settings: (self.node.settings.into_iter())
+                .filter(|setting| setting.id != TOOLS_SETTING)
                 .map(setting_to_handover)
                 .collect(),
             chosen: self.chosen,
@@ -253,7 +315,7 @@ impl HostedChat {
     /// its name is now.
     pub(crate) fn resume(chat: handover::Chat, agent: &AgentSpec) -> Self {
         let size = Size::new(chat.cols, chat.rows).unwrap_or(Size::new(80, 24).expect("valid"));
-        let mut resumed = Self::new(TerminalId(chat.id), size, chat.cwd, agent);
+        let mut resumed = Self::new(TerminalId(chat.id), size, chat.cwd, agent, AgentTools::Ask);
         resumed.link = Link::Closed;
         resumed.title = chat.title;
         resumed.session = chat.session;
@@ -262,6 +324,7 @@ impl HostedChat {
             .map(setting_from_handover)
             .collect();
         resumed.chosen = chat.chosen;
+        (resumed.node.settings).push(tools_setting(resumed.tools()));
         resumed.starting_mode = None;
         resumed.node.state = chat.failure.map_or(ChatState::Ready, ChatState::Failed);
         resumed
@@ -284,6 +347,31 @@ impl HostedChat {
     /// The agent's name.
     pub(crate) fn agent(&self) -> &str {
         &self.agent
+    }
+
+    /// The size of the pane it's in.
+    pub(crate) fn size(&self) -> Size {
+        self.size
+    }
+
+    /// What its agent may do with clackatoo's tools. A chat from before
+    /// they could be turned off may use them, asking first.
+    pub(crate) fn tools(&self) -> AgentTools {
+        let value =
+            (self.chosen.iter()).find_map(|(id, value)| (id == TOOLS_SETTING).then_some(value));
+        match value.map(String::as_str) {
+            Some("off") => AgentTools::Off,
+            Some("allow") => AgentTools::Allow,
+            _ => AgentTools::Ask,
+        }
+    }
+
+    /// Lets its agent do what `tools` says with clackatoo's tools, from
+    /// now on.
+    fn set_tools(&mut self, tools: AgentTools) {
+        self.chosen.retain(|(id, _)| id != TOOLS_SETTING);
+        (self.chosen).push((TOOLS_SETTING.to_owned(), tools_value(tools).to_owned()));
+        self.set_value(TOOLS_SETTING, tools_value(tools));
     }
 
     /// The agent's session, if it has made one.
@@ -366,34 +454,22 @@ impl HostedChat {
         match action {
             ChatAction::Send(text) => self.send(text, &mut actions),
             ChatAction::Stop => self.stop(&mut actions),
-            ChatAction::Answer(option) => match self.asking.take() {
-                Some(Asking::Agent(request)) => {
-                    self.set_question(None);
-                    actions.push(Action::Answer { request, option });
+            // Only an answer to the question shown counts: one sent twice,
+            // or as the question was taken back, isn't the next one's.
+            ChatAction::Answer { question, option } => {
+                if (self.asking.front()).is_some_and(|(_, asked)| asked.id == question)
+                    && let Some((asker, _)) = self.asking.pop_front()
+                {
+                    self.show_question();
+                    actions.extend(self.answer(asker, option));
                 }
-                Some(Asking::Install) => {
-                    self.set_question(None);
-                    if option.as_deref() == Some(INSTALL) {
-                        self.installing();
-                        actions.push(Action::Install);
-                    } else {
-                        self.failed_to_connect(
-                            "it isn't installed. The next message offers to install it again.",
-                        );
-                    }
+            }
+            // The chat's own: the agent never hears of it.
+            ChatAction::Set { setting, value } if setting == TOOLS_SETTING => {
+                if let Some(&(tools, ..)) = (TOOLS_VALUES.iter()).find(|(_, id, ..)| *id == value) {
+                    self.set_tools(tools);
                 }
-                Some(Asking::Suggest) => {
-                    self.set_question(None);
-                    if option.as_deref() == Some(INSTALL) {
-                        self.set_notice(Some(format!(
-                            "Installing {}'s adapter. The chat carries on meanwhile.",
-                            self.node.agent
-                        )));
-                        actions.push(Action::Install);
-                    }
-                }
-                None => {}
-            },
+            }
             // Only a value the agent offers is kept, and asked for.
             ChatAction::Set { setting, value } => {
                 if self.set_value(&setting, &value) {
@@ -464,24 +540,20 @@ impl HostedChat {
         if !self.answering() {
             return;
         }
-        // A question waiting is answered with none, as the protocol asks.
-        match self.asking.take() {
-            Some(Asking::Agent(request)) => {
-                self.set_question(None);
-                actions.push(Action::Answer {
-                    request,
-                    option: None,
-                });
+        // Questions waiting are answered with none, as the protocol asks.
+        // An offer to install is turned down, and a suggestion to install,
+        // which nothing waits for, stays.
+        for (asker, question) in std::mem::take(&mut self.asking) {
+            match asker {
+                Asker::Suggest => self.asking.push_back((asker, question)),
+                Asker::Install => {
+                    self.link = Link::Closed;
+                    self.set_state(ChatState::Ready);
+                }
+                asker => actions.extend(self.answer(asker, None)),
             }
-            Some(Asking::Install) => {
-                self.set_question(None);
-                self.link = Link::Closed;
-                self.set_state(ChatState::Ready);
-            }
-            // Nothing waits for it.
-            Some(Asking::Suggest) => self.asking = Some(Asking::Suggest),
-            None => {}
         }
+        self.show_question();
         if self.link == Link::Open {
             actions.push(Action::Cancel);
         } else if self.queued.take().is_some() {
@@ -516,6 +588,9 @@ impl HostedChat {
         }
         let mut actions = Vec::new();
         for (setting, value) in self.chosen.clone() {
+            if setting == TOOLS_SETTING {
+                continue;
+            }
             let differs = (self.node.settings.iter())
                 .any(|known| known.id == setting && known.value != value);
             if differs && self.set_value(&setting, &value) {
@@ -545,8 +620,13 @@ impl HostedChat {
     /// The chat's agent isn't installed: asks, in `what`, whether to
     /// install it, and holds any message until it's answered.
     pub(crate) fn offer_install(&mut self, what: &str) {
-        self.asking = Some(Asking::Install);
-        self.set_question(Some(Question {
+        self.ask_to_install(Asker::Install, what);
+    }
+
+    /// Asks `what`, whether to install the chat's agent, for `asker`.
+    fn ask_to_install(&mut self, asker: Asker, what: &str) {
+        let question = Question {
+            id: self.next_question,
             title: clean(what),
             choices: vec![
                 Choice {
@@ -560,12 +640,21 @@ impl HostedChat {
                     kind: ChoiceKind::RejectOnce,
                 },
             ],
-        }));
+        };
+        self.next_question += 1;
+        self.asking.push_back((asker, question));
+        self.show_question();
+    }
+
+    /// Takes back an offer to install the chat's agent, if one is asked.
+    fn withdraw_install(&mut self) {
+        (self.asking).retain(|(asker, _)| !matches!(asker, Asker::Install | Asker::Suggest));
+        self.show_question();
     }
 
     /// Whether the chat is asking whether to install its agent.
     pub(crate) fn offering_install(&self) -> bool {
-        matches!(self.asking, Some(Asking::Install | Asking::Suggest))
+        (self.asking.iter()).any(|(asker, _)| matches!(asker, Asker::Install | Asker::Suggest))
     }
 
     /// Whether the chat's session is open.
@@ -576,34 +665,16 @@ impl HostedChat {
     /// The chat's agent runs, but not from where clackatoo installs it:
     /// suggests, in `what`, installing it there, waiting for nothing.
     pub(crate) fn suggest_install(&mut self, what: &str) {
-        if self.asking.is_some() {
+        if !self.asking.is_empty() {
             return;
         }
-        self.asking = Some(Asking::Suggest);
-        self.set_question(Some(Question {
-            title: clean(what),
-            choices: vec![
-                Choice {
-                    id: INSTALL.to_owned(),
-                    name: "Install".to_owned(),
-                    kind: ChoiceKind::AllowOnce,
-                },
-                Choice {
-                    id: "later".to_owned(),
-                    name: "Not now".to_owned(),
-                    kind: ChoiceKind::RejectOnce,
-                },
-            ],
-        }));
+        self.ask_to_install(Asker::Suggest, what);
     }
 
     /// The chat's agent, which runs another way meanwhile, has been
     /// installed, or couldn't be: why.
     pub(crate) fn installed_meanwhile(&mut self, outcome: &Result<(), String>) {
-        if self.offering_install() {
-            self.asking = None;
-            self.set_question(None);
-        }
+        self.withdraw_install();
         self.set_notice(outcome.as_ref().err().cloned());
     }
 
@@ -617,10 +688,7 @@ impl HostedChat {
     /// The chat's agent has been installed: the server gets it a session
     /// next.
     pub(crate) fn installed(&mut self) {
-        if self.offering_install() {
-            self.asking = None;
-            self.set_question(None);
-        }
+        self.withdraw_install();
         self.link = Link::Opening;
         self.set_notice(None);
     }
@@ -628,10 +696,7 @@ impl HostedChat {
     /// The session couldn't be made or opened, nor the agent installed.
     pub(crate) fn failed_to_connect(&mut self, reason: &str) {
         self.set_notice(None);
-        if self.offering_install() {
-            self.asking = None;
-            self.set_question(None);
-        }
+        self.withdraw_install();
         self.link = Link::Closed;
         if self.queued.take().is_some() {
             self.end_turn(Outcome::Failed(format!(
@@ -690,6 +755,37 @@ impl HostedChat {
         self.set_state(ChatState::Ready);
     }
 
+    /// The option that lets `tool` go ahead once, if the agent asks
+    /// whether it may use one of clackatoo's own tools: those ask the
+    /// user themselves when they must, so the agent's question is answered
+    /// at once, and the user isn't asked twice. Codex asks about every
+    /// MCP tool call, as a call titled `mcp.clackatoo.TOOL`, with the
+    /// server in its input; Claude Code is told not to ask.
+    pub(crate) fn about_own_tools(
+        &self,
+        tool: &ToolCallUpdate,
+        options: &[PermissionOption],
+    ) -> Option<String> {
+        let id = tool.tool_call_id.0.to_string();
+        let title = (self.tool(&id).map(|tool| tool.title.clone()))
+            .or_else(|| tool.fields.title.clone())
+            .unwrap_or_default();
+        let input = tool.fields.raw_input.as_ref();
+        let server = input
+            .and_then(|input| input.get("server").or_else(|| input.get("serverName")))
+            .and_then(Value::as_str);
+        let name = crate::mcp::SERVER_NAME;
+        let ours = server == Some(name)
+            || title.starts_with(&format!("mcp.{name}."))
+            || title.starts_with(&format!("mcp__{name}__"));
+        if !ours || self.tools() == AgentTools::Off {
+            return None;
+        }
+        (options.iter())
+            .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+            .map(|option| option.option_id.0.to_string())
+    }
+
     /// The agent asks whether it may use a tool.
     pub(crate) fn ask(
         &mut self,
@@ -717,11 +813,106 @@ impl HostedChat {
                 },
             })
             .collect();
-        self.asking = Some(Asking::Agent(request));
-        self.set_question(Some(Question {
+        let question = Question {
+            id: self.next_question,
             title: clean(&title),
             choices,
-        }));
+        };
+        self.next_question += 1;
+        self.asking.push_back((Asker::Agent(request), question));
+        self.show_question();
+    }
+
+    /// One of clackatoo's tools asks whether the agent may do `what`, as
+    /// "run `make` in a terminal", for the call the server numbered
+    /// `call`. The answer comes back as [`Action::Permit`]. `whole` is
+    /// what the agent would type, if it's too long for the question: it
+    /// goes in the conversation, in full, for the user to read first.
+    /// Returns whether it was asked: too many questions waiting refuse it.
+    pub(crate) fn ask_for_tool(&mut self, call: u64, what: &str, whole: Option<&str>) -> bool {
+        if self.asking.len() >= MAX_QUESTIONS {
+            return false;
+        }
+        if let Some(whole) = whole {
+            self.set_tool(Tool {
+                id: format!("clackatoo-{call}"),
+                title: "What the agent asks to type, in full".to_owned(),
+                status: ToolStatus::Done,
+                kind: ToolKind::Other,
+                content: vec![ToolContent::Text(format!("```\n{whole}\n```"))],
+                locations: Vec::new(),
+            });
+        }
+        let choices = (TOOL_CHOICES.iter())
+            .map(|&(id, name, kind)| Choice {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                kind,
+            })
+            .collect();
+        // Shown as given: its control characters are already made
+        // visible, and nothing of it may go unseen.
+        let question = Question {
+            id: self.next_question,
+            title: what.to_owned(),
+            choices,
+        };
+        self.next_question += 1;
+        self.asking.push_back((Asker::Tool(call), question));
+        self.show_question();
+        true
+    }
+
+    /// Takes back the question about the tool call `call`, which no longer
+    /// waits for an answer: the agent cancelled it, or went.
+    pub(crate) fn withdraw(&mut self, call: u64) {
+        self.asking.retain(|(asker, _)| *asker != Asker::Tool(call));
+        self.show_question();
+    }
+
+    /// What to do about the answer `option` to `asker`'s question.
+    /// "Always allow" for clackatoo's tools lets the agent run commands in
+    /// its own terminals without asking from then on, until the user
+    /// changes the chat's Tools setting back.
+    fn answer(&mut self, asker: Asker, option: Option<String>) -> Option<Action> {
+        let install = option.as_deref() == Some(INSTALL);
+        match asker {
+            Asker::Agent(request) => Some(Action::Answer { request, option }),
+            Asker::Tool(call) => {
+                let option = option.as_deref();
+                if option == Some("always") {
+                    self.set_tools(AgentTools::Allow);
+                }
+                Some(Action::Permit {
+                    call,
+                    allow: matches!(option, Some("allow" | "always")),
+                })
+            }
+            Asker::Install if install => {
+                self.installing();
+                Some(Action::Install)
+            }
+            Asker::Install => {
+                self.failed_to_connect(
+                    "it isn't installed. The next message offers to install it again.",
+                );
+                None
+            }
+            Asker::Suggest if install => {
+                self.set_notice(Some(format!(
+                    "Installing {}'s adapter. The chat carries on meanwhile.",
+                    self.node.agent
+                )));
+                Some(Action::Install)
+            }
+            Asker::Suggest => None,
+        }
+    }
+
+    /// Shows the first question waiting, if any.
+    fn show_question(&mut self) {
+        let question = self.asking.front().map(|(_, question)| question.clone());
+        self.set_question(question);
     }
 
     /// Takes a change to the session. Returns the files a tool that has
@@ -1050,12 +1241,11 @@ impl HostedChat {
         }
         turn.end = Some(TurnEnd { at: now(), outcome });
         self.patch_turn(index);
-        // The agent's question goes with the turn; an offer to install
-        // stays until it's answered.
-        if matches!(self.asking, Some(Asking::Agent(_))) {
-            self.asking = None;
-            self.set_question(None);
-        }
+        // The agent's questions went with the turn. Those of clackatoo's
+        // tools wait for their calls to be answered or cancelled, and an
+        // offer to install stays until it's answered.
+        (self.asking).retain(|(asker, _)| !matches!(asker, Asker::Agent(_)));
+        self.show_question();
     }
 
     fn push_turn(&mut self, turn: Turn) {
@@ -1095,7 +1285,10 @@ impl HostedChat {
         }
     }
 
-    fn set_settings(&mut self, settings: Vec<Setting>) {
+    /// The agent's settings are `settings`, and the chat's own goes after
+    /// them.
+    fn set_settings(&mut self, mut settings: Vec<Setting>) {
+        settings.push(tools_setting(self.tools()));
         if self.node.settings != settings {
             self.node.settings.clone_from(&settings);
             self.journal.push(ChatPatch::Settings(settings));
@@ -1195,6 +1388,33 @@ fn weight(patch: &ChatPatch) -> usize {
     };
     // What each change takes, whatever's in it.
     size + 32
+}
+
+/// The chat's own setting for what its agent may do with clackatoo's
+/// tools, at `tools`.
+fn tools_setting(tools: AgentTools) -> Setting {
+    Setting {
+        id: TOOLS_SETTING.to_owned(),
+        name: "Tools".to_owned(),
+        kind: SettingKind::Tools,
+        value: tools_value(tools).to_owned(),
+        choices: (TOOLS_VALUES.iter())
+            .map(|&(_, value, name, description)| SettingChoice {
+                value: value.to_owned(),
+                name: name.to_owned(),
+                description: Some(description.to_owned()),
+            })
+            .collect(),
+    }
+}
+
+/// How a chat keeps `tools` among the values the user gave settings.
+fn tools_value(tools: AgentTools) -> &'static str {
+    match tools {
+        AgentTools::Off => "off",
+        AgentTools::Ask => "ask",
+        AgentTools::Allow => "allow",
+    }
 }
 
 /// Now, in milliseconds since the Unix epoch.
@@ -1368,7 +1588,8 @@ fn setting_to_handover(setting: Setting) -> handover::ChatSetting {
             SettingKind::Mode => handover::SettingKind::Mode,
             SettingKind::Model => handover::SettingKind::Model,
             SettingKind::Effort => handover::SettingKind::Effort,
-            SettingKind::Other => handover::SettingKind::Other,
+            // Never handed over: the chat keeps its value with those chosen.
+            SettingKind::Other | SettingKind::Tools => handover::SettingKind::Other,
         },
         value: setting.value,
         choices: (setting.choices.into_iter())
@@ -1541,7 +1762,15 @@ mod tests {
             Size::new(40, 12).unwrap(),
             "/tmp".to_owned(),
             &agent,
+            AgentTools::Ask,
         )
+    }
+
+    /// Answers the question `chat` shows with the choice `option`.
+    fn answer(chat: &mut HostedChat, option: Option<String>) -> Vec<Action> {
+        let shown = chat.node.question.as_ref();
+        let question = shown.map_or(u64::MAX, |question| question.id);
+        chat.act(ChatAction::Answer { question, option })
     }
 
     fn update(chat: &mut HostedChat, json: &str) -> Option<Wrote> {
@@ -1847,7 +2076,7 @@ mod tests {
         assert_eq!(question.title, "run ls");
         assert_eq!(question.choices[1].kind, ChoiceKind::RejectOnce);
         assert_eq!(
-            chat.act(ChatAction::Answer(Some("yes".into()))),
+            answer(&mut chat, Some("yes".into())),
             [Action::Answer {
                 request: Value::from(7),
                 option: Some("yes".into()),
@@ -1855,7 +2084,186 @@ mod tests {
         );
         assert_eq!(chat.node.question, None);
         // Nothing asked: an answer goes nowhere.
-        assert_eq!(chat.act(ChatAction::Answer(None)), []);
+        assert_eq!(answer(&mut chat, None), []);
+    }
+
+    #[test]
+    fn questions_wait_their_turn_and_tools_keep_theirs_past_the_turn() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        let tool: ToolCallUpdate =
+            serde_json::from_str(r#"{"toolCallId":"t","title":"Write a"}"#).unwrap();
+        chat.ask(Value::from(1), &tool, &[]);
+        chat.ask_for_tool(7, "run `make` in a terminal", None);
+        chat.ask_for_tool(8, "run `ls` in a terminal", None);
+        assert_eq!(chat.node.question.as_ref().unwrap().title, "Write a");
+        assert_eq!(
+            answer(&mut chat, Some("x".into())),
+            [Action::Answer {
+                request: Value::from(1),
+                option: Some("x".into()),
+            }]
+        );
+        let question = chat.node.question.clone().unwrap();
+        assert_eq!(question.title, "run `make` in a terminal");
+        assert_eq!(question.choices[1].kind, ChoiceKind::AllowAlways);
+        // A call cancelled takes its question back.
+        chat.withdraw(7);
+        let title = &chat.node.question.as_ref().unwrap().title;
+        assert_eq!(title, "run `ls` in a terminal");
+        // The turn ending leaves it: the call still waits.
+        chat.answered(Ok(StopReason::EndTurn));
+        assert!(chat.node.question.is_some());
+        assert_eq!(chat.tools(), AgentTools::Ask);
+        assert_eq!(
+            answer(&mut chat, Some("always".into())),
+            [Action::Permit {
+                call: 8,
+                allow: true
+            }]
+        );
+        assert_eq!(
+            chat.tools(),
+            AgentTools::Allow,
+            "always allowed from then on"
+        );
+        assert_eq!(chat.node.question, None);
+        // Kept through an upgrade, and never sent to the agent.
+        let agent = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        let mut resumed = HostedChat::resume(chat.hand_over(), &agent);
+        assert_eq!(resumed.tools(), AgentTools::Allow);
+        let opened = Opened {
+            session: String::new(),
+            settings: None,
+        };
+        assert_eq!(resumed.connected(opened), []);
+    }
+
+    #[test]
+    fn codexs_question_about_clackatoos_own_tools_is_answered_at_once() {
+        let mut chat = chat_with("codex");
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"tool_call","toolCallId":"m","title":"mcp.clackatoo.run_in_terminal",
+                "kind":"execute","status":"pending","rawInput":{"server":"clackatoo"}}"#,
+        );
+        let request: RequestPermissionRequest = serde_json::from_str(
+            r#"{"sessionId":"s","toolCall":{"toolCallId":"m","kind":"execute"},
+                "options":[{"optionId":"approved","name":"Allow","kind":"allow_once"},
+                           {"optionId":"cancel","name":"Cancel","kind":"reject_once"}]}"#,
+        )
+        .unwrap();
+        let allowed = chat.about_own_tools(&request.tool_call, &request.options);
+        assert_eq!(allowed.as_deref(), Some("approved"));
+        // Another server's tool, or a command, is the user's to answer.
+        let theirs: RequestPermissionRequest = serde_json::from_str(
+            r#"{"sessionId":"s","toolCall":{"toolCallId":"x","title":"mcp.other.run",
+                "rawInput":{"serverName":"other"}},
+                "options":[{"optionId":"approved","name":"Allow","kind":"allow_once"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            chat.about_own_tools(&theirs.tool_call, &theirs.options),
+            None
+        );
+    }
+
+    #[test]
+    fn an_answer_to_a_question_taken_back_lands_on_no_other() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        chat.ask_for_tool(1, "run `a` in a new terminal", None);
+        chat.ask_for_tool(2, "run `b` in a new terminal", None);
+        let shown = chat.node.question.clone().unwrap();
+        // The call is cancelled as the user answers it.
+        chat.withdraw(1);
+        let stale = ChatAction::Answer {
+            question: shown.id,
+            option: Some("allow".into()),
+        };
+        assert_eq!(chat.act(stale.clone()), []);
+        let next = chat.node.question.clone().unwrap();
+        assert_eq!(next.title, "run `b` in a new terminal");
+        // Answered once, a second press of the same answer does nothing.
+        let once = ChatAction::Answer {
+            question: next.id,
+            option: Some("allow".into()),
+        };
+        assert_eq!(
+            chat.act(once.clone()),
+            [Action::Permit {
+                call: 2,
+                allow: true
+            }]
+        );
+        assert_eq!(chat.act(once), []);
+    }
+
+    #[test]
+    fn the_tools_setting_is_the_chats_own_and_never_the_agents() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        let set = |value: &str| ChatAction::Set {
+            setting: TOOLS_SETTING.into(),
+            value: value.into(),
+        };
+        assert_eq!(chat.act(set("allow")), [], "the agent never hears of it");
+        assert_eq!(chat.tools(), AgentTools::Allow);
+        let shown = (chat.node.settings.iter()).find(|setting| setting.id == TOOLS_SETTING);
+        assert_eq!(shown.map(|setting| setting.value.as_str()), Some("allow"));
+        assert_eq!(chat.act(set("ask")), []);
+        assert_eq!(chat.tools(), AgentTools::Ask);
+        assert_eq!(chat.act(set("everything")), []);
+        assert_eq!(chat.tools(), AgentTools::Ask);
+        // Kept when the agent's settings change.
+        chat.settings_changed(Ok(claude_settings("sonnet")));
+        assert_eq!(chat.node.settings.last().unwrap().id, TOOLS_SETTING);
+    }
+
+    #[test]
+    fn too_many_questions_are_refused_and_long_text_is_shown_whole() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        let whole = "x".repeat(5000);
+        assert!(chat.ask_for_tool(0, "type 5 KB of text into pane 2", Some(&whole)));
+        let card = (chat.node.turns[0].items.iter()).find_map(|item| match item {
+            Item::Tool(tool) => Some(tool.content.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            card,
+            Some(vec![ToolContent::Text(format!("```\n{whole}\n```"))])
+        );
+        for call in 1..MAX_QUESTIONS as u64 {
+            assert!(chat.ask_for_tool(call, "run `x` in a new terminal", None));
+        }
+        assert!(!chat.ask_for_tool(99, "run `y` in a new terminal", None));
+    }
+
+    #[test]
+    fn stopping_refuses_the_tools_questions_too() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        send(&mut chat, "go");
+        chat.ask_for_tool(3, "type `y` into pane 2", None);
+        assert_eq!(
+            chat.act(ChatAction::Stop),
+            [
+                Action::Permit {
+                    call: 3,
+                    allow: false
+                },
+                Action::Cancel
+            ]
+        );
+        assert_eq!(chat.node.question, None);
     }
 
     #[test]
@@ -1958,9 +2366,15 @@ mod tests {
         let modes: Vec<(SettingKind, &str)> = (chat.node.settings.iter())
             .map(|setting| (setting.kind, setting.value.as_str()))
             .collect();
+        // The chat's own setting for clackatoo's tools comes after the
+        // agent's.
         assert_eq!(
             modes,
-            [(SettingKind::Mode, "auto"), (SettingKind::Model, "haiku")]
+            [
+                (SettingKind::Mode, "auto"),
+                (SettingKind::Model, "haiku"),
+                (SettingKind::Tools, "ask")
+            ]
         );
 
         // A choice goes to the agent, and the view shows it at once.
@@ -2187,6 +2601,7 @@ mod tests {
         .unwrap();
         chat.ask(Value::from(1), &request.tool_call, &request.options);
         assert_eq!(chat.node.question.as_ref().unwrap().title, "rm -r build");
+        answer(&mut chat, Some("a".into()));
         // One it hasn't said anything of goes by the question's.
         let request: RequestPermissionRequest = serde_json::from_str(
             r#"{"sessionId":"s","toolCall":{"toolCallId":"u","title":"Write a"},"options":[]}"#,
@@ -2202,10 +2617,7 @@ mod tests {
         chat.offer_install("Codex isn't installed. Install it?");
         assert!(chat.offering_install());
         assert_eq!(send(&mut chat, "hi"), []);
-        assert_eq!(
-            chat.act(ChatAction::Answer(Some(INSTALL.into()))),
-            [Action::Install]
-        );
+        assert_eq!(answer(&mut chat, Some(INSTALL.into())), [Action::Install]);
         assert_eq!(chat.node.question, None);
         assert_eq!(chat.node.notice.as_deref(), Some("Installing Codex…"));
         assert_eq!(chat.node.state, ChatState::Starting);
@@ -2218,7 +2630,7 @@ mod tests {
         let mut chat = chat_with("codex");
         chat.offer_install("Install?");
         send(&mut chat, "hi");
-        assert_eq!(chat.act(ChatAction::Answer(Some("later".into()))), []);
+        assert_eq!(answer(&mut chat, Some("later".into())), []);
         assert!(
             matches!(&chat.node.state, ChatState::Failed(why) if why.contains("isn't installed"))
         );

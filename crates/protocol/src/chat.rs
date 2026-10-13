@@ -57,6 +57,9 @@ pub enum SettingKind {
     Model,
     /// How hard it thinks.
     Effort,
+    /// What the agent may do with clackatoo's own tools: a setting of
+    /// the daemon's, not the agent's.
+    Tools,
     /// Anything else.
     Other,
 }
@@ -257,6 +260,9 @@ pub enum ChatState {
 /// The agent asking whether it may use a tool.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {
+    /// Its number, which an answer gives back, so an answer meant for one
+    /// question never lands on the next.
+    pub id: u64,
     /// What it wants to do, as the agent describes it: "Write notes.txt".
     pub title: String,
     /// The answers it offers.
@@ -347,9 +353,15 @@ pub enum ChatAction {
     Send(String),
     /// Stop the agent answering.
     Stop,
-    /// Answer the agent's question with the choice with this ID, or
-    /// with none.
-    Answer(Option<String>),
+    /// Answer the agent's question numbered `question` with the choice
+    /// with this ID, or with none. An answer to a question no longer
+    /// asked is ignored.
+    Answer {
+        /// The question's number.
+        question: u64,
+        /// The choice's ID.
+        option: Option<String>,
+    },
     /// Change one of the agent's settings for the chat.
     Set {
         /// The setting's ID.

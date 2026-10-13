@@ -82,7 +82,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 46;
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -332,6 +332,17 @@ pub enum Event {
         /// How it went.
         outcome: Result<(), FileOpError>,
     },
+    /// An agent asked to show the client a pane, for a client watching
+    /// the workspaces: draw the eye to it, and for a file, put its cursor
+    /// on `at`. Never a reason to move the client's keyboard focus: an
+    /// agent could have it typing into a terminal it chose. The pane is
+    /// in the workspaces sent before this.
+    Show {
+        /// The pane.
+        pane: PaneId,
+        /// Where in the pane's file to put its cursor.
+        at: Option<FileLocation>,
+    },
 }
 
 /// A message from a client to the daemon that expects an answer.
@@ -529,6 +540,17 @@ pub enum Request {
     /// without answering a `Hello` that came with it. Only a connection to
     /// the daemon's Unix socket can carry QUIC.
     CarryQuic,
+    /// Turns this connection into one an agent's tools are served on,
+    /// for the chat `chat`, which the agent works for: clackatoo as an MCP
+    /// server (the Model Context Protocol), which `clackatoo mcp` relays
+    /// to the agent. Answered with [`Response::Done`], after which each
+    /// way carries MCP's JSON-RPC messages, one per line, not frames. The
+    /// client must wait for the answer before sending any. Only a
+    /// connection to the daemon's Unix socket can carry them.
+    CarryMcp {
+        /// The chat.
+        chat: TerminalId,
+    },
     /// Starts sending the buffer: a snapshot, then each change to it (see
     /// [`BufferUpdate`]). Attaching twice sends a fresh snapshot.
     AttachBuffer {
@@ -642,6 +664,26 @@ pub struct NewAgent {
     /// The agent, by its name: `claude`, `codex`, or one the daemon's
     /// `agents.toml` adds. `None` is the daemon's default, Claude Code.
     pub agent: Option<String>,
+    /// What the agent may do in the workspace through clackatoo's own
+    /// tools.
+    pub tools: AgentTools,
+}
+
+/// What an agent may do through the tools clackatoo gives it, which show
+/// the user things: open files, run commands in terminals beside the
+/// chat, and read them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentTools {
+    /// It gets none.
+    Off,
+    /// It may use them, but asks before it runs a command, types into a
+    /// terminal, or shows what's outside the chat's project.
+    #[default]
+    Ask,
+    /// It runs commands in terminals it started without asking, but still
+    /// asks before it types into one it didn't start, or shows what's
+    /// outside the chat's project.
+    Allow,
 }
 
 /// The daemon's answer to a [`Request`].
@@ -792,6 +834,10 @@ pub enum Error {
     /// No file explorer has this ID. It may have been closed.
     #[error("no file explorer {0}")]
     NoSuchFiles(FilesId),
+    /// The connection can't serve an agent's tools: the chat has none, or
+    /// the connection isn't to the Unix socket.
+    #[error("can't serve an agent's tools: {0}")]
+    NoTools(String),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while

@@ -33,6 +33,7 @@ use agent_client_protocol_schema::v1::{
 use clackatoo_protocol::TerminalId;
 use serde_json::{Value, json};
 
+use crate::mcp;
 use crate::pty::Process;
 use crate::rpc::{Framing, Message, Peer, RpcError};
 
@@ -176,14 +177,22 @@ impl Agent {
     }
 
     /// Asks for a session for the chat in `terminal`, working in `cwd`:
-    /// `session`, which it had before, or else a new one.
-    pub(crate) fn open_session(&mut self, terminal: TerminalId, cwd: &str, session: Option<&str>) {
-        let (method, params) = match session {
-            Some(session) => (
-                "session/resume",
-                json!({ "sessionId": session, "cwd": cwd, "mcpServers": [] }),
-            ),
-            None => ("session/new", json!({ "cwd": cwd, "mcpServers": [] })),
+    /// `session`, which it had before, or else a new one. `tools` is the
+    /// MCP server that gives it clackatoo's tools, if it gets them.
+    pub(crate) fn open_session(
+        &mut self,
+        terminal: TerminalId,
+        cwd: &str,
+        session: Option<&str>,
+        tools: Option<Value>,
+    ) {
+        let mut params = session_params(cwd, tools);
+        let method = match session {
+            Some(session) => {
+                params["sessionId"] = session.into();
+                "session/resume"
+            }
+            None => "session/new",
         };
         self.request(Pending::Session(terminal), method, &params);
     }
@@ -488,6 +497,20 @@ impl Agent {
     pub(crate) fn stop(self) -> Process {
         self.peer.stop()
     }
+}
+
+/// What a session is opened with: its working directory, and clackatoo's
+/// tools, if it gets them. Claude Code is told it may use them without
+/// asking it: those that need the user's say ask in the chat themselves.
+fn session_params(cwd: &str, tools: Option<Value>) -> Value {
+    let allowed = tools
+        .is_some()
+        .then(|| format!("mcp__{}", mcp::SERVER_NAME));
+    let mut params = json!({ "cwd": cwd, "mcpServers": Vec::from_iter(tools) });
+    if let Some(allowed) = allowed {
+        params["_meta"] = json!({ "claudeCode": { "options": { "allowedTools": [allowed] } } });
+    }
+    params
 }
 
 /// The settings an answer gives, if it gives any.

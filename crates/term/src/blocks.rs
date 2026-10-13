@@ -197,6 +197,28 @@ pub enum Which {
     After,
 }
 
+/// How far the shell has got with a block, as [`Terminal::latest_block`]
+/// says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// It's showing the prompt: no command has started.
+    Prompt,
+    /// Its command is running.
+    Running,
+    /// Its command has finished, with its exit status if the shell said.
+    Finished(Option<i32>),
+}
+
+impl Entry {
+    fn progress(&self) -> Progress {
+        match self.phase {
+            Phase::Prompt => Progress::Prompt,
+            Phase::Running => Progress::Running,
+            Phase::Finished => Progress::Finished(self.exit),
+        }
+    }
+}
+
 /// Where a block's marks are in the document.
 #[derive(Clone, Copy, Debug)]
 struct Span {
@@ -206,6 +228,24 @@ struct Span {
 }
 
 impl Terminal {
+    /// The number of the shell's latest block, and how far it has got, or
+    /// `None` if the shell has marked none. Blocks are numbered in order,
+    /// so a later one has a higher number: a command typed at the prompt
+    /// of block `n` runs as block `n`, and the next prompt is `n + 1`.
+    #[must_use]
+    pub fn latest_block(&self) -> Option<(u32, Progress)> {
+        let blocks = self.emulator_blocks();
+        let last = blocks.parts().1.back()?;
+        Some((blocks.last(), last.progress()))
+    }
+
+    /// How far block `block` has got, while it's still known: until no
+    /// row is marked with it.
+    #[must_use]
+    pub fn block_progress(&self, block: u32) -> Option<Progress> {
+        self.block_entry(block).map(Entry::progress)
+    }
+
     /// The block at `line` of the document, or the one before or after it.
     /// None on the alternate screen, which has no blocks.
     #[must_use]
@@ -348,6 +388,31 @@ mod tests {
             Position { line: last, col: 0 },
             true,
         )
+    }
+
+    #[test]
+    fn the_latest_block_says_how_far_its_command_has_got() {
+        let mut t = terminal(20, 10, 100);
+        assert_eq!(t.latest_block(), None, "nothing marked yet");
+        t.advance(PROMPT.as_bytes());
+        let (first, progress) = t.latest_block().unwrap();
+        assert_eq!(progress, Progress::Prompt);
+        // A prompt drawn again is the same block.
+        t.advance(b"\r\n");
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.latest_block(), Some((first, Progress::Prompt)));
+        t.advance(b"sleep 1\r\n\x1b]133;C\x07");
+        assert_eq!(t.latest_block(), Some((first, Progress::Running)));
+        t.advance(b"\x1b]133;D;3\x07");
+        assert_eq!(t.latest_block(), Some((first, Progress::Finished(Some(3)))));
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.latest_block(), Some((first + 1, Progress::Prompt)));
+        assert_eq!(
+            t.block_progress(first),
+            Some(Progress::Finished(Some(3))),
+            "the command's block is still known"
+        );
+        assert_eq!(t.block_progress(first + 2), None);
     }
 
     #[test]

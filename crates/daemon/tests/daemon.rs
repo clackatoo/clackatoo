@@ -13,14 +13,14 @@ use clackatoo_daemon::{
 };
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction, ChatNode,
-    ChatState, ClientMessage, CompletionItem, Construct, Diff, Done, Edit, Error, Event,
-    FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate, Found,
-    FoundBuffer, FoundLine, GitMark, Item, Kind, Location, NewAgent, NewTerminal, OpenFile,
-    OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Query, Request,
-    Response, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span, TerminalId,
-    TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, View, ViewUpdate,
-    Workspaces,
+    AgentTools, Answer, Author, Axis, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction,
+    ChatNode, ChatState, ClientMessage, CompletionItem, Construct, Content, Diff, Done, Edit,
+    Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
+    Found, FoundBuffer, FoundLine, GitMark, Item, Kind, Layout, Location, NewAgent, NewTerminal,
+    OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Query,
+    Request, Response, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span,
+    TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, View,
+    ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -60,12 +60,14 @@ impl TestDaemon {
             home: dir.path().to_owned(),
             shell_integration: None,
             agents: AgentConfig::default(),
+            mcp: None,
             udp_ports: Some(0..=0),
             languages: None,
             servers: None,
             declined: None,
             // Stopped with their last file, unless a test says otherwise.
             server_idle: Duration::ZERO,
+            prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
             rename_gate: None,
             trash: Some(dir.path().join("trash")),
         };
@@ -1408,6 +1410,7 @@ fn new_chat_with(agent: Option<&str>) -> PaneTerminal {
         size: Size::new(40, 10).unwrap(),
         cwd: None,
         agent: agent.map(str::to_owned),
+        tools: AgentTools::Ask,
     })
 }
 
@@ -1458,6 +1461,16 @@ fn last_words(chat: &ChatNode) -> String {
             _ => None,
         })
         .collect()
+}
+
+/// Answers the question `chat` shows with the choice `option`.
+fn answer(client: &mut Client, chat: TerminalId, option: Option<String>) {
+    let view = client.capture(chat).expect("capture");
+    let shown = view.chat().and_then(|node| node.question.as_ref());
+    let question = shown.map_or(u64::MAX, |question| question.id);
+    client
+        .chat(chat, ChatAction::Answer { question, option })
+        .unwrap();
 }
 
 /// Sends `text` to `chat`, and waits for the answer to end.
@@ -1583,7 +1596,7 @@ fn tool_calls_are_kept_and_the_agent_asks_before_using_one() {
     let question = node.question.unwrap();
     assert_eq!(question.title, "Write notes.txt");
     let allow = question.choices[0].id.clone();
-    client.chat(chat, ChatAction::Answer(Some(allow))).unwrap();
+    answer(&mut client, chat, Some(allow));
     let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
     assert_eq!(last_words(&node), "picked allow\n");
     assert_eq!(node.question, None);
@@ -1648,7 +1661,8 @@ fn a_chat_starts_in_auto_mode_and_keeps_the_settings_chosen() {
     let node = wait_for_chat(&mut client, chat, |node| {
         node.settings.iter().any(|setting| setting.value == "auto")
     });
-    assert_eq!(node.settings.len(), 2);
+    // The agent's two, and the chat's own for clackatoo's tools.
+    assert_eq!(node.settings.len(), 3);
     assert_eq!(
         last_words(&ask(&mut client, chat, "settings")),
         "auto haiku\n"
@@ -1756,7 +1770,8 @@ fn a_codex_chat_shows_its_commands_output_and_its_own_settings() {
             "collaboration_mode",
             "model",
             "reasoning_effort",
-            "fast-mode"
+            "fast-mode",
+            "clackatoo.tools"
         ]
     );
     assert_eq!(
@@ -1789,9 +1804,7 @@ fn a_codex_chat_shows_its_commands_output_and_its_own_settings() {
         .unwrap();
     let node = wait_for_chat(&mut client, chat, |node| node.question.is_some());
     assert_eq!(node.question.unwrap().title, "Editing files");
-    client
-        .chat(chat, ChatAction::Answer(Some("allow_once".into())))
-        .unwrap();
+    answer(&mut client, chat, Some("allow_once".into()));
     let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
     assert_eq!(last_words(&node), "picked allow_once\n");
     let Item::Tool(tool) = &node.turns.last().unwrap().items[0] else {
@@ -1973,9 +1986,7 @@ fn a_known_agent_on_path_or_through_npx_runs_and_suggests_its_install_once() {
             .question
             .is_some()
     );
-    client
-        .chat(chat, ChatAction::Answer(Some("later".into())))
-        .unwrap();
+    answer(&mut client, chat, Some("later".into()));
     let node = wait_for_chat(&mut client, chat, |node| node.question.is_none());
     assert_eq!(node.state, ChatState::Ready);
 
@@ -2024,9 +2035,7 @@ fn a_known_agent_not_installed_is_offered_and_one_installed_is_run_from_there() 
         .chat(chat, ChatAction::Send("hi".to_owned()))
         .unwrap();
     // Not now: the chat says how it stands, and the message goes nowhere.
-    client
-        .chat(chat, ChatAction::Answer(Some("later".into())))
-        .unwrap();
+    answer(&mut client, chat, Some("later".into()));
     let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
     assert!(
         matches!(&node.state, ChatState::Failed(why) if why.starts_with("it isn't installed")),
@@ -2165,9 +2174,7 @@ fn a_real_agent_answers_and_asks_before_running_commands() {
     let reject = (question.choices.iter())
         .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::RejectOnce)
         .expect("a way to say no");
-    client
-        .chat(chat, ChatAction::Answer(Some(reject.id.clone())))
-        .unwrap();
+    answer(&mut client, chat, Some(reject.id.clone()));
     wait_for_chat_for(&mut client, chat, minute, |node| {
         last_outcome(node).is_some()
     });
@@ -2537,9 +2544,11 @@ fn a_real_agents_edit_lands_in_the_buffer_open_on_its_file() {
         let allow = (question.choices.iter())
             .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::AllowOnce)
             .expect("a way to say yes");
-        chatter
-            .chat(chat, ChatAction::Answer(Some(allow.id.clone())))
-            .unwrap();
+        let answer = ChatAction::Answer {
+            question: question.id,
+            option: Some(allow.id.clone()),
+        };
+        chatter.chat(chat, answer).unwrap();
         wait_for_chat_for(&mut chatter, chat, minute, |node| node.question.is_none());
     }
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma\n");
@@ -2574,9 +2583,7 @@ fn a_real_codex_is_installed_and_answers_and_shows_its_commands_output() {
     let minute = Duration::from_mins(1);
     let node = wait_for_chat_for(&mut client, chat, minute, |node| node.question.is_some());
     assert!(node.question.unwrap().title.contains("codex-acp@2.2.2"));
-    client
-        .chat(chat, ChatAction::Answer(Some("install".into())))
-        .unwrap();
+    answer(&mut client, chat, Some("install".into()));
     wait_for_chat_for(&mut client, chat, 5 * minute, |node| {
         matches!(node.state, ChatState::Ready | ChatState::Failed(_))
     });
@@ -2610,7 +2617,7 @@ fn a_real_codex_is_installed_and_answers_and_shows_its_commands_output() {
                 break node;
             };
             let yes = question.choices[0].id.clone();
-            client.chat(chat, ChatAction::Answer(Some(yes))).unwrap();
+            answer(client, chat, Some(yes));
         }
     };
 
@@ -2674,7 +2681,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::Clipboard { .. }
             | Event::ClipboardAsked { .. }
             | Event::Files { .. }
-            | Event::FileOp { .. }) => {
+            | Event::FileOp { .. }
+            | Event::Show { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }
@@ -6445,4 +6453,707 @@ fn a_directory_deleted_and_made_again_is_watched_again() {
     }
     std::fs::write(dir.join("new.txt"), "").unwrap();
     assert_eq!(names(&next_listing(&mut client, &dir)), ["new.txt"]);
+}
+
+// --- Agents' tools -------------------------------------------------------
+
+/// A shell for tests that marks its prompts and commands as shell
+/// integration does (OSC 133), so a command's finishing can be seen.
+const MARKING_SHELL: &str = "#!/bin/sh
+while :; do
+  printf '\\033]133;A\\007$ '
+  IFS= read -r line || exit 0
+  url=$(printf '%s' \"$line\" | sed 's/%/%25/g; s/;/%3B/g')
+  printf '\\033]133;C;cmdline_url=%s\\007' \"$url\"
+  eval \"$line\"
+  status=$?
+  printf '\\033]133;D;%s\\007' \"$status\"
+done
+";
+
+impl TestDaemon {
+    /// A daemon whose agents get clackatoo's tools, relayed by the fake
+    /// agent, and whose terminals run a shell that marks its commands.
+    fn with_tools() -> Self {
+        Self::with_tools_and_agent(vec![fake_agent().into()])
+    }
+
+    /// As [`with_tools`](Self::with_tools), with the agent `agent`.
+    fn with_tools_and_agent(agent: Vec<std::ffi::OsString>) -> Self {
+        Self::start_with(|dir, config| {
+            config.agents.custom = vec![custom_agent("claude", agent)];
+            config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+            let shell = dir.join("marking-sh");
+            std::fs::write(&shell, MARKING_SHELL).unwrap();
+            std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            config.shell = shell.into();
+        })
+    }
+}
+
+/// Starts a workspace with a chat whose agent may use its tools as
+/// `tools` says, and waits for it to be ready.
+fn start_tooled_chat(client: &mut Client, tools: AgentTools) -> TerminalId {
+    let chat = PaneTerminal::Agent(NewAgent {
+        size: Size::new(40, 10).unwrap(),
+        cwd: None,
+        agent: None,
+        tools,
+    });
+    let pane = client.new_workspace(None, chat).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let (_, _, pane) = workspaces.find_pane(pane).unwrap();
+    let chat = pane.content.terminal().unwrap();
+    wait_for_chat(client, chat, |node| node.state == ChatState::Ready);
+    chat
+}
+
+/// Sends `text` to `chat`, and waits up to `limit` for the answer to end.
+fn ask_for(client: &mut Client, chat: TerminalId, text: &str, limit: Duration) -> ChatNode {
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    wait_for_chat_for(client, chat, limit, |node| {
+        node.turns.last().is_some_and(|turn| turn.prompt == text) && last_outcome(node).is_some()
+    })
+}
+
+/// The panes of the first workspace's first tab, with what they show.
+fn tab_contents(client: &mut Client) -> Vec<Content> {
+    let workspaces = client.watch_workspaces().unwrap();
+    let panes = workspaces.list[0].tabs[0].layout.panes();
+    panes.iter().map(|pane| pane.content).collect()
+}
+
+#[test]
+fn an_agent_is_given_tools_for_its_own_chat_unless_they_are_off() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let words = last_words(&ask(&mut client, chat, "tools"));
+    let tools: serde_json::Value = serde_json::from_str(&words).unwrap();
+    assert_eq!(tools[0]["name"], "clackatoo");
+    let socket = daemon.socket().display().to_string();
+    assert_eq!(
+        tools[0]["args"],
+        serde_json::json!(["mcp", "--chat", chat.0.to_string(), "--socket", socket])
+    );
+
+    let off = start_tooled_chat(&mut client, AgentTools::Off);
+    assert_eq!(last_words(&ask(&mut client, off, "tools")), "[]\n");
+    // Nor can anything ask to serve them.
+    let refused = mcp_relay(&daemon, off);
+    assert!(refused.contains("has none"), "{refused}");
+}
+
+/// Runs the fake agent's relay for `chat`'s tools, as `clackatoo mcp`,
+/// with nothing to send: what it says on stderr if it can't.
+fn mcp_relay(daemon: &TestDaemon, chat: TerminalId) -> String {
+    let output = std::process::Command::new(fake_agent())
+        .args(["mcp", "--chat", &chat.0.to_string(), "--socket"])
+        .arg(daemon.socket())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn the_tools_speak_mcp_over_the_relays_stdio() {
+    use std::io::BufRead;
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let mut relay = std::process::Command::new(fake_agent())
+        .args(["mcp", "--chat", &chat.0.to_string(), "--socket"])
+        .arg(daemon.socket())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = relay.stdin.take().unwrap();
+    let mut output = std::io::BufReader::new(relay.stdout.take().unwrap());
+    let mut ask = |message: &str| -> serde_json::Value {
+        writeln!(input, "{message}").unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+    let started = ask(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}"#,
+    );
+    assert_eq!(started["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(started["result"]["serverInfo"]["name"], "clackatoo");
+    let tools = ask(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
+    let names: Vec<&str> = (tools["result"]["tools"].as_array().unwrap().iter())
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "open_file",
+            "run_in_terminal",
+            "read_terminal",
+            "wait_for_terminal",
+            "send_to_terminal",
+            "list_panes",
+            "show_pane",
+            "explore",
+            "get_diagnostics"
+        ]
+    );
+    // A notification needs no answer: the next line answers the ping.
+    let pong = ask(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":"p","method":"ping"}"#);
+    assert_eq!(pong["id"], "p");
+    let unknown = ask(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"nope"}}"#);
+    assert_eq!(unknown["error"]["code"], -32602);
+    let listed = ask(
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_panes","arguments":{}}}"#,
+    );
+    assert_eq!(listed["result"]["isError"], false);
+    let text = listed["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("pane 1: this chat"), "{text}");
+    let bad = ask(
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"read_terminal","arguments":{"pane":"x"}}}"#,
+    );
+    assert_eq!(bad["result"]["isError"], true);
+    // Hanging up ends the relay.
+    drop(input);
+    assert!(relay.wait().unwrap().success());
+}
+
+#[test]
+fn a_command_asks_then_runs_in_a_terminal_beside_the_chat() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let prompt = "mcp run_in_terminal {\"command\":\"echo h''i\",\"name\":\"greeting\"}\n\
+                  mcp wait_for_terminal {\"pane\":2}\n\
+                  mcp list_panes";
+    client
+        .chat(chat, ChatAction::Send(prompt.to_owned()))
+        .unwrap();
+    let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let question = asking.question.unwrap();
+    assert_eq!(question.title, "run `echo h''i` in a new terminal");
+    assert_eq!(question.choices.len(), 3);
+    assert_eq!(
+        tab_contents(&mut client).len(),
+        1,
+        "nothing runs before it's allowed"
+    );
+    answer(&mut client, chat, Some("allow".to_owned()));
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    let words = last_words(&node);
+    assert!(
+        words.contains("run_in_terminal: Running `echo h''i` in pane 2"),
+        "{words}"
+    );
+    assert!(
+        words.contains("wait_for_terminal: $ echo h''i\nhi\n[exited with status 0]"),
+        "{words}"
+    );
+    assert!(words.contains("pane 2: terminal \"greeting\""), "{words}");
+    assert_eq!(node.question, None);
+    // Beside the chat, to its right.
+    let workspaces = client.watch_workspaces().unwrap();
+    let Layout::Split { axis, parts, .. } = &workspaces.list[0].tabs[0].layout else {
+        panic!("no split: {workspaces:#?}");
+    };
+    assert_eq!((*axis, parts.len()), (Axis::LeftToRight, 2));
+    let terminal = workspaces.list[0].terminals()[1];
+    wait_for_screen(&mut client, terminal, |text| {
+        text.contains("$ echo h''i\nhi\n$")
+    });
+}
+
+#[test]
+fn refusing_tells_the_agent_and_always_allowing_stops_the_asking() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let run = "mcp run_in_terminal {\"command\":\"true\"}";
+    client.chat(chat, ChatAction::Send(run.to_owned())).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    answer(&mut client, chat, Some("reject".to_owned()));
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    assert!(last_words(&node).contains("run_in_terminal: failed: the user said no"));
+    assert_eq!(tab_contents(&mut client).len(), 1);
+
+    let run = "mcp run_in_terminal {\"command\":\"true\"}\nmcp wait_for_terminal {\"pane\":2}";
+    client.chat(chat, ChatAction::Send(run.to_owned())).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    answer(&mut client, chat, Some("always".to_owned()));
+    wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    // Typing into the terminal then goes ahead without asking.
+    let typed = "mcp send_to_terminal {\"pane\":2,\"text\":\"echo typed\\n\"}\n\
+                 mcp wait_for_terminal {\"pane\":2}";
+    let words = last_words(&ask(&mut client, chat, typed));
+    assert!(
+        words.contains("send_to_terminal: Typed into pane 2."),
+        "{words}"
+    );
+    assert!(
+        words.contains("wait_for_terminal: $ echo typed\ntyped\n[exited with status 0]"),
+        "{words}"
+    );
+}
+
+#[test]
+fn stopping_the_agent_takes_back_the_question_and_refuses_the_call() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let run = "mcp run_in_terminal {\"command\":\"true\"}";
+    client.chat(chat, ChatAction::Send(run.to_owned())).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    client.chat(chat, ChatAction::Stop).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        last_words(node).contains("the user said no")
+    });
+    assert_eq!(node.question, None);
+    assert_eq!(tab_contents(&mut client).len(), 1);
+}
+
+#[test]
+fn a_terminal_is_read_and_waited_for_and_waiting_times_out() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let prompt = "mcp run_in_terminal {\"command\":\"printf 'a\\\\nb\\\\nc\\\\n'; exit_with() { return $1; }; exit_with 3\"}\n\
+                  mcp wait_for_terminal {\"pane\":2}\n\
+                  mcp read_terminal {\"pane\":2,\"lines\":2}\n\
+                  mcp send_to_terminal {\"pane\":2,\"text\":\"sleep 5\\n\"}\n\
+                  mcp wait_for_terminal {\"pane\":2,\"timeout\":0.3}\n\
+                  mcp read_terminal {\"pane\":1}";
+    let node = ask_for(&mut client, chat, prompt, Duration::from_secs(10));
+    let words = last_words(&node);
+    assert!(words.contains("a\nb\nc\n[exited with status 3]"), "{words}");
+    assert!(
+        words.contains("read_terminal: $ printf 'a\\nb\\nc\\n'; exit_with() { return $1; }; exit_with 3\n[1 earlier lines left out]\nb\nc\n[exited with status 3]"),
+        "{words}"
+    );
+    assert!(
+        words.contains(
+            "wait_for_terminal: It hasn't finished yet. So far:\n$ sleep 5\n[still running]"
+        ),
+        "{words}"
+    );
+    assert!(
+        words.contains("read_terminal: failed: pane 1 is a chat"),
+        "{words}"
+    );
+}
+
+#[test]
+fn the_terminal_closing_ends_the_wait() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let prompt = "mcp run_in_terminal {\"command\":\"sleep 1; exit\"}\n\
+                  mcp wait_for_terminal {\"pane\":2,\"timeout\":20}";
+    let node = ask_for(&mut client, chat, prompt, Duration::from_secs(10));
+    assert!(
+        last_words(&node).contains("wait_for_terminal: failed: the terminal closed"),
+        "{node:#?}"
+    );
+}
+
+#[test]
+fn files_open_beside_the_chat_at_a_line_in_one_pane() {
+    let daemon = TestDaemon::with_tools();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let mut watcher = daemon.client();
+    watcher.watch_workspaces().unwrap();
+    let prompt = "mcp open_file {\"path\":\"a.txt\",\"line\":2}";
+    let words = last_words(&ask(&mut client, chat, prompt));
+    assert!(words.contains("in pane 2."), "{words}");
+    let shown = loop {
+        watcher
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        if let Event::Show { pane, at } = watcher.next_event().unwrap() {
+            break (pane, at.map(|at| (at.path, at.line)));
+        }
+    };
+    let a = dir.canonicalize().unwrap().join("a.txt");
+    assert_eq!(shown, (PaneId(2), Some((a.display().to_string(), 1))));
+    let opened = tab_contents(&mut client);
+    assert!(matches!(
+        opened.as_slice(),
+        [Content::Terminal(_), Content::Buffer(_)]
+    ));
+
+    // The next file takes its place; one already showing is shown again.
+    let prompt = "mcp open_file {\"path\":\"b.txt\"}\n\
+                  mcp open_file {\"path\":\"b.txt\",\"line\":1}\n\
+                  mcp open_file {\"path\":\"nowhere.txt\"}\n\
+                  mcp list_panes";
+    let words = last_words(&ask(&mut client, chat, prompt));
+    assert!(
+        words.contains("open_file: failed: there's no file") && words.contains("nowhere.txt"),
+        "{words}"
+    );
+    assert!(words.contains("pane 2: editor, b.txt"), "{words}");
+    let reopened = tab_contents(&mut client);
+    assert_eq!(reopened.len(), 2);
+    assert_ne!(reopened[1], opened[1]);
+}
+
+#[test]
+fn panes_open_in_a_column_and_pointing_one_out_moves_no_focus() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let mut watcher = daemon.client();
+    watcher.watch_workspaces().unwrap();
+    let prompt = "mcp run_in_terminal {\"command\":\"true\"}\n\
+                  mcp explore {}\n\
+                  mcp show_pane {\"pane\":2}\n\
+                  mcp focus_pane {\"pane\":2}";
+    let words = last_words(&ask(&mut client, chat, prompt));
+    assert!(words.contains("explore: Showing the files in"), "{words}");
+    assert!(
+        words.contains("show_pane: Pane 2 is pointed out"),
+        "{words}"
+    );
+    assert!(
+        words.contains("focus_pane: refused: there's no tool"),
+        "{words}"
+    );
+    let workspaces = client.watch_workspaces().unwrap();
+    let tab = &workspaces.list[0].tabs[0];
+    // Where the user's focus was is left alone.
+    let focused_before = tab.focused;
+    assert_ne!(focused_before, PaneId(2));
+    let shown = loop {
+        watcher
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        if let Event::Show { pane, at } = watcher.next_event().unwrap() {
+            break (pane, at);
+        }
+    };
+    assert_eq!(shown, (PaneId(2), None));
+    // The chat on the left; what the agent opened stacked on its right.
+    let Layout::Split { axis, parts, .. } = &tab.layout else {
+        panic!("no split: {tab:#?}");
+    };
+    assert_eq!(*axis, Axis::LeftToRight);
+    assert!(
+        matches!(&parts[1], Layout::Split { axis: Axis::TopToBottom, parts, .. } if parts.len() == 2),
+        "{tab:#?}"
+    );
+}
+
+#[test]
+fn the_tools_reach_only_the_chats_own_workspace() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let other = client
+        .new_workspace(Some("other".to_owned()), new_pane(&["sh"]))
+        .unwrap();
+    let prompt = format!(
+        "mcp read_terminal {{\"pane\":{other}}}\n\
+         mcp send_to_terminal {{\"pane\":{other},\"text\":\"x\"}}\n\
+         mcp read_terminal {{\"pane\":99}}\n\
+         mcp list_panes"
+    );
+    let words = last_words(&ask(&mut client, chat, &prompt));
+    assert!(
+        words.contains(&format!(
+            "read_terminal: failed: pane {other} is in another workspace"
+        )),
+        "{words}"
+    );
+    assert!(words.contains("send_to_terminal: failed: pane"), "{words}");
+    assert!(
+        words.contains("read_terminal: failed: there's no pane 99"),
+        "{words}"
+    );
+    assert!(
+        words.contains("Other workspaces, out of reach: other."),
+        "{words}"
+    );
+}
+
+#[test]
+fn diagnostics_say_when_there_are_none() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let prompt = "mcp get_diagnostics {}\nmcp get_diagnostics {\"path\":\"a.rs\"}";
+    let words = last_words(&ask(&mut client, chat, prompt));
+    assert!(
+        words.contains(
+            "get_diagnostics: No language server says anything is wrong in this chat's project"
+        ),
+        "{words}"
+    );
+    assert!(words.contains("anything is wrong in a.rs."), "{words}");
+}
+
+#[test]
+fn closing_the_chat_refuses_what_its_agent_waits_for() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let run = "mcp run_in_terminal {\"command\":\"true\"}";
+    client.chat(chat, ChatAction::Send(run.to_owned())).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    client.close_terminal(chat).unwrap();
+    // Nothing runs, and the daemon carries on.
+    assert!(client.list_terminals().unwrap().is_empty());
+}
+
+/// A real agent, as `a_real_agent_answers_and_asks_before_running_commands`
+/// runs one, finds clackatoo's tools and runs a command through them, in a
+/// terminal beside the chat, asking first.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_runs_a_command_in_a_terminal_through_its_tools() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::with_tools_and_agent(
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect(),
+    );
+    let mut client = daemon.client();
+    let minute = Duration::from_mins(1);
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let text = "Use the run_in_terminal tool from the clackatoo MCP server to run `echo hi`, \
+                then its wait_for_terminal tool, and reply with what the command printed.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    // Every question is allowed, the tool's among them.
+    let mut asked = Vec::new();
+    let node = loop {
+        let node = wait_for_chat_for(&mut client, chat, minute, |node| {
+            last_outcome(node).is_some() || node.question.is_some()
+        });
+        let Some(question) = &node.question else {
+            break node;
+        };
+        asked.push(question.title.clone());
+        let allow = (question.choices.iter())
+            .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::AllowOnce)
+            .map(|choice| choice.id.clone());
+        answer(&mut client, chat, allow);
+        wait_for_chat_for(&mut client, chat, minute, |now| {
+            now.question != node.question
+        });
+    };
+    assert!(
+        asked
+            .iter()
+            .any(|title| title == "run `echo hi` in a new terminal"),
+        "{asked:?}\n{node:#?}"
+    );
+    assert!(last_words(&node).contains("hi"), "{node:#?}");
+    let workspaces = client.watch_workspaces().unwrap();
+    let terminal = workspaces.list[0].terminals()[1];
+    wait_for_screen(&mut client, terminal, |text| text.contains("$ echo hi\nhi"));
+}
+
+/// As [`start_tooled_chat`], with the chat working in `cwd`.
+fn start_tooled_chat_in(client: &mut Client, tools: AgentTools, cwd: &Path) -> TerminalId {
+    let chat = PaneTerminal::Agent(NewAgent {
+        size: Size::new(40, 10).unwrap(),
+        cwd: Some(cwd.display().to_string()),
+        agent: None,
+        tools,
+    });
+    let pane = client.new_workspace(None, chat).unwrap();
+    let workspaces = client.watch_workspaces().unwrap();
+    let (_, _, pane) = workspaces.find_pane(pane).unwrap();
+    let chat = pane.content.terminal().unwrap();
+    wait_for_chat(client, chat, |node| node.state == ChatState::Ready);
+    chat
+}
+
+/// A daemon whose agents get clackatoo's tools, and whose shell is called
+/// `zsh`, so it's taken to mark its prompts, running `script`, and which
+/// waits `prompt_wait` for its first prompt.
+fn with_integrated_shell(script: &str, prompt_wait: Duration) -> TestDaemon {
+    let script = script.to_owned();
+    TestDaemon::start_with(move |dir, config| {
+        config.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let shell = bin.join("zsh");
+        std::fs::write(&shell, script).unwrap();
+        std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        config.shell = shell.into();
+        // Its scripts aren't there: the shell above ignores them.
+        config.shell_integration = Some(dir.join("integration"));
+        config.prompt_wait = prompt_wait;
+    })
+}
+
+#[test]
+fn a_command_waits_for_a_slow_shells_first_prompt() {
+    // Slower to start than a shell that marks nothing is waited for.
+    let slow = MARKING_SHELL.replacen("while :; do", "sleep 3.5\nwhile :; do", 1);
+    let daemon = with_integrated_shell(&slow, Duration::from_secs(30));
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let prompt = "mcp run_in_terminal {\"command\":\"echo slow\"}\n\
+                  mcp wait_for_terminal {\"pane\":2}";
+    let words = last_words(&ask_for(&mut client, chat, prompt, Duration::from_secs(15)));
+    assert!(
+        words.contains("wait_for_terminal: $ echo slow\nslow\n[exited with status 0]"),
+        "{words}"
+    );
+}
+
+#[test]
+fn a_shell_that_never_prompts_is_reported_and_typed_nothing() {
+    let daemon = with_integrated_shell("#!/bin/sh\nexec sleep 60\n", Duration::from_millis(300));
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let prompt = "mcp run_in_terminal {\"command\":\"echo never\"}\n\
+                  mcp wait_for_terminal {\"pane\":2,\"timeout\":5}";
+    let words = last_words(&ask_for(&mut client, chat, prompt, Duration::from_secs(10)));
+    assert!(
+        words.contains("wait_for_terminal: Pane 2: the shell didn't show a prompt within 0.3 s, so `echo never` wasn't typed"),
+        "{words}"
+    );
+    let terminal = client.watch_workspaces().unwrap().list[0].terminals()[1];
+    let screen = screen_text(&client.capture(terminal).unwrap());
+    assert!(!screen.contains("echo never"), "{screen}");
+}
+
+#[test]
+fn showing_what_is_outside_the_project_asks_and_diagnostics_stay_inside() {
+    let daemon = TestDaemon::with_tools();
+    let dir = daemon.dir.path().to_owned();
+    std::fs::create_dir(dir.join("project")).unwrap();
+    std::fs::write(dir.join("project/in.txt"), "in\n").unwrap();
+    std::fs::write(dir.join("outside.txt"), "out\n").unwrap();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat_in(&mut client, AgentTools::Allow, &dir.join("project"));
+    // Inside, nothing asks, even before the agent's allowed anything.
+    let words = last_words(&ask(
+        &mut client,
+        chat,
+        "mcp open_file {\"path\":\"in.txt\"}",
+    ));
+    assert!(words.contains("open_file: Showing"), "{words}");
+    let prompt = "mcp open_file {\"path\":\"../outside.txt\"}\n\
+                  mcp get_diagnostics {\"path\":\"../outside.txt\"}";
+    client
+        .chat(chat, ChatAction::Send(prompt.to_owned()))
+        .unwrap();
+    let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let title = asking.question.unwrap().title;
+    assert!(
+        title.starts_with("show ") && title.contains("outside.txt, outside this chat's project"),
+        "{title}"
+    );
+    answer(&mut client, chat, Some("reject".to_owned()));
+    let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+    let words = last_words(&node);
+    assert!(
+        words.contains("open_file: failed: the user said no"),
+        "{words}"
+    );
+    assert!(
+        words.contains("get_diagnostics: ")
+            && words.contains("outside.txt is outside this chat's project"),
+        "{words}"
+    );
+}
+
+#[test]
+fn typing_into_the_users_own_terminal_always_asks_and_the_setting_takes_it_back() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let workspaces = client.watch_workspaces().unwrap();
+    let chat_pane = workspaces.pane_showing(chat).unwrap();
+    let theirs = client
+        .split_pane(chat_pane, Side::Below, new_pane(&["sh"]))
+        .unwrap();
+    // Allowed, its own terminal doesn't ask; the user's does.
+    let prompt = format!(
+        "mcp run_in_terminal {{\"command\":\"true\"}}\n\
+         mcp send_to_terminal {{\"pane\":{theirs},\"text\":\"echo x\\n\"}}"
+    );
+    client.chat(chat, ChatAction::Send(prompt)).unwrap();
+    let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let title = asking.question.unwrap().title;
+    assert_eq!(
+        title,
+        format!("type `echo x⏎` into pane {theirs}, a terminal it didn't start")
+    );
+    answer(&mut client, chat, Some("reject".to_owned()));
+    wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
+
+    // Set back to asking, in the chat's settings, it asks again.
+    let set = ChatAction::Set {
+        setting: "clackatoo.tools".to_owned(),
+        value: "ask".to_owned(),
+    };
+    client.chat(chat, set).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        (node.settings.iter())
+            .any(|setting| setting.id == "clackatoo.tools" && setting.value == "ask")
+    });
+    assert_eq!(node.question, None);
+    let run = "mcp run_in_terminal {\"command\":\"true\"}";
+    client.chat(chat, ChatAction::Send(run.to_owned())).unwrap();
+    let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    assert_eq!(
+        asking.question.unwrap().title,
+        "run `true` in a new terminal"
+    );
+    client.chat(chat, ChatAction::Stop).unwrap();
+}
+
+#[test]
+fn an_answer_counts_only_for_the_question_it_was_given_for() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    let prompt = "mcp run_in_terminal {\"command\":\"true\"}\n\
+                  mcp run_in_terminal {\"command\":\"false\"}";
+    client
+        .chat(chat, ChatAction::Send(prompt.to_owned()))
+        .unwrap();
+    let first = wait_for_chat(&mut client, chat, |node| node.question.is_some())
+        .question
+        .unwrap();
+    // "1" pressed twice: the second answer is for the question already
+    // answered, and doesn't land on the next.
+    for _ in 0..2 {
+        let answer = ChatAction::Answer {
+            question: first.id,
+            option: Some("allow".to_owned()),
+        };
+        client.chat(chat, answer).unwrap();
+    }
+    let next = wait_for_chat(&mut client, chat, |node| {
+        node.question
+            .as_ref()
+            .is_some_and(|question| question.id != first.id)
+    });
+    assert_eq!(
+        next.question.unwrap().title,
+        "run `false` in a new terminal"
+    );
+    client.chat(chat, ChatAction::Stop).unwrap();
 }

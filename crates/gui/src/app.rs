@@ -1162,7 +1162,7 @@ impl App {
         let painted = chrome.paint(self.hover);
         let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
         fills.extend(painted.fills);
-        fills.extend(chrome::paint_panes(geometry, &placement, None));
+        fills.extend(chrome::paint_panes(geometry, &placement, None, None));
         let mut texts = painted.texts;
         texts.extend(painted.over_texts);
         if let Some(frame) = &mut self.frame {
@@ -1197,7 +1197,12 @@ impl App {
         let painted = chrome.paint(self.hover);
         let mut fills: Vec<Fill> = self.window_fill(geometry).into_iter().collect();
         fills.extend(painted.fills);
-        fills.extend(chrome::paint_panes(geometry, &placement, Some(shown.pane)));
+        fills.extend(chrome::paint_panes(
+            geometry,
+            &placement,
+            Some(shown.pane),
+            desk.pointed(),
+        ));
         fills.extend(chat_paint.fills);
         let drawings = drawings(desk, self.focused, &placement, &layout_panes, shown.pane);
         let focused = drawings.iter().find(|drawing| drawing.focused);
@@ -2004,6 +2009,13 @@ impl App {
         }
     }
 
+    /// An agent asked to show a pane (see [`Desk::agent_shows`]).
+    fn agent_shows(&mut self, pane: PaneId, at: Option<clackatoo_protocol::FileLocation>) {
+        self.desk.agent_shows(pane, at);
+        self.update_title();
+        self.request_redraw();
+    }
+
     fn handle_session_event(&mut self, event: SessionEvent) {
         match event {
             SessionEvent::Connected {
@@ -2065,6 +2077,9 @@ impl App {
                 self.desk.workspaces_changed(workspaces);
                 self.update_title();
                 self.request_redraw();
+            }
+            SessionEvent::Message(ServerMessage::Event(Event::Show { pane, at })) => {
+                self.agent_shows(pane, at);
             }
             SessionEvent::Message(ServerMessage::Response(response)) => {
                 let redraw = self.desk.answered(response);

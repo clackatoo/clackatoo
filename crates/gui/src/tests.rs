@@ -364,7 +364,7 @@ fn draw_window_shaped(
     let mut fills = vec![chrome::window_fill(&geometry, rounded)];
     fills.extend(painted.fills);
     let focused = placement.panes.get(1).map(|&(id, _)| id);
-    fills.extend(chrome::paint_panes(&geometry, placement, focused));
+    fills.extend(chrome::paint_panes(&geometry, placement, focused, None));
     let mut texts = painted.texts;
     texts.extend(painted.over_texts);
     let mut over = painted.over;
@@ -690,24 +690,19 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
         ],
         state: ChatState::Answering,
         question: question.then(|| Question {
+            id: 0,
             title: "run cargo build --release".into(),
-            choices: vec![
-                Choice {
-                    id: "a".into(),
-                    name: "Allow".into(),
-                    kind: ChoiceKind::AllowOnce,
-                },
-                Choice {
-                    id: "b".into(),
-                    name: "Always allow".into(),
-                    kind: ChoiceKind::AllowAlways,
-                },
-                Choice {
-                    id: "c".into(),
-                    name: "Reject".into(),
-                    kind: ChoiceKind::RejectOnce,
-                },
-            ],
+            choices: [
+                ("a", "Allow", ChoiceKind::AllowOnce),
+                ("b", "Always allow", ChoiceKind::AllowAlways),
+                ("c", "Reject", ChoiceKind::RejectOnce),
+            ]
+            .map(|(id, name, kind)| Choice {
+                id: id.into(),
+                name: name.into(),
+                kind,
+            })
+            .into(),
         }),
         settings: claude_settings(),
         usage: Some(clackatoo_protocol::Usage {
@@ -1721,7 +1716,7 @@ fn the_finder_is_drawn_over_the_panes_with_a_preview() {
     let painted = chrome.paint(Hit::Nothing);
     let mut fills = vec![chrome::window_fill(&geometry, false)];
     fills.extend(painted.fills);
-    fills.extend(chrome::paint_panes(&geometry, &placement, None));
+    fills.extend(chrome::paint_panes(&geometry, &placement, None, None));
     let mut texts = painted.texts;
     texts.extend(painted.over_texts);
     let picture = Picture {

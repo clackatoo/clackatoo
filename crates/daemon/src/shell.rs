@@ -87,9 +87,31 @@ pub(crate) fn integration(shell: &OsStr, dir: &Path, zdotdir: Option<&OsStr>) ->
     }
 }
 
+/// Whether `shell`, started by the daemon with its integration from
+/// `dir`, if the daemon has it, marks its prompts and commands: fish by
+/// itself, bash and zsh by their scripts.
+pub(crate) fn marks(shell: &OsStr, dir: Option<&Path>) -> bool {
+    let name = Path::new(shell).file_name().and_then(OsStr::to_str);
+    match name {
+        Some("fish") => true,
+        Some("bash" | "zsh") => dir.is_some(),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+
+    #[test]
+    fn fish_marks_by_itself_and_bash_and_zsh_with_their_scripts() {
+        let dir = Some(Path::new("/run/shell"));
+        assert!(marks(OsStr::new("/usr/bin/fish"), None));
+        assert!(marks(OsStr::new("/bin/zsh"), dir));
+        assert!(marks(OsStr::new("bash"), dir));
+        assert!(!marks(OsStr::new("/bin/bash"), None));
+        assert!(!marks(OsStr::new("/bin/sh"), dir));
+    }
 
     use super::*;
 

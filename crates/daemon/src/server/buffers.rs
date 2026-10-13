@@ -364,7 +364,7 @@ impl Daemon {
 
     /// Closes `buffer` if no pane shows it and it has no changes to save.
     /// One with changes waits, unseen, to be opened again.
-    fn close_if_unwanted(&mut self, buffer: BufferId) {
+    pub(super) fn close_if_unwanted(&mut self, buffer: BufferId) {
         let unwanted = !self.workspaces.shows(buffer)
             && (self.buffers.get(&buffer)).is_some_and(|slot| !slot.buffer.modified());
         if unwanted && let Some(slot) = self.buffers.remove(&buffer) {

@@ -136,11 +136,16 @@ enum Purpose {
     Workspace,
 }
 
+/// How long a pane an agent points out stays lit.
+const POINTED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// The window's view of the daemon's workspaces.
 #[derive(Debug, Default)]
 pub(crate) struct Desk {
     /// The daemon's workspaces, as last heard.
     workspaces: Workspaces,
+    /// The pane an agent last pointed out, and until when it's lit.
+    pointed: Option<(PaneId, std::time::Instant)>,
     /// What's shown, once connected.
     shown: Option<Shown>,
     /// Panes by the terminal each shows: those of the workspace shown, and
@@ -300,7 +305,9 @@ impl Desk {
     /// them: the window must be drawn again then.
     pub(crate) fn flash_ends(&self) -> Option<std::time::Instant> {
         let panes = self.panes.values().filter_map(Pane::flash_ends);
-        panes.chain(self.editor_flash_ends()).min()
+        let pointed = (self.pointed)
+            .and_then(|(_, until)| (until > std::time::Instant::now()).then_some(until));
+        panes.chain(self.editor_flash_ends()).chain(pointed).min()
     }
 
     /// Takes text copied, for the window to put on the clipboard or the
@@ -389,7 +396,16 @@ impl Desk {
             .tabs
             .iter()
             .enumerate()
-            .map(|(index, tab)| (tab.id, self.tab_name(index, tab), tab.id == shown.tab))
+            .map(|(index, tab)| {
+                let mut name = self.tab_name(index, tab);
+                // A pane an agent pointed out, in a tab not shown.
+                if tab.id != shown.tab
+                    && self.pointed().is_some_and(|pane| tab.layout.contains(pane))
+                {
+                    name.push_str(" ●");
+                }
+                (tab.id, name, tab.id == shown.tab)
+            })
             .collect()
     }
 
@@ -652,6 +668,31 @@ impl Desk {
             tab: tab.id,
             pane,
         });
+    }
+
+    /// An agent asked to show `pane`: it's lit for a moment, or its tab
+    /// is marked if another is shown, and its cursor goes to `at`, in its
+    /// file. Only in the workspace shown, and never moving the focus: an
+    /// agent that could would have the user's next keys typed where it
+    /// chose.
+    pub(crate) fn agent_shows(&mut self, pane: PaneId, at: Option<FileLocation>) {
+        let shown = self.shown.map(|shown| shown.workspace);
+        let Some((workspace, _, _)) = self.workspaces.find_pane(pane) else {
+            return;
+        };
+        if Some(workspace.id) != shown {
+            return;
+        }
+        if let Some(at) = at {
+            self.land_at(pane, at);
+        }
+        self.pointed = Some((pane, std::time::Instant::now() + POINTED_FOR));
+    }
+
+    /// The pane an agent pointed out, while it's lit.
+    pub(crate) fn pointed(&self) -> Option<PaneId> {
+        let (pane, until) = self.pointed?;
+        (std::time::Instant::now() < until).then_some(pane)
     }
 
     /// Switches to `pane`, wherever it is. From a pane in normal mode, it
@@ -1789,6 +1830,7 @@ fn new_pane(kind: Kind, agent: Option<String>, size: Size, options: &Options) ->
             size,
             cwd: None,
             agent: agent.or_else(|| Some(options.agent.clone()).filter(|name| !name.is_empty())),
+            tools: options.agenttools.asked(),
         }),
     }
 }
@@ -2013,6 +2055,49 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn an_agent_points_out_panes_but_never_moves_the_typing() {
+        let mut desk = desk(workspaces(vec![
+            workspace(
+                1,
+                "work",
+                vec![
+                    tab(1, side_by_side(vec![pane(1), pane(2)])),
+                    tab(2, pane(3)),
+                ],
+            ),
+            workspace(2, "play", vec![tab(3, pane(4))]),
+        ]));
+        snapshot(&mut desk, 1);
+        snapshot(&mut desk, 2);
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        // A pane beside: lit, and the typing stays.
+        desk.agent_shows(PaneId(2), None);
+        assert_eq!(desk.pointed(), Some(PaneId(2)));
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        assert!(
+            desk.flash_ends().is_some(),
+            "the window wakes to unlight it"
+        );
+        ctrl_b(&mut desk, "");
+        ctrl(&mut desk, "b");
+        assert!(answer_all(&mut desk).contains(&Request::SendInput {
+            terminal: TerminalId(1),
+            bytes: vec![0x02],
+        }));
+        // In another tab: the tab is marked, and still nothing moves.
+        desk.agent_shows(PaneId(3), None);
+        assert_eq!(shown_pane(&desk), PaneId(1));
+        let names = desk.tab_names();
+        assert!(names[1].1.ends_with(" ●"), "{names:?}");
+        assert!(!names[0].1.ends_with(" ●"));
+        // Never another workspace, or a pane that's gone.
+        desk.agent_shows(PaneId(4), None);
+        desk.agent_shows(PaneId(9), None);
+        assert_eq!(desk.pointed(), Some(PaneId(3)));
+        assert_eq!(shown_pane(&desk), PaneId(1));
     }
 
     #[test]

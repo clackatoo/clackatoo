@@ -12,7 +12,12 @@
 //! | `read PATH` | Reads the file through the daemon, and says `read:` and its text |
 //! | `write PATH`, a line's end, then text | Writes the text to the file through the daemon, in a tool call, and says `wrote` |
 //! | `disk PATH`, a line's end, then text | Writes the text to the file itself, as Claude Code's tools do, then says so as its adapter does: the tool call finished, then what it changed, the file's old and new text, in an update of its own; and `done` |
+//! | `tools` | The MCP servers it was given, as JSON |
+//! | `mcp NAME ARGS`, a line each | Calls each of clackatoo's tools `NAME` with the JSON `ARGS`, in turn, and says what each answered |
 //! | anything else | `echo:` and the message, in two pieces |
+//!
+//! Run as `fake_agent mcp --chat ID --socket PATH`, it relays MCP for a
+//! chat's tools, as `clackatoo mcp` does.
 //!
 //! Each session has a mode (Manual, `default`, or Auto) and a model
 //! (`haiku` or `sonnet`), as Claude Code's adapter offers them, starting
@@ -30,12 +35,26 @@
 //! `--broken`, it says why on stderr and exits before it starts.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let [_, mcp, chat_flag, chat, socket_flag, socket] = args.as_slice()
+        && mcp == "mcp"
+        && chat_flag == "--chat"
+        && socket_flag == "--socket"
+    {
+        let chat = clackatoo_protocol::TerminalId(chat.parse().unwrap());
+        let (input, output) = (std::io::stdin(), std::io::stdout());
+        if let Err(err) = clackatoo_daemon::mcp::relay(socket.as_ref(), chat, input, output) {
+            eprintln!("fake_agent mcp: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let flag = |name: &str| args.iter().any(|arg| arg == name);
     if flag("--broken") {
         eprintln!("npm ERR! notarget No matching version found for left-pad@^9");
@@ -47,6 +66,7 @@ fn main() {
         logged_out: flag("--logged-out"),
         sessions: BTreeMap::new(),
         settings: BTreeMap::new(),
+        tools: BTreeMap::new(),
         waiting: None,
         asked: None,
     };
@@ -68,6 +88,8 @@ struct Fake {
     sessions: BTreeMap<String, String>,
     /// Each session's mode and model.
     settings: BTreeMap<String, (String, String)>,
+    /// The MCP servers each session was given.
+    tools: BTreeMap<String, Value>,
     /// A message waiting to be answered: its request's ID and session.
     waiting: Option<(Value, String)>,
     /// A message waiting on the daemon's answer about a file: its
@@ -188,6 +210,8 @@ impl Fake {
                 let session = format!("s{}", self.sessions.len() + 1);
                 self.sessions
                     .insert(session.clone(), params["cwd"].as_str().unwrap().to_owned());
+                self.tools
+                    .insert(session.clone(), params["mcpServers"].clone());
                 let settings = self.starting_settings();
                 let options = self.options(&settings);
                 self.settings.insert(session.clone(), settings);
@@ -200,6 +224,8 @@ impl Fake {
             Some("session/resume") => {
                 self.sessions
                     .insert(session.clone(), params["cwd"].as_str().unwrap().to_owned());
+                self.tools
+                    .insert(session.clone(), params["mcpServers"].clone());
                 let settings = self.starting_settings();
                 let options = self.options(&settings);
                 self.settings.insert(session, settings);
@@ -410,6 +436,27 @@ impl Fake {
             }
             "wait" => self.waiting = Some((id, session)),
             "exit" => return false,
+            "tools" => {
+                let tools = self.tools.get(&session).cloned().unwrap_or_default();
+                say(&session, &format!("{tools}\n"));
+                done(&id, "end_turn");
+            }
+            calls if calls.starts_with("mcp ") => {
+                let server = self
+                    .tools
+                    .get(&session)
+                    .and_then(|tools| tools.get(0))
+                    .cloned();
+                let calls: Vec<String> = calls.lines().map(str::to_owned).collect();
+                // On a thread of its own, as a call may wait for the user.
+                std::thread::spawn(move || {
+                    match server {
+                        Some(server) => call_tools(&session, &server, &calls),
+                        None => say(&session, "no tools\n"),
+                    }
+                    done(&id, "end_turn");
+                });
+            }
             "settings" => {
                 let (mode, model) = self.settings.get(&session).cloned().unwrap_or_default();
                 say(&session, &format!("{mode} {model}\n"));
@@ -480,4 +527,73 @@ impl Fake {
         }
         false
     }
+}
+
+/// Starts the MCP server `server`, as ACP's `mcpServers` gives it, and
+/// makes each of `calls`, `mcp NAME ARGS`, in turn, saying what it
+/// answered.
+fn call_tools(session: &str, server: &Value, calls: &[String]) {
+    let args: Vec<&str> = (server["args"].as_array().unwrap().iter())
+        .map(|arg| arg.as_str().unwrap())
+        .collect();
+    let mut child = Command::new(server["command"].as_str().unwrap())
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut ask = |id: u64, method: &str, params: Value| -> Option<Value> {
+        let request = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        writeln!(input, "{request}").ok()?;
+        let mut line = String::new();
+        output.read_line(&mut line).ok()?;
+        serde_json::from_str(&line).ok()
+    };
+    let started = ask(
+        0,
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18",
+        "capabilities": {}, "clientInfo": { "name": "fake-agent", "version": "0" } }),
+    );
+    if started.is_none() {
+        say(session, "the tools didn't start\n");
+        drop(input);
+        let _ = child.wait();
+        return;
+    }
+    for (n, call) in calls.iter().enumerate() {
+        let call = call.strip_prefix("mcp ").unwrap_or(call);
+        let (name, arguments) = call.split_once(' ').unwrap_or((call, "{}"));
+        let arguments: Value = serde_json::from_str(arguments).unwrap();
+        let id = n as u64 + 1;
+        let answer = ask(
+            id,
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        );
+        let said = match answer {
+            Some(answer) if answer.get("error").is_some() => {
+                format!(
+                    "refused: {}",
+                    answer["error"]["message"].as_str().unwrap_or_default()
+                )
+            }
+            Some(answer) => {
+                let text = answer["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default();
+                if answer["result"]["isError"] == true {
+                    format!("failed: {text}")
+                } else {
+                    text.to_owned()
+                }
+            }
+            None => "no answer".to_owned(),
+        };
+        say(session, &format!("{name}: {said}\n"));
+    }
+    drop(input);
+    let _ = child.wait();
 }
