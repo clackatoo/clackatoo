@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026.10.3 (2026-10-13)
+
+### Features
+
+- connect to a machine from a picker: the launcher's Connect to…, its recent hosts, and :connect (c4ee555)
+
+### Fixes
+
+- **editor:** a line is plain only if its last character is too, and plain again once it is (b06905c)
+- **release:** scripts/deploy builds only the tag it waited for, never a HEAD moved meanwhile (4247fa3)
+
+### Speed
+
+- **editor:** keep laid-out lines across edits, laying out only from the change (1b21c1b)
+
 ## 2026.10.2 (2026-10-13)
 
 ### Features
