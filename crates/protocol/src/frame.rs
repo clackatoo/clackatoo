@@ -313,6 +313,25 @@ mod tests {
     }
 
     #[test]
+    fn layouts_nested_too_deeply_are_rejected_when_decoding() {
+        // A split holding a split, and so on, a million deep, in 5 MB.
+        // Read as it was, it overflowed the stack, which aborts.
+        let nested = |depth: usize| {
+            let mut payload = [1, 0, 1].repeat(depth);
+            payload.extend([0, 0, 0, 0]);
+            payload.extend([1, 1].repeat(depth));
+            payload
+        };
+        let read = |payload: &[u8]| postcard::from_bytes::<crate::Layout>(payload);
+        assert!(read(&nested(1_000_000)).is_err());
+        // As deep as any real layout is fine, and reading it again still
+        // is: the depth counted was put back.
+        assert!(read(&nested(64)).is_ok());
+        assert!(read(&nested(1000)).is_err());
+        assert!(read(&nested(64)).is_ok());
+    }
+
+    #[test]
     fn hello_stays_variant_zero() {
         // Version negotiation depends on this encoding never changing: it is
         // the same in every protocol version so far.

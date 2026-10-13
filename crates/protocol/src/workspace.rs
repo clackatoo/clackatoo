@@ -96,11 +96,40 @@ pub enum Layout {
         /// Which way the parts are side by side.
         axis: Axis,
         /// The parts, left to right or top to bottom.
+        #[serde(deserialize_with = "nested_parts")]
         parts: Vec<Layout>,
         /// Each part's share of the space: the part gets its share over
         /// their sum. One for each part, and none 0.
         shares: Vec<u32>,
     },
+}
+
+/// How deep splits may be nested in a layout that's read. A layout as
+/// deep has panes too small to see, but reading one any deeper, a split
+/// at a time, could overflow the stack, which aborts.
+const MAX_NESTING: u32 = 256;
+
+std::thread_local! {
+    /// How deep in a layout the one being read on this thread is.
+    static NESTING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Reads a split's parts, one level deeper, refusing past
+/// [`MAX_NESTING`].
+fn nested_parts<'de, D: serde::Deserializer<'de>>(parts: D) -> Result<Vec<Layout>, D::Error> {
+    /// Counts the level back out however reading it ends.
+    struct Level;
+    impl Drop for Level {
+        fn drop(&mut self) {
+            NESTING.set(NESTING.get() - 1);
+        }
+    }
+    if NESTING.get() >= MAX_NESTING {
+        return Err(serde::de::Error::custom("layout nested too deeply"));
+    }
+    NESTING.set(NESTING.get() + 1);
+    let _level = Level;
+    Vec::deserialize(parts)
 }
 
 /// One rectangle of a tab.
