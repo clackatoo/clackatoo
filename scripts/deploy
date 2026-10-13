@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Moves this machine's running daemon onto the release checked out here,
+# but only once that release is published on GitHub, so every other machine
+# can `clackatoo update` to the same build and still reach this daemon.
+# (Clients and daemons must speak the same protocol version.)
+#
+#   scripts/deploy           builds and upgrades, if HEAD's release is out
+#   scripts/deploy --wait    waits for CI to publish it first
+#
+# HEAD must be a release tag (made by scripts/release, and pushed). The
+# build is `cargo build --release` here, and the daemon is upgraded in
+# place with `clackatoo upgrade`, keeping its terminals.
+#
+# CLACKATOO_REPO names another GitHub repository, for tests.
+
+set -euo pipefail
+
+wait=false
+for arg in "$@"; do
+    case "$arg" in
+        --wait) wait=true ;;
+        -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "deploy: no option $arg" >&2; exit 2 ;;
+    esac
+done
+
+die() { echo "deploy: $*" >&2; exit 1; }
+
+repo=${CLACKATOO_REPO:-clackatoo/clackatoo}
+root=$(git rev-parse --show-toplevel) || die "not in a git repository"
+cd "$root"
+
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    die "there are changes not committed: the build wouldn't be the release"
+fi
+tag=$(git describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null) \
+    || die "HEAD isn't a release: run scripts/release and push the tag first"
+command -v gh >/dev/null || die "needs gh, to see whether $tag is published"
+
+# Published means out of draft, with the build every machine fetches.
+published() {
+    gh release view "$tag" --repo "$repo" --json isDraft,assets \
+        --jq 'select(.isDraft | not) | .assets[].name' 2>/dev/null \
+        | grep -qx 'clackatoo-x86_64-linux.gz'
+}
+
+until published; do
+    $wait || die "$tag isn't published on GitHub yet: try again with --wait"
+    echo "deploy: waiting for $tag to be published…"
+    sleep 30
+done
+
+cargo build --release --locked
+target/release/clackatoo upgrade
