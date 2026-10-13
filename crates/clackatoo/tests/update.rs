@@ -57,7 +57,13 @@ fn version_says_the_release_the_commit_and_the_day_it_was_built() {
 }
 
 /// A copy of clackatoo installed in a directory of its own, to update:
-/// a link to the one built, if it can be, since that costs nothing.
+/// a hard link to the one built, in cargo's scratch directory beside it, so
+/// that it can always be linked.
+///
+/// Never a copy: this process would have the copy open for writing, and a
+/// child another test starts meanwhile would inherit it until it runs its
+/// program, and running the copy then fails with "Text file busy"
+/// (ETXTBSY).
 struct Installed {
     dir: tempfile::TempDir,
     runtime: tempfile::TempDir,
@@ -67,11 +73,8 @@ struct Installed {
 
 impl Installed {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let program = dir.path().join("clackatoo");
-        if std::fs::hard_link(BINARY, &program).is_err() {
-            std::fs::copy(BINARY, &program).unwrap();
-        }
+        let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        std::fs::hard_link(BINARY, dir.path().join("clackatoo")).unwrap();
         Self {
             dir,
             // No daemon runs here.

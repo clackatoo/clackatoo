@@ -1438,18 +1438,21 @@ fn a_daemon_that_stops_answering_is_out_of_contact_until_it_answers_again() {
         let _ = notify.send(());
     });
 
+    // Out of contact 5 s after an unanswered ping, but the threads saying
+    // so may wait to run on a loaded machine: the limits are generous.
+    let limit = Duration::from_secs(30);
     cut.store(true, Ordering::Relaxed);
     // Something that wants an answer, without waiting for one.
     let cut_at = Instant::now();
     client.frame_done(TerminalId(1)).unwrap();
-    notified.recv_timeout(Duration::from_secs(10)).unwrap();
+    notified.recv_timeout(limit).unwrap();
     let silent_since = contact.silent_since().expect("out of contact");
     assert!(silent_since >= cut_at);
     // Not before a relay's stall of a few seconds would be over.
     assert!(cut_at.elapsed() >= Duration::from_secs(5));
 
     cut.store(false, Ordering::Relaxed);
-    notified.recv_timeout(Duration::from_secs(10)).unwrap();
+    notified.recv_timeout(limit).unwrap();
     assert_eq!(contact.silent_since(), None);
     client.list_terminals().unwrap();
 }
@@ -7303,27 +7306,37 @@ fn a_directory_deleted_and_made_again_is_watched_again() {
     let expand = || FilesAction::Expand(dir.display().to_string());
     files_action(&mut client, files, expand());
     assert_eq!(names(&next_listing(&mut client, &dir)), ["c.txt"]);
-    // Gone and back at once, its watch gone with it.
+    // Gone and back at once, its watch gone with it. Made again with a file
+    // in it, so a listing of it made again is told from one of it emptied
+    // on the way to going, as `c.txt` goes first.
     std::fs::remove_dir_all(&dir).unwrap();
     std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("d.txt"), "").unwrap();
     loop {
         match next_files_update(&mut client) {
             FilesUpdate::Listed {
                 dir: listed,
                 entries,
                 ..
-            } if listed == dir.display().to_string() && entries.is_empty() => {
+            } if listed == dir.display().to_string()
+                && (entries.iter()).any(|entry| entry.name == "d.txt") =>
+            {
                 break;
             }
             // Listed only once it had gone: expanded again.
-            FilesUpdate::Unlisted { .. } => {
+            FilesUpdate::Unlisted { dir: unlisted, .. }
+                if unlisted == dir.display().to_string() =>
+            {
                 files_action(&mut client, files, expand());
             }
             _ => {}
         }
     }
     std::fs::write(dir.join("new.txt"), "").unwrap();
-    assert_eq!(names(&next_listing(&mut client, &dir)), ["new.txt"]);
+    assert_eq!(
+        names(&next_listing(&mut client, &dir)),
+        ["d.txt", "new.txt"]
+    );
 }
 
 // --- Agents' tools -------------------------------------------------------
@@ -9240,6 +9253,9 @@ fn a_board_pane_shows_the_board_live_and_posts_as_the_user() {
         let (_, _, found) = workspaces.find_pane(pane).unwrap();
         (pane, found.content.board().expect("a board"))
     };
+    // A board's pane asked for before the boards are read is refused, to
+    // ask again; an agent's call waits for them.
+    board_calls(&mut client, chat, &["board_list {}"]);
     let (pane, board) = open(&mut client);
     client.request(&Request::AttachBoard { board }).unwrap();
     let BoardUpdate::Snapshot { summary, entries } = next_board_update(&mut client) else {

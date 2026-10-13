@@ -4,6 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -18,6 +19,9 @@ pub struct StreamRelay {
     client: UnixStream,
     server: UnixStream,
     link: Link,
+    /// Whether it was cut: what was on its way is lost, as it is when ssh
+    /// dies, where an end closing lets it arrive first.
+    cut: Arc<AtomicBool>,
     readers: Vec<JoinHandle<()>>,
 }
 
@@ -34,6 +38,7 @@ impl StreamRelay {
             client: ours,
             server,
             link,
+            cut: Arc::new(AtomicBool::new(false)),
             readers: Vec::new(),
         };
         relay.relay(Direction::Up)?;
@@ -50,8 +55,7 @@ impl StreamRelay {
     /// Cuts the stream both ways, at once, as when ssh dies: each end sees
     /// it close.
     pub fn kill(&self) {
-        let _ = self.client.shutdown(Shutdown::Both);
-        let _ = self.server.shutdown(Shutdown::Both);
+        cut(&self.cut, &self.client, &self.server);
     }
 
     /// Cuts the stream as [`kill`](Self::kill) does, `after` from now, as
@@ -81,6 +85,7 @@ impl StreamRelay {
         Ok(StreamKiller {
             client: self.client.try_clone()?,
             server: self.server.try_clone()?,
+            cut: Arc::clone(&self.cut),
         })
     }
 
@@ -91,18 +96,19 @@ impl StreamRelay {
             Direction::Down => (self.server.try_clone()?, self.client.try_clone()?),
         };
         let link = self.link.clone();
+        let cut = Arc::clone(&self.cut);
         let thread = std::thread::Builder::new()
             .name("netem-stream".into())
             .spawn(move || {
                 // A pipe of its own, so a full stream one way never holds
                 // up the other. An empty segment is the end of the stream.
-                let pipe = Arc::new(Pipe::start(move |_, bytes| {
+                let pipe = Pipe::start(move |_, bytes| {
                     if bytes.is_empty() {
                         let _ = to.shutdown(Shutdown::Write);
                     } else {
                         let _ = to.write_all(bytes);
                     }
-                }));
+                });
                 let mut buffer = vec![0; 64 * 1024];
                 loop {
                     let n = match from.read(&mut buffer) {
@@ -110,13 +116,18 @@ impl StreamRelay {
                         Ok(n) => n,
                     };
                     if n == 0 {
+                        if cut.load(Ordering::SeqCst) {
+                            // Lost with the stream.
+                            return;
+                        }
                         let at = match link.fate(direction, 0, true) {
                             Fate::Deliver(at) => at,
                             Fate::Drop => std::time::Instant::now(),
                         };
                         pipe.send(at, direction, Vec::new());
-                        // Waits for what's still on its way to go.
-                        drop(pipe);
+                        // What's still on its way arrives, and then the
+                        // end, as TCP has it.
+                        pipe.finish();
                         return;
                     }
                     for segment in buffer[..n].chunks(link.segment(direction)) {
@@ -136,14 +147,22 @@ impl StreamRelay {
 pub struct StreamKiller {
     client: UnixStream,
     server: UnixStream,
+    cut: Arc<AtomicBool>,
 }
 
 impl StreamKiller {
     /// Cuts the stream both ways, at once, as when ssh dies.
     pub fn kill(&self) {
-        let _ = self.client.shutdown(Shutdown::Both);
-        let _ = self.server.shutdown(Shutdown::Both);
+        cut(&self.cut, &self.client, &self.server);
     }
+}
+
+/// Cuts a stream relayed between `client` and `server` both ways, noting
+/// in `flag` that it was cut, before either end can see it close.
+fn cut(flag: &AtomicBool, client: &UnixStream, server: &UnixStream) {
+    flag.store(true, Ordering::SeqCst);
+    let _ = client.shutdown(Shutdown::Both);
+    let _ = server.shutdown(Shutdown::Both);
 }
 
 impl Drop for StreamRelay {
@@ -187,6 +206,28 @@ mod tests {
         let mut byte = [0];
         assert_eq!(client.read(&mut byte).unwrap_or(0), 0);
         assert_eq!(far.read(&mut byte).unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn what_is_on_its_way_when_an_end_closes_still_arrives() {
+        let (server, mut far) = UnixStream::pair().unwrap();
+        let link = Link::new(
+            Conditions::both(Impairment {
+                delay: Duration::from_millis(50),
+                ..Impairment::default()
+            }),
+            3,
+        );
+        let (_relay, mut client) = StreamRelay::start(server, link).unwrap();
+        far.write_all(b"last words").unwrap();
+        drop(far);
+        // Failing, rather than waiting for ever, if the end never comes.
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).unwrap();
+        assert_eq!(received, b"last words");
     }
 
     #[test]

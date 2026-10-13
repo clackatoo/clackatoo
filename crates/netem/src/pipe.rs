@@ -9,7 +9,8 @@ use std::time::Instant;
 use crate::link::Direction;
 
 /// Packets waiting for their time, and the thread that lets them go.
-/// Dropping it lets go of what's still waiting.
+/// Dropping it drops what's still waiting, as a network that goes away
+/// loses what was on it; [`finish`](Self::finish) lets it go first.
 #[derive(Debug)]
 pub(crate) struct Pipe {
     shared: Arc<Shared>,
@@ -28,6 +29,8 @@ struct Queue {
     /// Counts packets in, so equal times keep their order.
     count: u64,
     closed: bool,
+    /// The thread ends once nothing is waiting.
+    finishing: bool,
 }
 
 #[derive(Debug)]
@@ -71,7 +74,7 @@ impl Pipe {
                 .spawn(move || {
                     let mut queue = shared.queue.lock().unwrap_or_else(PoisonError::into_inner);
                     loop {
-                        if queue.closed {
+                        if queue.closed || (queue.finishing && queue.waiting.is_empty()) {
                             return;
                         }
                         let now = Instant::now();
@@ -119,6 +122,19 @@ impl Pipe {
             bytes,
         });
         self.shared.changed.notify_one();
+    }
+
+    /// Lets go of everything still waiting, each at its time, then ends.
+    pub(crate) fn finish(mut self) {
+        self.shared
+            .queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .finishing = true;
+        self.shared.changed.notify_one();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 

@@ -93,11 +93,28 @@ impl Drop for Runtime {
 
 /// Writes an executable shell script called `name` into `dir`.
 fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_program(&path, format!("#!/bin/sh\n{body}\n").as_bytes());
     path
+}
+
+/// Writes `contents` to an executable file at `path`, through `sh`, so
+/// this process never has it open for writing. If it did, a child another
+/// test starts meanwhile would inherit the open file until it runs its
+/// program, and running the file then fails with "Text file busy"
+/// (ETXTBSY).
+fn write_program(path: &Path, contents: &[u8]) {
+    use std::io::Write;
+    let mut writer = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = writer.stdin.take().unwrap();
+    stdin.write_all(contents).unwrap();
+    drop(stdin);
+    assert!(writer.wait().unwrap().success());
 }
 
 /// A stand-in for ssh that runs the remote command on this machine, as the
@@ -394,11 +411,12 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
     let terminals = client.list_terminals().unwrap();
     drop(client);
 
-    // Onto a copy at another path, to see that the daemon becomes the
-    // program that asked.
-    let bin = tempfile::tempdir().unwrap();
+    // Onto the build at another path, to see that the daemon becomes the
+    // program that asked. A hard link, in cargo's scratch directory beside
+    // the build so it can be: see `write_program` for why not a copy.
+    let bin = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let next = bin.path().join("clackatoo-next");
-    std::fs::copy(BINARY, &next).unwrap();
+    std::fs::hard_link(BINARY, &next).unwrap();
     let upgraded = Command::new(&next)
         .env("CLACKATOO_BOARDS", "off")
         .arg("upgrade")
@@ -622,8 +640,8 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     // Refused too: a file that isn't a program, and a program that isn't a
     // clackatoo that can take over.
     let bin = tempfile::tempdir().unwrap();
-    let garbage = script(bin.path(), "garbage", "");
-    std::fs::write(&garbage, b"not a program").unwrap();
+    let garbage = bin.path().join("garbage");
+    write_program(&garbage, b"not a program");
     not_upgrading(ask_to_upgrade(runtime.path(), &garbage), "can't be run");
     not_upgrading(
         ask_to_upgrade(runtime.path(), Path::new("/bin/true")),
