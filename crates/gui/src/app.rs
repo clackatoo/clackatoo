@@ -1194,6 +1194,21 @@ impl App {
         self.request_redraw();
     }
 
+    /// Becomes the build `clackatoo update` just put in place of this one,
+    /// with the arguments this window was started with, connecting to the
+    /// daemon it did: one picked from the picker of machines is named.
+    /// Returns only if it couldn't, saying why.
+    fn reopen_as_new_build(&self) -> String {
+        use std::os::unix::process::CommandExt as _;
+        let Some(program) = &self.updates.program else {
+            return "this program can't be found, to open it again".into();
+        };
+        let args = reopen_args(std::env::args_os().skip(1), self.session.host());
+        log::info!("opening the window again as the new build");
+        let err = std::process::Command::new(program).args(args).exec();
+        format!("couldn't open the window again as the new build: {err}")
+    }
+
     /// Opens a new window on the daemon on `host`, as `clackatoo --remote
     /// HOST` does, in a process of its own that outlives this window.
     fn open_window_on(&mut self, host: &str) {
@@ -1388,6 +1403,17 @@ impl App {
                 });
                 self.session.replace_daemon();
             }
+            Notice::OtherDaemon { protocol } if enter && *protocol > PROTOCOL_VERSION => {
+                let Some(program) = self.updates.program.clone() else {
+                    self.notice = Some(Notice::Updating {
+                        failed: Some("this program can't be found, to update it".into()),
+                    });
+                    self.request_redraw();
+                    return;
+                };
+                self.notice = Some(Notice::Updating { failed: None });
+                updates::update(program, self.session.proxy());
+            }
             Notice::Lost { .. } if enter => {
                 self.notice = Some(Notice::Connecting);
                 self.session.reconnect();
@@ -1403,7 +1429,12 @@ impl App {
                 self.session.forget();
                 self.open_picker(Purpose::ThisWindow, Some(why));
             }
-            Notice::OtherDaemon { .. } | Notice::Lost { .. } | Notice::Connecting if escape => {
+            Notice::OtherDaemon { .. }
+            | Notice::Lost { .. }
+            | Notice::Connecting
+            | Notice::Updating { failed: Some(_) }
+                if escape =>
+            {
                 event_loop.exit();
             }
             _ => return,
@@ -2071,6 +2102,10 @@ enum Notice {
     OtherDaemon { protocol: u32 },
     /// Replacing it: upgrading it in place if `upgrading`.
     Replacing { upgrading: bool },
+    /// The daemon is from a newer build: this clackatoo is being updated,
+    /// to open the window again as the new build, or couldn't be, `failed`
+    /// saying why.
+    Updating { failed: Option<String> },
     /// The connection was lost, or never made; try again?
     Lost { reason: String },
     /// Connecting, or trying again.
@@ -2101,8 +2136,10 @@ impl Notice {
                      It speaks protocol {protocol}, and this window speaks \
                      {PROTOCOL_VERSION}."
                 ),
-                "Open a window from the newer build instead.".into(),
-                "  Esc    quit".into(),
+                "Updating this clackatoo to the latest release (`clackatoo update`) opens \
+                 the window again as the new build."
+                    .into(),
+                "  Enter  update, and open the window again\n  Esc    quit".into(),
             ],
             Self::OtherDaemon { protocol } if launch::can_upgrade(*protocol) => vec![
                 format!(
@@ -2132,6 +2169,18 @@ impl Notice {
                 "  Enter  reconnect\n  Esc    quit".into(),
             ],
             Self::Connecting => vec![format!("Connecting to the daemon{on_host}…")],
+            Self::Updating { failed: None } => {
+                vec!["Updating clackatoo to the latest release…".into()]
+            }
+            Self::Updating { failed: Some(why) } => vec![
+                "clackatoo couldn't be updated.".into(),
+                why.clone(),
+                format!(
+                    "The daemon{on_host} may be from a build newer than any release: open a \
+                     window from that build instead."
+                ),
+                "  Esc    quit".into(),
+            ],
             Self::Picking => Vec::new(),
             Self::Ask {
                 question,
@@ -2161,6 +2210,29 @@ impl Notice {
         }
         lines
     }
+}
+
+/// The arguments a window started with `args` opens again with, connected
+/// to the daemon on `host`, if it's on another machine: as it was, but a
+/// window that started as the picker of a machine goes to the one picked.
+fn reopen_args(
+    args: impl Iterator<Item = std::ffi::OsString>,
+    host: Option<&str>,
+) -> Vec<std::ffi::OsString> {
+    let mut kept: Vec<std::ffi::OsString> = Vec::new();
+    let mut picker = false;
+    for arg in args {
+        if arg == "--connect-picker" {
+            picker = true;
+        } else {
+            kept.push(arg);
+        }
+    }
+    if picker && let Some(host) = host {
+        kept.push("--remote".into());
+        kept.push(host.into());
+    }
+    kept
 }
 
 /// `text` in lines of at most `width` characters, each after `indent`. Text
@@ -2540,6 +2612,18 @@ impl App {
                 let news = self.updates.newer_out(version);
                 self.tell_updates(news);
             }
+            SessionEvent::Updated(outcome)
+                if matches!(self.notice, Some(Notice::Updating { failed: None })) =>
+            {
+                // Updated for a newer daemon: this window opens again as the
+                // new build, in this process, connecting where it did.
+                let why = match outcome {
+                    Ok(_) => self.reopen_as_new_build(),
+                    Err(why) => why,
+                };
+                self.notice = Some(Notice::Updating { failed: Some(why) });
+                self.request_redraw();
+            }
             SessionEvent::Updated(outcome) => {
                 let said = match outcome {
                     Ok(said) => {
@@ -2697,6 +2781,49 @@ mod tests {
             .collect();
         assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30, 30]);
         assert_eq!(reconnect_wait(u32::MAX), RECONNECT_AT_MOST);
+    }
+
+    #[test]
+    fn a_window_opens_again_as_it_was_or_on_the_machine_it_picked() {
+        let args = |list: &[&str]| -> Vec<std::ffi::OsString> {
+            list.iter().map(std::ffi::OsString::from).collect()
+        };
+        let remote = args(&["--remote", "desk", "--font-size", "12"]);
+        assert_eq!(
+            reopen_args(remote.clone().into_iter(), Some("desk")),
+            remote
+        );
+        // Opened as the picker, it goes to the machine picked.
+        assert_eq!(
+            reopen_args(
+                args(&["--connect-picker"]).into_iter(),
+                Some("jack@desk:2222")
+            ),
+            args(&["--remote", "jack@desk:2222"])
+        );
+        // With none picked yet, it's the picker again.
+        assert_eq!(
+            reopen_args(args(&["--connect-picker"]).into_iter(), None),
+            args(&[])
+        );
+    }
+
+    #[test]
+    fn a_newer_daemon_offers_to_update_and_one_that_cant_be_says_why() {
+        let newer = Notice::OtherDaemon {
+            protocol: PROTOCOL_VERSION + 1,
+        };
+        let text = newer.lines(Some("desk"), 200).join("\n");
+        assert!(
+            text.contains("Enter  update, and open the window again"),
+            "{text}"
+        );
+        let failed = Notice::Updating {
+            failed: Some("no release is newer than 2026.10.4".into()),
+        };
+        let text = failed.lines(Some("desk"), 200).join("\n");
+        assert!(text.contains("no release is newer"), "{text}");
+        assert!(text.contains("Esc    quit"), "{text}");
     }
 
     #[test]

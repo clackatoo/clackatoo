@@ -149,6 +149,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "Edit folders as text in the explorer with e or :Explore!, and :w to rename, move, copy, make and delete",
     },
+    News {
+        id: "update-for-newer-daemon",
+        date: "2026-10-13",
+        lesson: "remote",
+        what: "A window meeting a newer daemon updates clackatoo with Enter and opens again, connected where it was",
+    },
 ];
 
 impl News {
