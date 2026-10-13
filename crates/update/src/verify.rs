@@ -8,8 +8,13 @@
 //! signature covers every file, and anyone can check by hand:
 //!
 //! ```text
-//! minisign -Vm SHA256SUMS -p release-key.pub && sha256sum -c --ignore-missing SHA256SUMS
+//! minisign -Vm SHA256SUMS -P RWTx1sQF7KMKtpn+w/3hupcC6cdxdWFs4eggGaTWFEXYfB2dFKNXx4/7 \
+//!   && sha256sum -c --ignore-missing SHA256SUMS
 //! ```
+//!
+//! The signature's trusted comment, which the signature covers too, names
+//! the release: `clackatoo v2026.10.0`. So an older release, signed in its
+//! day, can't be passed off as a newer one under the newer one's tag.
 
 use std::io::Read;
 
@@ -19,8 +24,8 @@ use ring::digest::{SHA256, digest};
 use crate::source::{MAX_DOWNLOAD, fetch};
 use crate::{Error, Release, Version};
 
-/// The release key's public half, as minisign writes it. Until the real
-/// one is made, this file says there's none, and updates are refused.
+/// The release key's public half, as minisign writes it: key
+/// B60AA3EC05C4D6F1.
 const RELEASE_KEY: &str = include_str!("../release-key.pub");
 
 /// The environment variable that replaces the release key in tests, as
@@ -75,7 +80,15 @@ pub fn download(release: &Release, key: &PublicKey) -> Result<Vec<u8>, Error> {
     unpack(&packed)
 }
 
-/// Checks `signature` is `key`'s, over `sums`.
+/// What the trusted comment on release `version`'s signature says, as CI
+/// signs it: `clackatoo v2026.10.0`.
+#[must_use]
+pub fn trusted_comment(version: Version) -> String {
+    format!("clackatoo {}", version.tag())
+}
+
+/// Checks `signature` is `key`'s, over `sums`, and that it was made for
+/// release `version`.
 fn check_signature(
     sums: &[u8],
     signature: &[u8],
@@ -88,7 +101,15 @@ fn check_signature(
         .ok_or(Error::BadSignature(version))?;
     // Only prehashed signatures, as minisign has made by default since
     // 0.10.
-    (key.verify(sums, &signature, false)).map_err(|_| Error::BadSignature(version))
+    (key.verify(sums, &signature, false)).map_err(|_| Error::BadSignature(version))?;
+    if signature.trusted_comment() == trusted_comment(version) {
+        Ok(())
+    } else {
+        Err(Error::SignedForAnother {
+            version,
+            comment: signature.trusted_comment().to_owned(),
+        })
+    }
 }
 
 /// Checks `bytes`, the file called `name`, has the SHA-256 `sums` lists
@@ -153,12 +174,17 @@ mod tests {
     }
 
     #[test]
-    fn the_release_key_is_minisigns_or_none() {
-        // Until the real key is made, the file holds none, and updates are
-        // refused, not checked against nothing.
-        match PublicKey::decode(RELEASE_KEY) {
-            Ok(_) => assert!(RELEASE_KEY.starts_with("untrusted comment: ")),
-            Err(_) => assert!(RELEASE_KEY.contains("no release key")),
+    fn this_build_trusts_the_release_key() {
+        assert_eq!(
+            RELEASE_KEY,
+            "untrusted comment: minisign public key B60AA3EC05C4D6F1\n\
+             RWTx1sQF7KMKtpn+w/3hupcC6cdxdWFs4eggGaTWFEXYfB2dFKNXx4/7\n"
+        );
+        let key = PublicKey::decode(RELEASE_KEY).unwrap();
+        // Without the test key's variable, as a release build always is,
+        // the key trusted is this build's own.
+        if std::env::var_os(KEY_VAR).is_none() {
+            assert_eq!(release_key().unwrap(), key);
         }
     }
 }

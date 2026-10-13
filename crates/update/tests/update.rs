@@ -111,6 +111,39 @@ fn a_release_signed_with_another_key_is_refused() {
 }
 
 #[test]
+fn an_old_release_served_under_a_new_tag_is_refused_before_it_runs() {
+    let key = Key::new();
+    let releases = Releases::new();
+    let ran = tempfile::tempdir().unwrap();
+    let marker = ran.path().join("ran");
+    // Release 2026.10.0, signed in its day, served as 2026.10.1: the files
+    // and signature are good, but the signature names 2026.10.0. A
+    // program that notes if it's ever run, to show it isn't.
+    let mut replayed = Fake::new("2026.10.1", &key);
+    replayed.signed_as = Some("2026.10.0");
+    replayed.program = format!(
+        "#!/bin/sh\ntouch {}\necho \"clackatoo 2026.10.1 (fake 2026-10-13)\"\n",
+        marker.display()
+    )
+    .into_bytes();
+    releases.publish(&replayed, true);
+    let (dir, target) = installed("2026.10.0");
+
+    let err = update(&releases.source(), &key.public(), &target).unwrap_err();
+    assert!(
+        matches!(&err, Error::SignedForAnother { comment, .. } if comment == "clackatoo v2026.10.0"),
+        "{err}"
+    );
+    assert!(!marker.exists(), "the download was run");
+    assert_eq!(std::fs::read(&target).unwrap(), program("2026.10.0"));
+    assert_eq!(files_in(dir.path()), ["clackatoo"]);
+    assert_eq!(
+        verify::trusted_comment("2026.10.1".parse().unwrap()),
+        "clackatoo v2026.10.1"
+    );
+}
+
+#[test]
 fn a_signature_that_was_tampered_with_is_refused() {
     let key = Key::new();
     let releases = Releases::new();

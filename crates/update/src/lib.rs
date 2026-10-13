@@ -53,6 +53,11 @@ pub enum Error {
     NoReleaseKey,
     #[error("release {0} isn't signed with the release key, so it wasn't installed")]
     BadSignature(Version),
+    #[error(
+        "release {version}'s signature was made for {comment:?}, not for this release, so it \
+         wasn't installed"
+    )]
+    SignedForAnother { version: Version, comment: String },
     #[error("{0} isn't listed in the release's checksums")]
     NotListed(String),
     #[error("{0} isn't what the release's checksums say, so it wasn't installed")]

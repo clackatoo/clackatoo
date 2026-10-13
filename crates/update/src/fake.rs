@@ -53,14 +53,16 @@ impl Key {
         PublicKey::from_base64(&self.public_base64()).unwrap()
     }
 
-    /// A minisign signature of `bytes`, as the `.minisig` file holds it.
+    /// A minisign signature of `bytes`, as the `.minisig` file holds it,
+    /// with `trusted_comment`, as CI's `minisign -t` gives it.
     ///
     /// # Panics
     ///
     /// If signing fails.
     #[must_use]
-    pub fn sign(&self, bytes: &[u8]) -> String {
-        minisign::sign(Some(&self.pair.pk), &self.pair.sk, bytes, None, None)
+    pub fn sign(&self, bytes: &[u8], trusted_comment: &str) -> String {
+        let pk = Some(&self.pair.pk);
+        minisign::sign(pk, &self.pair.sk, bytes, Some(trusted_comment), None)
             .unwrap()
             .into_string()
     }
@@ -112,6 +114,9 @@ pub struct Fake<'a> {
     pub wrong_sum: bool,
     /// Leaves this machine's build out.
     pub no_build: bool,
+    /// Signs it as this other version's release, as an old release served
+    /// under a new tag would be.
+    pub signed_as: Option<&'a str>,
 }
 
 impl<'a> Fake<'a> {
@@ -124,6 +129,7 @@ impl<'a> Fake<'a> {
             key,
             wrong_sum: false,
             no_build: false,
+            signed_as: None,
         }
     }
 }
@@ -245,7 +251,13 @@ impl Releases {
         );
         std::fs::write(assets.join(&name), &packed).unwrap();
         std::fs::write(assets.join(SUMS), &sums).unwrap();
-        std::fs::write(assets.join(SIGNATURE), fake.key.sign(sums.as_bytes())).unwrap();
+        let signed_as = fake.signed_as.unwrap_or(fake.version);
+        let comment = format!("clackatoo v{signed_as}");
+        std::fs::write(
+            assets.join(SIGNATURE),
+            fake.key.sign(sums.as_bytes(), &comment),
+        )
+        .unwrap();
         let url = |file: &str| format!("{}/assets/{tag}/{file}", self.base);
         let mut listed = vec![SUMS, SIGNATURE];
         if !fake.no_build {
