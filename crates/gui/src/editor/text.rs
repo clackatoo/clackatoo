@@ -10,8 +10,6 @@
 //! With `wrap`, a line too long for the pane is cut into screen rows (see
 //! [`wrap`]), which the Vim engine asks for with [`Lines::screen_rows`].
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -19,7 +17,8 @@ use clackatoo_protocol::BufferId;
 use clackatoo_term::{Row, RowBuilder, Style, Underline};
 use clackatoo_text::{Diagnostic, Rope, Span};
 
-use super::wrap::{self, Wrap};
+use super::kept::{Kept, LineLog};
+use super::wrap::Wrap;
 use crate::colors;
 use crate::motion::{self, Lines, Point, ScreenRow};
 use crate::objects::Object;
@@ -55,8 +54,37 @@ fn cells_of(ch: char, col: usize, tabstop: usize, joins: &mut bool) -> usize {
     width
 }
 
+/// The cells a row needs to hold `text`: at least as many as it fills,
+/// counted roughly, two for any character but a tab or plain ASCII, and
+/// never more than a row can have. Counted by the byte, a piece at a
+/// time, which is quicker than by the character.
+fn room_for(text: &str, tabstop: usize) -> usize {
+    let mut room = 0;
+    for piece in text.as_bytes().chunks(4096) {
+        room += (piece.iter())
+            .map(|&byte| match byte {
+                b'\t' => tabstop,
+                b' '..=b'~' => 1,
+                // A character's bytes after its first.
+                0x80..=0xbf => 0,
+                _ => 2,
+            })
+            .sum::<usize>();
+        if room >= ROW_CELLS {
+            return ROW_CELLS;
+        }
+    }
+    room
+}
+
+/// Whether `bytes` are all plain ASCII, one cell each: no tabs, no
+/// controls.
+fn plain(bytes: &[u8]) -> bool {
+    bytes.iter().all(|byte| (b' '..=b'~').contains(byte))
+}
+
 /// One line, laid out in cells.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Laid {
     /// The line's text, without its line break.
     text: String,
@@ -70,11 +98,11 @@ pub(crate) struct Laid {
 
 /// Where each character of a laid out line starts: its first cell, and
 /// its byte.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Starts {
-    /// As many characters, each one byte and one cell, as plain ASCII is:
-    /// the `n`th starts at cell and byte `n`, so nothing need be kept,
-    /// which matters on a minified file's long lines.
+    /// As many characters, each one byte and one cell, as plain ASCII
+    /// without tabs is: the `n`th starts at cell and byte `n`, so nothing
+    /// need be kept, which matters on a minified file's long lines.
     Plain(usize),
     /// Each one's, in 32 bits: no line is 4 GiB long.
     Table(Vec<(u32, u32)>),
@@ -117,11 +145,13 @@ impl Starts {
         }
     }
 
-    /// Notes that the next character starts at `cell` and `byte`.
-    fn push(&mut self, cell: usize, byte: usize) {
+    /// Notes that the next character, a tab if `tab`, starts at `cell` and
+    /// `byte`. A tab is never plain, even one a cell wide: moved along by
+    /// an edit before it, it can take more.
+    fn push(&mut self, cell: usize, byte: usize, tab: bool) {
         let narrow = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
         match self {
-            Self::Plain(count) if cell == *count && byte == *count => *count += 1,
+            Self::Plain(count) if cell == *count && byte == *count && !tab => *count += 1,
             Self::Plain(count) => {
                 let mut table: Vec<(u32, u32)> =
                     (0..*count).map(|at| (narrow(at), narrow(at))).collect();
@@ -129,6 +159,14 @@ impl Starts {
                 *self = Self::Table(table);
             }
             Self::Table(table) => table.push((narrow(cell), narrow(byte))),
+        }
+    }
+
+    /// Forgets all but the first `count`.
+    fn truncate(&mut self, count: usize) {
+        match self {
+            Self::Plain(kept) => *kept = count.min(*kept),
+            Self::Table(table) => table.truncate(count),
         }
     }
 
@@ -141,55 +179,193 @@ impl Starts {
     }
 }
 
+/// How far a line being laid out has got: into its row while it fits,
+/// then only counted on past it.
+enum Laying {
+    /// Its row being filled, which has room for so many cells.
+    Row(RowBuilder, usize),
+    /// Its row, full, and the cells the line fills so far.
+    Past(Row, usize),
+}
+
+/// Lays out `text` from byte `from`, where a character starts, going on
+/// from `laying`, with `starts` holding where the characters before
+/// start. The character before `from`, if there's one, isn't a joiner.
+/// From byte `plain` on, the text is known to be plain ASCII without tabs,
+/// so once the line is past its row, and as plain as that so far, the rest
+/// needn't be looked at.
+fn lay(
+    text: String,
+    from: usize,
+    plain: usize,
+    tabstop: usize,
+    laying: Laying,
+    mut starts: Starts,
+) -> Laid {
+    let mut joins = false;
+    let (row, mut cells, from) = match laying {
+        Laying::Row(mut builder, room) => {
+            // Where the row's full, if the line goes on past it.
+            let mut over = None;
+            for (offset, ch) in text[from..].char_indices() {
+                let byte = from + offset;
+                let before = builder.filled();
+                let joined = joins;
+                let width = cells_of(ch, before, tabstop, &mut joins);
+                if before + width > room {
+                    // Counted again, past the row.
+                    joins = joined;
+                    over = Some(byte);
+                    break;
+                }
+                if ch == '\t' {
+                    builder.push(&" ".repeat(width), &Style::DEFAULT, true);
+                } else {
+                    push(&mut builder, ch);
+                }
+                if builder.filled() > before {
+                    starts.push(before, byte, ch == '\t');
+                }
+            }
+            let filled = builder.filled();
+            (builder.finish(false), filled, over.unwrap_or(text.len()))
+        }
+        Laying::Past(row, cells) => (row, cells, from),
+    };
+    for (offset, ch) in text[from..].char_indices() {
+        let byte = from + offset;
+        if byte >= plain
+            && !joins
+            && cells == byte
+            && matches!(starts, Starts::Plain(n) if n == byte)
+        {
+            // Plain so far, and from here on: a cell for each byte.
+            starts = Starts::Plain(text.len());
+            cells = text.len();
+            break;
+        }
+        let width = cells_of(ch, cells, tabstop, &mut joins);
+        if width > 0 {
+            starts.push(cells, byte, ch == '\t');
+            cells += width;
+        }
+    }
+    if let Starts::Table(table) = &mut starts
+        && table.capacity() > table.len() + table.len() / 4
+    {
+        table.shrink_to_fit();
+    }
+    Laid {
+        text,
+        row,
+        starts,
+        cells,
+    }
+}
+
 impl Laid {
     /// Lays out `text`, with tabs stopping at multiples of `tabstop`.
     pub(crate) fn new(text: String, tabstop: usize) -> Self {
-        let room = (text.chars())
-            .map(|ch| match ch {
-                '\t' => tabstop,
-                ' '..='~' => 1,
-                _ => 2,
-            })
-            .sum::<usize>()
-            .min(ROW_CELLS);
-        let mut builder = RowBuilder::new(room);
-        let mut starts = Starts::Plain(0);
-        // Past the row's room, the cells the line would fill, counted as
-        // the row would have filled them.
-        let mut past: Option<usize> = None;
-        let mut joins = false;
-        for (byte, ch) in text.char_indices() {
-            let before = past.unwrap_or_else(|| builder.filled());
-            let width = cells_of(ch, before, tabstop, &mut joins);
-            if past.is_none() && before + width > room {
-                past = Some(before);
-            }
-            if let Some(cells) = &mut past {
-                if width > 0 {
-                    starts.push(before, byte);
-                    *cells += width;
-                }
-                continue;
-            }
-            if ch == '\t' {
-                builder.push(&" ".repeat(width), &Style::DEFAULT, true);
-            } else {
-                push(&mut builder, ch);
-            }
-            if builder.filled() > before {
-                starts.push(before, byte);
-            }
+        let room = room_for(&text, tabstop);
+        let plain = text.len();
+        let laying = Laying::Row(RowBuilder::new(room), room);
+        lay(text, 0, plain, tabstop, laying, Starts::Plain(0))
+    }
+
+    /// The line laid out again, its text now its first `from` bytes and
+    /// then `rest`. It's as it was before byte `from`, and in its last
+    /// `tail` bytes, but may have changed between. What's laid out before
+    /// the change is kept: the line is laid out afresh only from the last
+    /// character to start before `from`, as a character after it, an
+    /// accent, may join it. A long line's row is kept if that's past it;
+    /// and a plain line is still one if what changed is, so its rest
+    /// needn't be looked at.
+    ///
+    /// Returns the line, and the cell it's laid out afresh from: before
+    /// it, everything is as it was. `from` must be where a character of
+    /// the text starts, or its end.
+    pub(super) fn again<'r>(
+        mut self,
+        rest: impl Iterator<Item = &'r str>,
+        from: usize,
+        tail: usize,
+        tabstop: usize,
+    ) -> (Self, usize) {
+        // Its text, kept as far as it hasn't changed, which saves copying
+        // all of a long line typed at the end of.
+        let mut text = std::mem::take(&mut self.text);
+        text.truncate(from);
+        rest.for_each(|chunk| text.push_str(chunk));
+        if from == 0 {
+            return (Self::new(text, tabstop), 0);
         }
-        if let Starts::Table(table) = &mut starts {
-            table.shrink_to_fit();
+        let room = room_for(&text, tabstop);
+        // What's before and after the change is as plain as it was.
+        let changed = (text.as_bytes()).get(from..text.len().saturating_sub(tail).max(from));
+        let plain = if self.is_plain() && changed.is_some_and(plain) {
+            0
+        } else {
+            text.len()
+        };
+        // The last character to start before `from`.
+        let Some(index) = self.starts.to_byte(from - 1).checked_sub(1) else {
+            return (Self::new(text, tabstop), 0);
+        };
+        let (cell, byte) = self.starts.get(index).unwrap_or_default();
+        let mut starts = self.starts;
+        if cell < room || room != self.row.width() {
+            // In the row, which can't be built from where it's up to: all
+            // of it again, though the rest of a plain line needn't be.
+            let laying = Laying::Row(RowBuilder::new(room), room);
+            return (lay(text, 0, plain, tabstop, laying, Starts::Plain(0)), cell);
         }
-        let cells = past.unwrap_or_else(|| builder.filled());
-        Self {
-            text,
-            row: builder.finish(false),
-            starts,
-            cells,
-        }
+        starts.truncate(index);
+        let laying = Laying::Past(self.row, cell);
+        (lay(text, byte, plain, tabstop, laying, starts), cell)
+    }
+
+    /// Checks it's laid out as `fresh` is, every cell, start and row.
+    #[cfg(test)]
+    pub(super) fn assert_as(&self, fresh: &Self, context: &str) {
+        assert_eq!(self.text, fresh.text, "{context}");
+        assert_eq!(self.cells, fresh.cells, "{context}: {:?}", self.text);
+        let starts = |laid: &Self| -> Vec<_> {
+            (0..laid.starts.len())
+                .map(|index| laid.starts.get(index))
+                .collect()
+        };
+        assert_eq!(starts(self), starts(fresh), "{context}: {:?}", self.text);
+        assert_eq!(self.is_plain(), fresh.is_plain(), "{context}");
+        assert_eq!(self.row.width(), fresh.row.width(), "{context}");
+        assert_eq!(self.row.text(), fresh.row.text(), "{context}");
+        assert!(self.row.cells() == fresh.row.cells(), "{context}");
+    }
+
+    /// Whether every character is one byte and one cell, as plain ASCII
+    /// without tabs is.
+    pub(crate) fn is_plain(&self) -> bool {
+        matches!(self.starts, Starts::Plain(_))
+    }
+
+    /// How many characters it has apart: not counting those drawn in the
+    /// cell before, such as accents.
+    pub(crate) fn count(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// The `index`th character apart: its first cell, the cell after it,
+    /// and the character.
+    pub(crate) fn piece(&self, index: usize) -> (usize, usize, char) {
+        let (cell, byte) = self.starts.get(index).unwrap_or_default();
+        let next = (self.starts.get(index + 1)).map_or(self.cells, |(next, _)| next);
+        let ch = self.text[byte..].chars().next().unwrap_or(' ');
+        (cell, next, ch)
+    }
+
+    /// Which character apart cell `col` is in: the last to start at or
+    /// before it.
+    pub(crate) fn piece_at(&self, col: usize) -> usize {
+        self.starts.to_cell(col).saturating_sub(1)
     }
 
     pub(crate) fn text(&self) -> &str {
@@ -207,7 +383,7 @@ impl Laid {
     }
 
     /// About how many bytes it takes.
-    fn size(&self) -> usize {
+    pub(super) fn size(&self) -> usize {
         self.text.capacity()
             + self.starts.size()
             + self.row.width() * size_of::<clackatoo_term::Cell>()
@@ -253,12 +429,7 @@ impl Laid {
     /// in order. Characters drawn in the cell before, such as accents,
     /// aren't apart.
     pub(crate) fn pieces(&self) -> impl Iterator<Item = (usize, usize, char)> + '_ {
-        (0..self.starts.len()).map(|index| {
-            let (cell, byte) = self.starts.get(index).unwrap_or_default();
-            let next = (self.starts.get(index + 1)).map_or(self.cells, |(next, _)| next);
-            let ch = self.text[byte..].chars().next().unwrap_or(' ');
-            (cell, next, ch)
-        })
+        (0..self.starts.len()).map(|index| self.piece(index))
     }
 
     /// The byte after the character at `byte`, with any drawn in its cell.
@@ -404,59 +575,6 @@ pub(crate) struct Text<'a> {
     kept: Kept,
 }
 
-/// Lines laid out, and the rows they wrap onto, kept for as long as the
-/// text and how it's laid out stay as they were: motions ask for one line
-/// many times, and every key and frame for the lines in view, which can be
-/// long. A clone shares them.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Kept(Rc<RefCell<KeptLines>>);
-
-#[derive(Debug, Default)]
-struct KeptLines {
-    /// What they're laid out for: the buffer and how many times its text
-    /// has changed, the tab stop, and how lines wrap.
-    key: Option<(BufferId, u64, usize, Option<Wrap>)>,
-    laid: HashMap<u64, Rc<Laid>>,
-    /// Each line's rows, and whether they have room after its end for the
-    /// cursor typing there.
-    rows: HashMap<(u64, bool), Rc<[ScreenRow]>>,
-    /// About how many bytes what's kept of each line takes.
-    sizes: HashMap<u64, usize>,
-    /// And of them all.
-    size: usize,
-}
-
-impl KeptLines {
-    /// Notes that what's kept of line `line` has grown by `bytes`, then
-    /// forgets the lines furthest from it, while there's too much kept.
-    /// Line `line`, the one asked for last, near the view, stays.
-    fn grown(&mut self, line: u64, bytes: usize) {
-        *self.sizes.entry(line).or_default() += bytes;
-        self.size += bytes;
-        while self.size > KEPT_BYTES || self.sizes.len() > KEPT {
-            let furthest = (self.sizes.keys().copied())
-                .filter(|&kept| kept != line)
-                .max_by_key(|&kept| kept.abs_diff(line));
-            let Some(furthest) = furthest else {
-                break;
-            };
-            self.laid.remove(&furthest);
-            self.rows.remove(&(furthest, false));
-            self.rows.remove(&(furthest, true));
-            self.size -= self.sizes.remove(&furthest).unwrap_or(0);
-        }
-    }
-}
-
-/// The most lines a [`Kept`] keeps: more, as when scrolling a long way,
-/// and it forgets those furthest from the last asked for.
-const KEPT: usize = 1024;
-
-/// About the most bytes a [`Kept`] keeps, as it does, for each pane, for as
-/// long as the pane's open. A line that takes more on its own, as a long
-/// minified one can, is kept alone.
-const KEPT_BYTES: usize = 16 << 20;
-
 impl<'a> Text<'a> {
     /// `rope`, with tabs stopping at multiples of `tabstop`.
     pub(crate) fn new(rope: &'a Rope, tabstop: usize) -> Self {
@@ -480,20 +598,17 @@ impl<'a> Text<'a> {
         }
     }
 
-    /// The text, laid out into `kept`, which holds what's been laid out
-    /// before for revision `revision` of `buffer`'s text, laid out the same
-    /// way; or else, is emptied for it.
-    pub(crate) fn keeping(self, kept: &Kept, buffer: BufferId, revision: u64) -> Self {
-        let key = Some((buffer, revision, self.tabstop, self.wrap));
-        {
-            let mut lines = kept.0.borrow_mut();
-            if lines.key != key {
-                *lines = KeptLines {
-                    key,
-                    ..KeptLines::default()
-                };
-            }
-        }
+    /// The text, revision `revision` of `buffer`'s, laid out into `kept`,
+    /// which holds what's been laid out of it before, brought up to date
+    /// through the edits since, as `log` has them.
+    pub(crate) fn keeping(
+        self,
+        kept: &Kept,
+        buffer: BufferId,
+        revision: u64,
+        log: &LineLog,
+    ) -> Self {
+        kept.bring_up_to(buffer, revision, self.tabstop, self.wrap, log);
         Self {
             kept: kept.clone(),
             ..self
@@ -526,14 +641,8 @@ impl<'a> Text<'a> {
         if line >= self.lines() {
             return None;
         }
-        if let Some(laid) = self.kept.0.borrow().laid.get(&line) {
-            return Some(Rc::clone(laid));
-        }
-        let laid = Rc::new(Laid::new(self.line_text(line), self.tabstop));
-        let mut kept = self.kept.0.borrow_mut();
-        kept.laid.insert(line, Rc::clone(&laid));
-        kept.grown(line, laid.size());
-        Some(laid)
+        let bytes = || (self.line_start(line), self.line_end(line));
+        Some(self.kept.laid(line, self.rope, bytes, self.tabstop))
     }
 
     /// The text of line `line`, without its line break.
@@ -683,14 +792,7 @@ impl Lines for Text<'_> {
         };
         let typed_at_end =
             (self.typing).is_some_and(|at| at.line == line && at.col >= laid.cells());
-        if let Some(rows) = self.kept.0.borrow().rows.get(&(line, typed_at_end)) {
-            return Rc::clone(rows);
-        }
-        let rows: Rc<[ScreenRow]> = wrap::rows(&laid, wrap, typed_at_end).into();
-        let mut kept = self.kept.0.borrow_mut();
-        kept.rows.insert((line, typed_at_end), Rc::clone(&rows));
-        kept.grown(line, rows.len() * size_of::<ScreenRow>());
-        rows
+        self.kept.rows(line, &laid, wrap, typed_at_end)
     }
 
     fn last_cell(&self, line: u64) -> usize {
@@ -819,35 +921,6 @@ mod tests {
     }
 
     #[test]
-    fn lines_laid_out_are_kept_until_the_text_or_its_layout_changes() {
-        let rope = Rope::from_str("a long line\nb\n");
-        let kept = Kept::default();
-        let wrap = Some(Wrap {
-            width: 4,
-            linebreak: false,
-            breakindent: false,
-            showbreak: 0,
-        });
-        let text = |revision, wrap| {
-            Text::new(&rope, 4)
-                .wrapping(wrap, None)
-                .keeping(&kept, BufferId(1), revision)
-        };
-        let first = text(1, wrap);
-        let (laid, rows) = (first.laid(0).unwrap(), first.screen_rows(0));
-        drop(first);
-        // Another frame, the same text: the same layout, not done again.
-        let again = text(1, wrap);
-        assert!(Rc::ptr_eq(&laid, &again.laid(0).unwrap()));
-        assert!(Rc::ptr_eq(&rows, &again.screen_rows(0)));
-        drop(again);
-        // The text changed, or the wrapping: done again.
-        assert!(!Rc::ptr_eq(&laid, &text(2, wrap).laid(0).unwrap()));
-        let laid = text(2, wrap).laid(0).unwrap();
-        assert!(!Rc::ptr_eq(&laid, &text(2, None).laid(0).unwrap()));
-    }
-
-    #[test]
     fn a_line_longer_than_a_row_holds_is_laid_out_whole() {
         let laid = Laid::new(format!("{}字\tb", "a".repeat(70_000)), 4);
         assert_eq!(laid.cells(), 70_000 + 2 + 2 + 1);
@@ -861,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_lines_keep_no_starts_and_what_is_kept_has_a_budget() {
+    fn plain_lines_keep_no_starts() {
         // Plain ASCII needs no table of where characters start.
         let plain = Laid::new("ab c~".to_owned(), 4);
         assert!(matches!(plain.starts, Starts::Plain(5)));
@@ -872,18 +945,7 @@ mod tests {
         let mixed = Laid::new("a\tb字".to_owned(), 4);
         assert!(matches!(mixed.starts, Starts::Table(_)));
         assert_eq!(mixed.col_before(5), Some(4));
-        // Lines of 70,000 é, each well over a megabyte laid out: those
-        // furthest from the last asked for go, within the budget.
-        let rope = Rope::from_str(&format!("{}\n", "é".repeat(70_000)).repeat(20));
-        let kept = Kept::default();
-        let text = Text::new(&rope, 4).keeping(&kept, BufferId(1), 1);
-        for line in 0..20 {
-            text.laid(line);
-        }
-        let lines = kept.0.borrow();
-        assert!(lines.size <= KEPT_BYTES, "{} bytes", lines.size);
-        assert!(lines.laid.contains_key(&19), "the last asked for");
-        assert!(lines.laid.contains_key(&18));
-        assert!(!lines.laid.contains_key(&0), "the furthest from it");
+        // A tab is never plain, even one a cell wide.
+        assert!(!Laid::new("abc\td".to_owned(), 4).is_plain());
     }
 }

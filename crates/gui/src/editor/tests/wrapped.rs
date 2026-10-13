@@ -5,7 +5,7 @@ use clackatoo_protocol::{BufferUpdate, Diagnostic, Severity, Size};
 use clackatoo_term::Underline;
 
 use super::{Answer, Setup};
-use crate::motion::RowAt;
+use crate::motion::{Point, RowAt};
 use crate::render::HighlightKind;
 
 /// The rows drawn, as text.
@@ -559,6 +559,65 @@ fn gk_goes_onto_a_tab_that_spans_rows_and_gj_past_it() {
     assert_eq!(setup.cursor(), (1, 0));
 }
 
+#[test]
+fn what_is_laid_out_follows_edits_undos_and_redos_as_laid_out_afresh() {
+    use crate::editor::text::Laid;
+    use crate::editor::wrap;
+    use crate::motion::Lines;
+
+    // Lines with tabs, wide characters and accents, edited in the middle,
+    // split, joined, deleted, put back, undone and redone.
+    let line = "\tsome words 字字 and é\u{301} more, then-some;";
+    let mut setup = sized(&format!("{line}\n{line}{line}\nshort\n{line}\n"), 24, 12);
+    let keys = [
+        "jfdix<Esc>",
+        "a\t字<Esc>",
+        "i<CR><Esc>",
+        "kJ",
+        "u",
+        "<C-r>",
+        "dd",
+        "p",
+        "u",
+        "u",
+        "fwcwchanged<Esc>",
+        "o\tnew 字 line<Esc>",
+        "kddkP",
+        "5x",
+        "u",
+        "ggA tail<Esc>",
+        "3J",
+        "u",
+        "<C-r>",
+    ];
+    for keys in keys {
+        setup.keys(keys);
+        setup.editor.settle(&setup.copy);
+        let wrapping = setup.editor.wrapping.at(setup.editor.text_width().max(1));
+        let text = setup.editor.text(&setup.copy);
+        for at in 0..text.lines() {
+            let laid = text.laid(at).unwrap();
+            let fresh = Laid::new(text.line_text(at), setup.editor.indent.tabstop);
+            laid.assert_as(&fresh, &format!("after {keys}, line {at}"));
+            if let Some(wrapping) = wrapping
+                && setup.editor.mode != crate::pane::Mode::Insert
+            {
+                assert_eq!(
+                    *text.screen_rows(at),
+                    *wrap::rows(&fresh, wrapping, false),
+                    "after {keys}, line {at}"
+                );
+            }
+        }
+    }
+    // A line the edits didn't touch isn't laid out again.
+    let last = setup.editor.text(&setup.copy).last_line();
+    let before = setup.editor.text(&setup.copy).laid(last).unwrap();
+    setup.keys("ggix<CR><Esc>");
+    let after = setup.editor.text(&setup.copy).laid(last + 1).unwrap();
+    assert!(std::rc::Rc::ptr_eq(&before, &after));
+}
+
 /// How long a key that scrolls takes, laying out what's shown after it,
 /// in a file of 100,000 lines of 150 to 450 characters, words and code
 /// alike, wrapped in a pane 160 by 50. A measurement, not a check: run it
@@ -636,9 +695,9 @@ fn scroll_times() {
 }
 
 /// How long a frame and a key take on a 5 MB line, as a minified file
-/// has, wrapped in a pane 160 by 50, near its end. A measurement, not a
-/// check: run it by hand with `cargo test -p clackatoo-gui --release
-/// long_line_times -- --ignored --nocapture`.
+/// has, wrapped in a pane 160 by 50, near its end, and keys typed into it.
+/// A measurement, not a check: run it by hand with `cargo test -p
+/// clackatoo-gui --release long_line_times -- --ignored --nocapture`.
 #[test]
 #[ignore = "a timing, run by hand"]
 fn long_line_times() {
@@ -667,4 +726,76 @@ fn long_line_times() {
     time(&mut setup, "wheel", 10, &|setup| {
         setup.editor.wheel(3, &setup.copy);
     });
+    // Keys typed at its start, in its middle and at its end.
+    let cells = setup.editor.text(&setup.copy).laid(0).unwrap().cells();
+    for (name, col) in [("start", 0), ("middle", cells / 2), ("end", cells)] {
+        setup.keys("<Esc>");
+        setup.editor.cursor.at = Point { line: 0, col };
+        setup.keys(if col == cells { "a" } else { "i" });
+        setup.editor.settle(&setup.copy);
+        time(
+            &mut setup,
+            &format!("a key typed at its {name}"),
+            20,
+            &|setup| {
+                setup.keys("x");
+            },
+        );
+    }
+    // And into one that isn't plain ASCII, which keeps where each
+    // character starts.
+    let mut setup = sized(&format!("é{line}\n"), 160, 50);
+    setup.editor.settle(&setup.copy);
+    for (name, col) in [("start", 1), ("middle", cells / 2), ("end", cells + 1)] {
+        setup.keys("<Esc>");
+        setup.editor.cursor.at = Point { line: 0, col };
+        setup.keys(if col > cells { "a" } else { "i" });
+        setup.editor.settle(&setup.copy);
+        let name = format!("a key typed at the {name} of one with an é");
+        time(&mut setup, &name, 10, &|setup| setup.keys("x"));
+    }
+}
+
+/// How long editing keys take, laying out what's shown after them, in a
+/// file of 100,000 lines of 150 to 450 characters, wrapped in a pane 160
+/// by 50: `o` and a word typed, a key typed at a line's end, and `dd`. A
+/// measurement, not a check: run it by hand with `cargo test -p
+/// clackatoo-gui --release edit_times -- --ignored --nocapture`.
+#[test]
+#[ignore = "a timing, run by hand"]
+fn edit_times() {
+    use std::time::Instant;
+
+    let words = "let value = self.buffer(index) + 1; // a note\tif x ";
+    let mut text = String::new();
+    for line in 0..100_000_usize {
+        text.extend(words.chars().cycle().take(150 + line * 37 % 300));
+        text.push('\n');
+    }
+    let mut setup = sized(&text, 160, 50);
+    setup.keys("50%");
+    for (name, keys, times) in [
+        ("j", "j", 1000),
+        ("o, a word and Esc", "oword<Esc>", 500),
+        ("a key typed at the end", "Ax<Esc>", 500),
+        ("dd", "dd", 1000),
+    ] {
+        let mut took: Vec<f64> = (0..times)
+            .map(|_| {
+                let started = Instant::now();
+                setup.keys(keys);
+                setup.editor.settle(&setup.copy);
+                started.elapsed().as_secs_f64() * 1e6
+            })
+            .collect();
+        took.sort_by(f64::total_cmp);
+        #[allow(clippy::cast_precision_loss)]
+        let mean = took.iter().sum::<f64>() / took.len() as f64;
+        eprintln!(
+            "{name}: least {:.1} µs, median {:.1} µs, mean {mean:.1} µs, worst {:.1} µs",
+            took[0],
+            took[took.len() / 2],
+            took[took.len() - 1],
+        );
+    }
 }

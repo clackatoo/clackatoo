@@ -31,6 +31,8 @@ use clackatoo_text::{
     compose, line_start_through, transform,
 };
 
+use super::kept::{LineChange, LineLog};
+
 /// The most pieces an edit waiting to be sent grows to by joining the
 /// edits after it in its undo step; those after go on their own, in the
 /// same step.
@@ -131,6 +133,9 @@ pub(crate) struct BufferCopy {
     /// How many times the text has changed, here or by the daemon, so what's
     /// worked out from it can be kept until it does again.
     revision: u64,
+    /// What the last few changes did to its lines, for what's laid out
+    /// of them to follow.
+    lines: LineLog,
     modified: bool,
     /// Whether a snapshot has arrived.
     loaded: bool,
@@ -186,6 +191,7 @@ impl BufferCopy {
             text: Rope::new(),
             version: 0,
             revision: 0,
+            lines: LineLog::default(),
             modified: false,
             loaded: false,
             waiting: VecDeque::new(),
@@ -232,6 +238,26 @@ impl BufferCopy {
     /// text.
     pub(crate) fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// What the last few changes did to the text's lines, by the
+    /// revision each made.
+    pub(crate) fn line_log(&self) -> &LineLog {
+        &self.lines
+    }
+
+    /// Makes `edit` to the text, as another revision of it, noting what it
+    /// does to the lines.
+    ///
+    /// # Errors
+    ///
+    /// If it doesn't fit the text, which is left as it was.
+    fn change(&mut self, edit: &Edit) -> Result<(), clackatoo_text::EditError> {
+        let lines = LineChange::of(edit, &self.text);
+        edit.apply(&mut self.text)?;
+        self.revision += 1;
+        self.lines.push(self.revision, lines);
+        Ok(())
     }
 
     pub(crate) fn highlights(&self) -> &Highlights {
@@ -302,11 +328,10 @@ impl BufferCopy {
     /// Makes `edit` to the text, moving what moves with it. Returns whether
     /// it could be made, logging, as `whose` edit, one that doesn't fit.
     fn apply(&mut self, edit: &Edit, whose: &str) -> bool {
-        if let Err(err) = edit.apply(&mut self.text) {
+        if let Err(err) = self.change(edit) {
             log::error!("buffer {}: {whose} edit didn't fit: {err}", self.id);
             return false;
         }
-        self.revision += 1;
         self.highlights.map(edit);
         self.diagnostics.map(edit);
         self.hunks.map(edit);
@@ -323,13 +348,14 @@ impl BufferCopy {
         if edit.is_noop() {
             return true;
         }
-        if let Some((edits, _)) = &mut self.batch {
-            if let Err(err) = edit.apply(&mut self.text) {
+        if self.batch.is_some() {
+            if let Err(err) = self.change(&edit) {
                 log::error!("buffer {}: an edit didn't fit: {err}", self.id);
                 return false;
             }
-            self.revision += 1;
-            edits.push(edit);
+            if let Some((edits, _)) = &mut self.batch {
+                edits.push(edit);
+            }
             return true;
         }
         if !self.apply(&edit, "an") {
@@ -518,6 +544,7 @@ impl BufferCopy {
         self.path = snapshot.path;
         self.text = Rope::from_str(&snapshot.text);
         self.revision += 1;
+        self.lines.clear(self.revision);
         self.version = snapshot.version;
         self.modified = snapshot.modified;
         self.loaded = true;

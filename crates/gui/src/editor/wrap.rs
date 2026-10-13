@@ -96,51 +96,180 @@ const LEAST_TEXT: usize = 20;
 /// `room_after`, the cell after the line's last has to fit too, for the
 /// cursor typing there.
 pub(crate) fn rows(laid: &Laid, wrap: Wrap, room_after: bool) -> Vec<ScreenRow> {
-    let width = wrap.width.max(1);
-    let mut rows = vec![ScreenRow::WHOLE];
-    if laid.cells() + usize::from(room_after) <= width {
-        return rows;
+    match Rows::of(laid, wrap, room_after) {
+        Some(rows) => rows.go_on(laid, vec![ScreenRow::WHOLE]),
+        None => vec![ScreenRow::WHOLE],
     }
-    let indent = if wrap.breakindent {
-        let blanks = (laid.pieces())
-            .find(|&(_, _, ch)| ch != ' ' && ch != '\t')
-            .map_or(laid.cells(), |(cell, _, _)| cell);
-        blanks.min(width.saturating_sub(LEAST_TEXT))
-    } else {
-        0
+}
+
+/// The screen rows `laid` goes on over, as [`rows`] has them, given `old`,
+/// its rows before what's from cell `changed` on changed. Each row starts
+/// where what was on the row before it decided, looking no further than
+/// that row's edge: those whose rows before end before `changed` are
+/// kept, and only the rest worked out again.
+pub(crate) fn rows_again(
+    laid: &Laid,
+    wrap: Wrap,
+    room_after: bool,
+    old: &[ScreenRow],
+    changed: usize,
+) -> Vec<ScreenRow> {
+    let Some(rows) = Rows::of(laid, wrap, room_after) else {
+        return vec![ScreenRow::WHOLE];
     };
-    // At least a cell for the text, however much is before it.
-    let indent = (indent + wrap.showbreak).min(width - 1);
-    let end = laid.cells();
-    let after = room_after.then_some((end, end + 1, 'x'));
-    // Where the row starts, the cells it has, and with `linebreak`, the
-    // cell after the last character on it that a row can end after: not
-    // in the blanks it starts with, which would leave it empty.
-    let (mut start, mut room, mut break_at) = (0, width, None);
-    let mut words = false;
-    for (cell, next, ch) in laid.pieces().chain(after) {
-        while next > start + room {
-            let edge = start + room;
-            let to = if ch == '\t' && cell < edge {
-                edge
-            } else if let Some(at) = break_at.filter(|&at| at > start && at <= cell) {
-                at
-            } else if cell > start {
-                cell
-            } else {
-                // Wider than a whole row: it has one to itself.
-                break;
-            };
-            rows.push(ScreenRow { start: to, indent });
-            // What's carried onto the row, if anything, is a word.
-            (start, room, break_at, words) = (to, width - indent, None, to < cell);
+    if old.first() != Some(&ScreenRow::WHOLE) {
+        return rows.go_on(laid, vec![ScreenRow::WHOLE]);
+    }
+    let mut kept = 1;
+    while let Some(row) = old.get(kept)
+        && row.indent == rows.indent
+        && old[kept - 1].start + rows.room(kept - 1) < changed
+    {
+        kept += 1;
+    }
+    rows.go_on(laid, old[..kept].to_vec())
+}
+
+/// How a line goes on over rows.
+struct Rows {
+    /// The cells a row has for text.
+    width: usize,
+    /// The cells before the text on the rows after the first.
+    indent: usize,
+    linebreak: bool,
+    /// Whether the cell after the line's last has to fit too.
+    room_after: bool,
+}
+
+impl Rows {
+    /// How `laid` goes on over rows, wrapped as `wrap` says, if it doesn't
+    /// fit on one.
+    fn of(laid: &Laid, wrap: Wrap, room_after: bool) -> Option<Self> {
+        let width = wrap.width.max(1);
+        if laid.cells() + usize::from(room_after) <= width {
+            return None;
         }
-        words |= ch != ' ' && ch != '\t';
-        if wrap.linebreak && words && BREAK_AFTER.contains(&ch) {
-            break_at = Some(next);
+        let indent = if wrap.breakindent {
+            let blanks = (laid.pieces())
+                .find(|&(_, _, ch)| ch != ' ' && ch != '\t')
+                .map_or(laid.cells(), |(cell, _, _)| cell);
+            blanks.min(width.saturating_sub(LEAST_TEXT))
+        } else {
+            0
+        };
+        Some(Self {
+            width,
+            // At least a cell for the text, however much is before it.
+            indent: (indent + wrap.showbreak).min(width - 1),
+            linebreak: wrap.linebreak,
+            room_after,
+        })
+    }
+
+    /// The cells the `row`th row has for text.
+    fn room(&self, row: usize) -> usize {
+        if row == 0 {
+            self.width
+        } else {
+            self.width - self.indent
         }
     }
-    rows
+
+    /// `rows`, the first of the line's, worked out on from the last of
+    /// them.
+    fn go_on(&self, laid: &Laid, rows: Vec<ScreenRow>) -> Vec<ScreenRow> {
+        if laid.is_plain() {
+            self.go_on_plain(laid, rows)
+        } else {
+            self.go_on_cells(laid, rows)
+        }
+    }
+
+    /// [`go_on`](Self::go_on), character by character. A row ends at the
+    /// first character that doesn't fit, or with `linebreak`, after the
+    /// last blank or punctuation before it, not in the blanks the row
+    /// starts with, which would leave it empty. The next row starts afresh
+    /// from there, so where each starts depends only on what's from there
+    /// to its edge.
+    fn go_on_cells(&self, laid: &Laid, mut rows: Vec<ScreenRow>) -> Vec<ScreenRow> {
+        let end = laid.cells();
+        let count = laid.count() + usize::from(self.room_after);
+        let piece = |index| {
+            if index < laid.count() {
+                laid.piece(index)
+            } else {
+                (end, end + 1, 'x')
+            }
+        };
+        let Some(&ScreenRow { mut start, .. }) = rows.last() else {
+            return rows;
+        };
+        let mut room = self.room(rows.len() - 1);
+        // With `linebreak`, the cell after the last character on the row
+        // that it can end after, and whether there's been a word yet.
+        let (mut break_at, mut words) = (None, false);
+        let mut index = laid.piece_at(start);
+        while index < count {
+            let (cell, next, ch) = piece(index);
+            if next > start + room {
+                let edge = start + room;
+                let to = if ch == '\t' && cell < edge {
+                    Some(edge)
+                } else if let Some(at) = break_at.filter(|&at| at > start && at <= cell) {
+                    Some(at)
+                } else {
+                    // Unless it's wider than a whole row, and has one to
+                    // itself.
+                    (cell > start).then_some(cell)
+                };
+                if let Some(to) = to {
+                    rows.push(ScreenRow {
+                        start: to,
+                        indent: self.indent,
+                    });
+                    (start, room, break_at, words) = (to, self.room(1), None, false);
+                    index = laid.piece_at(to);
+                    continue;
+                }
+            }
+            words |= ch != ' ' && ch != '\t';
+            if self.linebreak && words && BREAK_AFTER.contains(&ch) {
+                break_at = Some(next);
+            }
+            index += 1;
+        }
+        rows
+    }
+
+    /// [`go_on`](Self::go_on) for a plain line, every character a byte and
+    /// a cell, a row at a time: the same rows, without looking at every
+    /// character of a long line.
+    fn go_on_plain(&self, laid: &Laid, mut rows: Vec<ScreenRow>) -> Vec<ScreenRow> {
+        let bytes = laid.text().as_bytes();
+        let count = bytes.len() + usize::from(self.room_after);
+        let Some(&ScreenRow { mut start, .. }) = rows.last() else {
+            return rows;
+        };
+        let mut room = self.room(rows.len() - 1);
+        while start + room < count {
+            let edge = start + room;
+            let on = &bytes[start..edge.min(bytes.len())];
+            // With `linebreak`, after the last blank or punctuation, if
+            // there's a word at or before it.
+            let last = self.linebreak.then(|| {
+                (on.iter())
+                    .rposition(|&byte| BREAK_AFTER.contains(&char::from(byte)))
+                    .filter(|&last| on[..=last].iter().any(|&byte| byte != b' '))
+            });
+            let to = last.flatten().map_or(edge, |last| start + last + 1);
+            rows.push(ScreenRow {
+                start: to,
+                indent: self.indent,
+            });
+            (start, room) = (to, self.room(1));
+        }
+        rows
+    }
 }
 
 /// Puts `cursor`, moved by screen rows, as `gj`, `gk`, paging and the
@@ -375,6 +504,56 @@ mod tests {
             ..wrap(4)
         };
         assert_eq!(starts("abcdef", long), [(0, 0), (4, 3), (5, 3)]);
+    }
+
+    #[test]
+    fn a_word_carried_onto_a_narrower_row_breaks_at_its_edge() {
+        // After "a-", the rest goes on over rows of 5, after `showbreak`.
+        let narrow = Wrap {
+            linebreak: true,
+            showbreak: 10,
+            ..wrap(15)
+        };
+        let text = format!("a-{}", "b".repeat(40));
+        assert_eq!(
+            starts(&text, narrow)[..4],
+            [(0, 0), (2, 10), (7, 10), (12, 10)]
+        );
+    }
+
+    #[test]
+    fn plain_lines_wrap_as_any_other_does() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut below = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            usize::try_from(seed % n as u64).unwrap()
+        };
+        for _ in 0..2000 {
+            let bytes = b"ab  -,.;x";
+            let text: String = (0..below(80))
+                .map(|_| char::from(bytes[below(bytes.len())]))
+                .collect();
+            let laid = Laid::new(text, 4);
+            assert!(laid.is_plain());
+            let wrap = Wrap {
+                width: 1 + below(20),
+                linebreak: below(2) == 0,
+                breakindent: below(2) == 0,
+                showbreak: below(4),
+            };
+            let room_after = below(2) == 0;
+            let Some(rows) = Rows::of(&laid, wrap, room_after) else {
+                continue;
+            };
+            assert_eq!(
+                rows.go_on_plain(&laid, vec![ScreenRow::WHOLE]),
+                rows.go_on_cells(&laid, vec![ScreenRow::WHOLE]),
+                "{:?} in {wrap:?}, room after: {room_after}",
+                laid.text(),
+            );
+        }
     }
 
     #[test]

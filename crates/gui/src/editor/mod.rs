@@ -44,6 +44,7 @@ mod complete;
 mod copy;
 mod ex;
 mod indent;
+mod kept;
 mod keys;
 mod marked;
 mod marks;
@@ -73,6 +74,7 @@ use complete::{Completion, Resolved, is_word};
 pub(crate) use copy::tests::Daemon;
 pub(crate) use copy::{BufferCopy, Heard, queries_asked};
 pub(crate) use ex::is_editor_command;
+use kept::Kept;
 pub(crate) use keys::Stroke;
 use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
 pub(crate) use marks::{FilePlace, Marks};
@@ -85,7 +87,7 @@ pub(crate) use pieces::GiveUp;
 use preview::Preview;
 use registers::Wrote;
 pub(crate) use registers::{Register, Registers};
-use text::{Kept, Text, tab_end};
+use text::{Text, tab_end};
 use wrap::{Shown, Top, Wrapping};
 
 use crate::colors;
@@ -779,7 +781,7 @@ impl Editor {
         let typing = (self.mode == Mode::Insert).then_some(self.cursor.at);
         Text::new(copy.text(), self.indent.tabstop)
             .wrapping(self.wrapping.at(self.text_width().max(1)), typing)
-            .keeping(&self.kept, self.buffer, copy.revision())
+            .keeping(&self.kept, self.buffer, copy.revision(), copy.line_log())
     }
 
     /// Enters normal mode, as moving the focus here from a pane in normal
