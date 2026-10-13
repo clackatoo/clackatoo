@@ -76,9 +76,33 @@ const INITIAL_GRID: (u16, u16) = (100, 30);
 /// than sent to arrive who knows when.
 const KEYS_UNANSWERED: Duration = Duration::from_secs(3);
 
+/// How long a connection must last to count as made: one that drops
+/// sooner counts as a try that failed.
+const STABLE: Duration = Duration::from_secs(10);
+
 /// The longest wait between tries at connecting again to a daemon on
 /// another machine. Each failed try doubles the wait, from a second.
 const RECONNECT_AT_MOST: Duration = Duration::from_secs(30);
+
+/// How tries at connecting again begin, when a connection, or a try at
+/// one, was lost: with how many tries counted so far, and whether to try
+/// again at once. A connection that had been working is tried again at
+/// once, but one that dropped within [`STABLE`] of being made (at
+/// `connected_at`, after its tries) is as good as a try that failed: the
+/// next waits, longer each time, rather than hammer a daemon that takes
+/// connections and drops them.
+fn next_try(
+    was_connected: bool,
+    connected_at: Option<(Instant, u32)>,
+    now: Instant,
+) -> (u32, bool) {
+    match connected_at {
+        Some((at, tries)) if was_connected && now.saturating_duration_since(at) < STABLE => {
+            (tries.max(1), false)
+        }
+        _ => (0, was_connected),
+    }
+}
 
 /// How long to wait before connecting again, after `tries` that failed:
 /// a second after the first, doubling, up to [`RECONNECT_AT_MOST`].
@@ -341,6 +365,8 @@ pub(crate) struct App {
     contact: Option<Contact>,
     /// Connecting again to a daemon on another machine.
     reconnecting: Option<Reconnecting>,
+    /// When the connection was made, and after how many tries at it.
+    connected_at: Option<(Instant, u32)>,
     /// Whether a frame has shown a terminal, rather than a notice.
     first_frame_drawn: bool,
     /// The input method: whether it's on, which it is while keys type
@@ -388,6 +414,7 @@ impl App {
             notice: Some(Notice::Connecting),
             contact: None,
             reconnecting: None,
+            connected_at: None,
             first_frame_drawn: false,
             ime: InputMethod::default(),
             ime_area: None,
@@ -562,14 +589,15 @@ impl App {
     /// The panes stay as they were meanwhile, and the top bar says so.
     fn reconnect_later(&mut self, why: String, was_connected: bool) {
         let now = Instant::now();
+        let (tries, at_once) = next_try(was_connected, self.connected_at.take(), now);
         let reconnecting = self.reconnecting.get_or_insert(Reconnecting {
             since: now,
-            tries: 0,
+            tries,
             retry_at: None,
             reason: String::new(),
         });
         reconnecting.reason = why;
-        if was_connected {
+        if at_once {
             reconnecting.tries += 1;
             reconnecting.retry_at = None;
             self.session.reconnect();
@@ -2230,13 +2258,15 @@ impl App {
                 contact,
                 daemon_version,
             } => {
-                if let Some(reconnecting) = self.reconnecting.take() {
+                let tries = self.reconnecting.take().map_or(0, |reconnecting| {
                     log::info!(
                         "connected again after {:.1?}, at try {}",
                         reconnecting.since.elapsed(),
                         reconnecting.tries
                     );
-                }
+                    reconnecting.tries
+                });
+                self.connected_at = Some((Instant::now(), tries));
                 self.notice = None;
                 self.contact = contact;
                 self.sender = Some(sender);
@@ -2371,6 +2401,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_that_drops_soon_after_it_was_made_counts_as_a_failed_try() {
+        let start = Instant::now();
+        let later = |secs| start + Duration::from_secs(secs);
+        // Working a good while: at once.
+        assert_eq!(next_try(true, Some((start, 3)), later(60)), (0, true));
+        // Dropped within seconds: it waits, counting the tries before.
+        assert_eq!(next_try(true, Some((start, 3)), later(2)), (3, false));
+        assert_eq!(reconnect_wait(3), Duration::from_secs(4));
+        // Even the first connection, dropped at once.
+        assert_eq!(next_try(true, Some((start, 0)), later(1)), (1, false));
+        // A try that failed waits as before.
+        assert_eq!(next_try(false, None, later(1)), (0, false));
+        // Kept up, the waits reach the limit and stay there.
+        assert_eq!(reconnect_wait(40), RECONNECT_AT_MOST);
+    }
 
     #[test]
     fn reconnecting_waits_longer_after_each_try_that_fails_up_to_a_limit() {
