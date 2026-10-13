@@ -64,6 +64,10 @@ const RACY: Duration = Duration::from_secs(2);
 /// How many names beside where a copy goes are tried before giving up.
 const NAMES: u32 = 100;
 
+/// For tests: a path that making panics, as a bug might.
+#[cfg(test)]
+pub(crate) const PANICS: &str = "/clackatoo test: a file operation that panics";
+
 /// Does `op`, with `trash` as the home trash, and `open` the files open in
 /// buffers. Returns how buffers are to follow what moved, and what was
 /// written over, even when it went wrong partway, and how it went.
@@ -72,6 +76,10 @@ pub(super) fn run(
     trash: Option<&Path>,
     open: &[Open],
 ) -> (Changed, Result<(), FileOpError>) {
+    #[cfg(test)]
+    if matches!(&op, FileOp::Create { path, .. } if path == PANICS) {
+        panic!("a file operation that panics, for tests");
+    }
     let mut changed = Changed::default();
     let outcome = match op {
         FileOp::Create { path, dir } => absolute(&path).and_then(|path| create(&path, dir)),

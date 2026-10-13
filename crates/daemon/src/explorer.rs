@@ -18,6 +18,7 @@
 use std::cmp::Reverse;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, OnceLock};
@@ -32,6 +33,8 @@ mod mounts;
 mod ops;
 mod trash;
 
+#[cfg(test)]
+pub(crate) use ops::PANICS;
 pub(crate) use trash::put as trash;
 
 /// The most a directory's listing holds: far more than anyone scrolls
@@ -180,16 +183,35 @@ impl Workers {
     }
 
     /// Does `op`, which the loop numbered `ticket`, with `trash` as the
-    /// home trash, and `open` the files open in buffers.
-    pub(crate) fn operate(&self, ticket: u64, op: FileOp, trash: Option<PathBuf>, open: Vec<Open>) {
+    /// home trash, and `open` the files open in buffers. Returns whether
+    /// the thread took it: one that's stopped never answers.
+    #[must_use]
+    pub(crate) fn operate(
+        &self,
+        ticket: u64,
+        op: FileOp,
+        trash: Option<PathBuf>,
+        open: Vec<Open>,
+    ) -> bool {
         send(&self.ops, move || {
-            let (changed, outcome) = ops::run(op, trash.as_deref(), &open);
+            // A bug that panics fails its operation, not the thread: those
+            // after it are still done, and every one is answered.
+            let run = || ops::run(op, trash.as_deref(), &open);
+            let (changed, outcome) =
+                panic::catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|panicked| {
+                    let why = (panicked.downcast_ref::<&str>().copied())
+                        .or_else(|| panicked.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("it panicked");
+                    log::error!("a file operation failed on a bug: {why}");
+                    let why = format!("it stopped partway, on a bug in clackatoo: {why}");
+                    (Changed::default(), Err(FileOpError::Failed(why)))
+                });
             Done::Op {
                 ticket,
                 changed,
                 outcome,
             }
-        });
+        })
     }
 
     /// For tests: keeps the thread for file operations busy, as a long
@@ -210,11 +232,13 @@ impl Workers {
     }
 }
 
-/// Hands `job` to the thread `jobs` goes to.
-fn send(jobs: &Sender<Job>, job: impl FnOnce() -> Done + Send + 'static) {
-    if jobs.send(Box::new(job)).is_err() {
+/// Hands `job` to the thread `jobs` goes to. Returns whether it took it.
+fn send(jobs: &Sender<Job>, job: impl FnOnce() -> Done + Send + 'static) -> bool {
+    let sent = jobs.send(Box::new(job)).is_ok();
+    if !sent {
         log::warn!("an explorer thread has stopped");
     }
+    sent
 }
 
 /// What's in the directory at `dir`: directories first, then the rest,

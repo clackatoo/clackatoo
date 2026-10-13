@@ -1134,7 +1134,14 @@ impl Daemon {
             self.send_event(token, Event::FileOp { id, outcome });
             return;
         };
-        workers.operate(ticket, op, trash, open);
+        if !workers.operate(ticket, op, trash, open) {
+            let outcome = Err(FileOpError::Failed(
+                "the daemon's thread for file operations has stopped: restart the daemon"
+                    .to_owned(),
+            ));
+            self.send_event(token, Event::FileOp { id, outcome });
+            return;
+        }
         self.explorers.ops.insert(ticket, (token, id));
         self.explorers.running += 1;
     }
@@ -1369,6 +1376,10 @@ mod tests {
         daemon.upgrade_to = Some(upgrading());
         assert!(daemon.upgrade_when_ready().unwrap().is_none());
         assert!(daemon.upgrade_to.is_some(), "it waits");
+        // Another ask is turned down, never put in its place unanswered.
+        let next = Path::new("/other/clackatoo");
+        let again = daemon.check_upgrade(true, clackatoo_protocol::PROTOCOL_VERSION, next);
+        assert_eq!(again, Err("the daemon is already upgrading".to_owned()));
         // Asked meanwhile, a file operation isn't started.
         daemon.serve_file_op(asker, 2, copy("late"));
         assert_eq!(daemon.explorers.running, 1);
@@ -1398,6 +1409,37 @@ mod tests {
         // The copy is whole and in place, with nothing half made beside it.
         assert_eq!(names(&files), ["from", "to"]);
         assert_eq!(names(&files.join("to/sub")).len(), 50);
+        drop(upgrade);
+    }
+
+    #[test]
+    fn a_file_operation_that_panics_is_answered_and_upgrades_still_go_ahead() {
+        use crate::server::{UPGRADE_OPS_WAIT, Upgrading};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let made = dir.path().canonicalize().unwrap().join("made.txt");
+        let create = |path: String| FileOp::Create { path, dir: false };
+        // One that panics, as a bug might, then one after it.
+        daemon.serve_file_op(Token(1000), 1, create(crate::explorer::PANICS.to_owned()));
+        daemon.serve_file_op(Token(1000), 2, create(made.display().to_string()));
+        assert_eq!(daemon.explorers.running, 2);
+        daemon.upgrade_to = Some(Upgrading {
+            executable: PathBuf::from("/next/clackatoo"),
+            token: Token(1001),
+            until: Instant::now() + UPGRADE_OPS_WAIT,
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let upgrade = loop {
+            if let Some(upgrade) = daemon.upgrade_when_ready().unwrap() {
+                break upgrade;
+            }
+            assert!(daemon.upgrade_to.is_some(), "refused: an answer never came");
+            assert!(Instant::now() < deadline, "an answer never came");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(daemon.explorers.running, 0);
+        assert!(made.exists(), "the thread carried on");
         drop(upgrade);
     }
 

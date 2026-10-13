@@ -919,6 +919,11 @@ impl Daemon {
     /// operations under way have finished, and the boards are written.
     /// Until then, or refused, the daemon carries on.
     fn upgrade_when_ready(&mut self) -> io::Result<Option<Upgrade>> {
+        if self.upgrade_to.is_none() {
+            return Ok(None);
+        }
+        // An operation that has just finished counts as finished.
+        self.explore();
         let Some(upgrading) = self.upgrade_to.take() else {
             return Ok(None);
         };
