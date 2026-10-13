@@ -6,6 +6,7 @@ mod config;
 mod language;
 mod ping;
 mod render;
+mod update;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -20,6 +21,17 @@ use clackatoo_daemon::{Client, ClientError, DaemonConfig, RuntimeDir, launch, up
 use clackatoo_protocol::{NewTerminal, OpenFile, PaneTerminal, Size, TerminalId};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+/// This build's version, the commit it's from, and the day it was built:
+/// `2026.10.0 (1a2b3c4d5e 2026-10-13)`. See `build.rs`.
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("CLACKATOO_GIT_HASH"),
+    " ",
+    env!("CLACKATOO_BUILD_DATE"),
+    ")"
+);
+
 /// A fast, lightweight terminal workspace.
 ///
 /// With no command, opens a window on your workspaces, starting the daemon
@@ -27,7 +39,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 /// your newest terminal or a new one. With `--remote`, the workspaces are
 /// on another machine.
 #[derive(Debug, Parser)]
-#[command(version, args_conflicts_with_subcommands = true)]
+#[command(version = VERSION, args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -129,6 +141,10 @@ enum Command {
     /// terminals and their programs running. Daemons from before protocol
     /// 11 can't be upgraded, only stopped.
     Upgrade,
+    /// Install the latest release in place of this build, checking it's
+    /// signed with clackatoo's release key, then upgrade the daemon onto
+    /// it. The build it replaces is kept, for `--rollback`.
+    Update(update::UpdateArgs),
     /// Show or change the window's settings in client/startup.toml. With no
     /// arguments, shows them all.
     Config(ConfigArgs),
@@ -363,6 +379,7 @@ fn run(command: Command) -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Update(args) => update::run(&args),
         Command::Ping(args) => {
             let started = Instant::now();
             let mut client = connect(&args.connection)?;

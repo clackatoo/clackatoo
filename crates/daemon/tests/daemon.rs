@@ -298,6 +298,14 @@ fn input_to_an_exited_terminal_is_refused() {
 }
 
 #[test]
+fn the_daemon_says_which_release_it_is() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let version = client.daemon_version().expect("version");
+    assert_eq!(version, env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
 fn closing_removes_the_terminal() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();

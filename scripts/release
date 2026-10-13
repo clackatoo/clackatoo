@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Makes a release of clackatoo, here, without pushing anything: bumps the
+# version, writes what changed into CHANGELOG.md, commits, and tags.
+#
+#   scripts/release              the next version this month
+#   scripts/release 2026.10.4    this version
+#   scripts/release --dry-run    says what it would do, changing nothing
+#
+# Versions are YEAR.MONTH.N: N counts the releases made that month before
+# this one, from 0. What changed is read from the Conventional Commits
+# since the last tag: features, fixes, speed, and anything marked as
+# breaking (`feat!:`, or `BREAKING CHANGE:` in the body). The rest
+# (tests, chores, refactoring) is left out.
+#
+# Pushing the commit and the tag is left to you: CI builds, signs and
+# publishes a release for each tag pushed.
+#
+# RELEASE_DATE=YYYY-MM-DD stands in for today, for tests.
+
+set -euo pipefail
+
+dry_run=false
+version=""
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) dry_run=true ;;
+        -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -*) echo "release: no option $arg" >&2; exit 2 ;;
+        *) version="$arg" ;;
+    esac
+done
+
+die() { echo "release: $*" >&2; exit 1; }
+
+root=$(git rev-parse --show-toplevel) || die "not in a git repository"
+cd "$root"
+
+[ -f Cargo.toml ] || die "no Cargo.toml at $root"
+if ! $dry_run && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    die "there are changes not committed; commit or stash them first"
+fi
+
+today=${RELEASE_DATE:-$(date -u +%F)}
+year=${today%%-*}
+month=${today#*-}; month=${month%%-*}; month=$((10#$month))
+
+if [ -z "$version" ]; then
+    # The next N for this month, after any tagged already.
+    last_n=$(git tag --list "v$year.$month.*" | sed "s/^v$year\.$month\.//" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
+    if [ -z "$last_n" ]; then
+        version="$year.$month.0"
+    else
+        version="$year.$month.$((last_n + 1))"
+    fi
+fi
+[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+    || die "$version isn't a version, such as $year.$month.0"
+tag="v$version"
+git rev-parse -q --verify "refs/tags/$tag" >/dev/null && die "$tag is tagged already"
+
+# Commits since the last release, or every commit if there's been none.
+last_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+range=${last_tag:+$last_tag..}HEAD
+
+breaking="" features="" fixes="" speed=""
+while IFS= read -r -d $'\x1e' record; do
+    record=${record#$'\n'}
+    hash=${record%%$'\x1f'*}
+    rest=${record#*$'\x1f'}
+    subject=${rest%%$'\x1f'*}
+    body=${rest#*$'\x1f'}
+    # type(scope)!: description
+    if [[ "$subject" =~ ^([a-z]+)(\(([^\)]+)\))?(!)?:[[:space:]]+(.+)$ ]]; then
+        type=${BASH_REMATCH[1]} scope=${BASH_REMATCH[3]} bang=${BASH_REMATCH[4]}
+        text=${BASH_REMATCH[5]}
+    else
+        continue
+    fi
+    line="- ${scope:+**$scope:** }$text ($hash)"$'\n'
+    if [ -n "$bang" ] || [[ "$body" == *"BREAKING CHANGE:"* || "$body" == *"BREAKING-CHANGE:"* ]]; then
+        breaking+=$line
+    fi
+    case "$type" in
+        feat) features+=$line ;;
+        fix) fixes+=$line ;;
+        perf) speed+=$line ;;
+    esac
+done < <(git log --reverse --no-merges --format='%h%x1f%s%x1f%b%x1e' "$range")
+
+section="## $version ($today)"$'\n'
+add() { [ -n "$2" ] && section+=$'\n'"### $1"$'\n\n'"$2"; true; }
+add "Breaking changes" "$breaking"
+add "Features" "$features"
+add "Fixes" "$fixes"
+add "Speed" "$speed"
+if [ -z "$breaking$features$fixes$speed" ]; then
+    section+=$'\n'"Nothing to note: tests, chores and tidying."$'\n'
+fi
+
+if $dry_run; then
+    echo "would release $tag, from ${last_tag:-the first commit}:"
+    echo
+    printf '%s' "$section"
+    exit 0
+fi
+
+# The version every crate shares, in the workspace's [workspace.package].
+awk -v version="$version" '
+    /^\[/ { in_package = ($0 == "[workspace.package]") }
+    in_package && /^version[[:space:]]*=/ && !done { print "version = \"" version "\""; done = 1; next }
+    { print }
+    END { if (!done) exit 1 }
+' Cargo.toml > Cargo.toml.release || { rm -f Cargo.toml.release; die "Cargo.toml has no version in [workspace.package]"; }
+mv Cargo.toml.release Cargo.toml
+# Cargo.lock names each crate's version too; CI builds with --locked.
+"${CARGO:-cargo}" update --workspace --offline --quiet
+
+header="# Changelog"
+if [ -f CHANGELOG.md ]; then
+    { head -n 1 CHANGELOG.md; echo; printf '%s\n' "$section"; tail -n +3 CHANGELOG.md; } > CHANGELOG.md.release
+else
+    { echo "$header"; echo; printf '%s' "$section"; } > CHANGELOG.md.release
+fi
+mv CHANGELOG.md.release CHANGELOG.md
+
+git add Cargo.toml Cargo.lock CHANGELOG.md
+git commit --quiet -m "chore(release): $tag"
+git tag -a "$tag" -m "clackatoo $version" -m "$section"
+
+echo "made $tag. To publish it, push the commit and the tag:"
+echo
+echo "    git push origin HEAD $tag"

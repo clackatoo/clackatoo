@@ -38,9 +38,14 @@ pub(crate) enum Location {
 impl Location {
     /// The other machine's name, if the daemon is on one.
     pub(crate) fn host(&self) -> Option<&str> {
+        self.remote().map(|remote| remote.host.as_str())
+    }
+
+    /// The other machine, if the daemon is on one.
+    pub(crate) fn remote(&self) -> Option<&Remote> {
         match self {
             Self::Local(_) => None,
-            Self::Remote(remote) => Some(&remote.host),
+            Self::Remote(remote) => Some(remote),
         }
     }
 }
@@ -56,6 +61,8 @@ pub(crate) enum SessionEvent {
         /// Whether a daemon on another machine is in contact. Changes to it
         /// arrive as [`SessionEvent::Contact`].
         contact: Option<Contact>,
+        /// Which release of clackatoo the daemon is, if it said.
+        daemon_version: Option<String>,
     },
     /// A daemon on another machine went out of contact, or came back.
     Contact,
@@ -82,6 +89,14 @@ pub(crate) enum SessionEvent {
     /// could be read, for the editors. Sent from a thread reading them, not
     /// the session's.
     Clipboard(Vec<(crate::pane::Copy, String)>),
+    /// Time to look for a new release, if the options say to. Sent a while
+    /// after the window opens (see [`crate::updates`]).
+    UpdateDue,
+    /// A newer release of clackatoo is out: this one.
+    NewRelease(String),
+    /// `clackatoo update`, run by `:update`, has finished, and the bar
+    /// should say this.
+    Updated(Result<String, String>),
 }
 
 /// What the window tells the session thread.
@@ -223,7 +238,7 @@ fn run(
             Connected::OtherProtocol(protocol) if replace => {
                 return lost(format!(
                     "clackatoo{} is from another build: it starts daemons speaking protocol \
-                     {protocol}, and this window speaks {PROTOCOL_VERSION}. Update it there.",
+                     {protocol}, and this window speaks {PROTOCOL_VERSION}. `clackatoo update` there updates it.",
                     location
                         .host()
                         .map(|host| format!(" on {host}"))
@@ -251,11 +266,12 @@ fn run(
         contact.on_change(move || drop(proxy.send_event(SessionEvent::Contact)));
     }
     let mut receiver = match open(client) {
-        Ok((sender, receiver, workspaces)) => {
+        Ok((sender, receiver, workspaces, daemon_version)) => {
             let connected = SessionEvent::Connected {
                 sender,
                 workspaces,
                 contact,
+                daemon_version,
             };
             if proxy.send_event(connected).is_err() {
                 return;
@@ -319,8 +335,8 @@ fn with_causes(err: &dyn std::error::Error) -> String {
 
 /// Starts watching the workspaces. With none, makes one, showing the
 /// newest running terminal, such as one a script started, or else a new
-/// one.
-fn open(mut client: Client) -> Result<(Sender, Receiver, Workspaces), ClientError> {
+/// one. Also asks which release the daemon is.
+fn open(mut client: Client) -> Result<(Sender, Receiver, Workspaces, Option<String>), ClientError> {
     // A daemon that accepts but never answers would otherwise leave the
     // window blank forever.
     client.set_read_timeout(Some(OPEN_TIMEOUT))?;
@@ -345,7 +361,11 @@ fn open(mut client: Client) -> Result<(Sender, Receiver, Workspaces), ClientErro
         client.new_workspace(None, terminal)?;
         workspaces = client.watch_workspaces()?;
     }
+    let daemon_version = client
+        .daemon_version()
+        .inspect_err(|err| log::warn!("the daemon didn't say which release it is: {err}"))
+        .ok();
     client.set_read_timeout(None)?;
     let (sender, receiver) = client.split()?;
-    Ok((sender, receiver, workspaces))
+    Ok((sender, receiver, workspaces, daemon_version))
 }

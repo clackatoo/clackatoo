@@ -10,7 +10,8 @@
 //! does, or else moves to that tab. Lowercase words are the
 //! window's own commands, and Vim's for files, `w`, `q`, `wq` and `e`, and
 //! for options, `set`, and for registers and marks, `registers` and
-//! `marks`, which list them. The finder's are capitalised too, as fzf.vim's are:
+//! `marks`, which list them, and `update`, which installs the latest
+//! release here, or named, on the daemon's machine. The finder's are capitalised too, as fzf.vim's are:
 //! `Files`, `Grep` and `Buffers`, each with what to start with typed. So is
 //! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
 //! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
@@ -96,6 +97,9 @@ pub(crate) enum Command {
         redo: bool,
         force: bool,
     },
+    /// `:update`: install the latest release of clackatoo on this machine,
+    /// or with a name, on that machine, the one the window's daemon is on.
+    Update(Option<String>),
 }
 
 /// Where a new pane goes.
@@ -144,8 +148,8 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 
 /// The window's own commands, for messages.
 const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
-                        w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, Buffers, \
-                        Diagnostics, Gitsigns, Explore, AgentUndo and AgentRedo";
+                        update, w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, \
+                        Buffers, Diagnostics, Gitsigns, Explore, AgentUndo and AgentRedo";
 
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
@@ -168,6 +172,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
         "marks" => return Ok(Command::Marks),
         "Explore" | "Ex" => return Ok(Command::Explore(argument.map(str::to_owned))),
+        "update" => return Ok(Command::Update(argument.map(str::to_owned))),
         _ => {}
     }
     if let Some(command) = file_command(word, argument).or_else(|| agent_undo(word, argument)) {
@@ -572,5 +577,14 @@ mod tests {
         assert_eq!(parse("AgentRedo!").unwrap(), undo(None, true, true));
         assert!(parse("AgentUndo 0").is_err());
         assert!(parse("AgentRedo last").is_err());
+    }
+
+    #[test]
+    fn update_installs_here_or_on_the_daemons_machine() {
+        assert_eq!(parse("update").unwrap(), Command::Update(None));
+        assert_eq!(
+            parse("update desk ").unwrap(),
+            Command::Update(Some("desk".into()))
+        );
     }
 }

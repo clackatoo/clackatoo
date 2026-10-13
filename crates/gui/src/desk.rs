@@ -31,6 +31,7 @@ use crate::layout::{Area, Direction, Divider, Placement};
 use crate::options::Options;
 use crate::pane::{self, Copy, Mode, Pane, PaneMouse, Selection};
 use bindings::Binding;
+pub(crate) use updating::UpdateAsked;
 
 /// What a mouse event did, for the window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -111,6 +112,7 @@ mod macros;
 mod offers;
 mod script;
 mod settings;
+mod updating;
 
 pub(crate) use script::LuaStart;
 
@@ -223,6 +225,11 @@ pub(crate) struct Desk {
     /// Why files being written weren't formatted first, to say when
     /// they're written.
     unformatted: HashMap<BufferId, String>,
+    /// What the bar says when nothing else has a say, such as that a new
+    /// release is out.
+    notice: Option<String>,
+    /// `:update`, asked for and waiting for the window to carry out.
+    update_asked: Option<UpdateAsked>,
 }
 
 impl Desk {
@@ -522,7 +529,8 @@ impl Desk {
                 .keymap
                 .hint()
                 .or_else(|| self.message.clone())
-                .or_else(|| pane.and_then(Pane::label)),
+                .or_else(|| pane.and_then(Pane::label))
+                .or_else(|| self.notice()),
             panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
         }
     }
@@ -1691,9 +1699,10 @@ impl Desk {
 
     /// Carries out a command.
     fn run(&mut self, command: Command) {
-        match &command {
+        match command {
             Command::Reload => return self.reload_lua(),
-            Command::Set(words) => return self.run_set(words),
+            Command::Set(words) => return self.run_set(&words),
+            Command::Update(host) => return self.ask_update(host),
             _ => {}
         }
         let Some(shown) = self.shown else { return };
@@ -1787,7 +1796,7 @@ impl Desk {
                     self.refuse(why);
                 }
             }
-            Command::Reload | Command::Set(_) => {}
+            Command::Reload | Command::Set(_) | Command::Update(_) => {}
         }
     }
 
@@ -4611,6 +4620,36 @@ mod tests {
         assert_eq!(desk.take_opened(), ["https://x.example/a"]);
         // The desktop opens it: nothing goes to the daemon.
         assert_eq!(answer_all(&mut desk), []);
+    }
+
+    #[test]
+    fn update_is_left_to_the_window_and_a_notice_waits_for_a_quiet_bar() {
+        let mut desk = desk(one_tab(pane(1)));
+        answer_all(&mut desk);
+        desk.set_notice(Some("clackatoo 2026.10.3 is out: :update".into()));
+        assert_eq!(note(&desk), "clackatoo 2026.10.3 is out: :update");
+        // A message has the bar first, until the next key.
+        normal_mode(&mut desk);
+        command(&mut desk, "update");
+        assert_eq!(desk.take_update_asked(), Some(UpdateAsked::Here));
+        assert_eq!(desk.take_update_asked(), None);
+        assert_eq!(note(&desk), "updating clackatoo…");
+        // Nothing goes to the daemon: the window runs it.
+        assert_eq!(answer_all(&mut desk), []);
+        command(&mut desk, "update desk");
+        assert_eq!(
+            desk.take_update_asked(),
+            Some(UpdateAsked::On("desk".into()))
+        );
+
+        // On the daemon's machine, it runs in a tab of its own.
+        desk.open_tab_running(vec!["sh".into(), "-c".into(), "clackatoo update".into()]);
+        let asked = answer_all(&mut desk);
+        assert!(
+            matches!(&asked[..], [Request::NewTab { terminal: PaneTerminal::New(new), .. }]
+                if new.command.as_deref() == Some(&["sh".to_owned(), "-c".into(), "clackatoo update".into()][..])),
+            "{asked:?}"
+        );
     }
 
     #[test]

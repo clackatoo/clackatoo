@@ -1619,6 +1619,7 @@ impl Daemon {
     /// Answers one request from the client at `token`.
     fn respond(&mut self, request: Request, token: Token) -> Response {
         let response = match request {
+            Request::Version => Ok(Response::Text(env!("CARGO_PKG_VERSION").to_owned())),
             Request::ListTerminals => Ok(Response::Terminals(self.terminal_infos())),
             Request::NewTerminal(request) => {
                 self.new_terminal(&request).map(Response::TerminalCreated)

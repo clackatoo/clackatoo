@@ -433,6 +433,10 @@ options! {
     /// terminals without asking, but asks the rest; `off` gives it no
     /// tools. The chat's Tools setting changes it later.
     agenttools("agt"): AgentTools = AgentTools::Ask;
+    /// Look for a new release of clackatoo, at most once a day, a while
+    /// after the window opens, and say in the bar when one is out. It's
+    /// never installed until `:update` or `clackatoo update` asks.
+    updatecheck("uc"): bool = true;
 }
 
 choice! {

@@ -37,6 +37,7 @@ use crate::render::{
 };
 use crate::screen::Screen;
 use crate::session::{Session, SessionEvent};
+use crate::updates;
 
 /// Lines scrolled per notch of a mouse wheel.
 const WHEEL_LINES: f64 = 3.0;
@@ -318,6 +319,8 @@ pub(crate) struct App {
     /// Whether a chat shows what the input method is composing, in its
     /// box, so the window doesn't.
     composing_in_chat: bool,
+    /// New releases, and how the daemon's differs from the window's.
+    updates: updates::Known,
     /// Why the window closed, if something went wrong.
     pub(crate) result: anyhow::Result<()>,
 }
@@ -356,6 +359,7 @@ impl App {
             ime: InputMethod::default(),
             ime_area: None,
             composing_in_chat: false,
+            updates: updates::Known::new(),
             result: Ok(()),
         }
     }
@@ -656,6 +660,47 @@ impl App {
         }
     }
 
+    /// Carries out `:update`, if it was typed: runs `clackatoo update`
+    /// here, or opens a tab running it on the daemon's machine, where it
+    /// can be watched.
+    fn update(&mut self) {
+        use crate::desk::UpdateAsked;
+        let Some(asked) = self.desk.take_update_asked() else {
+            return;
+        };
+        match (asked, self.session.location().remote()) {
+            (UpdateAsked::Here, _) => match &self.updates.program {
+                Some(program) => updates::update(program.clone(), self.session.proxy()),
+                None => self
+                    .desk
+                    .say("this program can't be found, to update it".into()),
+            },
+            (UpdateAsked::On(host), Some(remote)) if host == remote.host => {
+                let command = format!("{} update", remote.command);
+                self.desk
+                    .open_tab_running(vec!["sh".into(), "-c".into(), command]);
+            }
+            (UpdateAsked::On(host), Some(remote)) => self.desk.say(format!(
+                "this window's daemon is on {}, not {host}",
+                remote.host
+            )),
+            (UpdateAsked::On(_), None) => self
+                .desk
+                .say("this window's daemon is on this machine, which :update alone updates".into()),
+        }
+        self.send_outbox();
+    }
+
+    /// Puts what the window knows of releases in the bar, and says `news`
+    /// until the next key.
+    fn tell_updates(&mut self, news: Option<String>) {
+        self.desk.set_notice(self.updates.notice());
+        if let Some(news) = news {
+            self.desk.say(news);
+        }
+        self.request_redraw();
+    }
+
     fn hit(&mut self, point: [f32; 2]) -> Hit {
         let maximised = self
             .frame
@@ -889,6 +934,7 @@ impl App {
             })
         };
         self.open_links();
+        self.update();
         self.update_title();
         if redraw {
             self.request_redraw();
@@ -2020,19 +2066,43 @@ impl App {
         self.request_redraw();
     }
 
+    #[allow(clippy::too_many_lines, reason = "one arm per event, each short")]
     fn handle_session_event(&mut self, event: SessionEvent) {
         match event {
             SessionEvent::Connected {
                 sender,
                 workspaces,
                 contact,
+                daemon_version,
             } => {
                 self.notice = None;
                 self.contact = contact;
                 self.sender = Some(sender);
                 self.desk.connected(workspaces);
+                let host = self.session.location().host();
+                let news = self.updates.daemon_is(daemon_version.as_deref(), host);
+                self.tell_updates(news);
                 self.update_title();
                 self.request_redraw();
+            }
+            SessionEvent::UpdateDue => {
+                if self.desk.options().updatecheck {
+                    updates::look(self.session.proxy());
+                }
+            }
+            SessionEvent::NewRelease(version) => {
+                let news = self.updates.newer_out(version);
+                self.tell_updates(news);
+            }
+            SessionEvent::Updated(outcome) => {
+                let said = match outcome {
+                    Ok(said) => {
+                        self.updates.updated();
+                        said
+                    }
+                    Err(why) => why,
+                };
+                self.tell_updates(Some(said));
             }
             SessionEvent::Contact => self.request_redraw(),
             SessionEvent::OtherDaemon { protocol } => {

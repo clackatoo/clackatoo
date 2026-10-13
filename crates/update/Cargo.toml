@@ -1,0 +1,29 @@
+[package]
+name = "clackatoo-update"
+description = "Finds, checks and installs clackatoo's releases."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+flate2.workspace = true
+minisign-verify.workspace = true
+ring.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+minisign = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+clackatoo-update = { path = ".", features = ["fake"] }
+
+[features]
+# Fake releases, for tests (see src/fake.rs).
+fake = ["dep:minisign", "dep:tempfile"]
+
+[lints]
+workspace = true

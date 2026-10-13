@@ -18,6 +18,7 @@ clackatoo-gui.workspace = true
 clackatoo-protocol.workspace = true
 clackatoo-syntax.workspace = true
 clackatoo-term.workspace = true
+clackatoo-update.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true
@@ -25,6 +26,7 @@ toml_edit.workspace = true
 
 [dev-dependencies]
 clackatoo-bench.workspace = true
+clackatoo-update = { workspace = true, features = ["fake"] }
 tempfile.workspace = true
 
 [[bench]]

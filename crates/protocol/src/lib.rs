@@ -82,7 +82,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 49;
+pub const PROTOCOL_VERSION: u32 = 56;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -643,6 +643,10 @@ pub enum Request {
         /// The buffer.
         buffer: BufferId,
     },
+    /// Asks which release of clackatoo the daemon is, such as `2026.10.0`,
+    /// so a window on another machine can say when the two differ.
+    /// Answered with [`Response::Text`].
+    Version,
 }
 
 /// How to start a terminal.

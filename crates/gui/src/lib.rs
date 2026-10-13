@@ -40,6 +40,7 @@ mod pane;
 mod render;
 mod screen;
 mod session;
+mod updates;
 
 #[cfg(test)]
 mod tests;
@@ -135,6 +136,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         }))
     });
     let session = session::Session::start(location, &options.runtime, event_loop.create_proxy());
+    updates::after_opening(event_loop.create_proxy());
     let mut app = app::App::new(started, fonts, gpu, session);
     if let Some(start) = lua_start {
         app.start_lua(start);

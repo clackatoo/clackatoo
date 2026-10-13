@@ -451,6 +451,18 @@ impl Client {
         }
     }
 
+    /// Which release of clackatoo the daemon is, such as `2026.10.0`.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn daemon_version(&mut self) -> Result<String, ClientError> {
+        match self.request(&Request::Version)? {
+            Response::Text(version) => Ok(version),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Starts a terminal.
     ///
     /// # Errors

@@ -23,6 +23,7 @@ clackatoo-daemon.workspace = true
 clackatoo-protocol.workspace = true
 clackatoo-term.workspace = true
 clackatoo-text.workspace = true
+clackatoo-update.workspace = true
 fontique.workspace = true
 log.workspace = true
 nucleo-matcher.workspace = true
