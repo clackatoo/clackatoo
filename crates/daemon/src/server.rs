@@ -1555,7 +1555,7 @@ impl Daemon {
         terminal: PaneTerminal,
         share: Option<u16>,
     ) -> Result<Response, Error> {
-        self.workspaces.check_tab(tab)?;
+        self.workspaces.check_split_tab(tab, side)?;
         let beside = (self.workspaces.get().find_tab(tab)).map(|(_, tab)| tab.focused);
         let content = self.pane_content(terminal, beside)?;
         let new = self.workspaces.split_tab(tab, side, content, share);
@@ -1569,7 +1569,7 @@ impl Daemon {
         side: Side,
         terminal: PaneTerminal,
     ) -> Result<Response, Error> {
-        self.workspaces.check_pane(pane)?;
+        self.workspaces.check_split(pane, side)?;
         let content = self.pane_content(terminal, Some(pane))?;
         let new = self.workspaces.split(pane, side, content);
         self.workspaces_changed();

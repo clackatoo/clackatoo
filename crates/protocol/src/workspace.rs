@@ -104,10 +104,11 @@ pub enum Layout {
     },
 }
 
-/// How deep splits may be nested in a layout that's read. A layout as
-/// deep has panes too small to see, but reading one any deeper, a split
-/// at a time, could overflow the stack, which aborts.
-const MAX_NESTING: u32 = 256;
+/// How deep splits may be nested in a layout (see [`Layout::depth`]). A
+/// layout as deep has panes too small to see, but reading one any deeper,
+/// a split at a time, could overflow the stack, which aborts: so one that
+/// is is refused when read, and a daemon never makes one.
+pub const MAX_NESTING: u32 = 256;
 
 std::thread_local! {
     /// How deep in a layout the one being read on this thread is.
@@ -418,6 +419,17 @@ impl Layout {
                     part.collect_panes(panes);
                 }
             }
+        }
+    }
+
+    /// How many splits deep it goes: 0 for a single pane, 1 for a split of
+    /// panes, and so on. Never more than [`MAX_NESTING`] in a layout that
+    /// can be read.
+    #[must_use]
+    pub fn depth(&self) -> u32 {
+        match self {
+            Self::Pane(_) => 0,
+            Self::Split { parts, .. } => 1 + parts.iter().map(Self::depth).max().unwrap_or(0),
         }
     }
 

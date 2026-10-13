@@ -86,6 +86,7 @@ impl TestDaemon {
             trash: Some(root.join("trash")),
             boards: Some(root.join("boards")),
             browser: None,
+            web: None,
         };
         let mut daemon = Daemon::bind(&root.join("daemon.sock"), config).expect("bind");
         let shutdown = daemon.shutdown_handle();
@@ -302,6 +303,50 @@ fn bad_frames_cost_only_their_own_connection() {
         }
     }
     assert!(Connection::open(&daemon).version().is_some());
+}
+
+#[test]
+fn a_tab_split_as_deep_as_windows_read_refuses_more() {
+    // Split across the whole tab each time, so each split goes a level
+    // deeper. Past the limit, no window could read the workspaces again,
+    // and a handover would carry them on.
+    let daemon = TestDaemon::start();
+    let socket = daemon.root().join("daemon.sock");
+    let mut client = clackatoo_daemon::Client::connect(&socket).expect("connect");
+    client.watch_workspaces().expect("watch");
+    let file = || {
+        let path = daemon.root().join("a.txt").display().to_string();
+        PaneTerminal::File(OpenFile { path, cwd: None })
+    };
+    client.new_workspace(None, file()).expect("a workspace");
+    let tab = client.watch_workspaces().expect("watch").list[0].tabs[0].id;
+    let max = clackatoo_protocol::MAX_NESTING;
+    for n in 0..=max {
+        let side = if n % 2 == 0 {
+            clackatoo_protocol::Side::Above
+        } else {
+            clackatoo_protocol::Side::Left
+        };
+        let request = Request::SplitTab {
+            tab,
+            side,
+            terminal: file(),
+            share: None,
+        };
+        match client.request(&request).expect("an answer") {
+            Response::PaneCreated(_) => assert!(n < max, "split {n} was made"),
+            Response::Error(err) => {
+                assert_eq!(n, max, "split {n} was refused: {err}");
+                assert!(err.to_string().contains("as deep as"), "{err}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    // Windows, old and new, still read the workspaces.
+    let mut again = clackatoo_daemon::Client::connect(&socket).expect("connect");
+    let workspaces = again.watch_workspaces().expect("the workspaces, read");
+    assert_eq!(workspaces.list[0].tabs[0].layout.depth(), max);
+    client.list_terminals().expect("still connected");
 }
 
 #[test]

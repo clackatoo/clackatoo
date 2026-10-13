@@ -6,8 +6,8 @@
 //! makes the change, which can't fail.
 
 use clackatoo_protocol::{
-    Axis, BoardId, BufferId, Content, Error, FilesId, Layout, Pane, PaneId, ReviewId, Side, Tab,
-    TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
+    Axis, BoardId, BufferId, Content, Error, FilesId, Layout, MAX_NESTING, Pane, PaneId, ReviewId,
+    Side, Tab, TabId, TerminalId, Workspace, WorkspaceId, Workspaces,
 };
 
 use crate::handover::{self, HandoverError};
@@ -152,12 +152,22 @@ impl WorkspaceState {
         for workspace in &handed.list {
             let mut tabs = Vec::new();
             for tab in &workspace.tabs {
-                let tab = Tab {
+                let mut tab = Tab {
                     id: TabId(tab.id),
                     layout: layout(&tab.layout)?,
                     focused: PaneId(tab.focused),
                     name: tab.name.clone(),
                 };
+                // Builds before splits had a limit could have made one
+                // deeper, which no window could read.
+                if tab.layout.depth() > MAX_NESTING {
+                    log::warn!(
+                        "tab {}: its splits were flattened to a readable depth",
+                        tab.id
+                    );
+                    within(&mut tab.layout, MAX_NESTING);
+                    tidy(&mut tab.layout);
+                }
                 if !tab.layout.panes().iter().any(|pane| pane.id == tab.focused) {
                     return Err(HandoverError::Damaged("a tab's focused pane isn't in it"));
                 }
@@ -252,8 +262,26 @@ impl WorkspaceState {
         Ok(pane.content)
     }
 
+    /// Checks that `pane` exists and can be split on `side` without its
+    /// tab's splits going deeper than a window can read.
+    pub(crate) fn check_split(&self, pane: PaneId, side: Side) -> Result<(), Error> {
+        let (_, tab, _) = (self.workspaces.find_pane(pane)).ok_or(Error::NoSuchPane(pane))?;
+        let mut layout = tab.layout.clone();
+        split(&mut layout, pane, side, placeholder());
+        fits(&layout)
+    }
+
+    /// Checks that `tab` exists and can be split along `side` without its
+    /// splits going deeper than a window can read.
+    pub(crate) fn check_split_tab(&self, tab: TabId, side: Side) -> Result<(), Error> {
+        let (_, tab) = self.workspaces.find_tab(tab).ok_or(Error::NoSuchTab(tab))?;
+        let mut layout = tab.layout.clone();
+        split_edge(&mut layout, side, placeholder(), None);
+        fits(&layout)
+    }
+
     /// Puts a pane showing `content` on `side` of `pane`, which
-    /// [`check_pane`](Self::check_pane) checked.
+    /// [`check_split`](Self::check_split) checked.
     pub(crate) fn split(
         &mut self,
         pane: PaneId,
@@ -268,7 +296,7 @@ impl WorkspaceState {
     }
 
     /// Puts a pane showing `content` along `side` of `tab`, which
-    /// [`check_tab`](Self::check_tab) checked, as long as the tab, with
+    /// [`check_split_tab`](Self::check_split_tab) checked, as long as the tab, with
     /// `share` thousandths of its space, or as much as each part beside it
     /// if `None`.
     pub(crate) fn split_tab(
@@ -286,14 +314,6 @@ impl WorkspaceState {
         split_edge(&mut tab.layout, side, new, share);
         tab.focused = new.id;
         new.id
-    }
-
-    /// Checks that `tab` exists.
-    pub(crate) fn check_tab(&self, tab: TabId) -> Result<(), Error> {
-        self.workspaces
-            .find_tab(tab)
-            .map(|_| ())
-            .ok_or(Error::NoSuchTab(tab))
     }
 
     /// The focused pane of `workspace`'s active tab.
@@ -538,6 +558,50 @@ impl WorkspaceState {
             .flat_map(|workspace| &mut workspace.tabs)
             .find(|tab| tab.layout.contains(pane))
             .expect("callers check the pane exists")
+    }
+}
+
+/// A pane standing in for one about to be made, to try a split with.
+fn placeholder() -> Pane {
+    Pane {
+        id: PaneId(u32::MAX),
+        content: Content::Terminal(TerminalId(u32::MAX)),
+    }
+}
+
+/// Refuses `layout` if its splits go deeper than [`MAX_NESTING`], which a
+/// window refuses to read: every window would be locked out, and a
+/// handover would carry it on.
+fn fits(layout: &Layout) -> Result<(), Error> {
+    if layout.depth() <= MAX_NESTING {
+        return Ok(());
+    }
+    // The protocol has no error of its own for this, and one would change
+    // it: this one is only its words.
+    Err(Error::Review(format!(
+        "The tab's splits are nested {MAX_NESTING} deep, as deep as they can go: split \
+         another way, or close a pane."
+    )))
+}
+
+/// Keeps `layout` within `room` splits deep: a split at the limit takes
+/// every pane below it as its own parts, in equal shares.
+fn within(layout: &mut Layout, room: u32) {
+    let deeper = layout.depth() > 1;
+    let Layout::Split { parts, shares, .. } = layout else {
+        return;
+    };
+    if room > 1 {
+        for part in parts {
+            within(part, room - 1);
+        }
+    } else if deeper {
+        let panes: Vec<Layout> = (parts.iter())
+            .flat_map(Layout::panes)
+            .map(Layout::Pane)
+            .collect();
+        *shares = vec![1; panes.len()];
+        *parts = panes;
     }
 }
 
@@ -984,5 +1048,60 @@ mod tests {
         assert_eq!(state.get().active, Some(a));
         assert_eq!(state.focused_pane(a), Some(one));
         assert_eq!(state.focus(PaneId(99)), Err(Error::NoSuchPane(PaneId(99))));
+    }
+
+    #[test]
+    fn splits_go_no_deeper_than_a_window_reads() {
+        // Splitting the newest pane across the last split, each time.
+        let mut state = WorkspaceState::new();
+        let mut pane = state.new_workspace("a".into(), TerminalId(1));
+        for n in 0.. {
+            let side = if n % 2 == 0 { Side::Right } else { Side::Below };
+            if state.check_split(pane, side).is_err() {
+                assert_eq!(n, MAX_NESTING);
+                break;
+            }
+            pane = state.split(pane, side, TerminalId(n + 2));
+        }
+        assert_eq!(only_tab(&state).layout.depth(), MAX_NESTING);
+        // Along the same axis it joins the split, which is still fine.
+        let last = if MAX_NESTING.is_multiple_of(2) {
+            Side::Below
+        } else {
+            Side::Right
+        };
+        assert!(state.check_split(pane, last).is_ok());
+
+        // And splitting the whole tab, each time across.
+        let mut state = WorkspaceState::new();
+        state.new_workspace("b".into(), TerminalId(1));
+        let tab = only_tab(&state).id;
+        for n in 0.. {
+            let side = if n % 2 == 0 { Side::Above } else { Side::Left };
+            if let Err(err) = state.check_split_tab(tab, side) {
+                assert_eq!(n, MAX_NESTING);
+                assert!(err.to_string().contains("as deep as they can go"), "{err}");
+                break;
+            }
+            state.split_tab(tab, side, TerminalId(n + 2), None);
+        }
+        assert_eq!(only_tab(&state).layout.depth(), MAX_NESTING);
+    }
+
+    #[test]
+    fn a_layout_handed_over_too_deep_is_flattened() {
+        // Made as a build without the limit could.
+        let mut state = WorkspaceState::new();
+        let mut pane = state.new_workspace("a".into(), TerminalId(1));
+        for n in 0..MAX_NESTING + 40 {
+            let side = if n % 2 == 0 { Side::Right } else { Side::Below };
+            pane = state.split(pane, side, TerminalId(n + 2));
+        }
+        let before = only_tab(&state).layout.panes();
+        let resumed = WorkspaceState::resume(&state.hand_over()).unwrap();
+        let tab = only_tab(&resumed);
+        assert_eq!(tab.layout.depth(), MAX_NESTING);
+        assert_eq!(tab.layout.panes(), before, "every pane kept, in order");
+        assert_eq!(tab.focused, pane);
     }
 }

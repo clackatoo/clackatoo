@@ -329,6 +329,10 @@ mod tests {
         assert!(read(&nested(64)).is_ok());
         assert!(read(&nested(1000)).is_err());
         assert!(read(&nested(64)).is_ok());
+        // The limit is exactly what Layout::depth counts.
+        let deepest = read(&nested(crate::MAX_NESTING as usize)).unwrap();
+        assert_eq!(deepest.depth(), crate::MAX_NESTING);
+        assert!(read(&nested(crate::MAX_NESTING as usize + 1)).is_err());
     }
 
     /// Frames of messages of many kinds, to be mangled.

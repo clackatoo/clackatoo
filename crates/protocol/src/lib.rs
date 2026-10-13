@@ -95,8 +95,8 @@ pub use view::{
     NodeId, Patch, Run, View, ViewUpdate,
 };
 pub use workspace::{
-    Axis, Content, Layout, Pane, PaneId, PaneTerminal, Side, Tab, TabId, Workspace, WorkspaceId,
-    Workspaces,
+    Axis, Content, Layout, MAX_NESTING, Pane, PaneId, PaneTerminal, Side, Tab, TabId, Workspace,
+    WorkspaceId, Workspaces,
 };
 
 /// The protocol version this crate speaks. Bump it on any incompatible
