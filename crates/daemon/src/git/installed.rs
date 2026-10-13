@@ -92,6 +92,11 @@ fn run(installed: &Installed, args: &[&str], env: &[(&str, &str)]) -> Option<Vec
     let mut command = Command::new(&installed.program);
     command
         .args(args)
+        // As `git()` runs it: a `GIT_CONFIG` in the daemon's environment
+        // would make the probe read that file alone, and fail.
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
         .envs(env.iter().copied())
         .env("PATH", &installed.path)
         .current_dir("/")
