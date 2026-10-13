@@ -16,16 +16,16 @@ alternate screen: false
 ||
 
 styles:
-  0:0..4 "bold" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None }
-  0:5..8 "dim" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(DIM), underline: None }
-  0:9..15 "italic" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(ITALIC), underline: None }
-  0:16..21 "under" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: Single }
-  0:22..27 "curly" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: Curly }
-  0:28..35 "inverse" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(INVERSE), underline: None }
-  0:36..42 "strike" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(STRIKETHROUGH), underline: None }
-  1:0..4 "red " Style { fg: Indexed(1), bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: None }
-  1:4..11 "bright " Style { fg: Indexed(10), bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: None }
-  1:11..15 "208 " Style { fg: Indexed(208), bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: None }
-  1:15..19 "rgb " Style { fg: Rgb(10, 200, 30), bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: None }
-  1:19..21 "bg" Style { fg: Indexed(7), bg: Indexed(17), underline_color: Default, attributes: Attributes(0x0), underline: None }
-  2:0..60 "full-width background                                       " Style { fg: Default, bg: Indexed(1), underline_color: Default, attributes: Attributes(0x0), underline: None }
+  0:0..4 "bold" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None, link: None }
+  0:5..8 "dim" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(DIM), underline: None, link: None }
+  0:9..15 "italic" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(ITALIC), underline: None, link: None }
+  0:16..21 "under" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: Single, link: None }
+  0:22..27 "curly" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: Curly, link: None }
+  0:28..35 "inverse" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(INVERSE), underline: None, link: None }
+  0:36..42 "strike" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(STRIKETHROUGH), underline: None, link: None }
+  1:0..4 "red " Style { fg: Indexed(1), bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: None, link: None }
+  1:4..11 "bright " Style { fg: Indexed(10), bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: None, link: None }
+  1:11..15 "208 " Style { fg: Indexed(208), bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: None, link: None }
+  1:15..19 "rgb " Style { fg: Rgb(10, 200, 30), bg: Default, underline_color: Default, attributes: Attributes(0x0), underline: None, link: None }
+  1:19..21 "bg" Style { fg: Indexed(7), bg: Indexed(17), underline_color: Default, attributes: Attributes(0x0), underline: None, link: None }
+  2:0..60 "full-width background                                       " Style { fg: Default, bg: Indexed(1), underline_color: Default, attributes: Attributes(0x0), underline: None, link: None }

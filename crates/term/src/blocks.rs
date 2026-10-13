@@ -317,6 +317,7 @@ mod tests {
         let config = Config {
             scrollback_lines: scrollback,
             scrollback_compaction: Compaction::Lazy,
+            ..Config::default()
         };
         Terminal::new(Size::new(cols, rows).unwrap(), &config)
     }

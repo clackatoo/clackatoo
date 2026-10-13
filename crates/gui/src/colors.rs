@@ -264,6 +264,7 @@ impl Theme {
             // Only just there: they say where things are, not what they are.
             HighlightKind::CursorLine => white(0.035),
             HighlightKind::ColorColumn => white(0.05),
+            HighlightKind::Link => self.accent,
         }
     }
 

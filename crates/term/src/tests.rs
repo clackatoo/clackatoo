@@ -556,6 +556,7 @@ mod resizing {
         let config = Config {
             scrollback_lines: 100,
             scrollback_compaction: compaction,
+            ..Config::default()
         };
         let mut t = Terminal::new(size(cols, rows), &config);
         t.advance(input.as_bytes());
@@ -1061,6 +1062,9 @@ fn output_fragment() -> impl Strategy<Value = Vec<u8>> {
         b"\x1b]133;C;cmdline_url=ls%20-l\x07".to_vec(),
         b"\x1b]133;D;1\x07".to_vec(),
         b"\x1b]7;file://host/tmp\x07".to_vec(),
+        b"\x1b]8;;https://a.example/\x1b\\".to_vec(),
+        b"\x1b]8;id=x;file://host/tmp/b\x07".to_vec(),
+        b"\x1b]8;;\x1b\\".to_vec(),
     ]);
     prop_oneof![4 => printable, 2 => control, 3 => csi, 1 => modes, 1 => esc, 1 => any::<u8>().prop_map(|b| vec![b])]
 }
@@ -1134,7 +1138,7 @@ proptest! {
     ) {
         let start = |compaction| {
             let size = Size::new(cols, rows).expect("test sizes are valid");
-            Terminal::new(size, &Config { scrollback_lines: limit, scrollback_compaction: compaction })
+            Terminal::new(size, &Config { scrollback_lines: limit, scrollback_compaction: compaction, ..Config::default() })
         };
         let mut terminals = [
             start(Compaction::Off),
@@ -1262,6 +1266,248 @@ proptest! {
     }
 }
 
+mod links {
+    use super::*;
+    use crate::{LinkId, LinksSnapshot};
+
+    /// `text` printed as a link to `uri`, with `id` if given.
+    fn link(uri: &str, id: Option<&str>, text: &str) -> String {
+        let params = id.map(|id| format!("id={id}")).unwrap_or_default();
+        format!("\x1b]8;{params};{uri}\x1b\\{text}\x1b]8;;\x1b\\")
+    }
+
+    /// The link of the cell at `line` and `col` of the screen, by its URI.
+    fn uri_at(terminal: &Terminal, line: usize, col: usize) -> Option<String> {
+        let id = style_at(terminal, line, col).link?;
+        Some(
+            terminal
+                .link(id)
+                .expect("cells' links are kept")
+                .uri()
+                .to_owned(),
+        )
+    }
+
+    /// The URI of every link in every row of the screen's history, as the
+    /// cells of each row show them.
+    fn history_uris(terminal: &Terminal) -> Vec<Vec<Option<String>>> {
+        terminal
+            .grid()
+            .scrollback()
+            .map(|row| {
+                (row.cells().iter())
+                    .map(|&cell| {
+                        let id = row.style(cell).link?;
+                        Some(terminal.link(id)?.uri().to_owned())
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn text_between_open_and_close_is_the_link() {
+        let t = after(
+            20,
+            2,
+            &format!("a{}b", link("https://x.example/", None, "here")),
+        );
+        assert_eq!(t.screen_text(), "ahereb");
+        assert_eq!(uri_at(&t, 0, 0), None);
+        for col in 1..5 {
+            assert_eq!(uri_at(&t, 0, col).as_deref(), Some("https://x.example/"));
+        }
+        assert_eq!(uri_at(&t, 0, 5), None);
+        let id = style_at(&t, 0, 1).link.unwrap();
+        assert_eq!(t.link(id).unwrap().id(), None);
+    }
+
+    #[test]
+    fn a_uri_with_semicolons_and_bel_endings_is_read_whole() {
+        let t = after(20, 2, "\x1b]8;;https://x/a;b?c=1;2\x07go\x1b]8;;\x07");
+        assert_eq!(uri_at(&t, 0, 0).as_deref(), Some("https://x/a;b?c=1;2"));
+    }
+
+    #[test]
+    fn ids_join_the_cells_of_one_link_and_tell_others_apart() {
+        let input = [
+            link("https://x/", Some("1"), "ab"),
+            " ".to_owned(),
+            link("https://x/", Some("1"), "cd"),
+            " ".to_owned(),
+            link("https://x/", Some("2"), "ef"),
+            " ".to_owned(),
+            link("https://x/", None, "gh"),
+        ]
+        .concat();
+        let t = after(20, 2, &input);
+        let id = |col| style_at(&t, 0, col).link.unwrap();
+        assert_eq!(id(0), id(3), "the same id and URI are one link");
+        assert_ne!(id(0), id(6), "another id is another link");
+        assert_ne!(id(0), id(9), "no id is another link again");
+        assert_eq!(t.link(id(6)).unwrap().id(), Some("2"));
+    }
+
+    #[test]
+    fn sgr_resets_inside_a_link_keep_it_and_erasing_drops_it() {
+        let t = after(
+            20,
+            2,
+            "\x1b]8;;https://x/\x07\x1b[1ma\x1b[0mb\x1b[mc\x1b]8;;\x07",
+        );
+        for col in 0..3 {
+            assert_eq!(uri_at(&t, 0, col).as_deref(), Some("https://x/"), "{col}");
+        }
+        assert!(!style_at(&t, 0, 1).attributes.contains(Attributes::BOLD));
+
+        // Clearing while a link is open blanks cells that aren't part of it.
+        let t = after(20, 2, "\x1b]8;;https://x/\x07ab\x1b[2K\x1b[1Gc");
+        assert_eq!(uri_at(&t, 0, 0).as_deref(), Some("https://x/"));
+        assert_eq!(uri_at(&t, 0, 1), None);
+    }
+
+    #[test]
+    fn links_scroll_into_history_raw_or_compacted() {
+        for compaction in [Compaction::Off, Compaction::Lazy, Compaction::Eager] {
+            let config = Config {
+                scrollback_lines: 100,
+                scrollback_compaction: compaction,
+                ..Config::default()
+            };
+            let mut t = Terminal::new(Size::new(10, 2).unwrap(), &config);
+            t.advance(format!("{}x\r\n", link("https://a/", None, "aa")).as_bytes());
+            t.advance(format!("{}\r\n\r\n", link("https://b/", Some("b"), "bb")).as_bytes());
+            t.compact_scrollback();
+            t.assert_invariants();
+            let a = Some("https://a/".to_owned());
+            let b = Some("https://b/".to_owned());
+            let history = history_uris(&t);
+            assert_eq!(history[0][..3], [a.clone(), a, None], "{compaction:?}");
+            assert_eq!(history[1][..3], [b.clone(), b, None], "{compaction:?}");
+        }
+    }
+
+    #[test]
+    fn links_are_rewrapped_with_their_text_on_resize() {
+        let mut t = after(
+            10,
+            3,
+            &format!("ab{}", link("https://x/", None, "cdefghij")),
+        );
+        t.resize(Size::new(5, 4).unwrap());
+        t.assert_invariants();
+        assert_eq!(t.screen_text(), "abcde\nfghij");
+        assert_eq!(uri_at(&t, 0, 1), None);
+        assert_eq!(uri_at(&t, 0, 2).as_deref(), Some("https://x/"));
+        assert_eq!(uri_at(&t, 1, 4).as_deref(), Some("https://x/"));
+    }
+
+    #[test]
+    fn links_no_row_shows_are_forgotten_and_their_numbers_never_reused() {
+        let mut t = terminal(20, 3);
+        let kept = link("https://kept/", None, "k");
+        t.advance(format!("{kept}\r\n").as_bytes());
+        let kept_id = style_at(&t, 0, 0).link.unwrap();
+        // Hundreds of links, each overwritten by the next, as a program
+        // redrawing a status line would make.
+        let mut last = kept_id;
+        for n in 0..2000 {
+            t.advance(format!("\x1b[2;1H{}", link(&format!("https://{n}/"), None, "x")).as_bytes());
+            let id = style_at(&t, 1, 0).link.unwrap();
+            assert!(id > last, "{id:?} reuses a number");
+            last = id;
+        }
+        assert!(t.link_count() < 600, "{} links held", t.link_count());
+        assert_eq!(uri_at(&t, 0, 0).as_deref(), Some("https://kept/"));
+        assert_eq!(uri_at(&t, 1, 0).as_deref(), Some("https://1999/"));
+
+        // A link still open is kept, though nothing shows it yet.
+        t.advance(b"\x1b]8;;https://open/\x07");
+        for n in 0..600 {
+            t.advance(format!("\x1b]8;;https://n{n}/\x07").as_bytes());
+        }
+        t.advance(b"\x1b]8;;https://open/\x07o");
+        t.assert_invariants();
+        assert_eq!(uri_at(&t, 1, 1).as_deref(), Some("https://open/"));
+    }
+
+    #[test]
+    fn file_links_naming_this_machine_are_kept_as_local_files() {
+        let config = Config {
+            local_host: Some("desk".into()),
+            ..Config::default()
+        };
+        let mut t = Terminal::new(Size::new(20, 2).unwrap(), &config);
+        t.advance(link("file://desk/home/j/a.rs", None, "a").as_bytes());
+        t.advance(link("file://laptop/home/j/b.rs", None, "b").as_bytes());
+        assert_eq!(uri_at(&t, 0, 0).as_deref(), Some("file:///home/j/a.rs"));
+        assert_eq!(
+            uri_at(&t, 0, 1).as_deref(),
+            Some("file://laptop/home/j/b.rs")
+        );
+    }
+
+    #[test]
+    fn a_full_reset_keeps_counting_links_on() {
+        let mut t = after(10, 2, &link("https://a/", None, "a"));
+        let before = style_at(&t, 0, 0).link.unwrap();
+        t.advance(format!("\x1bc{}", link("https://a/", None, "a")).as_bytes());
+        assert!(style_at(&t, 0, 0).link.unwrap() > before);
+    }
+
+    #[test]
+    fn a_snapshot_keeps_links_on_both_screens_in_history_and_in_pens() {
+        let mut original = terminal(8, 2);
+        original.advance(format!("{}\r\n\r\n", link("https://h/", None, "hist")).as_bytes());
+        original.advance(link("https://p/", Some("p"), "prim").as_bytes());
+        original
+            .advance(format!("\x1b[?1049h\x1b[H{}", link("https://alt/", None, "alt")).as_bytes());
+        original.advance(b"\x1b]8;;https://saved/\x07\x1b7\x1b]8;;\x07\x1b]8;;https://pen/\x07");
+
+        let (snapshot, links) = original.snapshot_with_links();
+        let mut restored =
+            Terminal::restore_with_links(&snapshot, &links, &Config::default()).unwrap();
+        restored.assert_invariants();
+        assert_eq!(cells(&restored), cells(&original));
+        assert_eq!(uri_at(&restored, 0, 0).as_deref(), Some("https://alt/"));
+        // The pen prints its link, and so does the one DECSC saved.
+        restored.advance(b"x");
+        assert_eq!(uri_at(&restored, 0, 3).as_deref(), Some("https://pen/"));
+        restored.advance(b"\x1b8z");
+        assert_eq!(uri_at(&restored, 0, 3).as_deref(), Some("https://saved/"));
+        restored.advance(b"\x1b[?1049l");
+        assert_eq!(uri_at(&restored, 1, 0).as_deref(), Some("https://p/"));
+        assert_eq!(history_uris(&restored)[0][0].as_deref(), Some("https://h/"));
+
+        // Restored without its links, the text is all there, unlinked.
+        let plain = Terminal::restore(&snapshot, &Config::default()).unwrap();
+        assert_eq!(plain.screen_text(), original.screen_text());
+        assert_eq!(uri_at(&plain, 0, 0), None);
+    }
+
+    #[test]
+    fn links_snapshots_that_disagree_with_their_lines_are_refused() {
+        let original = after(8, 2, &link("https://a/", None, "a"));
+        let (snapshot, links) = original.snapshot_with_links();
+        let restore = |links: &LinksSnapshot| {
+            Terminal::restore_with_links(&snapshot, links, &Config::default()).is_err()
+        };
+        assert!(!restore(&links));
+        let mut unknown = links.clone();
+        unknown.links.clear();
+        assert!(restore(&unknown), "a link not in the table");
+        let mut off_screen = links.clone();
+        off_screen.primary[0].line = 9;
+        assert!(restore(&off_screen), "a link on a line not there");
+        let mut no_run = links.clone();
+        no_run.primary[0].run = 5;
+        assert!(restore(&no_run), "a link on a run not there");
+        let mut pen = links;
+        pen.pens[0] = LinkId::new(77).map(LinkId::get);
+        assert!(restore(&pen), "a pen's link not in the table");
+    }
+}
+
 mod snapshots {
     use super::*;
 
@@ -1286,12 +1532,12 @@ mod snapshots {
             prop_assume!(original.parser_is_idle());
             original.take_replies();
 
-            let snapshot = original.snapshot();
+            let (snapshot, links) = original.snapshot_with_links();
             let blocks = original.blocks_snapshot();
-            let mut restored = Terminal::restore(&snapshot, &config()).unwrap();
+            let mut restored = Terminal::restore_with_links(&snapshot, &links, &config()).unwrap();
             restored.restore_blocks(&blocks);
             restored.assert_invariants();
-            prop_assert_eq!(&restored.snapshot(), &snapshot);
+            prop_assert_eq!(&restored.snapshot_with_links(), &(snapshot, links));
             prop_assert_eq!(&restored.blocks_snapshot(), &blocks);
             prop_assert_eq!(cells(&restored), cells(&original));
 

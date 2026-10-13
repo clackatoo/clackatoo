@@ -7,7 +7,7 @@ use crate::blocks::Mark;
 use crate::damage::Damage;
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
-use crate::snapshot::{Line, RestoreError};
+use crate::snapshot::{Captured, Line, LineLinks, RestoreError};
 use crate::style::Style;
 
 /// A screen of rows and the history above it.
@@ -42,30 +42,43 @@ impl Grid {
         }
     }
 
-    /// The screen's rows and its history's, oldest first, for a snapshot.
-    pub(crate) fn lines(&self) -> (Vec<Line>, Vec<Line>) {
-        let screen = (0..self.height)
-            .map(|line| Line::of_row(&self.rows[line]))
-            .collect();
+    /// The screen's rows and its history's, oldest first, for a snapshot,
+    /// with the runs of them that are part of links.
+    pub(crate) fn lines(&self) -> (Captured, Captured) {
+        let mut screen = Captured::default();
+        for row in &self.rows {
+            screen.push_row(row);
+        }
         (screen, self.scrollback.lines())
     }
 
-    /// A grid showing `screen`, `width` × `screen.len()`, over `history`.
+    /// The styles the screen's rows and its history may have, with the
+    /// links they're part of.
+    pub(crate) fn styles(&self) -> impl Iterator<Item = &Style> + '_ {
+        let screen = self.rows.iter().flat_map(Row::styles);
+        screen.chain(self.scrollback.styles())
+    }
+
+    /// A grid showing `screen`, `width` × `screen.len()`, over `history`,
+    /// with the links `links` gives the screen's lines.
     pub(crate) fn restored(
         width: usize,
         screen: &[Line],
+        mut links: LineLinks<'_>,
         history: Scrollback,
     ) -> Result<Self, RestoreError> {
         let rows = screen
             .iter()
-            .map(|line| {
+            .enumerate()
+            .map(|(number, line)| {
                 if usize::from(line.width) == width {
-                    line.to_row()
+                    line.to_linked_row(&links.of(number)?)
                 } else {
                     Err(RestoreError("a screen line isn't as wide as the screen"))
                 }
             })
             .collect::<Result<VecDeque<_>, _>>()?;
+        links.finish()?;
         Ok(Self {
             height: rows.len(),
             rows,

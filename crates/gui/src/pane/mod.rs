@@ -30,6 +30,7 @@ use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
 
+mod links;
 mod mouse;
 mod normal;
 mod operator;
@@ -148,6 +149,13 @@ pub(crate) struct Pane {
     prefix: Option<Prefix>,
     /// Drawn for history lines still on their way.
     blank: Row,
+    /// Where the mouse is over the pane, for the link under it.
+    hovered: Option<links::Hover>,
+    /// A link clicked or `gx`ed, for the desk to open.
+    opening: Option<crate::links::Target>,
+    /// How many links the screen may know of before those no row shows
+    /// are forgotten.
+    links_kept: usize,
 }
 
 impl Pane {
@@ -175,6 +183,9 @@ impl Pane {
             unacknowledged: false,
             prefix: None,
             blank: RowBuilder::new(0).finish(false),
+            hovered: None,
+            opening: None,
+            links_kept: links::KEPT_LINKS,
         }
     }
 
@@ -412,6 +423,7 @@ impl Pane {
             self.enter_normal();
         }
         self.keep_cursor_in_bounds();
+        self.forget_unseen_links();
         self.unacknowledged = true;
         self.fetch_history();
         true
@@ -428,6 +440,9 @@ impl Pane {
             (Some(Pending::History(asked, generation)), Response::History(lines)) => {
                 let shown = self.shown_history();
                 self.history.receive(&lines, &asked, generation, &shown);
+                if generation == self.history.generation() {
+                    self.learn_links(&lines.links);
+                }
                 self.scroll = self.scroll.min(self.max_scroll());
                 self.fetch_history();
                 true
@@ -669,6 +684,17 @@ impl Pane {
                 cols: found.start.col..found.start.col + found.cells,
                 kind: HighlightKind::Match,
             });
+        }
+        if let Some(link) = self.hovered_link() {
+            let shown = link
+                .cells
+                .into_iter()
+                .filter(|(line, _)| (top..bottom).contains(line));
+            highlights.extend(shown.map(|(line, cols)| Highlight {
+                line: usize::try_from(line - top).expect("within the height"),
+                cols,
+                kind: HighlightKind::Link,
+            }));
         }
         highlights
     }
@@ -929,7 +955,7 @@ impl<'d> Lines for Document<'d> {
 
 #[cfg(test)]
 mod tests {
-    use clackatoo_protocol::{HistoryLine, HistoryLines, Line, View};
+    use clackatoo_protocol::{HistoryLine, HistoryLines, Line, LinkTarget, View};
     use clackatoo_term::{Config, Terminal};
     use winit::keyboard::KeyLocation;
 
@@ -966,7 +992,7 @@ mod tests {
                 ClientMessage::Request(Request::History { end, count, .. }) => {
                     let start = end.saturating_sub(u64::from(count));
                     let mut first = None;
-                    let lines = terminal
+                    let lines: Vec<HistoryLine> = terminal
                         .primary()
                         .scrollback_lines(start..end)
                         .map(|(number, row)| {
@@ -977,9 +1003,11 @@ mod tests {
                             }
                         })
                         .collect();
+                    let shown = LinkTarget::of(lines.iter().map(|line| &line.line), terminal);
                     Response::History(HistoryLines {
                         first: first.unwrap_or(end),
                         lines,
+                        links: shown,
                     })
                 }
                 ClientMessage::Request(Request::Text {

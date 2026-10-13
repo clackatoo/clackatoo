@@ -72,6 +72,8 @@ impl Pane {
             (_, Some('e')) if ctrl => return self.scroll_view(-1),
             (_, Some('y')) if ctrl => return self.scroll_view(1),
             (_, _) if ctrl => return false,
+            // `gx` opens the link under the cursor, as in Vim.
+            (_, Some('x')) if after_g => return self.open_link_at_cursor(),
             (_, Some(key @ ('i' | 'a'))) if visual => {
                 self.prefix = Some(Prefix::Object { inner: key == 'i' });
                 return false;

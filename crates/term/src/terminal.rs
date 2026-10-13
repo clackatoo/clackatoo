@@ -2,18 +2,21 @@
 
 use std::ops::Range;
 
+use std::collections::HashSet;
+
 use bitflags::bitflags;
 
 use crate::blocks::{self, Blocks, Mark};
 use crate::charset::Charsets;
 use crate::damage::Damage;
 use crate::grid::Grid;
+use crate::links::{self, Hyperlink, LinkId, Links, local_file_uri};
 use crate::mouse::{MouseEncoding, MouseTracking};
 use crate::parser::Parser;
 use crate::row::Row;
 use crate::scrollback::{Compaction, Scrollback};
 use crate::size::Size;
-use crate::snapshot::{BlocksSnapshot, Line, RestoreError, Snapshot, position};
+use crate::snapshot::{BlocksSnapshot, LineLinks, LinksSnapshot, RestoreError, Snapshot, position};
 use crate::style::Style;
 use crate::tabs::TabStops;
 use crate::width;
@@ -25,6 +28,11 @@ pub struct Config {
     pub scrollback_lines: usize,
     /// When those lines are compacted to save memory.
     pub scrollback_compaction: Compaction,
+    /// The name of the machine the terminal's programs run on. A
+    /// `file://` link naming it, as `ls --hyperlink` prints them, is kept
+    /// as a link to a local file, `file:///path`, so a window anywhere
+    /// knows it's on the daemon's machine.
+    pub local_host: Option<String>,
 }
 
 impl Default for Config {
@@ -32,6 +40,7 @@ impl Default for Config {
         Self {
             scrollback_lines: 10_000,
             scrollback_compaction: Compaction::default(),
+            local_host: None,
         }
     }
 }
@@ -201,25 +210,57 @@ impl Terminal {
         self.emulator.cwd.as_deref()
     }
 
+    /// What the link `id` points to, if any row may still be part of it.
+    /// Cells name their link in their [`Style`].
+    #[must_use]
+    pub fn link(&self, id: LinkId) -> Option<&Hyperlink> {
+        self.emulator.links.get(id)
+    }
+
     /// What the shell said about block `block`, if it is still kept.
     pub(crate) fn block_entry(&self, block: u32) -> Option<&blocks::Entry> {
         self.emulator.blocks.get(block)
     }
 
-    /// The terminal's whole state, to carry into another process. See
-    /// [`Snapshot`] for what isn't kept.
+    /// The terminal's whole state, to carry into another process, but its
+    /// links. See [`Snapshot`] for what isn't kept.
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
+        self.snapshot_with_links().0
+    }
+
+    /// The terminal's whole state, to carry into another process, with
+    /// its links. See [`Snapshot`] for what isn't kept.
+    #[must_use]
+    pub fn snapshot_with_links(&self) -> (Snapshot, LinksSnapshot) {
         let emulator = &self.emulator;
         let (primary, history) = emulator.primary.lines();
-        Snapshot {
+        let (alternate, alternate_links) = match &emulator.alternate {
+            Some(grid) => {
+                let captured = grid.lines().0;
+                (Some(captured.lines), captured.links)
+            }
+            None => (None, Vec::new()),
+        };
+        let links = LinksSnapshot::capture(
+            &emulator.links,
+            primary.links,
+            history.links,
+            alternate_links,
+            [
+                emulator.cursor.pen.link,
+                emulator.saved_primary.cursor.pen.link,
+                emulator.saved_alternate.cursor.pen.link,
+            ],
+        );
+        let snapshot = Snapshot {
             cols: emulator.size.cols(),
             rows: emulator.size.rows(),
             title: emulator.title.clone(),
-            primary,
-            history,
+            primary: primary.lines,
+            history: history.lines,
             history_end: emulator.primary.scrollback_end(),
-            alternate: emulator.alternate.as_ref().map(|grid| grid.lines().0),
+            alternate,
             alternate_shown: emulator.screen == Screen::Alternate,
             cursor: emulator.cursor.into(),
             saved_primary: emulator.saved_primary.into(),
@@ -236,20 +277,37 @@ impl Terminal {
             tab_stops: emulator.tabs.columns().map(position).collect(),
             cursor_shape: emulator.cursor_shape.into(),
             last_printed: emulator.last_printed,
-        }
+        };
+        (snapshot, links)
     }
 
-    /// The terminal a [`snapshot`](Self::snapshot) was taken of, with
-    /// `config`'s settings: history beyond its line limit is dropped.
+    /// The terminal a [`snapshot`](Self::snapshot) was taken of, without
+    /// links, with `config`'s settings: history beyond its line limit is
+    /// dropped.
     ///
     /// # Errors
     ///
     /// If the snapshot is inconsistent, so can't have come from a terminal.
     pub fn restore(snapshot: &Snapshot, config: &Config) -> Result<Self, RestoreError> {
+        Self::restore_with_links(snapshot, &LinksSnapshot::default(), config)
+    }
+
+    /// The terminal a [`snapshot_with_links`](Self::snapshot_with_links)
+    /// was taken of, links and all, with `config`'s settings.
+    ///
+    /// # Errors
+    ///
+    /// If the snapshots are inconsistent, so can't have come from a
+    /// terminal.
+    pub fn restore_with_links(
+        snapshot: &Snapshot,
+        links: &LinksSnapshot,
+        config: &Config,
+    ) -> Result<Self, RestoreError> {
         let size = Size::new(snapshot.cols, snapshot.rows)
             .map_err(|_| RestoreError("its size is out of range"))?;
         let (width, height) = (usize::from(size.cols()), usize::from(size.rows()));
-        let fits = |lines: &[Line]| lines.len() == height;
+        let fits = |lines: &[crate::snapshot::Line]| lines.len() == height;
         if !fits(&snapshot.primary)
             || snapshot
                 .alternate
@@ -270,25 +328,37 @@ impl Terminal {
             return Err(RestoreError("the cursor is off the screen"));
         }
 
+        let (table, pens) = links.table()?;
+        let mut history_links = LineLinks::new(&links.history, &table);
         let history = Scrollback::restored(
             config.scrollback_lines,
             config.scrollback_compaction,
-            snapshot.history.iter().map(Line::to_row),
+            (snapshot.history.iter().enumerate())
+                .map(|(number, line)| line.to_linked_row(&history_links.of(number)?)),
             snapshot.history_end,
         )?;
+        history_links.finish()?;
         let mut emulator = Emulator::new(size, config);
-        emulator.primary = Grid::restored(width, &snapshot.primary, history)?;
-        emulator.alternate = snapshot
-            .alternate
-            .as_deref()
-            .map(|lines| Grid::restored(width, lines, Scrollback::new(0, Compaction::Off)))
-            .transpose()?;
+        let primary_links = LineLinks::new(&links.primary, &table);
+        emulator.primary = Grid::restored(width, &snapshot.primary, primary_links, history)?;
+        let alternate_links = LineLinks::new(&links.alternate, &table);
+        emulator.alternate = if let Some(screen) = snapshot.alternate.as_deref() {
+            let history = Scrollback::new(0, Compaction::Off);
+            Some(Grid::restored(width, screen, alternate_links, history)?)
+        } else {
+            alternate_links.finish()?;
+            None
+        };
         if snapshot.alternate_shown {
             emulator.screen = Screen::Alternate;
         }
         emulator.cursor = snapshot.cursor.into();
         emulator.saved_primary = snapshot.saved_primary.into();
         emulator.saved_alternate = snapshot.saved_alternate.into();
+        emulator.cursor.pen.link = pens[0];
+        emulator.saved_primary.cursor.pen.link = pens[1];
+        emulator.saved_alternate.cursor.pen.link = pens[2];
+        emulator.links = table;
         (
             emulator.modes,
             emulator.mouse_tracking,
@@ -329,6 +399,12 @@ impl Terminal {
         emulator.primary.set_marks(&marks);
         emulator.blocks = blocks;
         emulator.cwd.clone_from(&snapshot.cwd);
+    }
+
+    /// The number of links the terminal holds.
+    #[cfg(test)]
+    pub(crate) fn link_count(&self) -> usize {
+        self.emulator.link_count()
     }
 
     /// The printing state the screen doesn't show: the cursor's position and
@@ -615,6 +691,8 @@ pub(crate) struct Emulator {
     cwd: Option<String>,
     /// The commands the shell marked (see [`crate::blocks`]).
     blocks: Blocks,
+    /// What the links cells are part of point to (see [`crate::links`]).
+    links: Links,
     /// The cursor shape the program asked for.
     cursor_shape: CursorShape,
     pub(crate) replies: Vec<u8>,
@@ -654,6 +732,7 @@ impl Emulator {
             title: String::new(),
             cwd: None,
             blocks: Blocks::default(),
+            links: Links::default(),
             cursor_shape: CursorShape::Default,
             replies: Vec::new(),
             last_printed: None,
@@ -1384,8 +1463,11 @@ impl Emulator {
     pub(crate) fn full_reset(&mut self) {
         let replies = std::mem::take(&mut self.replies);
         let generation = self.primary.history_generation();
+        let (_, next_link) = self.links.parts();
         *self = Self::new(self.size, &self.config);
         self.replies = replies;
+        // Link IDs are never reused (see crate::links).
+        self.links = Links::from_parts([], next_link);
         // History is numbered from 0 again.
         self.primary.follow_history(generation);
     }
@@ -1475,6 +1557,47 @@ impl Emulator {
         let line = self.cursor.line;
         let row = self.primary.row_mut(line);
         row.set_mark(Some(Mark::add(row.mark(), block, output)));
+    }
+
+    // --- Links (see crate::links) ------------------------------------------
+
+    /// OSC 8: text printed from now on links to `uri`, with the `id` among
+    /// `params`, or to nothing if `uri` is empty.
+    pub(crate) fn set_link(&mut self, params: &[u8], uri: &[u8]) {
+        let Some((uri, id)) = links::parse(params, uri) else {
+            self.cursor.pen.link = None;
+            return;
+        };
+        if self.links.wants_sweep() {
+            let (live, scanned) = self.live_links();
+            self.links.sweep(&live, scanned);
+        }
+        let uri = local_file_uri(&uri, self.config.local_host.as_deref());
+        self.cursor.pen.link = self.links.intern(&uri, id.as_deref());
+    }
+
+    /// Every link a row or a pen may refer to, and how many styles were
+    /// looked at to find them.
+    fn live_links(&self) -> (HashSet<LinkId>, usize) {
+        let pens = [
+            &self.cursor,
+            &self.saved_primary.cursor,
+            &self.saved_alternate.cursor,
+        ];
+        let alternate = self.alternate.iter().flat_map(Grid::styles);
+        let pens = pens.into_iter().map(|cursor| &cursor.pen);
+        let mut scanned = 0;
+        let live = (self.primary.styles().chain(alternate).chain(pens))
+            .inspect(|_| scanned += 1)
+            .filter_map(|style| style.link)
+            .collect();
+        (live, scanned)
+    }
+
+    /// The number of links the terminal holds.
+    #[cfg(test)]
+    pub(crate) fn link_count(&self) -> usize {
+        self.links.len()
     }
 
     /// OSC 7: the shell's working directory, as a `file://` URL.

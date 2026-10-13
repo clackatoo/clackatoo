@@ -19,12 +19,15 @@
 //!
 //! What the shell marked (see [`crate::blocks`]) came later, so it is a
 //! snapshot of its own, [`BlocksSnapshot`], and a terminal snapshotted
-//! without one restores with no blocks.
+//! without one restores with no blocks. So did links (see
+//! [`crate::Hyperlink`]): [`LinksSnapshot`] says which runs of which lines
+//! are part of which link, and a terminal restored without one has none.
 
 use std::collections::VecDeque;
 
 use crate::blocks::{Blocks, Entry, Mark, Phase as LivePhase};
 use crate::charset::{Charset as LiveCharset, Charsets as LiveCharsets, Slot};
+use crate::links::{Hyperlink, LinkId, Links};
 use crate::mouse::{MouseEncoding, MouseTracking};
 use crate::row::{Row, RowBuilder};
 use crate::style::{
@@ -79,6 +82,50 @@ pub struct BlocksSnapshot {
     /// The number of the first block.
     pub(crate) first: u32,
     pub(crate) blocks: Vec<BlockEntry>,
+}
+
+/// The links in a terminal's lines, from
+/// [`Terminal::snapshot_with_links`](crate::Terminal::snapshot_with_links),
+/// for [`Terminal::restore_with_links`](crate::Terminal::restore_with_links).
+///
+/// A [`Snapshot`]'s lines are split into runs wherever the style changes,
+/// and a link is part of the style, so each run is part of one link or
+/// none. This lists the runs that are, by line and run number.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct LinksSnapshot {
+    /// The terminal's links. Each ID is a link's number.
+    pub(crate) links: Vec<LinkEntry>,
+    /// The number the next new link gets.
+    pub(crate) next: u32,
+    /// The runs of the primary screen's lines that are part of links,
+    /// ordered by line, then run.
+    pub(crate) primary: Vec<LinkedRun>,
+    /// And of its history's lines, numbered from the oldest kept.
+    pub(crate) history: Vec<LinkedRun>,
+    /// And of the alternate screen's.
+    pub(crate) alternate: Vec<LinkedRun>,
+    /// The link the cursor's pen prints, then the pens DECSC saved for the
+    /// primary and alternate screens.
+    pub(crate) pens: [Option<u32>; 3],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub(crate) struct LinkEntry {
+    pub(crate) id: u32,
+    pub(crate) uri: String,
+    /// The `id` the program gave the link.
+    pub(crate) name: Option<String>,
+}
+
+/// Run `run` of line `line` is part of link `link`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub(crate) struct LinkedRun {
+    pub(crate) line: u32,
+    pub(crate) run: u32,
+    pub(crate) link: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,9 +334,40 @@ pub struct RestoreError(pub(crate) &'static str);
 
 // --- Lines -------------------------------------------------------------------
 
+/// Lines captured for a snapshot, and the runs of them that are part of
+/// links.
+#[derive(Debug, Default)]
+pub(crate) struct Captured {
+    pub(crate) lines: Vec<Line>,
+    pub(crate) links: Vec<LinkedRun>,
+}
+
+impl Captured {
+    /// Adds `line`, whose runs are part of the links `links` gives by run.
+    pub(crate) fn push(&mut self, line: Line, links: impl Iterator<Item = Option<LinkId>>) {
+        let number = offset(self.lines.len());
+        for (run, link) in links.enumerate() {
+            if let Some(link) = link {
+                self.links.push(LinkedRun {
+                    line: number,
+                    run: offset(run),
+                    link: link.get(),
+                });
+            }
+        }
+        self.lines.push(line);
+    }
+
+    /// Adds `row`.
+    pub(crate) fn push_row(&mut self, row: &Row) {
+        let (line, links) = Line::of_row(row);
+        self.push(line, links.into_iter());
+    }
+}
+
 impl Line {
-    /// `row` as a line.
-    pub(crate) fn of_row(row: &Row) -> Self {
+    /// `row` as a line, and the link each of its runs is part of.
+    pub(crate) fn of_row(row: &Row) -> (Self, Vec<Option<LinkId>>) {
         let cells = row.cells();
         // As history stores rows: a row that continues keeps every column
         // but padding; one that doesn't loses its trailing blanks.
@@ -303,6 +381,7 @@ impl Line {
         };
         let mut text = String::new();
         let mut runs = Vec::new();
+        let mut links = Vec::new();
         let mut current = LiveStyle::DEFAULT;
         let mut ends_in_zwj = false;
         for (col, &cell) in cells[..end].iter().enumerate() {
@@ -316,6 +395,7 @@ impl Line {
                     style: Style::from(style),
                     separate: ends_in_zwj,
                 });
+                links.push(style.link);
                 current = style;
             }
             text.push(cell.ch());
@@ -325,16 +405,24 @@ impl Line {
                 ends_in_zwj = extra.last() == Some(&ZWJ);
             }
         }
-        Self {
+        let line = Self {
             text,
             runs,
             width: u16::try_from(cells.len()).expect("rows are at most Size::MAX wide"),
             continues: row.is_wrapped(),
-        }
+        };
+        (line, links)
     }
 
-    /// The line as a row.
+    /// The line as a row, without links.
+    #[cfg(test)]
     pub(crate) fn to_row(&self) -> Result<Row, RestoreError> {
+        self.to_linked_row(&[])
+    }
+
+    /// The line as a row, its runs part of the links `links` gives by run
+    /// number, in order.
+    pub(crate) fn to_linked_row(&self, links: &[(u32, LinkId)]) -> Result<Row, RestoreError> {
         if self.width == 0 {
             return Err(RestoreError("a line has no columns"));
         }
@@ -347,12 +435,119 @@ impl Line {
         let text_end = offset(self.text.len());
         let first = self.runs.first().map_or(text_end, |run| run.start);
         builder.push(text(0, first)?, &LiveStyle::DEFAULT, false);
+        let mut links = links.iter().peekable();
         for (index, run) in self.runs.iter().enumerate() {
             let end = self.runs.get(index + 1).map_or(text_end, |next| next.start);
-            builder.push(text(run.start, end)?, &run.style.into(), run.separate);
+            let mut style = LiveStyle::from(run.style);
+            if let Some(&(_, link)) = links.next_if(|&&(at, _)| at == offset(index)) {
+                style.link = Some(link);
+            }
+            builder.push(text(run.start, end)?, &style, run.separate);
+        }
+        if links.next().is_some() {
+            return Err(RestoreError("a link is on a run that isn't there"));
         }
         Ok(builder.finish(self.continues))
     }
+}
+
+impl LinksSnapshot {
+    pub(crate) fn capture(
+        links: &Links,
+        primary: Vec<LinkedRun>,
+        history: Vec<LinkedRun>,
+        alternate: Vec<LinkedRun>,
+        pens: [Option<LinkId>; 3],
+    ) -> Self {
+        let (table, next) = links.parts();
+        let mut links: Vec<LinkEntry> = table
+            .map(|(id, link)| LinkEntry {
+                id: id.get(),
+                uri: link.uri().to_owned(),
+                name: link.id().map(str::to_owned),
+            })
+            .collect();
+        links.sort_by_key(|entry| entry.id);
+        Self {
+            links,
+            next,
+            primary,
+            history,
+            alternate,
+            pens: pens.map(|pen| pen.map(LinkId::get)),
+        }
+    }
+
+    /// The table of links, and the link each pen prints, checked.
+    pub(crate) fn table(&self) -> Result<(Links, [Option<LinkId>; 3]), RestoreError> {
+        let links = self
+            .links
+            .iter()
+            .map(|entry| {
+                let id = LinkId::new(entry.id).ok_or(RestoreError("a link is numbered 0"))?;
+                Ok((id, Hyperlink::new(&entry.uri, entry.name.as_deref())))
+            })
+            .collect::<Result<Vec<_>, RestoreError>>()?;
+        let table = Links::from_parts(links, self.next);
+        let mut pens = [None; 3];
+        for (pen, &id) in pens.iter_mut().zip(&self.pens) {
+            *pen = id.map(|id| known(&table, id)).transpose()?;
+        }
+        Ok((table, pens))
+    }
+}
+
+/// Hands out, line by line in order, the links of the runs of the lines
+/// of one part of a snapshot, checked against the table.
+pub(crate) struct LineLinks<'a> {
+    rest: &'a [LinkedRun],
+    table: &'a Links,
+    last: Option<(u32, u32)>,
+}
+
+impl<'a> LineLinks<'a> {
+    pub(crate) fn new(part: &'a [LinkedRun], table: &'a Links) -> Self {
+        Self {
+            rest: part,
+            table,
+            last: None,
+        }
+    }
+
+    /// The links of line `line`'s runs. Lines must be asked for in order.
+    pub(crate) fn of(&mut self, line: usize) -> Result<Vec<(u32, LinkId)>, RestoreError> {
+        let line = offset(line);
+        let mut links = Vec::new();
+        while let Some((linked, after)) = self.rest.split_first() {
+            let at = (linked.line, linked.run);
+            if linked.line < line || self.last.is_some_and(|last| at <= last) {
+                return Err(RestoreError("links are out of order"));
+            }
+            if linked.line > line {
+                break;
+            }
+            self.last = Some(at);
+            links.push((linked.run, known(self.table, linked.link)?));
+            self.rest = after;
+        }
+        Ok(links)
+    }
+
+    /// Fails if links were left over, on lines that aren't there.
+    pub(crate) fn finish(self) -> Result<(), RestoreError> {
+        if self.rest.is_empty() {
+            Ok(())
+        } else {
+            Err(RestoreError("a link is on a line that isn't there"))
+        }
+    }
+}
+
+/// Link `id`, which must be in `table`.
+fn known(table: &Links, id: u32) -> Result<LinkId, RestoreError> {
+    LinkId::new(id)
+        .filter(|&id| table.get(id).is_some())
+        .ok_or(RestoreError("a link isn't in the table"))
 }
 
 /// A line or column, which fits because sizes do.
@@ -405,6 +600,8 @@ impl From<Style> for LiveStyle {
                 Underline::Dotted => LiveUnderline::Dotted,
                 Underline::Dashed => LiveUnderline::Dashed,
             },
+            // Links come from a `LinksSnapshot`.
+            link: None,
         }
     }
 }

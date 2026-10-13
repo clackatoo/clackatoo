@@ -111,8 +111,17 @@ impl DaemonConfig {
     #[must_use]
     pub fn from_env() -> Self {
         let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+        // Programs name this machine in `file://` links (see
+        // `clackatoo_term::Config::local_host`).
+        let local_host = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .ok()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
         Self {
-            terminal: clackatoo_term::Config::default(),
+            terminal: clackatoo_term::Config {
+                local_host,
+                ..clackatoo_term::Config::default()
+            },
             shell: non_empty("SHELL").unwrap_or_else(|| "/bin/sh".into()),
             home: non_empty("HOME").map_or_else(|| "/".into(), PathBuf::from),
             shell_integration: None,

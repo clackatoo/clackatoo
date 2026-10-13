@@ -104,6 +104,7 @@ impl HostedTerminal {
         if self.recording.is_some() {
             log::info!("terminal {}: recording stopped by the upgrade", self.id);
         }
+        let (screen, links) = self.emulator.snapshot_with_links();
         handover::Terminal {
             id: self.id.0,
             process: self.process.map(|process| {
@@ -121,8 +122,9 @@ impl HostedTerminal {
                 TerminalStatus::Killed(signal) => handover::Status::Killed(signal),
             },
             input: self.input,
-            screen: self.emulator.snapshot(),
+            screen,
             blocks: self.emulator.blocks_snapshot(),
+            links,
         }
     }
 
@@ -141,7 +143,8 @@ impl HostedTerminal {
             .pty
             .map(|pty| fds.take(pty).map(Pty::from_fd))
             .transpose()?;
-        let mut emulator = Terminal::restore(&terminal.screen, &config.terminal)?;
+        let mut emulator =
+            Terminal::restore_with_links(&terminal.screen, &terminal.links, &config.terminal)?;
         emulator.restore_blocks(&terminal.blocks);
         Ok(Self {
             id: TerminalId(terminal.id),

@@ -8,6 +8,7 @@ use std::ops::Range;
 
 use crate::blocks::Mark;
 use crate::cell::{Cell, CellFlags, StyleIndex};
+use crate::links::LinkId;
 use crate::size::Size;
 use crate::style::Style;
 pub use builder::RowBuilder;
@@ -147,6 +148,19 @@ impl Row {
             0 => &Style::DEFAULT,
             i => &self.palette[usize::from(i) - 1],
         }
+    }
+
+    /// The links the row's palette refers to: every link its cells are
+    /// part of, and perhaps some an overwritten cell was, until the palette
+    /// is next compacted. Cheap, as it looks at styles, not cells.
+    pub fn links(&self) -> impl Iterator<Item = LinkId> + '_ {
+        self.palette.iter().filter_map(|style| style.link)
+    }
+
+    /// The row's palette: the styles other than the default its cells
+    /// have, or had until it's next compacted.
+    pub(crate) fn styles(&self) -> &[Style] {
+        &self.palette
     }
 
     /// Appends the text of the cell at `col` to `out`.

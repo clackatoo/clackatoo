@@ -5,7 +5,9 @@
 //! chat's a [`ChatNode`], its turns. Other nodes will join them as panes
 //! other than these need them.
 
-use clackatoo_term::{CursorShape, InputModes, Row, RowBuilder, Size, Style, Terminal};
+use std::collections::BTreeMap;
+
+use clackatoo_term::{CursorShape, InputModes, LinkId, Row, RowBuilder, Size, Style, Terminal};
 use serde::{Deserialize, Serialize};
 
 use crate::chat::{ChatNode, ChatPatch};
@@ -15,6 +17,9 @@ use crate::chat::{ChatNode, ChatPatch};
 pub struct View {
     /// The pane's title: for a terminal, the one its program set, or empty.
     pub title: String,
+    /// For a terminal, the working directory its shell last reported
+    /// (OSC 7), which paths it prints are relative to.
+    pub cwd: Option<String>,
     /// The view's content.
     pub root: Node,
 }
@@ -46,6 +51,57 @@ pub struct GridNode {
     pub state: GridState,
     /// The grid's lines, top to bottom. There is always one per row.
     pub lines: Vec<Line>,
+    /// What the links the lines are part of point to.
+    pub links: Links,
+}
+
+/// What links point to, by the ID cells name them by in their
+/// [`Style`]. A message carries the links its lines are part of, and no
+/// others. A terminal never gives one ID to two links, so a client can
+/// keep what it learns for as long as it keeps the lines.
+pub type Links = Vec<(LinkId, LinkTarget)>;
+
+/// What a link a program printed (OSC 8) points to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkTarget {
+    /// The URI.
+    pub uri: String,
+    /// Whether the program gave it an `id`, which makes all its cells one
+    /// link, wherever they are. Without one, only cells next to each other
+    /// are.
+    pub named: bool,
+}
+
+impl LinkTarget {
+    /// The IDs of the links `lines` are part of.
+    /// The IDs of the links `lines` are part of, in order, each once.
+    /// Sorted rather than searched as they come, as a screen can have a
+    /// link in every cell.
+    fn ids<'a>(lines: impl IntoIterator<Item = &'a Line>) -> Vec<LinkId> {
+        let mut ids: Vec<LinkId> = (lines.into_iter())
+            .flat_map(|line| &line.runs)
+            .filter_map(|run| run.style.link)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// The links `lines` are part of, as `terminal` has them, in order of
+    /// their IDs.
+    #[must_use]
+    pub fn of<'a>(lines: impl IntoIterator<Item = &'a Line>, terminal: &Terminal) -> Links {
+        (Self::ids(lines).into_iter())
+            .filter_map(|id| {
+                let link = terminal.link(id)?;
+                let link = Self {
+                    uri: link.uri().to_owned(),
+                    named: link.id().is_some(),
+                };
+                Some((id, link))
+            })
+            .collect()
+    }
 }
 
 /// The parts of a grid besides its lines. Small, so every patch carries
@@ -75,6 +131,8 @@ pub struct HistoryLines {
     pub first: u64,
     /// The lines, oldest first, each at the width it had.
     pub lines: Vec<HistoryLine>,
+    /// What the links the lines are part of point to.
+    pub links: Links,
 }
 
 /// One line of history.
@@ -142,6 +200,8 @@ pub enum ViewUpdate {
 pub enum Patch {
     /// The title changed.
     Title(String),
+    /// The working directory changed.
+    Cwd(Option<String>),
     /// A grid changed.
     Grid {
         /// The grid node.
@@ -150,6 +210,8 @@ pub enum Patch {
         state: GridState,
         /// The lines that changed, each with its line number.
         lines: Vec<(u16, Line)>,
+        /// What the links those lines are part of point to.
+        links: Links,
     },
     /// The chat changed.
     Chat(ChatPatch),
@@ -161,6 +223,7 @@ impl View {
     pub fn capture(terminal: &Terminal) -> Self {
         Self {
             title: terminal.title().to_owned(),
+            cwd: terminal.cwd().map(str::to_owned),
             root: Node::Grid(GridNode::capture(terminal)),
         }
     }
@@ -196,11 +259,13 @@ impl View {
         for patch in patches {
             match (patch, &mut self.root) {
                 (Patch::Title(title), _) => self.title = title,
+                (Patch::Cwd(cwd), _) => self.cwd = cwd,
                 (
                     Patch::Grid {
                         node: NodeId::ROOT,
                         state,
                         lines,
+                        links,
                     },
                     Node::Grid(grid),
                 ) => {
@@ -210,6 +275,13 @@ impl View {
                             *old = line;
                         }
                     }
+                    // The links the lines now shown are part of.
+                    let mut known: BTreeMap<LinkId, LinkTarget> = grid.links.drain(..).collect();
+                    known.extend(links);
+                    let shown = LinkTarget::ids(&grid.lines);
+                    grid.links = (known.into_iter())
+                        .filter(|(id, _)| shown.binary_search(id).is_ok())
+                        .collect();
                 }
                 (Patch::Chat(patch), Node::Chat(chat)) => chat.apply(patch),
                 (Patch::Grid { .. } | Patch::Chat(_), _) => {}
@@ -222,10 +294,12 @@ impl GridNode {
     /// What `terminal`'s screen shows.
     #[must_use]
     pub fn capture(terminal: &Terminal) -> Self {
+        let lines: Vec<Line> = terminal.grid().rows().map(Line::from_row).collect();
         Self {
             size: terminal.size(),
             state: GridState::of(terminal),
-            lines: terminal.grid().rows().map(Line::from_row).collect(),
+            links: LinkTarget::of(&lines, terminal),
+            lines,
         }
     }
 }
@@ -328,6 +402,8 @@ fn to_u16(value: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use clackatoo_term::{Color, Config};
 
     use super::*;
@@ -433,7 +509,8 @@ mod tests {
                 proptest::sample::select(vec![
                     "ab", "字", "e\u{301}", "👩\u{200D}💻", "\u{200D}", "\u{301}",
                     "\x1b[31m", "\x1b[1;44m", "\x1b[0m", "\x1b[K", "\x1b[3G", "\x1b[1G",
-                    "\x1b[D", "\r\n", " ",
+                    "\x1b[D", "\r\n", " ", "\x1b]8;;https://a/\x07", "\x1b]8;id=b;https://b/\x07",
+                    "\x1b]8;;\x07",
                 ]),
                 0..30,
             ),
@@ -458,8 +535,46 @@ mod tests {
                 node: NodeId::ROOT,
                 state: GridState::of(&t),
                 lines: vec![(1, Line::from_row(t.grid().row(1))), (9, Line::default())],
+                links: Vec::new(),
             },
         ]));
         assert_eq!(view, View::capture(&t));
+    }
+
+    #[test]
+    fn a_link_in_every_cell_is_listed_once_each_in_order() {
+        // Each link twice, in two cells.
+        let mut output = String::new();
+        for n in 0..2000 {
+            write!(output, "\x1b]8;;https://{}/\x07x", n / 2).unwrap();
+        }
+        let t = terminal(100, 20, &output);
+        let grid = GridNode::capture(&t);
+        assert_eq!(grid.links.len(), 1000);
+        assert!(grid.links.is_sorted_by_key(|&(id, _)| id));
+        assert_eq!(grid.links[999].1.uri, "https://999/");
+    }
+
+    #[test]
+    fn patches_bring_the_links_of_the_lines_now_shown() {
+        let mut t = terminal(8, 2, "\x1b]8;;https://a/\x07a\x1b]8;;\x07\r\n");
+        let mut view = View::capture(&t);
+        assert_eq!(view.grid().unwrap().links.len(), 1);
+        // Line 0's link is written over with another.
+        t.advance(b"\x1b[H\x1b]8;;https://b/\x07b\x1b]8;;\x07\x1b]7;file:///d\x07");
+        let lines = vec![(0, Line::from_row(t.grid().row(0)))];
+        view.apply(ViewUpdate::Patch(vec![
+            Patch::Cwd(Some("/d".into())),
+            Patch::Grid {
+                node: NodeId::ROOT,
+                state: GridState::of(&t),
+                links: LinkTarget::of(lines.iter().map(|(_, line)| line), &t),
+                lines,
+            },
+        ]));
+        assert_eq!(view, View::capture(&t));
+        let shown = &view.grid().unwrap().links;
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].1.uri, "https://b/");
     }
 }

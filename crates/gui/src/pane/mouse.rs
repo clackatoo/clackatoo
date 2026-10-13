@@ -11,6 +11,9 @@
 //! Ctrl+Shift+C, or `y` in normal mode, copies it to the clipboard. In
 //! normal mode a click also moves the cursor. The selection stays shown
 //! until the next key or click.
+//!
+//! With Ctrl held, the link under the mouse is underlined, and a click
+//! opens it instead (see [`super::links`]).
 
 use clackatoo_term::Row;
 use clackatoo_term::mouse::{self, MouseAction, MouseButton, MouseEvent, MouseTracking};
@@ -87,16 +90,25 @@ impl Pane {
             }
             return true;
         }
+        let relit = self.hover(Some((event.line, event.col, event.modifiers)));
+        if event.action == MouseAction::Press(MouseButton::Left)
+            && self.link_opens(event.modifiers)
+            && self.open_link_in_view(event.line, event.col)
+        {
+            self.mouse_selection = None;
+            return true;
+        }
         if self.reports_mouse(event.modifiers.shift) {
             self.report_mouse(event);
-            return false;
+            return relit;
         }
-        match event.action {
+        let redraw = match event.action {
             MouseAction::Press(MouseButton::Left) => self.start_selection(event),
             MouseAction::Motion(Some(MouseButton::Left)) => self.extend_selection(event),
             MouseAction::Release(MouseButton::Left) => self.finish_selection(),
             _ => false,
-        }
+        };
+        redraw || relit
     }
 
     /// Tells the program about `event`, at its cell on the screen.

@@ -20,4 +20,4 @@ alternate screen: true
 |:set nu|
 
 styles:
-  10:0..60 "numbers.txt [+]                           51,20          53%" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(INVERSE), underline: None }
+  10:0..60 "numbers.txt [+]                           51,20          53%" Style { fg: Default, bg: Default, underline_color: Default, attributes: Attributes(INVERSE), underline: None, link: None }

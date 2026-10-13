@@ -81,7 +81,9 @@ fn hash(style: &Style) -> usize {
     let rest = color(style.underline_color)
         | u64::from(style.attributes.bits()) << 32
         | (style.underline as u64) << 48;
-    let mixed = (colors ^ rest.rotate_left(29)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let link = style.link.map_or(0, |link| u64::from(link.get()));
+    let mixed =
+        (colors ^ rest.rotate_left(29) ^ link.rotate_left(47)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     // The high bits are the best mixed; fold them down to where the mask
     // looks. Truncating to usize is intended.
     #[allow(clippy::cast_possible_truncation)]

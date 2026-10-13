@@ -15,7 +15,7 @@ use clackatoo_term::Cell;
 
 use crate::boxdraw;
 use crate::colors::{Rgba, Theme};
-use crate::fonts::{FaceId, Fonts, Variant, is_regional_indicator, is_skin_tone};
+use crate::fonts::{CellMetrics, FaceId, Fonts, Variant, is_regional_indicator, is_skin_tone};
 use crate::glyphs::{ATLAS_SIZE, AtlasGlyph, GlyphCache};
 use swash::GlyphId;
 
@@ -259,6 +259,8 @@ pub(crate) enum HighlightKind {
     CursorLine,
     /// It's a column marked down an editor (`colorcolumn`).
     ColorColumn,
+    /// It's the link under the mouse, which a click opens: underlined.
+    Link,
 }
 
 impl HighlightKind {
@@ -783,7 +785,7 @@ impl Renderer {
         let cols = (scene.size[0] / cell_width).round() as usize;
         let lines = (scene.size[1] / cell_height).round() as usize;
         let cursor = scene.cursor;
-        self.push_highlights(scene, true, [cols, lines], [cell_width, cell_height]);
+        self.push_highlights(scene, true, [cols, lines], &cell);
         // Whether the row before wrapped halfway through a flag.
         let mut mid_flag = false;
         for (line, row) in scene.rows.iter().take(lines).enumerate() {
@@ -882,19 +884,20 @@ impl Renderer {
             }
             mid_flag = ends_mid_flag(row, mid_flag);
         }
-        self.push_highlights(scene, false, [cols, lines], [cell_width, cell_height]);
+        self.push_highlights(scene, false, [cols, lines], &cell);
     }
 
     /// Adds a pane's highlights drawn `behind` its cells, or those over
-    /// them, in a pane `cols` by `lines` of cells `cell` pixels in size.
+    /// them, in a pane `cols` by `lines` of cells measuring `cell`.
     #[allow(clippy::cast_precision_loss)]
     fn push_highlights(
         &mut self,
         scene: &Scene<'_>,
         behind: bool,
         [cols, lines]: [usize; 2],
-        [cell_width, cell_height]: [f32; 2],
+        cell: &CellMetrics,
     ) {
+        let (cell_width, cell_height) = (cell.width as f32, cell.height as f32);
         let [origin_x, origin_y] = scene.origin;
         for highlight in scene.highlights {
             if highlight.line >= lines || highlight.kind.behind() != behind {
@@ -902,14 +905,20 @@ impl Renderer {
             }
             let start = highlight.cols.start.min(cols);
             let end = highlight.cols.end.min(cols);
-            self.rects.push(Rect::solid(
-                [
-                    origin_x + start as f32 * cell_width,
-                    origin_y + highlight.line as f32 * cell_height,
-                ],
-                [(end - start) as f32 * cell_width, cell_height],
-                self.theme.highlight(highlight.kind),
-            ));
+            let left = origin_x + start as f32 * cell_width;
+            let top = origin_y + highlight.line as f32 * cell_height;
+            let width = (end - start) as f32 * cell_width;
+            let color = self.theme.highlight(highlight.kind);
+            if highlight.kind == HighlightKind::Link {
+                // A line under the text, as where text is underlined.
+                let under = top + cell.baseline + cell.underline_offset;
+                let stroke = cell.stroke.max(1.0);
+                self.overlays
+                    .push(Rect::solid([left, under], [width, stroke], color));
+                continue;
+            }
+            self.rects
+                .push(Rect::solid([left, top], [width, cell_height], color));
         }
     }
 

@@ -153,6 +153,8 @@ impl Perform for Emulator {
                 self.title = String::from_utf8_lossy(&title.join(&b';')).into_owned();
             }
             [b"7", url @ ..] => self.set_cwd(&url.join(&b';')),
+            // A URI may hold `;`, which the parser split it at.
+            [b"8", params, uri @ ..] => self.set_link(params, &uri.join(&b';')),
             [b"133", kind, options @ ..] => self.shell_mark(kind, options),
             _ => log::trace!(
                 "unhandled OSC {:?}",

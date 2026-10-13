@@ -111,6 +111,7 @@ mod tests {
             size: Size::new(10, u16::try_from(lines.len()).unwrap()).unwrap(),
             state: GridState::default(),
             lines,
+            links: Vec::new(),
         }
     }
 
@@ -147,6 +148,7 @@ mod tests {
             underline_color: Color::Indexed(4),
             attributes: Attributes::BOLD,
             underline: Underline::Curly,
+            link: None,
         };
         let screen = screen(vec![line(&[(Style::DEFAULT, "a"), (style, "b")])]);
         assert_eq!(

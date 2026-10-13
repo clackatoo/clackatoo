@@ -228,6 +228,39 @@ fn selections_and_matches_are_highlighted() {
     save("highlights", size, &pixels);
 }
 
+#[test]
+fn the_link_under_the_mouse_is_underlined_and_nothing_else_changes() {
+    let output = "see https://x.example now";
+    let link = [Highlight {
+        line: 0,
+        cols: 4..21,
+        kind: HighlightKind::Link,
+    }];
+    let (Some((size, plain)), Some((_, underlined))) = (
+        render(30, 2, output, 1.0, (false, &[])),
+        render(30, 2, output, 1.0, (false, &link)),
+    ) else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let cell = fonts(1.0).cell;
+    let changed: Vec<[u32; 2]> = (0..size[1])
+        .flat_map(|y| (0..size[0]).map(move |x| [x, y]))
+        .filter(|&[x, y]| {
+            let at = usize::try_from((y * size[0] + x) * 4).unwrap();
+            plain[at..at + 4] != underlined[at..at + 4]
+        })
+        .collect();
+    assert!(!changed.is_empty(), "nothing was underlined");
+    let padding = 4;
+    let columns = padding + 4 * cell.width..padding + 21 * cell.width;
+    let lower_half = padding + cell.height / 2..padding + cell.height;
+    for [x, y] in changed {
+        assert!(columns.contains(&x) && lower_half.contains(&y), "{x}, {y}");
+    }
+    save("link", size, &underlined);
+}
+
 /// A window with room for two tiles of 20 x 4 cells side by side, with
 /// its frame laid out and its tiles placed.
 #[allow(
@@ -907,6 +940,7 @@ fn a_chat_pane_sends_what_is_typed_and_esc_leaves_insert_mode() {
     let mut pane = Pane::new(TerminalId(3));
     pane.view_changed(&ViewUpdate::Snapshot(View {
         title: "agent".into(),
+        cwd: None,
         root: Node::Chat(ChatNode {
             state: ChatState::Ready,
             ..ChatNode::default()

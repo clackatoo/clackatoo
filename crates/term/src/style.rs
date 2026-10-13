@@ -2,6 +2,8 @@
 
 use bitflags::bitflags;
 
+use crate::links::LinkId;
+
 /// A colour as the application specified it.
 ///
 /// Colours stay symbolic: the grid records *which* colour was asked for, and
@@ -63,7 +65,8 @@ pub enum Underline {
     Dashed,
 }
 
-/// Everything about how a cell is drawn apart from its text.
+/// Everything about how a cell is drawn apart from its text, and the link
+/// it's part of.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Style {
@@ -77,6 +80,10 @@ pub struct Style {
     pub attributes: Attributes,
     /// Underline shape.
     pub underline: Underline,
+    /// The link the text is part of, which a program printed with OSC 8
+    /// (see [`crate::Hyperlink`]). Not drawn, but kept here so it goes
+    /// wherever a cell's style goes.
+    pub link: Option<LinkId>,
 }
 
 impl Style {
@@ -87,6 +94,7 @@ impl Style {
         underline_color: Color::Default,
         attributes: Attributes::empty(),
         underline: Underline::None,
+        link: None,
     };
 
     /// The style used for cells cleared while this style is active.
@@ -94,7 +102,8 @@ impl Style {
     /// Erasing keeps only the background colour. This is "background colour
     /// erase", which the `xterm-256color` terminfo entry we advertise promises
     /// (its `bce` capability). Without it, apps that paint a background by
-    /// clearing (vim, htop) draw with the wrong colour.
+    /// clearing (vim, htop) draw with the wrong colour. Nor is a cleared
+    /// cell part of a link.
     #[must_use]
     pub fn erased(&self) -> Self {
         Self {

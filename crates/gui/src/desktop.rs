@@ -55,6 +55,34 @@ impl Desktop {
     }
 }
 
+/// Opens `url` with the desktop's opener, `xdg-open`, as clicking a link
+/// elsewhere would. It runs on a thread of its own, which waits for it so
+/// it doesn't linger as a zombie, so the window never waits; it gets no
+/// terminal, and what it says goes nowhere. Callers only pass URLs with a
+/// known scheme (see [`crate::links`]), so one can't be taken for an
+/// option.
+pub(crate) fn open(url: &str) {
+    let url = url.to_owned();
+    let spawned = std::thread::Builder::new()
+        .name("xdg-open".into())
+        .spawn(move || {
+            let status = Command::new("xdg-open")
+                .arg(&url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            match status {
+                Ok(status) if status.success() => {}
+                Ok(status) => log::warn!("xdg-open {url} failed: {status}"),
+                Err(err) => log::warn!("couldn't run xdg-open for {url}: {err}"),
+            }
+        });
+    if let Err(err) = spawned {
+        log::warn!("couldn't start a thread to open a link: {err}");
+    }
+}
+
 /// A GNOME setting's value, without the quotes it's printed in.
 fn gsetting(schema: &str, key: &str) -> Option<String> {
     let output = Command::new("gsettings")

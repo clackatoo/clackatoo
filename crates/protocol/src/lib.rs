@@ -48,8 +48,8 @@ mod workspace;
 use std::fmt;
 
 pub use clackatoo_term::{
-    Attributes, Block, Color, CursorShape, InputModes, Match, Position, Size, Style, Underline,
-    Which,
+    Attributes, Block, Color, CursorShape, InputModes, LinkId, Match, Position, Size, Style,
+    Underline, Which,
 };
 use serde::{Deserialize, Serialize};
 
@@ -65,8 +65,8 @@ pub use chat::{
 pub use clackatoo_text::{Construct, Diagnostic, Edit, Hunk, Kind, Op, Piece, Severity, Span};
 pub use find::{Done, Found, FoundBuffer, FoundLine, Search};
 pub use view::{
-    CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, Node, NodeId, Patch, Run,
-    View, ViewUpdate,
+    CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, LinkTarget, Links, Node,
+    NodeId, Patch, Run, View, ViewUpdate,
 };
 pub use workspace::{
     Axis, Content, Layout, Pane, PaneId, PaneTerminal, Side, Tab, TabId, Workspace, WorkspaceId,
@@ -75,7 +75,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 37;
+pub const PROTOCOL_VERSION: u32 = 38;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

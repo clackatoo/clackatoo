@@ -30,7 +30,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use crate::blocks::Mark;
 use crate::cell::{Cell, StyleIndex};
 use crate::row::{Row, RowBuilder};
-use crate::snapshot::{self, Line};
+use crate::snapshot::{self, Captured, Line};
 use crate::style::Style;
 use crate::terminal::ZWJ;
 
@@ -347,13 +347,29 @@ impl Scrollback {
         }
     }
 
-    /// Every line, oldest first, for a snapshot.
-    pub(crate) fn lines(&self) -> Vec<Line> {
-        let records = self
-            .pages
-            .iter()
-            .flat_map(|page| (page.first..page.records.len()).map(move |index| page.line(index)));
-        records.chain(self.raw.iter().map(Line::of_row)).collect()
+    /// The styles held lines may have, with the links they're part of.
+    /// Pages keep their styles, so a page's links stay until all of it has
+    /// been evicted.
+    pub(crate) fn styles(&self) -> impl Iterator<Item = &Style> + '_ {
+        let pages = self.pages.iter().flat_map(|page| &page.styles);
+        pages.chain(self.raw.iter().flat_map(Row::styles))
+    }
+
+    /// Every line, oldest first, for a snapshot, with the runs of them
+    /// that are part of links.
+    pub(crate) fn lines(&self) -> Captured {
+        let mut captured = Captured::default();
+        for page in &self.pages {
+            for index in page.first..page.records.len() {
+                let (line, styles) = page.line(index);
+                let links = styles.iter().map(|&style| page.style(style).link);
+                captured.push(line, links);
+            }
+        }
+        for row in &self.raw {
+            captured.push_row(row);
+        }
+        captured
     }
 
     /// History holding `rows`, oldest first, the newest numbered `end - 1`.
@@ -578,8 +594,9 @@ impl Page {
         })
     }
 
-    /// Record `index` as a snapshot's line.
-    fn line(&self, index: usize) -> Line {
+    /// Record `index` as a snapshot's line, and the page's style of each
+    /// of its runs.
+    fn line(&self, index: usize) -> (Line, Vec<u16>) {
         let record = self.records[index];
         let (text_start, runs_start) = match index.checked_sub(1) {
             Some(previous) => {
@@ -590,20 +607,21 @@ impl Page {
         };
         let text = std::str::from_utf8(&self.text[span(text_start, record.text_end)])
             .expect("pages hold valid UTF-8");
-        let runs = self.runs[span(runs_start, record.runs_end)]
-            .iter()
-            .map(|run| snapshot::Run {
-                start: run.start - text_start,
-                style: (*self.style(run.style)).into(),
-                separate: run.separate,
-            })
-            .collect();
-        Line {
+        let runs = &self.runs[span(runs_start, record.runs_end)];
+        let line = Line {
             text: text.to_owned(),
-            runs,
+            runs: runs
+                .iter()
+                .map(|run| snapshot::Run {
+                    start: run.start - text_start,
+                    style: (*self.style(run.style)).into(),
+                    separate: run.separate,
+                })
+                .collect(),
             width: record.width,
             continues: record.continues,
-        }
+        };
+        (line, runs.iter().map(|run| run.style).collect())
     }
 
     /// Record `index` as a row.

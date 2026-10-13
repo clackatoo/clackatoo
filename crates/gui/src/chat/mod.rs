@@ -247,7 +247,8 @@ impl ChatView {
                             title.clone_into(&mut self.title);
                         }
                         clackatoo_protocol::Patch::Chat(patch) => self.node.apply(patch.clone()),
-                        clackatoo_protocol::Patch::Grid { .. } => {}
+                        clackatoo_protocol::Patch::Grid { .. }
+                        | clackatoo_protocol::Patch::Cwd(_) => {}
                     }
                 }
             }

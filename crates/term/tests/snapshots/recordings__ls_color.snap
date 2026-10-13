@@ -14,6 +14,6 @@ alternate screen: false
 ||
 
 styles:
-  0:0..4 "link" Style { fg: Indexed(6), bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None }
-  0:22..28 "run.sh" Style { fg: Indexed(2), bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None }
-  1:22..25 "src" Style { fg: Indexed(4), bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None }
+  0:0..4 "link" Style { fg: Indexed(6), bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None, link: None }
+  0:22..28 "run.sh" Style { fg: Indexed(2), bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None, link: None }
+  1:22..25 "src" Style { fg: Indexed(4), bg: Default, underline_color: Default, attributes: Attributes(BOLD), underline: None, link: None }

@@ -515,7 +515,7 @@ fn changed_lines(update: &ViewUpdate) -> Vec<u16> {
         .iter()
         .flat_map(|patch| match patch {
             Patch::Grid { lines, .. } => lines.iter().map(|(line, _)| *line).collect(),
-            Patch::Title(_) | Patch::Chat(_) => Vec::new(),
+            Patch::Title(_) | Patch::Cwd(_) | Patch::Chat(_) => Vec::new(),
         })
         .collect()
 }

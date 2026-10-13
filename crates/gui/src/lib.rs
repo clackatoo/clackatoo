@@ -30,6 +30,7 @@ mod ime;
 mod input;
 mod keymap;
 mod layout;
+mod links;
 mod lua;
 mod motion;
 mod objects;

@@ -216,6 +216,7 @@ impl HostedChat {
     pub(crate) fn view(&self) -> View {
         View {
             title: self.title.clone(),
+            cwd: None,
             root: Node::Chat(self.node.clone()),
         }
     }

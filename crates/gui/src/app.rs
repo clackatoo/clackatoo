@@ -535,6 +535,8 @@ impl App {
                 Axis::LeftToRight => CursorIcon::ColResize,
                 Axis::TopToBottom => CursorIcon::RowResize,
             },
+            // A link a click would open, with Ctrl held.
+            Hit::Panes if self.desk.link_at(point, self.modifiers) => CursorIcon::Pointer,
             // A program that takes the mouse gets the arrow, as clicks are
             // its, not for selecting text.
             Hit::Panes if self.desk.reports_mouse_at(point, self.modifiers.shift) => {
@@ -607,6 +609,7 @@ impl App {
                 Err(err) => log::warn!("pasting the primary selection failed: {err:#}"),
             }
         }
+        self.open_links();
         self.update_title();
         self.send_outbox();
         self.request_redraw();
@@ -634,9 +637,19 @@ impl App {
 
     fn pointer_left(&mut self) {
         self.pointer = None;
+        if self.desk.mouse_left() {
+            self.request_redraw();
+        }
         if self.hover != Hit::Nothing {
             self.hover = Hit::Nothing;
             self.request_redraw();
+        }
+    }
+
+    /// Hands the URLs links asked to open to the desktop's opener.
+    fn open_links(&mut self) {
+        for url in self.desk.take_opened() {
+            crate::desktop::open(&url);
         }
     }
 
@@ -866,6 +879,7 @@ impl App {
                 modifiers: self.modifiers,
             })
         };
+        self.open_links();
         self.update_title();
         if redraw {
             self.request_redraw();
@@ -1825,6 +1839,14 @@ impl App {
                     ctrl: state.control_key(),
                     alt: state.alt_key(),
                 };
+                // Ctrl underlines the link under the mouse, and shows the
+                // hand over it.
+                if self.desk.modifiers_changed(self.modifiers) {
+                    self.request_redraw();
+                }
+                if let Some(point) = self.pointer {
+                    self.pointer_moved(point);
+                }
             }
             WindowEvent::KeyboardInput {
                 event,

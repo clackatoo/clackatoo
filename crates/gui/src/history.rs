@@ -38,6 +38,11 @@ impl History {
         self.rows.get(&number)
     }
 
+    /// Every line kept.
+    pub(crate) fn rows(&self) -> impl Iterator<Item = &Row> {
+        self.rows.values()
+    }
+
     /// Forgets everything, as when history is renumbered.
     pub(crate) fn clear(&mut self) {
         *self = Self {
@@ -126,6 +131,7 @@ mod tests {
         let answer = HistoryLines {
             first: asked.end,
             lines: Vec::new(),
+            links: Vec::new(),
         };
         history.receive(&answer, &asked, generation, &(90..100));
         assert_eq!(history.start, None);

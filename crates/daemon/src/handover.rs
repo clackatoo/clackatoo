@@ -22,22 +22,23 @@
 //! 7. Where in files each tool works: their paths, and lines.
 //! 8. Buffers: files being edited, with their history, and panes showing
 //!    them.
+//! 9. Each terminal's links ([`clackatoo_term::LinksSnapshot`]).
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::os::fd::OwnedFd;
 
-use clackatoo_term::{BlocksSnapshot, Snapshot};
+use clackatoo_term::{BlocksSnapshot, LinksSnapshot, Snapshot};
 use serde::{Deserialize, Serialize};
 
 /// The start of every handover, to tell it from anything else.
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 8;
+pub(crate) const VERSION: u32 = 9;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -76,7 +77,7 @@ impl Fds {
     }
 }
 
-/// The daemon's state, version 5.
+/// The daemon's state, version 9.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The listening socket.
@@ -113,6 +114,7 @@ pub(crate) struct Terminal {
     pub(crate) input: Vec<u8>,
     pub(crate) screen: Snapshot,
     pub(crate) blocks: BlocksSnapshot,
+    pub(crate) links: LinksSnapshot,
 }
 
 /// A chat with an agent. The agent isn't handed over: the next build
@@ -394,6 +396,7 @@ impl State {
             5 => Ok(v7::State::from(postcard::from_bytes::<v5::State>(body)?).into()),
             6 => Ok(v7::State::from(postcard::from_bytes::<v6::State>(body)?).into()),
             7 => Ok(postcard::from_bytes::<v7::State>(body)?.into()),
+            8 => Ok(postcard::from_bytes::<v8::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -438,7 +441,7 @@ mod v1 {
                 terminals: state
                     .terminals
                     .into_iter()
-                    .map(|terminal| super::Terminal {
+                    .map(|terminal| super::v8::Terminal {
                         id: terminal.id,
                         process: terminal.process,
                         pid: terminal.pid,
@@ -462,7 +465,8 @@ mod v1 {
 mod v2 {
     use serde::Deserialize;
 
-    use super::{Process, Terminal, Workspaces};
+    use super::v8::Terminal;
+    use super::{Process, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -496,7 +500,7 @@ mod v3 {
     use serde::Deserialize;
 
     use super::{
-        ChatEnd, ChatItem, ChatOutcome, ChatTurn, HandoverError, Process, Terminal, Workspaces,
+        ChatEnd, ChatItem, ChatOutcome, ChatTurn, HandoverError, Process, Workspaces, v8::Terminal,
     };
 
     #[derive(Debug, Deserialize)]
@@ -597,7 +601,8 @@ mod v4 {
     use serde::Deserialize;
 
     use super::v5::ChatTurn;
-    use super::{Process, Terminal, Workspaces};
+    use super::v8::Terminal;
+    use super::{Process, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -657,7 +662,8 @@ mod v4 {
 mod v5 {
     use serde::Deserialize;
 
-    use super::{ChatEnd, ChatSetting, Process, Terminal, ToolStatus, Workspaces};
+    use super::v8::Terminal;
+    use super::{ChatEnd, ChatSetting, Process, ToolStatus, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -761,7 +767,7 @@ mod v6 {
     use serde::Deserialize;
 
     use super::{
-        ChatEnd, ChatSetting, Process, Terminal, ToolContent, ToolKind, ToolStatus, Workspaces,
+        ChatEnd, ChatSetting, Process, ToolContent, ToolKind, ToolStatus, Workspaces, v8::Terminal,
     };
 
     #[derive(Debug, Deserialize)]
@@ -873,7 +879,8 @@ mod v6 {
 mod v7 {
     use serde::Deserialize;
 
-    use super::{Chat, Process, Terminal, Workspaces};
+    use super::v8::Terminal;
+    use super::{Chat, Process, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -892,12 +899,78 @@ mod v7 {
                 listener: state.listener,
                 lock: state.lock,
                 next_terminal: state.next_terminal,
-                terminals: state.terminals,
+                terminals: state.terminals.into_iter().map(Into::into).collect(),
                 chats: state.chats,
                 orphans: state.orphans,
                 workspaces: state.workspaces,
                 next_buffer: 1,
                 buffers: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Version 8, as the builds that wrote it wrote it: terminals without
+/// their links. Older versions share its terminals.
+mod v8 {
+    use clackatoo_term::{BlocksSnapshot, LinksSnapshot, Snapshot};
+    use serde::Deserialize;
+
+    use super::{Buffer, Chat, Process, Status, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct Terminal {
+        pub(super) id: u32,
+        pub(super) process: Option<Process>,
+        pub(super) pid: u32,
+        pub(super) pty: Option<u32>,
+        pub(super) status: Status,
+        pub(super) input: Vec<u8>,
+        pub(super) screen: Snapshot,
+        pub(super) blocks: BlocksSnapshot,
+    }
+
+    impl From<Terminal> for super::Terminal {
+        fn from(terminal: Terminal) -> Self {
+            Self {
+                id: terminal.id,
+                process: terminal.process,
+                pid: terminal.pid,
+                pty: terminal.pty,
+                status: terminal.status,
+                input: terminal.input,
+                screen: terminal.screen,
+                blocks: terminal.blocks,
+                links: LinksSnapshot::default(),
+            }
+        }
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals.into_iter().map(Into::into).collect(),
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
             }
         }
     }
@@ -1228,6 +1301,33 @@ mod tests {
         assert_eq!(emulator.screen_text(), "two\nthree\nfour");
         assert_eq!(emulator.primary().scrollback_len(), 1);
         assert_eq!(emulator.cwd(), Some("/v8"));
+    }
+
+    /// Written by a build that wrote version 9. It must always be read.
+    #[test]
+    fn version_9_is_read_with_each_terminals_links() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v9.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!((state.next_terminal, state.orphans[0].pid), (10, 95));
+        let terminal = &state.terminals[0];
+        let emulator = clackatoo_term::Terminal::restore_with_links(
+            &terminal.screen,
+            &terminal.links,
+            &clackatoo_term::Config::default(),
+        )
+        .unwrap();
+        assert_eq!(emulator.screen_text(), "two\nthree\nfour");
+        let uri = |row: &clackatoo_term::Row| {
+            let id = row.style(row.cells()[0]).link?;
+            Some(emulator.link(id)?.uri().to_owned())
+        };
+        let history = emulator.primary().scrollback().next().unwrap();
+        assert_eq!(uri(&history).as_deref(), Some("https://a.example/"));
+        let three = emulator.grid().row(1);
+        assert_eq!(uri(three).as_deref(), Some("file:///v9/three"));
+        assert_eq!(uri(emulator.grid().row(2)), None);
     }
 
     #[test]

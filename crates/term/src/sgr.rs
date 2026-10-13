@@ -12,14 +12,14 @@ pub(crate) fn apply<'a>(style: &mut Style, params: impl IntoIterator<Item = &'a 
     let mut params = params.into_iter().peekable();
     if params.peek().is_none() {
         // `CSI m` with no parameters means `CSI 0 m`.
-        *style = Style::DEFAULT;
+        reset(style);
         return;
     }
 
     while let Some(param) = params.next() {
         let attributes = &mut style.attributes;
         match param {
-            [0] => *style = Style::DEFAULT,
+            [0] => reset(style),
             [1] => attributes.insert(Attributes::BOLD),
             [2] => attributes.insert(Attributes::DIM),
             [3] => attributes.insert(Attributes::ITALIC),
@@ -62,6 +62,15 @@ pub(crate) fn apply<'a>(style: &mut Style, params: impl IntoIterator<Item = &'a 
             _ => log::trace!("unhandled SGR parameter {param:?}"),
         }
     }
+}
+
+/// SGR 0: everything back to the default, but the link. OSC 8 links are
+/// set apart from SGR, and programs reset SGR inside a link's text.
+fn reset(style: &mut Style) {
+    *style = Style {
+        link: style.link,
+        ..Style::DEFAULT
+    };
 }
 
 /// Parses the colour that follows a 38, 48 or 58.

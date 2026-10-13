@@ -225,7 +225,7 @@ impl Desk {
 
     /// The file `pane` shows, or is about to: the last asked to open in
     /// it, if the daemon hasn't answered yet.
-    fn file_in(&self, pane: PaneId) -> Option<&str> {
+    pub(super) fn file_in(&self, pane: PaneId) -> Option<&str> {
         let editors = &self.editors;
         if let Some(path) = editors.opening.get(&pane).and_then(VecDeque::back) {
             return Some(path);

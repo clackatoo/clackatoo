@@ -30,9 +30,9 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
     BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine, HistoryLines,
-    Line, NewAgent, NodeId, PROTOCOL_VERSION, Pane, PaneId, PaneTerminal, Patch, Request, Response,
-    ServerMessage, Side, Size, TerminalId, TerminalInfo, TerminalStatus, Udp, View, ViewUpdate,
-    WorkspaceId,
+    Line, LinkTarget, NewAgent, NodeId, PROTOCOL_VERSION, Pane, PaneId, PaneTerminal, Patch,
+    Request, Response, ServerMessage, Side, Size, TerminalId, TerminalInfo, TerminalStatus, Udp,
+    View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_syntax::{Languages, Syntax};
 use clackatoo_term::{Damage, Terminal};
@@ -302,6 +302,8 @@ struct Subscription {
     /// A new one renumbers history, which only a snapshot tells a client.
     history_generation: u64,
     title: String,
+    /// The working directory last sent.
+    cwd: Option<String>,
     state: GridState,
     /// For a chat: what was last sent of it.
     chat: ChatSent,
@@ -316,6 +318,7 @@ impl Subscription {
             size: None,
             history_generation: 0,
             title: String::new(),
+            cwd: None,
             state: GridState::default(),
             chat: ChatSent::default(),
             awaiting_ack: false,
@@ -341,6 +344,7 @@ impl Subscription {
             self.size = Some(size);
             self.history_generation = history_generation;
             terminal.title().clone_into(&mut self.title);
+            self.cwd = terminal.cwd().map(str::to_owned);
             self.state = state;
             self.damage.clear();
             return Some(ViewUpdate::Snapshot(View::capture(terminal)));
@@ -350,6 +354,10 @@ impl Subscription {
         if terminal.title() != self.title {
             terminal.title().clone_into(&mut self.title);
             patches.push(Patch::Title(self.title.clone()));
+        }
+        if terminal.cwd() != self.cwd.as_deref() {
+            self.cwd = terminal.cwd().map(str::to_owned);
+            patches.push(Patch::Cwd(self.cwd.clone()));
         }
         let grid = terminal.grid();
         let lines: Vec<(u16, Line)> = self
@@ -363,10 +371,12 @@ impl Subscription {
         self.damage.clear();
         if !lines.is_empty() || state != self.state {
             self.state = state;
+            let shown = LinkTarget::of(lines.iter().map(|(_, line)| line), terminal);
             patches.push(Patch::Grid {
                 node: NodeId::ROOT,
                 state,
                 lines,
+                links: shown,
             });
         }
         (!patches.is_empty()).then_some(ViewUpdate::Patch(patches))
@@ -2413,9 +2423,10 @@ fn history(terminal: &Terminal, end: u64, count: u16) -> HistoryLines {
                 line: Line::from_row(&row),
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
     HistoryLines {
         first: first.unwrap_or(end),
+        links: LinkTarget::of(lines.iter().map(|line| &line.line), terminal),
         lines,
     }
 }
@@ -2447,6 +2458,54 @@ mod tests {
             sent.update(&terminal),
             Some(ViewUpdate::Snapshot(_))
         ));
+    }
+
+    #[test]
+    fn updates_and_history_carry_the_links_their_lines_show_and_the_cwd() {
+        let size = Size::new(20, 2).expect("test sizes are valid");
+        let mut terminal = Terminal::new(size, &Config::default());
+        terminal.advance(b"\x1b]8;id=d;https://docs/\x07docs\x1b]8;;\x07\r\n");
+        let mut sent = Subscription::new();
+        let Some(ViewUpdate::Snapshot(view)) = sent.update(&terminal) else {
+            panic!("a snapshot first");
+        };
+        let grid = view.grid().expect("a grid");
+        let uris = |links: &clackatoo_protocol::Links| -> Vec<(String, bool)> {
+            (links.iter())
+                .map(|(_, link)| (link.uri.clone(), link.named))
+                .collect()
+        };
+        assert_eq!(uris(&grid.links), [("https://docs/".to_owned(), true)]);
+        assert_eq!(view.cwd, None);
+
+        // A patch carries the links of the lines it sends, and no others.
+        terminal.take_damage(&mut Damage::new());
+        terminal.advance(b"\x1b]7;file:///w\x07\x1b]8;;https://new/\x07new\x1b]8;;\x07");
+        terminal.take_damage(&mut sent.damage);
+        let Some(ViewUpdate::Patch(patches)) = sent.update(&terminal) else {
+            panic!("a patch");
+        };
+        assert!(patches.contains(&Patch::Cwd(Some("/w".to_owned()))));
+        let links = patches.iter().find_map(|patch| match patch {
+            Patch::Grid { links, .. } => Some(links),
+            _ => None,
+        });
+        assert_eq!(
+            uris(links.expect("the grid changed")),
+            [("https://new/".to_owned(), false)]
+        );
+
+        // Lines scrolled into history bring theirs when fetched.
+        terminal.advance(b"\r\n\r\n");
+        let fetched = history(&terminal, terminal.primary().scrollback_end(), 10);
+        assert_eq!(fetched.lines[0].line.text(), "docs");
+        assert_eq!(
+            uris(&fetched.links),
+            [
+                ("https://docs/".to_owned(), true),
+                ("https://new/".to_owned(), false)
+            ]
+        );
     }
 
     #[test]

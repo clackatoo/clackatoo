@@ -101,6 +101,7 @@ mod editors;
 mod finding;
 mod formatting;
 mod jumps;
+mod links;
 mod offers;
 mod script;
 mod settings;
@@ -161,6 +162,9 @@ pub(crate) struct Desk {
     /// Text copied, waiting for the window to put on the clipboard or the
     /// primary selection.
     yanked: Option<(String, Copy)>,
+    /// URLs links asked to open, waiting for the window to hand to the
+    /// desktop's opener.
+    opened: Vec<String>,
     /// The terminal whose pane a mouse button went down in, and the
     /// button: it gets the drag, wherever the pointer goes.
     dragging: Option<(TerminalId, MouseButton)>,
@@ -1041,6 +1045,9 @@ impl Desk {
             return self.editor_key(press) || had_message;
         }
         let redraw = self.focused_pane().is_some_and(|pane| pane.key(press));
+        if let Some(terminal) = self.focused_terminal() {
+            self.open_pane_link(terminal);
+        }
         redraw || had_message
     }
 
@@ -1101,6 +1108,7 @@ impl Desk {
         if self.dragging.is_none()
             && let Some((pane, cell)) = self.editor_at(point)
         {
+            outcome.redraw |= self.mouse_left();
             if let MouseAction::Press(MouseButton::Left) = action {
                 outcome.redraw = self.focus_at(point) | self.editor_click(pane, cell);
             }
@@ -1130,6 +1138,12 @@ impl Desk {
                 MouseAction::Motion(self.dragging.map(|(_, button)| button))
             }
         };
+        // The pane the mouse was over no longer has a link under it.
+        if let Some((before, _)) = self.mouse_cell
+            && before != terminal
+        {
+            outcome.redraw |= self.mouse_left();
+        }
         self.mouse_cell = Some((terminal, cell));
         let Some(pane) = self.panes.get_mut(&terminal) else {
             return outcome;
@@ -1150,7 +1164,40 @@ impl Desk {
             modifiers,
         };
         outcome.redraw |= pane.mouse(&event);
+        self.open_pane_link(terminal);
         outcome
+    }
+
+    /// The mouse has left the pane it was over, which no longer has a
+    /// link under it. Returns whether the window must be redrawn.
+    pub(crate) fn mouse_left(&mut self) -> bool {
+        let Some((terminal, _)) = self.mouse_cell.take() else {
+            return false;
+        };
+        self.panes
+            .get_mut(&terminal)
+            .is_some_and(|pane| pane.hover(None))
+    }
+
+    /// Shift, Ctrl or Alt went down or up: holding Ctrl underlines the
+    /// link under the mouse. Returns whether the window must be redrawn.
+    pub(crate) fn modifiers_changed(&mut self, modifiers: Modifiers) -> bool {
+        let Some((terminal, [line, col])) = self.mouse_cell else {
+            return false;
+        };
+        self.panes
+            .get_mut(&terminal)
+            .is_some_and(|pane| pane.hover(Some((line, col, modifiers))))
+    }
+
+    /// Whether a click at `point` with `modifiers` held would open a link.
+    pub(crate) fn link_at(&self, point: [f32; 2], modifiers: Modifiers) -> bool {
+        let Some((terminal, [line, col], _)) = self.cell_at(point, None) else {
+            return false;
+        };
+        self.panes.get(&terminal).is_some_and(|pane| {
+            pane.link_opens(modifiers) && pane.link_in_view(line, col).is_some()
+        })
     }
 
     /// Whether the program in the pane at `point` gets the mouse, rather
@@ -4133,5 +4180,212 @@ mod tests {
         desk.settle_editors();
         assert!(desk.finder_view((10, 60), None).is_some());
         assert!(!panel(&desk));
+    }
+
+    // --- Links in terminals ---------------------------------------------------
+
+    /// Gives `terminal` a screen `cols` wide showing `output`, as attaching
+    /// does.
+    fn screen_showing(desk: &mut Desk, terminal: u32, cols: u16, output: &str) {
+        let mut screen = Terminal::new(Size::new(cols, 24).unwrap(), &Config::default());
+        screen.advance(output.as_bytes());
+        desk.view_changed(
+            TerminalId(terminal),
+            &ViewUpdate::Snapshot(View::capture(&screen)),
+        );
+    }
+
+    /// The point in the middle of the cell at `line` and `col` of the
+    /// first pane, whose cells start 5 pixels in and are 10 × 20.
+    fn cell_point(line: u16, col: u16) -> [f32; 2] {
+        [10.0 + f32::from(col) * 10.0, 15.0 + f32::from(line) * 20.0]
+    }
+
+    fn click(desk: &mut Desk, point: [f32; 2], modifiers: Modifiers) {
+        let left = MouseButton::Left;
+        desk.mouse(point, MouseAction::Press(left), 1, modifiers);
+        desk.mouse(point, MouseAction::Release(left), 1, modifiers);
+    }
+
+    const LINKS: &str = "\x1b]7;file:///p\x07see https://x.example/a now\r\n--> src/a.rs:3:2\r\n";
+
+    #[test]
+    fn ctrl_click_hands_urls_to_the_desktop_and_a_plain_click_doesnt() {
+        let mut desk = desk(one_tab(pane(1)));
+        screen_showing(&mut desk, 1, 40, LINKS);
+        answer_all(&mut desk);
+        click(&mut desk, cell_point(0, 8), Modifiers::default());
+        assert!(desk.take_opened().is_empty());
+        assert!(desk.link_at(cell_point(0, 8), CTRL));
+        assert!(!desk.link_at(cell_point(0, 2), CTRL));
+        assert!(!desk.link_at(cell_point(0, 8), Modifiers::default()));
+        click(&mut desk, cell_point(0, 8), CTRL);
+        assert_eq!(desk.take_opened(), ["https://x.example/a"]);
+        // The desktop opens it: nothing goes to the daemon.
+        assert_eq!(answer_all(&mut desk), []);
+    }
+
+    #[test]
+    fn holding_ctrl_over_a_link_underlines_it_until_ctrl_or_the_mouse_goes() {
+        let mut desk = desk(one_tab(pane(1)));
+        screen_showing(&mut desk, 1, 40, LINKS);
+        let underlined = |desk: &Desk| {
+            let pane = desk.pane(TerminalId(1)).unwrap();
+            (pane.highlights(24).into_iter())
+                .filter(|highlight| highlight.kind == crate::render::HighlightKind::Link)
+                .map(|highlight| (highlight.line, highlight.cols))
+                .collect::<Vec<_>>()
+        };
+        let motion = MouseAction::Motion(None);
+        desk.mouse(cell_point(1, 6), motion, 1, Modifiers::default());
+        assert_eq!(underlined(&desk), []);
+        assert!(desk.modifiers_changed(CTRL));
+        assert_eq!(underlined(&desk), [(1, 4..16)]);
+        // Moving along the link changes nothing; off it, it goes.
+        assert!(!desk.mouse(cell_point(1, 8), motion, 1, CTRL).redraw);
+        assert!(desk.mouse(cell_point(1, 30), motion, 1, CTRL).redraw);
+        assert_eq!(underlined(&desk), []);
+        desk.mouse(cell_point(1, 8), motion, 1, CTRL);
+        assert!(desk.modifiers_changed(Modifiers::default()));
+        assert_eq!(underlined(&desk), []);
+        desk.modifiers_changed(CTRL);
+        assert!(desk.mouse_left());
+        assert_eq!(underlined(&desk), []);
+    }
+
+    /// Where the requests asked for files to open.
+    fn files_opened(requests: Vec<Request>) -> Vec<String> {
+        (requests.into_iter())
+            .filter_map(|request| match request {
+                Request::NewTab {
+                    terminal: PaneTerminal::File(file),
+                    ..
+                } => Some(format!("tab {}", file.path)),
+                Request::Split {
+                    pane,
+                    side,
+                    terminal: PaneTerminal::File(file),
+                } => Some(format!("{side:?} of {} {}", pane.0, file.path)),
+                Request::OpenHere { pane, file } => Some(format!("in {} {}", pane.0, file.path)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_file_from_a_narrow_terminal_opens_in_a_tab_of_its_own() {
+        let mut desk = desk(one_tab(pane(1)));
+        screen_showing(&mut desk, 1, 40, LINKS);
+        answer_all(&mut desk);
+        click(&mut desk, cell_point(1, 6), CTRL);
+        assert_eq!(files_opened(answer_all(&mut desk)), ["tab /p/src/a.rs"]);
+    }
+
+    #[test]
+    fn a_file_from_a_wide_terminal_opens_beside_it() {
+        let mut desk = desk(one_tab(pane(1)));
+        screen_showing(&mut desk, 1, 200, LINKS);
+        answer_all(&mut desk);
+        click(&mut desk, cell_point(1, 6), CTRL);
+        assert_eq!(
+            files_opened(answer_all(&mut desk)),
+            ["Right of 1 /p/src/a.rs"]
+        );
+    }
+
+    #[test]
+    fn a_file_opens_in_the_tabs_editor_at_its_line_and_ctrl_o_comes_back() {
+        let mut desk = desk(one_tab(side_by_side(vec![pane(1), file_pane(2, 7)])));
+        screen_showing(&mut desk, 1, 40, LINKS);
+        load(&mut desk, 7, "/p/b.rs", "b\n");
+        answer_all(&mut desk);
+        click(&mut desk, cell_point(1, 6), CTRL);
+        assert_eq!(files_opened(answer_all(&mut desk)), ["in 2 /p/src/a.rs"]);
+        assert_eq!(shown_pane(&desk), PaneId(2));
+        desk.workspaces_changed(one_tab(side_by_side(vec![pane(1), file_pane(2, 8)])));
+        answer_all(&mut desk);
+        load(&mut desk, 8, "/p/src/a.rs", "one\ntwo\nthree\n");
+        assert_eq!(note(&desk), "a.rs  3:2");
+        normal_mode(&mut desk);
+        ctrl(&mut desk, "o");
+        assert_eq!(shown_pane(&desk), PaneId(1));
+    }
+
+    #[test]
+    fn a_relative_path_with_no_working_directory_is_left_to_the_daemon() {
+        let mut desk = desk(one_tab(side_by_side(vec![pane(1), file_pane(2, 7)])));
+        screen_showing(&mut desk, 1, 40, "src/a.rs:3\r\n");
+        load(&mut desk, 7, "/p/b.rs", "b\n");
+        answer_all(&mut desk);
+        click(&mut desk, cell_point(0, 2), CTRL);
+        // Not in the editor, whose directory it isn't from, but in a tab
+        // the daemon opens from the terminal's.
+        let asked = answer_all(&mut desk);
+        assert!(
+            matches!(&asked[..], [Request::NewTab { terminal: PaneTerminal::File(file), .. }]
+                if file.path == "src/a.rs" && file.cwd.is_none()),
+            "{asked:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_link_on_another_machine_says_so_and_opens_nothing() {
+        let mut desk = desk(one_tab(pane(1)));
+        let output = "\x1b]8;;file://laptop/home/j/a.rs#0\x07there\x1b]8;;\x07";
+        screen_showing(&mut desk, 1, 40, output);
+        answer_all(&mut desk);
+        click(&mut desk, cell_point(0, 2), CTRL);
+        assert!(desk.take_opened().is_empty());
+        assert!(files_opened(answer_all(&mut desk)).is_empty());
+        assert_eq!(
+            note(&desk),
+            "file://laptop/home/j/a.rs#0 is on laptop, not this machine"
+        );
+    }
+
+    #[test]
+    fn a_file_link_to_line_0_opens_the_file_at_its_top() {
+        let mut desk = desk(one_tab(pane(1)));
+        screen_showing(
+            &mut desk,
+            1,
+            40,
+            "\x1b]8;;file:///p/a.rs#0\x07a\x1b]8;;\x07",
+        );
+        answer_all(&mut desk);
+        click(&mut desk, cell_point(0, 0), CTRL);
+        assert_eq!(files_opened(answer_all(&mut desk)), ["tab /p/a.rs"]);
+    }
+
+    #[test]
+    fn gx_in_normal_mode_opens_the_link_under_the_cursor() {
+        let mut desk = desk(one_tab(pane(1)));
+        screen_showing(&mut desk, 1, 40, "https://x.example/b\r\n");
+        answer_all(&mut desk);
+        normal_mode(&mut desk);
+        type_keys(&mut desk, "kgx");
+        assert_eq!(desk.take_opened(), ["https://x.example/b"]);
+    }
+
+    #[test]
+    fn ctrl_click_goes_to_a_program_that_takes_the_mouse_and_ctrl_shift_click_opens() {
+        let mut desk = desk(one_tab(pane(1)));
+        let output = format!("\x1b[?1000h\x1b[?1006h{LINKS}");
+        screen_showing(&mut desk, 1, 40, &output);
+        answer_all(&mut desk);
+        click(&mut desk, cell_point(0, 8), CTRL);
+        assert!(desk.take_opened().is_empty());
+        let sent = answer_all(&mut desk);
+        assert!(
+            matches!(&sent[..], [Request::SendInput { bytes, .. }, ..] if bytes == b"\x1b[<16;9;1M"),
+            "{sent:?}"
+        );
+        let ctrl_shift = Modifiers {
+            shift: true,
+            ..CTRL
+        };
+        assert!(desk.link_at(cell_point(0, 8), ctrl_shift));
+        click(&mut desk, cell_point(0, 8), ctrl_shift);
+        assert_eq!(desk.take_opened(), ["https://x.example/a"]);
     }
 }
