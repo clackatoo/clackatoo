@@ -592,7 +592,7 @@ mod tests {
         // The change is queued in inotify, unread, as the agent's pipe is
         // read first in the pass that hears the command finish.
         start_command(&mut daemon, chat);
-        std::fs::write(&path, "one\ntwo\n").unwrap();
+        replace(&path, "one\ntwo\n");
         finish_command(&mut daemon, chat);
         daemon.check_disk();
         assert_eq!(daemon.buffers[&id].buffer.text().to_string(), "one\ntwo\n");
@@ -602,11 +602,22 @@ mod tests {
         assert_eq!(buffer.text().to_string(), "one\n");
 
         // A change after the finish, heard of in the next pass, isn't its.
-        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        replace(&path, "one\ntwo\nthree\n");
         daemon.read_files_changes();
         daemon.check_disk();
         assert!(!daemon.disk.noted.contains_key(&id));
         assert!(daemon.buffers[&id].stale());
+    }
+
+    /// Replaces the file at `path` with one holding `text`, renamed over
+    /// it, as most programs write a file. inotify hears of a rename as it's
+    /// made. A file written in place is heard of only once nothing has it
+    /// open, and a child another test is starting may hold it open until it
+    /// runs its program.
+    fn replace(path: &Path, text: &str) {
+        let new = path.with_extension("new");
+        std::fs::write(&new, text).unwrap();
+        std::fs::rename(&new, path).unwrap();
     }
 
     /// Redoes the last step of the agent in `chat` in buffer `id`.
