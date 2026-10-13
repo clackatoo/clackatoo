@@ -147,6 +147,8 @@ enum Hit {
     Subagent(clackatoo_protocol::TerminalId),
     /// The button that copies a block of code.
     CopyCode(TextKey),
+    /// The button under a turn that copies its answer, by the turn.
+    CopyAnswer(usize),
 }
 
 /// What the mouse pointer looks like over a chat.
@@ -265,6 +267,15 @@ pub(crate) struct ChatView {
     hovered_code: Option<TextKey>,
     /// The block of code just copied with its button, which says so.
     copied_code: Option<TextKey>,
+    /// The turn whose answer was just copied with the button under it,
+    /// which says so until the mouse leaves it.
+    copied_answer: Option<usize>,
+    /// Where the mouse is, from the pane's top left, while a drag selects
+    /// the conversation's text.
+    drag_to: Option<[f32; 2]>,
+    /// When the view last scrolled for that drag, as turns count the time,
+    /// while the mouse is past the view's top or bottom.
+    edge_step: Option<u64>,
     /// The column's right edge, from the pane's left, when last drawn.
     column_right: f32,
 }
@@ -318,6 +329,9 @@ impl ChatView {
             read_prefix: None,
             hovered_code: None,
             copied_code: None,
+            copied_answer: None,
+            drag_to: None,
+            edge_step: None,
             column_right: 0.0,
         }
     }
@@ -343,6 +357,13 @@ impl ChatView {
                         clackatoo_protocol::Patch::Chat(patch) => {
                             if let Some(turn) = touches(patch) {
                                 self.restyled(turn);
+                            }
+                            // When a turn ended says whether the time
+                            // shows over the turn after it.
+                            if let clackatoo_protocol::ChatPatch::Turn { index, .. } = patch
+                                && let Ok(index) = usize::try_from(*index)
+                            {
+                                self.restyled(index + 1);
                             }
                             // The turns with cards, before and after.
                             if let clackatoo_protocol::ChatPatch::Subagents(new) = patch {
@@ -454,15 +475,26 @@ impl ChatView {
             self.hovered_code = code;
             self.copied_code = None;
         }
+        // The button under an answer just copied says so until the mouse
+        // leaves it.
+        if let Some(turn) = self.copied_answer
+            && !(self.hits.iter())
+                .any(|(hit, rect)| *hit == Hit::CopyAnswer(turn) && contains(*rect, at))
+        {
+            self.copied_answer = None;
+            redraw = true;
+        }
         redraw |= self.hover_menu(at);
         redraw
     }
 
     /// The mouse left the pane: the button that copies a block of code
-    /// goes. Returns whether the chat must be redrawn.
+    /// goes, and the one under an answer stops saying it copied. Returns
+    /// whether the chat must be redrawn.
     pub(crate) fn unhover(&mut self) -> bool {
         self.copied_code = None;
-        self.hovered_code.take().is_some()
+        let copied = self.copied_answer.take().is_some();
+        self.hovered_code.take().is_some() || copied
     }
 
     /// The mouse moved to `at` with no button held, over the menu, if
@@ -532,15 +564,15 @@ impl ChatView {
                     self.drive(fonts, |driver| driver.extend_selection_to_point(x, y));
                 }
                 Input::Drag(at) if self.picking => {
-                    let head = self.spot_at(at, true);
-                    if let (Some(picked), Some(head)) = (self.picked.as_mut(), head) {
-                        picked.head = head;
-                    }
+                    self.drag_to = Some(at);
+                    self.pick_at(at);
                 }
                 Input::Drag(_) => {}
                 Input::Release => {
                     self.selecting = false;
                     self.sliding = None;
+                    self.drag_to = None;
+                    self.edge_step = None;
                     // Text selected with the mouse goes to the primary
                     // selection, as elsewhere on Linux.
                     if std::mem::take(&mut self.picking) {
@@ -1018,6 +1050,19 @@ impl ChatView {
                 if let Some(text) = self.text(key) {
                     settled.copied.push((text.text.to_owned(), Copy::Clipboard));
                     self.copied_code = Some(key);
+                }
+            }
+            // As `y` copies it: the Markdown it came as.
+            Some(Hit::CopyAnswer(turn)) => {
+                let answer = (self.node.turns.get(turn)).and_then(paint::answer_to_copy);
+                let key = answer.map(|item| TextKey {
+                    turn,
+                    piece: paint::ITEMS + item,
+                    part: 0,
+                });
+                if let Some(text) = key.and_then(|key| self.piece_text(key)) {
+                    settled.copied.push((text, Copy::Clipboard));
+                    self.copied_answer = Some(turn);
                 }
             }
             Some(Hit::Send) => self.send(settled),
@@ -1718,6 +1763,82 @@ mod tests {
             force: false,
         };
         assert_eq!(view.settle(&mut fonts).actions, [redo]);
+    }
+
+    /// The middle of where `wanted` was drawn, if it was.
+    fn drawn_at(view: &ChatView, wanted: &Hit) -> Option<[f32; 2]> {
+        let (_, [x, y, width, height]) = view.hits.iter().find(|(hit, _)| hit == wanted)?;
+        Some([x + width / 2.0, y + height / 2.0])
+    }
+
+    #[test]
+    fn the_button_under_an_answer_copies_it_as_y_does() {
+        let mut fonts = fonts();
+        let node = fixtures::talk(&[("one", "**bold** answer"), ("two", "second")]);
+        let mut view = ChatView::new(String::new(), node);
+        fixtures::paint(&mut view, &mut fonts);
+        let at = drawn_at(&view, &Hit::CopyAnswer(0)).expect("the button");
+        assert_eq!(view.pointer(at), Pointer::Hand);
+        // Under the answer, on the left.
+        let answer = (view.shown.iter())
+            .find(|shown| shown.key.turn == 0 && shown.key.piece == paint::ITEMS)
+            .expect("the answer");
+        assert!(at[1] > answer.at[1] + answer.size[1]);
+        view.press(at, 1, false);
+        view.release();
+        let settled = view.settle(&mut fonts);
+        assert_eq!(
+            settled.copied,
+            [("**bold** answer".to_owned(), Copy::Clipboard)]
+        );
+        // It says so until the mouse leaves it.
+        assert_eq!(view.copied_answer, Some(0));
+        assert!(!view.hover(at));
+        assert!(view.hover([1.0, 1.0]));
+        assert_eq!(view.copied_answer, None);
+    }
+
+    #[test]
+    fn only_a_finished_turn_ending_in_words_has_the_button() {
+        use clackatoo_protocol::{Item, Tool, ToolKind, ToolStatus};
+
+        let mut fonts = fonts();
+        let mut node = fixtures::talk(&[("one", "first"), ("two", "second"), ("three", "")]);
+        // Ending with a tool: nothing to copy.
+        node.turns[1].items.push(Item::Tool(Tool {
+            id: "t".into(),
+            title: "Read a.rs".into(),
+            status: ToolStatus::Done,
+            kind: ToolKind::Read,
+            content: Vec::new(),
+            locations: Vec::new(),
+        }));
+        // Still going.
+        node.turns[0].end = None;
+        let mut view = ChatView::new(String::new(), node);
+        fixtures::paint(&mut view, &mut fonts);
+        for turn in 0..3 {
+            assert_eq!(drawn_at(&view, &Hit::CopyAnswer(turn)), None, "{turn}");
+        }
+    }
+
+    #[test]
+    fn the_button_shares_its_line_with_what_the_turn_changed_in_files() {
+        use clackatoo_protocol::Item;
+        use clackatoo_protocol::TurnFilesState::Made;
+
+        let mut fonts = fonts();
+        let mut view = with_files(&[Made]);
+        view.node.turns[0].items.push(Item::Words("Done.".into()));
+        let mut alone = with_files(&[Made]);
+        view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        alone.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        let copy = drawn_at(&view, &Hit::CopyAnswer(0)).expect("the button");
+        let undo = drawn_at(&view, &Hit::Undo(0)).expect("Undo");
+        assert!((copy[1] - undo[1]).abs() < 1.0 && copy[0] < undo[0]);
+        // No answer, no button, and Undo goes to the left.
+        assert_eq!(drawn_at(&alone, &Hit::CopyAnswer(0)), None);
+        assert!(drawn_at(&alone, &Hit::Undo(0)).unwrap()[0] < undo[0]);
     }
 
     #[test]

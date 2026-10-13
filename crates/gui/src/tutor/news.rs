@@ -155,6 +155,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "A window meeting a newer daemon updates clackatoo with Enter and opens again, connected where it was",
     },
+    News {
+        id: "chat-polish",
+        date: "2026-10-13",
+        lesson: "agents",
+        what: "Chats show the time between turns far apart, Copy under each answer, and scroll as you select past them",
+    },
 ];
 
 impl News {

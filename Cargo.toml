@@ -52,6 +52,10 @@ ignore = "0.4.33"
 # signs beside its lines: the histogram algorithm, as Helix uses it, and
 # fast enough to run after every pause in typing on a big file.
 imara-diff = { version = "0.2.0", default-features = false }
+# Says when a chat's turns were sent, in the local time zone, which it
+# reads from TZ and /etc/localtime as the C library does. Already built,
+# for env_logger's timestamps; no copy of the time zone database.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 log = "0.4"
 # Finds line ends in files grepped.
 memchr = "2.8"

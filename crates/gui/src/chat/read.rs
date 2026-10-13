@@ -309,7 +309,7 @@ impl ChatView {
     /// as it was typed, the agent's words as the Markdown they came as, a
     /// command and its output, a change as a diff, or for the line a
     /// turn's work folds under, the turn.
-    fn piece_text(&self, key: TextKey) -> Option<String> {
+    pub(super) fn piece_text(&self, key: TextKey) -> Option<String> {
         let turn = self.node.turns.get(key.turn)?;
         match key.piece {
             PROMPT => Some(turn.prompt.clone()),

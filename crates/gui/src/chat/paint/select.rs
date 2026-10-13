@@ -188,7 +188,7 @@ impl ChatView {
             Piece::Fold => key.piece == FOLD,
             Piece::Agents => key.piece == AGENTS,
             Piece::Item(piece) | Piece::Card(piece) => key.piece == piece,
-            Piece::Note | Piece::Files | Piece::Badge => false,
+            Piece::Note | Piece::Footer | Piece::Badge | Piece::Divider => false,
         })?;
         if key.piece == AGENTS {
             let card = slot.agents.as_ref()?;
@@ -278,7 +278,7 @@ impl ChatView {
                 Piece::Card(piece) => {
                     add(piece, laid.cards.get(&piece).map_or(0, CardLaid::parts));
                 }
-                Piece::Note | Piece::Files | Piece::Badge => {}
+                Piece::Note | Piece::Footer | Piece::Badge | Piece::Divider => {}
             }
         }
         keys
@@ -435,7 +435,7 @@ impl ChatView {
         let before = slot.height.unwrap_or(0.0);
         let m = Measures::of(self.cache.size);
         let turns = std::mem::take(&mut self.node.turns);
-        self.lay_out_turn(fonts, m, self.cache.width, turn, &turns[turn]);
+        self.lay_out_turn(fonts, m, self.cache.width, turn, &turns);
         self.node.turns = turns;
         self.cache.turns[turn].height.unwrap_or(0.0) - before
     }

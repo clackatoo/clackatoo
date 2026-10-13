@@ -20,6 +20,14 @@ Below each message, what the agent did with it, in order: its words, its thinkin
 
 Along the box's bottom are its settings: its mode on the left, how much it does without asking; its model and effort on the right. Shift+Tab steps through the modes.
 
+## Copying, and when it was said
+
+Under each answer the agent has finished is `Copy`: click it to put the answer on the clipboard as the Markdown it came as, as `y` on the answer does in the chat's normal mode. A block of code shows its own Copy button while the mouse is over it.
+
+Drag to select text and let go to copy it to the primary selection; drag past the chat's top or bottom and it scrolls, faster the further past you go, selecting as it goes.
+
+When a message was sent more than half an hour after the turn before it ended, a line across the chat says when: `14:32` today, `Yesterday 09:10`, the day of the week for the last few days, and the date before that.
+
 ## What it can show you
 
 Each agent is given clackatoo's own tools, so it can show you things rather than only tell you: open a file in an editor beside the chat, run a command in a terminal you can watch, read a terminal, wait for its command to finish, open a file explorer, point out a pane, and say what the language servers say is wrong. Before it runs a command or types into a terminal, it asks: Allow, Always allow, or Reject.

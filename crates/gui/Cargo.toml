@@ -27,6 +27,7 @@ clackatoo-term.workspace = true
 clackatoo-text.workspace = true
 clackatoo-update.workspace = true
 fontique.workspace = true
+jiff.workspace = true
 log.workspace = true
 nucleo-matcher.workspace = true
 serde_json.workspace = true

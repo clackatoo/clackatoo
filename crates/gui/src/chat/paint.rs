@@ -8,6 +8,8 @@
 
 mod agents;
 mod cards;
+mod divider;
+mod edge;
 mod fold;
 mod select;
 
@@ -157,6 +159,9 @@ pub(super) struct TurnSlot {
     /// The card for the chats its agent started, laid out, if it started
     /// any: what it says changes as they go on.
     agents: Option<agents::AgentsLaid>,
+    /// The time above it, laid out, if it was sent long after the turn
+    /// before: what it says changes as the days go by.
+    divider: Option<Laid>,
 }
 
 /// A turn, laid out.
@@ -171,6 +176,8 @@ struct TurnLaid {
     note: Option<Laid>,
     /// What it changed in files, and the buttons that undo and redo it.
     files: Option<FilesLaid>,
+    /// Whether the button that copies its answer is under it.
+    copy: bool,
     /// Which chat sent its message, if another agent did.
     badge: Option<Laid>,
     height: f32,
@@ -401,12 +408,13 @@ impl ChatView {
 
         // The conversation: the turns in view are laid out, and drawn.
         self.view_height = view_height;
+        self.scroll_past_edge();
         self.arrange(fonts, m, column);
         let shown = in_view(&self.cache.bounds, self.scroll, self.scroll + view_height);
         self.label_folds(fonts, m, self.near());
         self.label_agents(fonts, m, self.near());
+        self.label_dividers(fonts, m, self.near());
         let clip = [origin[0], origin[1], size[0], view_height];
-        let top = origin[1] - self.scroll;
         let mut canvas = Canvas {
             paint: &mut paint,
             fonts,
@@ -414,19 +422,11 @@ impl ChatView {
             em,
             over: false,
         };
-        let (mut hits, mut texts) = (Vec::new(), Vec::new());
-        let mut drawn = Drawn {
-            pane: origin,
-            hits: &mut hits,
-            texts: &mut texts,
-        };
-        for index in shown {
-            let at = [origin[0] + left, top + self.cache.bounds[index][0]];
-            self.draw_turn(&mut canvas, m, index, at, &mut drawn);
-        }
-        self.hits.extend(hits);
-        self.shown = texts;
+        let top = [origin[0] + left, origin[1] - self.scroll];
+        self.draw_turns(&mut canvas, m, shown, top, origin);
+        self.pick_past_edge();
         self.note_live();
+        self.note_edge();
         self.column_right = left + column;
         self.cursor_onto_text();
         self.cursor_into_view();
@@ -448,6 +448,40 @@ impl ChatView {
             self.draw_menu(&mut paint, fonts, m, place, anchor);
         }
         paint
+    }
+
+    /// Draws `turns`, with the column's left and the conversation's top
+    /// at `origin`, and notes what of them takes a click, and their text,
+    /// from the pane's top left, `pane`.
+    fn draw_turns(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        turns: std::ops::Range<usize>,
+        origin: [f32; 2],
+        pane: [f32; 2],
+    ) {
+        // The button under each answer says "Copy", or "Copied" once it
+        // has.
+        let copy = COPY.map(|label| self.note(canvas.fonts, m, label, Tone::Muted, f32::INFINITY));
+        let (mut hits, mut texts) = (Vec::new(), Vec::new());
+        let mut drawn = Drawn {
+            pane,
+            hits: &mut hits,
+            texts: &mut texts,
+            copy: &copy,
+        };
+        for index in turns {
+            let at = [origin[0], origin[1] + self.cache.bounds[index][0]];
+            self.draw_turn(canvas, m, index, at, &mut drawn);
+        }
+        for laid in copy {
+            self.cache
+                .notes
+                .insert((laid.source.clone(), Tone::Muted), laid);
+        }
+        self.hits.extend(hits);
+        self.shown = texts;
     }
 
     /// The agent, as the chat names it: "Codex", or "the agent" for a
@@ -493,7 +527,8 @@ impl ChatView {
         // New turns, guessed at until they're laid out.
         for (index, turn) in turns.iter().enumerate().skip(had) {
             let open = self.shape(index, turn).open;
-            self.set_height(index, guess(m, column, turn, open));
+            let divided = divider::divided(&turns, index).is_some();
+            self.set_height(index, guess(m, column, turn, open, divided));
         }
         loop {
             self.update_bounds(m);
@@ -517,7 +552,7 @@ impl ChatView {
                 (index, self.scroll - top)
             });
             for index in stale {
-                self.lay_out_turn(fonts, m, column, index, &turns[index]);
+                self.lay_out_turn(fonts, m, column, index, &turns);
             }
             self.update_bounds(m);
             if let Some((index, offset)) = anchor
@@ -547,6 +582,7 @@ impl ChatView {
                 slot.laid = None;
                 slot.header = None;
                 slot.agents = None;
+                slot.divider = None;
             }
             near
         });
@@ -592,7 +628,7 @@ impl ChatView {
         cache.bounded = count;
     }
 
-    /// Lays out turn `index`, `turn`, keeping what of it was laid out
+    /// Lays out turn `index` of `turns`, keeping what of it was laid out
     /// already and hasn't changed, as the words of an answer before more
     /// came.
     fn lay_out_turn(
@@ -601,8 +637,9 @@ impl ChatView {
         m: Measures,
         column: f32,
         index: usize,
-        turn: &Turn,
+        turns: &[Turn],
     ) {
+        let turn = &turns[index];
         let shape = self.shape(index, turn);
         let old = self.cache.turns[index].laid.take();
         let (mut old_pieces, mut old_cards) = old
@@ -614,19 +651,11 @@ impl ChatView {
             cards: HashMap::new(),
             note: None,
             files: None,
+            copy: false,
             badge: None,
             height: 0.0,
         };
-        let mut y = 0.0;
-        // Sent by another chat's agent: which, over the message.
-        if let Some(from) = &turn.from {
-            let text = format!("From chat {} · {} · {}", from.chat, from.agent, from.title);
-            let look = Look::Plain(Tone::Accent);
-            let badge = lay_out(&mut self.layout_cx, fonts, m, &text, look, column * 0.78);
-            laid.spans.push(Span::of(Piece::Badge, y, badge.height));
-            y += badge.height + m.em(0.3);
-            laid.badge = Some(badge);
-        }
+        let mut y = self.lay_out_head(fonts, (m, column), (index, turns), &mut laid);
         if !turn.prompt.is_empty() {
             let width = (column * 0.78 - m.em(2.0)).max(m.em(4.0));
             let old = old_pieces.remove(&PROMPT);
@@ -707,9 +736,37 @@ impl ChatView {
         self.set_height(index, y);
     }
 
+    /// Lays out what goes over turn `index` of `turns`, into `laid`: when
+    /// it was sent, if long after the turn before, and which chat sent it,
+    /// if another agent did. Returns where that ends.
+    fn lay_out_head(
+        &mut self,
+        fonts: &mut Fonts,
+        (m, column): (Measures, f32),
+        (index, turns): (usize, &[Turn]),
+        laid: &mut TurnLaid,
+    ) -> f32 {
+        let mut y = 0.0;
+        if divider::divided(turns, index).is_some() {
+            let height = divider::height(m);
+            laid.spans.push(Span::of(Piece::Divider, y, height));
+            y += height + divider::below(m);
+        }
+        if let Some(from) = &turns[index].from {
+            let text = format!("From chat {} · {} · {}", from.chat, from.agent, from.title);
+            let look = Look::Plain(Tone::Accent);
+            let badge = lay_out(&mut self.layout_cx, fonts, m, &text, look, column * 0.78);
+            laid.spans.push(Span::of(Piece::Badge, y, badge.height));
+            y += badge.height + m.em(0.3);
+            laid.badge = Some(badge);
+        }
+        y
+    }
+
     /// Lays out what goes under turn `index`, `turn`, into `laid`, from
-    /// `y` down: how it ended, if not well, and what it changed in files.
-    /// Returns where that ends.
+    /// `y` down: how it ended, if not well, and a line with the button
+    /// that copies its answer and what it changed in files. Returns where
+    /// that ends.
     fn lay_out_ending(
         &mut self,
         fonts: &mut Fonts,
@@ -732,14 +789,19 @@ impl ChatView {
             y += note.height;
             laid.note = Some(note);
         }
-        // What it changed in files, once it's done, and the buttons that
-        // undo and redo it: under its answer, folded or not.
-        if let (Some(files), Some(_)) = (turn.files, &turn.end) {
+        // Once it's done, a line under its answer, folded or not: the
+        // button that copies the answer, and what it changed in files,
+        // with the buttons that undo and redo it.
+        laid.copy = answer_to_copy(turn).is_some();
+        let files = turn.files.filter(|_| turn.end.is_some());
+        if laid.copy || files.is_some() {
             y += m.em(0.75);
-            let files = self.lay_out_files(fonts, m, column, (index, files));
-            laid.spans.push(Span::of(Piece::Files, y, files.height));
-            y += files.height;
-            laid.files = Some(files);
+            let files = files.map(|files| self.lay_out_files(fonts, m, column, (index, files)));
+            let height = (files.as_ref()).map_or(0.0, |files| files.height);
+            let height = height.max(fold::height(m));
+            laid.spans.push(Span::of(Piece::Footer, y, height));
+            y += height;
+            laid.files = files;
         }
         y
     }
@@ -874,9 +936,21 @@ impl ChatView {
                         draw_laid(canvas, m, badge, [left, top], badge.width);
                     }
                 }
-                Piece::Files => {
+                Piece::Divider => self.draw_divider(canvas, m, index, [origin[0], top]),
+                Piece::Footer => {
+                    let mut x = origin[0];
+                    if laid.copy {
+                        let copied = self.copied_answer == Some(index);
+                        let label = &drawn.copy[usize::from(copied)];
+                        draw_laid(canvas, m, label, [x, top], label.width);
+                        let rect = [x, top, label.width, span.bottom - span.top];
+                        drawn.hit(canvas.clip, Hit::CopyAnswer(index), rect);
+                        // What follows stays put as it says "Copied".
+                        let widest = drawn.copy[0].width.max(drawn.copy[1].width);
+                        x += widest + m.em(1.2);
+                    }
                     if let Some(files) = &laid.files {
-                        draw_files(canvas, m, files, [origin[0], top], drawn);
+                        draw_files(canvas, m, files, [x, top], drawn);
                     }
                 }
             }
@@ -1735,12 +1809,17 @@ enum Piece {
     Card(usize),
     /// How it ended, if not well.
     Note,
-    /// What it changed in files, and what undoes or redoes it.
-    Files,
+    /// The line under it, once it's done: the button that copies its
+    /// answer, and what it changed in files, with what undoes or redoes
+    /// it.
+    Footer,
     /// Which chat sent its message, if another agent did.
     Badge,
     /// The card for the chats its agent started.
     Agents,
+    /// The time it was sent, over it, as it was long after the turn
+    /// before.
+    Divider,
 }
 
 impl Span {
@@ -1773,9 +1852,23 @@ struct Drawn<'a> {
     pane: [f32; 2],
     hits: &'a mut Vec<(Hit, [f32; 4])>,
     texts: &'a mut Vec<Shown>,
+    /// The button under each answer's label, laid out: "Copy", and
+    /// "Copied".
+    copy: &'a [Laid; 2],
 }
 
 impl Drawn<'_> {
+    /// Notes that `hit` takes a click in `rect`, from the window's top
+    /// left, where it's inside `clip`, the view.
+    fn hit(&mut self, clip: [f32; 4], hit: Hit, rect: [f32; 4]) {
+        let [left, top, wide, high] = intersection(clip, rect);
+        if wide > 0.0 && high > 0.0 {
+            let pane = self.pane;
+            self.hits
+                .push((hit, [left - pane[0], top - pane[1], wide, high]));
+        }
+    }
+
     /// Notes `laid`'s blocks, drawn with the column's left at
     /// `origin[0]` and its top at `origin[1]`, as `piece` of `turn`.
     fn note_laid(&mut self, laid: &Laid, origin: [f32; 2], (turn, piece): (usize, usize)) {
@@ -1828,12 +1921,13 @@ fn in_view(bounds: &[[f32; 2]], from: f32, to: f32) -> std::ops::Range<usize> {
 }
 
 /// How tall `turn` looks to be, `column` wide, before it's laid out:
-/// near enough to scroll by, from how much text it has.
+/// near enough to scroll by, from how much text it has. `divided` if the
+/// time it was sent is over it.
 #[allow(
     clippy::cast_precision_loss,
     reason = "a guess, from counts far inside f32's range"
 )]
-fn guess(m: Measures, column: f32, turn: &Turn, open: bool) -> f32 {
+fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f32 {
     let line = m.em * LINE;
     // About two characters to an em.
     let lines = |text: &str, wide: f32| -> f32 {
@@ -1843,6 +1937,9 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool) -> f32 {
             .sum()
     };
     let mut height = 0.0;
+    if divided {
+        height += divider::height(m) + divider::below(m);
+    }
     if turn.from.is_some() {
         height += line + m.em(0.3);
     }
@@ -1863,7 +1960,9 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool) -> f32 {
             Item::Tool(_) => line + m.em(0.35),
         };
     }
-    if turn.files.is_some() && turn.end.is_some() {
+    // The line with the button that copies its answer, and what it
+    // changed in files.
+    if (turn.files.is_some() && turn.end.is_some()) || answer_to_copy(turn).is_some() {
         height += line + m.em(0.75);
     }
     if let Some(switch) = &turn.switch {
@@ -1915,14 +2014,22 @@ fn draw_files(
     for (hit, laid) in &files.buttons {
         draw_laid(canvas, m, laid, [x, origin[1]], laid.width);
         let rect = [x, origin[1], laid.width, laid.height];
-        let [left, top, wide, high] = intersection(canvas.clip, rect);
-        if wide > 0.0 && high > 0.0 {
-            let pane = drawn.pane;
-            drawn
-                .hits
-                .push((hit.clone(), [left - pane[0], top - pane[1], wide, high]));
-        }
+        drawn.hit(canvas.clip, hit.clone(), rect);
         x += laid.width + m.em(0.8);
+    }
+}
+
+/// What the button under each answer says: before it's clicked, and after.
+const COPY: [&str; 2] = ["Copy", "Copied"];
+
+/// Where in `turn`'s items its answer is, if it's done and has one to
+/// copy: its last, the agent's words.
+pub(super) fn answer_to_copy(turn: &Turn) -> Option<usize> {
+    turn.end.as_ref()?;
+    let last = turn.items.len().checked_sub(1)?;
+    match &turn.items[last] {
+        Item::Words(words) if !words.trim().is_empty() => Some(last),
+        _ => None,
     }
 }
 
@@ -2231,7 +2338,7 @@ mod tests {
         );
         // No bubble, nor work to fold: just the line.
         let m = Measures::of(16.0);
-        assert!(guess(m, 400.0, &turn, false) >= 4.0 * m.em * LINE);
+        assert!(guess(m, 400.0, &turn, false, false) >= 4.0 * m.em * LINE);
     }
 
     #[test]

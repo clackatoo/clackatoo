@@ -607,6 +607,7 @@ dependencies = [
  "clackatoo-update",
  "criterion",
  "fontique",
+ "jiff",
  "log",
  "mlua",
  "nucleo-matcher",
