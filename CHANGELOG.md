@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026.10.2 (2026-10-13)
+
+### Features
+
+- review agents' changes hunk by hunk: gutter colour, review panes, keep and reject, line comments, blame (9b24b75)
+- one model menu across agents: a chat moves from Claude Code to Codex and back (4c8732d)
+
 ## 2026.10.1 (2026-10-13)
 
 ### Features
