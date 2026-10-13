@@ -469,6 +469,7 @@ impl Explorer {
                 self.sync();
             }
             FilesUpdate::Git(marks) => self.marks = marks.into_iter().collect(),
+            FilesUpdate::NoGit(reason) => self.message = Some(reason),
         }
     }
 

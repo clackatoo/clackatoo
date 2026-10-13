@@ -50,10 +50,11 @@ pub(crate) enum Done {
         listing: Result<Listing, String>,
     },
     /// The work tree the directory `root` is in, if any: its top, and its
-    /// repository's git directory.
+    /// repository's git directory. Or why git can't be run at all.
     Repository {
         root: PathBuf,
         tree: Option<(PathBuf, PathBuf)>,
+        no_git: Option<&'static str>,
     },
     /// What git says of the files in the work tree whose top is `top`,
     /// from the top, or `None` if it couldn't say.
@@ -161,7 +162,8 @@ impl Workers {
     pub(crate) fn find_repository(&self, root: PathBuf) {
         send(&self.listing, move || {
             let tree = crate::git::work_tree(&root);
-            Done::Repository { root, tree }
+            let no_git = crate::git::git(&root).err();
+            Done::Repository { root, tree, no_git }
         });
     }
 

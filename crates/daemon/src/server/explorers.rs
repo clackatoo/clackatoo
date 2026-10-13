@@ -92,6 +92,8 @@ pub(super) struct Explorers {
     /// them with: the client that asked, and its number for it.
     ops: HashMap<u64, (Token, u64)>,
     next_ticket: u64,
+    /// Why git can't be run, once a thread has found it can't.
+    no_git: Option<&'static str>,
 }
 
 impl Explorers {
@@ -131,6 +133,7 @@ impl Default for Explorers {
             full: false,
             ops: HashMap::new(),
             next_ticket: 0,
+            no_git: None,
         }
     }
 }
@@ -292,6 +295,9 @@ impl Daemon {
         self.tell_files(token, files, root);
         if let Some(marks) = marks {
             self.tell_files(token, files, FilesUpdate::Git(marks));
+        }
+        if let Some(reason) = self.explorers.no_git {
+            self.tell_files(token, files, FilesUpdate::NoGit(reason.to_owned()));
         }
         Ok(Response::Done)
     }
@@ -843,7 +849,9 @@ impl Daemon {
         for done in done {
             match done {
                 Done::Listed { dir, listing } => self.listed(&dir, listing),
-                Done::Repository { root, tree } => self.found_repository(&root, tree),
+                Done::Repository { root, tree, no_git } => {
+                    self.found_repository(&root, tree, no_git);
+                }
                 Done::Status { top, marks } => self.marked(&top, marks),
                 Done::Op {
                     ticket,
@@ -966,8 +974,26 @@ impl Daemon {
     }
 
     /// Notes the repository explorers rooted at `root` are in, watching its
-    /// index, and asks git about it if no one has yet.
-    fn found_repository(&mut self, root: &Path, tree: Option<(PathBuf, PathBuf)>) {
+    /// index, and asks git about it if no one has yet. If git can't be run,
+    /// as `no_git` says, their viewers are told why.
+    fn found_repository(
+        &mut self,
+        root: &Path,
+        tree: Option<(PathBuf, PathBuf)>,
+        no_git: Option<&'static str>,
+    ) {
+        if let Some(reason) = no_git {
+            self.explorers.no_git = Some(reason);
+            let viewers: Vec<(Token, FilesId)> = (self.explorers.list.iter())
+                .filter(|(_, explorer)| explorer.root == root)
+                .flat_map(|(&files, explorer)| {
+                    (explorer.viewers.iter()).map(move |&token| (token, files))
+                })
+                .collect();
+            for (token, files) in viewers {
+                self.tell_files(token, files, FilesUpdate::NoGit(reason.to_owned()));
+            }
+        }
         let found = tree.map(|(top, git_dir)| (top.canonicalize().unwrap_or(top), git_dir));
         // A folder thought to hold a repository inside another, which git
         // says doesn't, isn't asked about.

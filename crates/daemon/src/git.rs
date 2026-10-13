@@ -43,6 +43,7 @@ use clackatoo_protocol::{Answer, GitMark};
 use clackatoo_text::{Difference, Hunks, Rope, diff, line_starts};
 
 mod filters;
+mod installed;
 
 /// How long edits must pause before a buffer is compared again...
 pub(crate) const PAUSE: Duration = Duration::from_millis(100);
@@ -462,48 +463,76 @@ fn base_text(tracked: &Tracked) -> Option<&str> {
 
 /// git, to run in `dir`, reading nothing, seeing no repository but the
 /// one `dir` is in, and taking none of the locks it can do without, so
-/// reading never writes the index it's watched for.
+/// reading never writes the index it's watched for. Or why git can't be
+/// run at all (see [`installed`]).
 ///
-/// A command that can run files through filter drivers, comparing the
-/// work tree or checking a file out, is made with [`git_filtering`].
-pub(crate) fn git(dir: &Path) -> Command {
-    let mut command = Command::new("git");
+/// Nothing a repository's own config names is run: a folder copied from
+/// anyone, or a clone with a git directory committed inside it, must be
+/// safe to open. A command that can run files through filter drivers,
+/// comparing the work tree or checking a file out, is made with
+/// [`git_filtering`], which turns those off too.
+pub(crate) fn git(dir: &Path) -> Result<Command, &'static str> {
+    let installed = installed::installed()?;
+    let mut command = Command::new(&installed.program);
     command
-        // A repository's own config can name a command for git to run as
-        // it looks at the work tree: `core.fsmonitor`. Opening a folder
-        // cloned from anyone must never run it.
+        // A command for git to run as it looks at the work tree.
         .args(["-c", "core.fsmonitor=false"])
-        // Nor its hooks, which staging a hunk would run, as the index
-        // changes: no path is a directory under /dev/null.
+        // Hooks, which staging a hunk would run, as the index changes: no
+        // path is a directory under /dev/null.
         .args(["-c", "core.hooksPath=/dev/null"])
+        // A git directory found by itself, not as a work tree's `.git`,
+        // as one committed inside a clone would be, with a config of its
+        // own: it's a repository only when named, as clackatoo never
+        // does. Only the user's own config can say otherwise.
+        .args(["-c", "safe.bareRepository=explicit"])
         .current_dir(dir)
+        // Neither git nor the shell it runs anything in finds a program
+        // in the work tree (see [`installed`]).
+        .env("PATH", &installed.path)
         .env("GIT_OPTIONAL_LOCKS", "0")
         // Paths are paths, never patterns.
         .env("GIT_LITERAL_PATHSPECS", "1")
+        // An object missing from a partial clone is fetched from the
+        // remote the repository names, by the commands it names to reach
+        // it or log in with: never fetch, by any way at all. git before
+        // 2.44 knows only the second, which is enough alone.
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        // Nothing from where the daemon was started points git at another
+        // repository, or at other config in place of the repository's.
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_CONFIG")
         .stdin(Stdio::null());
-    command
+    Ok(command)
 }
 
 /// git, as [`git`] has it, to run in the work tree whose top is `top` a
 /// command that can run files through filter drivers: with every driver
 /// the repository's own config defines turned off, unless it's Git LFS's
-/// or `$CLACKATOO_GITFILTERS` allows it (see [`filters`]). `None` if git
-/// couldn't say what drivers there are, so the command can't be made
-/// safe.
-pub(crate) fn git_filtering(top: &Path) -> Option<Command> {
+/// or `$CLACKATOO_GITFILTERS` allows it (see [`filters`]). Or why it
+/// can't be made safe: git couldn't say what drivers there are.
+///
+/// The config is read, then the command is run: a driver added to the
+/// repository's config in between, or to a file it includes, isn't
+/// turned off. Only what can already write to the repository, or to what
+/// it includes, can do that, and the next command turns it off.
+pub(crate) fn git_filtering(top: &Path) -> Result<Command, &'static str> {
     let allowed = filters::Allowed::chosen();
-    let mut command = git(top);
+    let mut command = git(top)?;
     if allowed != filters::Allowed::All {
         let config = output_within(
-            git(top).args(["config", "--list", "-z", "--show-scope"]),
+            git(top)?.args(["config", "--list", "-z", "--show-scope"]),
             PATIENCE,
-        )?;
+        )
+        .ok_or("git couldn't say what filter drivers there are")?;
         filters::set(&mut command, &filters::turned_off(&config, allowed));
     }
-    Some(command)
+    Ok(command)
 }
 
 /// What git printed, if it ran and succeeded.
@@ -623,7 +652,9 @@ fn repository(path: &Path) -> Option<(PathBuf, PathBuf, String)> {
 /// and its repository's git directory.
 pub(crate) fn work_tree(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let printed = output_within(
-        git(dir).args(["rev-parse", "--show-toplevel", "--absolute-git-dir"]),
+        git(dir)
+            .ok()?
+            .args(["rev-parse", "--show-toplevel", "--absolute-git-dir"]),
         PATIENCE,
     )?;
     let printed = String::from_utf8(printed).ok()?;
@@ -640,7 +671,7 @@ pub(crate) fn work_tree(dir: &Path) -> Option<(PathBuf, PathBuf)> {
 /// every submodule's whole tree.
 pub(crate) fn status(top: &Path) -> Option<Vec<(String, GitMark)>> {
     let printed = output_within(
-        git_filtering(top)?.args([
+        git_filtering(top).ok()?.args([
             "status",
             "--porcelain=v1",
             "-z",
@@ -685,7 +716,7 @@ fn base_of(top: &Path, path: &str, converted: bool) -> Option<Base> {
 /// it's `converted`.
 fn read_base(top: &Path, path: &str, entry: Entry, converted: bool) -> Base {
     let command = if converted {
-        git_filtering(top).map(|mut command| {
+        git_filtering(top).ok().map(|mut command| {
             command.args([
                 "cat-file",
                 "--filters",
@@ -703,9 +734,10 @@ fn read_base(top: &Path, path: &str, entry: Entry, converted: bool) -> Base {
             command
         })
     } else {
-        let mut command = git(top);
-        command.args(["cat-file", "blob", &entry.object]);
-        Some(command)
+        git(top).ok().map(|mut command| {
+            command.args(["cat-file", "blob", &entry.object]);
+            command
+        })
     };
     let text = command
         .and_then(|mut command| output(&mut command))
@@ -722,9 +754,9 @@ fn read_base(top: &Path, path: &str, entry: Entry, converted: bool) -> Base {
 /// out of the index: it has a filter, such as Git LFS's, or its line ends
 /// are converted, by its attributes or by `core.autocrlf`.
 fn converted(top: &Path, path: &str) -> bool {
-    let Some(said) =
-        output(git(top).args(["check-attr", "-z", "filter", "text", "eol", "--", path]))
-    else {
+    let Some(said) = git(top).ok().and_then(|mut command| {
+        output(command.args(["check-attr", "-z", "filter", "text", "eol", "--", path]))
+    }) else {
         return false;
     };
     // "PATH\0ATTRIBUTE\0VALUE\0" for each.
@@ -744,7 +776,9 @@ fn converted(top: &Path, path: &str) -> bool {
         return false;
     }
     let setting = |name: &str| {
-        let said = output(git(top).args(["config", "--get", name])).unwrap_or_default();
+        let said = (git(top).ok())
+            .and_then(|mut command| output(command.args(["config", "--get", name])))
+            .unwrap_or_default();
         String::from_utf8_lossy(&said).trim().to_ascii_lowercase()
     };
     let autocrlf = setting("core.autocrlf");
@@ -755,11 +789,13 @@ fn converted(top: &Path, path: &str) -> bool {
 /// not in the index has none.
 fn list_index(top: &Path, paths: &[&str]) -> HashMap<String, Entry> {
     let mut found = HashMap::new();
-    let Some(listed) = output(
-        git(top)
-            .args(["ls-files", "--stage", "-z", "--"])
-            .args(paths),
-    ) else {
+    let Some(listed) = git(top).ok().and_then(|mut command| {
+        output(
+            command
+                .args(["ls-files", "--stage", "-z", "--"])
+                .args(paths),
+        )
+    }) else {
         return found;
     };
     // Each entry is "MODE OBJECT STAGE\tPATH": stage 0 for a file without
@@ -881,7 +917,7 @@ fn quoted(path: &str) -> String {
 /// Applies `patch` to the index of the work tree whose top is `top`, or
 /// says why git wouldn't.
 fn apply(top: &Path, patch: &str) -> Result<(), String> {
-    let mut child = git(top)
+    let mut child = git(top)?
         .args(["apply", "--cached", "--whitespace=nowarn", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -1023,6 +1059,127 @@ mod tests {
             left(ran),
             ["ran-clean", "ran-equals", "ran-included", "ran-smudge"]
         );
+    }
+
+    /// Makes the repository whose git directory is `git_dir` a partial
+    /// clone whose promisor remote is reached over ssh by a command that
+    /// leaves `ran-fetch` in `ran`, and takes `object` out of it, so git
+    /// would fetch it from there.
+    fn fetches_through(git_dir: &Path, ran: &Path, object: &str) {
+        let run = |args: &[&str]| by_hand(git_dir, &[&["--git-dir=."], args].concat());
+        run(&["config", "core.repositoryformatversion", "1"]);
+        run(&["config", "extensions.partialClone", "origin"]);
+        run(&["config", "remote.origin.url", "ssh://example.invalid/x"]);
+        run(&["config", "remote.origin.promisor", "true"]);
+        run(&["config", "protocol.allow", "always"]);
+        let command = format!("touch '{}'; false", ran.join("ran-fetch").display());
+        run(&["config", "core.sshCommand", &command]);
+        let (fan, rest) = object.split_at(2);
+        std::fs::remove_file(git_dir.join("objects").join(fan).join(rest)).unwrap();
+    }
+
+    /// Asks git, as a person would, for the text of `object` in the
+    /// repository it finds in `dir`, bare or not, which makes it fetch an
+    /// object that's missing.
+    fn fetch_by_hand(dir: &Path, object: &str) {
+        let _ = Command::new("git")
+            .args(["-c", "safe.bareRepository=all", "cat-file", "-p", object])
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_NO_LAZY_FETCH")
+            .env_remove("GIT_ALLOW_PROTOCOL")
+            .output()
+            .unwrap();
+    }
+
+    #[test]
+    fn an_object_missing_from_a_partial_clone_is_never_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = &dir.path().canonicalize().unwrap();
+        let run = |args: &[&str]| by_hand(top, args);
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(top.join("a.txt"), "was\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "a"]);
+        let entry = list_index(top, &["a.txt"]).remove("a.txt").unwrap();
+        let object = entry.object.clone();
+        let outside = tempfile::tempdir().unwrap();
+        let ran = outside.path();
+        fetches_through(&top.join(".git"), ran, &object);
+        std::fs::write(top.join("a.txt"), "new\n").unwrap();
+        // As signs, explorers and reviews read it.
+        assert_eq!(read_base(top, "a.txt", entry, false).text, None);
+        assert!(status(top).is_some());
+        let _ = crate::changes::changes_since_base(top, &[]);
+        assert!(left(ran).is_empty(), "the repository's ssh command ran");
+        // It would have run, fetching.
+        fetch_by_hand(top, &object);
+        assert_eq!(left(ran), ["ran-fetch"]);
+    }
+
+    #[test]
+    fn a_git_directory_committed_inside_a_clone_is_no_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = &dir.path().canonicalize().unwrap();
+        let run = |args: &[&str]| by_hand(top, args);
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(top.join("a.txt"), "was\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "a"]);
+        let object = list_index(top, &["a.txt"]).remove("a.txt").unwrap().object;
+        // A clone's folder that is itself a git directory, its work tree
+        // itself, and a partial clone that fetches through a command.
+        let outer = tempfile::tempdir().unwrap();
+        let evil = outer.path().canonicalize().unwrap().join("evil");
+        let copied = Command::new("cp")
+            .arg("-r")
+            .arg(top.join(".git"))
+            .arg(&evil)
+            .status()
+            .unwrap();
+        assert!(copied.success());
+        by_hand(&evil, &["--git-dir=.", "config", "core.bare", "false"]);
+        by_hand(&evil, &["--git-dir=.", "config", "core.worktree", "."]);
+        let outside = tempfile::tempdir().unwrap();
+        let ran = outside.path();
+        fetches_through(&evil, ran, &object);
+        assert_eq!(work_tree(&evil), None);
+        assert_eq!(repository(&evil.join("a.txt")), None);
+        assert_eq!(status(&evil), None);
+        assert!(crate::changes::changes_since_base(&evil, &[]).is_err());
+        assert!(left(ran).is_empty(), "the repository's ssh command ran");
+        // It would have run, fetching.
+        fetch_by_hand(&evil, &object);
+        assert_eq!(left(ran), ["ran-fetch"]);
+    }
+
+    #[test]
+    fn git_is_run_by_its_path_with_nothing_inherited_to_redirect_it() {
+        let command = git(Path::new("/")).expect("git 2.38 or newer is installed");
+        assert!(Path::new(command.get_program()).is_absolute());
+        let envs: HashMap<String, Option<String>> = (command.get_envs())
+            .map(|(key, value)| {
+                let value = value.map(|value| value.to_string_lossy().into_owned());
+                (key.to_string_lossy().into_owned(), value)
+            })
+            .collect();
+        for removed in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG",
+        ] {
+            assert_eq!(envs.get(removed), Some(&None), "{removed}");
+        }
+        assert_eq!(envs["GIT_NO_LAZY_FETCH"].as_deref(), Some("1"));
+        assert_eq!(envs["GIT_ALLOW_PROTOCOL"].as_deref(), Some(""));
+        let path = envs["PATH"].clone().unwrap();
+        assert!(path.split(':').all(|dir| dir.starts_with('/')), "{path}");
     }
 
     #[test]

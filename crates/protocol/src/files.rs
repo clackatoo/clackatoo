@@ -111,6 +111,10 @@ pub enum FilesUpdate {
     /// of what it said before. A directory git says is untracked or
     /// changed in has a mark of its own only if git gives it one.
     Git(Vec<(String, GitMark)>),
+    /// git can't be run, as this says, so nothing will come in
+    /// [`FilesUpdate::Git`]: it isn't installed, or is too old to run
+    /// safely.
+    NoGit(String),
 }
 
 /// One thing in a directory.

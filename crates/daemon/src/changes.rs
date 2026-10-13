@@ -113,7 +113,8 @@ pub(crate) fn changes_since_base(
     dir: &Path,
     known: &[Compared],
 ) -> Result<Vec<ReviewFile>, String> {
-    let (top, _) = work_tree(dir).ok_or("this isn't in a git repository")?;
+    let (top, _) =
+        work_tree(dir).ok_or_else(|| git(dir).err().unwrap_or("this isn't in a git repository"))?;
     let top = top.canonicalize().unwrap_or(top);
     let base = merge_base(&top)?;
     let paths = changed_paths(&top, &base, known)?;
@@ -121,7 +122,7 @@ pub(crate) fn changes_since_base(
         .flat_map(|(_, relative)| format!("{base}:{relative}\n").into_bytes())
         .collect();
     let checked = output_fed(
-        git(&top).args(["cat-file", "--batch-check"]),
+        git(&top)?.args(["cat-file", "--batch-check"]),
         asked,
         PATIENCE,
     )
@@ -199,29 +200,26 @@ fn changed_paths(
     known: &[Compared],
 ) -> Result<Vec<(PathBuf, String)>, String> {
     let mut paths = BTreeSet::new();
-    let changed = git_filtering(top)
-        .and_then(|mut command| {
-            output_within(
-                command.args([
-                    "diff",
-                    "--name-only",
-                    "-z",
-                    "--no-renames",
-                    // Nor any differ or converter a repository names.
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    // Nor look inside submodules, which would run `git
-                    // status` in each, with drivers of their own.
-                    "--ignore-submodules=dirty",
-                    base,
-                    "--",
-                ]),
-                PATIENCE,
-            )
-        })
-        .ok_or("git couldn't say what's changed since the base")?;
+    let changed = output_within(
+        git_filtering(top)?.args([
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            // Nor any differ or converter a repository names.
+            "--no-ext-diff",
+            "--no-textconv",
+            // Nor look inside submodules, which would run `git status` in
+            // each, with drivers of their own.
+            "--ignore-submodules=dirty",
+            base,
+            "--",
+        ]),
+        PATIENCE,
+    )
+    .ok_or("git couldn't say what's changed since the base")?;
     let untracked = output_within(
-        git(top).args(["ls-files", "--others", "--exclude-standard", "-z"]),
+        git(top)?.args(["ls-files", "--others", "--exclude-standard", "-z"]),
         PATIENCE,
     )
     .unwrap_or_default();
@@ -260,7 +258,7 @@ fn changed_paths(
 /// where it meets `main`, `master`, or the branch's upstream.
 fn merge_base(top: &Path) -> Result<String, String> {
     for other in ["main", "master", "@{upstream}"] {
-        if let Some(found) = output_within(git(top).args(["merge-base", "HEAD", other]), PATIENCE)
+        if let Some(found) = output_within(git(top)?.args(["merge-base", "HEAD", other]), PATIENCE)
             && let Ok(found) = String::from_utf8(found)
             && !found.trim().is_empty()
         {
@@ -282,7 +280,7 @@ fn read_blobs(top: &Path, objects: &[&str]) -> Result<HashMap<String, Option<Str
         .iter()
         .flat_map(|object| format!("{object}\n").into_bytes())
         .collect();
-    let printed = output_fed(git(top).args(["cat-file", "--batch"]), asked, PATIENCE)
+    let printed = output_fed(git(top)?.args(["cat-file", "--batch"]), asked, PATIENCE)
         .ok_or("git couldn't read the files at the base")?;
     // Each is "OBJECT TYPE SIZE\n", the bytes, and "\n".
     let mut at = 0;

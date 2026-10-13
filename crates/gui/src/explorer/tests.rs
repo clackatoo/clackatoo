@@ -506,6 +506,15 @@ fn a_directory_gone_is_collapsed_and_the_root_gone_says_so() {
     assert_eq!(explorer.label(), "~/p: No such file or directory");
 }
 
+#[test]
+fn git_that_cant_be_run_says_why() {
+    let mut explorer = explorer(10);
+    rooted(&mut explorer, project());
+    let why = "git 2.38 or newer is needed for git status, not 2.37.1";
+    explorer.update(FilesUpdate::NoGit(why.into()));
+    assert_eq!(explorer.label(), why);
+}
+
 /// Ten thousand files in a directory: the time to take them in, flatten
 /// them and draw what's in view, and then to move the cursor and draw
 /// again. Run with `--release --nocapture` for numbers worth reading.
