@@ -71,8 +71,14 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSfo "$RUNNER_TEMP/rustup-init" "$RUSTUP_INIT"
           echo "$RUSTUP_INIT_SHA256  $RUNNER_TEMP/rustup-init" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/rustup-init"
-          "$RUNNER_TEMP/rustup-init" -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION"
+          "$RUNNER_TEMP/rustup-init" -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION" \
+            --target wasm32-unknown-unknown
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install wasm-bindgen
+        # For the web app, built into the program: built from its source on
+        # crates.io, at exactly the version of the wasm-bindgen crate in
+        # Cargo.lock, with the dependencies its own lock file pins.
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
       - name: Check the tag is the workspace's version
         run: |
           version=$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml)
@@ -88,6 +94,8 @@ jobs:
         run: |
           export CLACKATOO_GIT_HASH="${CLACKATOO_GIT_HASH:0:10}"
           export SOURCE_DATE_EPOCH="$(date +%s)"
+          # A release always has the web app: fail rather than leave it out.
+          export CLACKATOO_WEB_APP=required
           cargo build --release --locked -p clackatoo
       - name: Check it runs on old systems
         # Nothing newer than glibc 2.28 and gcc 8's libstdc++, which
