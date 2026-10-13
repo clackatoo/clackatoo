@@ -1,0 +1,34 @@
+clackatoo
+Copyright (c) 2026 The clackatoo Authors
+
+clackatoo is licensed under either of the Apache License 2.0 (LICENSE-APACHE)
+or the MIT licence (LICENSE-MIT), at your option. Parts of it are derived
+from these projects, under their own licences:
+
+nvim-treesitter
+https://github.com/nvim-treesitter/nvim-treesitter
+Copyright the nvim-treesitter contributors
+Licensed under the Apache License 2.0
+- crates/syntax/src/indents.rs is derived from lua/nvim-treesitter/indent.lua
+  at cf12346a3414fa1b06af75c79faebe7f76df080a, which it follows step by step.
+- crates/syntax/tests/fixtures/languages/json/indents.scm is
+  queries/json/indents.scm at the same commit.
+
+nvim-treesitter-textobjects
+https://github.com/nvim-treesitter/nvim-treesitter-textobjects
+Copyright the nvim-treesitter-textobjects contributors
+Licensed under the Apache License 2.0
+- The patterns for an array's items in
+  crates/syntax/tests/fixtures/languages/json/textobjects.scm are adapted from
+  queries/c/textobjects.scm at 851e865342e5a4cb1ae23d31caf6e991e1c99f1e.
+
+tree-sitter-json
+https://github.com/tree-sitter/tree-sitter-json
+Copyright (c) 2014 Max Brunsfeld
+Licensed under the MIT licence (crates/syntax/tests/fixtures/languages/json/LICENSE)
+- crates/syntax/tests/fixtures/languages/json/grammar.wasm and highlights.scm.
+
+The grammars and queries clackatoo installs for languages are downloaded
+when you install them, from the projects that publish them, at pinned
+commits (crates/syntax/src/known.rs), and are under those projects' own
+licences. clackatoo doesn't include them.

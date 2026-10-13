@@ -13,6 +13,10 @@
 //! nvim-treesitter's `indent.lua` does, which this follows step by step,
 //! so the queries mean here what they mean there.
 //!
+//! Derived from nvim-treesitter's `lua/nvim-treesitter/indent.lua`,
+//! Copyright the nvim-treesitter contributors, under the Apache License
+//! 2.0: see `NOTICE` at the root of the repository.
+//!
 //! [`get_indent`]: https://github.com/nvim-treesitter/nvim-treesitter/blob/cf12346a3414fa1b06af75c79faebe7f76df080a/lua/nvim-treesitter/indent.lua
 
 use std::cell::RefCell;
