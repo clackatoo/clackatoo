@@ -133,8 +133,10 @@ impl Daemon {
             .collect();
         self.tools.talk.inboxes.extend(waiting);
         // The cards of the chats agents started, which the handover
-        // doesn't keep, are made again from the chats themselves.
+        // doesn't keep, are made again from the chats themselves, and with
+        // them which chat holds each closed one's card.
         self.note_subagents();
+        self.note_chats_above();
     }
 
     /// Whether `a` and `b` are of one family: one started the other, or
