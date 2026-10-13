@@ -102,6 +102,17 @@ pub(crate) fn rows(laid: &Laid, wrap: Wrap, room_after: bool) -> Vec<ScreenRow> 
     }
 }
 
+/// The screen rows `laid` goes on over, as [`rows`] has them, worked out
+/// character by character even for a plain line: what tests check the
+/// rest against.
+#[cfg(test)]
+pub(crate) fn rows_by_cells(laid: &Laid, wrap: Wrap, room_after: bool) -> Vec<ScreenRow> {
+    match Rows::of(laid, wrap, room_after) {
+        Some(rows) => rows.go_on_cells(laid, vec![ScreenRow::WHOLE]),
+        None => vec![ScreenRow::WHOLE],
+    }
+}
+
 /// The screen rows `laid` goes on over, as [`rows`] has them, given `old`,
 /// its rows before what's from cell `changed` on changed. Each row starts
 /// where what was on the row before it decided, looking no further than
@@ -530,13 +541,21 @@ mod tests {
             seed ^= seed << 17;
             usize::try_from(seed % n as u64).unwrap()
         };
-        for _ in 0..2000 {
+        // Some end in a character that isn't plain, which starts where a
+        // plain one would: wider, longer, a control, or with an accent or
+        // a joiner after it.
+        let ends = [
+            "", "", "字", "é", "\x01", "\u{301}", "\u{200d}", "e\u{301}", "\t",
+        ];
+        for _ in 0..4000 {
             let bytes = b"ab  -,.;x";
-            let text: String = (0..below(80))
+            let mut text: String = (0..below(80))
                 .map(|_| char::from(bytes[below(bytes.len())]))
                 .collect();
+            let end = ends[below(ends.len())];
+            text.push_str(end);
             let laid = Laid::new(text, 4);
-            assert!(laid.is_plain());
+            assert_eq!(laid.is_plain(), end.is_empty(), "{:?}", laid.text());
             let wrap = Wrap {
                 width: 1 + below(20),
                 linebreak: below(2) == 0,
@@ -548,12 +567,16 @@ mod tests {
                 continue;
             };
             assert_eq!(
-                rows.go_on_plain(&laid, vec![ScreenRow::WHOLE]),
+                rows.go_on(&laid, vec![ScreenRow::WHOLE]),
                 rows.go_on_cells(&laid, vec![ScreenRow::WHOLE]),
                 "{:?} in {wrap:?}, room after: {room_after}",
                 laid.text(),
             );
         }
+        // As found in review: a wide character doesn't split, and an
+        // accent takes no row of its own.
+        assert_eq!(starts("aaaaaaaaa字", wrap(5)), [(0, 0), (5, 0), (9, 0)]);
+        assert_eq!(starts("aaaaaaé", wrap(5)), [(0, 0), (5, 0)]);
     }
 
     #[test]

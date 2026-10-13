@@ -533,7 +533,7 @@ mod tests {
                 let room_after = typing.is_some_and(|at| at.line == line && at.col >= laid.cells());
                 assert_eq!(
                     *text.screen_rows(line),
-                    *wrap::rows(&fresh, wrap, room_after),
+                    *wrap::rows_by_cells(&fresh, wrap, room_after),
                     "{context}, line {line}: {:?}",
                     fresh.text(),
                 );
@@ -804,11 +804,15 @@ mod tests {
 
     #[test]
     fn a_line_longer_than_a_row_holds_is_kept_through_edits_past_its_row() {
-        for seed in 1..=4_u64 {
+        for seed in 1..=12_u64 {
             let mut random = Random(seed.wrapping_mul(0x2545_f491_4f6c_dd1d));
-            let plain = seed % 2 == 0;
+            // Plain, or not, or plain but for how it ends: in a character
+            // longer, wider or other than a plain one, or an accent.
+            let plain = seed % 6 != 1;
+            let end =
+                ["", "", "é", "字\u{301}", "\x01", "a\u{200d}"][usize::try_from(seed % 6).unwrap()];
             let line = if plain {
-                "a=b(c,d);".repeat(8_000)
+                "a=b(c,d);".repeat(8_000) + end
             } else {
                 "ab字\tc,".repeat(12_000)
             };
@@ -816,12 +820,14 @@ mod tests {
             for step in 0..24 {
                 let context = format!("seed {seed}, step {step}");
                 let len = edited.text(None).line_end(0);
-                // Mostly far along the line, past its row.
-                let at = edited.rope.char_to_byte(
-                    edited
-                        .rope
-                        .byte_to_char(len - random.below(len.min(2_000)).min(len)),
-                );
+                // Mostly far along the line, past its row, and sometimes
+                // anywhere in it.
+                let back = if random.below(4) == 0 {
+                    random.below(len + 1)
+                } else {
+                    random.below(len.min(2_000))
+                };
+                let at = (edited.rope).char_to_byte(edited.rope.byte_to_char(len - back.min(len)));
                 let removed = random.after(&edited.rope, at);
                 let removed = if removed.contains('\n') {
                     String::new()
@@ -838,6 +844,57 @@ mod tests {
                 edited.check(1, None, &context);
             }
         }
+    }
+
+    #[test]
+    fn a_long_line_is_counted_again_only_from_where_it_changed() {
+        use super::super::text::COUNTED;
+        // How many characters past the row laying out line 0 counts.
+        let counted = |edited: &Edited| {
+            COUNTED.with(|counted| counted.set(0));
+            edited.text(None).laid(0);
+            COUNTED.with(std::cell::Cell::get)
+        };
+        let plain = "a=b(c,d);".repeat(11_000);
+        let mut edited = Edited::new(&format!("{plain}\n"), 4, None);
+        assert!(counted(&edited) > 30_000, "laid out afresh");
+        // A plain line, typed into past its row, or in it, plainly: none.
+        edited.replace(80_000, "", "x");
+        assert_eq!(counted(&edited), 0);
+        edited.replace(30_000, "", "y");
+        assert_eq!(counted(&edited), 0);
+        assert!(edited.text(None).laid(0).unwrap().is_plain());
+        // One that isn't plain, typed into near its end: only its end.
+        let other = "ab字\tc,".repeat(14_000);
+        let mut edited = Edited::new(&format!("{other}\n"), 4, None);
+        counted(&edited);
+        let at = other.len() - 9;
+        edited.replace(at, "", "z");
+        assert!(counted(&edited) < 20);
+        edited.check(0, None, "typed near the end");
+    }
+
+    #[test]
+    fn a_long_line_is_plain_again_once_what_was_not_is_taken_out() {
+        let line = "a=b(c,d);".repeat(10_000);
+        let mut edited = Edited::new(&format!("{line}\n"), 4, Some(wrap(37)));
+        edited.check(0, None, "first");
+        assert!(edited.text(None).laid(0).unwrap().is_plain());
+        // An é typed past the row: no longer plain, and every character's
+        // start is kept.
+        edited.replace(80_000, "", "é");
+        edited.check(0, None, "é typed");
+        let laid = edited.text(None).laid(0).unwrap();
+        assert!(!laid.is_plain());
+        assert!(laid.keeps_starts());
+        drop(laid);
+        // Taken out: plain again, keeping nothing of where characters
+        // start, so the next key needn't look at what's after it.
+        edited.replace(80_000, "é", "");
+        edited.check(0, None, "é taken out");
+        let laid = edited.text(None).laid(0).unwrap();
+        assert!(laid.is_plain());
+        assert!(!laid.keeps_starts());
     }
 
     #[test]

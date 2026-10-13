@@ -560,6 +560,26 @@ fn gk_goes_onto_a_tab_that_spans_rows_and_gj_past_it() {
 }
 
 #[test]
+fn a_key_typed_into_a_long_line_ending_in_an_accented_letter_lays_it_out_right() {
+    // Plain but for its last character, which is two bytes.
+    let mut setup = sized(&format!("{}é\nnext\n", "a".repeat(70_000)), 24, 6);
+    drawn(&mut setup);
+    setup.editor.cursor.at = Point {
+        line: 0,
+        col: 35_000,
+    };
+    setup.keys("ix<Esc>$");
+    assert_eq!(setup.cursor(), (0, 70_001), "on the é");
+    let rows = drawn(&mut setup);
+    assert!(rows.iter().any(|row| row.ends_with("aé")), "{rows:?}");
+    setup.keys("x");
+    assert_eq!(
+        setup.text(),
+        format!("{}x{}\nnext\n", "a".repeat(35_000), "a".repeat(35_000))
+    );
+}
+
+#[test]
 fn what_is_laid_out_follows_edits_undos_and_redos_as_laid_out_afresh() {
     use crate::editor::text::Laid;
     use crate::editor::wrap;
@@ -604,7 +624,7 @@ fn what_is_laid_out_follows_edits_undos_and_redos_as_laid_out_afresh() {
             {
                 assert_eq!(
                     *text.screen_rows(at),
-                    *wrap::rows(&fresh, wrapping, false),
+                    *wrap::rows_by_cells(&fresh, wrapping, false),
                     "after {keys}, line {at}"
                 );
             }
@@ -742,6 +762,24 @@ fn long_line_times() {
             },
         );
     }
+    // An é typed into its middle and taken out again: it's plain again,
+    // and keys typed after are as quick as before.
+    setup.keys("<Esc>");
+    setup.editor.cursor.at = Point {
+        line: 0,
+        col: cells / 2,
+    };
+    time(
+        &mut setup,
+        "an é typed in its middle and taken out",
+        1,
+        &|setup| {
+            setup.keys("ié<BS>");
+        },
+    );
+    time(&mut setup, "a key typed there after", 20, &|setup| {
+        setup.keys("x");
+    });
     // And into one that isn't plain ASCII, which keeps where each
     // character starts.
     let mut setup = sized(&format!("é{line}\n"), 160, 50);

@@ -100,9 +100,11 @@ pub(crate) struct Laid {
 /// its byte.
 #[derive(Clone, Debug)]
 enum Starts {
-    /// As many characters, each one byte and one cell, as plain ASCII
-    /// without tabs is: the `n`th starts at cell and byte `n`, so nothing
-    /// need be kept, which matters on a minified file's long lines.
+    /// As many characters, each starting where one byte and one cell after
+    /// the last does, as plain ASCII without tabs: the `n`th starts at cell
+    /// and byte `n`, so nothing need be kept, which matters on a minified
+    /// file's long lines. The last may still be wider, take more bytes or
+    /// have accents after it: see [`Laid::is_plain`].
     Plain(usize),
     /// Each one's, in 32 bits: no line is 4 GiB long.
     Table(Vec<(u32, u32)>),
@@ -188,6 +190,14 @@ enum Laying {
     Past(Row, usize),
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many characters past lines' rows have been counted one by one,
+    /// for tests that check a line is laid out again only from where it
+    /// changed, and a plain one not even that.
+    pub(super) static COUNTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Lays out `text` from byte `from`, where a character starts, going on
 /// from `laying`, with `starts` holding where the characters before
 /// start. The character before `from`, if there's one, isn't a joiner.
@@ -244,16 +254,29 @@ fn lay(
             cells = text.len();
             break;
         }
+        #[cfg(test)]
+        COUNTED.with(|counted| counted.set(counted.get() + 1));
         let width = cells_of(ch, cells, tabstop, &mut joins);
         if width > 0 {
             starts.push(cells, byte, ch == '\t');
             cells += width;
         }
     }
-    if let Starts::Table(table) = &mut starts
-        && table.capacity() > table.len() + table.len() / 4
-    {
-        table.shrink_to_fit();
+    match &mut starts {
+        // Plain after all, as a line is again once the one character that
+        // wasn't is taken out: a character to each byte and to each cell,
+        // and no tabs, so each starts where its byte is.
+        Starts::Table(table)
+            if table.len() == text.len()
+                && cells == text.len()
+                && !text.as_bytes().contains(&b'\t') =>
+        {
+            starts = Starts::Plain(text.len());
+        }
+        Starts::Table(table) if table.capacity() > table.len() + table.len() / 4 => {
+            table.shrink_to_fit();
+        }
+        _ => {}
     }
     Laid {
         text,
@@ -291,6 +314,8 @@ impl Laid {
         tail: usize,
         tabstop: usize,
     ) -> (Self, usize) {
+        // Asked before its text is taken.
+        let was_plain = self.is_plain();
         // Its text, kept as far as it hasn't changed, which saves copying
         // all of a long line typed at the end of.
         let mut text = std::mem::take(&mut self.text);
@@ -302,7 +327,7 @@ impl Laid {
         let room = room_for(&text, tabstop);
         // What's before and after the change is as plain as it was.
         let changed = (text.as_bytes()).get(from..text.len().saturating_sub(tail).max(from));
-        let plain = if self.is_plain() && changed.is_some_and(plain) {
+        let plain = if was_plain && changed.is_some_and(plain) {
             0
         } else {
             text.len()
@@ -336,15 +361,28 @@ impl Laid {
         };
         assert_eq!(starts(self), starts(fresh), "{context}: {:?}", self.text);
         assert_eq!(self.is_plain(), fresh.is_plain(), "{context}");
+        for laid in [self, fresh] {
+            let truly = laid.text.chars().count() == laid.text.len()
+                && laid.cells == laid.text.len()
+                && plain(laid.text.as_bytes());
+            assert_eq!(laid.is_plain(), truly, "{context}: {:?}", laid.text);
+        }
         assert_eq!(self.row.width(), fresh.row.width(), "{context}");
         assert_eq!(self.row.text(), fresh.row.text(), "{context}");
         assert!(self.row.cells() == fresh.row.cells(), "{context}");
     }
 
+    /// Whether it keeps a table of where each character starts.
+    #[cfg(test)]
+    pub(super) fn keeps_starts(&self) -> bool {
+        matches!(self.starts, Starts::Table(_))
+    }
+
     /// Whether every character is one byte and one cell, as plain ASCII
-    /// without tabs is.
+    /// without tabs is. Where characters start says so only as far as the
+    /// last one's start: it may be wider, longer, or followed by an accent.
     pub(crate) fn is_plain(&self) -> bool {
-        matches!(self.starts, Starts::Plain(_))
+        matches!(self.starts, Starts::Plain(n) if n == self.text.len() && n == self.cells)
     }
 
     /// How many characters it has apart: not counting those drawn in the
