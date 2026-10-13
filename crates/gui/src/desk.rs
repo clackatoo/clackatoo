@@ -218,7 +218,7 @@ pub(crate) struct Desk {
     offer: Option<offers::Offer>,
     /// The devices asking to pair with the daemon's web app, asked about
     /// in the bar until a window answers.
-    pairing: Vec<clackatoo_protocol::PairingAsk>,
+    pairing: clackatoo_protocol::PairingState,
     /// When the daemon was last told the window's user is there, while
     /// they are.
     present_said: Option<std::time::Instant>,
@@ -1014,7 +1014,7 @@ impl Desk {
         self.workspaces_changed(workspaces);
         self.tutor_connected();
         // A new daemon, or one that lost the last connection, doesn't know.
-        self.pairing.clear();
+        self.pairing = clackatoo_protocol::PairingState::default();
         if !self.unfocused {
             self.say_present(true);
         }
@@ -3727,9 +3727,14 @@ mod tests {
             from: "jack@github".into(),
             until: 0,
         };
-        assert!(desk.pairing_asked(vec![ask.clone()]));
+        let asking =
+            |asks: Vec<clackatoo_protocol::PairingAsk>, locked| clackatoo_protocol::PairingState {
+                asking: asks,
+                locked,
+            };
+        assert!(desk.pairing_asked(asking(vec![ask.clone()], false)));
         assert!(
-            !desk.pairing_asked(vec![ask]),
+            !desk.pairing_asked(asking(vec![ask], false)),
             "the same again changes nothing"
         );
         let asked = |desk: &Desk| {
@@ -3748,8 +3753,15 @@ mod tests {
                 code: Some("0042".into())
             }]
         );
-        desk.pairing_asked(Vec::new());
+        desk.pairing_asked(asking(Vec::new(), false));
         assert!(!asked(&desk));
+        // Locked after too many wrong passwords: the bar says so, and how
+        // to unlock it.
+        desk.pairing_asked(asking(Vec::new(), true));
+        assert!(matches!(desk.status(), Status::Typing { text, .. }
+            if text.contains(":Devices unlock")));
+        desk.devices_command(command::DevicesCommand::Unlock);
+        assert_eq!(answer_all(&mut desk), [Request::UnlockPairing]);
     }
 
     #[test]

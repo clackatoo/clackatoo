@@ -60,8 +60,8 @@ pub(super) const SILENT_LIMIT: Duration = Duration::from_secs(70);
 pub(crate) enum Peer {
     /// An address on the network.
     Tcp(SocketAddr),
-    /// This machine, through the unix socket only the user and root can
-    /// reach: `tailscale serve`.
+    /// This machine, through the unix socket kept to the user (and root):
+    /// `tailscale serve`, or the user's own programs.
     Local,
 }
 

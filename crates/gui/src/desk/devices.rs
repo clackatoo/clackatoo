@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{ClientMessage, Device, PairingAsk, Request, Response};
+use clackatoo_protocol::{ClientMessage, Device, PairingState, Request, Response};
 
 use super::{Asked, Desk};
 use crate::chrome::Status;
@@ -23,21 +23,25 @@ use crate::command::DevicesCommand;
 const PRESENT_EVERY: Duration = Duration::from_mins(1);
 
 impl Desk {
-    /// The devices asking to pair are now `asking`. Returns whether the
-    /// window must be redrawn.
-    pub(crate) fn pairing_asked(&mut self, asking: Vec<PairingAsk>) -> bool {
-        let changed = self.pairing != asking;
-        self.pairing = asking;
+    /// Pairing now stands as `pairing` says. Returns whether the window
+    /// must be redrawn.
+    pub(crate) fn pairing_asked(&mut self, pairing: PairingState) -> bool {
+        let changed = self.pairing != pairing;
+        self.pairing = pairing;
         changed
     }
 
-    /// The question about the devices asking to pair, for the bar, while
-    /// any are and the command line isn't open.
+    /// The question about the devices asking to pair, or that pairing
+    /// with the password is locked, for the bar, while the command line
+    /// isn't open.
     pub(super) fn pairing_status(&self) -> Option<Status> {
         if self.input.is_some() {
             return None;
         }
-        let text = match self.pairing.as_slice() {
+        let text = match self.pairing.asking.as_slice() {
+            [] if self.pairing.locked => "Too many wrong passwords: pairing with the password \
+                                          is locked until :Devices unlock"
+                .to_owned(),
             [] => return None,
             [ask] => format!(
                 "{} ({}) asks to control clackatoo: :Devices allow and the code it shows, \
@@ -63,6 +67,7 @@ impl Desk {
             DevicesCommand::List => Request::Devices,
             DevicesCommand::Allow(code) => Request::AnswerPairing { code: Some(code) },
             DevicesCommand::Deny => Request::AnswerPairing { code: None },
+            DevicesCommand::Unlock => Request::UnlockPairing,
             DevicesCommand::Revoke(device) => Request::RevokeDevice { device },
         };
         self.request(request, Asked::Devices);

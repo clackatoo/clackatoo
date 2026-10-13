@@ -24,7 +24,9 @@
 //! in the files that can be, though others can't.
 //! `Devices` lists the devices paired with the daemon's web app; `Devices
 //! allow CODE` allows the one asking to pair that shows `CODE`, `Devices
-//! deny` turns down those asking, and `Devices revoke N` unpairs one.
+//! deny` turns down those asking, `Devices revoke N` unpairs one, and
+//! `Devices unlock` lets devices pair with the password again, after too
+//! many wrong ones locked it.
 //! `Board NAME` opens the board called that, made if there's none, in a
 //! tab or with a mark beside; `Board` alone, or `Boards`, picks one in
 //! the finder. `Browser` opens the focused chat's page in clackatoo's
@@ -178,6 +180,9 @@ pub(crate) enum DevicesCommand {
     Allow(String),
     /// `deny`: turns down every device asking to pair.
     Deny,
+    /// `unlock`: lets devices pair with the password again, after too
+    /// many wrong ones locked it.
+    Unlock,
     /// `revoke N`: unpairs device `N`.
     Revoke(u64),
 }
@@ -348,6 +353,7 @@ fn devices_command(argument: Option<&str>) -> Result<DevicesCommand, String> {
         ("allow", Some(code)) => Ok(DevicesCommand::Allow(code.to_owned())),
         ("allow", None) => Err("allow needs the code the device shows: :Devices allow CODE".into()),
         ("deny", None) => Ok(DevicesCommand::Deny),
+        ("unlock", None) => Ok(DevicesCommand::Unlock),
         ("revoke", Some(number)) => (number.parse()).map(DevicesCommand::Revoke).map_err(|_| {
             format!("revoke takes a device's number, as :Devices lists it, not {number}")
         }),
@@ -763,6 +769,10 @@ mod tests {
         assert_eq!(
             parse("Devices deny"),
             Ok(Command::Devices(DevicesCommand::Deny))
+        );
+        assert_eq!(
+            parse("Devices unlock"),
+            Ok(Command::Devices(DevicesCommand::Unlock))
         );
         assert_eq!(
             parse("Devices revoke 3"),

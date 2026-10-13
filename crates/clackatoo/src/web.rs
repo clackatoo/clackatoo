@@ -52,6 +52,9 @@ enum DevicesCommand {
     Allow { code: String },
     /// Turn down every device asking to pair.
     Deny,
+    /// Let devices pair with the password again, after too many wrong ones
+    /// locked it.
+    Unlock,
 }
 
 /// Runs `clackatoo web`.
@@ -84,6 +87,7 @@ pub(crate) fn devices(args: &DevicesArgs) -> anyhow::Result<()> {
             code: Some(code.clone()),
         },
         Some(DevicesCommand::Deny) => Request::AnswerPairing { code: None },
+        Some(DevicesCommand::Unlock) => Request::UnlockPairing,
     };
     match client.request(&request)? {
         Response::Devices(devices) if devices.is_empty() => {

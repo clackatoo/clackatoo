@@ -44,6 +44,10 @@ pub const DEFAULT_PORT: u16 = 8765;
 /// otherwise.
 pub const DEFAULT_EXPIRY: Duration = Duration::from_hours(90 * 24);
 
+/// How many wrong passwords in a row lock pairing with the password,
+/// unless told otherwise.
+pub const LOCK_AFTER: u32 = 50;
+
 /// The unix socket's name in the web app's data directory, unless told
 /// otherwise.
 pub const SOCKET: &str = "web.sock";
@@ -52,9 +56,9 @@ pub const SOCKET: &str = "web.sock";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WebMode {
     /// Through `tailscale serve`, which gives it HTTPS, and says who's
-    /// asking in headers it sets itself: it listens on a unix socket only
-    /// the user and root can reach, and trusts those headers from there
-    /// alone.
+    /// asking in headers it sets itself: it listens on a unix socket kept
+    /// to the user, and takes those headers from there alone. A device's
+    /// token, in its cookie, is still what lets it in.
     Tailscale,
     /// Straight from the network, over TLS with the user's own
     /// certificate. A password is required.
@@ -103,6 +107,9 @@ pub struct WebConfig {
     /// How often the certificate's files are looked at, to read them again
     /// if they've changed, as when they're renewed.
     pub reload_every: Duration,
+    /// How many wrong passwords in a row lock pairing with the password,
+    /// until a window unlocks it.
+    pub lock_after: u32,
 }
 
 impl WebConfig {
@@ -126,6 +133,7 @@ impl WebConfig {
             assets: &[],
             head_wait: super::conn::HEAD_WAIT,
             reload_every: Duration::from_mins(1),
+            lock_after: LOCK_AFTER,
         }
     }
 

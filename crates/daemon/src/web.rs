@@ -53,7 +53,7 @@ pub(crate) use socket::{Stream, Transport};
 
 use push::{Gone, Push};
 
-use auth::Buckets;
+use auth::{Bucket, Buckets};
 use devices::{Devices, Subscription, millis};
 use push::{Pusher, Vapid};
 
@@ -106,7 +106,7 @@ const NO_APP: &str = "<!doctype html><meta charset=utf-8>\
 pub(crate) enum Listener {
     /// On the network, for public.
     Tcp(TcpListener),
-    /// On a unix socket only the user and root can reach, for `tailscale
+    /// On a unix socket kept to the user, for `tailscale
     /// serve`, at this path, which is taken away when it closes.
     Unix(UnixListener, PathBuf),
 }
@@ -259,6 +259,11 @@ pub(crate) struct Web {
     /// The devices asking changed since the windows were told.
     pub(crate) asks_changed: bool,
     tries: Buckets,
+    /// Tries from everywhere at once.
+    all_tries: Bucket,
+    /// Wrong passwords in a row, which lock pairing with the password once
+    /// there are enough.
+    wrong: u32,
     ask_tries: Buckets,
     checker: Checker,
     /// The passwords being checked, oldest first.
@@ -315,6 +320,8 @@ impl Web {
             asks: Vec::new(),
             asks_changed: false,
             tries: Buckets::new(auth::TRIES, auth::TRY_EVERY),
+            all_tries: Bucket::new(auth::ALL_TRIES, auth::ALL_TRY_EVERY, Instant::now()),
+            wrong: 0,
             ask_tries: Buckets::new(ASKS, ASK_EVERY),
             checker,
             checking: Vec::new(),
@@ -347,16 +354,37 @@ impl Web {
         self.asks.iter().map(|ask| ask.until)
     }
 
-    /// The asks waiting for an answer, as windows show them.
-    pub(crate) fn asking(&self) -> Vec<clackatoo_protocol::PairingAsk> {
-        (self.asks.iter())
-            .filter(|ask| ask.answer.is_none())
-            .map(|ask| clackatoo_protocol::PairingAsk {
-                name: ask.name.clone(),
-                from: ask.from.clone(),
-                until: ask.until_ms,
-            })
-            .collect()
+    /// How pairing stands, as windows show it: the asks waiting for an
+    /// answer, and whether the password is locked.
+    pub(crate) fn pairing(&self) -> clackatoo_protocol::PairingState {
+        clackatoo_protocol::PairingState {
+            asking: (self.asks.iter())
+                .filter(|ask| ask.answer.is_none())
+                .map(|ask| clackatoo_protocol::PairingAsk {
+                    name: ask.name.clone(),
+                    from: ask.from.clone(),
+                    until: ask.until_ms,
+                })
+                .collect(),
+            locked: self.devices.locked(),
+        }
+    }
+
+    /// Lets devices pair with the password again, after too many wrong
+    /// ones locked it. Returns what was done.
+    ///
+    /// # Errors
+    ///
+    /// If it isn't locked.
+    pub(crate) fn unlock(&mut self) -> Result<String, String> {
+        if !self.devices.locked() {
+            return Err("pairing with the password isn't locked".into());
+        }
+        self.devices.set_locked(false);
+        self.wrong = 0;
+        self.asks_changed = true;
+        log::info!("pairing with the password unlocked from a window");
+        Ok("Devices can pair with the password again".into())
     }
 
     /// Answers the devices asking: allows the one showing `code`, or with
@@ -445,16 +473,27 @@ impl Web {
     /// Who a request comes from, for limiting tries: its address, or
     /// through Tailscale, the address `tailscale serve` says it came from,
     /// or else its login.
+    ///
+    /// `tailscale serve` (1.102, in `ipn/ipnlocal/serve.go`) proxies with
+    /// Go's `ReverseProxy` and `Rewrite`, which takes away the client's
+    /// `X-Forwarded-For` before it sets its own, the tailnet address the
+    /// request came from: one address, which is the last, the hop it
+    /// saw.
     fn who(conn: &HttpConn, request: &Request, login: Option<&str>) -> String {
         match conn.peer {
-            Peer::Tcp(address) => address.ip().to_string(),
-            Peer::Local => (request.header("x-forwarded-for"))
-                .and_then(|addresses| addresses.split(',').next())
-                .map(str::trim)
-                .filter(|address| !address.is_empty())
-                .or(login)
-                .unwrap_or("local")
-                .to_owned(),
+            Peer::Tcp(address) => auth::address_key(address.ip()),
+            Peer::Local => {
+                let forwarded = (request.header("x-forwarded-for"))
+                    .and_then(|addresses| addresses.rsplit(',').next())
+                    .map(str::trim)
+                    .filter(|address| !address.is_empty());
+                match forwarded {
+                    Some(address) => {
+                        (address.parse().ok()).map_or_else(|| address.to_owned(), auth::address_key)
+                    }
+                    None => login.unwrap_or("local").to_owned(),
+                }
+            }
         }
     }
 
@@ -574,7 +613,7 @@ impl Web {
             200,
             &json!({
                 "state": state,
-                "password": self.config.password.is_some(),
+                "password": self.config.password.is_some() && !self.devices.locked(),
                 "ask": self.config.ask,
                 "tailscale": self.config.tailscale(),
             }),
@@ -660,11 +699,23 @@ impl Web {
                 "no password is set: allow this device from a window instead",
             ));
         };
+        if self.devices.locked() {
+            return Handled::Respond(Response::error(
+                423,
+                "pairing with the password is locked after too many wrong ones: \
+                 :Devices unlock in a window lets it again",
+            ));
+        }
         if self.checking.len() >= MOST_CHECKS_WAITING {
             return Handled::Respond(too_many(Duration::from_secs(1)));
         }
         if let Err(wait) = self.tries.take(who, now) {
             log::warn!("a password try from {who} refused: too many tries");
+            return Handled::Respond(too_many(wait));
+        }
+        // However many addresses they come from.
+        if let Err(wait) = self.all_tries.take(now) {
+            log::warn!("a password try from {who} refused: too many tries from everywhere");
             return Handled::Respond(too_many(wait));
         }
         self.checks += 1;
@@ -705,6 +756,19 @@ impl Web {
             if !waiting(checking.token, checking.number) {
                 log::info!("a password was checked for a connection that has gone");
                 continue;
+            }
+            if matches {
+                self.wrong = 0;
+            } else {
+                self.wrong += 1;
+                if self.wrong >= self.config.lock_after && !self.devices.locked() {
+                    log::warn!(
+                        "{} wrong passwords in a row: pairing with the password is locked",
+                        self.wrong
+                    );
+                    self.devices.set_locked(true);
+                    self.asks_changed = true;
+                }
             }
             let response = if matches {
                 match checking.pairing {
@@ -1180,28 +1244,52 @@ fn same16(a: &[u8; 16], b: &[u8; 16]) -> bool {
     a.iter().zip(b).fold(0, |differ, (a, b)| differ | (a ^ b)) == 0
 }
 
-/// Listens as `config` says: on its unix socket for Tailscale, which only
-/// the user and root can reach, or on the network for public.
+/// Listens as `config` says: on its unix socket for Tailscale, kept to the
+/// user, in a directory only the user may write in, or on the network for
+/// public.
 fn listen(config: &WebConfig) -> Result<Listener, String> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
     if !config.tailscale() {
         let listener = TcpListener::bind(config.address)
             .map_err(|err| format!("can't listen on {}: {err}", config.address))?;
         return Ok(Listener::Tcp(listener));
     }
     let path = &config.socket;
-    // One left by a daemon that stopped: the devices' lock, taken before
-    // this, says no daemon has it now.
-    match std::fs::remove_file(path) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => {
-            return Err(format!("{} couldn't be replaced: {err}", path.display()));
-        }
-        _ => {}
+    let parent = (path.parent())
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    // A directory others can write in could have the socket swapped for
+    // one of theirs, or theirs put in its place.
+    let meta = std::fs::metadata(parent)
+        .map_err(|err| format!("{} can't be looked at: {err}", parent.display()))?;
+    if meta.uid() != rustix::process::getuid().as_raw() || meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{} isn't a directory only you can write in: the socket goes elsewhere",
+            parent.display()
+        ));
     }
-    let listener = UnixListener::bind(path)
-        .map_err(|err| format!("can't listen on {}: {err}", path.display()))?;
-    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-        .map_err(|err| format!("{} couldn't be kept to you: {err}", path.display()))?;
-    Ok(Listener::Unix(listener, path.clone()))
+    // Made in a directory only the user can enter, kept to the user, then
+    // moved into place: never, even for a moment, open to anyone else.
+    let staging = parent.join(format!(".web-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&staging)
+        .map_err(|err| format!("{} couldn't be made: {err}", staging.display()))?;
+    let staged = staging.join(config::SOCKET);
+    let listened = UnixListener::bind(&staged)
+        .map_err(|err| format!("can't listen on {}: {err}", path.display()))
+        .and_then(|listener| {
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))
+                .map_err(|err| format!("{} couldn't be kept to you: {err}", path.display()))?;
+            // One left by a daemon that stopped is replaced: the devices'
+            // lock, taken before this, says no daemon has it now.
+            std::fs::rename(&staged, path)
+                .map_err(|err| format!("{} couldn't be put in place: {err}", path.display()))?;
+            Ok(listener)
+        });
+    let _ = std::fs::remove_dir_all(&staging);
+    Ok(Listener::Unix(listened?, path.clone()))
 }
 
 /// When the certificate's files were last changed, if both can be

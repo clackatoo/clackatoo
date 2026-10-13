@@ -509,7 +509,7 @@ impl Daemon {
         if !std::mem::take(&mut web.asks_changed) {
             return;
         }
-        let event = ServerMessage::Event(Event::Pairing(web.asking()));
+        let event = ServerMessage::Event(Event::Pairing(web.pairing()));
         let Ok(bytes) = frame::encode(&event) else {
             return;
         };
@@ -532,15 +532,15 @@ impl Daemon {
     /// Queues the devices asking for the client at `token`, if any are and
     /// it's a window: it has just started watching the workspaces.
     pub(super) fn tell_of_asks(&mut self, token: Token) {
-        let Some(asking) = (self.web.as_ref()).map(Web::asking) else {
+        let Some(pairing) = (self.web.as_ref()).map(Web::pairing) else {
             return;
         };
-        if asking.is_empty() {
+        if pairing.asking.is_empty() && !pairing.locked {
             return;
         }
         if let Some(Source::Client(client)) = self.sources.get_mut(token.0)
             && !matches!(client.link, Link::Web(_))
-            && let Ok(bytes) = frame::encode(&ServerMessage::Event(Event::Pairing(asking)))
+            && let Ok(bytes) = frame::encode(&ServerMessage::Event(Event::Pairing(pairing)))
         {
             client.later.extend_from_slice(&bytes);
         }
@@ -565,6 +565,21 @@ impl Daemon {
         let said = web.answer_asks(code).map_err(Error::Pairing)?;
         self.settle_pairings(Instant::now());
         Ok(Response::Text(said))
+    }
+
+    /// Answers [`Request::UnlockPairing`] from the client at `token`.
+    ///
+    /// [`Request::UnlockPairing`]: clackatoo_protocol::Request::UnlockPairing
+    pub(super) fn unlock_pairing(&mut self, token: Token) -> Result<Response, Error> {
+        if let Some(Source::Client(client)) = self.sources.get(token.0)
+            && matches!(client.link, Link::Web(_))
+        {
+            return Err(Error::Pairing(
+                "pairing is unlocked from a window, not from a device".into(),
+            ));
+        }
+        let web = (self.web.as_mut()).ok_or_else(|| Error::Pairing("the web app is off".into()))?;
+        web.unlock().map(Response::Text).map_err(Error::Pairing)
     }
 
     /// Answers [`Request::Devices`](clackatoo_protocol::Request::Devices).

@@ -2018,6 +2018,7 @@ impl Daemon {
             Request::Devices => Ok(self.devices()),
             Request::RevokeDevice { device } => self.revoke_device(device),
             Request::AnswerPairing { code } => self.answer_pairing(token, code.as_deref()),
+            Request::UnlockPairing => self.unlock_pairing(token),
             request @ (Request::Install { .. } | Request::Decline { .. }) => {
                 self.respond_about_installs(token, request);
                 Ok(Response::Done)

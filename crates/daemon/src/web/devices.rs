@@ -81,6 +81,10 @@ pub(crate) struct Subscription {
 pub(crate) struct Devices {
     pub(crate) list: Vec<Device>,
     next: u64,
+    /// Whether pairing with the password is locked, after too many wrong
+    /// ones, until a window unlocks it: kept, so restarting the daemon
+    /// doesn't unlock it.
+    locked: bool,
     /// When each device's last use was last written, by its ID.
     written_used: Vec<(u64, u64)>,
     disk: Disk,
@@ -101,11 +105,12 @@ impl Devices {
             .create(dir)
             .map_err(|err| format!("{} couldn't be made: {err}", dir.display()))?;
         let lock = lock(dir)?;
-        let (next, list) = read(&dir.join(FILE))?;
+        let Kept { next, locked, list } = read(&dir.join(FILE))?;
         let written_used = list.iter().map(|device| (device.id, device.used)).collect();
         Ok(Self {
             list,
             next,
+            locked,
             written_used,
             disk: Disk::start(dir.to_owned(), lock),
         })
@@ -206,7 +211,20 @@ impl Devices {
 
     /// Writes the devices as they are now, on the thread.
     pub(crate) fn save(&self) {
-        self.disk.write(encode(self.next, &self.list));
+        self.disk.write(encode(self.next, self.locked, &self.list));
+    }
+
+    /// Whether pairing with the password is locked.
+    pub(crate) fn locked(&self) -> bool {
+        self.locked
+    }
+
+    /// Locks pairing with the password, or unlocks it, and writes so.
+    pub(crate) fn set_locked(&mut self, locked: bool) {
+        if self.locked != locked {
+            self.locked = locked;
+            self.save();
+        }
     }
 
     /// Waits up to `limit` for every change to be on disk.
@@ -231,7 +249,19 @@ struct FileV1 {
     /// is.
     clackatoo_devices: u32,
     next: u64,
+    /// Added after version 1 was first written: read as `false` where
+    /// it's missing.
+    #[serde(default)]
+    locked: bool,
     devices: Vec<FileDevice>,
+}
+
+/// What the file keeps.
+#[derive(Debug, PartialEq, Eq)]
+struct Kept {
+    next: u64,
+    locked: bool,
+    list: Vec<Device>,
 }
 
 /// A device, as the file keeps it.
@@ -266,12 +296,13 @@ struct Version {
     clackatoo_devices: u32,
 }
 
-/// The file's text, for `next` and `devices`.
-fn encode(next: u64, devices: &[Device]) -> Vec<u8> {
+/// The file's text, for `next`, `locked` and `devices`.
+fn encode(next: u64, locked: bool, devices: &[Device]) -> Vec<u8> {
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let file = FileV1 {
         clackatoo_devices: VERSION,
         next,
+        locked,
         devices: (devices.iter())
             .map(|device| FileDevice {
                 id: device.id,
@@ -294,19 +325,24 @@ fn encode(next: u64, devices: &[Device]) -> Vec<u8> {
     text
 }
 
-/// The next ID and the devices in the file at `path`: none if it isn't
-/// there.
-fn read(path: &Path) -> Result<(u64, Vec<Device>), String> {
+/// What the file at `path` keeps: no devices if it isn't there.
+fn read(path: &Path) -> Result<Kept, String> {
     let text = match fs::read(path) {
         Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok((1, Vec::new())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(Kept {
+                next: 1,
+                locked: false,
+                list: Vec::new(),
+            });
+        }
         Err(err) => return Err(format!("{} couldn't be read: {err}", path.display())),
     };
     decode(&text).map_err(|err| format!("{}: {err}", path.display()))
 }
 
-/// The next ID and the devices `text` holds.
-fn decode(text: &[u8]) -> Result<(u64, Vec<Device>), String> {
+/// What `text` keeps.
+fn decode(text: &[u8]) -> Result<Kept, String> {
     let version: Version =
         serde_json::from_slice(text).map_err(|err| format!("isn't a devices file: {err}"))?;
     if version.clackatoo_devices != VERSION {
@@ -342,7 +378,11 @@ fn decode(text: &[u8]) -> Result<(u64, Vec<Device>), String> {
         .chain([file.next, 1])
         .max()
         .expect("there's always 1");
-    Ok((next, devices))
+    Ok(Kept {
+        next,
+        locked: file.locked,
+        list: devices,
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -504,9 +544,10 @@ mod tests {
     #[test]
     fn devices_come_back_as_they_were_written() {
         let devices = vec![device(3), device(7)];
-        let (next, read) = decode(&encode(5, &devices)).unwrap();
-        assert_eq!(read, devices);
-        assert_eq!(next, 8, "never an ID a device has");
+        let kept = decode(&encode(5, true, &devices)).unwrap();
+        assert_eq!(kept.list, devices);
+        assert_eq!(kept.next, 8, "never an ID a device has");
+        assert!(kept.locked);
     }
 
     #[test]
@@ -516,8 +557,13 @@ mod tests {
         let text = br#"{"clackatoo_devices":1,"next":2,"devices":[{"id":1,"name":"iPhone",
             "token":"0000000000000000000000000000000000000000000000000000000000000001",
             "paired":1,"used":2,"later":true}]}"#;
-        let (next, devices) = decode(text).unwrap();
+        let Kept {
+            next,
+            locked,
+            list: devices,
+        } = decode(text).unwrap();
         assert_eq!(next, 2);
+        assert!(!locked, "unlocked where it isn't said");
         assert_eq!(devices[0].name, "iPhone");
         assert_eq!(devices[0].token[31], 1);
         assert_eq!(devices[0].push, None);

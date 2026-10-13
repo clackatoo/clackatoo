@@ -14,14 +14,18 @@
 //!   add nothing, and a leak of the devices' file gives no tokens away.
 //! - A request that changes something, and the WebSocket, must come from
 //!   a page of the app's own origin: see [`origin_allowed`].
-//! - Through Tailscale, a request must come through the unix socket only
-//!   the user and root can reach, which `tailscale serve` connects to,
-//!   with the login it sets: see [`tailscale_login`].
+//! - Through Tailscale, a request must come through the unix socket
+//!   `tailscale serve` connects to, with the login it sets: see
+//!   [`tailscale_login`]. The socket keeps other users out, but the
+//!   user's own programs can reach it, and write any header: what lets a
+//!   device in is its token, in its cookie. The login only narrows who
+//!   may pair, and says who asks.
 //! - Tries of the password, and asks to be allowed from a window, are
 //!   limited for each address they come from (see [`Buckets`]), so one
 //!   client can't use up everyone's.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use super::conn::Peer;
@@ -35,6 +39,28 @@ pub(super) const TRIES: u32 = 5;
 
 /// How often another try is allowed, once they're used up.
 pub(super) const TRY_EVERY: Duration = Duration::from_mins(1);
+
+/// How many passwords may be tried in a burst from everywhere at once,
+/// and how often one more may: about twenty a minute, however many
+/// addresses they come from.
+pub(super) const ALL_TRIES: u32 = 20;
+pub(super) const ALL_TRY_EVERY: Duration = Duration::from_secs(3);
+
+/// What tries from `ip` are counted under: the address itself for IPv4,
+/// and its /64 for IPv6, which one subscriber usually has whole, so
+/// hopping between its addresses gains nothing.
+pub(super) fn address_key(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => {
+            if let Some(ip) = ip.to_ipv4_mapped() {
+                return ip.to_string();
+            }
+            let [a, b, c, d, ..] = ip.segments();
+            format!("{a:x}:{b:x}:{c:x}:{d:x}::/64")
+        }
+    }
+}
 
 /// The name of the cookie a paired device's token goes in. `__Host-`
 /// makes the browser keep it to this origin, over HTTPS, for every path.
@@ -146,11 +172,12 @@ impl Refused {
 /// Who Tailscale says sent a request that came from `peer` saying
 /// `login` in `Tailscale-User-Login`. `tailscale serve` sets the header
 /// itself, taking away any the client sent, and connects through the
-/// unix socket only the user and root can reach, so the header is
-/// trusted from there alone: never from the network, nor from another
-/// user's program on this machine, which can reach any TCP port on it.
-/// A request without it, as from a tagged device or through Funnel,
-/// isn't let in.
+/// unix socket, so the header is taken from there alone: never from the
+/// network, nor from TCP on this machine, which any user's program can
+/// reach. The user's own programs, and root, can reach the socket and
+/// write the header too, so it's never what lets a device in: a device's
+/// token is. A request without it, as from a tagged device or through
+/// Funnel, isn't let in.
 ///
 /// # Errors
 ///
@@ -208,8 +235,8 @@ pub(crate) fn origin_allowed(
 }
 
 /// The most addresses whose tries are kept apart: past it, those whose
-/// tries have all come back are forgotten, and if none have, a new one
-/// waits.
+/// tries have all come back are forgotten, and if none have, the one
+/// least lately tried.
 const MOST_KEYS: usize = 4096;
 
 /// How many tries of something are allowed now from each address.
@@ -235,8 +262,13 @@ impl Buckets {
     pub(super) fn take(&mut self, key: &str, now: Instant) -> Result<(), Duration> {
         if !self.by_key.contains_key(key) && self.by_key.len() >= MOST_KEYS {
             self.by_key.retain(|_, bucket| !bucket.full(now));
-            if self.by_key.len() >= MOST_KEYS {
-                return Err(self.every);
+            // Never everyone locked out: the oldest goes.
+            if self.by_key.len() >= MOST_KEYS
+                && let Some(oldest) = (self.by_key.iter())
+                    .min_by_key(|(_, bucket)| bucket.tried)
+                    .map(|(key, _)| key.clone())
+            {
+                self.by_key.remove(&oldest);
             }
         }
         (self.by_key.entry(key.to_owned()))
@@ -256,6 +288,8 @@ pub(super) struct Bucket {
     /// How many there were at `since`.
     left: u32,
     since: Instant,
+    /// When a try was last taken, or asked for.
+    tried: Instant,
 }
 
 impl Bucket {
@@ -266,6 +300,7 @@ impl Bucket {
             every,
             left: size,
             since: now,
+            tried: now,
         }
     }
 
@@ -279,6 +314,7 @@ impl Bucket {
     /// Takes a try, if one is allowed at `now`, or says how long until
     /// one is.
     pub(super) fn take(&mut self, now: Instant) -> Result<(), Duration> {
+        self.tried = now;
         let elapsed = now.saturating_duration_since(self.since);
         let earned =
             u32::try_from(elapsed.as_nanos() / self.every.as_nanos().max(1)).unwrap_or(u32::MAX);
@@ -376,6 +412,31 @@ mod tests {
         ));
         assert!(!host_allowed(allowed, Some("evil.example"), None));
         assert!(!host_allowed(allowed, None, None));
+    }
+
+    #[test]
+    fn tries_are_counted_by_address_and_ipv6_by_64() {
+        let key = |ip: &str| address_key(ip.parse().unwrap());
+        assert_eq!(key("203.0.113.7"), "203.0.113.7");
+        assert_ne!(key("203.0.113.7"), key("203.0.113.8"));
+        assert_eq!(key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff::9"));
+        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+        assert_eq!(key("::ffff:203.0.113.7"), "203.0.113.7");
+    }
+
+    #[test]
+    fn a_full_map_lets_go_of_the_oldest_not_everyone() {
+        let start = Instant::now();
+        let mut buckets = Buckets::new(1, Duration::from_hours(1));
+        for n in 0..MOST_KEYS {
+            let at = start + Duration::from_millis(u64::try_from(n).unwrap());
+            assert!(buckets.take(&n.to_string(), at).is_ok());
+        }
+        let later = start + Duration::from_secs(10);
+        assert!(buckets.take("newcomer", later).is_ok(), "not locked out");
+        assert_eq!(buckets.by_key.len(), MOST_KEYS);
+        assert!(!buckets.by_key.contains_key("0"), "the oldest went");
+        assert!(buckets.take("1", later).is_err(), "the rest are kept");
     }
 
     #[test]

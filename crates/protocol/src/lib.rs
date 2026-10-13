@@ -80,7 +80,7 @@ pub use chat::{
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
 };
-pub use devices::{Device, PairingAsk};
+pub use devices::{Device, PairingAsk, PairingState};
 pub use files::{
     Entry, EntryKind, Expect, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
     GitMark, OpenFiles,
@@ -408,12 +408,14 @@ pub enum Event {
     /// The chats changed, for a client watching them
     /// ([`Request::WatchChats`]): every one, in place of the last list.
     Chats(Vec<ChatSummary>),
-    /// The devices asking to pair, waiting to be allowed, are now these,
-    /// for a window watching the workspaces: the question for its user,
-    /// answered with [`Request::AnswerPairing`]. Sent when a window starts
-    /// watching too, if any are waiting. Never sent to a device on the
-    /// web app.
-    Pairing(Vec<PairingAsk>),
+    /// Pairing is now as this says, for a window watching the workspaces:
+    /// the devices asking, waiting to be allowed, the question for its
+    /// user, answered with [`Request::AnswerPairing`], and whether pairing
+    /// with the password is locked, after too many wrong ones, until
+    /// [`Request::UnlockPairing`]. Sent when a window starts watching
+    /// too, if any are asking or it's locked. Never sent to a device on
+    /// the web app.
+    Pairing(PairingState),
 }
 
 /// A message from a client to the daemon that expects an answer.
@@ -797,6 +799,10 @@ pub enum Request {
         /// The code the device shows, as the user typed it.
         code: Option<String>,
     },
+    /// Lets devices pair with the password again, after too many wrong
+    /// ones locked it. Refused from a device on the web app. Answered with
+    /// [`Response::Text`], saying what was done.
+    UnlockPairing,
 }
 
 /// How to start a terminal.

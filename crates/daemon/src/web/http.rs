@@ -259,6 +259,8 @@ fn reason(status: u16) -> &'static str {
         409 => "Conflict",
         411 => "Length Required",
         413 => "Content Too Large",
+        421 => "Misdirected Request",
+        423 => "Locked",
         426 => "Upgrade Required",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",

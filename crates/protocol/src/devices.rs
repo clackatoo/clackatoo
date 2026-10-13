@@ -33,6 +33,16 @@ pub struct Device {
     pub connected: bool,
 }
 
+/// How pairing stands, as windows show it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingState {
+    /// The devices asking to pair, waiting to be allowed.
+    pub asking: Vec<PairingAsk>,
+    /// Whether pairing with the password is locked, after too many wrong
+    /// ones in a row, until a window unlocks it.
+    pub locked: bool,
+}
+
 /// A device asking to pair, waiting to be allowed from a window.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingAsk {

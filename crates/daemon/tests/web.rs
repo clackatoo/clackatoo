@@ -219,6 +219,25 @@ impl TestDaemon {
         answer.cookie().expect("pairing gives a cookie")
     }
 
+    /// Pairs a device by asking a window, returning its cookie.
+    fn pair_from_a_window(&self) -> String {
+        let asked = self
+            .post("/pair", r#"{"name":"phone","ask":true}"#, |_| {})
+            .json();
+        let (wait, code) = (
+            asked["wait"].as_str().unwrap(),
+            asked["code"].as_str().unwrap(),
+        );
+        self.window()
+            .request(&Request::AnswerPairing {
+                code: Some(code.to_owned()),
+            })
+            .unwrap();
+        let paired = self.post("/pair/wait", &format!(r#"{{"wait":"{wait}"}}"#), |_| {});
+        assert_eq!(paired.status, 200, "{}", paired.text());
+        paired.cookie().expect("pairing gives a cookie")
+    }
+
     /// Opens a WebSocket carrying `cookie`, with the app's headers changed
     /// by `headers`.
     fn socket(
@@ -679,9 +698,11 @@ fn a_device_is_allowed_from_a_window_by_its_code() {
     assert_eq!(code.len(), 4);
     let wait = asked["wait"].as_str().unwrap().to_owned();
 
-    let Event::Pairing(asking) = window.next_event().unwrap() else {
+    let Event::Pairing(pairing) = window.next_event().unwrap() else {
         panic!("the window is asked");
     };
+    assert!(!pairing.locked);
+    let asking = pairing.asking;
     assert_eq!(asking.len(), 1);
     assert_eq!(asking[0].name, "jack's iPhone");
     assert_eq!(asking[0].from, LOGIN);
@@ -1231,4 +1252,108 @@ fn one_address_opens_only_so_many_connections() {
     std::thread::sleep(Duration::from_millis(200));
     let mut another = Conn::Tcp(TcpStream::connect(address).unwrap());
     assert!(!closed_within(&mut another, Duration::from_millis(300)));
+}
+
+/// Sets where a request says, as `tailscale serve` does, it came from.
+fn forwarded_for(address: &str) -> impl FnOnce(&mut Vec<(String, String)>) + use<> {
+    let address = address.to_owned();
+    move |headers| headers.push(("X-Forwarded-For".into(), address))
+}
+
+#[test]
+fn addresses_in_one_ipv6_64_share_their_tries() {
+    let daemon = TestDaemon::start();
+    let wrong = r#"{"name":"phone","password":"hunter2"}"#;
+    for n in 1..=5 {
+        let from = forwarded_for(&format!("2001:db8:1:2::{n}"));
+        assert_eq!(daemon.post("/pair", wrong, from).status, 403);
+    }
+    let hopped = daemon.post("/pair", wrong, forwarded_for("2001:db8:1:2:ffff::99"));
+    assert_eq!(
+        hopped.status, 429,
+        "a new address in the same /64 gains nothing"
+    );
+    let right = format!(r#"{{"name":"phone","password":"{PASSWORD}"}}"#);
+    let elsewhere = daemon.post("/pair", &right, forwarded_for("2001:db8:9::1"));
+    assert_eq!(elsewhere.status, 200, "{}", elsewhere.text());
+}
+
+#[test]
+fn tries_from_everywhere_at_once_are_limited_together() {
+    let daemon = TestDaemon::start();
+    let wrong = r#"{"name":"phone","password":"hunter2"}"#;
+    for n in 0..20 {
+        let from = forwarded_for(&format!("198.51.100.{n}"));
+        assert_eq!(daemon.post("/pair", wrong, from).status, 403);
+    }
+    let one_more = daemon.post("/pair", wrong, forwarded_for("203.0.113.1"));
+    assert_eq!(
+        one_more.status, 429,
+        "a fresh address is over the daemon's ceiling"
+    );
+}
+
+#[test]
+fn too_many_wrong_passwords_lock_pairing_until_a_window_unlocks_it() {
+    let daemon = TestDaemon::start_with(|web| web.lock_after = 3);
+    let mut window = daemon.window();
+    window.watch_workspaces().unwrap();
+    let wrong = r#"{"name":"phone","password":"hunter2"}"#;
+    for n in 0..3 {
+        let from = forwarded_for(&format!("198.51.100.{n}"));
+        assert_eq!(daemon.post("/pair", wrong, from).status, 403);
+    }
+    let right = format!(r#"{{"name":"phone","password":"{PASSWORD}"}}"#);
+    let locked = daemon.post("/pair", &right, forwarded_for("203.0.113.1"));
+    assert_eq!(locked.status, 423, "{}", locked.text());
+    assert!(locked.cookie().is_none());
+    let session = http(&daemon.web, "GET", "/session", &daemon.app(), "").json();
+    assert_eq!(
+        session["password"], false,
+        "the app offers no password while locked"
+    );
+    // Every window's bar says so.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "the window wasn't told");
+        if let Ok(Event::Pairing(pairing)) = window.next_event()
+            && pairing.locked
+        {
+            break;
+        }
+    }
+    // Only a window unlocks it.
+    let cookie = daemon.pair_from_a_window();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    assert!(matches!(
+        phone.request(Request::UnlockPairing),
+        Response::Error(Error::Pairing(_))
+    ));
+    assert_eq!(
+        window.request(&Request::UnlockPairing).unwrap(),
+        Response::Text("Devices can pair with the password again".into())
+    );
+    let answer = daemon.post("/pair", &right, forwarded_for("203.0.113.2"));
+    assert_eq!(answer.status, 200, "{}", answer.text());
+}
+
+#[test]
+fn the_socket_is_kept_to_the_user_and_never_put_where_others_can_write() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let daemon = TestDaemon::start();
+    let Target::Unix(socket) = &daemon.web else {
+        panic!("tailscale listens on a socket");
+    };
+    let mode = std::fs::metadata(socket).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+
+    let shared = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(shared.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let path = shared.path().join("web.sock");
+    let refused = TestDaemon::start_with(|web| web.socket = path.clone());
+    assert!(
+        !path.exists(),
+        "a socket in a directory anyone can write in"
+    );
+    drop(refused);
 }
