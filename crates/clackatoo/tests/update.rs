@@ -61,6 +61,8 @@ fn version_says_the_release_the_commit_and_the_day_it_was_built() {
 struct Installed {
     dir: tempfile::TempDir,
     runtime: tempfile::TempDir,
+    /// Its `$XDG_DATA_HOME`, where the app launcher's entry goes.
+    data: tempfile::TempDir,
 }
 
 impl Installed {
@@ -74,6 +76,7 @@ impl Installed {
             dir,
             // No daemon runs here.
             runtime: tempfile::tempdir().unwrap(),
+            data: tempfile::tempdir().unwrap(),
         }
     }
 
@@ -88,20 +91,33 @@ impl Installed {
     fn update(&self, args: &[&str], releases: &Releases, key: &Key) -> Output {
         let mut all = vec!["update"];
         all.extend_from_slice(args);
-        run(&self.program(), &all, releases, key, self.runtime.path())
+        self.run(&self.program(), &all, releases, key, self.runtime.path())
     }
-}
 
-/// Runs `program` with `args`, updating from `releases`, trusting `key`,
-/// with the daemon, if any, in `runtime`.
-fn run(program: &Path, args: &[&str], releases: &Releases, key: &Key, runtime: &Path) -> Output {
-    Command::new(program)
-        .args(args)
-        .env(SOURCE_VAR, releases.base())
-        .env(verify::KEY_VAR, key.public_base64())
-        .env("XDG_RUNTIME_DIR", runtime)
-        .output()
-        .unwrap()
+    /// Runs `program` with `args`, updating from `releases`, trusting
+    /// `key`, with the daemon, if any, in `runtime`.
+    fn run(
+        &self,
+        program: &Path,
+        args: &[&str],
+        releases: &Releases,
+        key: &Key,
+        runtime: &Path,
+    ) -> Output {
+        Command::new(program)
+            .args(args)
+            .env(SOURCE_VAR, releases.base())
+            .env(verify::KEY_VAR, key.public_base64())
+            .env("XDG_RUNTIME_DIR", runtime)
+            .env("XDG_DATA_HOME", self.data.path())
+            .output()
+            .unwrap()
+    }
+
+    /// Where the app launcher's entry is.
+    fn desktop_entry(&self) -> PathBuf {
+        self.data.path().join("applications/clackatoo.desktop")
+    }
 }
 
 /// Whether the program at `path` is the clackatoo that was built.
@@ -137,7 +153,7 @@ fn update_installs_a_signed_release_and_rollback_goes_back() {
     assert!(is_the_build(&installed.previous()));
 
     // The build replaced rolls back to itself, even run by its new name.
-    let rollback = run(
+    let rollback = installed.run(
         &installed.previous(),
         &["update", "--rollback"],
         &releases,
@@ -272,7 +288,7 @@ fn update_moves_the_daemon_onto_the_new_build() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    let update = run(
+    let update = installed.run(
         &installed.program(),
         &["update"],
         &releases,
@@ -285,5 +301,72 @@ fn update_moves_the_daemon_onto_the_new_build() {
     assert!(
         stdout(&update).contains("clackatoo 2026.10.1 ran upgrade"),
         "{update:?}"
+    );
+}
+
+#[test]
+fn update_refreshes_the_launchers_entry_with_the_new_build_if_clackatoo_wrote_it() {
+    let key = Key::new();
+    let releases = Releases::new();
+    releases.publish(&Fake::new("2026.10.1", &key), true);
+    let installed = Installed::new();
+    let install = installed.run(
+        &installed.program(),
+        &["desktop", "install"],
+        &releases,
+        &key,
+        installed.runtime.path(),
+    );
+    assert!(install.status.success(), "{install:?}");
+    // As a build at another path would have written it.
+    let entry = std::fs::read_to_string(installed.desktop_entry()).unwrap();
+    let program = std::fs::canonicalize(installed.program()).unwrap();
+    let elsewhere = entry.replace(program.to_str().unwrap(), "/old/clackatoo");
+    assert_ne!(elsewhere, entry);
+    std::fs::write(installed.desktop_entry(), elsewhere).unwrap();
+
+    // The new build is the one asked, as it has the new icon.
+    let update = installed.update(&[], &releases, &key);
+    assert!(update.status.success(), "{update:?}");
+    assert!(
+        stdout(&update).contains("clackatoo 2026.10.1 ran desktop refresh"),
+        "{update:?}"
+    );
+
+    // Going back, this build is asked, and the entry starts it again.
+    let rollback = installed.run(
+        &installed.previous(),
+        &["update", "--rollback"],
+        &releases,
+        &key,
+        installed.runtime.path(),
+    );
+    assert!(rollback.status.success(), "{rollback:?}");
+    assert!(
+        stdout(&rollback).contains("the app launcher's entry now starts"),
+        "{rollback:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(installed.desktop_entry()).unwrap(),
+        entry
+    );
+}
+
+#[test]
+fn update_leaves_a_launchers_entry_clackatoo_didnt_write() {
+    let key = Key::new();
+    let releases = Releases::new();
+    releases.publish(&Fake::new("2026.10.1", &key), true);
+    let installed = Installed::new();
+    let handmade = "[Desktop Entry]\nType=Application\nName=clackatoo\nExec=/src/clackatoo\n";
+    std::fs::create_dir_all(installed.desktop_entry().parent().unwrap()).unwrap();
+    std::fs::write(installed.desktop_entry(), handmade).unwrap();
+
+    let update = installed.update(&[], &releases, &key);
+    assert!(update.status.success(), "{update:?}");
+    assert!(!stdout(&update).contains("ran desktop"), "{update:?}");
+    assert_eq!(
+        std::fs::read_to_string(installed.desktop_entry()).unwrap(),
+        handmade
     );
 }

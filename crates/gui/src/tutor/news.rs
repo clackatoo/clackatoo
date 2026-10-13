@@ -113,6 +113,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "The tutor: :Tutor teaches clackatoo a lesson at a time, and :Tutor new lists what's new",
     },
+    News {
+        id: "app-launcher",
+        date: "2026-10-13",
+        lesson: "basics",
+        what: "clackatoo in your app launcher: `clackatoo desktop install`",
+    },
 ];
 
 impl News {

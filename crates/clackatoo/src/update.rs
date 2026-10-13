@@ -2,12 +2,14 @@
 //! then moves the daemon onto it.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::Context;
 use clackatoo_daemon::{RuntimeDir, launch};
 use clackatoo_update::{Channel, Source, Version, install, verify};
 use clap::{Args, ValueEnum};
+
+use crate::desktop;
 
 #[derive(Debug, Args)]
 pub(crate) struct UpdateArgs {
@@ -58,6 +60,7 @@ pub(crate) fn run(args: &UpdateArgs) -> anyhow::Result<()> {
             target.display(),
             says_version(&target).unwrap_or_else(|| "the build before".into())
         );
+        refresh_desktop(&target);
         return upgrade_daemon(&target);
     }
     let source = Source::from_env();
@@ -104,7 +107,33 @@ pub(crate) fn run(args: &UpdateArgs) -> anyhow::Result<()> {
             version.tag()
         );
     }
+    refresh_desktop(&target);
     upgrade_daemon(&target)
+}
+
+/// Rewrites the app launcher's entry and icon, if `clackatoo desktop
+/// install` wrote them, by running the build at `program`: it carries its
+/// own icon and knows its own path, and this process is the old build.
+/// Only says so if it fails, in its own words: the build is installed
+/// either way, and an older build, gone back to, may not know how, so
+/// what it says about that is dropped.
+fn refresh_desktop(program: &Path) {
+    let Some(data) = desktop::data_dir() else {
+        return;
+    };
+    if !desktop::installed(&desktop::Paths::new(&data)) {
+        return;
+    }
+    let refreshed = Command::new(program)
+        .args(["desktop", "refresh"])
+        .stderr(Stdio::null())
+        .status();
+    if !refreshed.is_ok_and(|status| status.success()) {
+        eprintln!(
+            "clackatoo: the app launcher's entry and icon weren't brought up to date with {}",
+            program.display()
+        );
+    }
 }
 
 /// Moves the running daemon, if there is one, onto the build at `program`,

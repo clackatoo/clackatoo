@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod desktop;
 mod language;
 mod ping;
 mod render;
@@ -151,6 +152,9 @@ enum Command {
     /// The languages files are parsed and coloured in.
     #[command(subcommand)]
     Language(language::LanguageCommand),
+    /// Put clackatoo in your desktop's app launcher, or take it out.
+    #[command(subcommand)]
+    Desktop(desktop::DesktopCommand),
     /// Relay between standard input and output and the daemon, starting it
     /// if it isn't running. `--remote` runs this on the remote machine,
     /// through ssh.
@@ -347,6 +351,7 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::New(new) => new_terminal(new),
         Command::Edit(edit) => edit_file(edit),
         Command::Language(command) => language::run(command),
+        Command::Desktop(command) => desktop::run(command),
         Command::Run(run) => {
             let mut line = run.words.join(" ").into_bytes();
             line.push(b'\r');

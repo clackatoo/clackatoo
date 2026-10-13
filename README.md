@@ -23,8 +23,9 @@ RWTx1sQF7KMKtpn+w/3hupcC6cdxdWFs4eggGaTWFEXYfB2dFKNXx4/7
 ```
 
 With `minisign` and `curl` installed, this downloads the latest release,
-checks the signature and then the checksum, and installs it in
-`~/.local/bin`. It stops at the first step that fails:
+checks the signature and then the checksum, installs it in
+`~/.local/bin`, and puts it in your desktop's app launcher. It stops at
+the first step that fails:
 
 ```sh
 (
@@ -37,11 +38,20 @@ checks the signature and then the checksum, and installs it in
   sha256sum -c --ignore-missing SHA256SUMS
   gunzip "clackatoo-$arch-linux.gz"
   install -D -m 755 "clackatoo-$arch-linux" ~/.local/bin/clackatoo
+  ~/.local/bin/clackatoo desktop install ||
+    echo "clackatoo is installed in ~/.local/bin; it isn't in the app launcher (see above)"
 )
 ```
 
 The checksums only mean something once the signature on them is good,
 so the signature is checked first.
+
+`clackatoo desktop install` writes `clackatoo.desktop`, which starts the
+program it was run as, to `~/.local/share/applications`, and the icon to
+`~/.local/share/icons/hicolor`, marked as clackatoo's. It never replaces
+a launcher entry you wrote yourself: it says what it would write instead,
+and `--force` replaces it. `clackatoo desktop remove` takes them out
+again.
 
 Run `clackatoo` to open a window. It starts the daemon if it isn't
 running.
@@ -53,7 +63,9 @@ clackatoo update
 ```
 
 installs the latest release, checking its signature the same way, and
-moves the running daemon onto it, keeping its terminals.
+moves the running daemon onto it, keeping its terminals. If
+`clackatoo desktop install` put clackatoo in the app launcher, the new
+build brings its entry and icon up to date too.
 `clackatoo update --rollback` goes back.
 
 The window looks for a new release once a day, a while after it opens,
