@@ -23,7 +23,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{
-    Answer, BufferId, BufferUpdate, Change, ClientMessage, Edit, Query, ServerFeatures,
+    Answer, BufferId, BufferSnapshot, BufferUpdate, Change, ClientMessage, Edit, Query,
+    ServerFeatures,
 };
 use clackatoo_text::{
     Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span, compose,
@@ -391,25 +392,28 @@ impl BufferCopy {
         self.made.len()
     }
 
+    /// Takes `snapshot` in place of everything it had.
+    fn replace(&mut self, snapshot: BufferSnapshot) -> Heard {
+        self.path = snapshot.path;
+        self.text = Rope::from_str(&snapshot.text);
+        self.revision += 1;
+        self.version = snapshot.version;
+        self.modified = snapshot.modified;
+        self.loaded = true;
+        self.waiting.clear();
+        self.sent = None;
+        self.highlights.clear();
+        self.diagnostics = Diagnostics::new();
+        self.hunks = Hunks::new();
+        // Told again after the snapshot, if there's a server.
+        self.features = ServerFeatures::default();
+        Heard::Replaced
+    }
+
     /// Takes in what the daemon says about the buffer.
     pub(crate) fn update(&mut self, update: BufferUpdate) -> Heard {
         match update {
-            BufferUpdate::Snapshot(snapshot) => {
-                self.path = snapshot.path;
-                self.text = Rope::from_str(&snapshot.text);
-                self.revision += 1;
-                self.version = snapshot.version;
-                self.modified = snapshot.modified;
-                self.loaded = true;
-                self.waiting.clear();
-                self.sent = None;
-                self.highlights.clear();
-                self.diagnostics = Diagnostics::new();
-                self.hunks = Hunks::new();
-                // Told again after the snapshot, if there's a server.
-                self.features = ServerFeatures::default();
-                Heard::Replaced
-            }
+            BufferUpdate::Snapshot(snapshot) => self.replace(snapshot),
             BufferUpdate::Acked { version, seq } => {
                 if self.sent == Some(seq) {
                     self.waiting.pop_front();
@@ -474,7 +478,9 @@ impl BufferCopy {
                 Heard::Nothing
             }
             // The window asks and says these, not the editor.
-            BufferUpdate::Offer { .. } | BufferUpdate::Notice(_) => Heard::Nothing,
+            BufferUpdate::Offer { .. } | BufferUpdate::Notice(_) | BufferUpdate::ChangedOnDisk => {
+                Heard::Nothing
+            }
             BufferUpdate::Features(features) => {
                 self.features = features;
                 Heard::Nothing

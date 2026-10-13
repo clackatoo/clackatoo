@@ -207,6 +207,12 @@ pub enum BufferUpdate {
     /// Something the window should say in its bar, such as that an agent
     /// changed the file where you have changes not saved.
     Notice(String),
+    /// Something other than an agent changed the buffer's file on disk,
+    /// such as a git checkout or another editor, and the buffer has no
+    /// changes not saved. The window reads it again with
+    /// [`Request::Reload`](crate::Request::Reload), or says so, as its
+    /// `autoread` says. Sent again to a client attaching while it's so.
+    ChangedOnDisk,
 }
 
 /// What a buffer's language server does as you type, as it said when it

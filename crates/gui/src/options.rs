@@ -374,6 +374,12 @@ options! {
     tildeop("top"): bool = false;
     /// `:w` formats the file first, as its language server does.
     formatonsave("fos"): bool = false;
+    /// A file changed on disk by something other than an agent, as a git
+    /// checkout or another editor changes one, is read again, if its
+    /// buffer has no changes not saved: as an edit, which `u` undoes. Off,
+    /// or with changes, the bar says so, and `:e!` takes the file's
+    /// version, `:w!` keeps yours. Agents' changes are taken either way.
+    autoread("ar"): bool = true;
     /// What's done when a file is opened in a language that isn't
     /// installed, or whose language server isn't.
     languageinstall("li"): LanguageInstall = LanguageInstall::Ask;

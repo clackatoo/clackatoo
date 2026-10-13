@@ -330,18 +330,25 @@ impl Desk {
     /// Takes in a change to `buffer`. Returns whether a pane showing it is
     /// shown, and so the window must be redrawn.
     pub(crate) fn buffer_changed(&mut self, buffer: BufferId, update: BufferUpdate) -> bool {
-        if let BufferUpdate::Offer {
-            language,
-            grammar,
-            server,
-        } = update
-        {
-            return self.offered(language, grammar, server);
+        // What the window asks and says, not the editor.
+        match update {
+            BufferUpdate::Offer {
+                language,
+                grammar,
+                server,
+            } => self.offered(language, grammar, server),
+            BufferUpdate::Notice(notice) => {
+                self.message = Some(notice);
+                true
+            }
+            BufferUpdate::ChangedOnDisk => self.changed_on_disk(buffer),
+            update => self.copy_changed(buffer, update),
         }
-        if let BufferUpdate::Notice(notice) = update {
-            self.message = Some(notice);
-            return true;
-        }
+    }
+
+    /// Takes in a change to `buffer` that its copy, and the editors showing
+    /// it, take in. Returns whether a pane showing it is shown.
+    fn copy_changed(&mut self, buffer: BufferId, update: BufferUpdate) -> bool {
         let focused = self.shown.map(|shown| shown.pane);
         let editors = &mut self.editors;
         let Some(copy) = editors.buffers.get_mut(&buffer) else {
@@ -1135,6 +1142,24 @@ impl Desk {
             }
         }
         self.request(Request::ClosePane { pane: shown.pane }, Asked::Command);
+    }
+
+    /// Takes in that `buffer`'s file has changed on disk from outside, and
+    /// it has no changes not saved: has it read again, if `autoread` says
+    /// to, or says so. Returns whether the bar changed.
+    fn changed_on_disk(&mut self, buffer: BufferId) -> bool {
+        if self.options.autoread {
+            // The daemon reads it only if it's still changed and not
+            // modified, so another window asking too, or typing meanwhile,
+            // loses nothing.
+            self.request(Request::Reload { buffer }, Asked::Command);
+            return false;
+        }
+        let name = (self.editors.buffers.get(&buffer)).map_or("the file", BufferCopy::name);
+        self.message = Some(format!(
+            "{name} changed on disk: `:e!` to take it, `:w!` to keep yours"
+        ));
+        true
     }
 
     /// `:e!`: throws away the focused pane's file's changes not saved.

@@ -403,8 +403,12 @@ impl Daemon {
                 let Some((id, chat)) = self.chat_in(name, &session) else {
                     return;
                 };
+                let ran = chat.finishes_writing(&update);
                 if let Some(wrote) = chat.update(*update) {
                     self.take_written(id, &wrote);
+                }
+                if ran {
+                    self.writing_ended(id);
                 }
                 id
             }
@@ -431,8 +435,13 @@ impl Daemon {
                 let Some(chat) = self.chat(terminal) else {
                     return;
                 };
+                // A tool still running as the turn ends finishes with it.
+                let ran = chat.writing();
                 chat.answered(result);
                 self.settle_turn(terminal);
+                if ran {
+                    self.writing_ended(terminal);
+                }
                 terminal
             }
             Incoming::Permission {

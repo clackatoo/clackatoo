@@ -2439,6 +2439,459 @@ fn a_file_changed_by_more_than_the_agent_says_is_left_out_and_said() {
     );
 }
 
+// --- Files changed on disk ------------------------------------------------
+
+/// Waits for the daemon to say a buffer's file changed on disk from
+/// outside, skipping other updates, but not a notice or an edit.
+fn wait_for_changed_on_disk(client: &mut Client) {
+    loop {
+        match next_buffer_update(client) {
+            BufferUpdate::ChangedOnDisk => return,
+            update @ (BufferUpdate::Notice(_) | BufferUpdate::Edited { .. }) => {
+                panic!("{update:?}, not that the file changed on disk")
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reloads `buffer`, as a window with `autoread` on does when told its
+/// file changed.
+fn reload(client: &mut Client, buffer: BufferId) {
+    let answer = client.request(&Request::Reload { buffer }).unwrap();
+    assert_eq!(answer, Response::Done);
+}
+
+#[test]
+fn a_file_changed_from_outside_is_read_again_as_an_edit_you_can_undo() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt");
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    // Written in place, as a build tool writes.
+    std::fs::write(&path, "one\nTWO\nthree\n").unwrap();
+    wait_for_changed_on_disk(&mut editor);
+    reload(&mut editor, buffer);
+    let (author, edit) = next_edit(&mut editor);
+    assert_eq!(author, Author::User);
+    // Only what changed, so places in the text stay where they were.
+    assert_eq!(edit.changes().collect::<Vec<_>>(), [(4, "two", "TWO")]);
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(
+        (snapshot.text.as_str(), snapshot.modified),
+        ("one\nTWO\nthree\n", false)
+    );
+    // Asked again, as a second window asks, it changes nothing more.
+    reload(&mut editor, buffer);
+
+    // `u` takes it back.
+    send_change(&mut editor, buffer, 0, Change::Undo);
+    let (author, edit) = next_edit(&mut editor);
+    assert_eq!(author, Author::User);
+    assert_eq!(
+        edit.apply_to("one\nTWO\nthree\n").unwrap(),
+        "one\ntwo\nthree\n"
+    );
+    assert!(attach_buffer(&mut daemon.client(), buffer).modified);
+
+    // Renamed over the file, as git and most editors write it: heard of
+    // too, once the buffer is saved again.
+    let saved = editor.request(&Request::Save {
+        buffer,
+        force: false,
+    });
+    assert_eq!(saved.unwrap(), Response::Done);
+    let new = dir.join(".notes.txt.new");
+    std::fs::write(&new, "zero\none\ntwo\nthree\n").unwrap();
+    std::fs::rename(&new, &path).unwrap();
+    wait_for_changed_on_disk(&mut editor);
+    reload(&mut editor, buffer);
+    let (author, edit) = next_edit(&mut editor);
+    assert_eq!(author, Author::User);
+    assert_eq!(edit.changes().collect::<Vec<_>>(), [(0, "", "zero\n")]);
+}
+
+#[test]
+fn a_file_changed_from_outside_under_unsaved_edits_keeps_them_and_says_so() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt");
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+    type_in(&mut editor, buffer, 0, insert(8, 0, "> ", 0));
+
+    std::fs::write(&path, "one\nTWO\n").unwrap();
+    assert_eq!(
+        next_notice(&mut editor),
+        "notes.txt changed on disk: `:e!` to take it, `:w!` to keep yours"
+    );
+    // Asked to read it again, it keeps yours, and says so again.
+    reload(&mut editor, buffer);
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(
+        (snapshot.text.as_str(), snapshot.modified),
+        ("> one\ntwo\n", true)
+    );
+    // Not written over the file's change unless forced...
+    let refused = editor
+        .request(&Request::Save {
+            buffer,
+            force: false,
+        })
+        .unwrap();
+    assert!(
+        matches!(refused, Response::Error(Error::ChangedOnDisk(_))),
+        "{refused:?}"
+    );
+    // ...and `:e!` takes the file's.
+    let discarded = editor.request(&Request::Discard { buffer });
+    assert_eq!(discarded.unwrap(), Response::Done);
+    assert_eq!(
+        attach_buffer(&mut daemon.client(), buffer).text,
+        "one\nTWO\n"
+    );
+}
+
+#[test]
+fn a_window_attaching_to_a_buffer_changed_from_outside_is_told() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+    std::fs::write(&path, "two\n").unwrap();
+    wait_for_changed_on_disk(&mut editor);
+
+    // A window that wasn't there, or doesn't read it again, leaves it to
+    // the next window to come.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    wait_for_changed_on_disk(&mut other);
+    reload(&mut other, buffer);
+    assert_eq!(next_edit(&mut other).0, Author::User);
+}
+
+#[test]
+fn a_buffer_whose_directory_goes_and_comes_back_is_watched_again() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let sub = dir.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("notes.txt"), "one\n").unwrap();
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "sub/notes.txt");
+
+    std::fs::remove_dir_all(&sub).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("notes.txt"), "two\n").unwrap();
+    wait_for_changed_on_disk(&mut editor);
+    reload(&mut editor, buffer);
+    let (_, edit) = next_edit(&mut editor);
+    assert_eq!(edit.apply_to("one\n").unwrap(), "two\n");
+    // And changes after are heard of as ever.
+    std::fs::write(sub.join("notes.txt"), "three\n").unwrap();
+    wait_for_changed_on_disk(&mut editor);
+}
+
+#[test]
+fn a_buffer_whose_directory_a_branch_switch_takes_away_and_back_is_watched_again() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let sub = dir.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("notes.txt"), "one\n").unwrap();
+    run_git(dir, &["init", "-q", "-b", "main"]);
+    run_git(dir, &["add", "sub"]);
+    run_git(dir, &["commit", "-q", "-m", "sub"]);
+    run_git(dir, &["checkout", "-q", "-b", "bare"]);
+    run_git(dir, &["rm", "-q", "-r", "sub"]);
+    run_git(dir, &["commit", "-q", "-m", "no sub"]);
+    run_git(dir, &["checkout", "-q", "main"]);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "sub/notes.txt");
+
+    run_git(dir, &["checkout", "-q", "bare"]);
+    assert!(!sub.exists());
+    std::thread::sleep(Duration::from_millis(100));
+    run_git(dir, &["checkout", "-q", "main"]);
+    // Back, as it was, but a new file: read again, it changes nothing.
+    wait_for_changed_on_disk(&mut editor);
+    reload(&mut editor, buffer);
+    std::fs::write(sub.join("notes.txt"), "two\n").unwrap();
+    wait_for_changed_on_disk(&mut editor);
+    reload(&mut editor, buffer);
+    let (_, edit) = next_edit(&mut editor);
+    assert_eq!(edit.apply_to("one\n").unwrap(), "two\n");
+}
+
+#[test]
+fn a_file_too_big_to_read_again_on_the_loop_is_only_said_to_have_changed() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    std::fs::write(&path, "x".repeat(5 * 1024 * 1024)).unwrap();
+    assert_eq!(
+        next_notice(&mut editor),
+        "notes.txt changed on disk: `:e!` to take it, `:w!` to keep yours"
+    );
+    reload(&mut editor, buffer);
+    assert_eq!(attach_buffer(&mut daemon.client(), buffer).text, "one\n");
+}
+
+#[test]
+fn a_file_that_cant_be_read_again_is_said_so_once_until_it_changes() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    std::fs::write(&path, b"\xff\xfe\n").unwrap();
+    wait_for_changed_on_disk(&mut editor);
+    reload(&mut editor, buffer);
+    assert_eq!(
+        next_notice(&mut editor),
+        "notes.txt changed on disk, and can't be read: it isn't UTF-8 text"
+    );
+    // Asked again, as a window attaching asks, and touched without being
+    // changed: nothing more is said.
+    reload(&mut editor, buffer);
+    let mut other = daemon.client();
+    let version = attach_buffer(&mut other, buffer).version;
+    drop(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    send_change(&mut editor, buffer, 0, insert(4, 4, "two\n", version));
+    loop {
+        match next_buffer_update(&mut editor) {
+            BufferUpdate::Acked { .. } => break,
+            update @ (BufferUpdate::ChangedOnDisk | BufferUpdate::Notice(_)) => {
+                panic!("said again: {update:?}")
+            }
+            _ => {}
+        }
+    }
+    // Changed again, it's read again: with an edit not saved, it's kept.
+    std::fs::write(&path, "three\n").unwrap();
+    assert_eq!(
+        next_notice(&mut editor),
+        "notes.txt changed on disk: `:e!` to take it, `:w!` to keep yours"
+    );
+}
+
+#[test]
+fn what_an_agents_commands_change_on_disk_is_its_own_in_one_step() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+    // Yours, unsaved, on a line the command leaves be.
+    type_in(&mut editor, buffer, 0, insert(14, 0, "> ", 0));
+
+    // As `sed -i` changes two lines, saying nothing of it.
+    let said = agent_says(
+        &mut chatter,
+        chat,
+        &format!("run {path}\none\nTWO\nTHREE\n"),
+    );
+    assert_eq!(said, "ran\n");
+    let (author, edit) = next_edit(&mut editor);
+    assert_eq!(author, Author::Agent(chat));
+    // Both lines in one edit: one undo step.
+    assert_eq!(
+        edit.apply_to("> one\ntwo\nthree\n").unwrap(),
+        "> one\nTWO\nTHREE\n"
+    );
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!(
+        (snapshot.text.as_str(), snapshot.modified),
+        ("> one\nTWO\nTHREE\n", true)
+    );
+    // Saving puts yours over it, with nothing on disk to stop it.
+    let saved = editor.request(&Request::Save {
+        buffer,
+        force: false,
+    });
+    assert_eq!(saved.unwrap(), Response::Done);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "> one\nTWO\nTHREE\n"
+    );
+
+    // A command's change to a line you've changed and not saved is left
+    // out, and said, as a tool's is.
+    type_in(&mut editor, buffer, 1, insert(16, 9, "!", snapshot.version));
+    let run = format!("run {path}\n> one\ntwo\nTHREE\n");
+    assert_eq!(agent_says(&mut chatter, chat, &run), "ran\n");
+    assert_eq!(
+        next_notice(&mut editor),
+        "Claude Code changed notes.txt where you have unsaved edits: \
+         `:e!` takes its version, `:w!` keeps yours"
+    );
+    assert_eq!(
+        attach_buffer(&mut daemon.client(), buffer).text,
+        "> one\nTWO!\nTHREE\n"
+    );
+}
+
+/// Sends `text` to `chat`, and waits for the turn to start, and, if it
+/// runs a command, for that to show.
+fn start_turn(client: &mut Client, chat: TerminalId, text: &str) {
+    client.chat(chat, ChatAction::Send(text.into())).unwrap();
+    wait_for_chat(client, chat, |node| {
+        node.turns.last().is_some_and(|turn| {
+            turn.prompt == text
+                && (text != "busy" || (turn.items.iter()).any(|item| matches!(item, Item::Tool(_))))
+        })
+    });
+}
+
+/// Stops `chat`'s turn, and waits for it to end.
+fn stop_turn(client: &mut Client, chat: TerminalId) {
+    client.chat(chat, ChatAction::Stop).unwrap();
+    wait_for_chat(client, chat, |node| last_outcome(node).is_some());
+}
+
+#[test]
+fn a_change_on_disk_is_an_agents_only_while_one_command_of_its_runs() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut chatter = daemon.client();
+    let first = start_chat(&mut chatter);
+    chatter.new_workspace(None, new_chat()).unwrap();
+    let second = chatter.watch_workspaces().unwrap().list[1].terminals()[0];
+    wait_for_chat(&mut chatter, second, |node| node.state == ChatState::Ready);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    // An agent only thinking runs no command.
+    start_turn(&mut chatter, first, "wait");
+    std::fs::write(&path, "two\n").unwrap();
+    wait_for_changed_on_disk(&mut editor);
+    reload(&mut editor, buffer);
+    assert_eq!(next_edit(&mut editor).0, Author::User);
+    stop_turn(&mut chatter, first);
+
+    // With two running, which agent's it is can't be told.
+    start_turn(&mut chatter, first, "busy");
+    start_turn(&mut chatter, second, "busy");
+    std::fs::write(&path, "three\n").unwrap();
+    wait_for_changed_on_disk(&mut editor);
+    reload(&mut editor, buffer);
+    assert_eq!(next_edit(&mut editor).0, Author::User);
+
+    // With one, it's that agent's, once its command ends with its turn.
+    stop_turn(&mut chatter, first);
+    std::fs::write(&path, "four\n").unwrap();
+    chatter.chat(second, ChatAction::Stop).unwrap();
+    let (author, edit) = next_edit(&mut editor);
+    assert_eq!(author, Author::Agent(second));
+    assert_eq!(edit.apply_to("three\n").unwrap(), "four\n");
+}
+
+#[test]
+fn a_change_on_disk_while_the_agent_asks_to_run_something_isnt_its() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    chatter.chat(chat, ChatAction::Send("ask".into())).unwrap();
+    wait_for_chat(&mut chatter, chat, |node| node.question.is_some());
+    // As a `git checkout` while the question waits.
+    std::fs::write(&path, "two\n").unwrap();
+    wait_for_changed_on_disk(&mut editor);
+    reload(&mut editor, buffer);
+    assert_eq!(next_edit(&mut editor).0, Author::User);
+    answer(&mut chatter, chat, Some("reject".into()));
+}
+
+#[test]
+fn the_daemons_own_writes_arent_heard_as_changes_on_disk() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("notes.txt").display().to_string();
+    std::fs::write(&path, "one\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "notes.txt");
+
+    type_in(&mut editor, buffer, 0, insert(4, 0, "> ", 0));
+    let saved = editor.request(&Request::Save {
+        buffer,
+        force: false,
+    });
+    assert_eq!(saved.unwrap(), Response::Done);
+    // An agent's write through the daemon is saved by it too.
+    let said = agent_says(&mut chatter, chat, &format!("write {path}\n> one\ntwo\n"));
+    assert_eq!(said, "wrote");
+    let version = attach_buffer(&mut daemon.client(), buffer).version;
+
+    // Time for inotify to say what it heard, then an edit: nothing came
+    // between but the agent's edit and how the buffer is.
+    std::thread::sleep(Duration::from_millis(300));
+    send_change(&mut editor, buffer, 1, insert(10, 10, "three\n", version));
+    loop {
+        match next_buffer_update(&mut editor) {
+            BufferUpdate::Acked { .. } => break,
+            update @ (BufferUpdate::ChangedOnDisk | BufferUpdate::Notice(_)) => {
+                panic!("the daemon's own write was heard as a change: {update:?}")
+            }
+            BufferUpdate::Edited { author, .. } => assert_eq!(author, Author::Agent(chat)),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn a_tab_indented_files_change_said_with_spaces_lands_as_the_agents() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    let path = dir.join("Makefile").display().to_string();
+    std::fs::write(&path, "all:\n\tcc a.c\n\nclean:\n\trm -f a.out\n").unwrap();
+    let mut chatter = daemon.client();
+    let chat = start_chat(&mut chatter);
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "Makefile");
+
+    let new = "all:\n\tcc -O2 a.c\n\nclean:\n\trm -f a.out\n";
+    let said = agent_says(&mut chatter, chat, &format!("disk-spaces {path}\n{new}"));
+    assert_eq!(said, "done\n");
+    let (author, edit) = next_edit(&mut editor);
+    assert_eq!(author, Author::Agent(chat));
+    // The file's text, tabs and all, not the spaces the change was said
+    // with.
+    assert_eq!(edit.changes().collect::<Vec<_>>(), [(9, "", "-O2 ")]);
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!((snapshot.text.as_str(), snapshot.modified), (new, false));
+}
+
 #[test]
 fn an_agents_write_to_lines_changed_and_not_saved_or_outside_its_project_is_refused() {
     let daemon = TestDaemon::start();
@@ -2610,6 +3063,74 @@ fn a_real_agents_edit_to_a_file_not_open_can_be_undone() {
     let notice = undo_turn(&mut chatter, chat, 0, false, false);
     assert_eq!(notice, "Undid turn 1: notes.txt.");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\nbeta\n");
+}
+
+/// As [`a_real_agents_edit_lands_in_the_buffer_open_on_its_file`], in a
+/// tab-indented file, which Claude Code's adapter says changes to with
+/// spaces in place of tabs.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agents_edit_to_a_tab_indented_file_lands_in_its_buffer() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with_agent(|_| {
+        ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect()
+    });
+    let dir = daemon.dir.path();
+    let path = dir.join("Makefile").display().to_string();
+    std::fs::write(&path, "all:\n\tcc a.c\n\nclean:\n\trm -f a.out\n").unwrap();
+    let mut chatter = daemon.client();
+    chatter.new_workspace(None, new_chat()).unwrap();
+    let chat = chatter.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(&mut chatter, chat, minute, |node| {
+        node.state == ChatState::Ready
+    });
+    let mut editor = daemon.client();
+    let buffer = open_attached(&mut editor, dir, "Makefile");
+
+    let text = format!(
+        "Use your Edit tool to change `cc a.c` to `cc -O2 a.c` in {path}. Do nothing else."
+    );
+    chatter.chat(chat, ChatAction::Send(text)).unwrap();
+    loop {
+        let node = wait_for_chat_for(&mut chatter, chat, minute, |node| {
+            last_outcome(node).is_some() || node.question.is_some()
+        });
+        let Some(question) = node.question else {
+            break;
+        };
+        let allow = (question.choices.iter())
+            .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::AllowOnce)
+            .expect("a way to say yes");
+        let answer = ChatAction::Answer {
+            question: question.id,
+            option: Some(allow.id.clone()),
+        };
+        chatter.chat(chat, answer).unwrap();
+        wait_for_chat_for(&mut chatter, chat, minute, |node| node.question.is_none());
+    }
+    let new = "all:\n\tcc -O2 a.c\n\nclean:\n\trm -f a.out\n";
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), new);
+    loop {
+        match next_buffer_update(&mut editor) {
+            BufferUpdate::Edited { author, .. } => {
+                assert_eq!(author, Author::Agent(chat));
+                break;
+            }
+            update @ (BufferUpdate::Notice(_) | BufferUpdate::ChangedOnDisk) => {
+                panic!("not taken as the agent's: {update:?}")
+            }
+            _ => {}
+        }
+    }
+    let snapshot = attach_buffer(&mut daemon.client(), buffer);
+    assert_eq!((snapshot.text.as_str(), snapshot.modified), (new, false));
 }
 
 /// Codex, through its adapter, which the daemon installs as the chat asks,

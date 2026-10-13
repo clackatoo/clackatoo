@@ -57,6 +57,7 @@ mod agent_files;
 mod buffers;
 mod chats;
 mod clipboard;
+mod disk;
 mod edit_log;
 mod explorers;
 mod finder;
@@ -109,7 +110,8 @@ enum Source {
     Server(ServerId, Pipe),
     /// The inotify instance watching repositories' indexes.
     Index,
-    /// The inotify instance watching the directories explorers show.
+    /// The inotify instance watching the directories explorers show, and
+    /// those buffers' files are in.
     Files,
     Client(Client),
     Carrier(Carrier),
@@ -460,6 +462,8 @@ pub struct Daemon {
     agents: chats::Agents,
     /// Files as agents read them, and what agents changed in them.
     agent_files: agent_files::AgentFiles,
+    /// Buffers' files changed on disk, waiting to be looked at.
+    disk: disk::Disk,
     /// The QUIC endpoint, set up when a connection first carries QUIC.
     quic: Option<QuicServer>,
     /// What the QUIC endpoint last asked to be acted on.
@@ -562,6 +566,7 @@ impl Daemon {
             clipboard_unsent: false,
             agents: chats::Agents::default(),
             agent_files: agent_files::AgentFiles::default(),
+            disk: disk::Disk::default(),
             quic: None,
             quic_events: Vec::new(),
             carriers_made: 0,
@@ -623,6 +628,9 @@ impl Daemon {
             let slot = BufferSlot::new(Buffer::resume(buffer));
             daemon.buffers.insert(id, slot);
             daemon.parse_buffer(id);
+            // Its file may have changed while no one was watching.
+            daemon.watch_buffer(id);
+            daemon.disk_maybe_changed(id);
         }
         daemon.resume_files(state.next_files, explorers);
         daemon.agent_files.log = edit_log::EditLog::resume(edits);
@@ -768,11 +776,13 @@ impl Daemon {
                     let clipboard = self.next_clipboard_timeout();
                     let explore = self.next_explore();
                     let tools = self.next_tool_due();
+                    let rewatch = self.next_rewatch();
                     let next = (compaction.into_iter().chain(quic).chain(idle))
                         .chain(retry)
                         .chain(clipboard)
                         .chain(explore)
                         .chain(tools)
+                        .chain(rewatch)
                         .min();
                     next.map(|due| due.saturating_duration_since(Instant::now()))
                 } else {
@@ -807,6 +817,9 @@ impl Daemon {
             self.ask_again();
             self.take_found();
             self.explore();
+            // After what the daemon's own threads wrote has been taken, so
+            // it isn't taken for a change from outside.
+            self.check_disk();
             self.stop_idle_servers();
             self.compact_scrollbacks();
             self.time_out_clipboard_asks();
@@ -1596,15 +1609,17 @@ impl Daemon {
         Some(messages)
     }
 
+    /// What each terminal is, chats included.
+    fn terminal_infos(&self) -> Vec<TerminalInfo> {
+        (self.terminals.values())
+            .map(|slot| slot.terminal.info())
+            .collect()
+    }
+
     /// Answers one request from the client at `token`.
     fn respond(&mut self, request: Request, token: Token) -> Response {
         let response = match request {
-            Request::ListTerminals => Ok(Response::Terminals(
-                self.terminals
-                    .values()
-                    .map(|slot| slot.terminal.info())
-                    .collect(),
-            )),
+            Request::ListTerminals => Ok(Response::Terminals(self.terminal_infos())),
             Request::NewTerminal(request) => {
                 self.new_terminal(&request).map(Response::TerminalCreated)
             }
@@ -1693,6 +1708,7 @@ impl Daemon {
             Request::AttachFiles { files } => self.attach_files(token, files),
             Request::DetachFiles { files } => Ok(self.detach_files(token, files)),
             Request::Discard { buffer } => self.discard_buffer(buffer),
+            Request::Reload { buffer } => self.reload_buffer(buffer),
             request @ (Request::Install { .. } | Request::Decline { .. }) => {
                 self.respond_about_installs(token, request);
                 Ok(Response::Done)

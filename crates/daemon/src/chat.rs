@@ -1091,6 +1091,43 @@ impl HostedChat {
         .filter(|wrote| !wrote.paths.is_empty())
     }
 
+    /// Whether `update`, not yet taken, says a tool that may change files
+    /// has finished (see [`writes_files`]): whatever it changed on disk is
+    /// there by then.
+    pub(crate) fn finishes_writing(&self, update: &SessionUpdate) -> bool {
+        let finished = |status: ToolCallStatus| {
+            matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed)
+        };
+        match update {
+            SessionUpdate::ToolCall(call) => {
+                finished(call.status) && writes_files(tool_kind(call.kind))
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                let kind = (update.fields.kind.map(tool_kind))
+                    .or_else(|| self.tool(&update.tool_call_id.0).map(|tool| tool.kind));
+                update.fields.status.is_some_and(finished) && kind.is_none_or(writes_files)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a tool of the agent's that may change files is running now,
+    /// as an edit or `cargo fmt` does, while nothing waits on a question
+    /// the agent, or one of clackatoo's tools, has asked. A tool waiting to
+    /// be allowed isn't running, and while one is asked about, none is
+    /// taken to be.
+    pub(crate) fn writing(&self) -> bool {
+        let asked = (self.asking.iter())
+            .any(|(asker, _)| matches!(asker, Asker::Agent(_) | Asker::Tool(_)));
+        let Some(turn) = self.answering_turn().filter(|_| !asked) else {
+            return false;
+        };
+        self.node.turns[turn].items.iter().any(|item| {
+            matches!(item, Item::Tool(tool)
+                if tool.status == ToolStatus::Running && writes_files(tool.kind))
+        })
+    }
+
     /// The agent, as it's shown: "Claude Code", "Codex"…
     pub(crate) fn agent_title(&self) -> &str {
         &self.node.agent
@@ -1242,7 +1279,8 @@ impl HostedChat {
 
     // --- Changes ------------------------------------------------------------
 
-    /// Whether a message has been sent and not yet answered.
+    /// Whether a message has been sent and not yet answered: the agent's
+    /// turn is running.
     pub(crate) fn answering(&self) -> bool {
         self.answering_turn().is_some()
     }
@@ -1504,6 +1542,16 @@ fn tool_status(status: ToolCallStatus) -> ToolStatus {
         ToolCallStatus::Failed => ToolStatus::Failed,
         _ => ToolStatus::Running,
     }
+}
+
+/// Whether a tool of `kind` may change files: an edit, or a command, as
+/// running a program is, which says nothing of what it changed. A read,
+/// search, thought or fetch changes nothing.
+fn writes_files(kind: ToolKind) -> bool {
+    matches!(
+        kind,
+        ToolKind::Edit | ToolKind::Execute | ToolKind::Delete | ToolKind::Move | ToolKind::Other
+    )
 }
 
 fn tool_kind(kind: agent_client_protocol_schema::v1::ToolKind) -> ToolKind {

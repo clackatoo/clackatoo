@@ -7,6 +7,7 @@
 //! | `tool` | A tool call that runs and finishes, then `done` |
 //! | `ask` | Asks permission first, then says which option was picked |
 //! | `wait` | Nothing until the message is cancelled |
+//! | `busy` | Starts running a command, which goes on until the message is cancelled |
 //! | `exit` | Exits, as if it crashed |
 //! | `settings` | Its mode and model, as `mode model` |
 //! | `read PATH` | Reads the file through the daemon, and says `read:` and its text |
@@ -15,6 +16,8 @@
 //! | `tools` | The MCP servers it was given, as JSON |
 //! | `mcp NAME ARGS`, a line each | Calls each of clackatoo's tools `NAME` with the JSON `ARGS`, in turn, and says what each answered |
 //! | `edit PATH`, a line's end, then text | As `disk`, but asks permission first, as Claude Code does in Manual mode, and writes the file only once it's allowed |
+//! | `disk-spaces PATH`, a line's end, then text | As `disk`, but says the change as Claude Code's adapter says one to a tab-indented file: each line's leading tabs as two spaces, as the tool finishes |
+//! | `run PATH`, a line's end, then text | Writes the text to the file in a command, as `sed -i` would, saying nothing of what it changed, and says `ran` |
 //! | anything else | `echo:` and the message, in two pieces |
 //!
 //! Run as `fake_agent mcp --chat ID --socket PATH`, it relays MCP for a
@@ -69,6 +72,7 @@ fn main() {
         settings: BTreeMap::new(),
         tools: BTreeMap::new(),
         waiting: None,
+        waits: Vec::new(),
         asked: None,
         editing: None,
     };
@@ -94,6 +98,9 @@ struct Fake {
     tools: BTreeMap<String, Value>,
     /// A message waiting to be answered: its request's ID and session.
     waiting: Option<(Value, String)>,
+    /// Messages answered only once cancelled, one a session: each
+    /// request's ID and session.
+    waits: Vec<(Value, String)>,
     /// A message waiting on the daemon's answer about a file: its
     /// request's ID, its session, and the tool call it's in, if any.
     asked: Option<(Value, String, Option<String>)>,
@@ -279,11 +286,7 @@ impl Fake {
                 }
                 reply(&id, &json!({}));
             }
-            Some("session/cancel") => {
-                if let Some((id, _)) = self.waiting.take() {
-                    done(&id, "cancelled");
-                }
-            }
+            Some("session/cancel") => self.cancel(&session),
             Some("session/prompt") => {
                 let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
                 return self.prompt(id, session, text);
@@ -477,7 +480,8 @@ impl Fake {
                 );
                 self.waiting = Some((id, session));
             }
-            "wait" => self.waiting = Some((id, session)),
+            "wait" => self.waits.push((id, session)),
+            "busy" => self.busy(id, session),
             "exit" => return false,
             "tools" => {
                 let tools = self.tools.get(&session).cloned().unwrap_or_default();
@@ -541,6 +545,9 @@ impl Fake {
             self.asked = Some((id.clone(), session.to_owned(), Some("tw".to_owned())));
             return true;
         }
+        if Self::file_otherwise(id, session, command, rest) {
+            return true;
+        }
         if let Some(path) = command.strip_prefix("disk ") {
             update(
                 session,
@@ -578,6 +585,88 @@ impl Fake {
             return true;
         }
         false
+    }
+
+    /// Answers a message about a file by the scripts that change it in ways
+    /// other than `disk`'s, if its words choose one: `run` and
+    /// `disk-spaces`. Returns whether they did.
+    fn file_otherwise(id: &Value, session: &str, command: &str, rest: &str) -> bool {
+        if let Some(path) = command.strip_prefix("run ") {
+            // As a command the agent runs, such as `sed -i`, changes a file:
+            // saying nothing of it.
+            update(
+                session,
+                &json!({ "sessionUpdate": "tool_call", "toolCallId": "tr",
+                         "title": "Run a command", "kind": "execute",
+                         "status": "in_progress" }),
+            );
+            std::fs::write(path, rest).unwrap();
+            update(
+                session,
+                &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "tr",
+                         "status": "completed" }),
+            );
+            say(session, "ran\n");
+            done(id, "end_turn");
+            return true;
+        }
+        if let Some(path) = command.strip_prefix("disk-spaces ") {
+            // As Claude Code's adapter says a change to a tab-indented
+            // file: each line's leading tabs as spaces.
+            let spaced = |text: &str| -> String {
+                let mut spaced = String::with_capacity(text.len());
+                for line in text.split_inclusive('\n') {
+                    let tabs = line.len() - line.trim_start_matches('\t').len();
+                    spaced.push_str(&"  ".repeat(tabs));
+                    spaced.push_str(&line[tabs..]);
+                }
+                spaced
+            };
+            update(
+                session,
+                &json!({ "sessionUpdate": "tool_call", "toolCallId": "ts",
+                         "title": format!("Edit {path}"), "kind": "edit",
+                         "status": "pending", "locations": [{ "path": path }] }),
+            );
+            let old = std::fs::read_to_string(path).ok();
+            std::fs::write(path, rest).unwrap();
+            update(
+                session,
+                &json!({ "sessionUpdate": "tool_call_update", "toolCallId": "ts",
+                         "status": "completed",
+                         "content": [{ "type": "diff", "path": path,
+                                       "oldText": old.as_deref().map(spaced),
+                                       "newText": spaced(rest) }],
+                         "locations": [{ "path": path, "line": 1 }] }),
+            );
+            say(session, "done\n");
+            done(id, "end_turn");
+            return true;
+        }
+        false
+    }
+
+    /// Answers message `id` in `session` by starting to run a command,
+    /// which goes on until the message is cancelled.
+    fn busy(&mut self, id: Value, session: String) {
+        update(
+            &session,
+            &json!({ "sessionUpdate": "tool_call", "toolCallId": "tb",
+                     "title": "Run a command", "kind": "execute",
+                     "status": "in_progress" }),
+        );
+        self.waits.push((id, session));
+    }
+
+    /// Ends the message waiting in `session`, as cancelled.
+    fn cancel(&mut self, session: &str) {
+        let wait = (self.waits.iter()).position(|(_, waiting)| waiting == session);
+        if let Some(wait) = wait {
+            let (id, _) = self.waits.remove(wait);
+            done(&id, "cancelled");
+        } else if let Some((id, _)) = self.waiting.take() {
+            done(&id, "cancelled");
+        }
     }
 }
 

@@ -15,6 +15,12 @@
 //!   merged into the buffer. If it isn't, something else changed it too,
 //!   and nothing is taken.
 //!
+//! The agent's commands change files too, as `cargo fmt` and `sed -i` do,
+//! saying nothing of it. A change to a file open in a buffer, heard of
+//! while a tool of one chat's agent that may change files runs (see
+//! [`super::disk`]), and that no tool said it made, is that agent's: it's
+//! merged in the same way, in no tool call, once the tool finishes.
+//!
 //! Either way, the change is an edit by `Author::Agent(chat)`, one undo
 //! step for each of the agent's tool calls, so undoing it leaves your own
 //! edits be. The file on disk gets the agent's change under any changes
@@ -444,11 +450,31 @@ impl Daemon {
             });
         }
         if steps.len() != reports.len() || text != disk {
-            if last {
-                forget(&mut self.agent_files);
-                self.tell_of_change(chat, id, path, false);
+            // Claude Code's adapter says a tab-indented file's changes with
+            // spaces for each leading tab, two in 0.88.0, so they make the
+            // file only with its tabs so too. Then the file's text is what the tools
+            // made, as one change, since what each made can't be told
+            // exactly. Not if something else changed the file too, which
+            // the spaces could hide.
+            if let Some(report) = reports.last()
+                && !self.buffers[&id].stale()
+                && made_with_tabs_as_spaces(buffer.saved(), &reports, &disk)
+            {
+                let tool = Some(report.tool.as_str());
+                let step = !(self.agent_files.log).continues(chat, path, report.turn, tool);
+                steps = vec![(disk.clone(), step)];
+                makers = vec![Maker {
+                    chat,
+                    turn: report.turn,
+                    tool: Some(report.tool.clone()),
+                }];
+            } else {
+                if last {
+                    forget(&mut self.agent_files);
+                    self.tell_of_change(chat, id, path, false);
+                }
+                return;
             }
-            return;
         }
         forget(&mut self.agent_files);
         let slot = self.buffers.get_mut(&id).expect("the buffer just found");
@@ -464,6 +490,53 @@ impl Daemon {
                 self.saved_in_server(id);
             }
             Err(Refused::Conflict(_)) => self.tell_of_change(chat, id, path, true),
+            Err(Refused::Failed(err)) => log::warn!("buffer {id}: {err}"),
+        }
+    }
+
+    /// Takes the change found on disk to buffer `id`'s file into it, as a
+    /// change the agent in `chat` made in turn `turn` by its commands, in
+    /// no tool call: one undo step, merged into the changes not saved as a
+    /// tool's change is, and in the log as the turn's, so undoing the turn
+    /// takes it out too. If it touches a line changed and not saved, it
+    /// isn't, and the user is told. A file a tool of the agent has said it
+    /// changed is left to what the tool said, which comes to it at the
+    /// turn's end, if not before.
+    pub(super) fn take_from_commands(&mut self, chat: TerminalId, turn: usize, id: BufferId) {
+        let Some(slot) = self.buffers.get(&id) else {
+            return;
+        };
+        let path = slot.buffer.path().to_owned();
+        let reported = (self.agent_files.reports.iter())
+            .any(|report| report.chat == chat && report.path == path);
+        if reported {
+            return;
+        }
+        let (disk, stamp) = match slot.buffer.changed_on_disk() {
+            Ok(Some(changed)) => changed,
+            Ok(None) => return,
+            Err(err) => {
+                log::warn!("buffer {id}: {err}");
+                return;
+            }
+        };
+        let existed = slot.buffer.disk().is_some();
+        let slot = self.buffers.get_mut(&id).expect("the buffer just found");
+        let steps = [(disk.clone(), true)];
+        match (slot.buffer).take_written(&steps, (&disk, stamp), Author::Agent(chat)) {
+            Ok(made) => {
+                let maker = Maker {
+                    chat,
+                    turn,
+                    tool: None,
+                };
+                for made in made {
+                    self.landed(id, &maker, &path, made, existed);
+                }
+                self.note_modified(id);
+                self.saved_in_server(id);
+            }
+            Err(Refused::Conflict(_)) => self.tell_of_change(chat, id, &path, true),
             Err(Refused::Failed(err)) => log::warn!("buffer {id}: {err}"),
         }
     }
@@ -572,6 +645,10 @@ impl Daemon {
                  `:e!` takes the file's version, `:w!` keeps yours"
             )
         };
+        if !conflict && let Some(slot) = self.buffers.get_mut(&id) {
+            // What's on disk now isn't all the agent's.
+            slot.changed_outside();
+        }
         self.tell_viewers(id, None, &BufferUpdate::Notice(notice.clone()));
         if let Some(hosted) = self.chat(chat) {
             hosted.notify(notice);
@@ -646,7 +723,7 @@ impl Daemon {
 
 /// Where an agent working in `cwd` may read and write files through the
 /// daemon: the git worktree `cwd` is in, or else `cwd`.
-fn agent_root(cwd: &Path) -> PathBuf {
+pub(super) fn agent_root(cwd: &Path) -> PathBuf {
     let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
     (cwd.ancestors())
         .find(|dir| dir.join(".git").exists())
@@ -684,6 +761,43 @@ fn apply(text: &str, diffs: &[RawDiff]) -> Option<String> {
     }
     made.push_str(&text[done..]);
     Some(made)
+}
+
+/// How many spaces an agent that shows a file's tabs as spaces may show
+/// each leading tab as: Claude Code's adapter 0.88.0 shows two.
+const TAB_WIDTHS: [usize; 3] = [2, 4, 8];
+
+/// Whether the changes `reports` said, made in turn to `saved`, make
+/// `disk` once the leading tabs of each line of both are spaces, as an
+/// agent that shows a file's tabs so says its changes: as many for each
+/// tab as one of [`TAB_WIDTHS`].
+fn made_with_tabs_as_spaces(saved: &Rope, reports: &[&Report], disk: &str) -> bool {
+    let saved = saved.to_string();
+    TAB_WIDTHS.into_iter().any(|width| {
+        let mut text = tabs_as_spaces(&saved, width);
+        for report in reports {
+            match apply(&text, &report.diffs) {
+                Some(next) => text = next,
+                None => return false,
+            }
+        }
+        text == tabs_as_spaces(disk, width)
+    })
+}
+
+/// `text` with each tab in the indent each line starts with as `width`
+/// spaces.
+fn tabs_as_spaces(text: &str, width: usize) -> String {
+    let tab = " ".repeat(width);
+    let mut spaced = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        for blank in line[..indent].chars() {
+            spaced.push_str(if blank == '\t' { &tab } else { " " });
+        }
+        spaced.push_str(&line[indent..]);
+    }
+    spaced
 }
 
 /// The lines `ranges` of bytes of `text` are on, counting from 1, as
@@ -886,6 +1000,32 @@ pub(super) mod tests {
         buffer.reverse(Author::Agent(chat), false).unwrap().unwrap();
         assert_eq!(buffer.text().to_string(), "ONE\ntwo\n");
         assert_eq!(buffer.check_modified(), Some(true));
+    }
+
+    #[test]
+    fn changes_said_with_tabs_as_spaces_make_the_file_only_with_its_indent() {
+        let report = |old: &str, new: &str| Report {
+            chat: TerminalId(1),
+            turn: 0,
+            order: 0,
+            tool: "t".into(),
+            path: "/Makefile".into(),
+            diffs: vec![RawDiff {
+                path: "/Makefile".into(),
+                old: Some(old.into()),
+                new: new.into(),
+            }],
+        };
+        let saved = Rope::from_str("all:\n\tcc a.c\n\t\techo\n");
+        // As Claude Code's adapter says it: two spaces a tab.
+        let said = report("all:\n  cc a.c", "all:\n  cc -O2 a.c");
+        let disk = "all:\n\tcc -O2 a.c\n\t\techo\n";
+        assert!(made_with_tabs_as_spaces(&saved, &[&said], disk));
+        let four = report("    cc a.c\n        echo", "    cc -O2 a.c\n        echo");
+        assert!(made_with_tabs_as_spaces(&saved, &[&four], disk));
+        // Indented differently on disk than the change says: not the tool's.
+        let reindented = "all:\n\tcc -O2 a.c\n\techo\n";
+        assert!(!made_with_tabs_as_spaces(&saved, &[&said], reindented));
     }
 
     #[test]

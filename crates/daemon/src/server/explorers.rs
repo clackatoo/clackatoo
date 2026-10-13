@@ -19,6 +19,11 @@
 //! when a file in a directory watched is written, made or deleted, when
 //! the repository's index changes, as staging from a terminal changes it,
 //! and when a buffer is saved.
+//!
+//! The same watches serve buffers: each buffer's file is watched through
+//! the directory it's in, as most programs write a file by renaming a new
+//! one over it, which a watch on the file itself wouldn't outlive. What
+//! the buffers make of a change is in [`super::disk`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -66,8 +71,9 @@ pub(super) struct Explorers {
     /// The inotify instance directories are watched with, once one is, and
     /// its token.
     inotify: Option<(OwnedFd, Token)>,
-    /// What each watch is on: directories expanded, and repositories' git
-    /// directories. One directory reached by two paths is one watch.
+    /// What each watch is on: directories expanded, repositories' git
+    /// directories, and the directories of buffers' files. One directory
+    /// reached by two paths is one watch.
     watches: HashMap<i32, Watched>,
     /// Watches weren't made for lack of room, which is said once.
     full: bool,
@@ -138,11 +144,20 @@ struct Repo {
 
 /// What one watch is on.
 #[derive(Debug, Default)]
-struct Watched {
+pub(super) struct Watched {
     /// Directories expanded.
     dirs: Vec<PathBuf>,
     /// The top of the repository whose git directory it is.
     repo: Option<PathBuf>,
+    /// The buffers whose files are in it.
+    pub(super) buffers: Vec<BufferId>,
+}
+
+impl Watched {
+    /// Whether it's on nothing any more, so the watch can go.
+    fn unused(&self) -> bool {
+        self.dirs.is_empty() && self.repo.is_none() && self.buffers.is_empty()
+    }
 }
 
 impl Daemon {
@@ -418,13 +433,66 @@ impl Daemon {
     /// Watches `dir`, as a directory expanded, or as the git directory of
     /// the repository whose top is `repo`, unless there's no room.
     fn watch(&mut self, dir: &Path, repo: Option<&Path>) {
-        if self.explorers.watches.len() >= MAX_WATCHES {
-            if !self.explorers.full {
-                log::warn!("{MAX_WATCHES} directories are watched: no more will be");
-                self.explorers.full = true;
-            }
+        let Some(watch) = self.add_watch(dir) else {
             return;
+        };
+        let watched = self.explorers.watches.entry(watch).or_default();
+        if let Some(repo) = repo {
+            watched.repo = Some(repo.to_owned());
+        } else {
+            if !watched.dirs.iter().any(|watched| watched == dir) {
+                watched.dirs.push(dir.to_owned());
+            }
+            if let Some(entry) = self.explorers.dirs.get_mut(dir) {
+                entry.watched = true;
+            }
         }
+    }
+
+    /// Watches the directory buffer `id`'s file, `path`, is in, so a change
+    /// to the file is heard of, unless there's no room. Returns whether
+    /// it's watched.
+    pub(super) fn watch_buffer_file(&mut self, id: BufferId, path: &Path) -> bool {
+        let Some(dir) = path.parent() else {
+            return false;
+        };
+        let Some(watch) = self.add_watch(dir) else {
+            return false;
+        };
+        let watched = self.explorers.watches.entry(watch).or_default();
+        if !watched.buffers.contains(&id) {
+            watched.buffers.push(id);
+        }
+        true
+    }
+
+    /// No longer watches for changes to buffer `id`'s file, taking away the
+    /// watch on its directory if that was all it was for.
+    pub(super) fn unwatch_buffer_file(&mut self, id: BufferId) {
+        self.unwatch(|watched| watched.buffers.retain(|&buffer| buffer != id));
+    }
+
+    /// The watches, by what each is on, for tests to look at.
+    #[cfg(test)]
+    pub(super) fn watches(&self) -> impl Iterator<Item = &Watched> {
+        self.explorers.watches.values()
+    }
+
+    /// Fills the watches up to [`MAX_WATCHES`] with ones on nothing, under
+    /// numbers inotify never gives, for tests.
+    #[cfg(test)]
+    pub(super) fn fill_watches(&mut self) {
+        let mut wd = -1;
+        while self.explorers.watches.len() < MAX_WATCHES {
+            self.explorers.watches.insert(wd, Watched::default());
+            wd -= 1;
+        }
+    }
+
+    /// Has inotify watch `dir`, the first time making the instance watches
+    /// are made with, unless there's no room. Returns the watch, which is
+    /// the one `dir` already had if it had one.
+    fn add_watch(&mut self, dir: &Path) -> Option<i32> {
         if self.explorers.inotify.is_none() {
             let flags = inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK;
             let made = inotify::init(flags).map_err(std::io::Error::from);
@@ -435,14 +503,12 @@ impl Daemon {
             match registered {
                 Ok(inotify) => self.explorers.inotify = Some(inotify),
                 Err(err) => {
-                    log::warn!("explorers won't see changes: {err}");
-                    return;
+                    log::warn!("changes to files won't be seen: {err}");
+                    return None;
                 }
             }
         }
-        let Some((inotify, _)) = &self.explorers.inotify else {
-            return;
-        };
+        let (inotify, _) = self.explorers.inotify.as_ref()?;
         // Added to what's watched already, as a directory reached by
         // another path, or a git directory expanded, is one watch.
         let flags = inotify::WatchFlags::CREATE
@@ -456,21 +522,35 @@ impl Daemon {
             | inotify::WatchFlags::EXCL_UNLINK
             | inotify::WatchFlags::ONLYDIR
             | inotify::WatchFlags::MASK_ADD;
+        let full = self.explorers.watches.len() >= MAX_WATCHES;
         match inotify::add_watch(inotify, dir, flags) {
+            // The directory's watch already, which costs nothing more, or a
+            // new one with room for it.
+            Ok(watch) if !full || self.explorers.watches.contains_key(&watch) => Some(watch),
             Ok(watch) => {
-                let watched = self.explorers.watches.entry(watch).or_default();
-                if let Some(repo) = repo {
-                    watched.repo = Some(repo.to_owned());
-                } else {
-                    if !watched.dirs.iter().any(|watched| watched == dir) {
-                        watched.dirs.push(dir.to_owned());
-                    }
-                    if let Some(entry) = self.explorers.dirs.get_mut(dir) {
-                        entry.watched = true;
-                    }
+                if let Err(err) = inotify::remove_watch(inotify, watch) {
+                    log::debug!("a watch couldn't be taken away: {err}");
                 }
+                if !self.explorers.full {
+                    log::warn!("{MAX_WATCHES} directories are watched: no more will be");
+                    self.explorers.full = true;
+                }
+                None
             }
-            Err(err) => log::debug!("{} won't be watched: {err}", dir.display()),
+            Err(err) => {
+                log::debug!("{} won't be watched: {err}", dir.display());
+                None
+            }
+        }
+    }
+
+    /// Notes that there may be room for more watches again, as some have
+    /// gone: if there was none, buffers whose directories weren't watched
+    /// for lack of it are tried again.
+    fn watches_gone(&mut self) {
+        if self.explorers.full && self.explorers.watches.len() < MAX_WATCHES {
+            self.explorers.full = false;
+            self.rewatch_now();
         }
     }
 
@@ -481,7 +561,7 @@ impl Daemon {
         let mut gone = Vec::new();
         for (&watch, watched) in &mut explorers.watches {
             change(watched);
-            if watched.dirs.is_empty() && watched.repo.is_none() {
+            if watched.unused() {
                 gone.push(watch);
             }
         }
@@ -493,9 +573,7 @@ impl Daemon {
                 log::debug!("a watch couldn't be taken away: {err}");
             }
         }
-        if explorers.watches.len() < MAX_WATCHES {
-            explorers.full = false;
-        }
+        self.watches_gone();
     }
 
     /// Reads what inotify says has changed in the directories watched,
@@ -555,6 +633,7 @@ impl Daemon {
                 touched.push((wd, name));
             }
         }
+        self.buffer_files_touched(&touched, everything);
         let now = Instant::now();
         let explorers = &mut self.explorers;
         if everything {
@@ -606,11 +685,39 @@ impl Daemon {
         self.forget_watches(&gone);
     }
 
+    /// Has the files of buffers among what's `touched` looked at, as they
+    /// may have changed: each watch, and the name in its directory written,
+    /// made, moved or deleted. With `everything`, changes were lost, and
+    /// every buffer's file is.
+    fn buffer_files_touched(&mut self, touched: &[(i32, Option<Vec<u8>>)], everything: bool) {
+        let mut buffers: Vec<BufferId> = Vec::new();
+        for (wd, name) in touched {
+            let Some(watched) = self.explorers.watches.get(wd) else {
+                continue;
+            };
+            for id in &watched.buffers {
+                let file = (self.buffers.get(id)).and_then(|slot| slot.buffer.path().file_name());
+                if file.is_some_and(|file| Some(file.as_bytes()) == name.as_deref()) {
+                    buffers.push(*id);
+                }
+            }
+        }
+        if everything {
+            buffers = (self.explorers.watches.values())
+                .flat_map(|watched| watched.buffers.iter().copied())
+                .collect();
+        }
+        for id in buffers {
+            self.disk_maybe_changed(id);
+        }
+    }
+
     /// Forgets the watches `gone`, which the kernel has taken away, as when
     /// their directories went: their parents' listings say so. One made
     /// again is watched again when it's next listed.
     fn forget_watches(&mut self, gone: &[i32]) {
         let explorers = &mut self.explorers;
+        let mut buffers = Vec::new();
         for wd in gone {
             if let Some(watched) = explorers.watches.remove(wd) {
                 for dir in watched.dirs {
@@ -618,11 +725,11 @@ impl Daemon {
                         entry.watched = false;
                     }
                 }
+                buffers.extend(watched.buffers);
             }
         }
-        if explorers.watches.len() < MAX_WATCHES {
-            explorers.full = false;
-        }
+        self.watches_gone();
+        self.buffer_files_unwatched(&buffers);
     }
 
     /// Has git asked again about the repository the file at `path` is in,

@@ -64,6 +64,11 @@ impl DiskStamp {
         (self.inode, self.device) == (metadata.ino(), metadata.dev())
     }
 
+    /// How long the file is, in bytes.
+    pub(crate) fn len(&self) -> u64 {
+        self.len
+    }
+
     /// When the file was last written.
     pub(crate) fn written(&self) -> std::time::SystemTime {
         let since = std::time::Duration::new(
@@ -334,6 +339,10 @@ impl Buffer {
         match read(&self.path) {
             Ok((text, disk)) => Ok(Some((lf(text), disk))),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) if err.kind() == io::ErrorKind::InvalidData => Err(Error::OpenFailed {
+                path: self.path.display().to_string(),
+                reason: "it isn't UTF-8 text".to_owned(),
+            }),
             Err(err) => Err(failed(err)),
         }
     }

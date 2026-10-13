@@ -3158,6 +3158,18 @@ mod tests {
         let notice = "agent changed notes.txt where you have unsaved edits";
         assert!(desk.buffer_changed(buffer, BufferUpdate::Notice(notice.into())));
         assert_eq!(desk.message.as_deref(), Some(notice));
+        // A change from outside is read again, as `autoread` says...
+        assert!(!desk.buffer_changed(buffer, BufferUpdate::ChangedOnDisk));
+        assert_eq!(requests(&desk.take_outbox()), [&Request::Reload { buffer }]);
+        desk.answered(Response::Done);
+        // ...or said.
+        command(&mut desk, "set noautoread");
+        assert!(desk.buffer_changed(buffer, BufferUpdate::ChangedOnDisk));
+        assert!(requests(&desk.take_outbox()).is_empty());
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("notes.txt changed on disk: `:e!` to take it, `:w!` to keep yours")
+        );
         command(&mut desk, "q");
         assert_eq!(
             answer_all(&mut desk),

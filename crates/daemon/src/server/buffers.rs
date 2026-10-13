@@ -15,7 +15,7 @@ use mio::Token;
 
 use super::language::Opened;
 use super::{Daemon, Source};
-use crate::buffer::{Buffer, Made};
+use crate::buffer::{Buffer, DiskStamp, Made};
 
 /// A buffer, and the clients following it.
 #[derive(Debug)]
@@ -38,6 +38,25 @@ pub(super) struct BufferSlot {
     /// the index, as of the last comparison, moved along with each edit
     /// since.
     pub(super) hunks: Hunks,
+    /// Whether the directory its file is in is watched for changes.
+    pub(super) watched: bool,
+    /// Whether something other than an agent has changed its file on
+    /// disk, in a way it hasn't taken (see [`stale`](Self::stale)).
+    outside: Option<Outside>,
+    /// The file as it was when it last couldn't be read again, as when
+    /// it's no longer UTF-8: windows aren't asked to read it again until
+    /// it changes.
+    pub(super) unreadable: Option<DiskStamp>,
+}
+
+/// What a buffer knew of its file when something other than an agent
+/// changed it, in a way the buffer hasn't taken. It holds as long as
+/// that's still what the buffer knows, so reading or writing the file
+/// again ends it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Outside {
+    /// The file as last read or written, if it existed.
+    knew: Option<DiskStamp>,
 }
 
 impl BufferSlot {
@@ -51,7 +70,26 @@ impl BufferSlot {
             compared: false,
             git_dir: None,
             hunks: Hunks::new(),
+            watched: false,
+            outside: None,
+            unreadable: None,
         }
+    }
+
+    /// Whether its file has changed on disk, not only by an agent, since
+    /// it was last read or written: changes found on disk since aren't
+    /// all any one agent's.
+    pub(super) fn stale(&self) -> bool {
+        (self.outside).is_some_and(|outside| outside.knew == self.buffer.disk())
+    }
+
+    /// Notes that something other than an agent has changed its file on
+    /// disk, in a way it hasn't taken: it's [`stale`](Self::stale) until
+    /// it reads or writes the file again.
+    pub(super) fn changed_outside(&mut self) {
+        self.outside = Some(Outside {
+            knew: self.buffer.disk(),
+        });
     }
 }
 
@@ -84,6 +122,7 @@ impl Daemon {
         self.parse_buffer(id);
         self.open_in_server(id);
         self.compare_buffer(id);
+        self.watch_buffer(id);
         Ok(id)
     }
 
@@ -104,6 +143,7 @@ impl Daemon {
         self.compare_buffer(id);
         self.send_snapshot(token, id);
         self.offer_install(token, id);
+        self.tell_if_changed_on_disk(token, id);
         Ok(())
     }
 
@@ -209,6 +249,8 @@ impl Daemon {
         }
         log::info!("buffer {id} saved");
         self.files_written(&path);
+        // Its directory may be new.
+        self.watch_buffer(id);
         self.saved_in_server(id);
         Ok(Response::Done)
     }
@@ -306,6 +348,8 @@ impl Daemon {
         }
         self.closed_in_server(&from, server);
         self.closed_in_git(id, git_dir);
+        self.unwatch_buffer(id);
+        self.watch_buffer(id);
         // What was said of it at its old path is unsaid, until it's said
         // again at its new one.
         let unsaid = [
@@ -380,6 +424,7 @@ impl Daemon {
             }
             self.closed_in_server(slot.buffer.path(), slot.server);
             self.closed_in_git(buffer, slot.git_dir);
+            self.unwatch_buffer(buffer);
         }
     }
 

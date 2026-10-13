@@ -82,7 +82,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 48;
+pub const PROTOCOL_VERSION: u32 = 49;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -632,6 +632,16 @@ pub enum Request {
         /// to 999. `None` gives it as much as each of the parts beside it
         /// has, as a split does.
         share: Option<u16>,
+    },
+    /// Reads the buffer's file again, as an edit by the user, which can be
+    /// undone, if it has changed on disk since it was read or last written
+    /// and the buffer has no changes not saved: what a window does with
+    /// [`BufferUpdate::ChangedOnDisk`] as its `autoread` says. Otherwise
+    /// it does nothing, and a buffer changed meanwhile has its followers
+    /// told so in a [`BufferUpdate::Notice`].
+    Reload {
+        /// The buffer.
+        buffer: BufferId,
     },
 }
 
