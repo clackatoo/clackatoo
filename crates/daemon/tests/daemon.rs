@@ -351,7 +351,11 @@ fn a_flood_of_output_does_not_starve_other_clients() {
         started.elapsed()
     );
 
-    wait_for_screen(&mut client, flood, |text| text.contains("done"));
+    // The flood only has to finish, however long a debug build on a busy
+    // machine takes over 20 MB: what's tested is the answer above.
+    wait_for_screen_for(&mut client, flood, Duration::from_mins(1), |text| {
+        text.contains("done")
+    });
 }
 
 #[test]
