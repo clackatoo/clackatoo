@@ -70,6 +70,9 @@ pub(crate) enum Done {
         changed: Changed,
         outcome: Result<(), FileOpError>,
     },
+    /// For tests: the thread for file operations was let go of.
+    #[cfg(test)]
+    Held,
 }
 
 /// A file open in a buffer, as a file operation needs to know it.
@@ -187,6 +190,18 @@ impl Workers {
                 outcome,
             }
         });
+    }
+
+    /// For tests: keeps the thread for file operations busy, as a long
+    /// copy would, until what's returned is sent to or dropped.
+    #[cfg(test)]
+    pub(crate) fn hold_ops(&self) -> Sender<()> {
+        let (release, held) = mpsc::channel();
+        send(&self.ops, move || {
+            let _ = held.recv();
+            Done::Held
+        });
+        release
     }
 
     /// What the threads have done since last asked.

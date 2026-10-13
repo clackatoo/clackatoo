@@ -92,6 +92,10 @@ pub(super) struct Explorers {
     /// them with: the client that asked, and its number for it.
     ops: HashMap<u64, (Token, u64)>,
     next_ticket: u64,
+    /// File operations handed to the thread and not answered yet, whether
+    /// the client that asked is still here or not: an upgrade waits for
+    /// them.
+    running: usize,
     /// Why git can't be run, once a thread has found it can't.
     no_git: Option<&'static str>,
 }
@@ -133,6 +137,7 @@ impl Default for Explorers {
             full: false,
             ops: HashMap::new(),
             next_ticket: 0,
+            running: 0,
             no_git: None,
         }
     }
@@ -863,6 +868,8 @@ impl Daemon {
                     changed,
                     outcome,
                 } => self.operated(ticket, changed, outcome),
+                #[cfg(test)]
+                Done::Held => {}
             }
         }
         let now = Instant::now();
@@ -1100,6 +1107,14 @@ impl Daemon {
     /// [`ClientMessage::FileOp`](clackatoo_protocol::ClientMessage::FileOp),
     /// numbered `id`, on the thread for them.
     pub(super) fn serve_file_op(&mut self, token: Token, id: u64, op: FileOp) {
+        // An upgrade waiting for those under way would wait for this too.
+        if self.upgrade_to.is_some() {
+            let outcome = Err(FileOpError::Failed(
+                "the daemon is upgrading to a new build: try again in a moment".to_owned(),
+            ));
+            self.send_event(token, Event::FileOp { id, outcome });
+            return;
+        }
         let trash = self.config.trash.clone();
         let ticket = self.explorers.next_ticket;
         self.explorers.next_ticket += 1;
@@ -1121,12 +1136,37 @@ impl Daemon {
         };
         workers.operate(ticket, op, trash, open);
         self.explorers.ops.insert(ticket, (token, id));
+        self.explorers.running += 1;
+    }
+
+    /// Before an upgrade allowed to wait until `until`: whether, at `now`,
+    /// it waits for file operations under way, or why it's refused, as
+    /// they're still going past then.
+    ///
+    /// An upgrade execs the next build, which stops every thread where it
+    /// is: a copy would be left half made beside where it was going, and a
+    /// move between file systems in both places. Once every operation has
+    /// finished, each has put its copy in place or taken it away.
+    pub(super) fn file_ops_hold_upgrade(
+        &self,
+        until: Instant,
+        now: Instant,
+    ) -> Result<bool, String> {
+        match self.explorers.running {
+            0 => Ok(false),
+            _ if now < until => Ok(true),
+            1 => Err("a file operation is still running: try again when it's done".to_owned()),
+            running => Err(format!(
+                "{running} file operations are still running: try again when they're done"
+            )),
+        }
     }
 
     /// Takes how the file operation numbered `ticket` went: has buffers
     /// follow what it moved, even if it went wrong partway, and what it
     /// wrote over, and tells the client that asked.
     fn operated(&mut self, ticket: u64, changed: Changed, outcome: Result<(), FileOpError>) {
+        self.explorers.running = self.explorers.running.saturating_sub(1);
         let replaced = (changed.replaced.as_deref()).and_then(|path| self.buffer_at(path));
         let mut moved_onto = None;
         for follow in changed.follow {
@@ -1288,6 +1328,77 @@ mod tests {
         );
         assert!(!ignored("/p", Some("new.rs")), "not listed yet");
         assert!(!ignored("/p", None));
+    }
+
+    /// The names in `dir`, in order.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = (std::fs::read_dir(dir).unwrap().flatten())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn an_upgrade_waits_for_file_operations_so_none_is_cut_short() {
+        use crate::server::{UPGRADE_OPS_WAIT, Upgrading};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let files = dir.path().canonicalize().unwrap().join("files");
+        std::fs::create_dir_all(files.join("from/sub")).unwrap();
+        for file in 0..50 {
+            let path = files.join(format!("from/sub/{file}.txt"));
+            std::fs::write(path, [b'x'; 4096]).unwrap();
+        }
+        let copy = |to: &str| FileOp::Copy {
+            from: files.join("from").display().to_string(),
+            to: files.join(to).display().to_string(),
+            overwrite: None,
+            expect: None,
+        };
+        let asker = Token(1000);
+        let upgrading = || Upgrading {
+            executable: PathBuf::from("/next/clackatoo"),
+            token: Token(1001),
+            until: Instant::now() + UPGRADE_OPS_WAIT,
+        };
+        // A copy under way, held as a long one would be.
+        let release = daemon.files_workers().unwrap().hold_ops();
+        daemon.serve_file_op(asker, 1, copy("to"));
+        daemon.upgrade_to = Some(upgrading());
+        assert!(daemon.upgrade_when_ready().unwrap().is_none());
+        assert!(daemon.upgrade_to.is_some(), "it waits");
+        // Asked meanwhile, a file operation isn't started.
+        daemon.serve_file_op(asker, 2, copy("late"));
+        assert_eq!(daemon.explorers.running, 1);
+        // Past its time, it's refused, saying why.
+        let now = Instant::now();
+        assert_eq!(
+            daemon.file_ops_hold_upgrade(now, now),
+            Err("a file operation is still running: try again when it's done".to_owned())
+        );
+        daemon.upgrade_to.as_mut().unwrap().until = now;
+        assert!(daemon.upgrade_when_ready().unwrap().is_none());
+        assert!(daemon.upgrade_to.is_none(), "refused");
+        // Asked again, it goes ahead once the copy is done, and not before.
+        daemon.upgrade_to = Some(upgrading());
+        drop(release);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let upgrade = loop {
+            daemon.explore();
+            let running = daemon.explorers.running;
+            if let Some(upgrade) = daemon.upgrade_when_ready().unwrap() {
+                assert_eq!(running, 0);
+                break upgrade;
+            }
+            assert!(Instant::now() < deadline, "the copy never finished");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        // The copy is whole and in place, with nothing half made beside it.
+        assert_eq!(names(&files), ["from", "to"]);
+        assert_eq!(names(&files.join("to/sub")).len(), 50);
+        drop(upgrade);
     }
 
     #[test]

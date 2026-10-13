@@ -111,6 +111,22 @@ const UPGRADE_BOARDS_WAIT: Duration = Duration::from_secs(10);
 /// of a new path at once.
 const CLOSING_WAIT: Duration = Duration::from_millis(500);
 
+/// The longest an upgrade waits for file operations under way to finish,
+/// before it's refused: short of how long `clackatoo upgrade` waits to
+/// hear back, so it hears why.
+const UPGRADE_OPS_WAIT: Duration = Duration::from_secs(3);
+
+/// An upgrade a client asked for, waiting to go ahead.
+#[derive(Debug)]
+struct Upgrading {
+    /// The program the daemon is to become.
+    executable: PathBuf,
+    /// The client that asked.
+    token: Token,
+    /// The longest it waits for file operations under way to finish.
+    until: Instant,
+}
+
 /// What a token refers to.
 #[derive(Debug)]
 enum Source {
@@ -518,9 +534,9 @@ pub struct Daemon {
     damage: Damage,
     config: DaemonConfig,
     buffer: Box<[u8]>,
-    /// A client asked the daemon to become this program: see
-    /// [`ClientMessage::Upgrade`]. The client's token.
-    upgrade_to: Option<(PathBuf, Token)>,
+    /// A client asked the daemon to become another program: see
+    /// [`ClientMessage::Upgrade`].
+    upgrade_to: Option<Upgrading>,
     /// The arguments an upgrade runs the next build with. Without them,
     /// the daemon can't upgrade.
     upgrade_args: Vec<std::ffi::OsString>,
@@ -813,32 +829,8 @@ impl Daemon {
     pub fn run(&mut self) -> io::Result<Option<Upgrade>> {
         let mut events = Events::with_capacity(256);
         while !self.shutdown.load(Ordering::Acquire) {
-            if let Some((executable, token)) = self.upgrade_to.take() {
-                // Every change to the boards is on disk, and their lock let
-                // go of, before there's no way back.
-                if let Err(reason) = self.prepare_boards_for_upgrade(UPGRADE_BOARDS_WAIT) {
-                    log::warn!("not upgrading: {reason}");
-                    self.refuse_upgrade(token, reason);
-                    continue;
-                }
-                // The client that asked hears how it went: its connection
-                // closes as the new build starts, or says why it didn't.
-                self.close_remotes("the daemon is upgrading to a new build");
-                let requester = match self.sources.try_remove(token.0) {
-                    Some(Source::Client(Client {
-                        link: Link::Unix(mut stream),
-                        ..
-                    })) => {
-                        let _ = self.poll.registry().deregister(&mut stream);
-                        Some(stream)
-                    }
-                    _ => None,
-                };
-                return Ok(Some(Upgrade {
-                    executable,
-                    handover: self.hand_over()?,
-                    requester,
-                }));
+            if let Some(upgrade) = self.upgrade_when_ready()? {
+                return Ok(Some(upgrade));
             }
             // With output still waiting, poll without blocking so it gets read
             // right after anything else that's ready. Otherwise wait for the
@@ -865,6 +857,7 @@ impl Daemon {
                         .chain(rewatch)
                         .chain(reviews)
                         .chain(self.next_agent_due())
+                        .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
                         .min();
                     next.map(|due| due.saturating_duration_since(Instant::now()))
                 } else {
@@ -920,6 +913,56 @@ impl Daemon {
         self.abandon_renames();
         self.stop_boards();
         Ok(None)
+    }
+
+    /// The upgrade a client asked for, if it's to go ahead now: once file
+    /// operations under way have finished, and the boards are written.
+    /// Until then, or refused, the daemon carries on.
+    fn upgrade_when_ready(&mut self) -> io::Result<Option<Upgrade>> {
+        let Some(upgrading) = self.upgrade_to.take() else {
+            return Ok(None);
+        };
+        match self.file_ops_hold_upgrade(upgrading.until, Instant::now()) {
+            Ok(false) => {}
+            // Asked again when one finishes, or at the time.
+            Ok(true) => {
+                self.upgrade_to = Some(upgrading);
+                return Ok(None);
+            }
+            Err(reason) => {
+                log::warn!("not upgrading: {reason}");
+                self.refuse_upgrade(upgrading.token, reason);
+                return Ok(None);
+            }
+        }
+        let Upgrading {
+            executable, token, ..
+        } = upgrading;
+        // Every change to the boards is on disk, and their lock let go of,
+        // before there's no way back.
+        if let Err(reason) = self.prepare_boards_for_upgrade(UPGRADE_BOARDS_WAIT) {
+            log::warn!("not upgrading: {reason}");
+            self.refuse_upgrade(token, reason);
+            return Ok(None);
+        }
+        // The client that asked hears how it went: its connection closes
+        // as the new build starts, or says why it didn't.
+        self.close_remotes("the daemon is upgrading to a new build");
+        let requester = match self.sources.try_remove(token.0) {
+            Some(Source::Client(Client {
+                link: Link::Unix(mut stream),
+                ..
+            })) => {
+                let _ = self.poll.registry().deregister(&mut stream);
+                Some(stream)
+            }
+            _ => None,
+        };
+        Ok(Some(Upgrade {
+            executable,
+            handover: self.hand_over()?,
+            requester,
+        }))
     }
 
     /// Tells the client at `token`, which asked the daemon to upgrade,
@@ -1556,7 +1599,11 @@ impl Daemon {
                     match self.check_upgrade(local, protocol_version, &executable) {
                         Ok(()) => {
                             // The connection closes as the daemon upgrades.
-                            self.upgrade_to = Some((executable, token));
+                            self.upgrade_to = Some(Upgrading {
+                                executable,
+                                token,
+                                until: Instant::now() + UPGRADE_OPS_WAIT,
+                            });
                             return;
                         }
                         Err(reason) => {
@@ -2111,6 +2158,16 @@ impl Daemon {
     /// telling one over QUIC `why`.
     fn drop_client_saying(&mut self, token: Token, why: &str) {
         if let Some(Source::Client(client)) = self.sources.try_remove(token.0) {
+            // An upgrade it asked for, still waiting, is given up: no one
+            // is left to hear how it went, and its token may be another
+            // client's next.
+            if self
+                .upgrade_to
+                .take_if(|upgrading| upgrading.token == token)
+                .is_some()
+            {
+                log::info!("not upgrading: the client that asked has gone");
+            }
             self.forget_viewer(token, &client);
             self.forget_clipboard_asks(token, None);
             for slot in self.terminals.values_mut() {
