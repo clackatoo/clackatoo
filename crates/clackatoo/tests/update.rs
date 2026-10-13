@@ -130,13 +130,13 @@ fn update_installs_a_signed_release_and_rollback_goes_back() {
     let key = Key::new();
     let mut releases = Releases::new();
     releases.serve_over_http();
-    releases.publish(&Fake::new("2026.10.1", &key), true);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
     let installed = Installed::new();
 
     let check = installed.update(&["--check"], &releases, &key);
     assert!(check.status.success(), "{check:?}");
     assert!(
-        stdout(&check).contains("clackatoo 2026.10.1 is out"),
+        stdout(&check).contains("clackatoo 9999.1.0 is out"),
         "{check:?}"
     );
     assert!(is_the_build(&installed.program()));
@@ -144,11 +144,11 @@ fn update_installs_a_signed_release_and_rollback_goes_back() {
     let update = installed.update(&[], &releases, &key);
     assert!(update.status.success(), "{update:?}");
     let said = stdout(&update);
-    assert!(said.contains("installed clackatoo 2026.10.1"), "{said}");
+    assert!(said.contains("installed clackatoo 9999.1.0"), "{said}");
     assert!(said.contains("no daemon is running"), "{said}");
     assert_eq!(
         std::fs::read(installed.program()).unwrap(),
-        clackatoo_update::fake::program("2026.10.1")
+        clackatoo_update::fake::program("9999.1.0")
     );
     assert!(is_the_build(&installed.previous()));
 
@@ -168,7 +168,7 @@ fn update_installs_a_signed_release_and_rollback_goes_back() {
     assert!(is_the_build(&installed.program()));
     assert_eq!(
         std::fs::read(installed.previous()).unwrap(),
-        clackatoo_update::fake::program("2026.10.1")
+        clackatoo_update::fake::program("9999.1.0")
     );
 }
 
@@ -177,7 +177,7 @@ fn update_refuses_a_release_not_signed_with_the_release_key() {
     let key = Key::new();
     let stranger = Key::new();
     let releases = Releases::new();
-    releases.publish(&Fake::new("2026.10.1", &stranger), true);
+    releases.publish(&Fake::new("9999.1.0", &stranger), true);
     let installed = Installed::new();
 
     let update = installed.update(&[], &releases, &key);
@@ -194,7 +194,7 @@ fn update_refuses_a_release_not_signed_with_the_release_key() {
 fn update_refuses_a_build_that_isnt_what_the_checksums_say() {
     let key = Key::new();
     let releases = Releases::new();
-    let mut fake = Fake::new("2026.10.1", &key);
+    let mut fake = Fake::new("9999.1.0", &key);
     fake.wrong_sum = true;
     releases.publish(&fake, true);
     let installed = Installed::new();
@@ -212,7 +212,7 @@ fn update_refuses_a_build_that_isnt_what_the_checksums_say() {
 fn update_says_when_this_is_the_latest_and_goes_to_a_version_asked_for() {
     let key = Key::new();
     let releases = Releases::new();
-    releases.publish(&Fake::new("2026.10.1", &key), false);
+    releases.publish(&Fake::new("9999.1.0", &key), false);
     releases.publish(&Fake::new(env!("CARGO_PKG_VERSION"), &key), true);
     let installed = Installed::new();
 
@@ -235,10 +235,10 @@ fn update_says_when_this_is_the_latest_and_goes_to_a_version_asked_for() {
         "{nightly:?}"
     );
 
-    let to = installed.update(&["--to", "2026.10.1"], &releases, &key);
+    let to = installed.update(&["--to", "9999.1.0"], &releases, &key);
     assert!(to.status.success(), "{to:?}");
     assert!(
-        stdout(&to).contains("installed clackatoo 2026.10.1"),
+        stdout(&to).contains("installed clackatoo 9999.1.0"),
         "{to:?}"
     );
 }
@@ -263,7 +263,7 @@ impl Drop for Runtime {
 fn update_moves_the_daemon_onto_the_new_build() {
     let key = Key::new();
     let releases = Releases::new();
-    releases.publish(&Fake::new("2026.10.1", &key), true);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
     let installed = Installed::new();
     let runtime = tempfile::Builder::new()
         .prefix("ck")
@@ -299,7 +299,7 @@ fn update_moves_the_daemon_onto_the_new_build() {
     // The fake build says it was asked to upgrade the daemon: the new
     // build does it, not the old one updating.
     assert!(
-        stdout(&update).contains("clackatoo 2026.10.1 ran upgrade"),
+        stdout(&update).contains("clackatoo 9999.1.0 ran upgrade"),
         "{update:?}"
     );
 }
@@ -308,7 +308,7 @@ fn update_moves_the_daemon_onto_the_new_build() {
 fn update_refreshes_the_launchers_entry_with_the_new_build_if_clackatoo_wrote_it() {
     let key = Key::new();
     let releases = Releases::new();
-    releases.publish(&Fake::new("2026.10.1", &key), true);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
     let installed = Installed::new();
     let install = installed.run(
         &installed.program(),
@@ -329,7 +329,7 @@ fn update_refreshes_the_launchers_entry_with_the_new_build_if_clackatoo_wrote_it
     let update = installed.update(&[], &releases, &key);
     assert!(update.status.success(), "{update:?}");
     assert!(
-        stdout(&update).contains("clackatoo 2026.10.1 ran desktop refresh"),
+        stdout(&update).contains("clackatoo 9999.1.0 ran desktop refresh"),
         "{update:?}"
     );
 
@@ -356,7 +356,7 @@ fn update_refreshes_the_launchers_entry_with_the_new_build_if_clackatoo_wrote_it
 fn update_leaves_a_launchers_entry_clackatoo_didnt_write() {
     let key = Key::new();
     let releases = Releases::new();
-    releases.publish(&Fake::new("2026.10.1", &key), true);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
     let installed = Installed::new();
     let handmade = "[Desktop Entry]\nType=Application\nName=clackatoo\nExec=/src/clackatoo\n";
     std::fs::create_dir_all(installed.desktop_entry().parent().unwrap()).unwrap();

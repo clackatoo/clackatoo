@@ -39,18 +39,18 @@ fn a_signed_release_is_installed_and_the_old_build_kept() {
     let key = Key::new();
     let releases = Releases::new();
     releases.publish(&Fake::new("2026.10.0", &key), false);
-    releases.publish(&Fake::new("2026.10.1", &key), true);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
     let (dir, target) = installed("2026.9.4");
 
     let release = releases.source().latest(Channel::Stable).unwrap();
-    assert_eq!(release.version, "2026.10.1".parse().unwrap());
+    assert_eq!(release.version, "9999.1.0".parse().unwrap());
     assert!(release.notes.contains("- fake"));
     assert_eq!(
         update(&releases.source(), &key.public(), &target).unwrap(),
         release.version
     );
 
-    assert_eq!(std::fs::read(&target).unwrap(), program("2026.10.1"));
+    assert_eq!(std::fs::read(&target).unwrap(), program("9999.1.0"));
     let mode = std::fs::metadata(&target).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755);
     assert_eq!(
@@ -70,7 +70,7 @@ fn a_signed_release_is_installed_and_the_old_build_kept() {
     assert_eq!(std::fs::read(&target).unwrap(), program("2026.10.0"));
     assert_eq!(
         std::fs::read(install::previous(&target)).unwrap(),
-        program("2026.10.1")
+        program("9999.1.0")
     );
 }
 
@@ -78,7 +78,7 @@ fn a_signed_release_is_installed_and_the_old_build_kept() {
 fn rolling_back_swaps_the_builds_and_again_swaps_them_back() {
     let key = Key::new();
     let releases = Releases::new();
-    releases.publish(&Fake::new("2026.10.1", &key), true);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
     let (_dir, target) = installed("2026.10.0");
     assert!(matches!(
         install::rollback(&target),
@@ -90,10 +90,10 @@ fn rolling_back_swaps_the_builds_and_again_swaps_them_back() {
     assert_eq!(std::fs::read(&target).unwrap(), program("2026.10.0"));
     assert_eq!(
         std::fs::read(install::previous(&target)).unwrap(),
-        program("2026.10.1")
+        program("9999.1.0")
     );
     install::rollback(&target).unwrap();
-    assert_eq!(std::fs::read(&target).unwrap(), program("2026.10.1"));
+    assert_eq!(std::fs::read(&target).unwrap(), program("9999.1.0"));
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn a_release_signed_with_another_key_is_refused() {
     let key = Key::new();
     let stranger = Key::new();
     let releases = Releases::new();
-    releases.publish(&Fake::new("2026.10.1", &stranger), true);
+    releases.publish(&Fake::new("9999.1.0", &stranger), true);
     let (dir, target) = installed("2026.10.0");
 
     let err = update(&releases.source(), &key.public(), &target).unwrap_err();
@@ -116,13 +116,13 @@ fn an_old_release_served_under_a_new_tag_is_refused_before_it_runs() {
     let releases = Releases::new();
     let ran = tempfile::tempdir().unwrap();
     let marker = ran.path().join("ran");
-    // Release 2026.10.0, signed in its day, served as 2026.10.1: the files
+    // Release 2026.10.0, signed in its day, served as 9999.1.0: the files
     // and signature are good, but the signature names 2026.10.0. A
     // program that notes if it's ever run, to show it isn't.
-    let mut replayed = Fake::new("2026.10.1", &key);
+    let mut replayed = Fake::new("9999.1.0", &key);
     replayed.signed_as = Some("2026.10.0");
     replayed.program = format!(
-        "#!/bin/sh\ntouch {}\necho \"clackatoo 2026.10.1 (fake 2026-10-13)\"\n",
+        "#!/bin/sh\ntouch {}\necho \"clackatoo 9999.1.0 (fake 2026-10-13)\"\n",
         marker.display()
     )
     .into_bytes();
@@ -138,8 +138,8 @@ fn an_old_release_served_under_a_new_tag_is_refused_before_it_runs() {
     assert_eq!(std::fs::read(&target).unwrap(), program("2026.10.0"));
     assert_eq!(files_in(dir.path()), ["clackatoo"]);
     assert_eq!(
-        verify::trusted_comment("2026.10.1".parse().unwrap()),
-        "clackatoo v2026.10.1"
+        verify::trusted_comment("9999.1.0".parse().unwrap()),
+        "clackatoo v9999.1.0"
     );
 }
 
@@ -147,8 +147,8 @@ fn an_old_release_served_under_a_new_tag_is_refused_before_it_runs() {
 fn a_signature_that_was_tampered_with_is_refused() {
     let key = Key::new();
     let releases = Releases::new();
-    releases.publish(&Fake::new("2026.10.1", &key), true);
-    let sums = releases.path().join("assets/v2026.10.1").join(SUMS);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
+    let sums = releases.path().join("assets/v9999.1.0").join(SUMS);
     // A line added to the checksums after signing.
     let text = std::fs::read_to_string(&sums).unwrap();
     std::fs::write(
@@ -161,7 +161,7 @@ fn a_signature_that_was_tampered_with_is_refused() {
     let err = update(&releases.source(), &key.public(), &target).unwrap_err();
     assert!(matches!(err, Error::BadSignature(_)), "{err}");
     // So is a signature that isn't one.
-    let signature = releases.path().join("assets/v2026.10.1").join(SIGNATURE);
+    let signature = releases.path().join("assets/v9999.1.0").join(SIGNATURE);
     std::fs::write(&signature, "untrusted comment: no\nnonsense\n").unwrap();
     let err = update(&releases.source(), &key.public(), &target).unwrap_err();
     assert!(matches!(err, Error::BadSignature(_)), "{err}");
@@ -172,7 +172,7 @@ fn a_signature_that_was_tampered_with_is_refused() {
 fn a_build_that_isnt_what_the_signed_checksums_say_is_refused() {
     let key = Key::new();
     let releases = Releases::new();
-    let mut fake = Fake::new("2026.10.1", &key);
+    let mut fake = Fake::new("9999.1.0", &key);
     fake.wrong_sum = true;
     releases.publish(&fake, true);
     let (dir, target) = installed("2026.10.0");
@@ -183,12 +183,12 @@ fn a_build_that_isnt_what_the_signed_checksums_say_is_refused() {
     assert_eq!(files_in(dir.path()), ["clackatoo"]);
 
     // And a build swapped after the release was signed.
-    releases.publish(&Fake::new("2026.10.1", &key), true);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
     let build = releases
         .path()
-        .join("assets/v2026.10.1")
+        .join("assets/v9999.1.0")
         .join(verify::build_name());
-    std::fs::write(&build, gzip(&program("2026.10.1 evil"))).unwrap();
+    std::fs::write(&build, gzip(&program("9999.1.0 evil"))).unwrap();
     let err = update(&releases.source(), &key.public(), &target).unwrap_err();
     assert!(matches!(err, Error::BadChecksum(_)), "{err}");
 }
@@ -197,7 +197,7 @@ fn a_build_that_isnt_what_the_signed_checksums_say_is_refused() {
 fn a_build_that_wont_run_or_says_another_version_is_not_installed() {
     let key = Key::new();
     let releases = Releases::new();
-    let mut fake = Fake::new("2026.10.1", &key);
+    let mut fake = Fake::new("9999.1.0", &key);
     fake.program = program("2026.10.7");
     releases.publish(&fake, true);
     let (dir, target) = installed("2026.10.0");
@@ -218,7 +218,7 @@ fn a_build_that_wont_run_or_says_another_version_is_not_installed() {
 fn a_release_without_a_build_for_this_machine_or_a_version_that_doesnt_exist() {
     let key = Key::new();
     let releases = Releases::new();
-    let mut fake = Fake::new("2026.10.1", &key);
+    let mut fake = Fake::new("9999.1.0", &key);
     fake.no_build = true;
     releases.publish(&fake, true);
     let release = releases.source().latest(Channel::Stable).unwrap();
@@ -242,11 +242,11 @@ fn releases_are_fetched_over_http() {
     let key = Key::new();
     let mut releases = Releases::new();
     releases.serve_over_http();
-    releases.publish(&Fake::new("2026.10.1", &key), true);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
     let (_dir, target) = installed("2026.10.0");
 
     update(&releases.source(), &key.public(), &target).unwrap();
-    assert_eq!(std::fs::read(&target).unwrap(), program("2026.10.1"));
+    assert_eq!(std::fs::read(&target).unwrap(), program("9999.1.0"));
     let err = releases
         .source()
         .version("2026.9.0".parse().unwrap())
@@ -258,18 +258,18 @@ fn releases_are_fetched_over_http() {
 fn a_directory_is_a_source_too() {
     let key = Key::new();
     let releases = Releases::new();
-    releases.publish(&Fake::new("2026.10.1", &key), true);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
     let source = Source::new(releases.path().to_str().unwrap());
     assert_eq!(source, releases.source());
     let release = source.latest(Channel::Stable).unwrap();
-    assert_eq!(release.version, "2026.10.1".parse().unwrap());
+    assert_eq!(release.version, "9999.1.0".parse().unwrap());
 }
 
 #[test]
 fn the_window_looks_for_a_release_at_most_once_a_day() {
     let key = Key::new();
     let releases = Releases::new();
-    releases.publish(&Fake::new("2026.10.1", &key), true);
+    releases.publish(&Fake::new("9999.1.0", &key), true);
     let state_dir = tempfile::tempdir().unwrap();
     let state = state_dir.path().join("clackatoo/update-check");
     let now = SystemTime::now();
@@ -277,12 +277,12 @@ fn the_window_looks_for_a_release_at_most_once_a_day() {
 
     assert_eq!(
         newer(&releases.source(), now).unwrap(),
-        Some("2026.10.1".parse().unwrap())
+        Some("9999.1.0".parse().unwrap())
     );
     assert!(
         std::fs::read_to_string(&state)
             .unwrap()
-            .contains("latest 2026.10.1")
+            .contains("latest 9999.1.0")
     );
 
     // Within the day, what was found is said again, without asking.
@@ -290,7 +290,7 @@ fn the_window_looks_for_a_release_at_most_once_a_day() {
     let later = now + Duration::from_hours(23);
     assert_eq!(
         newer(&gone, later).unwrap(),
-        Some("2026.10.1".parse().unwrap())
+        Some("9999.1.0".parse().unwrap())
     );
 
     // A day on, it asks again. Failing is noted, so the next window that
@@ -300,7 +300,7 @@ fn the_window_looks_for_a_release_at_most_once_a_day() {
     let soon_after = tomorrow + Duration::from_mins(1);
     assert_eq!(
         newer(&gone, soon_after).unwrap(),
-        Some("2026.10.1".parse().unwrap())
+        Some("9999.1.0".parse().unwrap())
     );
 
     // A newer release, found the next day.
