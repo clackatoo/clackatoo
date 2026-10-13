@@ -250,7 +250,7 @@ impl Daemon {
                 Some(root) => Project::Root(root.to_owned()),
                 None => Project::Dir(home.clone()),
             },
-            Some(Content::Terminal(_)) => {
+            Some(Content::Terminal(_) | Content::Browser(_)) => {
                 let dir = pane.and_then(|pane| self.working_directory(pane));
                 Project::Dir(dir.map_or_else(|| home.clone(), PathBuf::from))
             }

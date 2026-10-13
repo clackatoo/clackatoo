@@ -165,6 +165,7 @@ impl TestDaemon {
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             boards: None,
+            browser: None,
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let shutdown = daemon.shutdown_handle();

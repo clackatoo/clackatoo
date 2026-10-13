@@ -167,6 +167,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "wrap",
         what: "w, f, % and other motions and text objects work on lines of any length, as a minified file's",
     },
+    News {
+        id: "browser",
+        date: "2026-10-13",
+        lesson: "agents",
+        what: "With a chat's Browser setting on, its agent drives a browser you watch in a pane",
+    },
 ];
 
 impl News {

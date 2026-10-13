@@ -449,7 +449,7 @@ mod tests {
             .unwrap();
         ours.set_nonblocking(true).unwrap();
         let stream = mio::net::UnixStream::from_std(ours);
-        let connection = Connection::new(stream, chat, Vec::new(), String::new());
+        let connection = Connection::new(stream, chat, Vec::new(), (String::new(), false));
         let token = Token(daemon.sources.insert(Source::Tools(connection)));
         daemon.tools.waiting.push(Waiting {
             token,

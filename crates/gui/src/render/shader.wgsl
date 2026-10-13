@@ -133,3 +133,29 @@ fn glyph_fs(in: GlyphOut) -> @location(0) vec4<f32> {
     // A shape: the atlas holds its coverage, and the text colour fills it.
     return in.color * texel.a;
 }
+
+// A picture, such as a page in a browser pane: its own texture, bound in
+// the atlas's place, stretched over its quad, opaque.
+struct ImageOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn image_vs(
+    @builtin(vertex_index) vertex: u32,
+    @location(0) origin: vec2<f32>,
+    @location(1) size: vec2<f32>,
+) -> ImageOut {
+    let at = corner(vertex);
+    var out: ImageOut;
+    out.position = to_clip(origin + at * size);
+    out.uv = at;
+    return out;
+}
+
+@fragment
+fn image_fs(in: ImageOut) -> @location(0) vec4<f32> {
+    let texel = textureSample(atlas, atlas_sampler, in.uv);
+    return vec4<f32>(texel.rgb, 1.0);
+}

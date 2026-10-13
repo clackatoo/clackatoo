@@ -56,6 +56,12 @@ Each subagent starts as a profile, which gives it a role, limits, and an agent a
 
 Add your own, or change these, in the daemon's `agents.toml`, under `[profiles.NAME]`. Claude Code's own Task tool, whose helpers you don't see, is off unless you `:set claudetask`.
 
+## The browser
+
+A chat's agent can drive a web page once you turn on its **Browser** setting, from the chip along the box's bottom, or for every new chat with `:set chatbrowser`. It opens pages, reads them as an outline of headings, links, buttons and text boxes, clicks, types and takes pictures, each a tool call you see in the chat. Before its first page, it asks.
+
+The browser is clackatoo's own, headless, with a profile of its own: never your browser, and never logged in as you. Each chat's page is kept apart from the others'. Its first page opens in a pane beside the chat, where you watch it as it goes; `:|Browser` opens the focused chat's page beside it, and `q` closes the pane.
+
 ## Try a chat
 
 Only if you'd like to, and are happy for it to use your agent: press Ctrl+B and then `a` to open a chat beside the practice file. The first chat starts the agent, which takes a second or two, and may first ask to install the agent's adapter. Otherwise, press `]s`.

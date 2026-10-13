@@ -35,7 +35,8 @@ use crate::input;
 use crate::layout::{Placement, Tile};
 use crate::pane::{Copy, Mode};
 use crate::render::{
-    self, CursorStyle, Fill, Highlight, PADDING, Paint, Picture, Renderer, Scene, SceneCursor,
+    self, CursorStyle, Fill, Highlight, PADDING, Paint, Picture, PlacedImage, Renderer, Scene,
+    SceneCursor,
 };
 use crate::screen::Screen;
 use crate::session::{Location, Session, SessionEvent};
@@ -1638,6 +1639,7 @@ impl App {
                     texts: &texts,
                     glyphs: &[],
                     over_glyphs: &[],
+                    images: &[],
                     transparent,
                 },
             );
@@ -1646,11 +1648,13 @@ impl App {
 
     /// Draws the frame and the shown tab's panes. Returns the terminals
     /// drawn, or `None` if the frame wasn't shown.
+    #[allow(clippy::too_many_lines, reason = "each layer of the frame in turn")]
     fn draw_panes(&mut self, chrome: &Chrome) -> Option<Vec<TerminalId>> {
         let (chats, chat_paint) = self.paint_chats(chrome);
         self.desk.settle_editors();
         self.desk.settle_explorers();
         self.desk.settle_boards();
+        self.desk.settle_browsers();
         let geometry = &chrome.geometry;
         let desk = &self.desk;
         let shown = desk.shown()?;
@@ -1668,6 +1672,7 @@ impl App {
         ));
         fills.extend(chat_paint.fills);
         let drawings = drawings(desk, self.focused, &placement, &layout_panes, shown.pane);
+        let images = browser_images(desk, &placement, &layout_panes, geometry.area.cell);
         let focused = drawings.iter().find(|drawing| drawing.focused);
         let cell = geometry.area.cell;
         let target = desk.text_goes_to();
@@ -1739,6 +1744,7 @@ impl App {
             texts: &texts,
             glyphs: &chat_paint.glyphs,
             over_glyphs: &chat_paint.over_glyphs,
+            images: &images,
             transparent,
         };
         let frame = self.frame.as_mut()?;
@@ -1825,6 +1831,46 @@ fn list_drawing(
     }
 }
 
+/// The pictures of pages the shown tab's browser panes show, each under
+/// its pane's words, as big as fits in proportion, with cells `cell`
+/// pixels.
+fn browser_images<'a>(
+    desk: &'a Desk,
+    placement: &Placement,
+    panes: &[LayoutPane],
+    cell: [f32; 2],
+) -> Vec<PlacedImage<'a>> {
+    let mut images = Vec::new();
+    for &(id, tile) in &placement.panes {
+        let showing = panes.iter().find(|pane| pane.id == id);
+        if !showing.is_some_and(|pane| matches!(pane.content, Content::Browser(_))) {
+            continue;
+        }
+        let Some(image) = desk
+            .browser(id)
+            .and_then(crate::browser::BrowserPane::image)
+        else {
+            continue;
+        };
+        let words = f32::from(crate::browser::STATUS_ROWS) * cell[1];
+        let [width, height] = tile.cells_size(cell);
+        let area = [
+            tile.origin[0],
+            tile.origin[1] + words,
+            width,
+            height - words,
+        ];
+        if let Some(rect) = crate::browser::fit([image.width, image.height], area) {
+            images.push(PlacedImage {
+                slot: u64::from(id.0),
+                rect,
+                image,
+            });
+        }
+    }
+    images
+}
+
 /// What each of the shown tab's terminals draws, as `placement` lays out
 /// `panes`, `focused` having the focus, and the window having it if
 /// `window_focused`.
@@ -1899,6 +1945,13 @@ fn drawings<'a>(
             Content::Review(_) => {
                 if let Some(review) = desk.review(id) {
                     let shown = (review.scene(), review.highlights());
+                    drawings.push(list_drawing(tile, shown, (has_focus, window_focused)));
+                }
+                continue;
+            }
+            Content::Browser(_) => {
+                if let Some(browser) = desk.browser(id) {
+                    let shown = ((browser.scene(), None), Vec::new());
                     drawings.push(list_drawing(tile, shown, (has_focus, window_focused)));
                 }
                 continue;
@@ -2577,6 +2630,7 @@ impl App {
         let redraw = match event {
             Event::Board { .. } => self.desk.board_event(event),
             Event::Review { .. } => self.desk.review_event(event),
+            Event::Browser { .. } => self.desk.browser_event(event),
             event => self.desk.explorer_event(event),
         };
         if redraw {
@@ -2721,8 +2775,14 @@ impl App {
                 event @ (Event::Files { .. }
                 | Event::FileOp { .. }
                 | Event::Board { .. }
-                | Event::Review { .. }),
+                | Event::Review { .. }
+                | Event::Browser { .. }),
             )) => self.explorer_event(event),
+            SessionEvent::BrowserPicture { chat, image } => {
+                if self.desk.browser_picture(chat, &image) {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Message(ServerMessage::Event(Event::Workspaces(workspaces))) => {
                 self.desk.workspaces_changed(workspaces);
                 self.update_title();

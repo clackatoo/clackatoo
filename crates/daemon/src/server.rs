@@ -55,6 +55,7 @@ use crate::workspaces::WorkspaceState;
 
 mod agent_files;
 mod boards;
+mod browser;
 mod buffers;
 mod chats;
 mod clipboard;
@@ -304,6 +305,9 @@ struct Client {
     /// What programs put on the clipboard for the client, waiting for it
     /// to catch up.
     clipboard: clipboard::Unsent,
+    /// The latest picture of each chat's page the client is attached to
+    /// that it hasn't been sent, waiting for it to catch up.
+    browser_frames: BTreeMap<TerminalId, Arc<Vec<u8>>>,
     /// The window the client is, as it said when attaching to a buffer:
     /// see [`Request::AttachBuffer`].
     window: Option<u64>,
@@ -332,6 +336,7 @@ impl Client {
             serving_tools: None,
             streams: BTreeMap::new(),
             clipboard: clipboard::Unsent::default(),
+            browser_frames: BTreeMap::new(),
             window: None,
         }
     }
@@ -515,6 +520,8 @@ pub struct Daemon {
     disk: disk::Disk,
     /// What agents changed and the user hasn't reviewed, and reviews.
     reviews: review::Reviews,
+    /// Chats' pages in clackatoo's browser, and the windows watching them.
+    browsing: browser::Browsing,
     /// The QUIC endpoint, set up when a connection first carries QUIC.
     quic: Option<QuicServer>,
     /// What the QUIC endpoint last asked to be acted on.
@@ -622,6 +629,7 @@ impl Daemon {
             agent_files: agent_files::AgentFiles::default(),
             disk: disk::Disk::default(),
             reviews: review::Reviews::default(),
+            browsing: browser::Browsing::default(),
             quic: None,
             quic_events: Vec::new(),
             carriers_made: 0,
@@ -763,6 +771,7 @@ impl Daemon {
         // them. The boards' last changes are written, for it to read.
         self.stop_agents();
         self.stop_servers();
+        self.stop_browser();
         self.stop_boards();
         let orphan_tokens: Vec<usize> = (self.sources.iter())
             .filter(|(_, source)| matches!(source, Source::Orphan(_)))
@@ -826,6 +835,7 @@ impl Daemon {
     /// # Errors
     ///
     /// If waiting for events fails, which leaves the daemon unable to work.
+    #[allow(clippy::too_many_lines, reason = "the event loop: one call per chore")]
     pub fn run(&mut self) -> io::Result<Option<Upgrade>> {
         let mut events = Events::with_capacity(256);
         while !self.shutdown.load(Ordering::Acquire) {
@@ -903,7 +913,9 @@ impl Daemon {
             self.time_out_clipboard_asks();
             self.time_out_tools();
             self.relay_chats();
+            self.take_browser();
             self.send_clipboard_writes();
+            self.send_browser_frames();
             self.send_reviews();
             self.send_view_updates();
             self.transmit_quic();
@@ -912,6 +924,7 @@ impl Daemon {
         self.close_remotes("the daemon stopped");
         self.abandon_renames();
         self.stop_boards();
+        self.stop_browser();
         Ok(None)
     }
 
@@ -1405,6 +1418,12 @@ impl Daemon {
             PaneTerminal::Review(new) => {
                 return self.new_review(new, beside).map(Content::Review);
             }
+            PaneTerminal::Browser(chat) => {
+                return match self.chat_ref(chat) {
+                    Some(_) => Ok(Content::Browser(chat)),
+                    None => Err(Error::NotAChat(chat)),
+                };
+            }
         };
         Ok(Content::Terminal(terminal))
     }
@@ -1423,6 +1442,7 @@ impl Daemon {
             Content::Files(files) => Some(self.files_root(files)?.display().to_string()),
             Content::Board(_) => None,
             Content::Review(review) => Some(self.review_root_of(review)?.display().to_string()),
+            Content::Browser(chat) => Some(self.chat_ref(chat)?.working_directory().to_owned()),
         }
     }
 
@@ -1434,7 +1454,7 @@ impl Daemon {
                 Content::Terminal(terminal) => self.close_terminal(terminal)?,
                 Content::Buffer(buffer) => self.close_buffer_pane(pane.id, buffer),
                 Content::Files(files) => self.close_files_pane(pane.id, files),
-                Content::Board(_) => self.close_board_pane(pane.id),
+                Content::Board(_) | Content::Browser(_) => self.close_board_pane(pane.id),
                 Content::Review(review) => self.close_review_pane(pane.id, review),
             }
         }
@@ -1901,6 +1921,12 @@ impl Daemon {
             Request::Reload { buffer } => self.reload_buffer(buffer),
             Request::AttachReview { review } => self.attach_review(token, review),
             Request::DetachReview { review } => Ok(self.detach_review(token, review)),
+            Request::AttachBrowser {
+                chat,
+                width,
+                height,
+            } => Ok(self.attach_browser(token, chat, [width, height])),
+            Request::DetachBrowser { chat } => Ok(self.detach_browser(token, chat)),
             Request::Review(action) => self.serve_review(action),
             request @ (Request::Install { .. } | Request::Decline { .. }) => {
                 self.respond_about_installs(token, request);
@@ -1953,7 +1979,7 @@ impl Daemon {
                     self.close_files_pane(pane, files);
                     Ok(Response::Done)
                 }
-                Content::Board(_) => {
+                Content::Board(_) | Content::Browser(_) => {
                     self.close_board_pane(pane);
                     Ok(Response::Done)
                 }
@@ -2135,9 +2161,13 @@ impl Daemon {
             return;
         }
         let flushed = client.outgoing.is_empty();
-        // Writes to the clipboard wait for a client to catch up.
+        // Writes to the clipboard, and pictures of pages, wait for a
+        // client to catch up.
         if flushed && client.clipboard.any() {
             self.clipboard_unsent = true;
+        }
+        if flushed && !client.browser_frames.is_empty() {
+            self.browsing.frames_unsent = true;
         }
         // Over QUIC, closing the connection discards what's still to send,
         // so a client dropped for breaking the protocol may not hear why.
@@ -2184,6 +2214,7 @@ impl Daemon {
             self.forget_files_viewer(token);
             self.forget_board_viewer(token);
             self.forget_review_viewer(token);
+            self.forget_browser_viewer(token);
             self.forget_stages(token, None);
             self.forget_piece_questions(token, None);
             if let Link::Quic(handle) = client.link

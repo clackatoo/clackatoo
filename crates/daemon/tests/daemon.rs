@@ -73,6 +73,7 @@ impl TestDaemon {
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             rename_gate: None,
             boards: None,
+            browser: None,
             trash: Some(dir.path().join("trash")),
         };
         change(dir.path(), &mut config);
@@ -1472,6 +1473,7 @@ fn new_chat_with(agent: Option<&str>) -> PaneTerminal {
         agent: agent.map(str::to_owned),
         tools: AgentTools::Ask,
         task: true,
+        browser: false,
     })
 }
 
@@ -1722,8 +1724,9 @@ fn a_chat_starts_in_auto_mode_and_keeps_the_settings_chosen() {
     let node = wait_for_chat(&mut client, chat, |node| {
         node.settings.iter().any(|setting| setting.value == "auto")
     });
-    // The agent's two, and the chat's own for clackatoo's tools.
-    assert_eq!(node.settings.len(), 3);
+    // The agent's two, and the chat's own for clackatoo's tools and the
+    // browser.
+    assert_eq!(node.settings.len(), 4);
     assert_eq!(
         last_words(&ask(&mut client, chat, "settings")),
         "auto haiku\n"
@@ -1832,7 +1835,8 @@ fn a_codex_chat_shows_its_commands_output_and_its_own_settings() {
             "model",
             "reasoning_effort",
             "fast-mode",
-            "clackatoo.tools"
+            "clackatoo.tools",
+            "clackatoo.browser",
         ]
     );
     assert_eq!(
@@ -3447,7 +3451,8 @@ fn next_buffer_update(client: &mut Client) -> BufferUpdate {
             | Event::FileOp { .. }
             | Event::Show { .. }
             | Event::Board { .. }
-            | Event::Review { .. }) => {
+            | Event::Review { .. }
+            | Event::Browser { .. }) => {
                 panic!("expected a buffer update, got {other:?}")
             }
         }
@@ -7387,6 +7392,7 @@ fn start_tooled_chat(client: &mut Client, tools: AgentTools) -> TerminalId {
             agent: None,
             tools,
             task: true,
+            browser: false,
         },
     )
 }
@@ -7456,6 +7462,7 @@ fn claude_code_keeps_its_task_tool_unless_the_chat_starts_without_it() {
         agent: None,
         tools,
         task,
+        browser: false,
     };
     let allowed = serde_json::json!(["mcp__clackatoo"]);
     let disallowed = serde_json::json!(["Agent", "Task"]);
@@ -7933,6 +7940,7 @@ fn start_tooled_chat_in(client: &mut Client, tools: AgentTools, cwd: &Path) -> T
             agent: None,
             tools,
             task: true,
+            browser: false,
         },
     )
 }
@@ -8908,6 +8916,7 @@ fn a_real_haiku_chat_fans_out_to_two_explorers_and_gets_one_summary() {
             agent: None,
             tools: AgentTools::Allow,
             task: false,
+            browser: false,
         },
     );
     let prompt = "Call clackatoo's start_chats tool once, starting two chats with profile \
@@ -9410,6 +9419,7 @@ fn an_agent_is_told_when_to_hand_work_to_another_chat() {
             agent: None,
             tools: AgentTools::Ask,
             task: false,
+            browser: false,
         },
     );
     let told = told_on_connecting(&daemon, without);
@@ -10074,6 +10084,7 @@ fn a_chat_without_claude_codes_task_tool_stays_without_it_wherever_it_moves() {
         agent: Some(agent.to_owned()),
         tools: AgentTools::Off,
         task: false,
+        browser: false,
     };
     let disallowed = serde_json::json!(["Agent", "Task"]);
     // Started with Codex, it opens a new session with Claude Code without
@@ -10089,4 +10100,565 @@ fn a_chat_without_claude_codes_task_tool_stays_without_it_wherever_it_moves() {
     wait_for_log(&daemon, "agent.log", "resumed s1");
     let meta = session_meta(&mut client, chat);
     assert_eq!(meta["claudeCode"]["options"]["disallowedTools"], disallowed);
+}
+
+// --- The browser --------------------------------------------------------
+
+/// A browser for tests: Chromium or Chrome, as installed, with a profile
+/// of its own that's removed when this goes.
+struct TestBrowser {
+    config: clackatoo_daemon::BrowserConfig,
+    profile: PathBuf,
+}
+
+impl Drop for TestBrowser {
+    fn drop(&mut self) {
+        // The browser's helpers may still be writing there for a moment
+        // after it has gone.
+        for _ in 0..50 {
+            match std::fs::remove_dir_all(&self.profile) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ if self.profile.exists() => std::thread::sleep(Duration::from_millis(100)),
+                _ => return,
+            }
+        }
+    }
+}
+
+/// A browser for tests, with its profile in `dir`, or, for a snap, which
+/// can reach nothing hidden, in the snap's own folder. `None`, saying so,
+/// if no browser is installed.
+fn test_browser(dir: &Path) -> Option<TestBrowser> {
+    let program = [
+        "chromium",
+        "google-chrome",
+        "chromium-browser",
+        "google-chrome-stable",
+    ]
+    .iter()
+    .find_map(|name| {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+    });
+    let Some(program) = program else {
+        eprintln!("skipped: no Chromium or Chrome is installed");
+        return None;
+    };
+    let snap = program
+        .canonicalize()
+        .is_ok_and(|real| real.file_name().is_some_and(|name| name == "snap"));
+    let profile = if snap {
+        let name = program.file_name().unwrap().to_string_lossy().into_owned();
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let unique = dir.file_name().unwrap().to_string_lossy().into_owned();
+        home.join("snap")
+            .join(name)
+            .join("common")
+            .join(format!("clackatoo-test-{unique}"))
+    } else {
+        dir.join("browser-profile")
+    };
+    let browser = TestBrowser {
+        config: clackatoo_daemon::BrowserConfig {
+            program: Some(program.clone()),
+            profile: Some(profile.clone()),
+            data: None,
+            home: dir.to_owned(),
+            idle: Duration::from_mins(1),
+        },
+        profile,
+    };
+    // Installed isn't enough: in a container, or where the sandbox is
+    // refused, it can't start.
+    let mut probe = std::process::Command::new(&program)
+        .arg(format!("--user-data-dir={}", browser.profile.display()))
+        .args([
+            "--headless=new",
+            "--no-first-run",
+            "--dump-dom",
+            "about:blank",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let started = loop {
+        match probe.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = probe.kill();
+                let _ = probe.wait();
+                break false;
+            }
+        }
+    };
+    if !started {
+        eprintln!(
+            "skipped: {} is installed but can't start here",
+            program.display()
+        );
+        return None;
+    }
+    Some(browser)
+}
+
+/// The number after `[ref=` on the first line of `outline` holding
+/// `thing`.
+fn ref_of(outline: &str, thing: &str) -> u64 {
+    let line = (outline.lines())
+        .find(|line| line.contains(thing))
+        .unwrap_or_else(|| panic!("no {thing} in:\n{outline}"));
+    let (_, after) = line.split_once("[ref=").expect("a ref");
+    after.split(']').next().unwrap().parse().unwrap()
+}
+
+/// Waits for `client`, attached to `chat`'s page, to be told something
+/// `wanted` wants.
+fn wait_for_page(
+    client: &mut Client,
+    chat: TerminalId,
+    wanted: impl Fn(&clackatoo_protocol::BrowserUpdate) -> bool,
+) -> clackatoo_protocol::BrowserUpdate {
+    client
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    loop {
+        let event = client
+            .next_event()
+            .expect("the page was waited for too long");
+        if let Event::Browser {
+            chat: about,
+            update,
+        } = event
+            && about == chat
+            && wanted(&update)
+        {
+            return update;
+        }
+    }
+}
+
+/// A chat with tools and its Browser setting on.
+fn start_browsing_chat(client: &mut Client) -> TerminalId {
+    start_new_chat(
+        client,
+        NewAgent {
+            size: Size::new(40, 10).unwrap(),
+            cwd: None,
+            agent: None,
+            tools: AgentTools::Ask,
+            task: true,
+            browser: true,
+        },
+    )
+}
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "one story, step by step")]
+fn an_agent_drives_a_page_the_user_watches_once_they_allow_it() {
+    use clackatoo_protocol::BrowserUpdate;
+    let dir = tempfile::tempdir().unwrap();
+    let Some(browser) = test_browser(dir.path()) else {
+        return;
+    };
+    let config = browser.config.clone();
+    let daemon = TestDaemon::start_with(|_, daemon| {
+        daemon.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        daemon.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        daemon.browser = Some(config);
+    });
+    let mut client = daemon.client();
+    let chat = start_browsing_chat(&mut client);
+    let page = "data:text/html,<title>Test page</title><h1>Hello</h1>\
+        <input aria-label=Name id=n><button onclick=\"document.querySelector('h1')\
+        .textContent='Clicked '+document.getElementById('n').value\">Go</button>";
+    let open = format!(
+        "mcp browser_navigate {}\nmcp browser_snapshot",
+        serde_json::json!({ "url": page })
+    );
+    client.chat(chat, ChatAction::Send(open)).unwrap();
+    let asking = wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    let question = asking.question.unwrap();
+    assert!(
+        question
+            .title
+            .starts_with("open data:text/html,<title>Test page")
+            && question.title.contains("a profile of its own, not yours"),
+        "{}",
+        question.title
+    );
+    let ids: Vec<&str> = (question.choices.iter())
+        .map(|choice| choice.id.as_str())
+        .collect();
+    assert_eq!(ids, ["browse", "reject"]);
+    assert!(
+        !tab_contents(&mut client).contains(&Content::Browser(chat)),
+        "nothing opens before it's allowed"
+    );
+    answer(&mut client, chat, Some("browse".to_owned()));
+    let node = wait_for_chat_for(&mut client, chat, Duration::from_secs(30), |node| {
+        last_outcome(node).is_some()
+    });
+    let words = last_words(&node);
+    assert!(
+        words.contains("browser_navigate: Page: data:text/html") && words.contains("\"Test page\""),
+        "{words}"
+    );
+    assert!(words.contains("- heading \"Hello\" [level=1]"), "{words}");
+    let textbox = ref_of(&words, "textbox \"Name\"");
+    let button = ref_of(&words, "button \"Go\"");
+    // Its first page opened a pane showing it, beside the chat.
+    assert!(tab_contents(&mut client).contains(&Content::Browser(chat)));
+
+    // A window watching it is told what it is, and sent pictures.
+    let mut watcher = daemon.client();
+    let attached = watcher.request(&Request::AttachBrowser {
+        chat,
+        width: 640,
+        height: 400,
+    });
+    assert_eq!(attached.unwrap(), Response::Done);
+    let status = wait_for_page(
+        &mut watcher,
+        chat,
+        |update| matches!(update, BrowserUpdate::Status(status) if status.running),
+    );
+    let BrowserUpdate::Status(status) = status else {
+        unreachable!()
+    };
+    assert_eq!(status.title, "Test page");
+    let frame = wait_for_page(&mut watcher, chat, |update| {
+        matches!(update, BrowserUpdate::Frame(_))
+    });
+    let BrowserUpdate::Frame(frame) = frame else {
+        unreachable!()
+    };
+    assert_eq!(frame.jpeg[..2], [0xFF, 0xD8], "a JPEG");
+
+    // Allowed once, it isn't asked again.
+    let drive = format!(
+        "mcp browser_type {}\nmcp browser_click {}\nmcp browser_read\nmcp browser_screenshot\n\
+         mcp browser_press_key {{\"key\":\"Hyper\"}}\nmcp browser_click {{\"ref\":999999}}\n\
+         mcp browser_navigate {{\"url\":\"javascript:alert(1)\"}}",
+        serde_json::json!({ "ref": textbox, "text": "Ada" }),
+        serde_json::json!({ "ref": button }),
+    );
+    let node = ask_for(&mut client, chat, &drive, Duration::from_secs(30));
+    let words = last_words(&node);
+    assert!(
+        words.contains("browser_type: Typed 3 characters into textbox \"Name\"."),
+        "{words}"
+    );
+    assert!(
+        words.contains("browser_click: Clicked button \"Go\"."),
+        "{words}"
+    );
+    assert!(words.contains("Clicked Ada"), "the page changed: {words}");
+    assert!(words.contains("[image/png picture,"), "{words}");
+    assert!(
+        words.contains("browser_press_key: failed: \"Hyper\" isn't a key"),
+        "{words}"
+    );
+    assert!(
+        words.contains("browser_click: failed: there's no ref 999999 on the page now"),
+        "{words}"
+    );
+    assert!(
+        words.contains("browser_navigate: failed: javascript: addresses aren't opened"),
+        "{words}"
+    );
+    wait_for_page(&mut watcher, chat, |update| {
+        matches!(update, BrowserUpdate::Status(status)
+            if status.action.as_deref() == Some("Clicked button \"Go\""))
+    });
+
+    // Turned off, the page closes, and the tools are refused.
+    let off = ChatAction::Set {
+        setting: "clackatoo.browser".to_owned(),
+        value: "off".to_owned(),
+    };
+    client.chat(chat, off).unwrap();
+    wait_for_page(
+        &mut watcher,
+        chat,
+        |update| matches!(update, BrowserUpdate::Status(status) if !status.running),
+    );
+    let words = last_words(&ask(&mut client, chat, "mcp browser_snapshot"));
+    assert!(
+        words.contains("failed: this chat's browser is off"),
+        "{words}"
+    );
+    drop(daemon);
+    drop(browser);
+}
+
+#[test]
+fn the_browser_is_off_for_a_chat_unless_it_is_turned_on() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Allow);
+    let node = ask(
+        &mut client,
+        chat,
+        "mcp browser_navigate {\"url\":\"https://example.com\"}",
+    );
+    let words = last_words(&node);
+    assert!(
+        words.contains("browser_navigate: failed: this chat's browser is off"),
+        "{words}"
+    );
+    assert!(node.question.is_none(), "nothing is asked");
+}
+
+/// A daemon with tools, and a browser that's never started.
+fn with_tools_and_a_browser() -> TestDaemon {
+    TestDaemon::start_with(|dir, daemon| {
+        daemon.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        daemon.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        daemon.browser = Some(clackatoo_daemon::BrowserConfig {
+            program: Some(dir.join("no-browser")),
+            profile: Some(dir.join("profile")),
+            data: None,
+            home: dir.to_owned(),
+            idle: Duration::from_mins(1),
+        });
+    })
+}
+
+#[test]
+fn the_browser_opens_no_file_outside_the_chats_project() {
+    let daemon = with_tools_and_a_browser();
+    let mut client = daemon.client();
+    let chat = start_browsing_chat(&mut client);
+    let node = ask(
+        &mut client,
+        chat,
+        "mcp browser_navigate {\"url\":\"file:///etc/hostname\"}\n\
+         mcp browser_navigate {\"url\":\"FILE://localhost/etc/../etc/hostname\"}",
+    );
+    let words = last_words(&node);
+    assert_eq!(
+        words.matches("is outside this chat's project").count(),
+        2,
+        "{words}"
+    );
+    assert!(node.question.is_none(), "refused without asking");
+}
+
+#[test]
+fn the_browsers_tools_are_listed_while_its_setting_is_on() {
+    use std::io::BufRead;
+    let daemon = with_tools_and_a_browser();
+    let mut client = daemon.client();
+    let chat = start_browsing_chat(&mut client);
+    let mut relay = std::process::Command::new(fake_agent())
+        .args(["mcp", "--chat", &chat.0.to_string(), "--socket"])
+        .arg(daemon.socket())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = relay.stdin.take().unwrap();
+    let mut output = std::io::BufReader::new(relay.stdout.take().unwrap());
+    let mut read = || -> serde_json::Value {
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+    let listed = |tools: &serde_json::Value| -> Vec<String> {
+        (tools["result"]["tools"].as_array().unwrap().iter())
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .filter(|name| name.starts_with("browser_"))
+            .collect()
+    };
+    writeln!(
+        input,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18","capabilities":{{}}}}}}"#
+    )
+    .unwrap();
+    let started = read();
+    assert_eq!(
+        started["result"]["capabilities"]["tools"]["listChanged"],
+        true
+    );
+    let instructions = started["result"]["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("The browser_ tools drive"),
+        "{instructions}"
+    );
+    writeln!(input, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#).unwrap();
+    assert_eq!(
+        listed(&read()),
+        [
+            "browser_navigate",
+            "browser_back",
+            "browser_snapshot",
+            "browser_click",
+            "browser_type",
+            "browser_press_key",
+            "browser_screenshot",
+            "browser_read",
+        ]
+    );
+    // Turned off, the agent is told the list changed, and it's without them.
+    let off = ChatAction::Set {
+        setting: "clackatoo.browser".to_owned(),
+        value: "off".to_owned(),
+    };
+    client.chat(chat, off).unwrap();
+    assert_eq!(read()["method"], "notifications/tools/list_changed");
+    writeln!(input, r#"{{"jsonrpc":"2.0","id":3,"method":"tools/list"}}"#).unwrap();
+    assert!(listed(&read()).is_empty());
+    drop(input);
+    assert!(relay.wait().unwrap().success());
+}
+
+/// A real agent, on the cheapest model, finds the browser's tools once the
+/// chat's Browser setting is on, asks before its first page, and reads it.
+#[test]
+#[ignore = "talks to a real model and runs a browser: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_agent_reads_a_page_in_the_browser_once_allowed() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let Some(browser) = test_browser(dir.path()) else {
+        return;
+    };
+    let config = browser.config.clone();
+    let agent: Vec<std::ffi::OsString> = ["env", "ANTHROPIC_MODEL=haiku"]
+        .into_iter()
+        .chain(command.split_whitespace())
+        .map(Into::into)
+        .collect();
+    let daemon = TestDaemon::start_with(|_, daemon| {
+        daemon.agents.custom = vec![custom_agent("claude", agent)];
+        daemon.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        daemon.browser = Some(config);
+    });
+    let mut client = daemon.client();
+    let minute = Duration::from_mins(1);
+    let chat = start_browsing_chat(&mut client);
+    let text = "Use the browser_navigate tool from the clackatoo MCP server to open \
+                data:text/html,<title>Quiz</title><h1>The codeword is pelican</h1>, then \
+                its browser_snapshot tool, and reply with the codeword alone.";
+    client
+        .chat(chat, ChatAction::Send(text.to_owned()))
+        .unwrap();
+    let mut asked = Vec::new();
+    let node = loop {
+        let node = wait_for_chat_for(&mut client, chat, minute, |node| {
+            last_outcome(node).is_some() || node.question.is_some()
+        });
+        let Some(question) = &node.question else {
+            break node;
+        };
+        asked.push(question.title.clone());
+        let allow = (question.choices.iter())
+            .find(|choice| choice.kind == clackatoo_protocol::ChoiceKind::AllowOnce)
+            .or_else(|| (question.choices.iter()).find(|choice| choice.id == "browse"))
+            .map(|choice| choice.id.clone());
+        answer(&mut client, chat, allow);
+        wait_for_chat_for(&mut client, chat, minute, |now| {
+            now.question != node.question
+        });
+    };
+    assert!(
+        asked
+            .iter()
+            .any(|title| title.starts_with("open data:text/html,<title>Quiz</title>")),
+        "{asked:?}\n{node:#?}"
+    );
+    assert!(
+        last_words(&node).to_lowercase().contains("pelican"),
+        "{node:#?}"
+    );
+    assert!(tab_contents(&mut client).contains(&Content::Browser(chat)));
+    drop(daemon);
+    drop(browser);
+}
+
+#[test]
+fn the_daemon_stops_without_waiting_for_a_page_to_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(browser) = test_browser(dir.path()) else {
+        return;
+    };
+    let config = browser.config.clone();
+    let daemon = TestDaemon::start_with(|_, daemon| {
+        daemon.agents.custom = vec![custom_agent("claude", vec![fake_agent().into()])];
+        daemon.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        daemon.browser = Some(config);
+    });
+    // A server that takes connections, and never answers them.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = silent.local_addr().unwrap().port();
+    let mut client = daemon.client();
+    let chat = start_browsing_chat(&mut client);
+    let open = format!("mcp browser_navigate {{\"url\":\"http://127.0.0.1:{port}/\"}}");
+    client.chat(chat, ChatAction::Send(open)).unwrap();
+    wait_for_chat(&mut client, chat, |node| node.question.is_some());
+    answer(&mut client, chat, Some("browse".to_owned()));
+    // The page is opening, and won't load.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !tab_contents(&mut client).contains(&Content::Browser(chat)) {
+        assert!(Instant::now() < deadline, "the page got no pane");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        last_outcome(&wait_for_chat(&mut client, chat, |_| true)).is_none(),
+        "still opening the page"
+    );
+    let stopping = Instant::now();
+    drop(client);
+    drop(daemon);
+    assert!(
+        stopping.elapsed() < Duration::from_secs(8),
+        "took {:?}",
+        stopping.elapsed()
+    );
+    drop(browser);
+}
+
+#[test]
+fn a_read_only_chat_reads_pages_but_clicks_and_types_in_none() {
+    let daemon = with_tools_and_a_browser();
+    let mut client = daemon.client();
+    let parent = start_new_chat(
+        &mut client,
+        NewAgent {
+            size: Size::new(40, 10).unwrap(),
+            cwd: None,
+            agent: None,
+            tools: AgentTools::Allow,
+            task: true,
+            browser: true,
+        },
+    );
+    // Its subagent gets its browser, with explore's limits.
+    let child = TerminalId(parent.0 + 1);
+    let start = serde_json::json!({
+        "profile": "explore",
+        "prompt": "mcp browser_click {\"ref\":1}\nmcp browser_type {\"ref\":1,\"text\":\"x\"}",
+    });
+    let prompt = format!("mcp start_chat {start}\nmcp wait_for_chat {{\"chat\":{child}}}");
+    let words = last_words(&ask_for(
+        &mut client,
+        parent,
+        &prompt,
+        Duration::from_secs(10),
+    ));
+    assert_eq!(
+        words
+            .matches("this chat is read-only: it reads pages, but clicks and types in none")
+            .count(),
+        2,
+        "{words}"
+    );
 }

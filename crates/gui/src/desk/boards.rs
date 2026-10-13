@@ -39,6 +39,7 @@ impl Desk {
             .map(|explorer| (explorer.label(), explorer.prompting()))
             .or_else(|| (self.focused_board()).map(|board| (board.label(), board.prompting())))
             .or_else(|| (self.focused_review()).map(|review| (review.label(), false)))
+            .or_else(|| (self.focused_browser()).map(|browser| (browser.label(), false)))
     }
 
     /// The focused pane's board, if it shows one.

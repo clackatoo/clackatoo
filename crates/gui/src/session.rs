@@ -19,7 +19,8 @@ use clackatoo_daemon::launch::{self, LaunchError};
 use clackatoo_daemon::remote::{self, Askpass, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, Contact, Receiver, RuntimeDir, Sender};
 use clackatoo_protocol::{
-    NewTerminal, PROTOCOL_VERSION, PaneTerminal, ServerMessage, Size, TerminalStatus, Workspaces,
+    BrowserUpdate, Event, NewTerminal, PROTOCOL_VERSION, PaneTerminal, ServerMessage, Size,
+    TerminalStatus, Workspaces,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -74,6 +75,12 @@ pub(crate) enum SessionEvent {
     },
     /// A message from the daemon.
     Message(ServerMessage),
+    /// A picture of a chat's page, decoded on the session's thread, as it
+    /// came, so the window never waits on decoding one.
+    BrowserPicture {
+        chat: clackatoo_protocol::TerminalId,
+        image: std::sync::Arc<crate::render::Image>,
+    },
     /// ssh asks `question`, such as for a password. ssh waits until the
     /// answer, or `None` to turn the question down, is sent on `answer`.
     Ask {
@@ -325,6 +332,16 @@ fn run(
     };
     loop {
         let event = match receiver.receive() {
+            Ok(ServerMessage::Event(Event::Browser {
+                chat,
+                update: BrowserUpdate::Frame(frame),
+            })) => match crate::browser::decode(&frame.jpeg) {
+                Some(image) => SessionEvent::BrowserPicture {
+                    chat,
+                    image: std::sync::Arc::new(image),
+                },
+                None => continue,
+            },
             Ok(message) => SessionEvent::Message(message),
             Err(err) => return lost(err.to_string()),
         };

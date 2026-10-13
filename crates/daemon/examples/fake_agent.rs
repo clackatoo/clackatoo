@@ -50,6 +50,7 @@
 //! `--mute`, it never answers a request for a new session.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
@@ -768,9 +769,17 @@ fn call_tools(session: &str, server: &Value, calls: &[String]) {
     let mut ask = |id: u64, method: &str, params: Value| -> Option<Value> {
         let request = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         writeln!(input, "{request}").ok()?;
-        let mut line = String::new();
-        output.read_line(&mut line).ok()?;
-        serde_json::from_str(&line).ok()
+        // Notifications, as of the tools changing, come between answers.
+        loop {
+            let mut line = String::new();
+            if output.read_line(&mut line).ok()? == 0 {
+                return None;
+            }
+            let message: Value = serde_json::from_str(&line).ok()?;
+            if message.get("id").is_some() {
+                return Some(message);
+            }
+        }
     };
     let started = ask(
         0,
@@ -805,10 +814,24 @@ fn call_tools(session: &str, server: &Value, calls: &[String]) {
                 let text = answer["result"]["content"][0]["text"]
                     .as_str()
                     .unwrap_or_default();
+                // A picture is said as its type and size.
+                let mut pictures = String::new();
+                let images = (answer["result"]["content"].as_array().into_iter())
+                    .flatten()
+                    .filter(|content| content["type"] == "image");
+                for image in images {
+                    let data = image["data"].as_str().unwrap_or_default();
+                    let kind = image["mimeType"].as_str().unwrap_or("?");
+                    let _ = write!(
+                        pictures,
+                        " [{kind} picture, {} bytes of base64]",
+                        data.len()
+                    );
+                }
                 if answer["result"]["isError"] == true {
                     format!("failed: {text}")
                 } else {
-                    text.to_owned()
+                    format!("{text}{pictures}")
                 }
             }
             None => "no answer".to_owned(),

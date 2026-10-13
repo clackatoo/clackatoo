@@ -22,6 +22,7 @@ use clackatoo_protocol::{
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
 
+use crate::browser::BrowserPane;
 use crate::chrome::{ModeName, Status};
 use crate::command::{self, Command, Kind, Place};
 use crate::finder::Finder;
@@ -106,6 +107,7 @@ enum Asked {
 
 mod bindings;
 mod boards;
+mod browsers;
 mod clipboard;
 mod connecting;
 mod editors;
@@ -245,6 +247,8 @@ pub(crate) struct Desk {
     explorers: explorers::Explorers,
     /// Panes showing boards.
     boards: boards::Boards,
+    /// Panes showing chats' pages.
+    browsers: browsers::Browsers,
     /// Reviews of what agents changed.
     reviews: reviews::Reviews,
     /// The macros being typed, and what's noted of keys pressed for the
@@ -353,6 +357,9 @@ impl Desk {
         }
         if let Some(board) = self.focused_board() {
             return board.prompting().then_some(TextTarget::Bar);
+        }
+        if self.focused_browser().is_some() {
+            return None;
         }
         let pane = self.pane(self.focused_terminal()?)?;
         if pane.prompting() {
@@ -471,6 +478,9 @@ impl Desk {
         }
         if let Some(review) = self.focused_review() {
             return Some(review.title());
+        }
+        if let Some(browser) = self.focused_browser() {
+            return Some(browser.title());
         }
         let terminal = self.focused_terminal()?;
         let title = self.panes.get(&terminal)?.title()?;
@@ -647,6 +657,7 @@ impl Desk {
                 Content::Files(_) => self.explorer(pane.id).map(crate::explorer::Explorer::title),
                 Content::Board(_) => self.board(pane.id).map(crate::board::BoardPane::title),
                 Content::Review(_) => self.review(pane.id).map(crate::review::Review::title),
+                Content::Browser(_) => self.browser(pane.id).map(BrowserPane::title),
             })
             .map(str::trim)
             .filter(|title| !title.is_empty())
@@ -892,6 +903,7 @@ impl Desk {
         self.attach_shown_explorers();
         self.attach_shown_boards();
         self.attach_shown_reviews();
+        self.attach_shown_browsers();
         if !self.connected {
             return;
         }
@@ -949,6 +961,10 @@ impl Desk {
                     }
                     continue;
                 }
+                Content::Browser(_) => {
+                    self.fit_browser(id, tile);
+                    continue;
+                }
             };
             if let (Some(pane), Ok(size)) = (
                 self.panes.get_mut(&terminal),
@@ -1002,6 +1018,7 @@ impl Desk {
         self.explorers_reconnected();
         self.boards_reconnected();
         self.reviews_reconnected();
+        self.browsers_reconnected();
         self.asked.clear();
         self.macros.requests_forgotten();
         self.outbox.clear();
@@ -1395,6 +1412,9 @@ impl Desk {
                 return Some(true);
             }
             return Some(self.explorer_key(press) || self.board_key(press));
+        }
+        if self.focused_browser().is_some() {
+            return Some(self.browser_key(press));
         }
         if self.focused_review().is_some() {
             return Some(self.stop_recording_in_review(press) || self.review_key(press));
@@ -1995,6 +2015,7 @@ impl Desk {
             Command::Explore { dir, edit } => self.open_explorer(dir, edit),
             Command::AgentUndo { turn, redo, force } => self.agent_undo(turn, redo, force),
             Command::Board { place, name } => self.open_board(name, place),
+            Command::Browser(place) => self.open_browser(place),
             Command::Review(review) => self.run_review(review),
             Command::Reload | Command::Set(_) | Command::Update(_) | Command::Connect(_) => {}
         }
@@ -2063,6 +2084,7 @@ fn new_pane(kind: Kind, agent: Option<String>, size: Size, options: &Options) ->
             agent: agent.or_else(|| Some(options.agent.clone()).filter(|name| !name.is_empty())),
             tools: options.agenttools.asked(),
             task: options.claudetask,
+            browser: options.chatbrowser,
         }),
     }
 }
@@ -6951,6 +6973,95 @@ mod tests {
         // Keys in it are its own: q closes it.
         type_keys(&mut desk, "q");
         assert!(answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(2) }));
+    }
+
+    // --- Browsers --------------------------------------------------------
+
+    #[test]
+    fn a_browser_pane_watches_its_chats_page_only_while_its_tab_is_shown() {
+        use clackatoo_protocol::{BrowserStatus, BrowserUpdate, Event};
+        let browser = |pane: u32| {
+            Layout::Pane(LayoutPane {
+                id: PaneId(pane),
+                content: Content::Browser(TerminalId(5)),
+            })
+        };
+        let mut desk = desk(one_tab(pane(3)));
+        normal_mode(&mut desk);
+        // Only a chat has a page.
+        command(&mut desk, "|Browser");
+        assert!(answer_all(&mut desk).is_empty());
+        assert!(
+            desk.message
+                .as_deref()
+                .is_some_and(|said| said.contains("focus the chat"))
+        );
+
+        // Shown, it's attached, at a size its tile gives, in steps.
+        let both = |second: Layout| {
+            workspaces(vec![workspace(
+                1,
+                "w",
+                vec![
+                    tab(1, side_by_side(vec![pane(3), browser(4)])),
+                    tab(2, second),
+                ],
+            )])
+        };
+        desk.workspaces_changed(both(pane(6)));
+        let attached: Vec<Request> = (answer_all(&mut desk).into_iter())
+            .filter(|request| matches!(request, Request::AttachBrowser { .. }))
+            .collect();
+        let [
+            Request::AttachBrowser {
+                chat,
+                width,
+                height,
+            },
+        ] = attached.as_slice()
+        else {
+            panic!("{attached:?}");
+        };
+        assert_eq!(*chat, TerminalId(5));
+        assert!(width % 160 == 0 && height % 160 == 0 && *width > 0);
+        ctrl(&mut desk, "l");
+        assert_eq!(shown_pane(&desk), PaneId(4));
+        let status = BrowserStatus {
+            url: "https://example.com/".into(),
+            title: "Example".into(),
+            action: Some("Opened https://example.com/".into()),
+            running: true,
+            failure: None,
+        };
+        let event = Event::Browser {
+            chat: TerminalId(5),
+            update: BrowserUpdate::Status(status),
+        };
+        assert!(desk.browser_event(event), "shown, so drawn again");
+        assert_eq!(desk.title(), Some("Example"));
+        // From a browser pane, another pane on the same chat's page.
+        command(&mut desk, "-Browser");
+        assert!(answer_all(&mut desk).contains(&Request::Split {
+            pane: PaneId(4),
+            side: Side::Below,
+            terminal: PaneTerminal::Browser(TerminalId(5)),
+        }));
+
+        // In a tab not shown, it's let go: no pictures nobody sees.
+        command(&mut desk, "2");
+        assert!(answer_all(&mut desk).contains(&Request::DetachBrowser {
+            chat: TerminalId(5)
+        }));
+        desk.show_tab(TabId(1));
+        assert!(
+            (answer_all(&mut desk).iter())
+                .any(|request| matches!(request, Request::AttachBrowser { .. }))
+        );
+        // q closes it.
+        ctrl(&mut desk, "l");
+        assert_eq!(shown_pane(&desk), PaneId(4));
+        type_keys(&mut desk, "q");
+        assert!(answer_all(&mut desk).contains(&Request::ClosePane { pane: PaneId(4) }));
     }
 
     // --- Boards ----------------------------------------------------------

@@ -72,6 +72,7 @@ pub(crate) enum Kind {
     Chat,
     Board,
     Review,
+    Browser,
 }
 
 /// Which pane has the focus, as a check names it.
@@ -263,6 +264,7 @@ fn kind_of(word: &str) -> Result<Kind, String> {
         "chat" => Kind::Chat,
         "board" => Kind::Board,
         "review" => Kind::Review,
+        "browser" => Kind::Browser,
         other => return Err(format!("`{other}` isn't a kind of pane")),
     })
 }

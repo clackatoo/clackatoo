@@ -86,6 +86,7 @@ fn render_rows(
         texts: &[],
         glyphs: &[],
         over_glyphs: &[],
+        images: &[],
         transparent: false,
     };
     Some((size, draw(&gpu, size, &picture, &mut fonts)))
@@ -111,7 +112,20 @@ pub(crate) fn fonts(scale: f64) -> Fonts {
 
 /// Draws `picture` in an image of `size`, and returns its RGBA pixels.
 fn draw(
+    gpu: &(wgpu::Device, wgpu::Queue),
+    size: [u32; 2],
+    picture: &Picture<'_>,
+    fonts: &mut Fonts,
+) -> Vec<u8> {
+    let mut renderer = Renderer::new(&gpu.0, FORMAT);
+    draw_with(gpu, &mut renderer, size, picture, fonts)
+}
+
+/// Draws `picture` with `renderer`, as it is from what it drew before, in
+/// an image of `size`, and returns its RGBA pixels.
+fn draw_with(
     (device, queue): &(wgpu::Device, wgpu::Queue),
+    renderer: &mut Renderer,
     size: [u32; 2],
     picture: &Picture<'_>,
     fonts: &mut Fonts,
@@ -131,7 +145,6 @@ fn draw(
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut renderer = Renderer::new(device, FORMAT);
     renderer.render((device, queue), &view, size, picture, fonts);
 
     // Rows of a texture copy must be padded to 256 bytes.
@@ -409,6 +422,7 @@ fn a_review_draws_old_lines_on_red_and_new_on_green() {
         texts: &[],
         glyphs: &[],
         over_glyphs: &[],
+        images: &[],
         transparent: false,
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
@@ -550,6 +564,7 @@ fn draw_window_shaped(
         texts: &texts,
         glyphs: &[],
         over_glyphs: &[],
+        images: &[],
         transparent: rounded,
     };
     draw(gpu, *size, &picture, fonts)
@@ -1050,6 +1065,7 @@ fn render_chat_in(
         texts: &[],
         glyphs: &paint.glyphs,
         over_glyphs: &paint.over_glyphs,
+        images: &[],
         transparent: false,
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
@@ -1404,6 +1420,7 @@ fn renders_an_editor_pane() {
         texts: &[],
         glyphs: &[],
         over_glyphs: &[],
+        images: &[],
         transparent: false,
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
@@ -1524,6 +1541,7 @@ fn renders_an_editor_pane_with_a_wrapped_line() {
         texts: &[],
         glyphs: &[],
         over_glyphs: &[],
+        images: &[],
         transparent: false,
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
@@ -1640,6 +1658,7 @@ fn frame_times() {
             texts: &[],
             glyphs: &[],
             over_glyphs: &[],
+            images: &[],
             transparent: false,
         };
         let (device, queue) = &gpu;
@@ -1881,6 +1900,7 @@ fn an_editors_completion_menu_and_signature_are_drawn_by_its_cursor() {
         texts: &texts,
         glyphs: &[],
         over_glyphs: &[],
+        images: &[],
         transparent: false,
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
@@ -1988,6 +2008,7 @@ fn an_editors_panel_is_drawn_over_its_text() {
         texts: &texts,
         glyphs: &[],
         over_glyphs: &[],
+        images: &[],
         transparent: false,
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
@@ -2085,6 +2106,7 @@ fn the_finder_is_drawn_over_the_panes_with_a_preview() {
         texts: &texts,
         glyphs: &[],
         over_glyphs: &[],
+        images: &[],
         transparent: false,
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
@@ -2209,6 +2231,7 @@ fn renders_an_explorer_pane() {
         texts: &[],
         glyphs: &[],
         over_glyphs: &[],
+        images: &[],
         transparent: false,
     };
     let pixels = draw(&gpu, size, &picture, &mut fonts);
@@ -2282,4 +2305,61 @@ fn a_turn_is_undone_by_its_number_which_skips_where_the_chat_moved() {
         pane.undo_turn(Some(2), false, false),
         Err("there's no turn 3".to_owned())
     );
+}
+
+#[test]
+fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
+    use crate::render::{Image, PlacedImage};
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    let mut fonts = fonts(1.0);
+    let mut renderer = Renderer::new(&gpu.0, FORMAT);
+    let size = [40, 20];
+    // A 2×1 picture: red on the left, blue on the right, stretched over
+    // the left half of the image.
+    let image = |id, left: [u8; 4], right: [u8; 4]| Image {
+        id,
+        width: 2,
+        height: 1,
+        rgba: [left, right].concat(),
+    };
+    let pixel = |pixels: &[u8], [x, y]: [usize; 2]| -> [u8; 4] {
+        let at = (y * size[0] as usize + x) * 4;
+        pixels[at..at + 4].try_into().unwrap()
+    };
+    let first = image(1, [255, 0, 0, 255], [0, 0, 255, 255]);
+    let placed = [PlacedImage {
+        slot: 7,
+        rect: [0.0, 0.0, 20.0, 20.0],
+        image: &first,
+    }];
+    let mut picture = Picture {
+        scenes: &[],
+        fills: &[],
+        over: &[],
+        texts: &[],
+        glyphs: &[],
+        over_glyphs: &[],
+        images: &placed,
+        transparent: true,
+    };
+    let pixels = draw_with(&gpu, &mut renderer, size, &picture, &mut fonts);
+    assert_eq!(pixel(&pixels, [2, 10]), [255, 0, 0, 255], "red on its left");
+    assert_eq!(
+        pixel(&pixels, [17, 10]),
+        [0, 0, 255, 255],
+        "blue on its right"
+    );
+    assert_eq!(pixel(&pixels, [30, 10])[3], 0, "nothing past it");
+    // The next picture in the same slot replaces it.
+    let second = image(2, [0, 255, 0, 255], [0, 255, 0, 255]);
+    let placed = [PlacedImage {
+        slot: 7,
+        rect: [0.0, 0.0, 20.0, 20.0],
+        image: &second,
+    }];
+    picture.images = &placed;
+    let pixels = draw_with(&gpu, &mut renderer, size, &picture, &mut fonts);
+    assert_eq!(pixel(&pixels, [2, 10]), [0, 255, 0, 255]);
 }

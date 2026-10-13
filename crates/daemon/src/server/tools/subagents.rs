@@ -321,11 +321,11 @@ impl Daemon {
         };
         let role = role_for(&profile.name, &profile.prompt, limits);
         let (root, depth) = (own.relations().root.unwrap_or(chat), own.relations().depth);
-        let (size, tools, task) = (own.size(), own.tools(), own.task());
+        let (size, tools, task, browser) = (own.size(), own.tools(), own.task(), own.browser());
         let spec = self.agent_spec(&name);
         let id = self.next_terminal();
         let cwd = dir.to_string_lossy().into_owned();
-        let mut child = HostedChat::new(id, size, cwd, &spec, tools, task);
+        let mut child = HostedChat::new(id, size, cwd, &spec, tools, task, browser);
         child.started_by(chat, root, depth + 1, mode);
         child.start_as(&profile.name, limits, role, wanted);
         self.start_hosted_chat(child);

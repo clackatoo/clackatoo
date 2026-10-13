@@ -112,6 +112,10 @@ unicode-width = "0.2"
 vte = { version = "0.15", default-features = false, features = ["std"] }
 wgpu = "30"
 winit = "0.30"
+# Decodes the pictures of chats' pages a browser pane shows, which
+# Chromium sends as JPEGs. Pure Rust, and fast; zune-core is its options.
+zune-core = "0.5"
+zune-jpeg = "0.5.15"
 
 alacritty_terminal = { version = "0.26", default-features = false }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

@@ -911,13 +911,22 @@ pub(super) mod tests {
             rename_gate: None,
             trash: Some(dir.join("Trash")),
             boards: None,
+            browser: None,
         };
         let mut daemon = Daemon::bind(&dir.join("daemon.sock"), config).unwrap();
         let id = TerminalId(1);
         let agent = crate::AgentConfig::default().find("claude").unwrap();
         let cwd = dir.display().to_string();
         let tools = clackatoo_protocol::AgentTools::Ask;
-        let mut chat = HostedChat::new(id, Size::new(40, 10).unwrap(), cwd, &agent, tools, true);
+        let mut chat = HostedChat::new(
+            id,
+            Size::new(40, 10).unwrap(),
+            cwd,
+            &agent,
+            tools,
+            true,
+            false,
+        );
         chat.connected(Opened {
             session: "s1".into(),
             settings: None,

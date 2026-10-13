@@ -126,6 +126,9 @@ pub enum Content {
     Board(BoardId),
     /// A review of what agents changed. One pane shows each.
     Review(ReviewId),
+    /// The page a chat's agent drives in clackatoo's browser, by the
+    /// chat's ID. Several panes can show one.
+    Browser(TerminalId),
 }
 
 impl From<TerminalId> for Content {
@@ -164,7 +167,11 @@ impl Content {
     pub fn terminal(self) -> Option<TerminalId> {
         match self {
             Self::Terminal(terminal) => Some(terminal),
-            Self::Buffer(_) | Self::Files(_) | Self::Board(_) | Self::Review(_) => None,
+            Self::Buffer(_)
+            | Self::Files(_)
+            | Self::Board(_)
+            | Self::Review(_)
+            | Self::Browser(_) => None,
         }
     }
 
@@ -173,7 +180,11 @@ impl Content {
     pub fn buffer(self) -> Option<BufferId> {
         match self {
             Self::Buffer(buffer) => Some(buffer),
-            Self::Terminal(_) | Self::Files(_) | Self::Board(_) | Self::Review(_) => None,
+            Self::Terminal(_)
+            | Self::Files(_)
+            | Self::Board(_)
+            | Self::Review(_)
+            | Self::Browser(_) => None,
         }
     }
 
@@ -182,7 +193,11 @@ impl Content {
     pub fn files(self) -> Option<FilesId> {
         match self {
             Self::Files(files) => Some(files),
-            Self::Terminal(_) | Self::Buffer(_) | Self::Board(_) | Self::Review(_) => None,
+            Self::Terminal(_)
+            | Self::Buffer(_)
+            | Self::Board(_)
+            | Self::Review(_)
+            | Self::Browser(_) => None,
         }
     }
 
@@ -191,7 +206,11 @@ impl Content {
     pub fn board(self) -> Option<BoardId> {
         match self {
             Self::Board(board) => Some(board),
-            Self::Terminal(_) | Self::Buffer(_) | Self::Files(_) | Self::Review(_) => None,
+            Self::Terminal(_)
+            | Self::Buffer(_)
+            | Self::Files(_)
+            | Self::Review(_)
+            | Self::Browser(_) => None,
         }
     }
 
@@ -200,7 +219,23 @@ impl Content {
     pub fn review(self) -> Option<ReviewId> {
         match self {
             Self::Review(review) => Some(review),
-            Self::Terminal(_) | Self::Buffer(_) | Self::Files(_) | Self::Board(_) => None,
+            Self::Terminal(_)
+            | Self::Buffer(_)
+            | Self::Files(_)
+            | Self::Board(_)
+            | Self::Browser(_) => None,
+        }
+    }
+    /// The chat whose page it is, if it's a browser's.
+    #[must_use]
+    pub fn browser(self) -> Option<TerminalId> {
+        match self {
+            Self::Browser(chat) => Some(chat),
+            Self::Terminal(_)
+            | Self::Buffer(_)
+            | Self::Files(_)
+            | Self::Board(_)
+            | Self::Review(_) => None,
         }
     }
 }
@@ -262,6 +297,8 @@ pub enum PaneTerminal {
     Board(OpenBoard),
     /// A review of what agents changed.
     Review(NewReview),
+    /// The page a chat's agent drives, by the chat's ID.
+    Browser(TerminalId),
 }
 
 impl Workspaces {

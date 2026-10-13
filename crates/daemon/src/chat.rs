@@ -103,10 +103,52 @@ const PROFILE_SETTING: &str = "clackatoo.profile";
 /// names, so each session opens with them again.
 const LIMITS_SETTING: &str = "clackatoo.limits";
 
+/// The ID of the chat's own setting for whether its agent gets tools that
+/// drive clackatoo's browser (see [`crate::browser`]). Shown with the
+/// agent's settings, as the tools setting is, and never sent to the
+/// agent.
+const BROWSER_SETTING: &str = "clackatoo.browser";
+
+/// The values the browser setting takes: each one's ID, what it's called,
+/// and what it means.
+const BROWSER_VALUES: [(bool, &str, &str, &str); 2] = [
+    (
+        false,
+        "off",
+        "Off",
+        "No browser: the agent can't open web pages",
+    ),
+    (
+        true,
+        "on",
+        "On",
+        "Drives a browser of clackatoo's, in its own profile, asking before the first page",
+    ),
+];
+
+/// The ID a chat keeps, with the values chosen, once the user has let its
+/// agent open pages in the browser, so it isn't asked again, even after
+/// an upgrade. Never shown, nor sent to the agent.
+const BROWSING_SETTING: &str = "clackatoo.browsing";
+
 /// Whether the setting with `id` is the chat's own, kept whichever agent
 /// it talks to, rather than one of an agent's.
 fn chat_wide(id: &str) -> bool {
-    [TOOLS_SETTING, TASK_SETTING, PROFILE_SETTING, LIMITS_SETTING].contains(&id)
+    [
+        TOOLS_SETTING,
+        TASK_SETTING,
+        PROFILE_SETTING,
+        LIMITS_SETTING,
+        BROWSER_SETTING,
+        BROWSING_SETTING,
+    ]
+    .contains(&id)
+}
+
+/// Whether the setting with `id` is one the chat shows of its own, after
+/// the agent's.
+fn shown_own(id: &str) -> bool {
+    id == TOOLS_SETTING || id == BROWSER_SETTING
 }
 
 /// The most questions a chat keeps waiting. Past it, a tool's question is
@@ -135,6 +177,14 @@ const TALK_CHOICES: [(&str, &str, ChoiceKind); 3] = [
     ("reject", "Deny", ChoiceKind::RejectOnce),
 ];
 
+/// The answers to the question asked before an agent first opens a page in
+/// the browser. Allowing is for the chat, from then on: it's the first
+/// page that's asked about, not each.
+const BROWSER_CHOICES: [(&str, &str, ChoiceKind); 2] = [
+    ("browse", "Allow for this chat", ChoiceKind::AllowAlways),
+    ("reject", "Reject", ChoiceKind::RejectOnce),
+];
+
 /// Which answers a tool's question offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Choices {
@@ -143,6 +193,9 @@ pub(crate) enum Choices {
     Tool,
     /// Allow, Always allow for the chat it's about, and Deny.
     Talk,
+    /// Allow for this chat, which lets its agent open pages in the
+    /// browser from then on, and Reject.
+    Browser,
 }
 
 /// What a chat asks the server to do.
@@ -178,6 +231,9 @@ pub(crate) enum Action {
     Set { setting: String, value: String },
     /// Install the chat's agent, as the user agreed to.
     Install,
+    /// The chat's Browser setting went on, or off: give the agent the
+    /// browser's tools, or take them away and close the chat's page.
+    Browser(bool),
 }
 
 /// The answer to an install offer that installs.
@@ -401,6 +457,7 @@ impl HostedChat {
         agent: &AgentSpec,
         tools: AgentTools,
         task: bool,
+        browser: bool,
     ) -> Self {
         Self {
             id,
@@ -413,7 +470,7 @@ impl HostedChat {
             queued: None,
             node: ChatNode {
                 agent: agent.title.clone(),
-                settings: vec![tools_setting(tools)],
+                settings: vec![tools_setting(tools), browser_setting(browser)],
                 ..ChatNode::default()
             },
             asking: VecDeque::new(),
@@ -423,6 +480,10 @@ impl HostedChat {
                 (
                     TASK_SETTING.to_owned(),
                     if task { "on" } else { "off" }.to_owned(),
+                ),
+                (
+                    BROWSER_SETTING.to_owned(),
+                    if browser { "on" } else { "off" }.to_owned(),
                 ),
             ],
             starting_mode: agent.starting_mode.clone(),
@@ -482,7 +543,7 @@ impl HostedChat {
             turns: self.node.turns.into_iter().map(turn_to_handover).collect(),
             // The chat's own setting is kept with the values chosen.
             settings: (self.node.settings.into_iter())
-                .filter(|setting| setting.id != TOOLS_SETTING)
+                .filter(|setting| !shown_own(&setting.id))
                 .map(setting_to_handover)
                 .collect(),
             chosen: self.chosen,
@@ -528,6 +589,7 @@ impl HostedChat {
             agent,
             AgentTools::Ask,
             true,
+            false,
         );
         resumed.link = Link::Closed;
         resumed.title = chat.title;
@@ -583,6 +645,7 @@ impl HostedChat {
             }
         }
         (resumed.node.settings).push(tools_setting(resumed.tools()));
+        (resumed.node.settings).push(browser_setting(resumed.browser()));
         resumed.starting_mode = None;
         resumed.node.state = chat.failure.map_or(ChatState::Ready, ChatState::Failed);
         resumed
@@ -628,6 +691,29 @@ impl HostedChat {
     /// before it could be taken away keeps it.
     pub(crate) fn task(&self) -> bool {
         !(self.chosen.iter()).any(|(id, value)| id == TASK_SETTING && value == "off")
+    }
+
+    /// Whether its agent gets tools that drive clackatoo's browser. A chat
+    /// from before there was one doesn't.
+    pub(crate) fn browser(&self) -> bool {
+        (self.chosen.iter()).any(|(id, value)| id == BROWSER_SETTING && value == "on")
+    }
+
+    /// Whether the user has let its agent open pages in the browser.
+    pub(crate) fn browsing(&self) -> bool {
+        (self.chosen.iter()).any(|(id, value)| id == BROWSING_SETTING && value == "yes")
+    }
+
+    /// Gives its agent the browser's tools, or takes them away, from now
+    /// on. Taking them away forgets that the user let it open pages.
+    fn set_browser(&mut self, browser: bool) {
+        let value = if browser { "on" } else { "off" };
+        self.chosen.retain(|(id, _)| id != BROWSER_SETTING);
+        (self.chosen).push((BROWSER_SETTING.to_owned(), value.to_owned()));
+        if !browser {
+            self.chosen.retain(|(id, _)| id != BROWSING_SETTING);
+        }
+        self.set_value(BROWSER_SETTING, value);
     }
 
     /// Lets its agent do what `tools` says with clackatoo's tools, from
@@ -737,6 +823,15 @@ impl HostedChat {
             ChatAction::Set { setting, value } if setting == TOOLS_SETTING => {
                 if let Some(&(tools, ..)) = (TOOLS_VALUES.iter()).find(|(_, id, ..)| *id == value) {
                     self.set_tools(tools);
+                }
+            }
+            ChatAction::Set { setting, value } if setting == BROWSER_SETTING => {
+                if let Some(&(browser, ..)) =
+                    (BROWSER_VALUES.iter()).find(|(_, id, ..)| *id == value)
+                    && browser != self.browser()
+                {
+                    self.set_browser(browser);
+                    actions.push(Action::Browser(browser));
                 }
             }
             // The server's to do: they're about files, or other agents.
@@ -1225,7 +1320,7 @@ impl HostedChat {
     /// chat's.
     pub(crate) fn agent_settings(&self) -> Vec<Setting> {
         (self.node.settings.iter())
-            .filter(|setting| setting.id != TOOLS_SETTING)
+            .filter(|setting| !shown_own(&setting.id))
             .cloned()
             .collect()
     }
@@ -1648,9 +1743,10 @@ impl HostedChat {
                 locations: Vec::new(),
             });
         }
-        let choices = match offered {
-            Choices::Tool => TOOL_CHOICES,
-            Choices::Talk => TALK_CHOICES,
+        let choices: &[(&str, &str, ChoiceKind)] = match offered {
+            Choices::Tool => &TOOL_CHOICES,
+            Choices::Talk => &TALK_CHOICES,
+            Choices::Browser => &BROWSER_CHOICES,
         };
         let choices = (choices.iter())
             .map(|&(id, name, kind)| Choice {
@@ -1693,9 +1789,13 @@ impl HostedChat {
                 if option == Some("always") {
                     self.set_tools(AgentTools::Allow);
                 }
+                if option == Some("browse") {
+                    self.chosen.retain(|(id, _)| id != BROWSING_SETTING);
+                    (self.chosen).push((BROWSING_SETTING.to_owned(), "yes".to_owned()));
+                }
                 Some(Action::Permit {
                     call,
-                    allow: matches!(option, Some("allow" | "always" | "pair")),
+                    allow: matches!(option, Some("allow" | "always" | "pair" | "browse")),
                     pair: option == Some("pair"),
                 })
             }
@@ -2177,6 +2277,7 @@ impl HostedChat {
     /// them.
     fn set_settings(&mut self, mut settings: Vec<Setting>) {
         settings.push(tools_setting(self.tools()));
+        settings.push(browser_setting(self.browser()));
         if self.node.settings != settings {
             self.node.settings.clone_from(&settings);
             self.journal.push(ChatPatch::Settings(settings));
@@ -2323,6 +2424,24 @@ fn tools_setting(tools: AgentTools) -> Setting {
         kind: SettingKind::Tools,
         value: tools_value(tools).to_owned(),
         choices: (TOOLS_VALUES.iter())
+            .map(|&(_, value, name, description)| SettingChoice {
+                value: value.to_owned(),
+                name: name.to_owned(),
+                description: Some(description.to_owned()),
+            })
+            .collect(),
+    }
+}
+
+/// The chat's own setting for whether its agent drives the browser, at
+/// `browser`.
+fn browser_setting(browser: bool) -> Setting {
+    Setting {
+        id: BROWSER_SETTING.to_owned(),
+        name: "Browser".to_owned(),
+        kind: SettingKind::Browser,
+        value: if browser { "on" } else { "off" }.to_owned(),
+        choices: (BROWSER_VALUES.iter())
             .map(|&(_, value, name, description)| SettingChoice {
                 value: value.to_owned(),
                 name: name.to_owned(),
@@ -2532,7 +2651,9 @@ fn setting_to_handover(setting: Setting) -> handover::ChatSetting {
             SettingKind::Model => handover::SettingKind::Model,
             SettingKind::Effort => handover::SettingKind::Effort,
             // Never handed over: the chat keeps its value with those chosen.
-            SettingKind::Other | SettingKind::Tools => handover::SettingKind::Other,
+            SettingKind::Other | SettingKind::Tools | SettingKind::Browser => {
+                handover::SettingKind::Other
+            }
         },
         value: setting.value,
         choices: (setting.choices.into_iter())
@@ -2711,6 +2832,7 @@ mod tests {
             &agent,
             AgentTools::Ask,
             true,
+            false,
         )
     }
 
@@ -3194,9 +3316,60 @@ mod tests {
         assert_eq!(chat.tools(), AgentTools::Ask);
         assert_eq!(chat.act(set("everything")), []);
         assert_eq!(chat.tools(), AgentTools::Ask);
-        // Kept when the agent's settings change.
+        // Kept when the agent's settings change, before the browser's.
         chat.settings_changed(Ok(claude_settings("sonnet")));
-        assert_eq!(chat.node.settings.last().unwrap().id, TOOLS_SETTING);
+        let ids: Vec<&str> = (chat.node.settings.iter().rev().take(2))
+            .map(|setting| setting.id.as_str())
+            .collect();
+        assert_eq!(ids, [BROWSER_SETTING, TOOLS_SETTING]);
+    }
+
+    #[test]
+    fn the_browser_setting_is_the_chats_own_and_off_unless_asked_for() {
+        let mut chat = chat();
+        connect(&mut chat, "s");
+        assert!(!chat.browser(), "off for a new chat");
+        let set = |value: &str| ChatAction::Set {
+            setting: BROWSER_SETTING.into(),
+            value: value.into(),
+        };
+        // The agent never hears of it; the server gives it the tools.
+        assert_eq!(chat.act(set("on")), [Action::Browser(true)]);
+        assert!(chat.browser());
+        assert_eq!(chat.act(set("on")), [], "already on");
+        let shown = (chat.node.settings.iter()).find(|setting| setting.id == BROWSER_SETTING);
+        assert_eq!(shown.map(|setting| setting.value.as_str()), Some("on"));
+
+        // Letting it open pages is remembered, and asked about no more...
+        chat.ask_for_tool(4, "open https://example.com", None, Choices::Browser);
+        let question = chat.node.question.clone().unwrap();
+        let ids: Vec<&str> = (question.choices.iter())
+            .map(|choice| choice.id.as_str())
+            .collect();
+        assert_eq!(ids, ["browse", "reject"]);
+        let answer = ChatAction::Answer {
+            question: question.id,
+            option: Some("browse".into()),
+        };
+        assert_eq!(
+            chat.act(answer),
+            [Action::Permit {
+                call: 4,
+                allow: true,
+                pair: false
+            }]
+        );
+        assert!(chat.browsing());
+        assert_eq!(
+            chat.tools(),
+            AgentTools::Ask,
+            "the Tools setting is untouched"
+        );
+
+        // ...until the browser goes off, which forgets it.
+        assert_eq!(chat.act(set("off")), [Action::Browser(false)]);
+        assert!(!chat.browser() && !chat.browsing());
+        assert_eq!(chat.act(set("sometimes")), []);
     }
 
     #[test]
@@ -3334,7 +3507,8 @@ mod tests {
             .unwrap();
         let size = Size::new(40, 12).unwrap();
         let tools = AgentTools::Ask;
-        let mut chat = HostedChat::new(TerminalId(1), size, "/".into(), &agent, tools, false);
+        let mut chat =
+            HostedChat::new(TerminalId(1), size, "/".into(), &agent, tools, false, false);
         assert!(!chat.task());
         // It's never shown, and never sent to the agent as a setting.
         let actions = connect(&mut chat, "s");
@@ -3796,7 +3970,8 @@ mod tests {
             [
                 (SettingKind::Mode, "auto"),
                 (SettingKind::Model, "haiku"),
-                (SettingKind::Tools, "ask")
+                (SettingKind::Tools, "ask"),
+                (SettingKind::Browser, "off"),
             ]
         );
 

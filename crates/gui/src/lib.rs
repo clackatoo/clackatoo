@@ -18,6 +18,7 @@
 mod app;
 mod board;
 mod boxdraw;
+mod browser;
 mod chat;
 mod chrome;
 mod colors;

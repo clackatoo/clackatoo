@@ -39,6 +39,7 @@
 #![warn(missing_docs)]
 
 mod board;
+mod browser;
 mod buffer;
 mod chat;
 mod files;
@@ -60,6 +61,7 @@ pub use board::{
     BoardAction, BoardAuthor, BoardEntry, BoardId, BoardLink, BoardScope, BoardSummary,
     BoardUpdate, OpenBoard, PostKind,
 };
+pub use browser::{BrowserFrame, BrowserStatus, BrowserUpdate};
 pub use buffer::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, CodeAction, CompletionItem,
     FileLocation, OpenFile, Query, Resume, ServerFeatures, TextChange, Trigger,
@@ -93,7 +95,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 66;
+pub const PROTOCOL_VERSION: u32 = 67;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -378,6 +380,14 @@ pub enum Event {
         review: ReviewId,
         /// What it lists.
         list: ReviewList,
+    },
+    /// A chat's page, which the client attached to, changed, or there's
+    /// a new picture of it.
+    Browser {
+        /// The chat.
+        chat: TerminalId,
+        /// What.
+        update: BrowserUpdate,
     },
 }
 
@@ -724,6 +734,25 @@ pub enum Request {
     /// saying how it went, or an [`Error::Review`] saying why nothing was
     /// done.
     Review(ReviewAction),
+    /// Starts sending a chat's page: what it is, in a
+    /// [`BrowserUpdate::Status`], and again whenever that changes, and
+    /// pictures of it, at most `width` by `height` pixels, while it
+    /// changes. Attaching again sends the status again, and pictures at
+    /// the new size. Answered with [`Response::Done`]: a chat that has
+    /// closed, or never was, is said to be in the status.
+    AttachBrowser {
+        /// The chat.
+        chat: TerminalId,
+        /// How wide the pictures may be, in pixels.
+        width: u32,
+        /// How tall the pictures may be, in pixels.
+        height: u32,
+    },
+    /// Stops sending a chat's page.
+    DetachBrowser {
+        /// The chat.
+        chat: TerminalId,
+    },
 }
 
 /// How to start a terminal.
@@ -763,6 +792,10 @@ pub struct NewAgent {
     /// agent hands work on with clackatoo's `start_chat`, in chats the
     /// user can watch. Other agents have no such tool, and ignore it.
     pub task: bool,
+    /// Whether the chat's Browser setting starts on: its agent gets
+    /// tools that drive a browser of clackatoo's, in a profile of its own,
+    /// never the user's. The user is asked before the first page opens.
+    pub browser: bool,
 }
 
 /// What an agent may do through the tools clackatoo gives it, which show

@@ -148,6 +148,9 @@ pub enum SettingKind {
     Tools,
     /// Anything else.
     Other,
+    /// Whether the agent gets tools that drive clackatoo's browser: a
+    /// setting of the daemon's, not the agent's.
+    Browser,
 }
 
 /// One value a setting can take.

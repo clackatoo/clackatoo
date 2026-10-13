@@ -117,7 +117,15 @@ impl Daemon {
             .unwrap_or_else(|| self.config.home.to_string_lossy().into_owned());
         let name = request.agent.as_deref().unwrap_or(agents::DEFAULT);
         let spec = self.agent_spec(name);
-        let chat = HostedChat::new(id, request.size, cwd, &spec, request.tools, request.task);
+        let chat = HostedChat::new(
+            id,
+            request.size,
+            cwd,
+            &spec,
+            request.tools,
+            request.task,
+            request.browser,
+        );
         log::info!("chat {id} started, with {name}");
         self.start_hosted_chat(chat);
         id
@@ -379,6 +387,7 @@ impl Daemon {
                     slot.agent.answer_permission(&request, option.as_deref());
                 }
                 (Action::Permit { call, allow, pair }, _, _) => self.permitted(call, allow, pair),
+                (Action::Browser(on), _, _) => self.browser_turned(id, on),
                 // The agent has gone, which the chat has heard or will.
                 _ => {}
             }

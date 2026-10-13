@@ -41,6 +41,34 @@ pub(crate) struct Picture<'a> {
     pub(crate) glyphs: &'a [PlacedGlyph],
     /// The same, over the overlays, as a chat's menu's text is.
     pub(crate) over_glyphs: &'a [PlacedGlyph],
+    /// Pictures, as a browser pane's page is, over the panes'
+    /// backgrounds and under their text.
+    pub(crate) images: &'a [PlacedImage<'a>],
+}
+
+/// A picture, decoded, as the GPU takes it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Image {
+    /// Its number, never reused, so the renderer uploads each picture
+    /// once however many frames draw it.
+    pub(crate) id: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    /// Its pixels, row by row from the top, four bytes each: red, green,
+    /// blue and alpha.
+    pub(crate) rgba: Vec<u8>,
+}
+
+/// A picture placed in the window.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PlacedImage<'a> {
+    /// What it's kept on the GPU by from one frame to the next, as the
+    /// pane showing it: one texture each.
+    pub(crate) slot: u64,
+    /// Where it goes, left, top, width and height, in pixels: it's
+    /// stretched to fill it.
+    pub(crate) rect: [f32; 4],
+    pub(crate) image: &'a Image,
 }
 
 /// A glyph laid out already: which, at what size, and where.
@@ -423,11 +451,35 @@ struct Uniforms {
     atlas_size: [f32; 2],
 }
 
+/// A picture's quad: where it goes, in pixels.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct ImageQuad {
+    origin: [f32; 2],
+    size: [f32; 2],
+}
+
+/// A picture on the GPU, in a slot.
+#[derive(Debug)]
+struct GpuImage {
+    /// The picture's number.
+    id: u64,
+    size: [u32; 2],
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+}
+
 /// The GPU objects that draw a terminal.
 #[derive(Debug)]
 pub(crate) struct Renderer {
     rect_pipeline: wgpu::RenderPipeline,
     glyph_pipeline: wgpu::RenderPipeline,
+    image_pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// The pictures drawn last frame, by slot.
+    images: std::collections::HashMap<u64, GpuImage>,
+    image_buffer: InstanceBuffer,
     bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     atlas: wgpu::Texture,
@@ -480,6 +532,7 @@ impl CharGlyphs {
 
 impl Renderer {
     /// A renderer drawing into textures of `format`.
+    #[allow(clippy::too_many_lines, reason = "one GPU object after another")]
     pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
@@ -562,9 +615,20 @@ impl Renderer {
             ],
             std::mem::size_of::<Glyph>() as u64,
         );
+        let image_pipeline = pipeline(
+            "images",
+            ("image_vs", "image_fs"),
+            &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+            std::mem::size_of::<ImageQuad>() as u64,
+        );
         Self {
             rect_pipeline,
             glyph_pipeline,
+            image_pipeline,
+            layout,
+            sampler,
+            images: std::collections::HashMap::new(),
+            image_buffer: InstanceBuffer::new("images"),
             bind_group,
             uniforms,
             atlas,
@@ -653,6 +717,7 @@ impl Renderer {
             atlas_size: [ATLAS_SIZE as f32; 2],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
+        let images = self.upload_images(device, queue, picture.images);
         let background_rects = self.rects.len();
         self.rects.append(&mut self.overlays);
         let grid_glyphs = self.glyph_instances.len();
@@ -692,6 +757,7 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..4, 0..count(background_rects));
             }
+            self.draw_images(&mut pass, &images);
             if let Some(buffer) = &self.glyph_buffer.buffer {
                 pass.set_pipeline(&self.glyph_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
@@ -713,6 +779,134 @@ impl Renderer {
             }
         }
         queue.submit([encoder.finish()]);
+    }
+
+    /// Puts each of `placed` on the GPU, unless it's there already, and
+    /// their quads in the image buffer, letting go of pictures no longer
+    /// drawn. Returns the slots drawn, in the quads' order.
+    fn upload_images(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        placed: &[PlacedImage<'_>],
+    ) -> Vec<u64> {
+        self.images
+            .retain(|slot, _| placed.iter().any(|placed| placed.slot == *slot));
+        let mut quads = Vec::with_capacity(placed.len());
+        let mut slots = Vec::with_capacity(placed.len());
+        for placed in placed {
+            let image = placed.image;
+            let expected = (image.width as usize) * (image.height as usize) * 4;
+            if image.width == 0 || image.height == 0 || image.rgba.len() != expected {
+                continue;
+            }
+            let size = [image.width, image.height];
+            let stale = (self.images.get(&placed.slot)).is_none_or(|kept| kept.size != size);
+            if stale {
+                let gpu = self.new_image(device, size);
+                self.images.insert(placed.slot, gpu);
+            }
+            let Some(gpu) = self.images.get_mut(&placed.slot) else {
+                continue;
+            };
+            if stale || gpu.id != image.id {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &gpu.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &image.rgba,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(image.width * 4),
+                        rows_per_image: Some(image.height),
+                    },
+                    wgpu::Extent3d {
+                        width: image.width,
+                        height: image.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                gpu.id = image.id;
+            }
+            let [left, top, width, height] = placed.rect;
+            quads.push(ImageQuad {
+                origin: [left, top],
+                size: [width, height],
+            });
+            slots.push(placed.slot);
+        }
+        self.image_buffer
+            .write(device, queue, bytemuck::cast_slice(&quads));
+        slots
+    }
+
+    /// Draws the pictures in `slots`, in the image buffer's order, each
+    /// with its own texture bound, then binds the atlas again.
+    fn draw_images(&self, pass: &mut wgpu::RenderPass<'_>, slots: &[u64]) {
+        let Some(buffer) = self
+            .image_buffer
+            .buffer
+            .as_ref()
+            .filter(|_| !slots.is_empty())
+        else {
+            return;
+        };
+        let count = |n: usize| u32::try_from(n).expect("far fewer than 4 billion pictures");
+        pass.set_pipeline(&self.image_pipeline);
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        for (index, slot) in slots.iter().enumerate() {
+            if let Some(image) = self.images.get(slot) {
+                pass.set_bind_group(0, &image.bind_group, &[]);
+                pass.draw(0..4, count(index)..count(index + 1));
+            }
+        }
+        pass.set_bind_group(0, &self.bind_group, &[]);
+    }
+
+    /// A texture `size` pixels, and what draws it.
+    fn new_image(&self, device: &wgpu::Device, [width, height]: [u32; 2]) -> GpuImage {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("image"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        GpuImage {
+            id: u64::MAX,
+            size: [width, height],
+            texture,
+            bind_group,
+        }
     }
 
     /// Turns the picture into rectangles and glyphs.
@@ -1475,6 +1669,7 @@ mod tests {
                 texts: &[],
                 glyphs: &[],
                 over_glyphs: &[],
+                images: &[],
                 transparent: false,
             };
             renderer.build(&picture, fonts);
@@ -1563,6 +1758,7 @@ mod tests {
                 texts: &[],
                 glyphs: &[],
                 over_glyphs: &[],
+                images: &[],
                 transparent: false,
             };
             renderer.build(&picture, &mut fonts);

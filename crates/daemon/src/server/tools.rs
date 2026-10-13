@@ -41,6 +41,7 @@ use mio::{Interest, Token};
 use serde_json::Value;
 
 use super::{Daemon, Link, Source, write_out};
+use crate::browser::Act;
 use crate::chat::Choices;
 use crate::mcp::{self, Connection, Incoming, Tool};
 
@@ -58,6 +59,29 @@ const MAX_OUTPUT: usize = 16 * 1024;
 
 /// The most diagnostics `get_diagnostics` gives back.
 const MAX_DIAGNOSTICS: usize = 200;
+
+/// The URL's path `path` with its `%XX` escapes decoded; one that isn't
+/// UTF-8 decoded is left as it was, as it names no file the agent could
+/// mean.
+fn percent_decoded(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let escaped = (bytes[at] == b'%')
+            .then(|| path.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        if let Some(byte) = escaped {
+            decoded.push(byte);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| path.to_owned())
+}
 
 /// The most of what would be typed that a question shows itself, in
 /// bytes. More goes in the conversation, in full, for the user to read
@@ -132,6 +156,9 @@ enum Wait {
     /// The boards being read, which takes a moment as the daemon starts:
     /// then it's carried out, unless they aren't read by `due`.
     Boards { tool: Tool, due: Instant },
+    /// The browser's answer to the call it was handed as `call`. The
+    /// browser's thread gives up on its own waits.
+    Browser { call: u64 },
 }
 
 /// A terminal an agent ran a command in, or typed into.
@@ -211,6 +238,8 @@ impl Daemon {
             return;
         };
         let instructions = self.tools_instructions(chat);
+        let browser = self.config.browser.is_some()
+            && (self.chat_ref(chat)).is_some_and(crate::chat::HostedChat::browser);
         let entry = self.sources.vacant_entry();
         let new = Token(entry.key());
         if let Err(err) = self
@@ -225,7 +254,7 @@ impl Daemon {
             stream,
             chat,
             client.outgoing,
-            instructions,
+            (instructions, browser),
         )));
         log::info!("chat {chat}: its agent's tools are served");
         self.flush_tools(new);
@@ -254,9 +283,15 @@ impl Daemon {
             .and_then(|own| own.limits().told())
             .map(|told| format!(" {told}"))
             .unwrap_or_default();
+        let browsing = own.is_some_and(crate::chat::HostedChat::browser);
+        let browser = if browsing && self.config.browser.is_some() {
+            format!(" {}", mcp::BROWSING)
+        } else {
+            String::new()
+        };
         format!(
             "{} {} The profiles are:{profiles} This chat is chat {chat}: other agents name it \
-             by that number.{limits}{}",
+             by that number.{limits}{browser}{}",
             mcp::INSTRUCTIONS,
             if task {
                 mcp::DELEGATING
@@ -267,10 +302,78 @@ impl Daemon {
         )
     }
 
+    /// The chat `chat`'s Browser setting went on or off: its connections
+    /// list the browser's tools, or stop, and with it off, its page
+    /// closes.
+    pub(super) fn browser_turned(&mut self, chat: TerminalId, on: bool) {
+        let mut changed = Vec::new();
+        for (key, source) in &mut self.sources {
+            if let Source::Tools(connection) = source
+                && connection.chat == chat
+            {
+                connection.set_browser(on && self.config.browser.is_some());
+                changed.push(Token(key));
+            }
+        }
+        for token in changed {
+            self.flush_tools(token);
+        }
+        if !on {
+            self.close_page(chat);
+        }
+    }
+
+    /// Keeps the call `id` on the connection at `token`, from the chat
+    /// `chat`'s agent, waiting for the browser's answer to `call`.
+    pub(super) fn wait_for_browser(
+        &mut self,
+        token: Token,
+        id: Value,
+        chat: TerminalId,
+        call: u64,
+    ) {
+        self.tools.waiting.push(Waiting {
+            token,
+            id,
+            chat,
+            what: Wait::Browser { call },
+        });
+    }
+
+    /// Takes the call waiting for the browser's answer to `call`, if it's
+    /// still waiting: the connection and the call's ID, to answer.
+    pub(super) fn browser_answered(&mut self, call: u64) -> Option<(Token, Value)> {
+        let at = (self.tools.waiting.iter()).position(
+            |waiting| matches!(waiting.what, Wait::Browser { call: asked } if asked == call),
+        )?;
+        let waiting = self.tools.waiting.remove(at);
+        Some((waiting.token, waiting.id))
+    }
+
+    /// Answers the call `id` on the connection at `token` with words and
+    /// a picture.
+    pub(super) fn answer_picture(&mut self, token: Token, id: &Value, text: &str, png: &str) {
+        if let Some(Source::Tools(connection)) = self.sources.get_mut(token.0) {
+            connection.answer_picture(id, text, png);
+            self.flush_tools(token);
+        }
+    }
+
     /// Why the chat `chat`'s agent can't make `tool`, if its limits rule
-    /// it out: running or typing commands, for a chat with none.
+    /// it out: running or typing commands, for a chat with none, and
+    /// clicking or typing in a page, which can change what's behind it.
     fn limits_refused(&self, chat: TerminalId, tool: &Tool) -> Option<String> {
         let limits = self.chat_ref(chat)?.limits();
+        let acting = matches!(
+            tool,
+            Tool::Browser(Act::Click { .. } | Act::Type { .. } | Act::Press { .. })
+        );
+        if acting && limits.no_commands() {
+            return Some(format!(
+                "this chat is {}: it reads pages, but clicks and types in none",
+                limits.name()
+            ));
+        }
         let commands = matches!(
             tool,
             Tool::RunInTerminal { .. } | Tool::SendToTerminal { .. }
@@ -385,7 +488,7 @@ impl Daemon {
     }
 
     /// Answers the call `id` on the connection at `token`.
-    fn answer_tool(&mut self, token: Token, id: &Value, result: Result<String, String>) {
+    pub(super) fn answer_tool(&mut self, token: Token, id: &Value, result: Result<String, String>) {
         if let Some(Source::Tools(connection)) = self.sources.get_mut(token.0) {
             connection.answer(id, result);
             self.flush_tools(token);
@@ -406,6 +509,22 @@ impl Daemon {
             self.answer_tool(token, &id, refused);
             return;
         }
+        if matches!(tool, Tool::Browser(_))
+            && !self
+                .chat_ref(chat)
+                .is_some_and(crate::chat::HostedChat::browser)
+        {
+            let refused = "this chat's browser is off: the user turns it on in the chat's \
+                settings, as Browser";
+            self.answer_tool(token, &id, Err(refused.to_owned()));
+            return;
+        }
+        if let Tool::Browser(Act::Navigate { url }) = &tool
+            && let Some(why) = self.file_out_of_reach(chat, url)
+        {
+            self.answer_tool(token, &id, Err(why));
+            return;
+        }
         // What would be refused anyway isn't asked about.
         if let Some(why) =
             (self.limits_refused(chat, &tool)).or_else(|| self.talk_refused(chat, &tool))
@@ -421,6 +540,7 @@ impl Daemon {
         self.tools.next_call += 1;
         let offered = match tool {
             Tool::SendToChat { .. } | Tool::StartChat(_) | Tool::StartChats(_) => Choices::Talk,
+            Tool::Browser(_) => Choices::Browser,
             _ => Choices::Tool,
         };
         let asked = (self.chat(chat))
@@ -496,8 +616,44 @@ impl Daemon {
             Tool::SendToChat { .. } | Tool::StartChat(_) | Tool::StartChats(_) => {
                 self.talk_question(chat, tool, tools)
             }
+            // The first page is asked about, whatever the Tools setting:
+            // turning the browser on isn't the same as letting it go
+            // where the agent likes.
+            Tool::Browser(Act::Navigate { url }) => {
+                if self.chat_ref(chat)?.browsing() {
+                    return None;
+                }
+                let what = format!(
+                    "open {} in clackatoo's browser, which has a profile of its own, not \
+                     yours, and use it for the rest of this chat",
+                    visible(url)
+                );
+                Some((what, None))
+            }
             _ => None,
         }
+    }
+
+    /// Why the browser won't open `url` for the chat `chat`'s agent, if
+    /// it's a file outside the chat's project: one the user hasn't shown
+    /// it, which the browser would read with no question asked.
+    fn file_out_of_reach(&mut self, chat: TerminalId, url: &str) -> Option<String> {
+        let scheme = url.get(..5)?;
+        if !scheme.eq_ignore_ascii_case("file:") {
+            return None;
+        }
+        let rest = url[5..].trim_start_matches('/');
+        let rest = rest.strip_prefix("localhost/").unwrap_or(rest);
+        let path = PathBuf::from(format!("/{}", percent_decoded(rest)));
+        let path = path.canonicalize().unwrap_or(path);
+        let root = self.project_root(chat)?;
+        (!path.starts_with(&root)).then(|| {
+            format!(
+                "{} is outside this chat's project ({}): the browser opens only files in it",
+                visible(url),
+                root.display()
+            )
+        })
     }
 
     /// `path`, as the chat `chat`'s agent names it: from the chat's
@@ -613,6 +769,10 @@ impl Daemon {
                     return;
                 }
             },
+            Tool::Browser(act) => {
+                self.browse(token, chat, id, act);
+                return;
+            }
             Tool::ListChats => Ok(self.list_chats(chat)),
             Tool::SendToChat { chat: to, message } => self.send_to_chat(chat, to, message),
             Tool::ReadChat { chat: to, turns } => self.read_chat(chat, to, turns),
@@ -641,7 +801,11 @@ impl Daemon {
     /// Opens `content` in a new pane for the chat `chat`'s agent: below
     /// the last one it opened, if that's still in the chat's tab, or else
     /// to the chat's right.
-    fn place_beside(&mut self, chat: TerminalId, content: PaneTerminal) -> Result<PaneId, String> {
+    pub(super) fn place_beside(
+        &mut self,
+        chat: TerminalId,
+        content: PaneTerminal,
+    ) -> Result<PaneId, String> {
         let chat_pane = self.anchor_pane(chat).ok_or("the chat isn't in a pane")?;
         let workspaces = self.workspaces.get();
         let (_, tab, _) = workspaces
@@ -728,6 +892,7 @@ impl Daemon {
             Content::Files(_) => Err(format!("pane {pane} is a file explorer, not a terminal")),
             Content::Board(_) => Err(format!("pane {pane} shows a board, not a terminal")),
             Content::Review(_) => Err(format!("pane {pane} is a review, not a terminal")),
+            Content::Browser(_) => Err(format!("pane {pane} shows a browser, not a terminal")),
         }
     }
 
@@ -906,6 +1071,7 @@ impl Daemon {
                 None => "board".to_owned(),
             },
             Content::Review(_) => "review of what agents changed".to_owned(),
+            Content::Browser(chat) => format!("browser, watching chat {chat}'s page"),
             Content::Terminal(terminal) => {
                 let Some(slot) = self.terminals.get(&terminal) else {
                     return "terminal".to_owned();
@@ -1209,6 +1375,7 @@ impl Daemon {
         self.answer_finished(terminal, true);
         self.tools.sides.remove(&terminal);
         self.tools.editors.remove(&terminal);
+        self.chat_left_browser(terminal);
         let (gone, kept) = std::mem::take(&mut self.tools.waiting)
             .into_iter()
             .partition(|waiting| waiting.chat == terminal);
@@ -1232,7 +1399,7 @@ impl Daemon {
             | Wait::Turn { due, .. }
             | Wait::Chats { due, .. }
             | Wait::Boards { due, .. } => Some(due),
-            Wait::Permission { .. } => None,
+            Wait::Permission { .. } | Wait::Browser { .. } => None,
         });
         typing.chain(waits).min()
     }
@@ -1302,7 +1469,7 @@ impl Daemon {
                     self.answer_tool(waiting.token, &waiting.id, Err(late.to_owned()));
                     continue;
                 }
-                Wait::Permission { .. } => continue,
+                Wait::Permission { .. } | Wait::Browser { .. } => continue,
             };
             let result = match self.workspaces.get().pane_showing(terminal) {
                 Some(pane) => {
@@ -1618,6 +1785,14 @@ mod tests {
             "{question}"
         );
         assert_eq!(whole, Some(long));
+    }
+
+    #[test]
+    fn a_files_address_is_decoded_to_its_path() {
+        assert_eq!(percent_decoded("home/me/a%20b.html"), "home/me/a b.html");
+        assert_eq!(percent_decoded("x%2"), "x%2");
+        assert_eq!(percent_decoded("%2e%2E/etc"), "../etc");
+        assert_eq!(percent_decoded("%ff"), "%ff", "not UTF-8: left as it was");
     }
 
     #[test]

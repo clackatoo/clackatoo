@@ -490,6 +490,7 @@ fn upgrading_keeps_chats_and_reaps_their_agent() {
                 agent: None,
                 tools: clackatoo_protocol::AgentTools::Ask,
                 task: true,
+                browser: false,
             }),
         )
         .unwrap();
@@ -542,6 +543,7 @@ fn mcp_serves_a_chats_tools_on_stdio() {
         agent: None,
         tools: AgentTools::Ask,
         task: true,
+        browser: false,
     });
     client.new_workspace(None, chat).unwrap();
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
@@ -652,7 +654,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let flagless = script(
         bin.path(),
         "flagless",
-        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16"#,
+        r#"case " $* " in *" --scrollback-compaction "*) exit 2;; esac; echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17"#,
     );
     not_upgrading(ask_to_upgrade(runtime.path(), &flagless), "can't take over");
     // Failed after everything was handed over: it says it can take over,
@@ -661,7 +663,7 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     let vanishing = script(
         bin.path(),
         "vanishing",
-        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; rm -- "$0";; esac"#,
+        r#"case " $* " in *" --handover-versions "*) echo 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; rm -- "$0";; esac"#,
     );
     not_upgrading(
         ask_to_upgrade(runtime.path(), &vanishing),

@@ -1245,8 +1245,9 @@ impl ChatView {
 }
 
 impl ChatView {
-    /// Draws the box's controls along its bottom: the mode and what the
-    /// agent may do with clackatoo's tools on the left, and on the right,
+    /// Draws the box's controls along its bottom: the mode, what the agent
+    /// may do with clackatoo's tools, and whether it drives the browser,
+    /// on the left, and on the right,
     /// by the send button, how much context the chat fills and the model
     /// and effort.
     fn draw_controls(&mut self, canvas: &mut Canvas<'_>, m: Measures, frame: &BoxFrame) {
@@ -1258,11 +1259,12 @@ impl ChatView {
                 .find(|setting| setting.kind == kind)
                 .cloned()
         };
-        let (mode, model, effort, tools) = (
+        let (mode, model, effort, tools, browser) = (
             of(SettingKind::Mode),
             of(SettingKind::Model),
             of(SettingKind::Effort),
             of(SettingKind::Tools),
+            of(SettingKind::Browser),
         );
 
         let picked: Vec<Setting> = model.into_iter().chain(effort).collect();
@@ -1303,6 +1305,10 @@ impl ChatView {
         let chips = [
             mode.map(|mode| (format!("{}  ▾", chosen_name(&mode)), mode.id)),
             tools.map(|tools| (format!("Tools: {}  ▾", chosen_name(&tools)), tools.id)),
+            browser.map(|browser| {
+                let label = format!("Browser: {}  ▾", chosen_name(&browser));
+                (label, browser.id)
+            }),
         ];
         for (label, id) in chips.into_iter().flatten() {
             let laid = lay_out(

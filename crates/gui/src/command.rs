@@ -24,7 +24,8 @@
 //! in the files that can be, though others can't.
 //! `Board NAME` opens the board called that, made if there's none, in a
 //! tab or with a mark beside; `Board` alone, or `Boards`, picks one in
-//! the finder.
+//! the finder. `Browser` opens the focused chat's page in clackatoo's
+//! browser, in a tab or with a mark beside.
 //!
 //! `Review` opens a review of what agents changed: of the chat's whole
 //! work (`chat`, the default), a turn (`turn`, the last, or `turn N`), or
@@ -159,6 +160,8 @@ pub(crate) enum Command {
     /// `:Board`: the board with this name, made if there's none, where
     /// `place` says; or with none, the finder, to pick one.
     Board { place: Place, name: Option<String> },
+    /// `:Browser`: the focused chat's page, where `place` says.
+    Browser(Place),
 }
 
 /// Where a new pane goes.
@@ -199,6 +202,9 @@ const FINDERS: [(&str, finder::Kind); 5] = [
 /// The kind of pane that shows a board, which takes the board's name.
 const BOARD: &str = "Board";
 
+/// The kind of pane that shows a chat's page in the browser.
+const BROWSER: &str = "Browser";
+
 /// What `:Gitsigns` does to the hunk at the cursor, by gitsigns.nvim's
 /// names for it.
 const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
@@ -212,7 +218,7 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 /// The window's own commands, for messages.
 const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
                         update, connect, w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, \
-                        Buffers, Diagnostics, Boards, Gitsigns, Explore, AgentUndo, AgentRedo, \
+                        Buffers, Diagnostics, Boards, Browser, Gitsigns, Explore, AgentUndo, AgentRedo, \
                         Review, ReviewKeep, ReviewReject, ReviewSend and Blame";
 
 /// What `line` asks for, or why it means nothing.
@@ -258,19 +264,8 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         return Ok(Command::Find { kind, query });
     }
     let (place, rest) = place(word);
-    if rest == BOARD {
-        return Ok(Command::Board {
-            place,
-            name: argument.map(str::to_owned),
-        });
-    }
-    if rest == EDITOR {
-        return argument
-            .map(|path| Command::Edit {
-                place,
-                path: path.to_owned(),
-            })
-            .ok_or_else(|| format!("{word} needs a file: :{word} PATH"));
+    if let Some(command) = pane_of(word, rest, place, argument) {
+        return command;
     }
     let agent = agent_named(word, rest, argument)?;
     if !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -424,6 +419,31 @@ fn place(word: &str) -> (Place, &str) {
     } else {
         (Place::Tab, word)
     }
+}
+
+/// The pane `rest` names, after the mark saying where it goes, `place`,
+/// if it's a browser, a board, or an editor, which takes `argument`: the
+/// board's name or the file's path. `word` is the whole word typed.
+fn pane_of(
+    word: &str,
+    rest: &str,
+    place: Place,
+    argument: Option<&str>,
+) -> Option<Result<Command, String>> {
+    Some(match rest {
+        BROWSER => Ok(Command::Browser(place)),
+        BOARD => Ok(Command::Board {
+            place,
+            name: argument.map(str::to_owned),
+        }),
+        EDITOR => argument
+            .map(|path| Command::Edit {
+                place,
+                path: path.to_owned(),
+            })
+            .ok_or_else(|| format!("{word} needs a file: :{word} PATH")),
+        _ => return None,
+    })
 }
 
 /// A command about reviewing, if `word` is one, with `argument` after it,
@@ -635,7 +655,7 @@ mod tests {
     #[test]
     fn mistakes_say_what_there_is() {
         assert!(
-            parse("Browser")
+            parse("Telescope")
                 .unwrap_err()
                 .contains("the kinds are Terminal, Agent, Editor")
         );

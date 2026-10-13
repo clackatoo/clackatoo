@@ -118,7 +118,7 @@ fn reach(tools: AgentTools) -> u8 {
 
 impl Daemon {
     /// The chat `id`, to read.
-    pub(super) fn chat_ref(&self, id: TerminalId) -> Option<&HostedChat> {
+    pub(in crate::server) fn chat_ref(&self, id: TerminalId) -> Option<&HostedChat> {
         self.terminals.get(&id)?.terminal.chat_ref()
     }
 
@@ -945,6 +945,7 @@ mod tests {
             &agent,
             AgentTools::Ask,
             true,
+            false,
         );
         chat.connected(Opened {
             session: format!("s{id}"),

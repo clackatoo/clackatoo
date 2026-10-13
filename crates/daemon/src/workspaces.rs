@@ -56,6 +56,10 @@ impl WorkspaceState {
                         id: pane.id.0,
                         review: review.0,
                     },
+                    Content::Browser(chat) => handover::Layout::Browser {
+                        id: pane.id.0,
+                        chat: chat.0,
+                    },
                 },
                 Layout::Split {
                     axis,
@@ -114,6 +118,10 @@ impl WorkspaceState {
                 handover::Layout::Review { id, review } => Layout::Pane(Pane {
                     id: PaneId(*id),
                     content: Content::Review(ReviewId(*review)),
+                }),
+                handover::Layout::Browser { id, chat } => Layout::Pane(Pane {
+                    id: PaneId(*id),
+                    content: Content::Browser(TerminalId(*chat)),
                 }),
                 handover::Layout::Split {
                     left_to_right,

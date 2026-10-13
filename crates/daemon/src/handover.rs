@@ -37,6 +37,9 @@
 //! 16. Chats that move between agents: the sessions each had with other
 //!     agents, where it moved, how much of it each session has seen, and
 //!     the agent's plan.
+//! 17. Panes showing a chat's page in clackatoo's browser. The browser
+//!     itself isn't handed over: it stops, and starts again with the next
+//!     page an agent opens.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -49,10 +52,12 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 16;
+pub(crate) const VERSION: u32 = 17;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, VERSION];
+pub(crate) const READABLE: &[u32] = &[
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, VERSION,
+];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -578,6 +583,9 @@ pub(crate) enum Layout {
     Board { id: u32, board: u32 },
     /// A pane showing a review. Since version 15.
     Review { id: u32, review: u32 },
+    /// A pane showing a chat's page in the browser, by the chat's ID.
+    /// Since version 17.
+    Browser { id: u32, chat: u32 },
 }
 
 /// A file explorer: the directory at its root. What's expanded in it is
@@ -700,7 +708,9 @@ impl State {
             13 => Ok(postcard::from_bytes::<v13::State>(body)?.into()),
             14 => Ok(postcard::from_bytes::<v14::State>(body)?.into()),
             15 => Ok(postcard::from_bytes::<v15::State>(body)?.into()),
-            VERSION => Ok(postcard::from_bytes(body)?),
+            // Version 16 is this one without browser panes, which go on
+            // the end of `Layout`, so it reads as this one does.
+            16 | VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
     }
@@ -1862,8 +1872,9 @@ mod tests {
                                 Layout::Files { id: 4, files: 1 },
                                 Layout::Board { id: 5, board: 3 },
                                 Layout::Review { id: 6, review: 1 },
+                                Layout::Browser { id: 7, chat: 2 },
                             ],
-                            shares: vec![2, 1, 1, 1, 1, 1],
+                            shares: vec![2, 1, 1, 1, 1, 1, 1],
                         },
                         focused: 2,
                         name: None,
@@ -1873,7 +1884,7 @@ mod tests {
                 active: Some(1),
                 next_workspace: 2,
                 next_tab: 2,
-                next_pane: 7,
+                next_pane: 8,
             },
             next_buffer: 2,
             buffers: vec![buffer()],
@@ -2090,7 +2101,19 @@ mod tests {
         assert_eq!(state.edits.chats[0].chat, 2);
     }
 
-    /// Versions before 15 come with no reviews.
+    #[test]
+    fn version_17_is_read_with_panes_showing_chats_pages() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v17.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let Layout::Split { parts, .. } = &state.workspaces.list[0].tabs[0].layout else {
+            panic!("not split");
+        };
+        assert!(matches!(parts[6], Layout::Browser { id: 7, chat: 2 }));
+        assert_eq!(state.workspaces.next_pane, 8);
+    }
+
     #[test]
     fn version_16_is_read_with_chats_that_moved_between_agents() {
         let mut file = tempfile::tempfile().unwrap();
@@ -2164,11 +2187,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v16.bin"]
+    #[ignore = "writes tests/fixtures/handover-v17.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v16.bin"
+            "/tests/fixtures/handover-v17.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();

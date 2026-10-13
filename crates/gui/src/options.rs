@@ -445,6 +445,12 @@ options! {
     /// as cards and can open, steer and undo. Other agents have no Task
     /// tool.
     claudetask("ct"): bool = false;
+    /// A new chat starts with its Browser setting on: its agent gets tools
+    /// that drive a headless browser of clackatoo's, with a profile of its
+    /// own, never yours, and asks before its first page. Off, as it is
+    /// unless you turn it on, a chat gets no browser until you turn it on
+    /// in the chat's settings.
+    chatbrowser("cb"): bool = false;
     /// About the most of a conversation, in tokens, a chat tells an agent
     /// it moves to, as the model menu moves it from Claude Code to Codex,
     /// say: the newest turns whole, older ones a line each. An agent it

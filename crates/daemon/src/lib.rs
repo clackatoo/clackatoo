@@ -6,15 +6,16 @@
 //! socket, or over SSH to a daemon on another machine (see [`remote`]).
 //! Terminals outlive any client, so closing a window closes nothing.
 
-// The only unsafe code is the pre-exec hook in `pty::spawn` and the
-// declaration of glibc's `malloc_trim` in `memory`, which opt out of this
-// explicitly.
+// The only unsafe code is the pre-exec hooks in `pty::spawn` and
+// `browser::cdp::spawn`, and the declaration of glibc's `malloc_trim` in
+// `memory`, which opt out of this explicitly.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 mod agent;
 mod agents;
 mod boards;
+mod browser;
 mod buffer;
 mod changes;
 mod chat;
@@ -45,6 +46,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 pub use agents::{AgentConfig, CustomAgent};
+pub use browser::BrowserConfig;
 pub use client::{Client, ClientError, Receiver, Sender, UdpTarget, random_window};
 pub use quic::{Contact, Redial, Redialed, Route};
 pub use runtime::{DaemonLock, LockError, RuntimeDir};
@@ -114,6 +116,9 @@ pub struct DaemonConfig {
     /// to the next (see `boards::disk`). `None` keeps none: there are no
     /// boards.
     pub boards: Option<PathBuf>,
+    /// The browser agents drive for chats whose Browser setting is on
+    /// (see `browser`). `None` gives them none.
+    pub browser: Option<BrowserConfig>,
 }
 
 /// How long a language server is kept with no files open in it, unless
@@ -135,6 +140,10 @@ pub const DEFAULT_PROBE_WAIT: std::time::Duration = std::time::Duration::from_se
 /// next message.
 pub const DEFAULT_PARK_AFTER: std::time::Duration = std::time::Duration::from_mins(2);
 
+/// How long the browser keeps running with no chat using it, unless
+/// told otherwise: about 150 MB, and a second to start again.
+pub const DEFAULT_BROWSER_IDLE: std::time::Duration = std::time::Duration::from_mins(5);
+
 /// The UDP ports a daemon uses unless told otherwise: mosh's, so a
 /// firewall opened for mosh lets clackatoo through too.
 pub const DEFAULT_UDP_PORTS: RangeInclusive<u16> = 60000..=61000;
@@ -147,8 +156,12 @@ impl DaemonConfig {
     /// chat gets when it asks for none, split at spaces (or else Claude
     /// Code's adapter), `$CLACKATOO_UDP_PORTS`: a port, a range such as
     /// `60000-61000` (the default), or `off`, the language packs in
-    /// [`languages_dir`], and agents added in `daemon/agents.toml` in
-    /// [`config_dir`].
+    /// [`languages_dir`], agents added in `daemon/agents.toml` in
+    /// [`config_dir`], and `$CLACKATOO_BROWSER`: the browser agents drive,
+    /// or `off` for none (or else Chromium or Chrome, as found on `PATH`),
+    /// with its profile in `$CLACKATOO_BROWSER_PROFILE` (or else
+    /// `clackatoo/browser` in the data directory, or for a snap, in its
+    /// own folder).
     #[must_use]
     pub fn from_env() -> Self {
         let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
@@ -207,6 +220,16 @@ impl DaemonConfig {
                 Some(off) if off == "off" => None,
                 Some(dir) => Some(PathBuf::from(dir)),
                 None => data_dir().map(|dir| dir.join("clackatoo/boards")),
+            },
+            browser: match non_empty("CLACKATOO_BROWSER") {
+                Some(off) if off == "off" => None,
+                program => Some(BrowserConfig {
+                    program: program.map(PathBuf::from),
+                    profile: non_empty("CLACKATOO_BROWSER_PROFILE").map(PathBuf::from),
+                    data: data_dir().map(|dir| dir.join("clackatoo/browser")),
+                    home: non_empty("HOME").map_or_else(|| "/".into(), PathBuf::from),
+                    idle: DEFAULT_BROWSER_IDLE,
+                }),
             },
         }
     }
