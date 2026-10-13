@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026.10.6 (2026-10-13)
+
+### Features
+
+- **editor:** motions and text objects work on lines of any length (7f923ce)
+- **agents:** agents drive a browser of clackatoo's, and you watch the page in a pane (1c19807)
+- **gui:** the font and its size as options, set in config and live with :set (0cf4523)
+
+### Fixes
+
+- **git:** never run a repository's own filter drivers or hooks (c5db812)
+- **git:** never fetch, find a stray git directory, or run git that can't be made safe (08fc21c)
+- **explorer:** the check that git honours its environment ignores an inherited GIT_CONFIG, as git() does (a34c492)
+- **daemon:** an agent's last change is its own, a folder made again is watched again, and a stopping daemon's QUIC closes reach their clients (d4c5453)
+- **daemon:** a stop waits only for closes still to be sent, a path check isn't taken for the close, and a folder gone before it's watched is listed again (8926311)
+- **explorer:** a move between file systems deletes its source through the directories it copied, never by path (352130a)
+- **daemon:** an upgrade waits for file operations under way, so no copy or move is cut short (1ca8fac)
+- **explorer:** a move between file systems never empties a mount point, and tells a file given its old time back (b5dae13)
+- **daemon:** a file operation that panics is still answered, and upgrades still go ahead (d7a61df)
+- **editor:** a laid out line drops what a cell can't hold, as a terminal's row does (1f00db3)
+- **browser:** no files, downloads off in every context, a browser on the wrong profile killed unasked, and no page can take the daemon down (bda42dd)
+- **browser:** a snap starts only when $HOME is the home the system gives it, and the tests that start the installed Chromium are opt-in (88cbc32)
+
+### Speed
+
+- **motion:** a walk finds where a line's text ends once, not at every step (63b4dd7)
+
 ## 2026.10.5 (2026-10-13)
 
 ### Features
