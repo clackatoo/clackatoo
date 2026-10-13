@@ -41,6 +41,17 @@ pub struct Client {
     events: VecDeque<Event>,
     /// What carries the connection to a remote daemon.
     carried: Option<Carried>,
+    /// The number this client attaches to buffers as: see
+    /// [`Request::AttachBuffer`].
+    window: u64,
+}
+
+/// A number for a window to attach to buffers as, chosen at random.
+#[must_use]
+pub fn random_window() -> u64 {
+    use std::hash::BuildHasher;
+    // Each RandomState is keyed afresh from the system's randomness.
+    std::hash::RandomState::new().hash_one(std::process::id())
 }
 
 impl Client {
@@ -67,6 +78,7 @@ impl Client {
             decoder: FrameDecoder::new(),
             events: VecDeque::new(),
             carried: None,
+            window: random_window(),
         };
         // A socket nothing serves would otherwise hang the handshake.
         client.stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
@@ -274,7 +286,19 @@ impl Client {
     ///
     /// See [`ClientError`].
     pub fn attach_buffer(&mut self, buffer: BufferId) -> Result<(), ClientError> {
-        match self.request(&Request::AttachBuffer { buffer })? {
+        let window = self.window;
+        self.attach_buffer_as(buffer, window)
+    }
+
+    /// As [`attach_buffer`](Self::attach_buffer), as the window numbered
+    /// `window` (see [`Request::AttachBuffer`]), as one does again on a new
+    /// connection.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientError`].
+    pub fn attach_buffer_as(&mut self, buffer: BufferId, window: u64) -> Result<(), ClientError> {
+        match self.request(&Request::AttachBuffer { buffer, window })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
         }

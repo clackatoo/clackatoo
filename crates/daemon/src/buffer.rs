@@ -193,6 +193,7 @@ impl Buffer {
             text: self.text.to_string(),
             version: self.history.version(),
             modified: self.modified,
+            applied: None,
         }
     }
 

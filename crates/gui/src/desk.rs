@@ -3026,6 +3026,7 @@ mod tests {
                 text: "x\n".into(),
                 version: 0,
                 modified: false,
+                applied: None,
             }),
         );
         let features = ServerFeatures {
@@ -3211,7 +3212,10 @@ mod tests {
         );
         let asked = answer_all(&mut desk);
         assert!(
-            asked.contains(&Request::AttachBuffer { buffer }),
+            asked.contains(&Request::AttachBuffer {
+                buffer,
+                window: desk.editors.window.0
+            }),
             "{asked:?}"
         );
         desk.buffer_changed(
@@ -3221,6 +3225,7 @@ mod tests {
                 text: "notes\n".into(),
                 version: 0,
                 modified: false,
+                applied: None,
             }),
         );
         assert_eq!(desk.title(), Some("notes.txt"));
@@ -3315,6 +3320,7 @@ mod tests {
             text: text.into(),
             version: 0,
             modified: false,
+            applied: None,
         };
         desk.buffer_changed(
             BufferId(buffer),
@@ -3750,6 +3756,7 @@ mod tests {
                 text: text.into(),
                 version: 0,
                 modified: false,
+                applied: None,
             }),
         );
         answer_all(&mut desk);

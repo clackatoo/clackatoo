@@ -88,6 +88,12 @@ pub struct BufferSnapshot {
     pub version: u64,
     /// Whether it has changes that aren't saved.
     pub modified: bool,
+    /// The number of the last change the attaching window (see
+    /// [`Request::AttachBuffer`](crate::Request::AttachBuffer)) sent that
+    /// the daemon has dealt with, made or not, if any: the window's changes
+    /// up to it are in the text, or were nothing to make, and any after it
+    /// never arrived, as when a connection was lost with one on its way.
+    pub applied: Option<u64>,
 }
 
 /// A change a window makes to a buffer.

@@ -2,12 +2,13 @@
 //! window that attached to a buffer its edits, and making the edits windows
 //! send. And having buffers parsed, and sending their highlights.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use clackatoo_protocol::{
-    Author, BufferId, BufferUpdate, Change, Content, Edit, Error, Event, OpenFile, PaneId,
-    Response, ServerMessage, frame,
+    Author, BufferId, BufferSnapshot, BufferUpdate, Change, Content, Edit, Error, Event, OpenFile,
+    PaneId, Response, ServerMessage, frame,
 };
 use clackatoo_syntax::{Found, Highlighted, Syntax};
 use clackatoo_text::{Highlights, Hunks};
@@ -47,6 +48,11 @@ pub(super) struct BufferSlot {
     /// it's no longer UTF-8: windows aren't asked to read it again until
     /// it changes.
     pub(super) unreadable: Option<DiskStamp>,
+    /// For each window that has sent it changes, the number of the last
+    /// one dealt with, made or not: a window that lost its connection
+    /// learns from it which of its changes arrived (see
+    /// [`BufferSnapshot::applied`](clackatoo_protocol::BufferSnapshot)).
+    pub(super) applied: HashMap<u64, u64>,
 }
 
 /// What a buffer knew of its file when something other than an agent
@@ -73,6 +79,7 @@ impl BufferSlot {
             watched: false,
             outside: None,
             unreadable: None,
+            applied: HashMap::new(),
         }
     }
 
@@ -154,7 +161,14 @@ impl Daemon {
             return;
         };
         let version = slot.buffer.version();
-        let snapshot = BufferUpdate::Snapshot(slot.buffer.snapshot());
+        let window = match self.sources.get(token.0) {
+            Some(Source::Client(client)) => client.window,
+            _ => None,
+        };
+        let snapshot = BufferUpdate::Snapshot(BufferSnapshot {
+            applied: window.and_then(|window| slot.applied.get(&window).copied()),
+            ..slot.buffer.snapshot()
+        });
         let highlights = (!slot.highlights.spans().is_empty()).then(|| BufferUpdate::Highlights {
             version,
             start: 0,
@@ -196,6 +210,12 @@ impl Daemon {
         if !slot.viewers.contains(&token) {
             log::debug!("an edit to buffer {id} from a client not following it");
             return;
+        }
+        // Dealt with, whatever comes of it, so it's never sent again.
+        if let Some(Source::Client(client)) = self.sources.get(token.0)
+            && let Some(window) = client.window
+        {
+            slot.applied.insert(window, seq);
         }
         let buffer = &mut slot.buffer;
         let made = match change {

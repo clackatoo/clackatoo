@@ -2573,6 +2573,56 @@ fn a_file_changed_from_outside_under_unsaved_edits_keeps_them_and_says_so() {
 }
 
 #[test]
+fn a_window_attaching_again_hears_which_of_its_changes_arrived() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("notes.txt"), "one\n").unwrap();
+    let window = clackatoo_daemon::random_window();
+    let mut first = daemon.client();
+    first.watch_workspaces().unwrap();
+    let pane = first
+        .new_workspace(None, open_file(dir, "notes.txt"))
+        .unwrap();
+    let buffer = buffer_in(&mut first, pane);
+    first.attach_buffer_as(buffer, window).unwrap();
+    let snapshot = loop {
+        if let BufferUpdate::Snapshot(snapshot) = next_buffer_update(&mut first) {
+            break snapshot;
+        }
+    };
+    assert_eq!(snapshot.applied, None, "nothing sent yet");
+    send_change(&mut first, buffer, 41, insert(4, 0, "a", snapshot.version));
+    assert!(matches!(
+        next_buffer_update(&mut first),
+        BufferUpdate::Acked { seq: 41, .. }
+    ));
+    // Lost as the answer to an undo was on its way, which the daemon made.
+    send_change(&mut first, buffer, 42, Change::Undo);
+    while !matches!(
+        next_buffer_update(&mut first),
+        BufferUpdate::Edited {
+            answers: Some(42),
+            ..
+        }
+    ) {}
+    drop(first);
+
+    // The same window, on a new connection, hears both arrived.
+    let mut again = daemon.client();
+    again.attach_buffer_as(buffer, window).unwrap();
+    let snapshot = loop {
+        if let BufferUpdate::Snapshot(snapshot) = next_buffer_update(&mut again) {
+            break snapshot;
+        }
+    };
+    assert_eq!(snapshot.applied, Some(42));
+    assert_eq!(snapshot.text, "one\n", "the undo was made");
+    // Another window hears nothing of the first's.
+    let mut other = daemon.client();
+    assert_eq!(attach_buffer(&mut other, buffer).applied, None);
+}
+
+#[test]
 fn a_window_attaching_to_a_buffer_changed_from_outside_is_told() {
     let daemon = TestDaemon::start();
     let dir = daemon.dir.path();
@@ -5463,7 +5513,9 @@ fn a_buffer_wont_write_over_changes_made_on_disk_and_outlives_its_panes_while_mo
     assert_eq!(answer, Response::Done);
     assert_eq!(attach_buffer(&mut client, buffer).text, "fn b() {}\n");
     client.close_pane(reopened).unwrap();
-    let gone = client.request(&Request::AttachBuffer { buffer }).unwrap();
+    let gone = client
+        .request(&Request::AttachBuffer { buffer, window: 1 })
+        .unwrap();
     assert_eq!(gone, Response::Error(Error::NoSuchBuffer(buffer)));
 }
 
@@ -5497,7 +5549,10 @@ fn a_pane_shows_another_file_in_place_as_e_does() {
     assert_ne!(a, b);
     assert_eq!(attach_buffer(&mut client, b).text, "// b.rs\n");
     let gone = client
-        .request(&Request::AttachBuffer { buffer: a })
+        .request(&Request::AttachBuffer {
+            buffer: a,
+            window: 1,
+        })
         .unwrap();
     assert_eq!(gone, Response::Error(Error::NoSuchBuffer(a)));
 
@@ -5506,7 +5561,10 @@ fn a_pane_shows_another_file_in_place_as_e_does() {
     open_here(&mut client, "src/c.rs").unwrap();
     assert_ne!(buffer_in(&mut client, pane), b);
     let kept = client
-        .request(&Request::AttachBuffer { buffer: b })
+        .request(&Request::AttachBuffer {
+            buffer: b,
+            window: 1,
+        })
         .unwrap();
     assert_eq!(kept, Response::Done);
     open_here(&mut client, "src/b.rs").unwrap();
@@ -6947,7 +7005,10 @@ fn a_file_moved_over_one_open_takes_its_panes_and_one_with_changes_is_never_writ
         .filter_map(|pane| pane.content.buffer())
         .collect();
     assert_eq!(shown, [moving, moving]);
-    let gone = client.request(&Request::AttachBuffer { buffer: over });
+    let gone = client.request(&Request::AttachBuffer {
+        buffer: over,
+        window: 1,
+    });
     assert!(
         matches!(gone, Ok(Response::Error(Error::NoSuchBuffer(_)))),
         "{gone:?}"

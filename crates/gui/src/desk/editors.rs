@@ -46,6 +46,21 @@ pub(super) struct Editors {
     /// The keys and pastes that came while an editor's command waited for
     /// the grammar, oldest first, to be had once it's done.
     held: VecDeque<Held>,
+    /// The number the window attaches to buffers as.
+    pub(super) window: WindowNumber,
+}
+
+/// The number a window attaches to buffers as: chosen at random when it
+/// starts, and the same on every connection, so the daemon can say which
+/// of its changes to a buffer arrived before a connection was lost (see
+/// [`Request::AttachBuffer`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct WindowNumber(pub(super) u64);
+
+impl Default for WindowNumber {
+    fn default() -> Self {
+        Self(clackatoo_daemon::random_window())
+    }
 }
 
 /// A key or a paste held while an editor's command waits for the grammar.
@@ -254,7 +269,8 @@ impl Desk {
         }
         for buffer in new {
             self.editors.attached.insert(buffer);
-            self.request(Request::AttachBuffer { buffer }, Asked::Quiet);
+            let window = self.editors.window.0;
+            self.request(Request::AttachBuffer { buffer, window }, Asked::Quiet);
         }
     }
 
@@ -851,7 +867,8 @@ impl Desk {
         }
         // Attaching again sends a fresh snapshot, which puts it right.
         if astray && self.connected {
-            self.request(Request::AttachBuffer { buffer }, Asked::Quiet);
+            let window = self.editors.window.0;
+            self.request(Request::AttachBuffer { buffer, window }, Asked::Quiet);
         }
         if let Some((keys, times)) = asked_macro {
             self.type_macro(&keys, times);

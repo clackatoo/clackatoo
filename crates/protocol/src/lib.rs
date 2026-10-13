@@ -87,7 +87,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 60;
+pub const PROTOCOL_VERSION: u32 = 61;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -131,8 +131,9 @@ pub enum ClientMessage {
     Edit {
         /// The buffer.
         buffer: BufferId,
-        /// The client's number for the change, counting up from 0 for each
-        /// buffer, by which the daemon says it's been made.
+        /// The client's number for the change, counting up for each
+        /// buffer, by which the daemon says it's been made. A window keeps
+        /// counting up across its connections.
         seq: u64,
         /// The change.
         change: Change,
@@ -577,6 +578,14 @@ pub enum Request {
     AttachBuffer {
         /// The buffer to follow.
         buffer: BufferId,
+        /// The window attaching, as a number it chose at random when it
+        /// started, the same on every connection it makes. The daemon
+        /// remembers the last change each window sent to each buffer, and
+        /// says in the snapshot, so a window that lost its connection with
+        /// changes waiting knows which arrived (see
+        /// [`BufferSnapshot::applied`]). A change's number (`seq` in
+        /// [`ClientMessage::Edit`]) only ever goes up, for a window.
+        window: u64,
     },
     /// Stops sending the buffer.
     DetachBuffer {

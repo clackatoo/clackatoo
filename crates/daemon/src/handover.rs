@@ -29,6 +29,8 @@
 //!     that turns can still be undone.
 //! 13. Where each chat stands among the chats agents talk in, and panes
 //!     showing boards.
+//! 14. The last change each window sent each buffer, so a window that lost
+//!     its connection as the daemon upgraded knows which arrived.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -41,10 +43,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 13;
+pub(crate) const VERSION: u32 = 14;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -83,7 +85,7 @@ impl Fds {
     }
 }
 
-/// The daemon's state, version 13.
+/// The daemon's state, version 14.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The listening socket.
@@ -110,6 +112,17 @@ pub(crate) struct State {
     pub(crate) explorers: Vec<Files>,
     /// What agents changed in files.
     pub(crate) edits: EditLog,
+    /// The last change each window sent each buffer. Since version 14.
+    pub(crate) applied: Vec<Applied>,
+}
+
+/// The number of the last change window `window` sent buffer `buffer`
+/// that the daemon dealt with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Applied {
+    pub(crate) buffer: u32,
+    pub(crate) window: u64,
+    pub(crate) seq: u64,
 }
 
 /// What agents changed in files, by chat and turn. Since version 12.
@@ -524,6 +537,7 @@ impl State {
             10 => Ok(postcard::from_bytes::<v10::State>(body)?.into()),
             11 => Ok(postcard::from_bytes::<v11::State>(body)?.into()),
             12 => Ok(postcard::from_bytes::<v12::State>(body)?.into()),
+            13 => Ok(postcard::from_bytes::<v13::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -1036,6 +1050,7 @@ mod v7 {
                 next_files: 1,
                 explorers: Vec::new(),
                 edits: super::EditLog::default(),
+                applied: Vec::new(),
             }
         }
     }
@@ -1106,6 +1121,7 @@ mod v8 {
                 next_files: 1,
                 explorers: Vec::new(),
                 edits: super::EditLog::default(),
+                applied: Vec::new(),
             }
         }
     }
@@ -1146,6 +1162,7 @@ mod v9 {
                 next_files: 1,
                 explorers: Vec::new(),
                 edits: super::EditLog::default(),
+                applied: Vec::new(),
             }
         }
     }
@@ -1188,6 +1205,50 @@ mod v11 {
                 next_files: state.next_files,
                 explorers: state.explorers,
                 edits: super::EditLog::default(),
+                applied: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Version 13, as the builds that wrote it wrote it: no windows' changes.
+mod v13 {
+    use serde::Deserialize;
+
+    use super::{Buffer, Chat, EditLog, Files, Process, Terminal, Workspaces};
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats,
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: Vec::new(),
             }
         }
     }
@@ -1266,6 +1327,7 @@ mod v12 {
                 next_files: state.next_files,
                 explorers: state.explorers,
                 edits: state.edits,
+                applied: Vec::new(),
             }
         }
     }
@@ -1342,6 +1404,7 @@ mod v10 {
                 next_files: state.next_files,
                 explorers: state.explorers,
                 edits: super::EditLog::default(),
+                applied: Vec::new(),
             }
         }
     }
@@ -1463,6 +1526,11 @@ mod tests {
                 root: b"/src".to_vec(),
             }],
             edits: edits(),
+            applied: vec![Applied {
+                buffer: 1,
+                window: 0xfeed,
+                seq: 7,
+            }],
         }
     }
 
@@ -1914,6 +1982,33 @@ mod tests {
         file.write_all(include_bytes!("../tests/fixtures/handover-v11.bin"))
             .unwrap();
         assert!(State::read(&mut file).unwrap().edits.chats.is_empty());
+    }
+
+    /// Written by a build that wrote version 14. It must always be read.
+    #[test]
+    fn version_14_is_read_with_each_windows_last_change() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v14.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        assert_eq!(
+            state.applied,
+            [Applied {
+                buffer: 1,
+                window: 0xfeed,
+                seq: 7
+            }]
+        );
+        assert_eq!(state.buffers[0].text, "new");
+    }
+
+    /// Versions before 14 come knowing no window's changes.
+    #[test]
+    fn version_13_comes_with_no_windows_changes() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v13.bin"))
+            .unwrap();
+        assert!(State::read(&mut file).unwrap().applied.is_empty());
     }
 
     #[test]

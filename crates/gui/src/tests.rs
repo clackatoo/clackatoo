@@ -1181,6 +1181,7 @@ fn renders_an_editor_pane() {
         text: "fn main() {\n\tprintln!(\"hello, 世界\");\n}\n".into(),
         version: 0,
         modified: false,
+        applied: None,
     }));
     // As tree-sitter-rust's queries colour it.
     let span = |start, end, kind| Span { start, end, kind };
@@ -1312,6 +1313,7 @@ fn renders_an_editor_pane_with_a_wrapped_line() {
         text: text.into(),
         version: 0,
         modified: false,
+        applied: None,
     }));
     // A language server's warning, under "world", on the row the line
     // goes on over.
@@ -1566,6 +1568,7 @@ fn an_editors_completion_menu_and_signature_are_drawn_by_its_cursor() {
         text,
         version: 0,
         modified: false,
+        applied: None,
     }));
     copy.update(BufferUpdate::Features(ServerFeatures {
         completion: Some(vec!['.']),
@@ -1763,6 +1766,7 @@ fn an_editors_panel_is_drawn_over_its_text() {
         text,
         version: 0,
         modified: false,
+        applied: None,
     }));
     let (cols, rows) = (32u16, 9u16);
     let mut editor = Editor::new(BufferId(1), &crate::options::Options::default());

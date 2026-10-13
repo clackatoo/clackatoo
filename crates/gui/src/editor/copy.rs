@@ -133,6 +133,9 @@ pub(crate) struct BufferCopy {
     /// The copy has gone astray from the daemon's text, as a batch whose
     /// edits couldn't be sent leaves it: a fresh snapshot is wanted.
     astray: bool,
+    /// The connection was lost, and the next snapshot is the new one's:
+    /// the changes waiting are kept, to be brought past it and sent again.
+    reattaching: bool,
 }
 
 impl BufferCopy {
@@ -158,6 +161,7 @@ impl BufferCopy {
             steps: 0,
             batch: None,
             astray: false,
+            reattaching: false,
         }
     }
 
@@ -392,8 +396,18 @@ impl BufferCopy {
         self.made.len()
     }
 
-    /// Takes `snapshot` in place of everything it had.
+    /// Takes `snapshot` in place of everything it had, or after a lost
+    /// connection, brings the changes still waiting past it.
     fn replace(&mut self, snapshot: BufferSnapshot) -> Heard {
+        if std::mem::take(&mut self.reattaching) && self.loaded {
+            if let Some(heard) = self.rebase(&snapshot) {
+                return heard;
+            }
+            log::error!(
+                "buffer {}: changes made while disconnected were lost",
+                self.id
+            );
+        }
         self.path = snapshot.path;
         self.text = Rope::from_str(&snapshot.text);
         self.revision += 1;
@@ -634,11 +648,51 @@ impl BufferCopy {
         (self.highlights).replace_since(start..end, spans, waiting);
     }
 
-    /// The connection was lost. A new one sends a snapshot, and changes
-    /// not answered are lost with the old one.
+    /// The connection was lost. Changes waiting, and any made before the
+    /// next one's snapshot, are kept: the snapshot says which of them the
+    /// daemon made, and the rest are brought past it and sent again (see
+    /// [`rebase`](Self::rebase)).
     pub(crate) fn reconnected(&mut self) {
-        self.waiting.clear();
+        self.reattaching = true;
+    }
+
+    /// Brings the changes waiting past `snapshot`, the first of a new
+    /// connection, made to the copy, and sends them. Returns `None` if they
+    /// don't fit, as they always should.
+    ///
+    /// What the daemon changed since the copy's version isn't known, only
+    /// its text now: so it's worked out, as the edit from the text the
+    /// changes waiting were made to (the copy with them taken out again)
+    /// to the snapshot's. The change that was on its way when the
+    /// connection was lost is in that text too if the daemon made it,
+    /// as `snapshot.applied` says, and isn't sent again. Then that edit is
+    /// brought past the rest, as anyone else's is, and the rest past it.
+    fn rebase(&mut self, snapshot: &BufferSnapshot) -> Option<Heard> {
+        let mut base = self.text.clone();
+        for waiting in self.waiting.iter().rev() {
+            if let Waiting::Edit { edit, .. } = waiting {
+                edit.invert().apply(&mut base).ok()?;
+            }
+        }
+        // An undo or redo made is in the snapshot, and nowhere else.
+        if self.sent.is_some_and(|sent| snapshot.applied >= Some(sent))
+            && let Some(Waiting::Edit { edit, .. }) = self.waiting.pop_front()
+        {
+            edit.apply(&mut base).ok()?;
+        }
         self.sent = None;
+        let theirs = Edit::between(&base.to_string(), &snapshot.text);
+        let theirs = self.bring_past_waiting(theirs)?;
+        if !self.apply(&theirs, "the daemon's") {
+            return None;
+        }
+        self.path.clone_from(&snapshot.path);
+        self.version = snapshot.version;
+        self.modified = snapshot.modified;
+        // Told again after the snapshot, if there's a server.
+        self.features = ServerFeatures::default();
+        self.send_next();
+        Some(Heard::Edited(theirs))
     }
 
     pub(crate) fn take_outbox(&mut self) -> Vec<ClientMessage> {
@@ -706,7 +760,7 @@ impl BufferCopy {
     /// Sends the first change waiting, if none is on its way, and the
     /// queries before it, which aren't waited on.
     fn send_next(&mut self) {
-        if self.sent.is_some() || !self.loaded || self.batch.is_some() {
+        if self.sent.is_some() || !self.loaded || self.batch.is_some() || self.reattaching {
             return;
         }
         while let Some(Waiting::Query { .. } | Waiting::Rename { .. } | Waiting::Stage { .. }) =
@@ -807,6 +861,9 @@ pub(super) mod tests {
     pub(crate) struct Daemon {
         pub(crate) text: Rope,
         history: History<Author>,
+        /// The number of the last change the window sent that was dealt
+        /// with.
+        applied: Option<u64>,
     }
 
     impl Daemon {
@@ -814,6 +871,7 @@ pub(super) mod tests {
             Self {
                 text: Rope::from_str(text),
                 history: History::new(0),
+                applied: None,
             }
         }
 
@@ -828,6 +886,7 @@ pub(super) mod tests {
                 text: self.text.to_string(),
                 version: self.history.version(),
                 modified: false,
+                applied: self.applied,
             })
         }
 
@@ -840,6 +899,7 @@ pub(super) mod tests {
             let ClientMessage::Edit { seq, change, .. } = message else {
                 panic!("an edit");
             };
+            self.applied = Some(seq);
             match change {
                 Change::Edit { edit, base, step } => {
                     let edit = self.history.rebase(edit, base).unwrap();
@@ -907,6 +967,139 @@ pub(super) mod tests {
                 answers: None,
             }
         }
+    }
+
+    /// Sends the copy's changes to `daemon` and its answers back, until
+    /// there are no more.
+    fn settle(copy: &mut BufferCopy, daemon: &mut Daemon) {
+        loop {
+            let sent = copy.take_outbox();
+            if sent.is_empty() {
+                return;
+            }
+            for message in sent {
+                let (answer, _) = daemon.take(message);
+                copy.update(answer);
+            }
+        }
+    }
+
+    #[test]
+    fn changes_waiting_when_the_connection_goes_are_made_once_on_the_next() {
+        // The change on its way never arrived; another was made while
+        // disconnected; an agent changed the text meanwhile.
+        let mut daemon = Daemon::new(
+            "abc
+",
+        );
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        assert!(copy.edit(Edit::replace(4, 0, "", "1"), true));
+        assert_eq!(copy.take_outbox().len(), 1, "on its way, and lost");
+        copy.reconnected();
+        assert!(copy.edit(Edit::replace(5, 5, "", "2"), true));
+        assert!(
+            copy.take_outbox().is_empty(),
+            "nothing goes before the snapshot"
+        );
+        daemon.agent(3, "X");
+        assert_eq!(
+            copy.update(daemon.snapshot()),
+            Heard::Edited(Edit::replace(6, 4, "", "X"))
+        );
+        assert_eq!(
+            copy.text().to_string(),
+            "1abcX
+2"
+        );
+        settle(&mut copy, &mut daemon);
+        assert_eq!(
+            daemon.text.to_string(),
+            "1abcX
+2"
+        );
+        assert_eq!(copy.text().to_string(), daemon.text.to_string());
+    }
+
+    #[test]
+    fn a_change_that_arrived_as_the_connection_went_isnt_made_twice() {
+        let mut daemon = Daemon::new(
+            "abc
+",
+        );
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        daemon.agent(0, "X");
+        assert!(copy.edit(Edit::replace(4, 4, "", "1"), true));
+        // It arrives and is made, but the answer is lost.
+        for message in copy.take_outbox() {
+            daemon.take(message);
+        }
+        copy.reconnected();
+        assert!(copy.edit(Edit::replace(5, 0, "", "2"), true));
+        copy.update(daemon.snapshot());
+        assert_eq!(
+            copy.text().to_string(),
+            "2Xabc
+1"
+        );
+        settle(&mut copy, &mut daemon);
+        assert_eq!(
+            daemon.text.to_string(),
+            "2Xabc
+1",
+            "1 once"
+        );
+        assert_eq!(copy.text().to_string(), daemon.text.to_string());
+    }
+
+    #[test]
+    fn an_undo_that_arrived_as_the_connection_went_comes_with_the_snapshot() {
+        let mut daemon = Daemon::new(
+            "abc
+",
+        );
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        copy.edit(Edit::replace(4, 0, "", "1"), true);
+        settle(&mut copy, &mut daemon);
+        copy.reverse(true);
+        for message in copy.take_outbox() {
+            daemon.take(message);
+        }
+        copy.reconnected();
+        copy.update(daemon.snapshot());
+        assert_eq!(
+            copy.text().to_string(),
+            "abc
+"
+        );
+        settle(&mut copy, &mut daemon);
+        assert_eq!(
+            daemon.text.to_string(),
+            "abc
+",
+            "undone once"
+        );
+
+        // Not arrived: it goes again.
+        copy.edit(Edit::replace(4, 0, "", "1"), true);
+        settle(&mut copy, &mut daemon);
+        copy.reverse(true);
+        assert_eq!(copy.take_outbox().len(), 1, "lost");
+        copy.reconnected();
+        copy.update(daemon.snapshot());
+        settle(&mut copy, &mut daemon);
+        assert_eq!(
+            daemon.text.to_string(),
+            "abc
+"
+        );
+        assert_eq!(
+            copy.text().to_string(),
+            "abc
+"
+        );
     }
 
     #[test]

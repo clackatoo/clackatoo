@@ -277,6 +277,9 @@ struct Client {
     /// What programs put on the clipboard for the client, waiting for it
     /// to catch up.
     clipboard: clipboard::Unsent,
+    /// The window the client is, as it said when attaching to a buffer:
+    /// see [`Request::AttachBuffer`].
+    window: Option<u64>,
 }
 
 /// A stream a QUIC client is sent one terminal's view updates on.
@@ -302,6 +305,7 @@ impl Client {
             serving_tools: None,
             streams: BTreeMap::new(),
             clipboard: clipboard::Unsent::default(),
+            window: None,
         }
     }
 }
@@ -642,7 +646,11 @@ impl Daemon {
         daemon.next_buffer = state.next_buffer;
         for buffer in buffers {
             let id = BufferId(buffer.id);
-            let slot = BufferSlot::new(Buffer::resume(buffer));
+            let mut slot = BufferSlot::new(Buffer::resume(buffer));
+            slot.applied = (state.applied.iter())
+                .filter(|applied| applied.buffer == id.0)
+                .map(|applied| (applied.window, applied.seq))
+                .collect();
             daemon.buffers.insert(id, slot);
             daemon.parse_buffer(id);
             // Its file may have changed while no one was watching.
@@ -736,6 +744,15 @@ impl Daemon {
                 next_files,
                 explorers,
                 edits: self.agent_files.log.hand_over(),
+                applied: (self.buffers.iter())
+                    .flat_map(|(id, slot)| {
+                        (slot.applied.iter()).map(|(&window, &seq)| handover::Applied {
+                            buffer: id.0,
+                            window,
+                            seq,
+                        })
+                    })
+                    .collect(),
             },
             fds,
         })
@@ -1753,7 +1770,10 @@ impl Daemon {
             | Request::OpenHere { .. }
             | Request::SplitTab { .. }) => self.respond_about_workspaces(request, token),
             asked @ (Request::CarryQuic | Request::CarryMcp { .. }) => self.carry(token, &asked),
-            Request::AttachBuffer { buffer } => {
+            Request::AttachBuffer { buffer, window } => {
+                if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
+                    client.window = Some(window);
+                }
                 self.attach_buffer(token, buffer).map(|()| Response::Done)
             }
             Request::DetachBuffer { buffer } => {

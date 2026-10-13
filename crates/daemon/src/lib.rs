@@ -42,7 +42,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 pub use agents::{AgentConfig, CustomAgent};
-pub use client::{Client, ClientError, Receiver, Sender, UdpTarget};
+pub use client::{Client, ClientError, Receiver, Sender, UdpTarget, random_window};
 pub use quic::{Contact, Redial, Redialed, Route};
 pub use runtime::{DaemonLock, LockError, RuntimeDir};
 pub use server::{Daemon, ShutdownHandle};
