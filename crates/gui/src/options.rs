@@ -344,6 +344,15 @@ options! {
     /// Indent with spaces, not tabs, where no line nearby is indented yet.
     /// A file keeps the kind of indent it has.
     expandtab("et"): bool = true;
+    /// A new line, one where `}`, `]` or `)` is typed first, and one where
+    /// `:` ends `else`, `elif`, `except`, `finally`, `case` or `default`,
+    /// is indented as the file's language says: by the rules of its
+    /// grammar's `indents.scm`, as nvim-treesitter's are, not Vim's rules
+    /// for C. It takes the indent of the line before at once, and is put
+    /// right a moment later, unless its indent has been typed in, or
+    /// another change made meanwhile. Off, a new line keeps the line
+    /// before's. `=` indents by the rules either way.
+    smartindent("si"): bool = true;
     /// Searches ignore case...
     ignorecase("ic"): bool = true;
     /// ...unless, with `ignorecase`, what's searched for has a capital.

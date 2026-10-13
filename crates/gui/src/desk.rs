@@ -3400,6 +3400,44 @@ mod tests {
     }
 
     #[test]
+    fn a_new_lines_indent_is_put_right_when_the_grammar_answers() {
+        use clackatoo_protocol::{Answer, BufferUpdate, Change, LineIndent, Query};
+        let mut desk = editing("/p/a.rs", "{\n}\n");
+        type_keys(&mut desk, "ox");
+        // Its edit first, which the question waits behind.
+        let changes = buffer_changes(&mut desk);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        desk.buffer_changed(BufferId(7), BufferUpdate::Acked { version: 1, seq: 0 });
+        let asked: Vec<(u64, usize, Query)> = (desk.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Query { id, at, query, .. } => Some((id, at, query)),
+                _ => None,
+            })
+            .collect();
+        let [(id, 2, Query::Indent { end: 2, .. })] = asked[..] else {
+            panic!("asked {asked:?}");
+        };
+        // The x typed meanwhile wasn't held.
+        assert_eq!(editor_text(&desk), "{\nx\n}\n");
+        let answer = BufferUpdate::Answer {
+            id,
+            version: 1,
+            answer: Answer::Indents(vec![LineIndent {
+                line: 2,
+                width: Some(4),
+            }]),
+        };
+        assert!(desk.buffer_changed(BufferId(7), answer));
+        assert_eq!(editor_text(&desk), "{\n    x\n}\n");
+        // Sent once the x is, as part of the same change.
+        desk.buffer_changed(BufferId(7), BufferUpdate::Acked { version: 2, seq: 1 });
+        let changes = buffer_changes(&mut desk);
+        let [(2, Change::Edit { step: false, .. })] = changes[..] else {
+            panic!("sent {changes:?}");
+        };
+    }
+
+    #[test]
     fn an_object_from_the_grammar_is_copied_to_the_clipboard_once_it_answers() {
         use clackatoo_protocol::{Answer, BufferUpdate, Construct, Piece, Query};
         let text = "fn a() {}\nfn b() {}\n";
@@ -4502,6 +4540,42 @@ mod tests {
         }
     }
 
+    /// Answers the edits sent to buffer 7, and its questions how lines are
+    /// indented, as the daemon does for a file with no grammar, until
+    /// none are left.
+    fn serve_without_grammar(desk: &mut Desk) {
+        use clackatoo_protocol::{Answer, BufferUpdate, Query};
+        let mut version = 0;
+        loop {
+            let messages = desk.take_outbox();
+            if messages.is_empty() {
+                return;
+            }
+            for message in messages {
+                match message {
+                    ClientMessage::Edit { seq, .. } => {
+                        version += 1;
+                        desk.buffer_changed(BufferId(7), BufferUpdate::Acked { version, seq });
+                    }
+                    ClientMessage::Query {
+                        id,
+                        query: Query::Indent { .. },
+                        ..
+                    } => {
+                        let answer = Answer::Nothing;
+                        let answer = BufferUpdate::Answer {
+                            id,
+                            version,
+                            answer,
+                        };
+                        desk.buffer_changed(BufferId(7), answer);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Answers the grammar question `id` with `pieces`, counted in the
     /// daemon's text at `version`.
     fn answer_at(desk: &mut Desk, id: u64, version: u64, pieces: Vec<clackatoo_protocol::Piece>) {
@@ -4720,6 +4794,10 @@ mod tests {
         type_text(&mut desk, "`aq");
         assert_eq!(note(&desk), "t.txt  3:1");
         type_text(&mut desk, "@a");
+        // It waits at the O for the grammar to say how the line's
+        // indented: there's none for a .txt.
+        assert_eq!(note(&desk), "t.txt  1:1");
+        serve_without_grammar(&mut desk);
         assert_eq!(note(&desk), "t.txt  5:1");
         assert_eq!(&editor_text(&desk)[..10], "x\nx\nl1\nl2\n");
         // Its jumps are in the jump list, in order.

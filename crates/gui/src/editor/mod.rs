@@ -42,6 +42,7 @@ mod case;
 mod complete;
 mod copy;
 mod ex;
+mod indent;
 mod keys;
 mod marked;
 mod marks;
@@ -226,6 +227,8 @@ struct Indent {
     step: usize,
     /// A line not indented yet is indented with spaces (`expandtab`).
     spaces: bool,
+    /// New lines are indented as the language says (`smartindent`).
+    smart: bool,
 }
 
 impl Indent {
@@ -238,6 +241,7 @@ impl Indent {
                 shiftwidth => shiftwidth as usize,
             },
             spaces: options.expandtab,
+            smart: options.smartindent,
         }
     }
 
@@ -498,6 +502,9 @@ pub(crate) struct Editor {
     replaying: bool,
     /// Whether the command waiting for the grammar is a macro's.
     resume_replaying: bool,
+    /// New lines given an indent at once, waiting for the grammar to say
+    /// what it should be.
+    corrections: Vec<indent::Correction>,
     /// The keys to note in a macro being recorded for the key just typed,
     /// if a menu took it: what it put in, or nothing.
     menu_keys: Option<Vec<Stroke>>,
@@ -587,6 +594,7 @@ impl Editor {
             keep_status: false,
             replaying: false,
             resume_replaying: false,
+            corrections: Vec::new(),
             menu_keys: None,
             in_global: false,
             counted_matches: (0, 0),
@@ -809,14 +817,15 @@ impl Editor {
     /// Whether the editor waits for the language server or the daemon to
     /// answer something the keys after may depend on, asked as query
     /// `since` or later: where `gd` goes, a menu or panel to show, a
-    /// rename or a stage; or an undo. A macro waits for it before its next
-    /// key.
+    /// rename or a stage, or a new line's indent; or an undo. A macro waits
+    /// for it before its next key.
     pub(crate) fn waiting_for_answer(&self, copy: &BufferCopy, since: u64) -> bool {
         let new = |query: u64| query >= since;
         self.asked.is_some_and(|(query, _)| new(query))
             || self.acting.is_some_and(new)
             || self.renaming.is_some_and(new)
             || self.staging.iter().any(|&query| new(query))
+            || self.correcting_since(since)
             || copy.reversing()
     }
 
@@ -827,6 +836,7 @@ impl Editor {
         self.acting = None;
         self.renaming = None;
         self.staging.clear();
+        self.corrections.clear();
     }
 
     /// A key failed, as a motion that can't move does: the macros being
@@ -1075,7 +1085,7 @@ impl Editor {
         shared: &mut Shared,
         again: bool,
     ) -> Done {
-        if self.waits_for_grammar(command, copy) {
+        if self.waits_for_grammar(command, copy, &shared.marks) {
             return Done::default();
         }
         let done = Done::REDRAW;
@@ -1402,6 +1412,10 @@ impl Editor {
         marks: &Marks,
         (registers, name): (&mut Registers, Option<char>),
     ) -> bool {
+        if operator == Operator::Reindent {
+            // As the grammar answered, for the lines it found.
+            return self.reindent(copy);
+        }
         let span = match target {
             Target::Mark { mark, exact } => self.mark_span(mark, exact, copy, marks),
             _ => self.span(operator, target, times, copy),
@@ -1464,7 +1478,7 @@ impl Editor {
             Operator::Yank => self.yanked(span, copy),
             Operator::Delete => self.delete_span(span, copy),
             Operator::Change => self.change_span(span, copy),
-            Operator::Indent | Operator::Dedent | Operator::Recase(_) => {}
+            Operator::Indent | Operator::Dedent | Operator::Recase(_) | Operator::Reindent => {}
         }
         true
     }
@@ -2067,6 +2081,8 @@ impl Editor {
                 let text = self.text(copy);
                 let col = text.laid(line).map_or(0, |laid| laid.cells());
                 self.cursor = Cursor::new(Point { line, col });
+                drop(text);
+                self.ask_indent(line, copy);
             }
         }
         self.enter_insert(times);
@@ -2111,6 +2127,7 @@ impl Editor {
             Stroke::Escape => self.leave_insert(copy),
             Stroke::Char { ch, ctrl: false } => {
                 self.insert_text(at, ch.encode_utf8(&mut [0; 4]), copy);
+                self.typed_indent_key(ch, copy);
             }
             Stroke::Enter => {
                 let text = self.text(copy);
@@ -2120,6 +2137,7 @@ impl Editor {
                 let indent = indent_of(&line_text[..before_cursor.min(line_text.len())]).to_owned();
                 drop(text);
                 self.insert_text(at, &format!("\n{indent}"), copy);
+                self.ask_indent(line + 1, copy);
             }
             Stroke::Tab => {
                 let text = self.text(copy);
@@ -2265,6 +2283,7 @@ impl Editor {
     /// Moves the word being completed, and the places its items are at,
     /// through `edit`, made to the text.
     fn edited(&mut self, edit: &Edit) {
+        self.corrections_follow(edit);
         if let Some(completing) = &mut self.completing {
             completing.start = edit.map(completing.start, Bias::Before);
         }
@@ -3205,6 +3224,7 @@ impl Editor {
         match heard {
             Heard::Replaced => {
                 self.text_replaced();
+                self.corrections.clear();
                 self.held = None;
                 // What `:s///c` was asking about is gone.
                 if matches!(self.prompt, Some(Prompt::Confirm(_))) {
@@ -3221,6 +3241,7 @@ impl Editor {
                     if let (Some(at), Some((cursor, _))) = (at, &mut self.held) {
                         *cursor = at;
                     }
+                    self.corrections_follow(edit);
                     self.place_held(copy);
                 } else {
                     self.follow_edit(edit, copy);
@@ -3239,8 +3260,9 @@ impl Editor {
                 let resolving = (self.completion.as_ref())
                     .and_then(|completion| completion.resolving)
                     .filter(|(resolving, _)| resolving == id);
-                if self.heard_pieces(*id, answer) {
-                    // Done by `resume`, which the desk calls.
+                if self.heard_pieces(*id, answer) || self.heard_indent(*id, answer) {
+                    // Done by `resume` or `correct_indents`, which the desk
+                    // calls.
                 } else if let Some((asked, asking)) = self.asked
                     && asked == *id
                 {
@@ -3442,6 +3464,7 @@ impl Editor {
             | Answer::Formatted { .. }
             | Answer::Staged
             | Answer::Pieces(_)
+            | Answer::Indents(_)
             | Answer::Completions { .. }
             | Answer::Resolved { .. }
             | Answer::Signature { .. }

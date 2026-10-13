@@ -176,6 +176,8 @@ pub(crate) enum Operator {
     Dedent,
     /// `g~`, `gu`, `gU` and `g?`: change its case.
     Recase(Recase),
+    /// `=`: indent its lines as their language's grammar says.
+    Reindent,
 }
 
 /// What an operator acts on.
@@ -366,7 +368,8 @@ impl Action {
                     | Operator::Change
                     | Operator::Indent
                     | Operator::Dedent
-                    | Operator::Recase(_),
+                    | Operator::Recase(_)
+                    | Operator::Reindent,
                 _
             ) | Self::DeleteChars { .. }
                 | Self::Tilde
@@ -589,12 +592,13 @@ impl Reader<'_> {
             })
         };
         Ok(match ch {
-            'd' | 'c' | 'y' | '>' | '<' => {
+            'd' | 'c' | 'y' | '>' | '<' | '=' => {
                 let operator = match ch {
                     'd' => Operator::Delete,
                     'c' => Operator::Change,
                     'y' => Operator::Yank,
                     '>' => Operator::Indent,
+                    '=' => Operator::Reindent,
                     _ => Operator::Dedent,
                 };
                 if visual {
@@ -970,6 +974,13 @@ mod tests {
             command(None, Action::Operate(Operator::Dedent, Target::Lines))
         );
         assert_eq!(read("><"), Parsed::Nothing);
+        let reindent = |target| Action::Operate(Operator::Reindent, target);
+        assert_eq!(read("2=="), command(Some(2), reindent(Target::Lines)));
+        assert_eq!(
+            read("=G"),
+            command(None, reindent(Target::Motion(Motion::Last)))
+        );
+        assert_eq!(read("=>"), Parsed::Nothing);
     }
 
     #[test]

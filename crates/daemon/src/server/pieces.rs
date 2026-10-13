@@ -1,7 +1,7 @@
 //! Questions about the pieces of code in buffers, in the event loop: where
 //! the functions, classes and arguments around a place are, for text
 //! objects such as `af`, and where the next ones start, for motions such
-//! as `]f`.
+//! as `]f`; and how lines should be indented, for `=` and new lines.
 //!
 //! They come as [`ClientMessage::Query`](clackatoo_protocol::ClientMessage::Query)s,
 //! as questions for language servers do, but only the thread parsing
@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use clackatoo_protocol::{Answer, BufferId, BufferUpdate, Query};
-use clackatoo_syntax::{Answered, Ask};
-use clackatoo_text::Bias;
+use clackatoo_syntax::{Answered, Ask, Reply};
+use clackatoo_text::{Bias, line_start_through};
 use mio::Token;
 
 use super::Daemon;
@@ -63,7 +63,7 @@ impl Daemon {
             let why = failed("the thread reading grammars has stopped");
             return self.tell_answer(token, buffer, id, why);
         }
-        let ask = match query {
+        let mut ask = match query {
             Query::Pieces(construct) => Ask::Around(construct),
             Query::Starts {
                 construct,
@@ -73,6 +73,15 @@ impl Daemon {
                 construct,
                 backward,
                 count: count as usize,
+            },
+            Query::Indent {
+                end,
+                shiftwidth,
+                tabstop,
+            } => Ask::Indent {
+                end,
+                shiftwidth,
+                tabstop,
             },
             other => {
                 log::error!("{other:?} isn't for a grammar");
@@ -84,7 +93,19 @@ impl Daemon {
         let Some(edits) = slot.buffer.edits_since(version) else {
             return self.tell_answer(token, buffer, id, failed("the file has changed since"));
         };
-        let at = edits.fold(at, |at, edit| edit.map(at, Bias::Before));
+        // The starts of the lines asked about keep to their lines, or if
+        // one's gone, the place it was at is asked about: the window drops
+        // the answer of a line it knows is gone.
+        let line = |at: usize, edit: &clackatoo_text::Edit| {
+            line_start_through(edit, at).unwrap_or_else(|| edit.map(at, Bias::Before))
+        };
+        let at = if let Ask::Indent { end, .. } = &mut ask {
+            let edits: Vec<_> = edits.collect();
+            *end = edits.iter().fold(*end, |end, edit| line(end, edit));
+            edits.iter().fold(at, |at, edit| line(at, edit))
+        } else {
+            edits.fold(at, |at, edit| edit.map(at, Bias::Before))
+        };
         let questions = &mut self.piece_questions;
         let ticket = questions.next_ticket;
         questions.next_ticket += 1;
@@ -112,9 +133,9 @@ impl Daemon {
             let failed = Answer::Failed("the file isn't open".into());
             return self.tell_answer(token, buffer, id, failed);
         };
-        let answer = match (answered.pieces, slot.buffer.edits_since(answered.version)) {
+        let answer = match (answered.reply, slot.buffer.edits_since(answered.version)) {
             (None, _) => Answer::Failed("its grammar couldn't be loaded".into()),
-            (Some(mut pieces), Some(edits)) => {
+            (Some(Reply::Pieces(mut pieces)), Some(edits)) => {
                 for edit in edits {
                     for piece in &mut pieces {
                         piece.map(edit);
@@ -122,6 +143,17 @@ impl Daemon {
                 }
                 Answer::Pieces(pieces)
             }
+            (Some(Reply::Indents(mut indents)), Some(edits)) => {
+                // Lines taken out since are dropped, and so are those
+                // joined to the line before.
+                for edit in edits {
+                    indents.retain_mut(|indent| indent.map(edit));
+                }
+                let text = slot.buffer.text();
+                indents.retain(|indent| starts_line(text, indent.line));
+                Answer::Indents(indents)
+            }
+            (Some(Reply::Failed(why)), _) => Answer::Failed(why),
             (Some(_), None) => Answer::Failed("the file has changed since".into()),
         };
         self.tell_answer(token, buffer, id, answer);
@@ -153,4 +185,9 @@ impl Daemon {
         };
         self.tell(token, buffer, update);
     }
+}
+
+/// Whether byte `at` of `text` starts a line.
+pub(super) fn starts_line(text: &clackatoo_text::Rope, at: usize) -> bool {
+    at == 0 || (at <= text.len_bytes() && text.byte(at - 1) == b'\n')
 }

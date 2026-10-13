@@ -72,7 +72,8 @@ fn index(construct: Construct) -> usize {
     }
 }
 
-/// What a question about a buffer's pieces asks.
+/// What a question about a buffer's tree asks: where its pieces are, or
+/// how its lines should be indented.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ask {
     /// The pieces of this kind around a place, innermost first, each with
@@ -88,6 +89,16 @@ pub enum Ask {
         backward: bool,
         /// How many.
         count: usize,
+    },
+    /// How the lines from the place's to `end`'s should be indented, as
+    /// the pack's `indents.scm` says.
+    Indent {
+        /// A byte in the last line.
+        end: usize,
+        /// The columns a step of indent is.
+        shiftwidth: u32,
+        /// The columns tabs stop at multiples of.
+        tabstop: u32,
     },
 }
 
@@ -123,6 +134,8 @@ impl Finder<'_> {
                 backward,
                 count,
             } => self.starts(construct, at, backward, count.min(MOST_STARTS)),
+            // No pieces: the indenter answers it.
+            Ask::Indent { .. } => Vec::new(),
         }
     }
 

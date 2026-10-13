@@ -28,6 +28,10 @@ pub struct Known {
     /// from nvim-treesitter-textobjects, in the order they go in
     /// `textobjects.scm`: none if it has none of those.
     pub textobjects: &'static [Download],
+    /// The queries saying how its lines are indented, from
+    /// nvim-treesitter, in the order they go in `indents.scm`: none if it
+    /// has none.
+    pub indents: &'static [Download],
 }
 
 /// A file to download, and what it must be.
@@ -93,6 +97,7 @@ pub fn install(known: &Known, dir: &Path) -> Result<(), InstallError> {
     let wasm = download(&known.wasm)?;
     let highlights = download_all(known.highlights)?;
     let textobjects = download_all(known.textobjects)?;
+    let indents = download_all(known.indents)?;
     let manifest = manifest(known);
 
     fs::create_dir_all(dir)?;
@@ -102,14 +107,8 @@ pub fn install(known: &Known, dir: &Path) -> Result<(), InstallError> {
         // manifest last.
         write(&pack, "grammar.wasm", &wasm)?;
         write(&pack, "highlights.scm", &highlights)?;
-        if textobjects.is_empty() {
-            match fs::remove_file(pack.join("textobjects.scm")) {
-                Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err.into()),
-                _ => {}
-            }
-        } else {
-            write(&pack, "textobjects.scm", &textobjects)?;
-        }
+        write_or_remove(&pack, "textobjects.scm", &textobjects)?;
+        write_or_remove(&pack, "indents.scm", &indents)?;
         return write(&pack, "language.toml", manifest.as_bytes());
     }
     // Hidden, so it isn't taken for a pack while it's being written.
@@ -119,6 +118,9 @@ pub fn install(known: &Known, dir: &Path) -> Result<(), InstallError> {
     fs::write(partial.join("highlights.scm"), &highlights)?;
     if !textobjects.is_empty() {
         fs::write(partial.join("textobjects.scm"), &textobjects)?;
+    }
+    if !indents.is_empty() {
+        fs::write(partial.join("indents.scm"), &indents)?;
     }
     fs::write(partial.join("language.toml"), manifest)?;
     fs::rename(&partial, &pack)?;
@@ -149,6 +151,18 @@ fn write(dir: &Path, name: &str, contents: &[u8]) -> Result<(), InstallError> {
     fs::write(&partial, contents)?;
     fs::rename(&partial, dir.join(name))?;
     Ok(())
+}
+
+/// Writes `name` in `dir`, replacing it whole, or removes it if
+/// `contents` is empty, as for a language with no such queries.
+fn write_or_remove(dir: &Path, name: &str, contents: &[u8]) -> Result<(), InstallError> {
+    if !contents.is_empty() {
+        return write(dir, name, contents);
+    }
+    match fs::remove_file(dir.join(name)) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err.into()),
+        _ => Ok(()),
+    }
 }
 
 /// Downloads each of `files`, and puts them one after another.
@@ -200,7 +214,9 @@ mod tests {
             assert!(all[..index].iter().all(|other| other.name != language.name));
             assert_eq!(language.wasm.sha256.len(), 64, "{}", language.name);
             assert!(!language.highlights.is_empty(), "{}", language.name);
-            let files = language.highlights.iter().chain(language.textobjects);
+            let files = (language.highlights.iter())
+                .chain(language.textobjects)
+                .chain(language.indents);
             assert!(
                 files
                     .chain([&language.wasm])

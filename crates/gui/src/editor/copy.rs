@@ -26,7 +26,8 @@ use clackatoo_protocol::{
     Answer, BufferId, BufferUpdate, Change, ClientMessage, Edit, Query, ServerFeatures,
 };
 use clackatoo_text::{
-    Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span, compose, transform,
+    Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span, compose,
+    line_start_through, transform,
 };
 
 /// The most pieces an edit waiting to be sent grows to by joining the
@@ -119,6 +120,10 @@ pub(crate) struct BufferCopy {
     /// Whether the macro being typed has edited the buffer yet, so its
     /// first edit starts an undo step and the rest join it.
     macro_edited: bool,
+    /// How many undo steps the window has started in the buffer, by
+    /// editing or by asking for an undo or a redo: a change made since a
+    /// count is taken has.
+    steps: u64,
     /// The edits of a batch being made, while one is, and how many changes
     /// were waiting when it began.
     batch: Option<(Vec<Edit>, usize)>,
@@ -147,6 +152,7 @@ impl BufferCopy {
             hunks: Hunks::new(),
             features: ServerFeatures::default(),
             macro_edited: false,
+            steps: 0,
             batch: None,
             astray: false,
         }
@@ -249,6 +255,7 @@ impl BufferCopy {
         if !self.apply(&edit, "an") {
             return false;
         }
+        self.steps += u64::from(step);
         let edit = Rc::new(edit);
         self.made.push(Rc::clone(&edit));
         // An edit joining the last step joins the last edit, if that's
@@ -325,6 +332,7 @@ impl BufferCopy {
         self.highlights.map(&edit);
         self.diagnostics.map(&edit);
         self.hunks.map(&edit);
+        self.steps += u64::from(step);
         let edit = Rc::new(edit);
         self.made.push(Rc::clone(&edit));
         self.waiting.insert(at, Waiting::Edit { edit, step });
@@ -334,6 +342,7 @@ impl BufferCopy {
     /// Asks the daemon to undo the user's last step, or redo the last
     /// undone.
     pub(crate) fn reverse(&mut self, undo: bool) {
+        self.steps += 1;
         self.waiting
             .push_back(if undo { Waiting::Undo } else { Waiting::Redo });
         self.send_next();
@@ -367,6 +376,12 @@ impl BufferCopy {
         self.waiting.push_back(Waiting::Stage { id, at });
         self.send_next();
         id
+    }
+
+    /// How many undo steps the window has started in the buffer: one more
+    /// for each change that starts one, and each undo and redo asked for.
+    pub(crate) fn steps(&self) -> u64 {
+        self.steps
     }
 
     /// How many edits have been made here since they were last taken.
@@ -525,6 +540,17 @@ impl BufferCopy {
             }
             return Answer::Pieces(pieces);
         }
+        if let Answer::Indents(mut indents) = answer {
+            if version != self.version {
+                log::debug!("buffer {}: indents for version {version}", self.id);
+                return Answer::Failed("the text changed meanwhile".into());
+            }
+            // Lines the window's taken out meanwhile are gone.
+            for edit in waiting {
+                indents.retain_mut(|indent| indent.map(edit));
+            }
+            return Answer::Indents(indents);
+        }
         let Answer::Locations(mut found) = answer else {
             return answer;
         };
@@ -628,6 +654,20 @@ impl BufferCopy {
                 } => {
                     *at = edit.map(*at, Bias::Before);
                     *end = edit.map(*end, Bias::Before).max(*at);
+                    continue;
+                }
+                // The starts of the lines asked about keep to their lines,
+                // or if one's gone, go where it was: the editor that asked
+                // knows to drop its answer.
+                Waiting::Query {
+                    at,
+                    query: Query::Indent { end, .. },
+                    ..
+                } => {
+                    let line = |at: usize| {
+                        line_start_through(&edit, at).unwrap_or_else(|| edit.map(at, Bias::Before))
+                    };
+                    (*at, *end) = (line(*at), line(*end));
                     continue;
                 }
                 Waiting::Query { at, .. }
@@ -747,7 +787,7 @@ pub(crate) fn queries_asked() -> u64 {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use clackatoo_protocol::{Author, BufferSnapshot, FileLocation, Piece};
+    use clackatoo_protocol::{Author, BufferSnapshot, FileLocation, LineIndent, Piece};
     use clackatoo_text::History;
 
     use super::*;
@@ -835,7 +875,17 @@ pub(super) mod tests {
 
         /// An agent's edit, made in the daemon.
         pub(in crate::editor) fn agent(&mut self, at: usize, text: &str) -> BufferUpdate {
-            let edit = Edit::replace(self.text.len_bytes(), at, "", text);
+            self.agent_replace(at, "", text)
+        }
+
+        /// An agent's edit, replacing `removed` at byte `at` with `text`.
+        pub(in crate::editor) fn agent_replace(
+            &mut self,
+            at: usize,
+            removed: &str,
+            text: &str,
+        ) -> BufferUpdate {
+            let edit = Edit::replace(self.text.len_bytes(), at, removed, text);
             edit.apply(&mut self.text).unwrap();
             let author = Author::Agent(clackatoo_protocol::TerminalId(9));
             let version = self.history.record(edit.clone(), author, true).unwrap();
@@ -1028,6 +1078,45 @@ pub(super) mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_line_asked_how_to_indent_keeps_to_its_line_through_others_edits() {
+        let mut daemon = Daemon::new("{\nx\n}");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        typed(&mut copy, 0, "a", true);
+        let sent = copy.take_outbox();
+        // About the line "x", which waits for the edit before it.
+        let query = Query::Indent {
+            end: 3,
+            shiftwidth: 4,
+            tabstop: 4,
+        };
+        let id = copy.ask(query, 3);
+        // An agent's line put in above it, at its start, moves it down
+        // past that line, where a place in it would stay.
+        let agents = daemon.agent(2, "y\n");
+        let (ack, _) = daemon.take(sent.into_iter().next().unwrap());
+        copy.update(agents);
+        copy.update(ack);
+        assert_eq!(copy.text.to_string(), "a{\ny\nx\n}");
+        let [ClientMessage::Query { at, .. }] = copy.take_outbox()[..] else {
+            panic!("the query is sent");
+        };
+        assert_eq!(at, 5);
+        // The answer moves past the window's edits waiting in turn: a line
+        // typed above it.
+        typed(&mut copy, 3, "z\n", true);
+        let line = |line, width| LineIndent { line, width };
+        let heard = copy.update(BufferUpdate::Answer {
+            id,
+            version: 2,
+            answer: Answer::Indents(vec![line(5, Some(4))]),
+        });
+        let answer = Answer::Indents(vec![line(7, Some(4))]);
+        assert_eq!(heard, Heard::Answer { id, answer });
+        assert_eq!(&copy.text.to_string()[7..], "x\n}");
     }
 
     #[test]

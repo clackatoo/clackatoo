@@ -6,16 +6,19 @@ use std::ops::Range;
 use clackatoo_text::{Kind, Rope, Span};
 use tree_sitter::{Language, Node, Query, QueryCursor, StreamingIterator, TextProvider, Tree};
 
+use crate::indents::IndentRules;
 use crate::pieces::Objects;
 
-/// A language's grammar and highlight query, loaded, and its query for
-/// pieces of code, if it has one.
+/// A language's grammar and highlight query, loaded, and its queries for
+/// pieces of code and indenting, if it has them.
 #[derive(Debug)]
 pub(crate) struct Grammar {
     pub(crate) language: Language,
     pub(crate) objects: Option<Objects>,
     /// Which constructs its kinds could be, for finding pieces by them.
     pub(crate) findable: [bool; 3],
+    /// Its rules for indenting.
+    pub(crate) indents: Option<IndentRules>,
     query: Query,
     /// The kind each of the query's captures is, by its index.
     kinds: Vec<Option<Kind>>,
@@ -34,6 +37,7 @@ impl Grammar {
             findable: crate::pieces::findable_by_kinds(&language),
             language,
             objects: None,
+            indents: None,
             query,
             kinds,
         })

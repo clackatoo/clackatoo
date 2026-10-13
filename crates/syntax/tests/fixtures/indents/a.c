@@ -1,0 +1,20 @@
+#include <stdio.h>
+int main(int argc,
+char **argv) {
+int x = 1;
+if (x)
+x++;
+for (int i = 0; i < 3; i++) {
+switch (i) {
+case 1:
+x++;
+break;
+default:
+x--;
+}
+}
+#ifdef DEBUG
+printf("%d\n", x);
+#endif
+return 0;
+}

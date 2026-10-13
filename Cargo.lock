@@ -627,6 +627,7 @@ dependencies = [
  "clackatoo-text",
  "log",
  "proptest",
+ "regex",
  "ring",
  "ropey",
  "tempfile",

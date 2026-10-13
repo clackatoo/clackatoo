@@ -12,7 +12,8 @@
 //! the [`Highlights`](clackatoo_text::Highlights) of what each parse
 //! changed. It finds the [`Piece`](clackatoo_text::Piece)s of code that
 //! text objects and motions use too: as a pack's `textobjects.scm` says,
-//! or else by the kinds of the tree's nodes.
+//! or else by the kinds of the tree's nodes; and how lines should be
+//! indented, as its `indents.scm` says.
 //!
 //! [tree-sitter]: https://tree-sitter.github.io
 
@@ -20,6 +21,7 @@
 
 mod document;
 mod highlight;
+mod indents;
 pub mod install;
 mod known;
 pub mod pack;
@@ -33,4 +35,4 @@ pub use known::KNOWN;
 pub use pack::{Languages, Pack};
 pub use pieces::Ask;
 pub use server::{Server, git_root};
-pub use worker::{Answered, Found, Highlighted, Key, Syntax};
+pub use worker::{Answered, Found, Highlighted, Key, Reply, Syntax};

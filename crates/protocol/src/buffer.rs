@@ -36,11 +36,12 @@
 //! are, for text objects such as `af`, or where the next one starts, for
 //! motions such as `]f`, as it asks a language server about a place: with
 //! a [`Query`](crate::ClientMessage::Query). The daemon answers those
-//! from the buffer's syntax tree, off the event loop.
+//! from the buffer's syntax tree, off the event loop, and so how lines
+//! should be indented.
 
 use std::fmt;
 
-use clackatoo_text::{Construct, Diagnostic, Edit, Hunk, Piece, Span};
+use clackatoo_text::{Construct, Diagnostic, Edit, Hunk, LineIndent, Piece, Span};
 use serde::{Deserialize, Serialize};
 
 use crate::TerminalId;
@@ -300,13 +301,31 @@ pub enum Query {
         /// How many.
         count: u32,
     },
+    /// How the lines from the one starting at the place to the one
+    /// starting at `end` should be indented, as their language's
+    /// `indents.scm` says, for `=` and to put right the indent a new line
+    /// was given. Both are moved with edits made since, so lines put in
+    /// between are indented too. Answered from the syntax tree with
+    /// [`Answer::Indents`], or [`Answer::Failed`] if the language has no
+    /// rules, or they'd take too long.
+    Indent {
+        /// The start of the last line.
+        end: usize,
+        /// The columns one step of indent is (`shiftwidth`).
+        shiftwidth: u32,
+        /// The columns tabs stop at multiples of (`tabstop`).
+        tabstop: u32,
+    },
 }
 
 impl Query {
     /// Whether the buffer's grammar answers it, not its language server.
     #[must_use]
     pub fn for_grammar(self) -> bool {
-        matches!(self, Self::Pieces(_) | Self::Starts { .. })
+        matches!(
+            self,
+            Self::Pieces(_) | Self::Starts { .. } | Self::Indent { .. }
+        )
     }
 }
 
@@ -411,6 +430,11 @@ pub enum Answer {
     /// past its own changes that haven't been made yet, as it moves
     /// diagnostics. There are none if the buffer has no grammar.
     Pieces(Vec<Piece>),
+    /// How lines should be indented, as [`Query::Indent`] asks, each
+    /// line by the byte it starts at in the text at the answer's version,
+    /// which a client moves past its own changes as it moves pieces. A
+    /// line taken out since isn't there.
+    Indents(Vec<LineIndent>),
     /// A [`ClientMessage::Stage`](crate::ClientMessage::Stage) was made:
     /// the hunk's lines are in git's index, and the buffer's hunks, sent
     /// before this, no longer have it.

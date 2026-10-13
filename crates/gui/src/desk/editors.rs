@@ -375,6 +375,7 @@ impl Desk {
         let mut left = Vec::new();
         let mut places = None;
         let mut resuming = Vec::new();
+        let mut correcting = Vec::new();
         let mut gave_up = false;
         for pane in &showing {
             let editor = editors.panes.get_mut(pane).expect("just found");
@@ -385,6 +386,9 @@ impl Desk {
             places = places.or_else(|| editor.take_places());
             if editor.resumable() {
                 resuming.push(*pane);
+            }
+            if editor.correcting() {
+                correcting.push(*pane);
             }
         }
         let here = copy.path().to_owned();
@@ -399,6 +403,10 @@ impl Desk {
             if (self.editors.panes.get_mut(&pane)).is_some_and(Editor::take_gave_up) {
                 self.gave_up();
             }
+        }
+        // A new line's indent, put right as the grammar says.
+        for pane in correcting {
+            self.in_editor(pane, Editor::correct_indents);
         }
         for (pane, byte) in left {
             self.record_jump(pane, Some(byte));

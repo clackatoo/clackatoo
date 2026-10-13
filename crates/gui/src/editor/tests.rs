@@ -16,6 +16,7 @@ use crate::options::{CompleteAccept, Options};
 use crate::pane::Selection;
 use crate::render::{HighlightKind, Ink};
 
+mod indent;
 mod substitute;
 mod wrapped;
 
@@ -27,6 +28,9 @@ struct Setup {
     options: Options,
     /// The queries sent, for the language server.
     queries: Vec<(u64, usize, Query)>,
+    /// The questions how lines should be indented, for the grammar, kept
+    /// apart.
+    indents: Vec<(u64, usize, Query)>,
     /// The renames sent, for the language server.
     renames: Vec<(u64, usize, String)>,
     /// The stages sent.
@@ -53,6 +57,7 @@ impl Setup {
             shared: Shared::default(),
             options,
             queries: Vec::new(),
+            indents: Vec::new(),
             renames: Vec::new(),
             stages: Vec::new(),
         }
@@ -106,7 +111,11 @@ impl Setup {
             }
             for message in messages {
                 if let ClientMessage::Query { id, at, query, .. } = message {
-                    self.queries.push((id, at, query));
+                    if let Query::Indent { .. } = query {
+                        self.indents.push((id, at, query));
+                    } else {
+                        self.queries.push((id, at, query));
+                    }
                     continue;
                 }
                 if let ClientMessage::Rename { id, at, name, .. } = message {
@@ -153,9 +162,14 @@ impl Setup {
             answer,
         });
         self.editor.heard(&mut heard, true, &mut self.copy);
-        // As the desk does, for a command that waited for it.
+        // As the desk does, for a command that waited for it, and a new
+        // line's indent.
         if self.editor.resumable() {
             self.editor.resume(&mut self.copy, &mut self.shared);
+        }
+        if self.editor.correcting() {
+            self.editor
+                .correct_indents(&mut self.copy, &mut self.shared);
         }
         self.serve();
     }

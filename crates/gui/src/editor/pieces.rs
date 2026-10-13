@@ -26,7 +26,7 @@ use clackatoo_protocol::{Answer, Construct, Edit, Piece, Query};
 use clackatoo_text::Bias;
 
 use super::keys::{Action, Target};
-use super::{BufferCopy, Change, Command, Done, Editor, Shared, Stroke};
+use super::{BufferCopy, Change, Command, Done, Editor, Marks, Shared, Stroke};
 use crate::motion::Cursor;
 use crate::objects::Object;
 use crate::pane::{Mode, Selection};
@@ -106,8 +106,16 @@ fn grammar_question(command: Command) -> Option<Query> {
 impl Editor {
     /// Asks the grammar what `command` needs to know, if it needs to,
     /// unless it's been answered: the command is done again once it is.
-    /// Returns whether it asked.
-    pub(super) fn waits_for_grammar(&mut self, command: Command, copy: &mut BufferCopy) -> bool {
+    /// `marks` are where `=` to a mark goes. Returns whether it asked.
+    pub(super) fn waits_for_grammar(
+        &mut self,
+        command: Command,
+        copy: &mut BufferCopy,
+        marks: &Marks,
+    ) -> bool {
+        if let Some(waits) = self.waits_to_reindent(command, copy, marks) {
+            return waits;
+        }
         if self.answered.is_some() {
             return false;
         }
@@ -115,8 +123,17 @@ impl Editor {
             return false;
         };
         let at = self.asked_about(query, copy);
+        let id = copy.ask(query, at);
+        self.await_answer(command, id, at);
+        true
+    }
+
+    /// Has `command` wait for the answer to the query numbered `id`,
+    /// asked when the cursor, or the selection's start for an object, was
+    /// at byte `at`.
+    pub(super) fn await_answer(&mut self, command: Command, id: u64, at: usize) {
         self.awaiting = Some(Awaiting {
-            id: copy.ask(query, at),
+            id,
             command,
             at,
             again: None,
@@ -124,12 +141,11 @@ impl Editor {
             strokes: Vec::new(),
             since: Instant::now(),
         });
-        true
     }
 
     /// The byte `query` asks about: the cursor's for a motion, or the
     /// selection's start, for an object that may grow it.
-    fn asked_about(&self, query: Query, copy: &BufferCopy) -> usize {
+    pub(super) fn asked_about(&self, query: Query, copy: &BufferCopy) -> usize {
         let place = match (query, self.anchor) {
             (Query::Pieces(_), Some(anchor)) => anchor.min(self.cursor.at),
             _ => self.cursor.at,
@@ -164,8 +180,14 @@ impl Editor {
     /// Moves the place a command waiting asked about along with `edit`,
     /// someone else's, as the cursor moves.
     pub(super) fn awaiting_follows(&mut self, edit: &Edit) {
+        self.awaiting_follows_by(edit, Bias::Before);
+    }
+
+    /// ...or, by `bias`, along with an edit of the window's own, made
+    /// meanwhile, as a new line's indent put right is.
+    pub(super) fn awaiting_follows_by(&mut self, edit: &Edit, bias: Bias) {
         if let Some(awaiting) = &mut self.awaiting {
-            awaiting.at = edit.map(awaiting.at, Bias::Before);
+            awaiting.at = edit.map(awaiting.at, bias);
         }
     }
 
@@ -245,8 +267,13 @@ impl Editor {
         let Some(awaiting) = self.awaiting.take_if(|awaiting| awaiting.answer.is_some()) else {
             return Done::default();
         };
-        let moved = grammar_question(awaiting.command)
-            .is_some_and(|question| self.asked_about(question, copy) != awaiting.at);
+        // `=`, if it asked nothing else first, waits with the cursor
+        // where it was.
+        let asked_about = grammar_question(awaiting.command).map_or_else(
+            || self.text(copy).byte_at(self.cursor.at),
+            |question| self.asked_about(question, copy),
+        );
+        let moved = asked_about != awaiting.at;
         let late = awaiting.since.elapsed() >= PATIENCE;
         if moved || late {
             self.awaiting = Some(awaiting);

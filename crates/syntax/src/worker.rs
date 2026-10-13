@@ -1,6 +1,7 @@
 //! The thread that parses: the event loop hands it each buffer's edits, and
 //! it hands back highlights, so a parse never holds up a keystroke. It
-//! answers questions about the pieces of code in each buffer's tree too.
+//! answers questions about each buffer's tree too: where its pieces of
+//! code are, and how its lines should be indented.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -8,15 +9,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use clackatoo_text::{Edit, Piece, Rope, Span};
+use clackatoo_text::{Edit, LineIndent, Piece, Rope, Span};
 use tree_sitter::{Parser, QueryCursor, WasmStore, wasmtime};
 
 use crate::document::Document;
 use crate::highlight::Grammar;
+use crate::indents::{IndentRules, Indenter, TooLong};
 use crate::pack::Pack;
 use crate::pieces::{Ask, Finder, Objects};
+
+/// The longest working out how lines should be indented may take, as
+/// every buffer's highlights wait for it: `=` over a file too big for that
+/// is refused, saying so.
+const INDENT_PATIENCE: Duration = Duration::from_millis(500);
 
 /// A buffer, as the event loop numbers it.
 pub type Key = u64;
@@ -39,12 +47,24 @@ pub struct Highlighted {
 pub struct Answered {
     /// The question's number.
     pub ticket: u64,
-    /// The version of the buffer's text the pieces are in: the one the
+    /// The version of the buffer's text the answer is about: the one the
     /// question was asked of.
     pub version: u64,
-    /// The pieces, as the question asked, or `None` if the buffer isn't
-    /// parsed, as when its grammar couldn't be loaded.
-    pub pieces: Option<Vec<Piece>>,
+    /// The answer, or `None` if the buffer isn't parsed, as when its
+    /// grammar couldn't be loaded.
+    pub reply: Option<Reply>,
+}
+
+/// What a question about a buffer's tree is answered with.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Reply {
+    /// The pieces of code it asked for.
+    Pieces(Vec<Piece>),
+    /// How the lines it asked about should be indented.
+    Indents(Vec<LineIndent>),
+    /// Why it can't be answered, as when the pack has no rules for
+    /// indenting, or they'd take too long.
+    Failed(String),
 }
 
 /// What the thread has found.
@@ -172,6 +192,8 @@ impl Syntax {
 /// A buffer being parsed.
 struct Open {
     grammar: Arc<Grammar>,
+    /// The name of its pack.
+    language: String,
     document: Document,
     version: u64,
 }
@@ -272,24 +294,60 @@ impl Worker {
             return Answered {
                 ticket,
                 version: 0,
-                pieces: None,
+                reply: None,
             };
         };
-        let pieces = match open.document.tree() {
-            Some(tree) => Finder {
+        let text = open.document.text();
+        let reply = match (ask, open.document.tree()) {
+            (
+                Ask::Indent {
+                    end,
+                    shiftwidth,
+                    tabstop,
+                },
                 tree,
-                text: open.document.text(),
-                objects: open.grammar.objects.as_ref(),
-                findable: open.grammar.findable,
-                cursor: &mut self.pieces_cursor,
+            ) => {
+                let line = |at: usize| text.byte_to_line(at.min(text.len_bytes()));
+                let (first, last) = (line(at), line(end));
+                match (tree, &open.grammar.indents) {
+                    (Some(tree), Some(rules)) => {
+                        let mut indenter = Indenter {
+                            tree,
+                            text,
+                            rules,
+                            cursor: &mut self.pieces_cursor,
+                            shiftwidth,
+                            tabstop,
+                        };
+                        let deadline = Instant::now() + INDENT_PATIENCE;
+                        match indenter.indents(first, last.max(first), deadline) {
+                            Ok(indents) => Reply::Indents(indents),
+                            Err(TooLong) => Reply::Failed(format!(
+                                "too many lines to indent at once: {}",
+                                last.max(first) - first + 1
+                            )),
+                        }
+                    }
+                    (None, _) => Reply::Failed("the file isn't parsed".into()),
+                    (_, None) => Reply::Failed(no_rules(&open.language)),
+                }
             }
-            .answer(ask, at),
-            None => Vec::new(),
+            (ask, Some(tree)) => Reply::Pieces(
+                Finder {
+                    tree,
+                    text,
+                    objects: open.grammar.objects.as_ref(),
+                    findable: open.grammar.findable,
+                    cursor: &mut self.pieces_cursor,
+                }
+                .answer(ask, at),
+            ),
+            (_, None) => Reply::Pieces(Vec::new()),
         };
         Answered {
             ticket,
             version: open.version,
-            pieces: Some(pieces),
+            reply: Some(reply),
         }
     }
 
@@ -307,6 +365,7 @@ impl Worker {
                     buffer,
                     Open {
                         grammar,
+                        language: pack.name.clone(),
                         document: Document::new(text),
                         version,
                     },
@@ -388,6 +447,7 @@ impl Worker {
         let mut grammar =
             Grammar::new(language, &highlights).map_err(|err| format!("highlights.scm: {err}"))?;
         grammar.objects = objects(pack, &grammar.language);
+        grammar.indents = indents(pack, &grammar.language);
         Ok(grammar)
     }
 }
@@ -408,6 +468,34 @@ fn objects(pack: &Pack, language: &tree_sitter::Language) -> Option<Objects> {
         log::warn!("syntax: language {}: textobjects.scm: {err}", pack.name);
         None
     })
+}
+
+/// `pack`'s rules for indenting, if it has them, compiled for `language`.
+/// Ones that can't be read or compiled are passed over, and lines keep the
+/// indent the line before gives them.
+fn indents(pack: &Pack, language: &tree_sitter::Language) -> Option<IndentRules> {
+    let source = match fs::read_to_string(pack.dir.join("indents.scm")) {
+        Ok(source) => source,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            log::warn!("syntax: language {}: indents.scm: {err}", pack.name);
+            return None;
+        }
+    };
+    IndentRules::new(language, &source)
+        .inspect_err(|err| log::warn!("syntax: language {}: indents.scm: {err}", pack.name))
+        .ok()
+}
+
+/// What a question about indenting is answered with in a language whose
+/// pack has no rules for it: how to get them, for a language clackatoo
+/// knows.
+fn no_rules(language: &str) -> String {
+    if crate::install::known(language).is_some_and(|known| !known.indents.is_empty()) {
+        format!("no rules for indenting: run `clackatoo language install {language}` to get them")
+    } else {
+        format!("no rules for indenting {language}: its pack has no indents.scm")
+    }
 }
 
 /// The WebAssembly engine grammars run in. Each grammar's memory is
@@ -435,6 +523,98 @@ mod tests {
     fn json() -> Arc<Pack> {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/languages/json");
         Arc::new(Pack::read(&dir).unwrap())
+    }
+
+    /// The pieces `answered` gives.
+    fn pieces(answered: Answered) -> Vec<Piece> {
+        match answered.reply {
+            Some(Reply::Pieces(pieces)) => pieces,
+            other => panic!("not pieces: {other:?}"),
+        }
+    }
+
+    /// The indents `answered` gives.
+    fn indents(answered: Answered) -> Vec<LineIndent> {
+        match answered.reply {
+            Some(Reply::Indents(indents)) => indents,
+            other => panic!("not indents: {other:?}"),
+        }
+    }
+
+    /// The indents `worker` says `lines` lines of `text` from line `first`
+    /// should have, read as `pack`'s language, with steps of 4 columns.
+    fn indents_by(
+        worker: &mut Worker,
+        pack: &Arc<Pack>,
+        text: &str,
+        first: usize,
+        lines: usize,
+    ) -> Vec<LineIndent> {
+        indents(ask_indents(worker, pack, text, first, lines))
+    }
+
+    /// What `worker` answers when asked how `lines` lines of `text` from
+    /// line `first` should be indented, as `indents_by` asks.
+    fn ask_indents(
+        worker: &mut Worker,
+        pack: &Arc<Pack>,
+        text: &str,
+        first: usize,
+        lines: usize,
+    ) -> Answered {
+        worker.take(Job::Open {
+            buffer: 4,
+            pack: pack.clone(),
+            text: Rope::from_str(text),
+            version: 0,
+        });
+        worker.parse(4);
+        let rope = Rope::from_str(text);
+        let line = |line: usize| rope.line_to_byte(line.min(rope.len_lines() - 1));
+        let ask = Ask::Indent {
+            end: line(first + lines.max(1) - 1),
+            shiftwidth: 4,
+            tabstop: 4,
+        };
+        worker.answer(4, 0, line(first), ask)
+    }
+
+    /// `text` with each line indented as `worker` says, as `=` does it:
+    /// a blank line has no indent, and one the rules say to keep keeps
+    /// its own.
+    fn reindented(worker: &mut Worker, pack: &Arc<Pack>, text: &str) -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        let indents = indents_by(worker, pack, text, 0, lines.len());
+        assert_eq!(indents.len(), lines.len());
+        (lines.iter().zip(indents))
+            .map(|(line, indent)| {
+                let body = line.trim_start();
+                match indent.width {
+                    _ if body.is_empty() => "\n".to_owned(),
+                    Some(width) => format!("{}{body}\n", " ".repeat(width as usize)),
+                    None => format!("{line}\n"),
+                }
+            })
+            .collect()
+    }
+
+    /// The indent of a line opened below each line of `text`, as `o`
+    /// gives it: it starts with the indent of the line it's opened below,
+    /// which it keeps if the rules say to.
+    fn opened(worker: &mut Worker, pack: &Arc<Pack>, text: &str) -> Vec<u32> {
+        let lines: Vec<&str> = text.lines().collect();
+        (0..lines.len())
+            .map(|line| {
+                let indent = lines[line].len() - lines[line].trim_start().len();
+                let mut opened = lines.clone();
+                opened.insert(line + 1, &lines[line][..indent]);
+                let text = opened.join("\n") + "\n";
+                let [answer] = indents_by(worker, pack, &text, line + 1, 1)[..] else {
+                    panic!("one line asked about");
+                };
+                answer.width.unwrap_or(u32::try_from(indent).unwrap())
+            })
+            .collect()
     }
 
     fn worker() -> Worker {
@@ -511,7 +691,7 @@ mod tests {
         assert!(worker.parse(1).is_none());
         // Asked about, it says it isn't parsed.
         let ask = Ask::Around(Construct::Function);
-        assert_eq!(worker.answer(1, 5, 0, ask).pieces, None);
+        assert_eq!(worker.answer(1, 5, 0, ask).reply, None);
     }
 
     #[test]
@@ -640,7 +820,7 @@ mod tests {
             version: 0,
         });
         worker.parse(3);
-        worker.answer(3, 0, at, ask).pieces.unwrap()
+        pieces(worker.answer(3, 0, at, ask))
     }
 
     /// The text of each piece found, and of its insides.
@@ -813,6 +993,212 @@ impl Point {
         assert_eq!(starts, if query { 1 } else { 2 });
     }
 
+    /// A case for indenting, and what Neovim makes of it.
+    fn indent_case(name: &str) -> (String, String) {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/indents");
+        let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
+        (read(name), read(&format!("{name}.indented")))
+    }
+
+    #[test]
+    fn lines_are_indented_as_the_packs_rules_say() {
+        let (text, indented) = indent_case("a.json");
+        WORKER.with_borrow_mut(|worker| {
+            assert_eq!(reindented(worker, &json(), &text), indented);
+            // As Neovim's `o` indents a line opened below each.
+            let opened = opened(worker, &json(), &text);
+            assert_eq!(opened, [4, 8, 8, 8, 4, 8, 8, 8, 4]);
+            // Lines asked about past the end aren't answered. The blank
+            // line after the array is in it, as Neovim has it, as the
+            // `]` isn't an `@indent.end`.
+            let past = indents_by(worker, &json(), "[\n1]\n", 1, 9);
+            let widths: Vec<_> = past
+                .iter()
+                .map(|indent| (indent.line, indent.width))
+                .collect();
+            assert_eq!(widths, [(2, Some(4)), (5, Some(4))]);
+        });
+    }
+
+    #[test]
+    fn a_pack_without_indents_has_no_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("json");
+        fs::create_dir(&pack).unwrap();
+        for file in ["language.toml", "grammar.wasm", "highlights.scm"] {
+            fs::copy(json().dir.join(file), pack.join(file)).unwrap();
+        }
+        let pack = Arc::new(Pack::read(&pack).unwrap());
+        let answered = ask_indents(&mut worker(), &pack, "[\n  1]\n", 0, 2);
+        let why = "no rules for indenting: run `clackatoo language install json` to get them";
+        assert_eq!(answered.reply, Some(Reply::Failed(why.into())));
+        assert_eq!(
+            no_rules("mine"),
+            "no rules for indenting mine: its pack has no indents.scm"
+        );
+    }
+
+    #[test]
+    fn indenting_that_takes_too_long_is_given_up_on() {
+        let text = "[\n1,\n2\n]\n".repeat(300);
+        WORKER.with_borrow_mut(|worker| {
+            indents_by(worker, &json(), &text, 0, 1);
+            let open = &worker.open[&4];
+            let mut indenter = Indenter {
+                tree: open.document.tree().unwrap(),
+                text: open.document.text(),
+                rules: open.grammar.indents.as_ref().unwrap(),
+                cursor: &mut worker.pieces_cursor,
+                shiftwidth: 4,
+                tabstop: 4,
+            };
+            let past = Instant::now();
+            assert_eq!(indenter.indents(0, 1199, past), Err(TooLong));
+            // A line or two is looked at before the clock is.
+            assert!(indenter.indents(1, 2, past).is_ok());
+            let later = Instant::now() + INDENT_PATIENCE;
+            assert_eq!(
+                indenter.indents(0, 1199, later).map(|all| all.len()),
+                Ok(1200)
+            );
+        });
+    }
+
+    /// Checks what the installed packs in `dir` make of the cases Neovim
+    /// was asked about, and how long indenting a big file takes.
+    fn known_indents(worker: &mut Worker, dir: &Path) {
+        // Each case, and the indent Neovim gives a line opened below each
+        // of its lines. Python without its indent is code in error, which
+        // the grammars Neovim and clackatoo pin read differently, so only
+        // `=` is checked of it.
+        let opened_below: [(&str, &str, &[u32]); 6] = [
+            (
+                "rust",
+                "a.rs",
+                &[
+                    4, 4, 4, 0, 0, 4, 8, 8, 12, 12, 12, 8, 12, 16, 16, 12, 12, 8, 4, 0, 0, 4, 4, 8,
+                    8, 8, 12, 12, 4, 0,
+                ],
+            ),
+            ("python", "a.py", &[]),
+            (
+                "python",
+                "b.py",
+                &[
+                    4, 8, 8, 8, 8, 8, 12, 16, 12, 8, 15, 12, 12, 12, 0, 0, 0, 4, 10, 8, 12, 8, 0,
+                ],
+            ),
+            (
+                "lua",
+                "a.lua",
+                &[4, 8, 8, 8, 8, 8, 12, 12, 12, 8, 4, 8, 8, 4, 0, 0, 4, 4, 0],
+            ),
+            ("json", "a.json", &[4, 8, 8, 8, 4, 8, 8, 8, 4]),
+            (
+                "c",
+                "a.c",
+                &[
+                    0, 9, 4, 4, 8, 4, 8, 12, 16, 16, 16, 16, 12, 8, 4, 4, 4, 0, 4, 0,
+                ],
+            ),
+        ];
+        for (language, case, opened_widths) in opened_below {
+            let pack = Arc::new(Pack::read(&dir.join(language)).unwrap());
+            let (text, indented) = indent_case(case);
+            assert_eq!(reindented(worker, &pack, &text), indented, "{case}");
+            if !opened_widths.is_empty() {
+                assert_eq!(opened(worker, &pack, &text), opened_widths, "{case}");
+            }
+        }
+
+        // An `else:` typed under the body it ends. Neovim takes it back a
+        // step, to 4, as its grammar reads it as an ERROR holding `else`,
+        // which a pattern makes a branch. The grammar clackatoo pins, run
+        // by its tree-sitter, puts the `else` in an ERROR in the `if` with
+        // no node of its own, so it stays where it was typed until the
+        // grammar's updated: this says when it is.
+        let python = Arc::new(Pack::read(&dir.join("python")).unwrap());
+        let text = "def f(a):\n    if a:\n        pass\n        else:\n";
+        let [indent] = indents_by(worker, &python, text, 3, 1)[..] else {
+            panic!("one line asked about");
+        };
+        assert_eq!(indent.width, Some(8), "Neovim's is 4");
+        wide_indents(worker, dir);
+
+        // How long indenting takes in a big file: a line opened in the
+        // middle of it, and the whole of it, as `gg=G` asks.
+        big_indents(worker, dir);
+    }
+
+    /// How long `gg=G` takes over thousands of lines in one node, with the
+    /// installed packs in `dir`: an aligned list, whose brackets are looked
+    /// for once, not once a line, and an array.
+    fn wide_indents(worker: &mut Worker, dir: &Path) {
+        for (name, text) in [
+            (
+                "python",
+                format!("x = [\n{}2]\n", "    1,\n".repeat(20_000)),
+            ),
+            ("json", format!("[\n{}2\n]\n", "1,\n".repeat(50_000))),
+        ] {
+            let pack = Arc::new(Pack::read(&dir.join(name)).unwrap());
+            let lines = text.lines().count();
+            let took = std::time::Instant::now();
+            let answered = ask_indents(worker, &pack, &text, 0, lines);
+            let took = took.elapsed();
+            eprintln!("gg=G of a {name} list of {lines} lines: {took:?}");
+            // Done, or refused at its deadline, as an unoptimised build
+            // may be.
+            match answered.reply {
+                Some(Reply::Indents(indents)) => assert_eq!(indents.len(), lines),
+                Some(Reply::Failed(why)) => assert!(why.starts_with("too many lines"), "{why}"),
+                other => panic!("{other:?}"),
+            }
+            assert!(took < INDENT_PATIENCE * 2, "{took:?}");
+        }
+    }
+
+    /// How long indenting a line opened in the middle of a big file takes,
+    /// and the whole of it, with the installed Rust pack in `dir`.
+    fn big_indents(worker: &mut Worker, dir: &Path) {
+        let rust = Arc::new(Pack::read(&dir.join("rust")).unwrap());
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gui/src/editor/mod.rs");
+        let text = fs::read_to_string(path).unwrap();
+        let mut lines: Vec<&str> = text.lines().collect();
+        let middle = lines.len() / 2;
+        lines.insert(middle, "");
+        let text = lines.join("\n") + "\n";
+        worker.take(Job::Open {
+            buffer: 9,
+            pack: rust,
+            text: Rope::from_str(&text),
+            version: 0,
+        });
+        worker.parse(9);
+        let rope = Rope::from_str(&text);
+        let (at, last) = (
+            rope.line_to_byte(middle),
+            rope.line_to_byte(lines.len() - 1),
+        );
+        for (what, lines) in [("a new line", 1), ("gg=G", lines.len())] {
+            let (at, end) = if lines == 1 { (at, at) } else { (0, last) };
+            let ask = Ask::Indent {
+                end,
+                shiftwidth: 4,
+                tabstop: 4,
+            };
+            let took = (0..5)
+                .map(|_| {
+                    let took = std::time::Instant::now();
+                    assert_eq!(indents(worker.answer(9, 0, at, ask)).len(), lines);
+                    took.elapsed()
+                })
+                .min()
+                .unwrap();
+            eprintln!("{what} of {} lines: {took:?}", text.lines().count());
+        }
+    }
+
     #[test]
     #[ignore = "downloads every known language from GitHub: run with --ignored"]
     fn known_languages_install_and_find_their_pieces() {
@@ -824,8 +1210,11 @@ impl Point {
             let grammar = (worker.grammar(&pack)).unwrap_or_else(|| panic!("{}", known.name));
             let has = !known.textobjects.is_empty();
             assert_eq!(grammar.objects.is_some(), has, "{}", known.name);
+            let has = !known.indents.is_empty();
+            assert_eq!(grammar.indents.is_some(), has, "{} indents", known.name);
         }
 
+        known_indents(&mut worker, dir.path());
         let rust = Arc::new(Pack::read(&dir.path().join("rust")).unwrap());
         rust_pieces(&mut worker, &rust, true);
         // A pack installed before textobjects were: by kinds.
@@ -873,7 +1262,7 @@ impl Point {
                 let (found, took) = (0..5)
                     .map(|_| {
                         let took = std::time::Instant::now();
-                        let found = worker.answer(9, 0, at, ask).pieces.unwrap().len();
+                        let found = pieces(worker.answer(9, 0, at, ask)).len();
                         (found, took.elapsed())
                     })
                     .min_by_key(|&(_, took)| took)
@@ -941,7 +1330,7 @@ impl Point {
             Some(Answered {
                 ticket: 7,
                 version: 1,
-                pieces: Some(vec![piece]),
+                reply: Some(Reply::Pieces(vec![piece])),
             })
         );
     }

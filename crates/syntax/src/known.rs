@@ -6,6 +6,11 @@
 //!
 //! Where a grammar builds on another's queries, as TypeScript's on
 //! JavaScript's, they're given in the order its `tree-sitter.json` gives.
+//!
+//! The queries for text objects come from nvim-treesitter-textobjects at
+//! 851e865, and those for indenting from nvim-treesitter at cf12346, the
+//! last of its `master` branch before its rewrite on `main`, with the
+//! queries they inherit put first, as Neovim reads them.
 
 use crate::install::{Download, Known};
 
@@ -29,6 +34,7 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/bash/textobjects.scm",
             sha256: "ae2635891b859a478a0a1826b5b4c1a5958ff62426914bf5cbd03996c7e35cae",
         }],
+        indents: &[],
     },
     Known {
         name: "c",
@@ -48,6 +54,10 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/c/textobjects.scm",
             sha256: "ee37e1e3b9114bf59787757cb79e792692ecd93aaeb7f6bfdf9de7b2e102c730",
         }],
+        indents: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/c/indents.scm",
+            sha256: "f23c147d7b9522c6d4f4b761a4ea7de1f32090af36974527cbca6a1fd46facde",
+        }],
     },
     Known {
         name: "css",
@@ -64,6 +74,10 @@ pub const KNOWN: &[Known] = &[
             sha256: "23f7948a3817a0d06d7120158c3bee4ec5b58daa77e524985a4738b364db17b2",
         }],
         textobjects: &[],
+        indents: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/css/indents.scm",
+            sha256: "91fe5062c2bb1af135a2e3ed11d79dd20b5776c9e6b34496b4eceba5ac816685",
+        }],
     },
     Known {
         name: "go",
@@ -83,6 +97,10 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/go/textobjects.scm",
             sha256: "96e54438985a715948c39e955a95a614c85b7df75392c693ff47fd50bb3024ec",
         }],
+        indents: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/go/indents.scm",
+            sha256: "702a14a44a4e0accf6c749f6b50755ac585495f5b6ce7ec5323b95c262e3741f",
+        }],
     },
     Known {
         name: "html",
@@ -101,6 +119,10 @@ pub const KNOWN: &[Known] = &[
         textobjects: &[Download {
             url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/html/textobjects.scm",
             sha256: "c3b5b16815c35390e2cad8467c48727aea8134d00af54f9496e4a56b6d4f4030",
+        }],
+        indents: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/html_tags/indents.scm",
+            sha256: "d9a4998f3b138a948aaf239f2930f8b0d88bb9dcb8f2b188a91416f27c66dbcd",
         }],
     },
     Known {
@@ -137,6 +159,16 @@ pub const KNOWN: &[Known] = &[
                 sha256: "91fa18f70ee836b32b3542845fc1ae6ee0ba57597c54c6c58df0a7579c168f8c",
             },
         ],
+        indents: &[
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/ecma/indents.scm",
+                sha256: "da023bf0aff5fd81bdfafb753f3da3041b7c6ba953ef083821a17a622af6d155",
+            },
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/jsx/indents.scm",
+                sha256: "014d00e54eb822ac0c8718f8d05e65c561d7a0a08bafc9b1b4dde8ceb8569c55",
+            },
+        ],
     },
     Known {
         name: "json",
@@ -153,6 +185,10 @@ pub const KNOWN: &[Known] = &[
             sha256: "0511524465b56aed122580792254e68b6abbbfde7119f1d02b135acbe278233f",
         }],
         textobjects: &[],
+        indents: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/json/indents.scm",
+            sha256: "fd028a09dd815ff8c67a1156be5051ef78f5cb0661c8685a56befb1d4fdde999",
+        }],
     },
     Known {
         name: "lua",
@@ -171,6 +207,10 @@ pub const KNOWN: &[Known] = &[
         textobjects: &[Download {
             url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/lua/textobjects.scm",
             sha256: "add881541a6d270229773fa4b416a4b53463bab73077ff89d8baf1785dca0354",
+        }],
+        indents: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/lua/indents.scm",
+            sha256: "593b6b01a3a7fccf8b01dfc80de058c813bf3fa83c1f24a6244326b96e19ec51",
         }],
     },
     Known {
@@ -191,6 +231,10 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/python/textobjects.scm",
             sha256: "b0502ab4cc4310db49bd1bb9f601f5a6c2b214fec97f165d980ae6fe0c7032e0",
         }],
+        indents: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/python/indents.scm",
+            sha256: "50781d783a18a566581d8280c53e150454d1e3523cfcd4f1401bb3a228a98e80",
+        }],
     },
     Known {
         name: "rust",
@@ -210,6 +254,10 @@ pub const KNOWN: &[Known] = &[
             url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/rust/textobjects.scm",
             sha256: "24da7788840c8b724122d046c109890823c9f2def20b4fdc4400c9617b33ff26",
         }],
+        indents: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/rust/indents.scm",
+            sha256: "5d15704815f121361cf35aa8ba51d78e5923c2c67467659e7a3bd23ebcdabe36",
+        }],
     },
     Known {
         name: "toml",
@@ -228,6 +276,10 @@ pub const KNOWN: &[Known] = &[
         textobjects: &[Download {
             url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/toml/textobjects.scm",
             sha256: "672182757920d6773e95ecd614da114d00f8c1b6a64265ecd246d19221285cf3",
+        }],
+        indents: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/toml/indents.scm",
+            sha256: "13f2a61390cd7757cd846f1e284c13160f442247fc6e3ec518759c1b93caad07",
         }],
     },
     Known {
@@ -258,6 +310,16 @@ pub const KNOWN: &[Known] = &[
             Download {
                 url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter-textobjects/851e865342e5a4cb1ae23d31caf6e991e1c99f1e/queries/typescript/textobjects.scm",
                 sha256: "d41e0324a5edc583dfa55b3c62688f6c3686bfcd0b21c061502861f294ca8546",
+            },
+        ],
+        indents: &[
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/ecma/indents.scm",
+                sha256: "da023bf0aff5fd81bdfafb753f3da3041b7c6ba953ef083821a17a622af6d155",
+            },
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/typescript/indents.scm",
+                sha256: "b197d236e16cb5b9acd93c48daf411f9d64b5ee43c0ea42abba97c9c671101d1",
             },
         ],
     },
@@ -299,6 +361,20 @@ pub const KNOWN: &[Known] = &[
                 sha256: "91fa18f70ee836b32b3542845fc1ae6ee0ba57597c54c6c58df0a7579c168f8c",
             },
         ],
+        indents: &[
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/ecma/indents.scm",
+                sha256: "da023bf0aff5fd81bdfafb753f3da3041b7c6ba953ef083821a17a622af6d155",
+            },
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/typescript/indents.scm",
+                sha256: "b197d236e16cb5b9acd93c48daf411f9d64b5ee43c0ea42abba97c9c671101d1",
+            },
+            Download {
+                url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/jsx/indents.scm",
+                sha256: "014d00e54eb822ac0c8718f8d05e65c561d7a0a08bafc9b1b4dde8ceb8569c55",
+            },
+        ],
     },
     Known {
         name: "yaml",
@@ -315,5 +391,9 @@ pub const KNOWN: &[Known] = &[
             sha256: "2fbfbbd5ca0928d0a7e09e59f8f2964b14a328a7ee0ce799270d9013dcce49a0",
         }],
         textobjects: &[],
+        indents: &[Download {
+            url: "https://raw.githubusercontent.com/nvim-treesitter/nvim-treesitter/cf12346a3414fa1b06af75c79faebe7f76df080a/queries/yaml/indents.scm",
+            sha256: "992bc118ad191dcfe8080291bc75e6eb825d55e631ca3afd3305a6cbb58c3e0f",
+        }],
     },
 ];

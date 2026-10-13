@@ -3506,6 +3506,128 @@ fn a_buffer_with_no_grammar_has_no_pieces() {
     assert_eq!(answer_to(&mut client, 1), (0, Answer::Nothing));
 }
 
+/// The question how the lines from the place to the one starting at
+/// byte `end` should be indented, with steps of 4.
+fn indent_to(end: usize) -> Query {
+    Query::Indent {
+        end,
+        shiftwidth: 4,
+        tabstop: 4,
+    }
+}
+
+/// Each line's start and width an answer gives.
+fn widths(answer: Answer) -> Vec<(usize, Option<u32>)> {
+    let Answer::Indents(indents) = answer else {
+        panic!("not indents: {answer:?}");
+    };
+    (indents.iter())
+        .map(|indent| (indent.line, indent.width))
+        .collect()
+}
+
+#[test]
+fn lines_are_indented_as_the_grammar_says() {
+    // The fixture's indents.scm indents an object's and an array's lines.
+    let text = "{\n\"a\": [\n1\n]\n}\n";
+    let (_daemon, mut client, buffer) = parsed_buffer(text, "a.json");
+    client.query(buffer, 1, (0, 0), indent_to(13)).unwrap();
+    let (version, answer) = answer_to(&mut client, 1);
+    assert_eq!(version, 0);
+    let lines = [
+        (0, Some(0)),
+        (2, Some(4)),
+        (9, Some(8)),
+        (11, Some(4)),
+        (13, Some(0)),
+    ];
+    assert_eq!(widths(answer), lines);
+    // From the middle of a line: that line's.
+    client.query(buffer, 2, (0, 5), indent_to(5)).unwrap();
+    assert_eq!(widths(answer_to(&mut client, 2).1), [(2, Some(4))]);
+}
+
+#[test]
+fn a_line_put_in_above_the_one_asked_how_to_indent_moves_its_answer() {
+    let (daemon, mut client, buffer) = parsed_buffer("[\n1\n]", "a.json");
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    // Another window's line, put in at the start of the line asked about,
+    // before the question about the text before it: the question goes
+    // with the line, not the place.
+    send_change(&mut other, buffer, 0, insert(5, 2, "0,\n", 0));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    client.query(buffer, 1, (0, 2), indent_to(2)).unwrap();
+    let (version, answer) = answer_to(&mut client, 1);
+    assert_eq!((version, widths(answer)), (1, vec![(5, Some(4))]));
+    let text = attach_buffer(&mut client, buffer).text;
+    assert_eq!(text, "[\n0,\n1\n]");
+}
+
+#[test]
+fn lines_put_in_among_those_asked_how_to_indent_are_indented_too() {
+    let (daemon, mut client, buffer) = parsed_buffer("[\n1,\n2\n]", "a.json");
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    // Another window's line, put in at the start of the last line asked
+    // about, before the question about the text before it.
+    send_change(&mut other, buffer, 0, insert(8, 5, "9,\n", 0));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    client.query(buffer, 1, (0, 2), indent_to(5)).unwrap();
+    let (version, answer) = answer_to(&mut client, 1);
+    let lines = vec![(2, Some(4)), (5, Some(4)), (8, Some(4))];
+    assert_eq!((version, widths(answer)), (1, lines));
+}
+
+#[test]
+fn a_line_taken_out_before_its_indent_is_told_is_left_out() {
+    let (daemon, mut client, buffer) = parsed_buffer("[\n1,\n2,\n3\n]", "a.json");
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    client.query(buffer, 1, (0, 2), indent_to(8)).unwrap();
+    // Another window's `dd` of the middle line, at once: the answer is of
+    // the text before it or after it.
+    let dd = Change::Edit {
+        edit: Edit::replace(11, 5, "2,\n", ""),
+        base: 0,
+        step: true,
+    };
+    send_change(&mut other, buffer, 0, dd);
+    match answer_to(&mut client, 1) {
+        (0, answer) => assert_eq!(widths(answer).len(), 3),
+        (1, answer) => assert_eq!(widths(answer), [(2, Some(4)), (5, Some(4))]),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_buffer_with_no_grammar_or_rules_has_no_indents() {
+    let (_daemon, mut client, buffer) = parsed_buffer("fn a() {\n}", "a.unknown");
+    client.query(buffer, 1, (0, 9), indent_to(9)).unwrap();
+    assert_eq!(answer_to(&mut client, 1), (0, Answer::Nothing));
+    // A pack without indents.scm: how to get it.
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let pack = dir.join("languages/json");
+        std::fs::create_dir_all(&pack).unwrap();
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages/json");
+        for file in ["language.toml", "grammar.wasm", "highlights.scm"] {
+            std::fs::copy(fixture.join(file), pack.join(file)).unwrap();
+        }
+        config.languages = Some(dir.join("languages"));
+    });
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("a.json"), "[\n1]").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "a.json"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    client.query(buffer, 1, (0, 2), indent_to(2)).unwrap();
+    let why = "no rules for indenting: run `clackatoo language install json` to get them";
+    assert_eq!(answer_to(&mut client, 1).1, Answer::Failed(why.into()));
+}
+
 #[test]
 fn a_buffer_is_shared_by_windows_editing_it_at_once() {
     let daemon = TestDaemon::start();
