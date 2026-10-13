@@ -444,6 +444,11 @@ options! {
     /// `start_chat`, in chats beside it that you can watch and steer.
     /// Other agents have no Task tool.
     claudetask("ct"): bool = true;
+    /// About the most of a conversation, in tokens, a chat tells an agent
+    /// it moves to, as the model menu moves it from Claude Code to Codex,
+    /// say: the newest turns whole, older ones a line each. An agent it
+    /// goes back to hears only what happened since, as briefly.
+    carryover("co"): u32 (1000..=200_000) = 20_000;
     /// Look for a new release of clackatoo, at most once a day, a while
     /// after the window opens, and say in the bar when one is out. It's
     /// never installed until `:update` or `clackatoo update` asks.

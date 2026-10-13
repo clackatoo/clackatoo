@@ -146,6 +146,9 @@ pub(crate) struct Pane {
     search: Option<(String, bool)>,
     /// How searches treat case, as the options say.
     case: Case,
+    /// About the most of the conversation, in tokens, the chat it shows
+    /// tells an agent it moves to, as the options say.
+    carryover: u32,
     /// The last match found, highlighted until Esc.
     found: Option<Match>,
     /// A short message for the label, until the next key.
@@ -194,6 +197,7 @@ impl Pane {
             prompt: None,
             search: None,
             case: Case::default(),
+            carryover: Options::default().carryover,
             found: None,
             status: None,
             yanked: None,
@@ -215,6 +219,7 @@ impl Pane {
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.case = Case::of(options);
+        self.carryover = options.carryover;
         self.predictor.set_choice(options.predictecho);
         self.refresh_overlay();
     }
@@ -288,9 +293,11 @@ impl Pane {
             .as_ref()
             .ok_or("that's for a chat with an agent")?;
         let undo = if redo { "redo" } else { "undo" };
+        // Asked for by its number, which doesn't count where the chat
+        // moved to another agent.
         let turn = match turn {
-            Some(turn) if turn < chat.node.turns.len() => turn,
-            Some(turn) => return Err(format!("there's no turn {}", turn + 1)),
+            Some(turn) => clackatoo_protocol::turn_numbered(&chat.node.turns, turn + 1)
+                .ok_or(format!("there's no turn {}", turn + 1))?,
             None => (chat.turn_to_undo(redo)).ok_or(format!("no turn has files to {undo}"))?,
         };
         let turn = u32::try_from(turn).unwrap_or(u32::MAX);
@@ -339,7 +346,10 @@ impl Pane {
             return false;
         };
         let settled = chat.settle(fonts);
-        for action in settled.actions {
+        for mut action in settled.actions {
+            if let ChatAction::Switch { budget, .. } = &mut action {
+                *budget = self.carryover;
+            }
             self.request(
                 Request::Chat {
                     terminal: self.terminal,

@@ -1395,7 +1395,7 @@ impl ChatView {
         menu: &Menu,
         wide: f32,
     ) -> Vec<MenuRow> {
-        let rows = picker::rows(&self.node.settings, menu);
+        let rows = picker::rows(&self.offer(), menu);
         let mut text = |text: &str, tone| {
             lay_out(&mut self.layout_cx, fonts, m, text, Look::Plain(tone), wide)
         };
@@ -1838,11 +1838,24 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool) -> f32 {
     if turn.files.is_some() && turn.end.is_some() {
         height += line + m.em(0.75);
     }
+    if let Some(switch) = &turn.switch {
+        height += (1 + switch.notes.len()) as f32 * 2.0 * line;
+    }
     height
 }
 
-/// What's said under a turn: how it ended, if not well.
+/// What's said under a turn: how it ended, if not well; or for one where
+/// the chat moved to another agent, a line across saying so, and what
+/// didn't carry over.
 fn turn_note(turn: &Turn) -> Option<(String, Tone)> {
+    if let Some(switch) = &turn.switch {
+        let mut note = format!("── {} ──", switch.label());
+        for line in &switch.notes {
+            note.push_str("\n\n");
+            note.push_str(line);
+        }
+        return Some((note, Tone::Muted));
+    }
     match &turn.end.as_ref()?.outcome {
         Outcome::Done => None,
         Outcome::Stopped => Some(("Stopped.".to_owned(), Tone::Muted)),
@@ -2158,6 +2171,40 @@ fn escape(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::fonts::FontOptions;
+
+    #[test]
+    fn a_turn_where_the_chat_moved_is_a_line_across_it_with_what_didnt_carry_over() {
+        let turn = Turn {
+            prompt: String::new(),
+            sent: 1,
+            items: Vec::new(),
+            end: Some(clackatoo_protocol::TurnEnd {
+                at: 1,
+                outcome: Outcome::Done,
+            }),
+            files: None,
+            from: None,
+            switch: Some(clackatoo_protocol::Switch {
+                from: "Claude Code".into(),
+                to: "Codex".into(),
+                model: Some("6 Luna".into()),
+                resumed: false,
+                notes: vec!["Mode Auto doesn't carry over: Codex uses Auto review".into()],
+            }),
+        };
+        assert_eq!(
+            turn_note(&turn),
+            Some((
+                "── Switched to Codex · 6 Luna · context carried over ──\n\n\
+                 Mode Auto doesn't carry over: Codex uses Auto review"
+                    .to_owned(),
+                Tone::Muted
+            ))
+        );
+        // No bubble, nor work to fold: just the line.
+        let m = Measures::of(16.0);
+        assert!(guess(m, 400.0, &turn, false) >= 4.0 * m.em * LINE);
+    }
 
     #[test]
     fn characters_the_interface_font_lacks_come_from_the_fonts_behind_it() {

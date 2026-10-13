@@ -856,6 +856,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                     state: TurnFilesState::Made,
                 }),
                 from: None,
+                switch: None,
             },
             Turn {
                 prompt: "Turn on vendored and try again".into(),
@@ -864,6 +865,7 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
                 end: None,
                 files: None,
                 from: None,
+                switch: None,
             },
         ],
         state: ChatState::Answering,
@@ -1095,6 +1097,64 @@ fn renders_a_chat_with_its_box_and_question() {
         use clackatoo_protocol::SettingKind;
         chat.open_menu(&[SettingKind::Model, SettingKind::Effort]);
     });
+    // Other agents' models in the menu, under the agent's own, and a line
+    // across the chat where it moved to Codex.
+    render_chat_with("chat-menu-agents", moved_chat_node(), "", 1.0, |chat| {
+        use clackatoo_protocol::SettingKind;
+        chat.open_menu(&[SettingKind::Model, SettingKind::Effort]);
+    });
+}
+
+/// [`chat_node`], moved from Claude Code to Codex after its first turn,
+/// with Gemini CLI not installed.
+fn moved_chat_node() -> clackatoo_protocol::ChatNode {
+    use clackatoo_protocol::{
+        Outcome, Provider, ProviderModels, SettingChoice, Switch, Turn, TurnEnd,
+    };
+    let mut node = chat_node(false);
+    node.agent = "Claude Code".into();
+    let choice = |value: &str, name: &str| SettingChoice {
+        value: value.into(),
+        name: name.into(),
+        description: None,
+    };
+    node.providers = vec![
+        Provider {
+            agent: "codex".into(),
+            title: "Codex".into(),
+            models: ProviderModels::Known(vec![
+                choice("gpt-6-astra", "6 Astra"),
+                choice("gpt-6-luna", "6 Luna"),
+            ]),
+        },
+        Provider {
+            agent: "gemini".into(),
+            title: "Gemini CLI".into(),
+            models: ProviderModels::NotInstalled,
+        },
+    ];
+    node.turns.insert(
+        1,
+        Turn {
+            prompt: String::new(),
+            sent: 1,
+            items: Vec::new(),
+            end: Some(TurnEnd {
+                at: 1,
+                outcome: Outcome::Done,
+            }),
+            files: None,
+            from: None,
+            switch: Some(Switch {
+                from: "Claude Code".into(),
+                to: "Codex".into(),
+                model: Some("6 Luna".into()),
+                resumed: false,
+                notes: vec!["Mode Auto doesn't carry over: Codex uses Auto review".into()],
+            }),
+        },
+    );
+    node
 }
 
 #[test]
@@ -1216,6 +1276,7 @@ fn u_in_a_chat_undoes_the_last_turn_or_says_theres_none() {
                         outcome: Outcome::Done,
                     }),
                     files,
+                    switch: None,
                 }],
                 ..ChatNode::default()
             })),
@@ -2190,4 +2251,34 @@ fn renders_an_explorer_pane() {
     assert_ne!(at(2, 20), background, "the cursor's line");
     assert_eq!(at(5, 20), background);
     assert_ne!(at(2, 0), background, "the mark");
+}
+
+#[test]
+fn a_turn_is_undone_by_its_number_which_skips_where_the_chat_moved() {
+    use clackatoo_protocol::{ChatAction, ClientMessage, Node, Request, ViewUpdate};
+
+    use crate::pane::Pane;
+
+    let mut pane = Pane::new(TerminalId(3));
+    pane.view_changed(&ViewUpdate::Snapshot(View {
+        title: "agent".into(),
+        cwd: None,
+        root: Node::Chat(Box::new(moved_chat_node())),
+    }));
+    // Turn 2 is the third: the second shows the move.
+    pane.undo_turn(Some(1), false, false).unwrap();
+    assert!(
+        pane.take_outbox()
+            .contains(&ClientMessage::Request(Request::Chat {
+                terminal: TerminalId(3),
+                action: ChatAction::Undo {
+                    turn: 2,
+                    force: false
+                },
+            }))
+    );
+    assert_eq!(
+        pane.undo_turn(Some(2), false, false),
+        Err("there's no turn 3".to_owned())
+    );
 }

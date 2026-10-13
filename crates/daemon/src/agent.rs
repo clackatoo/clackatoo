@@ -60,6 +60,8 @@ enum Pending {
     Prompt(TerminalId),
     /// A change to a setting of the chat in this terminal.
     Setting(TerminalId),
+    /// A session made only to learn the agent's settings.
+    Probe,
     /// Nothing waits for the answer.
     Ignored,
 }
@@ -72,6 +74,8 @@ pub(crate) enum Incoming {
         terminal: TerminalId,
         result: Result<Opened, Refused>,
     },
+    /// A session made to learn the agent's settings was made, or not.
+    Probed { result: Result<Opened, Refused> },
     /// The settings of the chat in `terminal`, after it asked to change
     /// one, or why it couldn't.
     Settings {
@@ -199,12 +203,34 @@ impl Agent {
         self.request(Pending::Session(terminal), method, &params);
     }
 
-    /// Sends the chat in `terminal` a message from its user.
-    pub(crate) fn prompt(&mut self, terminal: TerminalId, session: &str, text: &str) {
+    /// Asks for a session in `cwd` only to learn the settings the agent
+    /// offers, such as its models, with none of clackatoo's tools. It's
+    /// to be closed once it's made.
+    pub(crate) fn probe(&mut self, cwd: &str) {
+        self.request(
+            Pending::Probe,
+            "session/new",
+            &session_params(cwd, None, true),
+        );
+    }
+
+    /// Whether a session asked for by [`probe`](Self::probe) is still to
+    /// come.
+    pub(crate) fn probing(&self) -> bool {
+        (self.pending.values()).any(|pending| matches!(pending, Pending::Probe))
+    }
+
+    /// Sends the chat in `terminal` a message from its user, as `blocks`
+    /// of text, in order: the message is the last, after anything the
+    /// agent is to know first.
+    pub(crate) fn prompt(&mut self, terminal: TerminalId, session: &str, blocks: &[&str]) {
+        let prompt: Vec<Value> = (blocks.iter())
+            .map(|text| json!({ "type": "text", "text": text }))
+            .collect();
         self.request(
             Pending::Prompt(terminal),
             "session/prompt",
-            &json!({ "sessionId": session, "prompt": [{ "type": "text", "text": text }] }),
+            &json!({ "sessionId": session, "prompt": prompt }),
         );
     }
 
@@ -403,24 +429,25 @@ impl Agent {
         result: Result<Value, RpcError>,
         incoming: &mut Vec<Incoming>,
     ) {
-        if let Pending::Session(terminal) = pending {
-            incoming.push(Incoming::Session {
-                terminal,
-                // A resumed session's ID is the one asked for, which the
-                // answer leaves out: the chat keeps it.
-                result: result
-                    .map(|result| Opened {
-                        session: result
-                            .get("sessionId")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned(),
-                        settings: settings(&result),
-                    })
-                    .map_err(|error| Refused {
-                        login: error.code == AUTH_REQUIRED,
-                        message: error.message,
-                    }),
+        if let Pending::Session(_) | Pending::Probe = pending {
+            // A resumed session's ID is the one asked for, which the
+            // answer leaves out: the chat keeps it.
+            let result = result
+                .map(|result| Opened {
+                    session: result
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    settings: settings(&result),
+                })
+                .map_err(|error| Refused {
+                    login: error.code == AUTH_REQUIRED,
+                    message: error.message,
+                });
+            incoming.push(match pending {
+                Pending::Session(terminal) => Incoming::Session { terminal, result },
+                _ => Incoming::Probed { result },
             });
             return;
         }
@@ -451,7 +478,7 @@ impl Agent {
                         .map_err(|err| format!("the agent's answer made no sense: {err}"))
                 }),
             }),
-            Pending::Session(_) | Pending::Ignored => {}
+            Pending::Session(_) | Pending::Probe | Pending::Ignored => {}
         }
     }
 
@@ -474,7 +501,7 @@ impl Agent {
             Pending::Session(terminal) | Pending::Prompt(terminal) | Pending::Setting(terminal) => {
                 Some(*terminal)
             }
-            Pending::Initialize | Pending::Ignored => None,
+            Pending::Initialize | Pending::Probe | Pending::Ignored => None,
         })
     }
 

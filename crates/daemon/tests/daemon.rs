@@ -17,10 +17,10 @@ use clackatoo_protocol::{
     ChatNode, ChatState, ClientMessage, CompletionItem, Construct, Content, Diff, Done, Edit,
     Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
     Found, FoundBuffer, FoundLine, GitMark, Item, Kind, Layout, Location, NewAgent, NewTerminal,
-    OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Query,
-    Request, Response, Resume, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span,
-    TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger,
-    TurnFiles, TurnFilesState, View, ViewUpdate, Workspaces,
+    OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece,
+    ProviderModels, Query, Request, Response, Resume, Search, Selection, ServerFeatures,
+    ServerMessage, Side, Size, Span, TerminalId, TerminalStatus, TextChange, Tool, ToolContent,
+    ToolKind, ToolStatus, Trigger, TurnFiles, TurnFilesState, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -68,6 +68,7 @@ impl TestDaemon {
             // Stopped with their last file, unless a test says otherwise.
             server_idle: Duration::ZERO,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
+            probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
             rename_gate: None,
             boards: None,
             trash: Some(dir.path().join("trash")),
@@ -9046,4 +9047,525 @@ fn a_chat_started_gets_its_parents_mode_and_only_its_family_goes_unasked() {
     );
     answer(&mut client, a, Some("reject".to_owned()));
     wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+}
+
+// --- Moving a chat between agents ------------------------------------------
+
+/// A daemon with the fake agent as Claude Code and as Codex, which finds
+/// no other programs, so Gemini isn't installed.
+fn with_two_agents() -> TestDaemon {
+    TestDaemon::start_with(|dir, config| {
+        let fake = |flags: &[&str], log: &str| -> Vec<std::ffi::OsString> {
+            std::iter::once(fake_agent().into_os_string())
+                .chain(flags.iter().map(Into::into))
+                .chain(["--log".into(), dir.join(log).into()])
+                .collect()
+        };
+        config.agents.custom = vec![
+            custom_agent("claude", fake(&[], "agent.log")),
+            custom_agent("codex", fake(&["--codex"], "codex.log")),
+        ];
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        config.agents.path = Some(bin.into());
+    })
+}
+
+/// What the agent whose log is `log`, in `daemon`'s directory, noted.
+fn agent_log(daemon: &TestDaemon, log: &str) -> String {
+    std::fs::read_to_string(daemon.dir.path().join(log)).unwrap_or_default()
+}
+
+/// Waits for the agent whose log is `log` to note `line`.
+fn wait_for_log(daemon: &TestDaemon, log: &str, line: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !agent_log(daemon, log).lines().any(|noted| noted == line) {
+        assert!(
+            Instant::now() < deadline,
+            "{log} never said {line:?}: {}",
+            agent_log(daemon, log)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// What was carried to session `session` before its messages, as the
+/// agent whose log is `log` noted it, each time.
+fn carried(daemon: &TestDaemon, log: &str, session: &str) -> Vec<String> {
+    let log = agent_log(daemon, log);
+    let start = format!("carried {session}\n");
+    let mut found = Vec::new();
+    let mut rest = log.as_str();
+    while let Some(at) = rest.find(&start) {
+        let after = &rest[at + start.len()..];
+        let end = after
+            .find("\nend carried")
+            .expect("the end of what was carried");
+        found.push(after[..end].to_owned());
+        rest = &after[end..];
+    }
+    found
+}
+
+/// Moves `chat` to `agent`, on `model`, and waits for its session.
+fn switch_to(client: &mut Client, chat: TerminalId, agent: &str, model: Option<&str>) -> ChatNode {
+    let title = if agent == "codex" {
+        "Codex"
+    } else {
+        "Claude Code"
+    };
+    client
+        .chat(
+            chat,
+            ChatAction::Switch {
+                agent: agent.to_owned(),
+                model: model.map(str::to_owned),
+                budget: 20_000,
+            },
+        )
+        .unwrap();
+    wait_for_chat(client, chat, |node| {
+        node.agent == title
+            && node.state == ChatState::Ready
+            && (node.turns.last()).is_some_and(|turn| turn.switch.is_some())
+    })
+}
+
+/// Whether the agent run with `flag` is running, in `daemon`.
+fn running_with(daemon: &TestDaemon, flag: &str) -> bool {
+    child_processes_in(daemon.dir.path()).iter().any(|pid| {
+        std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|command| command.contains(flag))
+    })
+}
+
+#[test]
+fn the_model_menu_offers_other_agents_models_once_asked() {
+    let daemon = with_two_agents();
+    let mut client = daemon.client();
+    let (chat, node) = start_chat_with(&mut client, "claude");
+    // Codex has had no session to say, and Gemini isn't there.
+    let providers: Vec<(&str, &ProviderModels)> = (node.providers.iter())
+        .map(|provider| (provider.agent.as_str(), &provider.models))
+        .collect();
+    assert_eq!(
+        providers,
+        [
+            ("codex", &ProviderModels::Unknown),
+            ("gemini", &ProviderModels::NotInstalled)
+        ]
+    );
+    assert!(!running_with(&daemon, "--codex"));
+    // Opening the menu asks Codex, with a session made for that, and
+    // stops it again, as no chat talks to it.
+    client.chat(chat, ChatAction::LearnModels).unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| {
+        matches!(node.providers[0].models, ProviderModels::Known(_))
+    });
+    let ProviderModels::Known(models) = &node.providers[0].models else {
+        unreachable!()
+    };
+    let names: Vec<&str> = models.iter().map(|model| model.name.as_str()).collect();
+    assert_eq!(names, ["6 Astra", "6 Luna"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while running_with(&daemon, "--codex") {
+        assert!(Instant::now() < deadline, "Codex is still running");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_chat_moves_to_another_agent_with_the_conversation_so_far_and_back() {
+    let daemon = with_two_agents();
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "claude");
+    ask(&mut client, chat, "hello");
+    ask(&mut client, chat, "tool");
+
+    // To Codex, on Luna: Claude Code, which no chat talks to now, stops,
+    // and the chat says where it moved, and what didn't carry over.
+    let node = switch_to(&mut client, chat, "codex", Some("gpt-6-luna"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while running_with(&daemon, "agent.log") {
+        assert!(Instant::now() < deadline, "Claude Code is still running");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let switch = node.turns[2].switch.clone().expect("a turn shows the move");
+    assert_eq!(
+        (switch.from.as_str(), switch.to.as_str()),
+        ("Claude Code", "Codex")
+    );
+    assert_eq!(switch.model.as_deref(), Some("6 Luna"));
+    assert!(!switch.resumed);
+    assert_eq!(
+        switch.notes,
+        ["Mode Auto doesn't carry over: Codex uses Auto review"]
+    );
+    assert_eq!(
+        switch.label(),
+        "Switched to Codex · 6 Luna · context carried over"
+    );
+    // Claude Code is offered now, with the models its session gave.
+    let claude = (node.providers.iter()).find(|provider| provider.agent == "claude");
+    assert!(matches!(
+        claude.map(|provider| &provider.models),
+        Some(ProviderModels::Known(models)) if models.len() == 2
+    ));
+
+    // Its first message carries the conversation, framed as context, and
+    // within its budget; the next carries nothing.
+    assert_eq!(
+        last_words(&ask(&mut client, chat, "settings")),
+        "agent gpt-6-luna\n"
+    );
+    ask(&mut client, chat, "again");
+    let digests = carried(&daemon, "codex.log", "s1");
+    let [digest] = digests.as_slice() else {
+        panic!("{digests:#?}");
+    };
+    assert!(digest.starts_with("[Context carried over by clackatoo. This is not a request.]"));
+    assert!(digest.contains("started with Claude Code, and the user has moved it to you, Codex"));
+    assert!(digest.contains("### User\nhello\n"), "{digest}");
+    assert!(digest.contains("echo: hello"), "{digest}");
+    assert!(
+        digest.contains("(Tools: used Read notes.txt; ran `ls`; edited /notes.txt)"),
+        "{digest}"
+    );
+    assert!(digest.ends_with("Continue from here; the user's next message follows."));
+    assert!(digest.len().div_ceil(4) <= 20_000);
+
+    // Back to Claude Code: its session is opened again, and its next
+    // message carries only what happened since.
+    let node = switch_to(&mut client, chat, "claude", None);
+    wait_for_log(&daemon, "agent.log", "resumed s1");
+    let switch = node.turns.last().unwrap().switch.clone().unwrap();
+    assert!(switch.resumed);
+    assert_eq!(
+        switch.label(),
+        "Switched back to Claude Code · Haiku · caught up on what happened since"
+    );
+    ask(&mut client, chat, "hi");
+    let digests = carried(&daemon, "agent.log", "s1");
+    let [digest] = digests.as_slice() else {
+        panic!("{digests:#?}");
+    };
+    assert!(
+        digest.contains(
+            "Since you last answered in this conversation, the user carried on with Codex"
+        )
+    );
+    assert!(digest.contains("### Codex\nagent gpt-6-luna\n"), "{digest}");
+    assert!(!digest.contains("hello"), "{digest}");
+}
+
+#[test]
+fn a_chat_cant_move_while_its_agent_answers() {
+    let daemon = with_two_agents();
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "claude");
+    start_turn(&mut client, chat, "wait");
+    client
+        .chat(
+            chat,
+            ChatAction::Switch {
+                agent: "codex".into(),
+                model: None,
+                budget: 20_000,
+            },
+        )
+        .unwrap();
+    let node = wait_for_chat(&mut client, chat, |node| node.notice.is_some());
+    assert_eq!(node.agent, "Claude Code");
+    assert!(node.notice.unwrap().contains("still answering"));
+}
+
+#[test]
+fn turns_from_either_agent_are_undone_after_a_move() {
+    let daemon = with_two_agents();
+    let dir = daemon.dir.path();
+    let (one, two) = (dir.join("one.txt"), dir.join("two.txt"));
+    std::fs::write(&one, "one\n").unwrap();
+    std::fs::write(&two, "two\n").unwrap();
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "claude");
+    let write = |path: &Path, text: &str| format!("write {}\n{text}", path.display());
+    assert_eq!(
+        agent_says(&mut client, chat, &write(&one, "ONE\n")),
+        "wrote"
+    );
+    switch_to(&mut client, chat, "codex", None);
+    let mut editor = daemon.client();
+    open_attached(&mut editor, dir, "two.txt");
+    assert_eq!(
+        agent_says(&mut client, chat, &write(&two, "TWO\n")),
+        "wrote"
+    );
+    // Codex's change is the chat's to review, in the turn it made it in.
+    let hunks = loop {
+        if let BufferUpdate::Agents { hunks, .. } = next_buffer_update(&mut editor)
+            && !hunks.is_empty()
+        {
+            break hunks;
+        }
+    };
+    assert_eq!((hunks[0].chat, hunks[0].turn), (chat.0, 2));
+
+    // Claude Code's turn, then Codex's, each on its own, counted without
+    // the turn that shows the move, which has nothing to undo.
+    let notice = undo_turn(&mut client, chat, 0, false, false);
+    assert_eq!(notice, "Undid turn 1: one.txt.");
+    assert_eq!(std::fs::read_to_string(&one).unwrap(), "one\n");
+    assert_eq!(std::fs::read_to_string(&two).unwrap(), "TWO\n");
+    let notice = undo_turn(&mut client, chat, 1, false, false);
+    assert_eq!(
+        notice,
+        "That's where the chat moved to another agent: there's nothing to undo."
+    );
+    let notice = undo_turn(&mut client, chat, 2, false, false);
+    assert_eq!(notice, "Undid turn 2: two.txt.");
+    assert_eq!(std::fs::read_to_string(&two).unwrap(), "two\n");
+    let notice = undo_turn(&mut client, chat, 0, true, false);
+    assert_eq!(notice, "Redid turn 1: one.txt.");
+    assert_eq!(std::fs::read_to_string(&one).unwrap(), "ONE\n");
+}
+
+#[test]
+fn a_chat_an_agent_started_keeps_its_place_and_its_messages_after_a_move() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.agents.custom = vec![
+            custom_agent("claude", vec![fake_agent().into()]),
+            custom_agent(
+                "codex",
+                vec![
+                    fake_agent().into(),
+                    "--codex".into(),
+                    "--log".into(),
+                    dir.join("codex.log").into(),
+                ],
+            ),
+        ];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+    });
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let start = "mcp start_chat {\"prompt\":\"hi kid\"}";
+    client.chat(a, ChatAction::Send(start.to_owned())).unwrap();
+    wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
+    let kid = tab_contents(&mut client)[1].terminal().unwrap();
+    wait_for_chat(&mut client, kid, |node| last_outcome(node).is_some());
+
+    switch_to(&mut client, kid, "codex", None);
+    // Messages still reach it, now answered by Codex, which hears of the
+    // message that started it; and it's still the chat its parent started.
+    let talk = format!(
+        "mcp send_to_chat {{\"chat\":{kid},\"message\":\"more\"}}\n\
+         mcp wait_for_chat {{\"chat\":{kid}}}\nmcp list_chats"
+    );
+    let node = ask_for(&mut client, a, &talk, Duration::from_secs(10));
+    let words = last_words(&node);
+    assert!(words.contains("echo: more"), "{words}");
+    assert!(words.contains(&format!("(started by chat {a})")), "{words}");
+    let digests = carried(&daemon, "codex.log", "s1");
+    assert!(
+        digests.iter().any(|digest| digest.contains("hi kid")),
+        "{digests:#?}"
+    );
+    let kid_now = chat_now(&mut client, kid);
+    assert_eq!(kid_now.agent, "Codex");
+    assert!(turn_from(&kid_now, a).is_some_and(|turn| turn.prompt == "more"));
+}
+
+#[test]
+#[ignore = "installs Codex and talks to real models: set CLACKATOO_REAL_AGENT and run with --ignored"]
+#[expect(clippy::too_many_lines, reason = "one conversation, start to end")]
+fn a_real_chat_moves_from_haiku_to_codex_and_back() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to Claude Code's adapter's command");
+    };
+    // Claude Code on Haiku, and Codex installed, as only the real npm is
+    // found.
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let claude = ["/usr/bin/env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect();
+        config.agents.custom = vec![custom_agent("claude", claude)];
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let npm = clackatoo_syntax::servers::on_path("npm").expect("npm");
+        std::os::unix::fs::symlink(npm, bin.join("npm")).unwrap();
+        config.agents.dir = Some(dir.join("agents"));
+        config.agents.path = Some(bin.into());
+    });
+    let mut client = daemon.client();
+    client
+        .new_workspace(None, new_chat_with(Some("claude")))
+        .unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    let minute = Duration::from_mins(1);
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.state == ChatState::Ready
+    });
+    let send = |client: &mut Client, text: &str| {
+        client
+            .chat(chat, ChatAction::Send(text.to_owned()))
+            .unwrap();
+        wait_for_chat_for(client, chat, 2 * minute, |node| {
+            node.turns.last().is_some_and(|turn| turn.prompt == text)
+                && last_outcome(node).is_some()
+        })
+    };
+    let node = send(
+        &mut client,
+        "Remember the word marmalade. Reply with exactly one word, ok, and use no tools.",
+    );
+    assert!(last_words(&node).to_lowercase().contains("ok"), "{node:#?}");
+
+    // To Codex, on Luna: it's installed first, as asked.
+    client
+        .chat(
+            chat,
+            ChatAction::Switch {
+                agent: "codex".into(),
+                model: Some("gpt-6-luna".into()),
+                budget: 20_000,
+            },
+        )
+        .unwrap();
+    let node = wait_for_chat_for(&mut client, chat, minute, |node| node.question.is_some());
+    assert!(node.question.unwrap().title.contains("codex-acp"));
+    answer(&mut client, chat, Some("install".into()));
+    let node = wait_for_chat_for(&mut client, chat, 5 * minute, |node| {
+        matches!(node.state, ChatState::Ready | ChatState::Failed(_))
+    });
+    assert_eq!(node.state, ChatState::Ready, "{node:#?}");
+    client
+        .chat(
+            chat,
+            ChatAction::Set {
+                setting: "reasoning_effort".into(),
+                value: "low".into(),
+            },
+        )
+        .unwrap();
+    let node = wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.settings.iter().any(|setting| {
+            (setting.id.as_str(), setting.value.as_str()) == ("reasoning_effort", "low")
+        }) && node
+            .settings
+            .iter()
+            .any(|setting| setting.value == "gpt-6-luna")
+    });
+    let switch = node.turns[1].switch.clone().unwrap();
+    eprintln!("{}: {:?}", switch.label(), switch.notes);
+    // It knows the conversation, from the digest alone.
+    let node = send(
+        &mut client,
+        "What word did I ask you to remember? Reply with that word alone, and use no tools.",
+    );
+    assert!(
+        last_words(&node).to_lowercase().contains("marmalade"),
+        "{node:#?}"
+    );
+
+    // Back to Claude Code's own session, which hears what Codex said.
+    client
+        .chat(
+            chat,
+            ChatAction::Switch {
+                agent: "claude".into(),
+                model: None,
+                budget: 20_000,
+            },
+        )
+        .unwrap();
+    wait_for_chat_for(&mut client, chat, minute, |node| {
+        node.agent == "Claude Code" && node.state == ChatState::Ready
+    });
+    let node = send(
+        &mut client,
+        "In one word: what did the other agent reply with just now? Use no tools.",
+    );
+    assert!(
+        last_words(&node).to_lowercase().contains("marmalade"),
+        "{node:#?}"
+    );
+}
+
+#[test]
+fn an_agent_that_wont_say_its_models_is_given_up_on_and_not_asked_again_at_once() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.agents.custom = vec![
+            custom_agent("claude", vec![fake_agent().into()]),
+            custom_agent(
+                "codex",
+                vec![
+                    fake_agent().into(),
+                    "--codex".into(),
+                    "--mute".into(),
+                    "--log".into(),
+                    dir.join("codex.log").into(),
+                ],
+            ),
+        ];
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        config.agents.path = Some(bin.into());
+        config.probe_wait = Duration::from_millis(300);
+    });
+    let mut client = daemon.client();
+    let (chat, _) = start_chat_with(&mut client, "claude");
+    client.chat(chat, ChatAction::LearnModels).unwrap();
+    wait_for_chat(&mut client, chat, |node| {
+        node.providers[0].models == ProviderModels::Learning
+    });
+    assert!(running_with(&daemon, "--mute"));
+    let node = wait_for_chat(&mut client, chat, |node| {
+        matches!(node.providers[0].models, ProviderModels::Failed(_))
+    });
+    assert_eq!(
+        node.providers[0].models,
+        ProviderModels::Failed("it didn't say what models it has within 300 ms".to_owned())
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while running_with(&daemon, "--mute") {
+        assert!(Instant::now() < deadline, "Codex is still running");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Opening the menu again soon after doesn't start it again.
+    client.chat(chat, ChatAction::LearnModels).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!running_with(&daemon, "--mute"));
+    assert!(matches!(
+        chat_now(&mut client, chat).providers[0].models,
+        ProviderModels::Failed(_)
+    ));
+}
+
+#[test]
+fn a_chat_without_claude_codes_task_tool_stays_without_it_wherever_it_moves() {
+    let daemon = with_two_agents();
+    let mut client = daemon.client();
+    let new = |agent: &str| NewAgent {
+        size: Size::new(40, 10).unwrap(),
+        cwd: None,
+        agent: Some(agent.to_owned()),
+        tools: AgentTools::Off,
+        task: false,
+    };
+    let disallowed = serde_json::json!(["Agent", "Task"]);
+    // Started with Codex, it opens a new session with Claude Code without
+    // the Task tool.
+    let chat = start_new_chat(&mut client, new("codex"));
+    ask(&mut client, chat, "hello");
+    switch_to(&mut client, chat, "claude", None);
+    let meta = session_meta(&mut client, chat);
+    assert_eq!(meta["claudeCode"]["options"]["disallowedTools"], disallowed);
+    // And going back to that session, after Codex, opens it the same way.
+    switch_to(&mut client, chat, "codex", None);
+    switch_to(&mut client, chat, "claude", None);
+    wait_for_log(&daemon, "agent.log", "resumed s1");
+    let meta = session_meta(&mut client, chat);
+    assert_eq!(meta["claudeCode"]["options"]["disallowedTools"], disallowed);
 }

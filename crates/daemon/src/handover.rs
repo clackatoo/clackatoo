@@ -34,6 +34,9 @@
 //! 15. What agents changed and the user hasn't reviewed: each agent hunk,
 //!     open or not, the comments waiting to go to chats, and reviews, and
 //!     panes showing them.
+//! 16. Chats that move between agents: the sessions each had with other
+//!     agents, where it moved, how much of it each session has seen, and
+//!     the agent's plan.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
@@ -46,10 +49,10 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8] = b"clackatoo handover\n";
 
 /// The version written.
-pub(crate) const VERSION: u32 = 15;
+pub(crate) const VERSION: u32 = 16;
 
 /// The versions this build reads.
-pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, VERSION];
+pub(crate) const READABLE: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, VERSION];
 
 /// Everything one build hands the next.
 #[derive(Debug)]
@@ -307,6 +310,73 @@ pub(crate) struct Chat {
     pub(crate) agent: String,
     /// Where it stands among the chats agents talk in. Since version 13.
     pub(crate) relations: ChatRelations,
+    /// How many of the turns the session has seen. Since version 16.
+    pub(crate) known: u64,
+    /// The sessions it had with other agents. Since version 16.
+    pub(crate) parked: Vec<ParkedSession>,
+    /// The turns where it moved to another agent. Since version 16.
+    pub(crate) switches: Vec<ChatSwitch>,
+    /// About the most tokens a digest for the next agent takes. Since
+    /// version 16.
+    pub(crate) budget: u32,
+    /// The agent's plan, as it last gave it, and that agent, as it's
+    /// shown. Since version 16.
+    pub(crate) plan: Vec<PlanStep>,
+    pub(crate) plan_by: Option<String>,
+}
+
+impl Chat {
+    /// What a chat from before version 16 had of moving between agents:
+    /// nothing, its session having seen all of its `turns`.
+    fn of_one_agent(turns: &[ChatTurn]) -> (u64, u32) {
+        let known = u64::try_from(turns.len()).unwrap_or(u64::MAX);
+        let budget = u32::try_from(crate::handoff::BUDGET).unwrap_or(u32::MAX);
+        (known, budget)
+    }
+}
+
+/// A session a chat had with another agent. Since version 16.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ParkedSession {
+    /// The agent, by its name.
+    pub(crate) agent: String,
+    /// The agent, as it's shown.
+    pub(crate) title: String,
+    pub(crate) session: Option<String>,
+    /// How many of the chat's turns it saw.
+    pub(crate) known: u64,
+    pub(crate) chosen: Vec<(String, String)>,
+    pub(crate) settings: Vec<ChatSetting>,
+}
+
+/// A turn of a chat that's where it moved to another agent. Since
+/// version 16.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChatSwitch {
+    /// The turn's index.
+    pub(crate) turn: u64,
+    /// The agents it moved from and to, as they're shown.
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) model: Option<String>,
+    /// It went back to a session it had before.
+    pub(crate) resumed: bool,
+    /// The settings that didn't carry over.
+    pub(crate) notes: Vec<String>,
+}
+
+/// One step of an agent's plan. Since version 16.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PlanStep {
+    pub(crate) content: String,
+    pub(crate) state: StepState,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) enum StepState {
+    ToDo,
+    Doing,
+    Done,
 }
 
 /// Where a chat stands among the chats agents talk in: which chat's agent
@@ -629,6 +699,7 @@ impl State {
             12 => Ok(postcard::from_bytes::<v12::State>(body)?.into()),
             13 => Ok(postcard::from_bytes::<v13::State>(body)?.into()),
             14 => Ok(postcard::from_bytes::<v14::State>(body)?.into()),
+            15 => Ok(postcard::from_bytes::<v15::State>(body)?.into()),
             VERSION => Ok(postcard::from_bytes(body)?),
             other => Err(HandoverError::Version(other)),
         }
@@ -1310,11 +1381,106 @@ mod v11 {
     }
 }
 
+/// Version 15, as the builds that wrote it wrote it: chats with one agent
+/// each. Versions 13 and 14 share its chats.
+mod v15 {
+    use serde::Deserialize;
+
+    use super::{
+        Applied, Buffer, ChatRelations, ChatSetting, ChatTurn, EditLog, Files, Process, Reviews,
+        Terminal, Workspaces,
+    };
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct State {
+        listener: u32,
+        lock: Option<u32>,
+        next_terminal: u32,
+        terminals: Vec<Terminal>,
+        chats: Vec<Chat>,
+        orphans: Vec<Process>,
+        workspaces: Workspaces,
+        next_buffer: u32,
+        buffers: Vec<Buffer>,
+        next_files: u32,
+        explorers: Vec<Files>,
+        edits: EditLog,
+        applied: Vec<Applied>,
+        daemon: u64,
+        reviews: Reviews,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub(super) struct Chat {
+        id: u32,
+        cols: u16,
+        rows: u16,
+        title: String,
+        cwd: String,
+        session: Option<String>,
+        failure: Option<String>,
+        turns: Vec<ChatTurn>,
+        settings: Vec<ChatSetting>,
+        chosen: Vec<(String, String)>,
+        agent: String,
+        relations: ChatRelations,
+    }
+
+    impl From<Chat> for super::Chat {
+        fn from(chat: Chat) -> Self {
+            let (known, budget) = Self::of_one_agent(&chat.turns);
+            Self {
+                id: chat.id,
+                cols: chat.cols,
+                rows: chat.rows,
+                title: chat.title,
+                cwd: chat.cwd,
+                session: chat.session,
+                failure: chat.failure,
+                turns: chat.turns,
+                settings: chat.settings,
+                chosen: chat.chosen,
+                agent: chat.agent,
+                relations: chat.relations,
+                known,
+                parked: Vec::new(),
+                switches: Vec::new(),
+                budget,
+                plan: Vec::new(),
+                plan_by: None,
+            }
+        }
+    }
+
+    impl From<State> for super::State {
+        fn from(state: State) -> Self {
+            Self {
+                listener: state.listener,
+                lock: state.lock,
+                next_terminal: state.next_terminal,
+                terminals: state.terminals,
+                chats: state.chats.into_iter().map(Into::into).collect(),
+                orphans: state.orphans,
+                workspaces: state.workspaces,
+                next_buffer: state.next_buffer,
+                buffers: state.buffers,
+                next_files: state.next_files,
+                explorers: state.explorers,
+                edits: state.edits,
+                applied: state.applied,
+                daemon: state.daemon,
+                reviews: state.reviews,
+            }
+        }
+    }
+}
+
 /// Version 14, as the builds that wrote it wrote it: no reviews.
 mod v14 {
     use serde::Deserialize;
 
-    use super::{Applied, Buffer, Chat, EditLog, Files, Process, Terminal, Workspaces};
+    use super::v15::Chat;
+    use super::{Applied, Buffer, EditLog, Files, Process, Terminal, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -1341,7 +1507,7 @@ mod v14 {
                 lock: state.lock,
                 next_terminal: state.next_terminal,
                 terminals: state.terminals,
-                chats: state.chats,
+                chats: state.chats.into_iter().map(Into::into).collect(),
                 orphans: state.orphans,
                 workspaces: state.workspaces,
                 next_buffer: state.next_buffer,
@@ -1361,7 +1527,8 @@ mod v14 {
 mod v13 {
     use serde::Deserialize;
 
-    use super::{Buffer, Chat, EditLog, Files, Process, Terminal, Workspaces};
+    use super::v15::Chat;
+    use super::{Buffer, EditLog, Files, Process, Terminal, Workspaces};
 
     #[derive(Debug, Deserialize)]
     pub(super) struct State {
@@ -1386,7 +1553,7 @@ mod v13 {
                 lock: state.lock,
                 next_terminal: state.next_terminal,
                 terminals: state.terminals,
-                chats: state.chats,
+                chats: state.chats.into_iter().map(Into::into).collect(),
                 orphans: state.orphans,
                 workspaces: state.workspaces,
                 next_buffer: state.next_buffer,
@@ -1443,6 +1610,7 @@ mod v12 {
 
     impl From<Chat> for super::Chat {
         fn from(chat: Chat) -> Self {
+            let (known, budget) = Self::of_one_agent(&chat.turns);
             Self {
                 id: chat.id,
                 cols: chat.cols,
@@ -1456,6 +1624,12 @@ mod v12 {
                 chosen: chat.chosen,
                 agent: chat.agent,
                 relations: super::ChatRelations::default(),
+                known,
+                parked: Vec::new(),
+                switches: Vec::new(),
+                budget,
+                plan: Vec::new(),
+                plan_by: None,
             }
         }
     }
@@ -1522,6 +1696,7 @@ mod v10 {
 
     impl From<Chat> for super::Chat {
         fn from(chat: Chat) -> Self {
+            let (known, budget) = Self::of_one_agent(&chat.turns);
             Self {
                 id: chat.id,
                 cols: chat.cols,
@@ -1535,6 +1710,12 @@ mod v10 {
                 chosen: chat.chosen,
                 agent: crate::agents::DEFAULT.to_owned(),
                 relations: super::ChatRelations::default(),
+                known,
+                parked: Vec::new(),
+                switches: Vec::new(),
+                budget,
+                plan: Vec::new(),
+                plan_by: None,
             }
         }
     }
@@ -1641,6 +1822,29 @@ mod tests {
                         cause: Some((4, 7)),
                     }],
                 },
+                known: 1,
+                parked: vec![ParkedSession {
+                    agent: "claude".to_owned(),
+                    title: "Claude Code".to_owned(),
+                    session: Some("c".to_owned()),
+                    known: 1,
+                    chosen: vec![("mode".to_owned(), "plan".to_owned())],
+                    settings: Vec::new(),
+                }],
+                switches: vec![ChatSwitch {
+                    turn: 1,
+                    from: "Claude Code".to_owned(),
+                    to: "Codex".to_owned(),
+                    model: Some("6 Luna".to_owned()),
+                    resumed: false,
+                    notes: vec!["Mode Plan doesn't carry over".to_owned()],
+                }],
+                budget: 9000,
+                plan: vec![PlanStep {
+                    content: "test it".to_owned(),
+                    state: StepState::Doing,
+                }],
+                plan_by: Some("Codex".to_owned()),
             }],
             orphans: vec![Process { pid: 42, pidfd: 2 }],
             workspaces: Workspaces {
@@ -1888,6 +2092,52 @@ mod tests {
 
     /// Versions before 15 come with no reviews.
     #[test]
+    fn version_16_is_read_with_chats_that_moved_between_agents() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v16.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let chat = &state.chats[0];
+        assert_eq!(
+            (chat.agent.as_str(), chat.known, chat.budget),
+            ("codex", 1, 9000)
+        );
+        let parked = &chat.parked[0];
+        assert_eq!(
+            (
+                parked.agent.as_str(),
+                parked.session.as_deref(),
+                parked.known
+            ),
+            ("claude", Some("c"), 1)
+        );
+        assert_eq!(parked.chosen, [("mode".to_owned(), "plan".to_owned())]);
+        let switch = &chat.switches[0];
+        assert_eq!(
+            (switch.turn, switch.to.as_str(), switch.model.as_deref()),
+            (1, "Codex", Some("6 Luna"))
+        );
+        assert_eq!(switch.notes, ["Mode Plan doesn't carry over"]);
+        assert!(matches!(chat.plan[0].state, StepState::Doing));
+        assert_eq!(chat.plan_by.as_deref(), Some("Codex"));
+        assert_eq!(chat.relations.inbox[0].text, "next");
+    }
+
+    /// Before version 16, a chat's session had seen every turn, and it had
+    /// no other.
+    #[test]
+    fn version_15_comes_with_each_session_having_seen_every_turn() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/handover-v15.bin"))
+            .unwrap();
+        let state = State::read(&mut file).unwrap();
+        let chat = &state.chats[0];
+        assert_eq!(chat.known, 1);
+        assert!(chat.parked.is_empty() && chat.switches.is_empty());
+        assert_eq!(chat.relations.parent, Some(5));
+    }
+
+    #[test]
     fn version_14_comes_with_no_reviews() {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v14.bin"))
@@ -1914,11 +2164,11 @@ mod tests {
     /// Writes the fixture for the current version: run once, with
     /// `--ignored`, when a version is made, and never again.
     #[test]
-    #[ignore = "writes tests/fixtures/handover-v13.bin"]
+    #[ignore = "writes tests/fixtures/handover-v16.bin"]
     fn write_the_current_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/handover-v13.bin"
+            "/tests/fixtures/handover-v16.bin"
         );
         let mut file = File::create(path).unwrap();
         state().write(&mut file).unwrap();

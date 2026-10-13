@@ -894,6 +894,7 @@ pub(super) mod tests {
             declined: None,
             server_idle: std::time::Duration::ZERO,
             prompt_wait: crate::DEFAULT_PROMPT_WAIT,
+            probe_wait: crate::DEFAULT_PROBE_WAIT,
             rename_gate: None,
             trash: Some(dir.join("Trash")),
             boards: None,

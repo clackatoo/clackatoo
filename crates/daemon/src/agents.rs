@@ -225,6 +225,12 @@ impl AgentConfig {
     /// replaced by the user's, or why there isn't one.
     pub(crate) fn find(&self, name: &str) -> Result<AgentSpec, String> {
         let from_file = self.file.as_deref().map(read_file).unwrap_or_default();
+        self.find_among(name, &from_file)
+    }
+
+    /// The agent called `name`, as [`find`](Self::find) finds it, with
+    /// `from_file` the agents `agents.toml` adds.
+    fn find_among(&self, name: &str, from_file: &[CustomAgent]) -> Result<AgentSpec, String> {
         let custom = (self.custom.iter().find(|custom| custom.name == name))
             .or_else(|| from_file.iter().find(|custom| custom.name == name));
         let known = known(name);
@@ -249,7 +255,7 @@ impl AgentConfig {
             (None, None) => {
                 let mut names: Vec<&str> = KNOWN.iter().map(|known| known.name).collect();
                 let added =
-                    (self.custom.iter().chain(&from_file)).map(|custom| custom.name.as_str());
+                    (self.custom.iter().chain(from_file)).map(|custom| custom.name.as_str());
                 for added in added {
                     if !names.contains(&added) {
                         names.push(added);
@@ -328,6 +334,43 @@ impl AgentConfig {
                  then send a message to try again, or give {} a command in agents.toml",
                 known.title, known.name
             ))
+        }
+    }
+
+    /// Every agent a chat can talk to: those clackatoo knows, then the
+    /// user's own, in the order they're given. Reads `agents.toml` once.
+    pub(crate) fn all(&self) -> Vec<AgentSpec> {
+        let from_file = self.file.as_deref().map(read_file).unwrap_or_default();
+        let mut names: Vec<&str> = KNOWN.iter().map(|known| known.name).collect();
+        for custom in self.custom.iter().chain(&from_file) {
+            if !names.contains(&custom.name.as_str()) {
+                names.push(&custom.name);
+            }
+        }
+        (names.into_iter())
+            .filter_map(|name| self.find_among(name, &from_file).ok())
+            .collect()
+    }
+
+    /// Whether `spec` can start as it is, without installing anything or
+    /// fetching it through `npx`: it's installed, its adapter is on
+    /// `PATH`, or the user gave it a command whose program is there.
+    pub(crate) fn installed(&self, spec: &AgentSpec) -> bool {
+        match &spec.launch {
+            Launch::Command(command) => command.first().is_some_and(|program| {
+                let program = Path::new(program);
+                if program.components().count() > 1 {
+                    is_program(program)
+                } else {
+                    self.program(&program.to_string_lossy()).is_some()
+                }
+            }),
+            Launch::Known(known) => {
+                let installed = (self.dir.as_deref())
+                    .map(|dir| known.adapter.installed_program(&install_dir(dir, known)));
+                installed.is_some_and(|program| program.is_file())
+                    || self.program(known.adapter.program).is_some()
+            }
         }
     }
 

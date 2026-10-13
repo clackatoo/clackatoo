@@ -274,6 +274,7 @@ mod tests {
                         outcome: Outcome::Done,
                     }),
                     files: None,
+                    switch: None,
                 },
                 Turn {
                     from: None,
@@ -282,6 +283,7 @@ mod tests {
                     items: vec![tool("Read build.rs\nand more", ToolStatus::Running)],
                     end: None,
                     files: None,
+                    switch: None,
                 },
             ],
             ..ChatNode::default()

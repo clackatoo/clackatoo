@@ -7,22 +7,34 @@
 //! Code chat shares one, every Codex chat another. An agent doesn't come
 //! through an upgrade: the next build starts it again when one of its
 //! chats is next sent a message.
+//!
+//! A chat can move to another agent (see `handoff.rs`). The session it
+//! leaves is closed, and its agent stopped if no chat talks to it now; the
+//! chat keeps the session's ID, and going back opens it again, as after an
+//! upgrade. The models each agent offers are kept as its sessions say,
+//! for every chat's model menu to offer; an agent no session has spoken
+//! for yet is asked, as the menu first opens, with a session made only
+//! for that and closed at once.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{NewAgent, PaneId, TerminalId};
+use agent_client_protocol_schema::v1::SessionUpdate;
+use clackatoo_protocol::{
+    NewAgent, PaneId, Provider, ProviderModels, Setting, SettingKind, TerminalId,
+};
 use mio::unix::SourceFd;
 use mio::{Interest, Token};
 
 use super::language::Pipe;
 use super::{Daemon, Hosted, OUTPUT_BUDGET, Orphan, Slot, Source};
-use crate::agent::{Agent, Incoming};
+use crate::agent::{Agent, Incoming, Opened, Refused};
 use crate::agents::{self, AgentSpec, Launch, Start};
-use crate::chat::{Action, HostedChat};
+use crate::chat::{Action, HostedChat, settings_of};
 
 /// Identifies a running agent within one daemon. Never reused, so a
 /// token left over from a stopped agent can't reach another.
@@ -56,7 +68,22 @@ pub(super) struct Agents {
     suggested: HashSet<String>,
     /// Installs that have ended, put here by their threads.
     ended: Arc<Mutex<Vec<Ended>>>,
+    /// Each agent's settings, by its name, as its sessions last gave
+    /// them, for chats to offer its models, and to show at once when a
+    /// chat moves to it.
+    settings: HashMap<String, Vec<Setting>>,
+    /// The agents being asked for their settings, and since when.
+    learning: HashMap<String, Instant>,
+    /// The agents that couldn't say, why, and when they were asked.
+    unlearned: HashMap<String, (String, Instant)>,
+    /// How many tokens each agent's context holds, by its name, as its
+    /// sessions last said, to keep a digest for it to a quarter of that.
+    context: HashMap<String, u64>,
 }
+
+/// How long an agent that couldn't say what models it has isn't asked
+/// again, however often the model menu opens.
+const ASK_AGAIN: Duration = Duration::from_mins(1);
 
 /// An install that's ended: the agent's name, and how it went.
 type Ended = (String, Result<(), String>);
@@ -90,6 +117,7 @@ impl Daemon {
         let chat = HostedChat::new(id, request.size, cwd, &spec, request.tools, request.task);
         log::info!("chat {id} started, with {name}");
         self.add_chat(chat);
+        self.offer_providers(Some(id));
         self.connect(id);
         id
     }
@@ -305,7 +333,18 @@ impl Daemon {
                 }
                 (Action::Install, _, _) => self.install_agent(id),
                 (Action::Prompt(text), Some(slot), Some(session)) => {
-                    slot.agent.prompt(id, &session, &text);
+                    slot.agent.prompt(id, &session, &[&text]);
+                }
+                (Action::Carry { text, from, to }, Some(_), Some(session)) => {
+                    let files = self.agent_files.log.changed_in(id, from..to);
+                    let digest = self.chat(id).and_then(|chat| chat.digest(from, to, &files));
+                    let slot = agent.and_then(|agent| self.agents.running.get_mut(&agent));
+                    if let Some(slot) = slot {
+                        match &digest {
+                            Some(digest) => slot.agent.prompt(id, &session, &[digest, &text]),
+                            None => slot.agent.prompt(id, &session, &[&text]),
+                        }
+                    }
                 }
                 (Action::Cancel, Some(slot), Some(session)) => slot.agent.cancel(&session),
                 (Action::Set { setting, value }, Some(slot), Some(session)) => {
@@ -372,45 +411,41 @@ impl Daemon {
     fn receive_from_agent(&mut self, agent: AgentId, name: &str, message: Incoming) {
         let id = match message {
             Incoming::Session { terminal, result } => {
-                // Looked for on PATH, so only when it's needed.
-                let login = (result.as_ref().err())
-                    .filter(|refused| refused.login)
-                    .and_then(|_| self.login_hint(agent));
-                let Some(chat) = self.chat(terminal) else {
-                    // The chat closed while its session was being made.
-                    if let (Ok(opened), Some(slot)) = (result, self.agents.running.get_mut(&agent))
-                        && !opened.session.is_empty()
-                    {
-                        slot.agent.close_session(&opened.session);
-                    }
+                if !self.session_opened((agent, name), terminal, result) {
                     return;
-                };
-                match result {
-                    Ok(opened) => {
-                        let actions = chat.connected(opened);
-                        self.act(terminal, actions);
-                    }
-                    Err(refused) => chat.failed_to_connect(&login.unwrap_or(refused.message)),
                 }
                 terminal
             }
+            Incoming::Probed { result } => {
+                self.probed(agent, name, result);
+                return;
+            }
             Incoming::Settings { terminal, result } => {
-                let Some(chat) = self.chat(terminal) else {
+                // A chat that moved to another agent since asked its last.
+                let Some(chat) = self.chat(terminal).filter(|chat| chat.agent() == name) else {
                     return;
                 };
                 chat.settings_changed(result);
+                self.note_settings(terminal);
                 terminal
             }
             Incoming::Update { session, update } => {
+                if let SessionUpdate::UsageUpdate(usage) = &*update {
+                    self.agents.context.insert(name.to_owned(), usage.size);
+                }
                 let Some((id, chat)) = self.chat_in(name, &session) else {
                     return;
                 };
                 let ran = chat.finishes_writing(&update);
+                let settings = matches!(*update, SessionUpdate::ConfigOptionUpdate(_));
                 if let Some(wrote) = chat.update(*update) {
                     self.take_written(id, &wrote);
                 }
                 if ran {
                     self.writing_ended(id);
+                }
+                if settings {
+                    self.note_settings(id);
                 }
                 id
             }
@@ -474,6 +509,48 @@ impl Daemon {
         self.collect_damage(id);
     }
 
+    /// Agent `agent`, called `name`, made or opened the session the chat
+    /// in `terminal` asked for, or couldn't. Returns whether that chat is
+    /// still there, with that agent, to hear of it.
+    fn session_opened(
+        &mut self,
+        (agent, name): (AgentId, &str),
+        terminal: TerminalId,
+        result: Result<Opened, Refused>,
+    ) -> bool {
+        // Looked for on PATH, so only when it's needed.
+        let login = (result.as_ref().err())
+            .filter(|refused| refused.login)
+            .and_then(|_| self.login_hint(agent));
+        let Some(chat) = self.chat(terminal).filter(|chat| chat.agent() == name) else {
+            // The chat closed while its session was being made, or moved
+            // to another agent.
+            if let (Ok(opened), Some(slot)) = (result, self.agents.running.get_mut(&agent))
+                && !opened.session.is_empty()
+            {
+                slot.agent.close_session(&opened.session);
+            }
+            self.stop_if_unneeded(agent);
+            return false;
+        };
+        match result {
+            Ok(opened) => {
+                let actions = chat.connected(opened);
+                self.act(terminal, actions);
+                self.note_settings(terminal);
+            }
+            // The session it had is gone, as one closed long ago may be: it
+            // starts a new one, which hears the whole conversation.
+            Err(refused) if !refused.login && chat.session().is_some() => {
+                log::info!("chat {terminal}: its session is gone: {}", refused.message);
+                chat.session_lost();
+                self.connect(terminal);
+            }
+            Err(refused) => chat.failed_to_connect(&login.unwrap_or(refused.message)),
+        }
+        true
+    }
+
     /// Answers agent `agent`'s request about a file: with its result, or
     /// an error code and why.
     pub(super) fn agent_answer(
@@ -524,6 +601,298 @@ impl Daemon {
         for id in chats {
             self.collect_damage(id);
         }
+        // Asked for its settings, it never said.
+        if self.agents.learning.remove(&name).is_some() {
+            let why = why.unwrap_or_else(|| "it stopped".to_owned());
+            self.agents.unlearned.insert(name, (why, Instant::now()));
+            self.offer_providers(None);
+        }
+    }
+
+    /// Stops agent `id` if nothing needs it: no chat talks to it, and it's
+    /// making no session.
+    fn stop_if_unneeded(&mut self, id: AgentId) {
+        let Some(slot) = self.agents.running.get(&id) else {
+            return;
+        };
+        let name = slot.spec.name.clone();
+        let busy = slot.agent.waiting().next().is_some() || slot.agent.probing();
+        let talked_to = (self.terminals.values())
+            .any(|slot| matches!(&slot.terminal, Hosted::Chat(chat) if chat.agent() == name));
+        if busy || talked_to {
+            self.flush_agent(id);
+        } else {
+            self.stop_agent(id);
+        }
+    }
+
+    // --- Moving between agents ----------------------------------------------
+
+    /// Moves the chat in `id` to the agent called `name`, on `model`, as
+    /// its user asked: its session with the agent it leaves is closed,
+    /// and that agent stopped if no chat talks to it now, and it gets a
+    /// session with the new one. Asked for the agent it has, it changes
+    /// the model instead.
+    pub(super) fn switch_chat(
+        &mut self,
+        id: TerminalId,
+        name: &str,
+        model: Option<String>,
+        budget: usize,
+    ) {
+        let spec = self.agent_spec(name);
+        let known = self.agents.settings.get(name).cloned();
+        // At most a quarter of its context, if it's said how big that is.
+        let context = (self.agents.context.get(name)).map_or(usize::MAX, |size| {
+            usize::try_from(size / 4).unwrap_or(usize::MAX)
+        });
+        let budget = budget.min(crate::handoff::MOST).min(context);
+        let Some(chat) = self.chat(id) else { return };
+        if chat.agent() == name {
+            // The same agent: only the model changes, as in the menu.
+            let setting = (chat.agent_settings().into_iter())
+                .find(|setting| setting.kind == SettingKind::Model);
+            if let (Some(setting), Some(value)) = (setting, model) {
+                let actions = chat.act(clackatoo_protocol::ChatAction::Set {
+                    setting: setting.id,
+                    value,
+                });
+                self.act(id, actions);
+            }
+            return;
+        }
+        let Some((old, session)) = chat.switch(&spec, model, known.as_deref(), budget) else {
+            return;
+        };
+        log::info!("chat {id} moved from {old} to {name}");
+        // An install of the agent it left no longer has it waiting.
+        for waiting in self.agents.installing.values_mut() {
+            waiting.retain(|&waiting| waiting != id);
+        }
+        if let Some(agent) = self.agents.named(&old) {
+            if let (Some(session), Some(slot)) = (session, self.agents.running.get_mut(&agent)) {
+                slot.agent.close_session(&session);
+            }
+            self.stop_if_unneeded(agent);
+        }
+        self.offer_providers(Some(id));
+        self.connect(id);
+    }
+
+    /// Notes the settings the chat in `id`'s agent gives, for every chat
+    /// to offer its models: if they've changed, chats are told.
+    fn note_settings(&mut self, id: TerminalId) {
+        let Some(chat) = self.chat(id) else { return };
+        let (name, settings) = (chat.agent().to_owned(), chat.agent_settings());
+        if settings.is_empty() || self.agents.settings.get(&name) == Some(&settings) {
+            return;
+        }
+        let models = |settings: Option<&Vec<Setting>>| {
+            settings
+                .and_then(|settings| model_choices(settings))
+                .map(<[clackatoo_protocol::SettingChoice]>::to_vec)
+        };
+        let changed = models(self.agents.settings.get(&name)) != models(Some(&settings));
+        self.agents.unlearned.remove(&name);
+        self.agents.settings.insert(name, settings);
+        if changed {
+            self.offer_providers(None);
+        }
+    }
+
+    /// Notes the settings each chat has, and had with other agents, as
+    /// they come through an upgrade, and tells every chat what other
+    /// agents it could move to.
+    pub(super) fn learn_from_chats(&mut self) {
+        for slot in self.terminals.values() {
+            let Hosted::Chat(chat) = &slot.terminal else {
+                continue;
+            };
+            let settings = std::iter::once((chat.agent().to_owned(), chat.agent_settings())).chain(
+                (chat.parked().iter())
+                    .map(|parked| (parked.agent.clone(), parked.settings.clone())),
+            );
+            for (name, settings) in settings {
+                if !settings.is_empty() {
+                    self.agents.settings.entry(name).or_insert(settings);
+                }
+            }
+        }
+        self.offer_providers(None);
+    }
+
+    /// Tells the chat in `id`, or every chat, which other agents it could
+    /// move to, and their models, as far as they're known.
+    fn offer_providers(&mut self, only: Option<TerminalId>) {
+        let offered: Vec<Provider> = (self.config.agents.all().into_iter())
+            .map(|spec| {
+                let name = spec.name.as_str();
+                let models = if !self.config.agents.installed(&spec) {
+                    ProviderModels::NotInstalled
+                } else if self.agents.learning.contains_key(name) {
+                    ProviderModels::Learning
+                } else if let Some(choices) =
+                    (self.agents.settings.get(name)).and_then(|settings| model_choices(settings))
+                {
+                    ProviderModels::Known(choices.to_vec())
+                } else if let Some((why, _)) = self.agents.unlearned.get(name) {
+                    ProviderModels::Failed(why.clone())
+                } else {
+                    ProviderModels::Unknown
+                };
+                Provider {
+                    agent: spec.name,
+                    title: spec.title,
+                    models,
+                }
+            })
+            .collect();
+        let mut told = Vec::new();
+        for (&id, slot) in &mut self.terminals {
+            if only.is_some_and(|only| only != id) {
+                continue;
+            }
+            let Some(chat) = slot.terminal.chat() else {
+                continue;
+            };
+            let others = (offered.iter())
+                .filter(|provider| provider.agent != chat.agent())
+                .cloned()
+                .collect();
+            chat.set_providers(others);
+            told.push(id);
+        }
+        for id in told {
+            self.collect_damage(id);
+        }
+    }
+
+    /// Asks each other agent the chat in `id` could move to, that's
+    /// installed and whose models aren't known, for its settings, with a
+    /// session made only for that, in the chat's directory.
+    pub(super) fn learn_models(&mut self, id: TerminalId) {
+        let Some(chat) = self.chat(id) else { return };
+        let (cwd, own) = (chat.working_directory().to_owned(), chat.agent().to_owned());
+        let mut asked = false;
+        for spec in self.config.agents.all() {
+            let name = spec.name.clone();
+            let known = (self.agents.settings.get(&name))
+                .is_some_and(|settings| model_choices(settings).is_some());
+            let lately = (self.agents.unlearned.get(&name))
+                .is_some_and(|(_, asked)| asked.elapsed() < ASK_AGAIN);
+            if name == own
+                || known
+                || lately
+                || self.agents.learning.contains_key(&name)
+                || !self.config.agents.installed(&spec)
+            {
+                continue;
+            }
+            let agent = if let Some(agent) = self.agents.named(&name) {
+                agent
+            } else {
+                let Start::Ready { command, .. } = self.config.agents.start(&spec) else {
+                    continue;
+                };
+                match self.start_agent(spec, command) {
+                    Ok(agent) => agent,
+                    Err(err) => {
+                        (self.agents.unlearned).insert(name, (err.to_string(), Instant::now()));
+                        asked = true;
+                        continue;
+                    }
+                }
+            };
+            log::info!("asking {name} for its models");
+            if let Some(slot) = self.agents.running.get_mut(&agent) {
+                slot.agent.probe(&cwd);
+            }
+            self.flush_agent(agent);
+            self.agents.unlearned.remove(&name);
+            self.agents.learning.insert(name, Instant::now());
+            asked = true;
+        }
+        if asked {
+            self.offer_providers(None);
+        }
+    }
+
+    /// Agent `agent`, called `name`, made the session it was asked for to
+    /// learn its settings, or couldn't: its settings are noted, and the
+    /// session closed, and the agent stopped if nothing else needs it.
+    fn probed(&mut self, agent: AgentId, name: &str, result: Result<Opened, Refused>) {
+        // Given up on already, it's said after all.
+        self.agents.learning.remove(name);
+        match result {
+            Ok(opened) => {
+                let settings = settings_of(opened.settings.as_deref().unwrap_or_default());
+                self.agents.unlearned.remove(name);
+                self.agents.settings.insert(name.to_owned(), settings);
+                if let Some(slot) = self.agents.running.get_mut(&agent)
+                    && !opened.session.is_empty()
+                {
+                    slot.agent.close_session(&opened.session);
+                }
+            }
+            Err(refused) => {
+                let why = if refused.login {
+                    self.login_hint(agent).unwrap_or(refused.message)
+                } else {
+                    refused.message
+                };
+                (self.agents.unlearned).insert(name.to_owned(), (why, Instant::now()));
+            }
+        }
+        self.stop_if_unneeded(agent);
+        self.offer_providers(None);
+    }
+
+    /// Starts the agents whose installs have ended, and gives up on those
+    /// asked for their models that haven't said in time.
+    pub(super) fn agent_chores(&mut self) {
+        self.take_agent_installs();
+        self.time_out_probes();
+    }
+
+    /// When the next agent asked for its models is to have said, if one
+    /// is being asked.
+    pub(super) fn next_probe_due(&self) -> Option<Instant> {
+        (self.agents.learning.values().min()).map(|asked| *asked + self.config.probe_wait)
+    }
+
+    /// Gives up on agents asked for their models that haven't said in
+    /// time: the menu says so, and each is stopped unless a chat talks to
+    /// it.
+    fn time_out_probes(&mut self) {
+        let wait = self.config.probe_wait;
+        let late: Vec<String> = (self.agents.learning.iter())
+            .filter(|(_, asked)| asked.elapsed() >= wait)
+            .map(|(name, _)| name.clone())
+            .collect();
+        if late.is_empty() {
+            return;
+        }
+        for name in late {
+            log::info!("{name} didn't say what models it has in time");
+            self.agents.learning.remove(&name);
+            let within = if wait.as_secs() > 0 {
+                format!("{} s", wait.as_secs())
+            } else {
+                format!("{} ms", wait.as_millis())
+            };
+            let why = format!("it didn't say what models it has within {within}");
+            self.agents
+                .unlearned
+                .insert(name.clone(), (why, Instant::now()));
+            let talked_to = (self.terminals.values())
+                .any(|slot| matches!(&slot.terminal, Hosted::Chat(chat) if chat.agent() == name));
+            if let Some(agent) = self.agents.named(&name)
+                && !talked_to
+            {
+                self.stop_agent(agent);
+            }
+        }
+        self.offer_providers(None);
     }
 
     /// Ends a closed chat's session, and its agent with the agent's last
@@ -634,7 +1003,7 @@ impl Daemon {
 
     /// Starts the agents whose installs have ended for the chats waiting
     /// for them, or tells them why they couldn't be installed.
-    pub(super) fn take_agent_installs(&mut self) {
+    fn take_agent_installs(&mut self) {
         if self.agents.installing.is_empty() {
             return;
         }
@@ -665,5 +1034,15 @@ impl Daemon {
                 self.collect_damage(id);
             }
         }
+        // It may be offered for models now.
+        self.offer_providers(None);
     }
+}
+
+/// The models `settings` offer, if they offer any.
+fn model_choices(settings: &[Setting]) -> Option<&[clackatoo_protocol::SettingChoice]> {
+    (settings.iter())
+        .find(|setting| setting.kind == SettingKind::Model)
+        .map(|setting| setting.choices.as_slice())
+        .filter(|choices| !choices.is_empty())
 }

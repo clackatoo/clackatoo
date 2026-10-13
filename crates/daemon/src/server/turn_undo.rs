@@ -124,16 +124,23 @@ impl Daemon {
         } else {
             ("Undid", "undo")
         };
-        let number = turn + 1;
         let Some(hosted) = self.chat(chat) else {
             return String::new();
         };
         if hosted.answering() {
             return format!("Wait for the agent to finish before you {undo} a turn.");
         }
-        if turn >= hosted.turns() {
-            return format!("There's no turn {number}.");
+        let turns = &hosted.node().turns;
+        if turn >= turns.len() {
+            let numbered = turns.iter().filter(|turn| turn.switch.is_none()).count();
+            return format!("There's no turn {}.", numbered + turn - turns.len() + 1);
         }
+        // Counted as people count them, without where the chat moved.
+        let Some(number) = clackatoo_protocol::turn_number(turns, turn) else {
+            return format!(
+                "That's where the chat moved to another agent: there's nothing to {undo}."
+            );
+        };
         let cwd = PathBuf::from(hosted.working_directory());
         let Some(edits) = self.agent_files.log.turn(chat, turn) else {
             return match self.agent_files.log.summary(chat, turn) {

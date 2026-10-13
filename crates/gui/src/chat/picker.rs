@@ -10,8 +10,14 @@
 //! name them so are rows of their own, as any other setting's are.
 //!
 //! Effort, whose choices go from least to most, is a slider.
+//!
+//! Beside the chat's own agent's models, the model menu offers the other
+//! agents', each under its name: picking one moves the chat to that agent,
+//! rather than setting a setting. Those rows go by a setting ID of the
+//! window's own, which names the agent, so the menu moves through them as
+//! through any other.
 
-use clackatoo_protocol::{Setting, SettingChoice, SettingKind};
+use clackatoo_protocol::{Provider, ProviderModels, Setting, SettingChoice, SettingKind};
 
 use super::Menu;
 
@@ -89,17 +95,52 @@ impl Row {
 /// The value that leaves a slider's setting to the agent.
 const RESET: &str = "default";
 
-/// The rows of `menu`, for `settings`: each of its settings', under its
-/// name when there are several.
-pub(super) fn rows(settings: &[Setting], menu: &Menu) -> Vec<Row> {
+/// What starts the setting ID of a row that moves the chat to another
+/// agent, before the agent's name. No agent's setting is called so.
+const SWITCH: &str = "clackatoo.agent:";
+
+/// The agent a row's setting ID moves the chat to, if it's one that does.
+pub(super) fn switch_to(setting: &str) -> Option<&str> {
+    setting.strip_prefix(SWITCH)
+}
+
+/// What the chat offers in its menus: its agent's settings, and the other
+/// agents it could move to.
+pub(super) struct Offer<'a> {
+    pub(super) settings: &'a [Setting],
+    /// The chat's agent, as it's shown.
+    pub(super) agent: &'a str,
+    pub(super) providers: &'a [Provider],
+}
+
+/// Whether `menu` offers models, and so the other agents' too.
+pub(super) fn offers_models(offer: &Offer<'_>, menu: &Menu) -> bool {
+    (menu.settings.iter()).any(|id| {
+        (offer.settings.iter())
+            .any(|setting| setting.id == *id && setting.kind == SettingKind::Model)
+    })
+}
+
+/// The rows of `menu`, for `offer`: each of its settings', under its name
+/// when there are several, and with the models, the other agents', each
+/// under the agent's name.
+pub(super) fn rows(offer: &Offer<'_>, menu: &Menu) -> Vec<Row> {
+    let settings = offer.settings;
     let shown: Vec<&Setting> = (menu.settings.iter())
         .filter_map(|id| settings.iter().find(|setting| setting.id == *id))
         .collect();
+    let others = offers_models(offer, menu) && !offer.providers.is_empty();
     let mut rows = Vec::new();
     for setting in &shown {
         let value = menu.value(setting);
         let slider = slider(setting, value);
-        if shown.len() > 1 {
+        if others && setting.kind == SettingKind::Model {
+            // The models are the agent's, among others'.
+            rows.push(Row::Heading {
+                name: offer.agent.to_owned(),
+                aside: None,
+            });
+        } else if shown.len() > 1 {
             // A slider's steps don't say which is chosen: its heading does.
             let aside = slider.as_ref().map(|_| {
                 (setting.choices.iter())
@@ -124,7 +165,59 @@ pub(super) fn rows(settings: &[Setting], menu: &Menu) -> Vec<Row> {
             })),
         }
     }
+    if others {
+        for provider in offer.providers {
+            provider_rows(provider, menu.expanded.as_deref(), &mut rows);
+        }
+    }
     rows
+}
+
+/// The rows for another agent, `provider`: its name, and its models to
+/// move the chat to, or one row that moves it on the agent's own choice
+/// of model while they aren't known.
+fn provider_rows(provider: &Provider, expanded: Option<&str>, rows: &mut Vec<Row>) {
+    let aside = match &provider.models {
+        ProviderModels::Known(_) => None,
+        ProviderModels::Unknown | ProviderModels::Learning => Some("loading…"),
+        ProviderModels::NotInstalled => Some("install to use"),
+        ProviderModels::Failed(_) => Some("unavailable"),
+    };
+    rows.push(Row::Heading {
+        name: provider.title.clone(),
+        aside: aside.map(str::to_owned),
+    });
+    // A setting of the window's own, that no choice is current in.
+    let mut setting = Setting {
+        id: format!("{SWITCH}{}", provider.agent),
+        name: provider.title.clone(),
+        kind: SettingKind::Model,
+        value: String::new(),
+        choices: Vec::new(),
+    };
+    let (name, description) = match &provider.models {
+        ProviderModels::Known(choices) => {
+            setting.choices.clone_from(choices);
+            family_rows(&setting, expanded, rows);
+            return;
+        }
+        ProviderModels::NotInstalled => ("Install and switch".to_owned(), None),
+        ProviderModels::Failed(why) => ("Switch anyway".to_owned(), Some(why.clone())),
+        ProviderModels::Unknown | ProviderModels::Learning => {
+            (format!("Switch to {}", provider.title), None)
+        }
+    };
+    rows.push(Row::Choice(ChoiceRow {
+        setting: setting.id,
+        value: String::new(),
+        name,
+        version: None,
+        description,
+        current: false,
+        recommended: false,
+        nested: false,
+        family: None,
+    }));
 }
 
 /// `setting` as a slider on `value`, if it's an effort with steps to
@@ -367,6 +460,17 @@ mod tests {
         }
     }
 
+    /// The rows of `menu` for a chat with `settings` and no other agents
+    /// to move to.
+    fn rows(settings: &[Setting], menu: &Menu) -> Vec<Row> {
+        let offer = Offer {
+            settings,
+            agent: "Claude Code",
+            providers: &[],
+        };
+        super::rows(&offer, menu)
+    }
+
     fn menu(settings: &[&str], expanded: Option<&str>) -> Menu {
         Menu {
             settings: settings.iter().map(|id| (*id).to_owned()).collect(),
@@ -394,6 +498,73 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn other_agents_models_follow_the_agents_own_each_under_its_name() {
+        let providers = [
+            Provider {
+                agent: "codex".into(),
+                title: "Codex".into(),
+                models: ProviderModels::Known(vec![
+                    choice("gpt-6-astra", "6 Astra", None),
+                    choice("gpt-6-luna", "6 Luna", None),
+                ]),
+            },
+            Provider {
+                agent: "gemini".into(),
+                title: "Gemini CLI".into(),
+                models: ProviderModels::NotInstalled,
+            },
+            Provider {
+                agent: "mine".into(),
+                title: "Mine".into(),
+                models: ProviderModels::Learning,
+            },
+        ];
+        let offer = Offer {
+            settings: &[models("opus"), effort("high")],
+            agent: "Claude Code",
+            providers: &providers,
+        };
+        let rows = super::rows(&offer, &menu(&["model", "effort"], None));
+        let headings: Vec<(&str, Option<&str>)> = (rows.iter())
+            .filter_map(|row| match row {
+                Row::Heading { name, aside } => Some((name.as_str(), aside.as_deref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            headings,
+            [
+                ("Claude Code", None),
+                ("Effort", Some("High")),
+                ("Codex", None),
+                ("Gemini CLI", Some("install to use")),
+                ("Mine", Some("loading…"))
+            ]
+        );
+        // Codex's rows move the chat to it, none of them chosen.
+        let codex: Vec<(&str, &str, bool)> = (rows.iter())
+            .filter_map(|row| match row {
+                Row::Choice(row) if switch_to(&row.setting).is_some() => {
+                    Some((row.name.as_str(), row.value.as_str(), row.current))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            codex,
+            [
+                ("6 Astra", "gpt-6-astra", false),
+                ("6 Luna", "gpt-6-luna", false),
+                ("Install and switch", "", false),
+                ("Switch to Mine", "", false)
+            ]
+        );
+        // The effort menu alone offers no other agents.
+        let rows = super::rows(&offer, &menu(&["effort"], None));
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]
@@ -486,7 +657,7 @@ mod tests {
             aside: Some("High".into())
         }));
         // On the default, no step is.
-        let rows = super::rows(&[effort("default")], &menu(&["effort"], None));
+        let rows = self::rows(&[effort("default")], &menu(&["effort"], None));
         let Some(Row::Slider(slider)) = rows.last() else {
             panic!("{rows:?}")
         };

@@ -66,8 +66,9 @@ pub use buffer::{
 };
 pub use chat::{
     ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome,
-    Question, Sender, Setting, SettingChoice, SettingKind, Tool, ToolContent, ToolKind, ToolStatus,
-    Turn, TurnEnd, TurnFiles, TurnFilesState, Usage,
+    Provider, ProviderModels, Question, Sender, Setting, SettingChoice, SettingKind, Switch, Tool,
+    ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, TurnFilesState, Usage,
+    turn_number, turn_numbered,
 };
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
@@ -92,7 +93,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 62;
+pub const PROTOCOL_VERSION: u32 = 63;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

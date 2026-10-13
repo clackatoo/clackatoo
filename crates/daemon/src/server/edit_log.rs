@@ -354,6 +354,40 @@ impl EditLog {
         self.chats.retain(|edits| edits.chat != chat);
     }
 
+    /// The files `chat`'s turns `turns` changed, as far as the log keeps
+    /// them, each once, in the order they were first changed: whether it
+    /// was there before the first of those turns, after the last, and
+    /// whether every change to it was undone.
+    pub(super) fn changed_in(
+        &self,
+        chat: TerminalId,
+        turns: std::ops::Range<usize>,
+    ) -> Vec<crate::handoff::Changed> {
+        let mut changed: Vec<crate::handoff::Changed> = Vec::new();
+        let Some(edits) = self.chats.iter().find(|edits| edits.chat == chat) else {
+            return changed;
+        };
+        let files = (edits.turns.iter())
+            .filter(|turn| turns.contains(&turn.turn))
+            .flat_map(|turn| &turn.files);
+        for file in files {
+            let path = file.path.to_string_lossy().into_owned();
+            match changed.iter_mut().find(|known| known.path == path) {
+                Some(known) => {
+                    known.exists = file.exists;
+                    known.undone &= file.undone;
+                }
+                None => changed.push(crate::handoff::Changed {
+                    path,
+                    existed: file.existed,
+                    exists: file.exists,
+                    undone: file.undone,
+                }),
+            }
+        }
+        changed
+    }
+
     /// Every change to buffer `buffer`, with the chat it's in, to be turned
     /// into changes to the file as the buffer closes.
     pub(super) fn changes_to(

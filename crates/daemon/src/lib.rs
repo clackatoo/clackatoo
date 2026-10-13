@@ -22,6 +22,7 @@ pub mod client;
 mod explorer;
 mod find;
 mod git;
+mod handoff;
 mod handover;
 mod hosted;
 pub mod launch;
@@ -92,6 +93,9 @@ pub struct DaemonConfig {
     /// prompt, when the shell marks its prompts, before the agent is told
     /// the shell never became ready.
     pub prompt_wait: std::time::Duration,
+    /// How long an agent asked what models it has, for a chat's model
+    /// menu, has to say, before it's given up on and stopped.
+    pub probe_wait: std::time::Duration,
     /// For tests: a file a rename's thread waits for once it has written
     /// the new text of the files not open beside them, before they're put
     /// in place, so a test can act while it's under way. `None`, but in
@@ -114,6 +118,10 @@ pub const DEFAULT_SERVER_IDLE: std::time::Duration = std::time::Duration::from_m
 /// How long a command an agent runs waits for its shell's first prompt,
 /// unless told otherwise: zsh with plugins can take seconds to start.
 pub const DEFAULT_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long an agent asked what models it has gets to say, unless the
+/// daemon is told otherwise.
+pub const DEFAULT_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The UDP ports a daemon uses unless told otherwise: mosh's, so a
 /// firewall opened for mosh lets clackatoo through too.
@@ -179,6 +187,7 @@ impl DaemonConfig {
             declined: languages_dir().map(|dir| dir.with_file_name("declined")),
             server_idle: DEFAULT_SERVER_IDLE,
             prompt_wait: DEFAULT_PROMPT_WAIT,
+            probe_wait: DEFAULT_PROBE_WAIT,
             rename_gate: None,
             trash: data_dir().map(|dir| dir.join("Trash")),
             boards: match non_empty("CLACKATOO_BOARDS") {

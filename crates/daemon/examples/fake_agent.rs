@@ -33,7 +33,11 @@
 //! (`haiku` or `sonnet`), as Claude Code's adapter offers them, starting
 //! as Manual and Haiku, and each answer ends with how much context it uses.
 //!
-//! Run with `--log FILE`, it notes each session it's asked to close there.
+//! Run with `--log FILE`, it notes each session it's asked to close or
+//! resume there, and what came before the message in a prompt of several
+//! pieces of text, as a chat that moved to it sends what happened before:
+//! `carried SESSION`, the text, then `end carried`. A message is the last
+//! piece of its prompt.
 //!
 //! Run with `--codex`, it sends what Codex's adapter sends where that
 //! differs: Codex's settings (its modes, Read-only to Full access, starting
@@ -42,7 +46,8 @@
 //! `_meta.terminal_output_delta` rather than in their content, and
 //! questions that call every change "Edit files". With `--logged-out`, it
 //! refuses sessions as Codex does when no one's logged in. With
-//! `--broken`, it says why on stderr and exits before it starts.
+//! `--broken`, it says why on stderr and exits before it starts. With
+//! `--mute`, it never answers a request for a new session.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -74,6 +79,7 @@ fn main() {
         log: (args.iter().position(|arg| arg == "--log")).and_then(|at| args.get(at + 1).cloned()),
         codex: flag("--codex"),
         logged_out: flag("--logged-out"),
+        mute: flag("--mute"),
         sessions: BTreeMap::new(),
         settings: BTreeMap::new(),
         tools: BTreeMap::new(),
@@ -97,6 +103,8 @@ struct Fake {
     codex: bool,
     /// Refuses sessions, as no one's logged in.
     logged_out: bool,
+    /// Never answers a request for a new session.
+    mute: bool,
     /// Each session's working directory.
     sessions: BTreeMap<String, String>,
     /// Each session's mode and model.
@@ -201,6 +209,18 @@ fn config_options((mode, model): &(String, String)) -> Value {
 }
 
 impl Fake {
+    /// Notes `line` in the log, if there is one.
+    fn note(&self, line: &str) {
+        if let Some(log) = &self.log {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+                .unwrap();
+            writeln!(file, "{line}").unwrap();
+        }
+    }
+
     /// A new session's settings.
     fn starting_settings(&self) -> (String, String) {
         if self.codex {
@@ -239,6 +259,7 @@ impl Fake {
     }
 
     /// Acts on a message. Returns whether to carry on.
+    #[expect(clippy::too_many_lines, reason = "a match of what the agent is sent")]
     fn receive(&mut self, message: &Value) -> bool {
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let params = &message["params"];
@@ -248,6 +269,7 @@ impl Fake {
             Some("session/new" | "session/resume") if self.logged_out => send(&json!({
                 "jsonrpc": "2.0", "id": id,
                 "error": { "code": -32000, "message": "Authentication required" } })),
+            Some("session/new") if self.mute => {}
             Some("session/new") => {
                 let session = format!("s{}", self.sessions.len() + 1);
                 self.sessions
@@ -265,6 +287,7 @@ impl Fake {
             }
             // As after a crash: the settings are back where they started.
             Some("session/resume") => {
+                self.note(&format!("resumed {session}"));
                 self.sessions
                     .insert(session.clone(), params["cwd"].as_str().unwrap().to_owned());
                 self.tools
@@ -287,20 +310,22 @@ impl Fake {
                 self.settings.insert(session, settings);
             }
             Some("session/close") => {
-                if let Some(log) = &self.log {
-                    let mut file = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(log)
-                        .unwrap();
-                    writeln!(file, "closed {session}").unwrap();
-                }
+                self.note(&format!("closed {session}"));
                 reply(&id, &json!({}));
             }
             Some("session/cancel") => self.cancel(&session),
             Some("session/prompt") => {
-                let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
-                return self.prompt(id, session, text);
+                let blocks: Vec<&str> = (params["prompt"].as_array().into_iter().flatten())
+                    .filter_map(|block| block["text"].as_str())
+                    .collect();
+                let Some((text, before)) = blocks.split_last() else {
+                    return true;
+                };
+                for carried in before {
+                    self.note(&format!("carried {session}\n{carried}\nend carried"));
+                }
+                let text = (*text).to_owned();
+                return self.prompt(id, session, &text);
             }
             // The answer about a file.
             None if id == "f1" => {

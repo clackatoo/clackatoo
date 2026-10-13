@@ -685,6 +685,7 @@ impl Daemon {
         daemon.resume_talk();
         daemon.agent_files.log = edit_log::EditLog::resume(edits);
         daemon.resume_reviews(reviews);
+        daemon.learn_from_chats();
         daemon.refresh_all_files();
         for orphan in &state.orphans {
             match Orphan::resume(orphan, fds) {
@@ -857,6 +858,7 @@ impl Daemon {
                         .chain(tools)
                         .chain(rewatch)
                         .chain(reviews)
+                        .chain(self.next_probe_due())
                         .min();
                     next.map(|due| due.saturating_duration_since(Instant::now()))
                 } else {
@@ -886,7 +888,7 @@ impl Daemon {
             self.take_highlights();
             self.take_signs();
             self.take_installs();
-            self.take_agent_installs();
+            self.agent_chores();
             self.take_renames();
             if self.take_boards() {
                 self.boards_read();
@@ -1990,6 +1992,24 @@ impl Daemon {
             let turn = usize::try_from(turn).unwrap_or(usize::MAX);
             self.undo_turn(id, turn, redo, force);
             return Ok(());
+        }
+        // Other agents are the server's.
+        match action {
+            ChatAction::Switch {
+                agent,
+                model,
+                budget,
+            } => {
+                let budget = usize::try_from(budget).unwrap_or(usize::MAX);
+                self.switch_chat(id, &agent, model, budget);
+                self.collect_damage(id);
+                return Ok(());
+            }
+            ChatAction::LearnModels => {
+                self.learn_models(id);
+                return Ok(());
+            }
+            _ => {}
         }
         let actions = chat.act(action);
         self.act(id, actions);

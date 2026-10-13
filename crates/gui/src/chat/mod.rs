@@ -21,7 +21,8 @@ mod picker;
 mod read;
 
 use clackatoo_protocol::{
-    ChatAction, ChatNode, ChoiceKind, Setting, SettingKind, TurnFilesState, ViewUpdate,
+    ChatAction, ChatNode, ChoiceKind, ProviderModels, Setting, SettingKind, TurnFilesState,
+    ViewUpdate,
 };
 use parley::{LayoutContext, PlainEditor};
 use winit::keyboard::{Key, NamedKey};
@@ -729,7 +730,7 @@ impl ChatView {
         let Some(menu) = self.menu.clone() else {
             return false;
         };
-        let rows = picker::rows(&self.node.settings, &menu);
+        let rows = picker::rows(&self.offer(), &menu);
         let spots: Vec<Spot> = rows.iter().filter_map(Row::spot).collect();
         let at = (menu.highlighted.as_ref())
             .and_then(|highlighted| spots.iter().position(|spot| spot == highlighted));
@@ -763,7 +764,7 @@ impl ChatView {
             }
             Key::Named(NamedKey::Enter) => {
                 if let Some(Spot::Choice { setting, value }) = menu.highlighted {
-                    settled.actions.push(ChatAction::Set { setting, value });
+                    settled.actions.push(choose(setting, value));
                 }
                 self.menu = None;
                 true
@@ -859,15 +860,17 @@ impl ChatView {
 
     /// Opens the menu for `settings`, on the choice made, with the versions
     /// of a model family shown if one of them is chosen, or closes it if
-    /// it's open for them.
-    fn toggle_menu(&mut self, settings: Vec<String>) {
+    /// it's open for them. Returns whether the daemon is to be asked for
+    /// the other agents' models, as the menu offers them and they aren't
+    /// all known.
+    fn toggle_menu(&mut self, settings: Vec<String>) -> bool {
         if self
             .menu
             .as_ref()
             .is_some_and(|menu| menu.settings == settings)
         {
             self.menu = None;
-            return;
+            return false;
         }
         let expanded = (settings.iter())
             .filter_map(|id| self.setting(id))
@@ -878,10 +881,28 @@ impl ChatView {
             expanded,
             held: None,
         };
-        menu.highlighted = (picker::rows(&self.node.settings, &menu).iter())
+        menu.highlighted = (picker::rows(&self.offer(), &menu).iter())
             .find(|row| matches!(row, Row::Choice(choice) if choice.current))
             .and_then(Row::spot);
+        let learn = picker::offers_models(&self.offer(), &menu)
+            && (self.node.providers.iter()).any(|provider| {
+                matches!(
+                    provider.models,
+                    ProviderModels::Unknown | ProviderModels::Failed(_)
+                )
+            });
         self.menu = Some(menu);
+        learn
+    }
+
+    /// What the menus offer: the agent's settings, and the other agents
+    /// the chat could move to.
+    fn offer(&self) -> picker::Offer<'_> {
+        picker::Offer {
+            settings: &self.node.settings,
+            agent: &self.node.agent,
+            providers: &self.node.providers,
+        }
     }
 
     /// Moves the agent's mode on to the next it offers, round to the first.
@@ -938,7 +959,11 @@ impl ChatView {
             self.menu = None;
         }
         match hit {
-            Some(Hit::Chip(settings)) => self.toggle_menu(settings),
+            Some(Hit::Chip(settings)) => {
+                if self.toggle_menu(settings) {
+                    settled.actions.push(ChatAction::LearnModels);
+                }
+            }
             Some(Hit::Expand(family)) => {
                 if let Some(menu) = &mut self.menu {
                     menu.expanded = (menu.expanded.as_ref() != Some(&family)).then_some(family);
@@ -951,7 +976,7 @@ impl ChatView {
             Some(Hit::Reset { setting, value }) => self.slide_to(&setting, &value, settled),
             Some(Hit::Pick { setting, value }) => {
                 self.menu = None;
-                settled.actions.push(ChatAction::Set { setting, value });
+                settled.actions.push(choose(setting, value));
             }
             Some(Hit::Card(turn, tool)) => {
                 self.restyled(turn);
@@ -1146,7 +1171,8 @@ impl ChatView {
     }
 
     /// Opens the menu for the setting of `kind`, as clicking its chip does.
-    pub(crate) fn open_menu(&mut self, kinds: &[SettingKind]) {
+    /// Returns whether it asks the daemon for other agents' models.
+    pub(crate) fn open_menu(&mut self, kinds: &[SettingKind]) -> bool {
         let ids = (kinds.iter())
             .filter_map(|kind| {
                 self.node
@@ -1156,7 +1182,7 @@ impl ChatView {
             })
             .map(|setting| setting.id.clone())
             .collect();
-        self.toggle_menu(ids);
+        self.toggle_menu(ids)
     }
 }
 
@@ -1173,7 +1199,23 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Question(_)
         | ChatPatch::Notice(_)
         | ChatPatch::Settings(_)
-        | ChatPatch::Usage(_) => None,
+        | ChatPatch::Usage(_)
+        | ChatPatch::Agent(_)
+        | ChatPatch::Providers(_) => None,
+    }
+}
+
+/// What picking `value` of `setting` in a menu asks: to set it, or for a
+/// row of another agent's, to move the chat to that agent, on that model,
+/// or the agent's own choice if none. The pane fills in the budget.
+fn choose(setting: String, value: String) -> ChatAction {
+    match picker::switch_to(&setting) {
+        Some(agent) => ChatAction::Switch {
+            agent: agent.to_owned(),
+            model: (!value.is_empty()).then_some(value),
+            budget: 0,
+        },
+        None => ChatAction::Set { setting, value },
     }
 }
 
@@ -1253,6 +1295,7 @@ mod tests {
             end: None,
             files: None,
             from: None,
+            switch: None,
         });
         let mut view = ChatView::new(String::new(), node);
         typed(&mut view, "more");
@@ -1364,6 +1407,78 @@ mod tests {
         );
         // From the last, round to the first.
         assert_eq!(view.settle(&mut fonts).actions, [set("mode", "default")]);
+    }
+
+    #[test]
+    fn picking_another_agents_model_moves_the_chat_to_it() {
+        use clackatoo_protocol::{Provider, SettingChoice};
+        let mut fonts = fonts();
+        let mut view = with_settings();
+        view.node.agent = "Claude Code".into();
+        let luna = SettingChoice {
+            value: "gpt-6-luna".into(),
+            name: "6 Luna".into(),
+            description: None,
+        };
+        view.node.providers = vec![
+            Provider {
+                agent: "codex".into(),
+                title: "Codex".into(),
+                models: ProviderModels::Known(vec![luna]),
+            },
+            Provider {
+                agent: "gemini".into(),
+                title: "Gemini CLI".into(),
+                models: ProviderModels::NotInstalled,
+            },
+        ];
+        // Every model known: nothing to ask the daemon.
+        assert!(!view.open_menu(&[SettingKind::Model]));
+        // From Haiku, past Sonnet, to Codex's Luna.
+        for _ in 0..2 {
+            press(
+                &mut view,
+                &Key::Named(NamedKey::ArrowDown),
+                None,
+                Modifiers::default(),
+            );
+        }
+        press(
+            &mut view,
+            &Key::Named(NamedKey::Enter),
+            Some("\r"),
+            Modifiers::default(),
+        );
+        let switch = |agent: &str, model: Option<&str>| ChatAction::Switch {
+            agent: agent.into(),
+            model: model.map(str::to_owned),
+            budget: 0,
+        };
+        assert_eq!(
+            view.settle(&mut fonts).actions,
+            [switch("codex", Some("gpt-6-luna"))]
+        );
+        // Up from Haiku, round to the bottom: Gemini, to install.
+        view.open_menu(&[SettingKind::Model]);
+        press(
+            &mut view,
+            &Key::Named(NamedKey::ArrowUp),
+            None,
+            Modifiers::default(),
+        );
+        press(
+            &mut view,
+            &Key::Named(NamedKey::Enter),
+            Some("\r"),
+            Modifiers::default(),
+        );
+        assert_eq!(view.settle(&mut fonts).actions, [switch("gemini", None)]);
+        // An agent whose models aren't known is asked for them as the
+        // model menu opens, but not as the mode menu does.
+        view.node.providers[0].models = ProviderModels::Unknown;
+        assert!(view.open_menu(&[SettingKind::Model]));
+        view.menu = None;
+        assert!(!view.open_menu(&[SettingKind::Mode]));
     }
 
     #[test]
@@ -1548,6 +1663,7 @@ mod tests {
                     outcome: Outcome::Done,
                 }),
                 files: Some(TurnFiles { count: 2, state }),
+                switch: None,
             });
         }
         ChatView::new(String::new(), node)

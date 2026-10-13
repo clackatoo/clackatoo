@@ -30,6 +30,36 @@ pub struct ChatNode {
     pub settings: Vec<Setting>,
     /// How much of the agent's context the chat fills, once it has said.
     pub usage: Option<Usage>,
+    /// The other agents the chat could move to, and their models, for
+    /// the model menu to offer beside its own agent's.
+    pub providers: Vec<Provider>,
+}
+
+/// Another agent a chat could move to, and the models it offers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Provider {
+    /// Its name, to switch to it by: `codex`.
+    pub agent: String,
+    /// What to show: "Codex".
+    pub title: String,
+    /// Its models, as far as they're known.
+    pub models: ProviderModels,
+}
+
+/// What's known of another agent's models.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderModels {
+    /// Nothing yet: opening the model menu asks the daemon to find out.
+    Unknown,
+    /// The daemon is asking the agent.
+    Learning,
+    /// These, as the agent offers them.
+    Known(Vec<SettingChoice>),
+    /// It isn't installed: picking it offers to install it.
+    NotInstalled,
+    /// The agent couldn't say: why. Picking it switches anyway, and the
+    /// chat says what's wrong.
+    Failed(String),
 }
 
 /// One of the agent's settings for a chat, and the values it can take.
@@ -111,6 +141,9 @@ pub struct Turn {
     /// The chat whose agent sent the message, if another agent sent it
     /// rather than the user: clients show it beside the message.
     pub from: Option<Sender>,
+    /// Where the chat moved to another agent: a turn of its own, with no
+    /// message and nothing done, that's shown as a line across the chat.
+    pub switch: Option<Switch>,
 }
 
 /// The chat whose agent sent a message to another chat, as it was when it
@@ -123,6 +156,46 @@ pub struct Sender {
     pub agent: String,
     /// Its title.
     pub title: String,
+}
+
+/// A chat moving to another agent, or back to one it had before.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Switch {
+    /// The agent it moved from, as shown: "Claude Code".
+    pub from: String,
+    /// The agent it moved to, as shown: "Codex".
+    pub to: String,
+    /// The model it runs on there, as shown, once that's known.
+    pub model: Option<String>,
+    /// Whether it went back to a session it had with that agent before,
+    /// which hears only what happened since, rather than starting one that
+    /// hears the conversation so far.
+    pub resumed: bool,
+    /// Settings that didn't carry over, as "Mode Auto isn't Codex's: it
+    /// uses its own default".
+    pub notes: Vec<String>,
+}
+
+impl Switch {
+    /// What the line across the chat says: "Switched to Codex · 6 Luna ·
+    /// context carried over".
+    #[must_use]
+    pub fn label(&self) -> String {
+        let mut label = if self.resumed {
+            format!("Switched back to {}", self.to)
+        } else {
+            format!("Switched to {}", self.to)
+        };
+        if let Some(model) = &self.model {
+            let _ = write!(label, " · {model}");
+        }
+        label.push_str(if self.resumed {
+            " · caught up on what happened since"
+        } else {
+            " · context carried over"
+        });
+        label
+    }
 }
 
 /// What an agent changed in files in a turn, and whether it can be undone.
@@ -391,6 +464,10 @@ pub enum ChatPatch {
         /// What it changed.
         files: Option<TurnFiles>,
     },
+    /// The chat talks to this agent now, as it's shown.
+    Agent(String),
+    /// The other agents it could move to are now these.
+    Providers(Vec<Provider>),
 }
 
 /// What a client asks of a chat.
@@ -433,6 +510,40 @@ pub enum ChatAction {
         /// Redo what can be, though some files can't be.
         force: bool,
     },
+    /// Move the chat to another agent, on `model`, or the agent's own
+    /// choice: a session with it hears the conversation so far, or what
+    /// happened since, if it had one before, with its next message. Not
+    /// while the agent is answering.
+    Switch {
+        /// The agent, by its name.
+        agent: String,
+        /// The model, by its value, as the agent offers it.
+        model: Option<String>,
+        /// About the most of the conversation it hears, in tokens.
+        budget: u32,
+    },
+    /// Find out the models of the other agents the chat could move to,
+    /// where they aren't known, as the model menu opens.
+    LearnModels,
+}
+
+/// The number turn `index` of `turns` goes by, as people count them: from
+/// 1, counting only turns with a message, not those where the chat moved
+/// to another agent. `None` for one of those, or past the end.
+#[must_use]
+pub fn turn_number(turns: &[Turn], index: usize) -> Option<usize> {
+    let turn = turns.get(index)?;
+    let before = turns[..index].iter().filter(|turn| turn.switch.is_none());
+    turn.switch.is_none().then(|| before.count() + 1)
+}
+
+/// The index of the turn [`turn_number`] numbers `number`, if there is one.
+#[must_use]
+pub fn turn_numbered(turns: &[Turn], number: usize) -> Option<usize> {
+    (turns.iter().enumerate())
+        .filter(|(_, turn)| turn.switch.is_none())
+        .nth(number.checked_sub(1)?)
+        .map(|(index, _)| index)
 }
 
 impl ChatNode {
@@ -486,6 +597,8 @@ impl ChatNode {
                     turn.files = files;
                 }
             }
+            ChatPatch::Agent(agent) => self.agent = agent,
+            ChatPatch::Providers(providers) => self.providers = providers,
         }
     }
 
@@ -494,6 +607,9 @@ impl ChatNode {
     pub fn text(&self) -> String {
         let mut text = String::new();
         for turn in &self.turns {
+            if let Some(switch) = &turn.switch {
+                let _ = write!(text, "— {} —\n\n", switch.label());
+            }
             if !turn.prompt.is_empty() {
                 text.push_str("> ");
                 text.push_str(&turn.prompt.replace('\n', "\n> "));
@@ -541,7 +657,25 @@ mod tests {
             end: None,
             files: None,
             from: None,
+            switch: None,
         }
+    }
+
+    #[test]
+    fn turns_are_numbered_without_those_where_the_chat_moved() {
+        let mut moved = turn("", vec![]);
+        moved.switch = Some(Switch {
+            from: "Claude Code".into(),
+            to: "Codex".into(),
+            model: None,
+            resumed: false,
+            notes: Vec::new(),
+        });
+        let turns = [turn("a", vec![]), moved, turn("b", vec![])];
+        let numbers: Vec<Option<usize>> = (0..4).map(|at| turn_number(&turns, at)).collect();
+        assert_eq!(numbers, [Some(1), None, Some(2), None]);
+        let indices: Vec<Option<usize>> = (0..4).map(|n| turn_numbered(&turns, n)).collect();
+        assert_eq!(indices, [None, Some(0), Some(2), None]);
     }
 
     #[test]

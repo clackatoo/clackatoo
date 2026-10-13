@@ -40,6 +40,7 @@ pub(crate) fn talk(pairs: &[(&str, &str)]) -> ChatNode {
                     outcome: Outcome::Done,
                 }),
                 files: None,
+                switch: None,
             })
             .collect(),
         ..ChatNode::default()
@@ -100,6 +101,7 @@ pub(crate) fn long_chat(turns: usize) -> ChatNode {
                 outcome: Outcome::Done,
             }),
             files: None,
+            switch: None,
         });
     }
     node

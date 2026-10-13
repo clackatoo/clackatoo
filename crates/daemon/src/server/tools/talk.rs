@@ -473,7 +473,10 @@ impl Daemon {
         let mut body = String::new();
         for (index, turn) in node.turns.iter().enumerate().skip(first) {
             body.push('\n');
-            body.push_str(&turn_text(index, turn));
+            body.push_str(&turn_text(
+                clackatoo_protocol::turn_number(&node.turns, index),
+                turn,
+            ));
         }
         if first > 0 {
             let _ = writeln!(text, "[{first} earlier turns left out]");
@@ -644,7 +647,7 @@ impl Daemon {
             .find(|(_, turn)| turn.from.as_ref().is_some_and(|from| from.chat == chat));
         let last = || {
             (self.may_see(chat, to))
-                .then(|| turns.iter().enumerate().next_back())
+                .then(|| (turns.iter().enumerate()).rfind(|(_, turn)| turn.switch.is_none()))
                 .flatten()
         };
         let mut text = String::new();
@@ -664,7 +667,8 @@ impl Daemon {
         } else {
             "its last message"
         };
-        let _ = writeln!(text, "Chat {to}'s answer to {whose}, turn {}:", index + 1);
+        let number = clackatoo_protocol::turn_number(turns, index).unwrap_or(index + 1);
+        let _ = writeln!(text, "Chat {to}'s answer to {whose}, turn {number}:");
         text.push_str(&head(&final_words(turn), MAX_READ));
         text.push('\n');
         text.push_str(&ending(turn));
@@ -746,18 +750,24 @@ fn status(chat: &HostedChat) -> String {
     }
 }
 
-/// Turn `index` of a chat, as `read_chat` shows it: who sent it, the
-/// message, what the agent said and the tools it used, and how it ended.
-fn turn_text(index: usize, turn: &Turn) -> String {
+/// Turn `turn`, numbered `number`, of a chat, as `read_chat` shows it: who
+/// sent it, the message, what the agent said and the tools it used, and
+/// how it ended. A turn where the chat moved to another agent, which has no
+/// number, says so.
+fn turn_text(number: Option<usize>, turn: &Turn) -> String {
+    let Some(number) = number else {
+        let to = turn
+            .switch
+            .as_ref()
+            .map_or("another agent", |switch| switch.to.as_str());
+        return format!("(switched to {to})\n");
+    };
     let mut text = match &turn.from {
         Some(from) => format!(
-            "Turn {}, from chat {} ({}, {:?}):\n",
-            index + 1,
-            from.chat,
-            from.agent,
-            from.title
+            "Turn {number}, from chat {} ({}, {:?}):\n",
+            from.chat, from.agent, from.title
         ),
-        None => format!("Turn {}, from the user:\n", index + 1),
+        None => format!("Turn {number}, from the user:\n"),
     };
     for line in head(&turn.prompt, MAX_PROMPT).lines() {
         let _ = writeln!(text, "> {line}");
@@ -954,6 +964,7 @@ mod tests {
     fn turn(items: Vec<Item>) -> Turn {
         Turn {
             files: None,
+            switch: None,
             prompt: "go".to_owned(),
             sent: 0,
             items,
@@ -987,12 +998,25 @@ mod tests {
         assert_eq!(final_words(&turn), "It's fine.");
         let only_tools = self::turn(vec![words("Looking."), tool()]);
         assert_eq!(final_words(&only_tools), "Looking.");
-        let shown = turn_text(2, &turn);
+        let shown = turn_text(Some(3), &turn);
         assert_eq!(
             shown,
             "Turn 3, from chat 4 (Codex, \"fixes\"):\n> go\nLooking.\n[tool: Read a.rs (done)]\n\
              It's fine.\n[finished]\n"
         );
+    }
+
+    #[test]
+    fn where_the_chat_moved_reads_as_a_line_of_its_own() {
+        let mut moved = turn(Vec::new());
+        moved.switch = Some(clackatoo_protocol::Switch {
+            from: "Claude Code".to_owned(),
+            to: "Codex".to_owned(),
+            model: None,
+            resumed: false,
+            notes: Vec::new(),
+        });
+        assert_eq!(turn_text(None, &moved), "(switched to Codex)\n");
     }
 
     #[test]

@@ -21,14 +21,15 @@ use agent_client_protocol_schema::v1::{
 };
 use clackatoo_protocol::{
     AgentTools, ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item,
-    Location, Node, Outcome, Patch, Question, Sender, Setting, SettingChoice, SettingKind, Size,
-    TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, Turn,
-    TurnEnd, TurnFiles, Usage, View, ViewUpdate,
+    Location, Node, Outcome, Patch, Provider, ProviderModels, Question, Sender, Setting,
+    SettingChoice, SettingKind, Size, Switch, TerminalId, TerminalInfo, TerminalStatus, Tool,
+    ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, Usage, View, ViewUpdate,
 };
 use serde_json::Value;
 
 use crate::agent::Opened;
 use crate::agents::AgentSpec;
+use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
 mod relations;
@@ -91,6 +92,12 @@ const TOOLS_VALUES: [(AgentTools, &str, &str, &str); 3] = [
 /// Code reads it only as a session opens.
 const TASK_SETTING: &str = "clackatoo.task";
 
+/// Whether the setting with `id` is the chat's own, kept whichever agent
+/// it talks to, rather than one of an agent's.
+fn chat_wide(id: &str) -> bool {
+    id == TOOLS_SETTING || id == TASK_SETTING
+}
+
 /// The most questions a chat keeps waiting. Past it, a tool's question is
 /// refused rather than queued.
 pub(crate) const MAX_QUESTIONS: usize = 16;
@@ -132,6 +139,14 @@ pub(crate) enum Choices {
 pub(crate) enum Action {
     /// Send the agent this message.
     Prompt(String),
+    /// Send the agent this message, after a digest of the turns from
+    /// `from` up to `to`, which its session hasn't seen, as the chat was
+    /// with another agent then.
+    Carry {
+        text: String,
+        from: usize,
+        to: usize,
+    },
     /// Get the chat a session: its own again, or a new one.
     Connect,
     /// Stop the agent answering.
@@ -231,6 +246,57 @@ pub(crate) struct HostedChat {
     diffs: Vec<(String, Vec<RawDiff>)>,
     /// Where it stands among the chats agents talk in.
     relations: Relations,
+    /// How many of the turns the session has seen, from the first: those
+    /// after went to other agents, and it hears of them with its next
+    /// message.
+    known: usize,
+    /// The sessions the chat had with other agents, to go back to.
+    parked: Vec<Parked>,
+    /// About the most tokens a digest of the conversation takes, for an
+    /// agent the chat moves to.
+    budget: usize,
+    /// The agent's plan, as it last gave it, for a digest to tell the
+    /// next agent.
+    plan: Vec<Step>,
+    /// What the chat moved from, until the new agent's session opens and
+    /// its settings can be set to match.
+    carry: Option<Carry>,
+    /// The agent that gave the plan, as it's shown.
+    plan_by: Option<String>,
+    /// How many turns the session will have seen once the message sent
+    /// with a digest is answered: until it is, without failing, the next
+    /// message carries the digest again.
+    heard: Option<usize>,
+}
+
+/// A session a chat had with another agent, which it can go back to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Parked {
+    /// The agent's name.
+    pub(crate) agent: String,
+    /// The agent as it's shown.
+    pub(crate) title: String,
+    pub(crate) session: Option<String>,
+    /// How many of the chat's turns it saw.
+    pub(crate) known: usize,
+    /// The values the user gave its settings.
+    pub(crate) chosen: Vec<(String, String)>,
+    /// Its settings, as it last gave them.
+    pub(crate) settings: Vec<Setting>,
+}
+
+/// What a chat moved from, to set the new agent's settings to match.
+#[derive(Debug)]
+struct Carry {
+    /// The turn that shows the move.
+    turn: usize,
+    /// The model asked for, by its value.
+    model: Option<String>,
+    /// The mode and effort it had, to give the new agent the same, where
+    /// it offers them. Not for a session it goes back to, which keeps its
+    /// own.
+    mode: Option<Setting>,
+    effort: Option<Setting>,
 }
 
 /// Who asked a question in a chat, and so gets the answer.
@@ -328,6 +394,13 @@ impl HostedChat {
             journal: Journal::default(),
             diffs: Vec::new(),
             relations: Relations::default(),
+            known: 0,
+            parked: Vec::new(),
+            budget: handoff::BUDGET,
+            plan: Vec::new(),
+            carry: None,
+            plan_by: None,
+            heard: None,
         }
     }
 
@@ -346,6 +419,19 @@ impl HostedChat {
             .filter_map(|(index, turn)| Some((index, turn.from.as_ref()?)))
             .collect();
         let relations = self.relations.hand_over(&senders);
+        let switches = (self.node.turns.iter().enumerate())
+            .filter_map(|(turn, each)| {
+                let switch = each.switch.clone()?;
+                Some(handover::ChatSwitch {
+                    turn: turn as u64,
+                    from: switch.from,
+                    to: switch.to,
+                    model: switch.model,
+                    resumed: switch.resumed,
+                    notes: switch.notes,
+                })
+            })
+            .collect();
         handover::Chat {
             id: self.id.0,
             cols: self.size.cols(),
@@ -363,6 +449,32 @@ impl HostedChat {
             chosen: self.chosen,
             agent: self.agent,
             relations,
+            known: self.known as u64,
+            parked: (self.parked.into_iter())
+                .map(|parked| handover::ParkedSession {
+                    agent: parked.agent,
+                    title: parked.title,
+                    session: parked.session,
+                    known: parked.known as u64,
+                    chosen: parked.chosen,
+                    settings: (parked.settings.into_iter())
+                        .map(setting_to_handover)
+                        .collect(),
+                })
+                .collect(),
+            switches,
+            budget: u32::try_from(self.budget).unwrap_or(u32::MAX),
+            plan_by: self.plan_by,
+            plan: (self.plan.into_iter())
+                .map(|step| handover::PlanStep {
+                    content: step.content,
+                    state: match step.state {
+                        StepState::ToDo => handover::StepState::ToDo,
+                        StepState::Doing => handover::StepState::Doing,
+                        StepState::Done => handover::StepState::Done,
+                    },
+                })
+                .collect(),
         }
     }
 
@@ -382,6 +494,44 @@ impl HostedChat {
         resumed.title = chat.title;
         resumed.session = chat.session;
         resumed.node.turns = chat.turns.into_iter().map(turn_from_handover).collect();
+        for switch in chat.switches {
+            let at = usize::try_from(switch.turn).unwrap_or(usize::MAX);
+            if let Some(turn) = resumed.node.turns.get_mut(at) {
+                turn.switch = Some(Switch {
+                    from: switch.from,
+                    to: switch.to,
+                    model: switch.model,
+                    resumed: switch.resumed,
+                    notes: switch.notes,
+                });
+            }
+        }
+        let count = |known: u64| usize::try_from(known).unwrap_or(usize::MAX);
+        resumed.known = count(chat.known).min(resumed.node.turns.len());
+        resumed.parked = (chat.parked.into_iter())
+            .map(|parked| Parked {
+                agent: parked.agent,
+                title: parked.title,
+                session: parked.session,
+                known: count(parked.known),
+                chosen: parked.chosen,
+                settings: (parked.settings.into_iter())
+                    .map(setting_from_handover)
+                    .collect(),
+            })
+            .collect();
+        resumed.budget = usize::try_from(chat.budget).unwrap_or(handoff::BUDGET);
+        resumed.plan_by = chat.plan_by;
+        resumed.plan = (chat.plan.into_iter())
+            .map(|step| Step {
+                content: step.content,
+                state: match step.state {
+                    handover::StepState::ToDo => StepState::ToDo,
+                    handover::StepState::Doing => StepState::Doing,
+                    handover::StepState::Done => StepState::Done,
+                },
+            })
+            .collect();
         resumed.node.settings = (chat.settings.into_iter())
             .map(setting_from_handover)
             .collect();
@@ -447,6 +597,11 @@ impl HostedChat {
         self.chosen.retain(|(id, _)| id != TOOLS_SETTING);
         (self.chosen).push((TOOLS_SETTING.to_owned(), tools_value(tools).to_owned()));
         self.set_value(TOOLS_SETTING, tools_value(tools));
+    }
+
+    /// The sessions it had with other agents.
+    pub(crate) fn parked(&self) -> &[Parked] {
+        &self.parked
     }
 
     /// The agent's session, if it has made one.
@@ -545,8 +700,11 @@ impl HostedChat {
                     self.set_tools(tools);
                 }
             }
-            // The server's to do: they're about files, not the agent.
-            ChatAction::Undo { .. } | ChatAction::Redo { .. } => {}
+            // The server's to do: they're about files, or other agents.
+            ChatAction::Undo { .. }
+            | ChatAction::Redo { .. }
+            | ChatAction::Switch { .. }
+            | ChatAction::LearnModels => {}
             // Only a value the agent offers is kept, and asked for.
             ChatAction::Set { setting, value } => {
                 if self.set_value(&setting, &value) {
@@ -613,11 +771,12 @@ impl HostedChat {
             end: None,
             files: None,
             from,
+            switch: None,
         });
         match self.link {
             Link::Open => {
                 self.set_state(ChatState::Answering);
-                actions.push(Action::Prompt(prompt));
+                actions.push(self.prompt(prompt));
             }
             Link::Opening => self.queued = Some(prompt),
             Link::Closed => {
@@ -771,6 +930,9 @@ impl HostedChat {
         if let Some(options) = &opened.settings {
             self.set_settings(settings_of(options));
         }
+        if let Some(carry) = self.carry.take() {
+            self.carry_settings(carry);
+        }
         if let Some(mode) = self.starting_mode.take()
             && let Some(setting) = (self.node.settings.iter()).find(|setting| {
                 setting.kind == SettingKind::Mode
@@ -797,8 +959,304 @@ impl HostedChat {
         } else {
             ChatState::Ready
         });
-        actions.extend(queued.map(Action::Prompt));
+        actions.extend(queued.map(|text| self.prompt(text)));
         actions
+    }
+
+    /// What sends `text`, the message of the last turn, to the agent:
+    /// after a digest of the turns before it the session hasn't seen, if
+    /// there are any. The session has seen them all once that's answered,
+    /// without failing; a message sent with nothing to carry is seen as
+    /// it's sent.
+    fn prompt(&mut self, text: String) -> Action {
+        let to = self.node.turns.len().saturating_sub(1);
+        if self.known < to {
+            self.heard = Some(self.node.turns.len());
+            Action::Carry {
+                text,
+                from: self.known,
+                to,
+            }
+        } else {
+            self.known = self.node.turns.len();
+            Action::Prompt(text)
+        }
+    }
+
+    /// A digest of turns `from` up to `to` for the chat's agent, which
+    /// hasn't seen them, with the files they changed: `None` if there's
+    /// nothing in them to tell. It keeps to the chat's budget, at most
+    /// [`handoff::MOST`] and a quarter of the agent's context, if it's
+    /// said how big that is.
+    pub(crate) fn digest(&self, from: usize, to: usize, files: &[Changed]) -> Option<String> {
+        let context = (self.node.usage).map_or(usize::MAX, |usage| {
+            usize::try_from(usage.size / 4).unwrap_or(usize::MAX)
+        });
+        Digest {
+            turns: &self.node.turns,
+            from,
+            to,
+            agent: &self.node.agent,
+            catching_up: from > 0,
+            cwd: &self.cwd,
+            files,
+            plan: &self.plan,
+            plan_by: self.plan_by.as_deref(),
+            budget: self.budget.min(handoff::MOST).min(context),
+            tag: fence_tag(self.id.0),
+        }
+        .make()
+    }
+
+    /// Moves the chat to the agent `to`, on `model`, or the agent's own
+    /// choice, with `settings` the settings it last gave, if known, and
+    /// a digest of the conversation of at most `budget` tokens. Returns
+    /// the agent and session it moved from, for the server to close, or
+    /// `None` if it didn't move: the agent is answering, or it's the same
+    /// agent.
+    ///
+    /// A session the chat had with `to` before is gone back to; else a
+    /// new one starts. Either hears of the turns it hasn't seen with the
+    /// next message.
+    pub(crate) fn switch(
+        &mut self,
+        to: &AgentSpec,
+        model: Option<String>,
+        settings: Option<&[Setting]>,
+        budget: usize,
+    ) -> Option<(String, Option<String>)> {
+        if self.answering() {
+            self.set_notice(Some(format!(
+                "{} is still answering: stop it first, or switch once it's done.",
+                self.node.agent
+            )));
+            return None;
+        }
+        self.budget = budget;
+        if to.name == self.agent {
+            return None;
+        }
+        let (tools, task) = (self.tools(), self.task());
+        let own = self.agent_settings();
+        let of = |kind| own.iter().find(|setting| setting.kind == kind).cloned();
+        let (mode, effort) = (of(SettingKind::Mode), of(SettingKind::Effort));
+        let left = Parked {
+            agent: std::mem::replace(&mut self.agent, to.name.clone()),
+            title: self.node.agent.clone(),
+            session: self.session.take(),
+            known: self.known,
+            chosen: (self.chosen.drain(..))
+                .filter(|(id, _)| !chat_wide(id))
+                .collect(),
+            settings: own,
+        };
+        let back = (self.parked.iter())
+            .position(|parked| parked.agent == to.name)
+            .map(|at| self.parked.remove(at));
+        self.parked.retain(|parked| parked.agent != left.agent);
+        let from = (left.agent.clone(), left.session.clone());
+        let from_title = left.title.clone();
+        self.parked.push(left);
+
+        // Named after its agent, it's named after the new one.
+        if self.title == from_title {
+            self.title.clone_from(&to.title);
+        }
+        to.title.clone_into(&mut self.node.agent);
+        self.journal.push(ChatPatch::Agent(to.title.clone()));
+        let resumed = back.is_some();
+        let shown: Vec<Setting> = if let Some(back) = back {
+            self.session = back.session;
+            self.known = back.known;
+            self.chosen = back.chosen;
+            self.starting_mode = None;
+            back.settings
+        } else {
+            self.known = 0;
+            // An agent's chat never starts in more than the user chose.
+            self.starting_mode =
+                (to.starting_mode.clone()).filter(|_| self.relations.parent.is_none());
+            settings.map(<[Setting]>::to_vec).unwrap_or_default()
+        };
+        // The chat's own settings go with it to every agent: what it may
+        // do with clackatoo's tools, and whether it keeps Claude Code's
+        // Task tool, which a session with Claude Code opens with.
+        self.chosen.retain(|(id, _)| !chat_wide(id));
+        self.chosen
+            .push((TOOLS_SETTING.to_owned(), tools_value(tools).to_owned()));
+        self.chosen.push((
+            TASK_SETTING.to_owned(),
+            if task { "on" } else { "off" }.to_owned(),
+        ));
+        let model_name = model.as_ref().and_then(|value| {
+            let setting = shown
+                .iter()
+                .find(|setting| setting.kind == SettingKind::Model)?;
+            let choice = setting
+                .choices
+                .iter()
+                .find(|choice| choice.value == *value)?;
+            Some(choice.name.clone())
+        });
+        self.set_settings(shown);
+        self.set_usage(None);
+        self.set_notice(None);
+        self.withdraw_install();
+        self.push_turn(Turn {
+            prompt: String::new(),
+            sent: now(),
+            items: Vec::new(),
+            end: Some(TurnEnd {
+                at: now(),
+                outcome: Outcome::Done,
+            }),
+            files: None,
+            from: None,
+            switch: Some(Switch {
+                from: from_title,
+                to: to.title.clone(),
+                model: model_name,
+                resumed,
+                notes: Vec::new(),
+            }),
+        });
+        self.carry = Some(Carry {
+            turn: self.node.turns.len() - 1,
+            model,
+            mode: if resumed { None } else { mode },
+            effort: if resumed { None } else { effort },
+        });
+        self.link = Link::Opening;
+        self.set_state(ChatState::Starting);
+        Some(from)
+    }
+
+    /// The agent's own settings, as it last gave them, without the
+    /// chat's.
+    pub(crate) fn agent_settings(&self) -> Vec<Setting> {
+        (self.node.settings.iter())
+            .filter(|setting| setting.id != TOOLS_SETTING)
+            .cloned()
+            .collect()
+    }
+
+    /// The other agents the chat could move to are `providers`.
+    pub(crate) fn set_providers(&mut self, providers: Vec<Provider>) {
+        if self.node.providers != providers {
+            self.node.providers.clone_from(&providers);
+            self.journal.push(ChatPatch::Providers(providers));
+        }
+    }
+
+    /// The agent wouldn't open the session the chat had with it, as it
+    /// was asked to: the chat starts a new one, which hears the whole
+    /// conversation with the next message, rather than failing.
+    pub(crate) fn session_lost(&mut self) {
+        self.session = None;
+        self.known = 0;
+        self.link = Link::Opening;
+        // The line that said it went back to it is wrong now.
+        let moved = (self.node.turns.iter()).rposition(|turn| turn.switch.is_some());
+        if let Some(at) = moved
+            && let Some(switch) = self.node.turns[at].switch.as_mut()
+            && switch.resumed
+        {
+            switch.resumed = false;
+            self.patch_turn(at);
+        }
+    }
+
+    /// Gives the settings the new agent's session opened with the values
+    /// the chat had with the agent it moved from, where they mean the
+    /// same, and says in the turn that shows the move which don't.
+    fn carry_settings(&mut self, carry: Carry) {
+        let mut notes = Vec::new();
+        let agent = self.node.agent.clone();
+        let mut chosen = Vec::new();
+        if let Some(model) = &carry.model
+            && let Some(setting) = self.setting_of(SettingKind::Model)
+            && setting.choices.iter().any(|choice| choice.value == *model)
+        {
+            chosen.push((setting.id.clone(), model.clone()));
+        }
+        for old in [carry.mode, carry.effort].into_iter().flatten() {
+            let Some(was) = old.current() else { continue };
+            let Some(setting) = self.setting_of(old.kind) else {
+                notes.push(format!(
+                    "{} {} doesn't carry over: {agent} has no {}",
+                    old.name,
+                    was.name,
+                    old.name.to_lowercase()
+                ));
+                continue;
+            };
+            let same = (setting.choices.iter())
+                .find(|choice| choice.value == was.value)
+                .or_else(|| {
+                    (setting.choices.iter())
+                        .find(|choice| choice.name.eq_ignore_ascii_case(&was.name))
+                });
+            if let Some(choice) = same {
+                chosen.push((setting.id.clone(), choice.value.clone()));
+                continue;
+            }
+            // A chat an agent started gets the agent's safest mode, the
+            // first it offers, as Manual or Read-only, never more than its
+            // parent chose.
+            if setting.kind == SettingKind::Mode
+                && self.relations.parent.is_some()
+                && let Some(safest) = setting.choices.first()
+            {
+                chosen.push((setting.id.clone(), safest.value.clone()));
+                notes.push(format!(
+                    "{} {} doesn't carry over: {agent} uses {}, its safest, as an agent started \
+                     this chat",
+                    old.name, was.name, safest.name
+                ));
+                continue;
+            }
+            // What it'll have: the mode a new chat with it asks for, or
+            // else its own.
+            let value = (self.starting_mode.as_ref())
+                .filter(|_| setting.kind == SettingKind::Mode)
+                .filter(|mode| setting.choices.iter().any(|choice| choice.value == **mode))
+                .unwrap_or(&setting.value);
+            let name = (setting.choices.iter())
+                .find(|choice| choice.value == *value)
+                .map_or(value.as_str(), |choice| choice.name.as_str());
+            notes.push(format!(
+                "{} {} doesn't carry over: {agent} uses {name}",
+                old.name, was.name
+            ));
+        }
+        for (id, value) in chosen {
+            self.chosen.retain(|(known, _)| *known != id);
+            self.chosen.push((id, value));
+        }
+        let model = (self.setting_of(SettingKind::Model)).map(|setting| {
+            let value = (self.chosen.iter())
+                .find(|(id, _)| *id == setting.id)
+                .map_or(&setting.value, |(_, value)| value);
+            (setting.choices.iter())
+                .find(|choice| choice.value == *value)
+                .map_or_else(|| value.clone(), |choice| choice.name.clone())
+        });
+        let turn = self.node.turns.get_mut(carry.turn);
+        if let Some(switch) = turn.and_then(|turn| turn.switch.as_mut()) {
+            switch.notes = notes;
+            if model.is_some() {
+                switch.model = model;
+            }
+            self.patch_turn(carry.turn);
+        }
+    }
+
+    /// The agent's setting of `kind`, if it has one.
+    fn setting_of(&self, kind: SettingKind) -> Option<&Setting> {
+        self.node
+            .settings
+            .iter()
+            .find(|setting| setting.kind == kind)
     }
 
     /// The agent's settings after the chat asked to change one, or why it
@@ -1222,8 +1680,13 @@ impl HostedChat {
                 used: usage.used,
                 size: usage.size,
             })),
-            // Its plan and commands, which the chat doesn't show yet, and
-            // the user's own words, already kept.
+            // Not shown yet, but kept for the next agent to hear of.
+            SessionUpdate::Plan(plan) => {
+                self.plan = steps(plan);
+                self.plan_by = Some(self.node.agent.clone());
+            }
+            // Its commands, which the chat doesn't show yet, and the
+            // user's own words, already kept.
             _ => {}
         }
         None
@@ -1496,6 +1959,17 @@ impl HostedChat {
         let Some(index) = self.answering_turn() else {
             return;
         };
+        // A digest carried with the message is heard, unless it failed.
+        if let Some(heard) = self.heard.take()
+            && !matches!(outcome, Outcome::Failed(_))
+        {
+            self.known = heard;
+            // Another agent's plan has been told: it's for the user now.
+            if self.plan_by.as_ref() != Some(&self.node.agent) {
+                self.plan.clear();
+                self.plan_by = None;
+            }
+        }
         let turn = &mut self.node.turns[index];
         for item in &mut turn.items {
             if let Item::Tool(tool) = item
@@ -1575,6 +2049,35 @@ impl HostedChat {
     }
 }
 
+/// The steps of the agent's `plan`.
+fn steps(plan: agent_client_protocol_schema::v1::Plan) -> Vec<Step> {
+    use agent_client_protocol_schema::v1::PlanEntryStatus;
+    (plan.entries.into_iter())
+        .map(|entry| Step {
+            content: clean_text(&entry.content),
+            state: match entry.status {
+                PlanEntryStatus::Completed => StepState::Done,
+                PlanEntryStatus::InProgress => StepState::Doing,
+                // Pending, or a state newer than this build knows.
+                _ => StepState::ToDo,
+            },
+        })
+        .collect()
+}
+
+/// A tag for the lines a message or a digest goes between, that whoever
+/// wrote what's between them can't know, so it can't end itself early and
+/// go on as if clackatoo said what follows: from the clock's nanoseconds,
+/// mixed with `salt`.
+pub(crate) fn fence_tag(salt: u32) -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            since.subsec_nanos() ^ u32::try_from(since.as_secs() & 0xffff_ffff).unwrap_or(0)
+        })
+        ^ salt.rotate_left(16)
+}
+
 /// Whether `patch` adds to item `item` of turn `turn`.
 fn adds_to(patch: &ChatPatch, turn: u32, item: u32) -> bool {
     matches!(patch, ChatPatch::Append { turn: t, item: i, .. } | ChatPatch::Output { turn: t, item: i, .. }
@@ -1649,6 +2152,13 @@ fn weight(patch: &ChatPatch) -> usize {
             .flat_map(|setting| &setting.choices)
             .map(|choice| choice.name.len() + choice.value.len())
             .sum(),
+        ChatPatch::Providers(providers) => (providers.iter())
+            .flat_map(|provider| match &provider.models {
+                ProviderModels::Known(choices) => choices.as_slice(),
+                _ => &[],
+            })
+            .map(|choice| choice.name.len() + choice.value.len())
+            .sum(),
         _ => 0,
     };
     // What each change takes, whatever's in it.
@@ -1693,7 +2203,7 @@ fn now() -> u64 {
 
 /// The settings the agent offers, as the chat shows them. Only those that
 /// pick from a list: on/off ones aren't shown yet.
-fn settings_of(options: &[SessionConfigOption]) -> Vec<Setting> {
+pub(crate) fn settings_of(options: &[SessionConfigOption]) -> Vec<Setting> {
     options
         .iter()
         .filter_map(|option| {
@@ -2019,6 +2529,7 @@ fn turn_from_handover(turn: handover::ChatTurn) -> Turn {
         files: None,
         // Put back from the chat's relations, if another agent sent it.
         from: None,
+        switch: None,
     }
 }
 
@@ -2677,6 +3188,209 @@ mod tests {
         handed.chosen.retain(|(id, _)| id != TASK_SETTING);
         assert!(HostedChat::resume(handed, &agent).task());
         assert!(chat_with("claude").task());
+    }
+
+    #[test]
+    fn a_chat_that_moved_keeps_where_it_moved_through_an_upgrade_and_can_go_back() {
+        let config = crate::agents::AgentConfig::default();
+        let (claude, codex) = (
+            config.find("claude").unwrap(),
+            config.find("codex").unwrap(),
+        );
+        let mut chat = chat();
+        chat.connected(Opened {
+            session: "c".into(),
+            settings: Some(claude_settings("sonnet")),
+        });
+        send(&mut chat, "hi");
+        words(&mut chat, "hello");
+        chat.answered(Ok(StopReason::EndTurn));
+        assert_eq!(
+            chat.switch(&codex, None, None, 5_000),
+            Some(("claude".to_owned(), Some("c".to_owned())))
+        );
+        connect(&mut chat, "x");
+        // The first message to Codex carries the first turn.
+        assert_eq!(
+            send(&mut chat, "next"),
+            [Action::Carry {
+                text: "next".into(),
+                from: 0,
+                to: 2
+            }]
+        );
+        chat.answered(Ok(StopReason::EndTurn));
+
+        let mut resumed = HostedChat::resume(chat.hand_over(), &codex);
+        assert_eq!((resumed.agent(), resumed.session()), ("codex", Some("x")));
+        assert!(resumed.node.turns[1].switch.is_some());
+        assert_eq!(resumed.parked()[0].session.as_deref(), Some("c"));
+        // Already told: the next goes as it is.
+        connect(&mut resumed, "");
+        assert_eq!(send(&mut resumed, "more"), [Action::Prompt("more".into())]);
+        resumed.answered(Ok(StopReason::EndTurn));
+        // Back to Claude Code's session, with the model it had.
+        assert_eq!(
+            resumed.switch(&claude, None, None, 5_000),
+            Some(("codex".to_owned(), Some("x".to_owned())))
+        );
+        assert_eq!(resumed.session(), Some("c"));
+        let model = resumed
+            .setting_of(SettingKind::Model)
+            .map(|setting| &setting.value);
+        assert_eq!(model.map(String::as_str), Some("sonnet"));
+        assert!(
+            resumed
+                .node
+                .turns
+                .last()
+                .unwrap()
+                .switch
+                .as_ref()
+                .unwrap()
+                .resumed
+        );
+    }
+
+    /// Codex's settings, as its adapter gives them, in short: its modes,
+    /// starting at Auto review, and its models.
+    fn codex_settings() -> Vec<SessionConfigOption> {
+        serde_json::from_str(
+            r#"[{"id":"mode","name":"Mode","category":"mode","type":"select","currentValue":"agent",
+                 "options":[{"value":"read-only","name":"Read-only"},{"value":"agent","name":"Auto review"}]},
+                {"id":"model","name":"Model","category":"model","type":"select","currentValue":"gpt-6-astra",
+                 "options":[{"value":"gpt-6-astra","name":"6 Astra"},{"value":"gpt-6-luna","name":"6 Luna"}]}]"#,
+        )
+        .unwrap()
+    }
+
+    /// A chat with Claude Code that has answered one message, `hi`, and
+    /// then moved to Codex, whose session has opened.
+    fn moved_to_codex(chat: &mut HostedChat) {
+        let codex = crate::agents::AgentConfig::default().find("codex").unwrap();
+        chat.connected(Opened {
+            session: "c".into(),
+            settings: Some(claude_settings("haiku")),
+        });
+        send(chat, "hi");
+        words(chat, "hello");
+        chat.answered(Ok(StopReason::EndTurn));
+        chat.switch(&codex, None, None, handoff::BUDGET);
+        chat.connected(Opened {
+            session: "x".into(),
+            settings: Some(codex_settings()),
+        });
+    }
+
+    #[test]
+    fn a_digest_that_failed_to_go_goes_again_with_the_next_message() {
+        let mut chat = chat();
+        moved_to_codex(&mut chat);
+        let carry = |text: &str, to| Action::Carry {
+            text: text.into(),
+            from: 0,
+            to,
+        };
+        assert_eq!(send(&mut chat, "one"), [carry("one", 2)]);
+        chat.answered(Err("overloaded".into()));
+        // Not heard: it goes again, with the turn that failed.
+        assert_eq!(send(&mut chat, "two"), [carry("two", 3)]);
+        chat.answered(Ok(StopReason::EndTurn));
+        assert_eq!(send(&mut chat, "three"), [Action::Prompt("three".into())]);
+    }
+
+    #[test]
+    fn another_agents_plan_is_told_once_then_left_to_the_user() {
+        let mut chat = chat();
+        connect(&mut chat, "c");
+        send(&mut chat, "plan it");
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"plan","entries":[{"content":"Test it","priority":"high","status":"pending"}]}"#,
+        );
+        chat.answered(Ok(StopReason::EndTurn));
+        let codex = crate::agents::AgentConfig::default().find("codex").unwrap();
+        chat.switch(&codex, None, None, handoff::BUDGET);
+        connect(&mut chat, "x");
+        send(&mut chat, "go on");
+        let digest = chat.digest(0, 2, &[]).unwrap();
+        assert!(
+            digest.contains("(ask the user before continuing it)\nClaude Code's, as it last gave it:\n- [ ] Test it"),
+            "{digest}"
+        );
+        chat.answered(Ok(StopReason::EndTurn));
+        assert!(chat.plan.is_empty());
+    }
+
+    #[test]
+    fn a_digest_keeps_to_a_quarter_of_the_agents_context_and_at_most_the_most() {
+        let mut chat = chat();
+        connect(&mut chat, "c");
+        for at in 0..400 {
+            send(&mut chat, &format!("ask {at}"));
+            words(&mut chat, &"an answer of some length ".repeat(40));
+            chat.answered(Ok(StopReason::EndTurn));
+        }
+        let codex = crate::agents::AgentConfig::default().find("codex").unwrap();
+        chat.switch(&codex, None, None, 1_000_000);
+        connect(&mut chat, "x");
+        let to = chat.node.turns.len();
+        let most = chat.digest(0, to, &[]).unwrap();
+        assert!(
+            handoff::tokens(&most) <= handoff::MOST,
+            "{}",
+            handoff::tokens(&most)
+        );
+        assert!(handoff::tokens(&most) > handoff::MOST / 2);
+        chat.set_usage(Some(Usage {
+            used: 0,
+            size: 40_000,
+        }));
+        let quarter = chat.digest(0, to, &[]).unwrap();
+        assert!(
+            handoff::tokens(&quarter) <= 10_000,
+            "{}",
+            handoff::tokens(&quarter)
+        );
+    }
+
+    #[test]
+    fn a_chat_an_agent_started_moves_to_the_new_agents_safest_mode() {
+        let mut chat = chat();
+        chat.started_by(TerminalId(7), TerminalId(7), 1, Some("auto".into()));
+        moved_to_codex(&mut chat);
+        let mode = chat.setting_of(SettingKind::Mode).unwrap();
+        assert_eq!(mode.value, "read-only");
+        let switch = chat.node.turns[1].switch.as_ref().unwrap();
+        assert_eq!(
+            switch.notes,
+            [
+                "Mode Auto doesn't carry over: Codex uses Read-only, its safest, as an agent started this chat"
+            ]
+        );
+        // The user's own chat keeps Codex's own.
+        let mut chat = super::tests::chat();
+        moved_to_codex(&mut chat);
+        assert_eq!(chat.setting_of(SettingKind::Mode).unwrap().value, "agent");
+    }
+
+    #[test]
+    fn a_session_that_couldnt_be_gone_back_to_isnt_said_to_be() {
+        let mut chat = chat();
+        moved_to_codex(&mut chat);
+        let claude = crate::agents::AgentConfig::default()
+            .find("claude")
+            .unwrap();
+        chat.switch(&claude, None, None, handoff::BUDGET);
+        assert!(chat.node.turns[2].switch.as_ref().unwrap().resumed);
+        chat.session_lost();
+        let switch = chat.node.turns[2].switch.as_ref().unwrap();
+        assert!(!switch.resumed);
+        assert_eq!(chat.session(), None);
+        assert!(matches!(
+            chat.journal.patches.back(),
+            Some(ChatPatch::Turn { index: 2, .. })
+        ));
     }
 
     /// A message from chat `from`, `hops` along a chain.

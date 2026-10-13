@@ -5638,6 +5638,7 @@ mod tests {
                     outcome: Outcome::Done,
                 }),
                 files: None,
+                switch: None,
             }],
             ..ChatNode::default()
         };
