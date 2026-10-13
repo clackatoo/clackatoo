@@ -858,7 +858,7 @@ impl Daemon {
                         .chain(tools)
                         .chain(rewatch)
                         .chain(reviews)
-                        .chain(self.next_probe_due())
+                        .chain(self.next_agent_due())
                         .min();
                     next.map(|due| due.saturating_duration_since(Instant::now()))
                 } else {
@@ -1002,6 +1002,9 @@ impl Daemon {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
+        // A chat an agent started shows in that chat's card.
+        let started =
+            (slot.terminal.chat_ref()).is_some_and(|chat| chat.relations().parent.is_some());
         self.damage.clear();
         slot.terminal.take_damage(&mut self.damage);
         // The cursor or title may have changed without damage, so viewers
@@ -1013,6 +1016,9 @@ impl Daemon {
                 subscription.damage.merge(&self.damage);
                 self.views_pending = true;
             }
+        }
+        if started {
+            self.note_subagent(id);
         }
     }
 
@@ -1278,6 +1284,7 @@ impl Daemon {
                     self.workspaces_changed();
                 }
                 log::info!("chat {id} closed");
+                self.subagent_closed(id, chat.relations().parent);
                 return Ok(());
             }
         };
@@ -1437,6 +1444,9 @@ impl Daemon {
     /// client whose request changed them hears before the request's answer,
     /// which is queued after this.
     fn workspaces_changed(&mut self) {
+        // A chat agents started may have come out of the background, or
+        // gone back.
+        self.note_subagents();
         let event = ServerMessage::Event(clackatoo_protocol::Event::Workspaces(
             self.workspaces.get().clone(),
         ));
@@ -1995,6 +2005,10 @@ impl Daemon {
         }
         // Other agents are the server's.
         match action {
+            ChatAction::Open { chat } => {
+                self.open_subagent(id, chat);
+                return Ok(());
+            }
             ChatAction::Switch {
                 agent,
                 model,

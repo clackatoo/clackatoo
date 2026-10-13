@@ -15,11 +15,12 @@
 //! - a message goes without asking the user only to a chat of the
 //!   sender's family (the chat that started it, the chats it started, and
 //!   the chats its own started), and only if that chat's Tools setting is
-//!   no looser than the sender's; any other message asks, until the user
-//!   allows that pair of chats always;
+//!   no looser than the sender's, and its limits no fewer; any other
+//!   message asks, until the user allows that pair of chats always;
 //! - `start_chat` asks, unless the chat's tools are allowed, and always
 //!   for a chat working outside the sender's project; the chat started
-//!   gets the sender's Tools setting and mode;
+//!   gets the sender's Tools setting and mode, and its limits, if its
+//!   profile's are fewer (see `subagents.rs`);
 //! - a chat reads, and waits for, only chats in its workspace or family,
 //!   or that the user let it message always, and of others, the answers
 //!   to its own messages. It lists other workspaces' chats by number and
@@ -40,19 +41,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{
-    AgentTools, ChatState, Content, Item, NewAgent, Outcome, PaneTerminal, TerminalId, ToolStatus,
-    Turn,
-};
+use clackatoo_protocol::{AgentTools, ChatState, Item, Outcome, TerminalId, ToolStatus, Turn};
 use mio::Token;
 use serde_json::Value;
 
 use super::{Wait, Waiting, asked, visible};
 use crate::chat::{Cause, HostedChat, MAX_INBOX, Message};
-use crate::mcp::Tool;
+use crate::mcp::{NewChat, Tool};
 use crate::server::Daemon;
 
 /// The most chats started by agents that may be working at once. Idle
@@ -134,6 +132,9 @@ impl Daemon {
             })
             .collect();
         self.tools.talk.inboxes.extend(waiting);
+        // The cards of the chats agents started, which the handover
+        // doesn't keep, are made again from the chats themselves.
+        self.note_subagents();
     }
 
     /// Whether `a` and `b` are of one family: one started the other, or
@@ -144,17 +145,18 @@ impl Daemon {
         of_a == Some(b) || of_b == Some(a) || (of_a.is_some() && of_a == of_b)
     }
 
-    /// The name of the workspace the chat `chat` is in, if it's in one.
+    /// The name of the workspace the chat `chat` is in, if it's in one: a
+    /// chat in the background is in its anchor's.
     pub(super) fn chat_workspace(&self, chat: TerminalId) -> Option<String> {
         let workspaces = self.workspaces.get();
-        let pane = workspaces.pane_showing(chat)?;
+        let pane = self.anchor_pane(chat)?;
         let (workspace, _, _) = workspaces.find_pane(pane)?;
         Some(workspace.name.clone())
     }
 
     /// Whether the chat `chat`'s agent may read the chat `to`: one in its
     /// workspace or family, or one the user let it talk to always.
-    fn may_see(&self, chat: TerminalId, to: TerminalId) -> bool {
+    pub(super) fn may_see(&self, chat: TerminalId, to: TerminalId) -> bool {
         let workspace = self.chat_workspace(chat);
         (workspace.is_some() && workspace == self.chat_workspace(to))
             || self.family(chat, to)
@@ -172,9 +174,14 @@ impl Daemon {
     /// other chats, if it can't: checked before the user is asked, and
     /// again before it's made.
     pub(super) fn talk_refused(&self, chat: TerminalId, tool: &Tool) -> Option<String> {
-        if !matches!(tool, Tool::SendToChat { .. } | Tool::StartChat { .. }) {
-            return None;
-        }
+        let starts: &[NewChat] = match tool {
+            Tool::SendToChat { .. } => &[],
+            Tool::StartChat(new) => std::slice::from_ref(new.as_ref()),
+            Tool::StartChats(news) => news,
+            _ => return None,
+        };
+        // A message counts one, and so does each chat started.
+        let count = u32::try_from(starts.len().max(1)).unwrap_or(u32::MAX);
         let own = self.chat_ref(chat)?;
         let spent = (self.tools.talk.spent.get(&chat))
             .filter(|(turn, _)| *turn == own.working_on().0)
@@ -188,6 +195,12 @@ impl Daemon {
             return Some(format!(
                 "this turn has sent {MAX_PER_TURN} messages already: finish it, and tell the \
                  user what you're waiting for"
+            ));
+        }
+        if spent + count > MAX_PER_TURN {
+            return Some(format!(
+                "this turn has sent {spent} messages, and may send {MAX_PER_TURN}, chats started \
+                 included: start fewer"
             ));
         }
         if own.relations().hops >= MAX_HOPS {
@@ -206,9 +219,15 @@ impl Daemon {
                  already: stop here, and tell the user where it got to"
             ));
         }
-        let Tool::StartChat { agent, .. } = tool else {
+        if caused + count > MAX_CAUSED {
+            return Some(format!(
+                "the user's request has led to {caused} turns of other agents' work, and may \
+                 lead to {MAX_CAUSED}: start fewer"
+            ));
+        }
+        if starts.is_empty() {
             return None;
-        };
+        }
         if own.relations().depth >= MAX_DEPTH {
             return Some(format!(
                 "this chat was started by an agent {MAX_DEPTH} deep, which is as deep as chats \
@@ -229,22 +248,46 @@ impl Daemon {
                  wait_for_chat, or ask the user"
             ));
         }
+        if working + starts.len() > MAX_STARTED {
+            return Some(format!(
+                "{working} chats started by agents are working already, and {MAX_STARTED} may \
+                 at once: start fewer, or wait for some with wait_for_chats"
+            ));
+        }
         let root = own.relations().root.unwrap_or(chat);
         let live = started()
             .filter(|other| other.relations().root == Some(root))
             .count();
-        if live >= MAX_CHILDREN {
+        // Finished chats in the background close to make room.
+        let free = MAX_CHILDREN.saturating_sub(live) + self.closable(root).len();
+        if starts.len() > free {
             return Some(format!(
-                "{MAX_CHILDREN} chats started by agents for the user's chat {root} are open \
-                 already: message one of them, or ask the user to close some"
+                "{live} chats started by agents for the user's chat {root} are open, of \
+                 {MAX_CHILDREN} at most, and none can close to make room: message one of them, \
+                 or ask the user to close some"
             ));
         }
-        let name = agent.as_deref().unwrap_or_else(|| own.agent());
-        self.config
-            .agents
-            .find(name)
-            .err()
-            .map(|why| format!("there's no agent {name:?} to start: {why}"))
+        self.unstartable(own.agent(), starts)
+    }
+
+    /// Why one of `starts`, chats a chat whose agent is `own` asks to
+    /// start, can't be, if one can't: its profile or its agent isn't
+    /// there.
+    fn unstartable(&self, own: &str, starts: &[NewChat]) -> Option<String> {
+        for new in starts {
+            let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
+            let profile = match self.config.agents.profile(profile) {
+                Ok(profile) => profile,
+                Err(why) => return Some(why),
+            };
+            let name = (new.agent.as_deref())
+                .or(profile.agent.as_deref())
+                .unwrap_or(own);
+            if let Err(why) = self.config.agents.find(name) {
+                return Some(format!("there's no agent {name:?} to start: {why}"));
+            }
+        }
+        None
     }
 
     /// What the user is asked before the chat `chat`'s agent makes
@@ -262,7 +305,8 @@ impl Daemon {
                     return None;
                 }
                 let target = self.chat_ref(*to)?;
-                let looser = reach(target.tools()) > reach(tools);
+                let own = self.chat_ref(chat)?.limits();
+                let looser = reach(target.tools()) > reach(tools) || target.limits() < own;
                 if self.family(chat, *to) && !looser {
                     return None;
                 }
@@ -280,29 +324,51 @@ impl Daemon {
                 }
                 Some(asked("send", message, &then))
             }
-            Tool::StartChat { agent, prompt, cwd } => {
-                let own = self.chat_ref(chat)?;
-                let name = agent.as_deref().unwrap_or_else(|| own.agent()).to_owned();
-                let title = self.agent_spec(&name).title;
-                let home = self.chat_dir(chat).ok()?;
-                let dir = cwd.as_ref().map_or_else(
-                    || Path::new(&home).to_owned(),
-                    |cwd| crate::server::buffers::resolve(cwd, Path::new(&home), &self.config.home),
-                );
-                let dir = dir.canonicalize().unwrap_or(dir);
+            Tool::StartChat(new) => {
+                let (title, dir, outside) = self.start_place(chat, new)?;
                 let root = self.project_root(chat)?;
-                let outside = !dir.starts_with(&root);
                 if tools == AgentTools::Allow && !outside {
                     return None;
                 }
+                let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
                 let mut then = format!(
-                    "to a new {title} chat it starts, in {}",
+                    "to a new {title} chat it starts, as {profile}, in {}",
                     visible(&dir.display().to_string())
                 );
                 if outside {
                     let _ = write!(then, ", outside this chat's project ({})", root.display());
                 }
-                Some(asked("send", prompt, &then))
+                Some(asked("send", &new.prompt, &then))
+            }
+            Tool::StartChats(news) => {
+                let mut outside = false;
+                let mut each = String::new();
+                for (number, new) in news.iter().enumerate() {
+                    let (title, dir, out) = self.start_place(chat, new)?;
+                    outside |= out;
+                    let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
+                    let _ = write!(
+                        each,
+                        "{}{}. {title}, as {profile}, in {}: {}",
+                        if number == 0 { "" } else { "\n" },
+                        number + 1,
+                        dir.display(),
+                        new.prompt
+                    );
+                }
+                if tools == AgentTools::Allow && !outside {
+                    return None;
+                }
+                let root = self.project_root(chat)?;
+                let mut then = format!("to {} new chats it starts", news.len());
+                if outside {
+                    let _ = write!(
+                        then,
+                        ", some outside this chat's project ({})",
+                        root.display()
+                    );
+                }
+                Some(asked("send", &each, &then))
             }
             _ => None,
         }
@@ -314,6 +380,27 @@ impl Daemon {
         if pair && let Tool::SendToChat { chat: to, .. } = tool {
             self.tools.talk.allowed.insert((chat, *to));
         }
+    }
+
+    /// Where `new`, a chat the chat `chat`'s agent asks to start, would
+    /// start: its agent's title, its directory, and whether that's outside
+    /// the chat's project.
+    fn start_place(&mut self, chat: TerminalId, new: &NewChat) -> Option<(String, PathBuf, bool)> {
+        let own = self.chat_ref(chat)?;
+        let profile = new.profile.as_deref().unwrap_or(crate::profiles::DEFAULT);
+        let by_profile =
+            (self.config.agents.profile(profile).ok()).and_then(|profile| profile.agent);
+        let name = (new.agent.clone().or(by_profile)).unwrap_or_else(|| own.agent().to_owned());
+        let title = self.agent_spec(&name).title;
+        let home = self.chat_dir(chat).ok()?;
+        let dir = new.cwd.as_ref().map_or_else(
+            || Path::new(&home).to_owned(),
+            |cwd| crate::server::buffers::resolve(cwd, Path::new(&home), &self.config.home),
+        );
+        let dir = dir.canonicalize().unwrap_or(dir);
+        let root = self.project_root(chat)?;
+        let outside = !dir.starts_with(&root);
+        Some((title, dir, outside))
     }
 
     /// Checks `to` is a chat other than `chat`.
@@ -330,7 +417,7 @@ impl Daemon {
 
     /// Counts one more of the chat `chat`'s turn's messages, and one more
     /// turn of agents' work for the user's turn it comes of.
-    fn spend(&mut self, chat: TerminalId) {
+    pub(super) fn spend(&mut self, chat: TerminalId) {
         let Some(turn) = self.chat_ref(chat).map(|own| own.working_on().0) else {
             return;
         };
@@ -345,7 +432,7 @@ impl Daemon {
     }
 
     /// The message `text` from the chat `chat`, as it's sent.
-    fn message_from(&self, chat: TerminalId, text: String) -> Option<Message> {
+    pub(super) fn message_from(&self, chat: TerminalId, text: String) -> Option<Message> {
         let own = self.chat_ref(chat)?;
         Some(Message {
             from: own.sender(),
@@ -373,15 +460,18 @@ impl Daemon {
                 );
                 continue;
             }
-            let place = (workspaces.pane_showing(id))
-                .and_then(|pane| workspaces.find_pane(pane))
-                .map_or_else(
-                    || "in no pane".to_owned(),
-                    |(workspace, _, _)| format!("workspace {:?}", workspace.name),
-                );
+            let place = match (workspaces.pane_showing(id), self.chat_workspace(id)) {
+                (Some(_), Some(workspace)) => format!("workspace {workspace:?}"),
+                (None, Some(workspace)) => format!("in the background, workspace {workspace:?}"),
+                (_, None) => "in no pane".to_owned(),
+            };
+            let profile = other
+                .profile()
+                .map(|profile| format!(", as {profile}"))
+                .unwrap_or_default();
             let _ = write!(
                 text,
-                "- chat {id}: {}, {:?}, in {}, {place}: {}",
+                "- chat {id}: {}{profile}, {:?}, in {}, {place}: {}",
                 other.agent_title(),
                 other.info().title,
                 other.working_directory(),
@@ -492,73 +582,6 @@ impl Daemon {
         Ok(text)
     }
 
-    /// `start_chat`: starts a chat with `agent`, or the chat `chat`'s own,
-    /// beside it, in `cwd` or its own, and sends it `prompt`. It gets the
-    /// sender's Tools setting, and its mode, if it's the same agent: an
-    /// agent of another kind starts in its own default mode, never in the
-    /// one clackatoo picks for a new chat.
-    pub(super) fn start_chat(
-        &mut self,
-        chat: TerminalId,
-        agent: Option<String>,
-        prompt: String,
-        cwd: Option<&str>,
-    ) -> Result<String, String> {
-        let tool = Tool::StartChat {
-            agent: agent.clone(),
-            prompt: String::new(),
-            cwd: None,
-        };
-        if let Some(why) = self.talk_refused(chat, &tool) {
-            return Err(why);
-        }
-        let dir = self.chat_dir(chat)?;
-        let dir = match cwd {
-            Some(cwd) => crate::server::buffers::resolve(cwd, Path::new(&dir), &self.config.home),
-            None => dir.into(),
-        };
-        if !dir.is_dir() {
-            return Err(format!("there's no directory {}", dir.display()));
-        }
-        let message = self
-            .message_from(chat, prompt)
-            .ok_or("the chat has closed")?;
-        let own = self.chat_ref(chat).ok_or("the chat has closed")?;
-        let name = agent.unwrap_or_else(|| own.agent().to_owned());
-        let mode = (name == own.agent())
-            .then(|| own.mode().map(str::to_owned))
-            .flatten();
-        let root = own.relations().root.unwrap_or(chat);
-        let (depth, size, tools, task) =
-            (own.relations().depth, own.size(), own.tools(), own.task());
-        // It may do what the chat that starts it may.
-        let new = PaneTerminal::Agent(NewAgent {
-            size,
-            cwd: Some(dir.to_string_lossy().into_owned()),
-            agent: Some(name.clone()),
-            tools,
-            task,
-        });
-        let pane = self.place_beside(chat, new)?;
-        let Ok(Content::Terminal(started)) = self.workspaces.check_pane(pane) else {
-            return Err("the chat closed at once".to_owned());
-        };
-        let started_chat = self.chat(started).ok_or("the chat closed at once")?;
-        started_chat.started_by(chat, root, depth + 1, mode);
-        let actions = started_chat
-            .deliver(message)
-            .map_err(|_| "the new chat refused its first message".to_owned())?;
-        self.spend(chat);
-        self.act(started, actions);
-        self.collect_damage(started);
-        log::info!("chat {chat} started chat {started}, with {name}");
-        Ok(format!(
-            "Started chat {started} ({name}) in pane {pane}, in {}, and sent it the message. \
-             wait_for_chat waits for its answer.",
-            dir.display()
-        ))
-    }
-
     /// `wait_for_chat`: answers at once if the chat `to` has nothing to
     /// finish, or else waits, until `timeout`, for the call `id` on the
     /// connection at `token`. A chat out of the caller's sight is waited
@@ -592,7 +615,10 @@ impl Daemon {
             )));
         }
         let waits = (self.tools.waiting.iter())
-            .filter(|waiting| waiting.chat == chat && matches!(waiting.what, Wait::Turn { .. }))
+            .filter(|waiting| {
+                waiting.chat == chat
+                    && matches!(waiting.what, Wait::Turn { .. } | Wait::Chats { .. })
+            })
             .count();
         if waits >= super::MAX_WAITS {
             return Some(Err(format!(
@@ -614,14 +640,17 @@ impl Daemon {
 
     /// Whether the chat `from` waits for `to` to finish, itself or through
     /// chats it waits for.
-    fn waits_on(&self, from: TerminalId, to: TerminalId) -> bool {
+    pub(super) fn waits_on(&self, from: TerminalId, to: TerminalId) -> bool {
         let mut seen = vec![from];
         let mut next = vec![from];
         while let Some(waiter) = next.pop() {
-            for waiting in &self.tools.waiting {
-                if let Wait::Turn { chat: target, .. } = waiting.what
-                    && waiting.chat == waiter
-                {
+            for waiting in (self.tools.waiting.iter()).filter(|waiting| waiting.chat == waiter) {
+                let targets = match &waiting.what {
+                    Wait::Turn { chat, .. } => std::slice::from_ref(chat),
+                    Wait::Chats { chats, .. } => chats.as_slice(),
+                    _ => &[],
+                };
+                for &target in targets {
                     if target == to {
                         return true;
                     }
@@ -699,8 +728,9 @@ impl Daemon {
                 }
             }
         }
-        let finished = |daemon: &Self, waiting: &Waiting| match waiting.what {
-            Wait::Turn { chat, .. } => daemon.chat_ref(chat).is_none_or(idle),
+        let finished = |daemon: &Self, waiting: &Waiting| match &waiting.what {
+            Wait::Turn { chat, .. } => daemon.chat_ref(*chat).is_none_or(idle),
+            Wait::Chats { chats, first, .. } => daemon.chats_finished(chats, *first),
             _ => false,
         };
         if !self
@@ -716,10 +746,12 @@ impl Daemon {
             .partition(|waiting| finished(self, waiting));
         self.tools.waiting = kept;
         for waiting in done {
-            if let Wait::Turn { chat, .. } = waiting.what {
-                let answer = self.answer_of(waiting.chat, chat, false);
-                self.answer_tool(waiting.token, &waiting.id, Ok(answer));
-            }
+            let answer = match &waiting.what {
+                Wait::Turn { chat, .. } => self.answer_of(waiting.chat, *chat, false),
+                Wait::Chats { chats, .. } => self.summary(waiting.chat, chats),
+                _ => continue,
+            };
+            self.answer_tool(waiting.token, &waiting.id, Ok(answer));
         }
     }
 
@@ -732,12 +764,12 @@ impl Daemon {
 
 /// Whether `chat` has nothing to finish: no answer under way, and no
 /// message waiting.
-fn idle(chat: &HostedChat) -> bool {
+pub(super) fn idle(chat: &HostedChat) -> bool {
     !chat.is_answering() && chat.relations().inbox.is_empty()
 }
 
 /// What `chat` is doing, in a few words.
-fn status(chat: &HostedChat) -> String {
+pub(super) fn status(chat: &HostedChat) -> String {
     let node = chat.node();
     if node.question.is_some() {
         return "waiting for the user to answer a question".to_owned();
@@ -807,7 +839,7 @@ fn ending(turn: &Turn) -> String {
 
 /// What the agent said last in `turn`: its words after its last tool, or
 /// else all it said.
-fn final_words(turn: &Turn) -> String {
+pub(super) fn final_words(turn: &Turn) -> String {
     let after = (turn.items.iter())
         .rposition(|item| matches!(item, Item::Tool(_)))
         .map_or(0, |at| at + 1);
@@ -830,7 +862,7 @@ fn final_words(turn: &Turn) -> String {
 }
 
 /// The start of `text`, at most `max` bytes of it, saying if it's cut.
-fn head(text: &str, max: usize) -> String {
+pub(super) fn head(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_owned();
     }
@@ -917,11 +949,10 @@ mod tests {
     fn a_users_chat_has_so_many_agents_chats_under_it_at_most() {
         let dir = tempfile::tempdir().unwrap();
         let (mut daemon, a) = daemon_with_chat(dir.path());
-        let start = Tool::StartChat {
-            agent: None,
+        let start = Tool::StartChat(Box::new(NewChat {
             prompt: "x".to_owned(),
-            cwd: None,
-        };
+            ..NewChat::default()
+        }));
         for id in 2..2 + u32::try_from(MAX_CHILDREN).unwrap() {
             assert_eq!(daemon.talk_refused(a, &start), None, "{id}");
             let kid = idle_chat(&mut daemon, id);
@@ -929,7 +960,7 @@ mod tests {
         }
         let refused = daemon.talk_refused(a, &start).unwrap();
         assert!(
-            refused.contains("8 chats started by agents for the user's chat 1 are open"),
+            refused.contains("8 chats started by agents for the user's chat 1 are open, of 8"),
             "{refused}"
         );
         // Nor can those chats start more under it.
@@ -937,6 +968,62 @@ mod tests {
         // Closing one makes room.
         daemon.terminals.remove(&TerminalId(2));
         assert_eq!(daemon.talk_refused(a, &start), None);
+    }
+
+    #[test]
+    fn a_chat_in_the_background_keeps_its_limits_its_anchor_and_its_card_through_an_upgrade() {
+        use crate::chat::Wanted;
+        use crate::profiles::Limits;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, a) = daemon_with_chat(dir.path());
+        let name = daemon.workspaces.name_for_new(None).unwrap();
+        let pane = daemon
+            .workspaces
+            .new_workspace(name, clackatoo_protocol::Content::Terminal(a));
+        let b = idle_chat(&mut daemon, 2);
+        let kid = daemon.chat(b).unwrap();
+        kid.started_by(a, a, 1, None);
+        kid.start_as("explore", Limits::ReadOnly, None, Wanted::default());
+        daemon
+            .chat(b)
+            .unwrap()
+            .deliver(message(a.0, "look"))
+            .unwrap();
+        daemon.note_subagent(b);
+        let entry = daemon.chat_ref(a).unwrap().subagent(b).cloned().unwrap();
+        assert_eq!(
+            (entry.profile.as_deref(), entry.shown),
+            (Some("explore"), false)
+        );
+        assert_eq!(entry.task, "look");
+        // In no pane, its tools reach from its parent's.
+        assert_eq!(daemon.anchor_pane(b), Some(pane));
+        assert_eq!(daemon.chat_workspace(b), daemon.chat_workspace(a));
+
+        let config = daemon.config.clone();
+        let handover = daemon.hand_over().unwrap();
+        drop(daemon);
+        let resumed = Daemon::resume(handover, config).unwrap();
+        assert_eq!(resumed.chat_ref(b).unwrap().limits(), Limits::ReadOnly);
+        assert_eq!(resumed.chat_ref(b).unwrap().profile(), Some("explore"));
+        let card = resumed.chat_ref(a).unwrap().subagent(b).cloned().unwrap();
+        assert_eq!((card.task.as_str(), card.turn), ("look", 0));
+        assert_eq!(resumed.anchor_pane(b), Some(pane));
+    }
+
+    /// A message from the chat `from`, sent in a turn the user started.
+    fn message(from: u32, text: &str) -> Message {
+        Message {
+            from: clackatoo_protocol::Sender {
+                chat: TerminalId(from),
+                agent: "Claude Code".to_owned(),
+                title: "parent".to_owned(),
+            },
+            text: text.to_owned(),
+            hops: 1,
+            cause: None,
+        }
     }
 
     #[test]

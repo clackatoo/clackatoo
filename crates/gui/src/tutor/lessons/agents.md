@@ -32,9 +32,21 @@ When an agent changes a file you have open, the change lands in the editor as th
 
 Under each turn that changed files, the chat says how many, with Undo. In the chat's normal mode, `u` undoes what the last turn changed in files, keeping what you or later turns changed since, and Ctrl+R makes it again. `:AgentUndo 3` and `:AgentRedo 3` name a turn.
 
-## Handing work on
+## Subagents
 
-An agent can hand work to another chat with clackatoo's `start_chat`: it opens beside its own, where you can watch it, steer it, and review what it changes, and it carries on after the turn that started it. Claude Code also has a Task tool of its own, for quick research inside one turn, whose helpers you don't see. Each agent is told which suits what. `:set noclaudetask` takes the Task tool away from new chats, so Claude hands everything on in chats you can see.
+An agent hands work on with clackatoo's `start_chat`, or `start_chats` for several at once. Each starts a chat of its own, a subagent, in the background: your chat shows them as one line under the turn that started them, such as `3 subagents working… 12s ›`. Click it, or press Enter on it in normal mode, to see a line for each: what it is, what it was asked, and how it's going. Click one, or press Enter on its line, to open it as a pane.
+
+A subagent is a chat like any other: you can steer it, review and undo what it changes, and answer its questions. The card says when one is waiting for you. Subagents in the background close with the chat that started them.
+
+## Profiles
+
+Each subagent starts as a profile, which gives it a role, limits, and an agent and model:
+
+- `explore` researches quickly on the cheapest model, changes nothing, and answers briefly;
+- `plan` reads and thinks on a strong model, changes nothing, and returns a plan;
+- `general` works as your chat does, on its agent and model.
+
+Add your own, or change these, in the daemon's `agents.toml`, under `[profiles.NAME]`. Claude Code's own Task tool, whose helpers you don't see, is off unless you `:set claudetask`.
 
 ## Try a chat
 

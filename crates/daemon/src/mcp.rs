@@ -68,6 +68,10 @@ const MAX_TURNS: usize = 20;
 const DEFAULT_CHAT_WAIT: Duration = Duration::from_mins(5);
 const MAX_CHAT_WAIT: Duration = Duration::from_mins(30);
 
+/// The most chats `start_chats` starts, and `wait_for_chats` waits for,
+/// at once.
+pub(crate) const MAX_FAN_OUT: usize = 8;
+
 /// How many entries `board_read` gives unless asked for another number,
 /// and the most it gives.
 const DEFAULT_ENTRIES: usize = 50;
@@ -96,18 +100,23 @@ pub(crate) const INSTRUCTIONS: &str = "clackatoo is the terminal and editor the 
 /// What the agent is told, after [`INSTRUCTIONS`], about handing work on,
 /// when it may have a subagent tool of its own, as Claude Code's Task
 /// tool is.
-pub(crate) const DELEGATING: &str = "To hand work on: a subagent tool of \
-    your own, if you have one, such as Claude Code's Task tool, suits \
-    quick, throwaway research within this turn. start_chat suits work \
-    the user may want to watch or steer, work that should outlive this \
-    turn, work that needs another agent, and work that edits files the \
-    user will review.";
+pub(crate) const DELEGATING: &str = "For all subagent work, use start_chat, \
+    or start_chats for several at once, with a profile, rather than a \
+    subagent tool of your own, such as Claude Code's Task tool: the user \
+    sees each as a card in this chat, opens and steers it, and reviews and \
+    undoes what it changes. Use explore for quick research, plan for a \
+    plan, and general for work that changes things. Then wait_for_chat or \
+    wait_for_chats gives back the answers in one summary.";
 
 /// What the agent is told instead of [`DELEGATING`] when the user has
 /// taken Claude Code's Task tool away.
-pub(crate) const DELEGATING_WITHOUT_TASK: &str = "To hand work on, use \
-    start_chat: the user can watch and steer the chat it starts, which \
-    can outlive this turn.";
+pub(crate) const DELEGATING_WITHOUT_TASK: &str = "For all subagent work, use \
+    start_chat, or start_chats for several at once, with a profile: the \
+    user sees each as a card in this chat, opens and steers it, and \
+    reviews and undoes what it changes. Use explore for quick research, \
+    plan for a plan, and general for work that changes things. Then \
+    wait_for_chat or wait_for_chats gives back the answers in one \
+    summary.";
 
 /// A tool the agent called, with what it asked, for the server to carry
 /// out.
@@ -144,15 +153,19 @@ pub(crate) enum Tool {
     SendToChat { chat: TerminalId, message: String },
     /// Read a chat's last `turns` turns.
     ReadChat { chat: TerminalId, turns: usize },
-    /// Start a chat with `agent`, or this chat's own, beside this one,
-    /// sending it `prompt`.
-    StartChat {
-        agent: Option<String>,
-        prompt: String,
-        cwd: Option<String>,
-    },
+    /// Start a chat, sending it its first message.
+    StartChat(Box<NewChat>),
+    /// Start several chats at once.
+    StartChats(Vec<NewChat>),
     /// Wait until a chat has finished answering, or `timeout` passes.
     WaitForChat { chat: TerminalId, timeout: Duration },
+    /// Wait until all of `chats` have finished answering, or with
+    /// `first`, any of them, or `timeout` passes.
+    WaitForChats {
+        chats: Vec<TerminalId>,
+        first: bool,
+        timeout: Duration,
+    },
     /// Make a board called `name`, for `purpose`, in the chat's workspace,
     /// or every workspace if `global`.
     BoardCreate {
@@ -197,6 +210,41 @@ pub(crate) enum Tool {
     },
     /// Release a claim.
     BoardRelease { board: String, entry: u32 },
+}
+
+/// A chat an agent asks to start.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub(crate) struct NewChat {
+    /// The agent, by name: the profile's, or else the starting chat's,
+    /// if none.
+    pub(crate) agent: Option<String>,
+    /// The profile it's started as, by name: `general` if none.
+    pub(crate) profile: Option<String>,
+    /// The model, by its value or name: the profile's if none.
+    pub(crate) model: Option<String>,
+    /// Its first message.
+    pub(crate) prompt: String,
+    /// The directory it works in: the starting chat's if none.
+    pub(crate) cwd: Option<String>,
+    /// Whether it gets a pane of its own, rather than starting in the
+    /// background.
+    #[serde(default)]
+    pub(crate) show: bool,
+}
+
+impl NewChat {
+    /// It, as asked for, with nothing left empty that means "none".
+    fn checked(self) -> Result<Self, Refused> {
+        let given = |text: Option<String>| text.filter(|text| !text.trim().is_empty());
+        Ok(Self {
+            agent: given(self.agent),
+            profile: given(self.profile),
+            model: given(self.model),
+            prompt: message_text(self.prompt)?,
+            cwd: given(self.cwd),
+            show: self.show,
+        })
+    }
 }
 
 /// Something the agent sent that the server must act on.
@@ -437,14 +485,19 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
         turns: Option<usize>,
     }
     #[derive(Deserialize)]
-    struct StartChat {
-        agent: Option<String>,
-        prompt: String,
-        cwd: Option<String>,
+    struct StartChats {
+        chats: Vec<NewChat>,
+        show: Option<bool>,
     }
     #[derive(Deserialize)]
     struct WaitChat {
         chat: u32,
+        timeout: Option<f64>,
+    }
+    #[derive(Deserialize)]
+    struct WaitChats {
+        chats: Vec<u32>,
+        mode: Option<String>,
         timeout: Option<f64>,
     }
     #[derive(Deserialize)]
@@ -605,22 +658,56 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
                 turns: turns.unwrap_or(DEFAULT_TURNS).clamp(1, MAX_TURNS),
             }
         }
-        "start_chat" => {
-            let StartChat { agent, prompt, cwd } = args(arguments)?;
-            Tool::StartChat {
-                agent: agent.filter(|agent| !agent.trim().is_empty()),
-                prompt: message_text(prompt)?,
-                cwd: cwd.filter(|cwd| !cwd.trim().is_empty()),
+        "start_chat" => Tool::StartChat(Box::new(args::<NewChat>(arguments)?.checked()?)),
+        "start_chats" => {
+            let StartChats { chats, show } = args(arguments)?;
+            if chats.is_empty() || chats.len() > MAX_FAN_OUT {
+                return Err(Bad(format!("start 1 to {MAX_FAN_OUT} chats at once")));
             }
+            let chats = (chats.into_iter())
+                .map(|chat| {
+                    let show = chat.show || show == Some(true);
+                    Ok(NewChat {
+                        show,
+                        ..chat.checked()?
+                    })
+                })
+                .collect::<Result<Vec<_>, Refused>>()?;
+            Tool::StartChats(chats)
         }
         "wait_for_chat" => {
             let WaitChat { chat, timeout } = args(arguments)?;
-            let timeout = timeout.map_or(DEFAULT_CHAT_WAIT, |seconds| {
-                Duration::try_from_secs_f64(seconds.max(0.0)).unwrap_or(MAX_CHAT_WAIT)
-            });
             Tool::WaitForChat {
                 chat: TerminalId(chat),
-                timeout: timeout.min(MAX_CHAT_WAIT),
+                timeout: chat_wait(timeout),
+            }
+        }
+        "wait_for_chats" => {
+            let WaitChats {
+                chats,
+                mode,
+                timeout,
+            } = args(arguments)?;
+            if chats.is_empty() || chats.len() > MAX_FAN_OUT {
+                return Err(Bad(format!("wait for 1 to {MAX_FAN_OUT} chats at once")));
+            }
+            let first = match mode.as_deref() {
+                None | Some("all") => false,
+                Some("first") => true,
+                Some(other) => {
+                    return Err(Bad(format!("mode is \"all\" or \"first\", not {other:?}")));
+                }
+            };
+            let mut ids: Vec<TerminalId> = Vec::new();
+            for chat in chats.into_iter().map(TerminalId) {
+                if !ids.contains(&chat) {
+                    ids.push(chat);
+                }
+            }
+            Tool::WaitForChats {
+                chats: ids,
+                first,
+                timeout: chat_wait(timeout),
             }
         }
         "board_create" => {
@@ -722,6 +809,14 @@ fn parse(name: &str, arguments: &Value) -> Result<Tool, Refused> {
     })
 }
 
+/// How long a wait for chats lasts, given `timeout` seconds, or none.
+fn chat_wait(timeout: Option<f64>) -> Duration {
+    let timeout = timeout.map_or(DEFAULT_CHAT_WAIT, |seconds| {
+        Duration::try_from_secs_f64(seconds.max(0.0)).unwrap_or(MAX_CHAT_WAIT)
+    });
+    timeout.min(MAX_CHAT_WAIT)
+}
+
 /// `text`, as a message to another chat, if it can be one.
 fn message_text(text: String) -> Result<String, Refused> {
     if text.trim().is_empty() {
@@ -746,6 +841,14 @@ fn catalogue() -> Value {
                         "description": "The board, by its name, as board_list gives it." });
     let entry = json!({ "type": "integer", "minimum": 1,
                         "description": "The entry's number on the board, as board_read gives it." });
+    let new_chat = json!({
+        "profile": { "type": "string", "description": "What it's started as: explore, plan, general, or one the user added, as this server's instructions list them. Sets its role, its limits, and its default agent and model. Defaults to general." },
+        "agent": { "type": "string", "description": "The agent, by name: claude, codex, or one the user added. Defaults to the profile's, or this chat's own." },
+        "model": { "type": "string", "description": "The model, by name, such as haiku. Defaults to the profile's." },
+        "prompt": { "type": "string", "description": "The first message." },
+        "cwd": { "type": "string", "description": "The directory it works in, such as a git worktree. Defaults to this chat's." },
+        "show": { "type": "boolean", "description": "Give it a pane of its own, rather than a card in this chat. Defaults to false." },
+    });
     json!([
         {
             "name": "open_file",
@@ -883,15 +986,25 @@ fn catalogue() -> Value {
         {
             "name": "start_chat",
             "title": "Start a chat",
-            "description": "Starts a new chat with an agent in a pane beside this one, and sends it a \
-                first message, marked as from this chat. Returns at once with its number: then \
-                wait_for_chat waits for its answer. Give it everything it needs to know: it sees \
-                nothing of this conversation. The user may be asked first.",
+            "description": "Starts a subagent: a new chat with an agent, as a profile, and sends it a \
+                first message, marked as from this chat. It runs in the background, shown as a card \
+                in this chat that the user can open, unless show is true. Returns at once with its \
+                number: then wait_for_chat waits for its answer. Give it everything it needs to \
+                know: it sees nothing of this conversation. The user may be asked first.",
+            "inputSchema": { "type": "object", "properties": new_chat.clone(), "required": ["prompt"] },
+            "annotations": { "destructiveHint": false, "openWorldHint": true },
+        },
+        {
+            "name": "start_chats",
+            "title": "Start several chats",
+            "description": "Starts several subagents at once, each as start_chat does, in the \
+                background unless show is true. Returns their numbers: then wait_for_chats waits \
+                for all of them, or the first to finish, and gives back one summary.",
             "inputSchema": { "type": "object", "properties": {
-                "agent": { "type": "string", "description": "The agent, by name: claude, codex, or one the user added. Defaults to this chat's own." },
-                "prompt": { "type": "string", "description": "The first message." },
-                "cwd": { "type": "string", "description": "The directory it works in, such as a git worktree. Defaults to this chat's." },
-            }, "required": ["prompt"] },
+                "chats": { "type": "array", "minItems": 1, "maxItems": MAX_FAN_OUT,
+                           "items": { "type": "object", "properties": new_chat, "required": ["prompt"] } },
+                "show": { "type": "boolean", "description": "Give each a pane of its own. Defaults to false." },
+            }, "required": ["chats"] },
             "annotations": { "destructiveHint": false, "openWorldHint": true },
         },
         {
@@ -907,6 +1020,23 @@ fn catalogue() -> Value {
                 "timeout": { "type": "number", "minimum": 0, "maximum": MAX_CHAT_WAIT.as_secs(),
                              "description": format!("The most seconds to wait. Defaults to {}.", DEFAULT_CHAT_WAIT.as_secs()) },
             }, "required": ["chat"] },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "wait_for_chats",
+            "title": "Wait for several chats",
+            "description": "Waits until all the chats given have finished answering, or with mode \
+                first, any one of them, or the timeout passes, then returns one summary: each \
+                chat's status, its final answer, and the files it changed. read_chat reads a \
+                chat's whole turns.",
+            "inputSchema": { "type": "object", "properties": {
+                "chats": { "type": "array", "minItems": 1, "maxItems": MAX_FAN_OUT,
+                           "items": { "type": "integer", "minimum": 0 },
+                           "description": "The chats' numbers, as start_chats gives them." },
+                "mode": { "type": "string", "enum": ["all", "first"], "description": "Wait for all of them, or the first to finish. Defaults to all." },
+                "timeout": { "type": "number", "minimum": 0, "maximum": MAX_CHAT_WAIT.as_secs(),
+                             "description": format!("The most seconds to wait. Defaults to {}.", DEFAULT_CHAT_WAIT.as_secs()) },
+            }, "required": ["chats"] },
             "annotations": { "readOnlyHint": true, "openWorldHint": false },
         },
         {
@@ -1184,21 +1314,72 @@ mod tests {
         for tool in catalogue().as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
             let schema = &tool["inputSchema"];
-            // The least each takes: its required arguments, made up.
-            let mut arguments = serde_json::Map::new();
-            for required in schema["required"].as_array().into_iter().flatten() {
-                let required = required.as_str().unwrap();
-                let value = match schema["properties"][required]["type"].as_str() {
-                    Some("integer") => json!(1),
-                    _ => json!("x"),
-                };
-                arguments.insert(required.to_owned(), value);
-            }
-            assert!(
-                parse(name, &Value::Object(arguments)).is_ok(),
-                "{name} doesn't parse"
-            );
+            assert!(parse(name, &least(schema)).is_ok(), "{name} doesn't parse");
         }
+    }
+
+    /// The least an object `schema` describes: its required properties,
+    /// made up.
+    fn least(schema: &Value) -> Value {
+        let mut arguments = serde_json::Map::new();
+        for required in schema["required"].as_array().into_iter().flatten() {
+            let required = required.as_str().unwrap();
+            let property = &schema["properties"][required];
+            let value = match property["type"].as_str() {
+                Some("integer") => json!(1),
+                Some("array") if property["items"]["type"] == "object" => {
+                    json!([least(&property["items"])])
+                }
+                Some("array") => json!([1]),
+                _ => json!("x"),
+            };
+            arguments.insert(required.to_owned(), value);
+        }
+        Value::Object(arguments)
+    }
+
+    #[test]
+    fn fan_out_takes_several_chats_and_says_what_it_wont_take() {
+        let started = parse(
+            "start_chats",
+            &json!({ "chats": [{ "prompt": "a", "profile": "explore" },
+                               { "prompt": "b", "agent": " ", "show": true }],
+                     "show": false }),
+        );
+        let Ok(Tool::StartChats(chats)) = started else {
+            panic!("{started:?}");
+        };
+        assert_eq!(chats[0].profile.as_deref(), Some("explore"));
+        assert_eq!((chats[1].agent.as_deref(), chats[1].show), (None, true));
+        assert!(!chats[0].show);
+        assert!(matches!(
+            parse("start_chats", &json!({ "chats": [] })),
+            Err(Bad(_))
+        ));
+        assert!(matches!(
+            parse("start_chats", &json!({ "chats": [{ "prompt": " " }] })),
+            Err(Bad(_))
+        ));
+        assert_eq!(
+            parse(
+                "wait_for_chats",
+                &json!({ "chats": [3, 4, 3], "mode": "first", "timeout": 0 })
+            ),
+            Ok(Tool::WaitForChats {
+                chats: vec![TerminalId(3), TerminalId(4)],
+                first: true,
+                timeout: Duration::ZERO,
+            })
+        );
+        assert!(matches!(
+            parse("wait_for_chats", &json!({ "chats": [3], "mode": "most" })),
+            Err(Bad(_))
+        ));
+        let many: Vec<u32> = (0..=u32::try_from(MAX_FAN_OUT).unwrap()).collect();
+        assert!(matches!(
+            parse("wait_for_chats", &json!({ "chats": many })),
+            Err(Bad(_))
+        ));
     }
 
     #[test]

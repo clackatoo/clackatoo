@@ -34,6 +34,7 @@ use clackatoo_protocol::TerminalId;
 use serde_json::{Value, json};
 
 use crate::mcp;
+use crate::profiles::Limits;
 use crate::pty::Process;
 use crate::rpc::{Framing, Message, Peer, RpcError};
 
@@ -181,18 +182,16 @@ impl Agent {
     }
 
     /// Asks for a session for the chat in `terminal`, working in `cwd`:
-    /// `session`, which it had before, or else a new one. `tools` is the
-    /// MCP server that gives it clackatoo's tools, if it gets them, and
-    /// `task` whether Claude Code keeps its own Task tool.
+    /// `session`, which it had before, or else a new one, opened as
+    /// `opening` says.
     pub(crate) fn open_session(
         &mut self,
         terminal: TerminalId,
         cwd: &str,
         session: Option<&str>,
-        tools: Option<Value>,
-        task: bool,
+        opening: Opening,
     ) {
-        let mut params = session_params(cwd, tools, task);
+        let mut params = session_params(cwd, opening);
         let method = match session {
             Some(session) => {
                 params["sessionId"] = session.into();
@@ -210,8 +209,14 @@ impl Agent {
         self.request(
             Pending::Probe,
             "session/new",
-            &session_params(cwd, None, true),
+            &session_params(cwd, Opening::default()),
         );
+    }
+
+    /// Whether it can close a session, ending the work it does for it,
+    /// as Claude Code's adapter can, ending the process it runs for each.
+    pub(crate) fn can_close(&self) -> bool {
+        self.can_close
     }
 
     /// Whether a session asked for by [`probe`](Self::probe) is still to
@@ -528,21 +533,52 @@ impl Agent {
     }
 }
 
+/// What a chat's session opens with, beside its working directory.
+#[derive(Debug)]
+pub(crate) struct Opening {
+    /// The MCP server that gives it clackatoo's tools, if it gets them.
+    pub(crate) tools: Option<Value>,
+    /// Whether Claude Code keeps its own Task tool.
+    pub(crate) task: bool,
+    /// What the chat may do, beyond its agent's own settings.
+    pub(crate) limits: Limits,
+}
+
+impl Default for Opening {
+    fn default() -> Self {
+        Self {
+            tools: None,
+            task: true,
+            limits: Limits::None,
+        }
+    }
+}
+
 /// What a session is opened with: its working directory, and clackatoo's
 /// tools, if it gets them. Claude Code is told it may use them without
 /// asking it: those that need the user's say ask in the chat themselves.
 /// Without `task`, Claude Code is told not to use its Task tool, under
 /// both its names: `Agent`, as Claude Code calls it now, and `Task`, as
-/// it was called before, which Claude Code still reads as `Agent`.
-/// Other agents ignore what's said to Claude Code.
-fn session_params(cwd: &str, tools: Option<Value>, task: bool) -> Value {
+/// it was called before, which Claude Code still reads as `Agent`. The
+/// tools the chat's limits rule out are taken away too. Other agents
+/// ignore what's said to Claude Code.
+fn session_params(cwd: &str, opening: Opening) -> Value {
+    let Opening {
+        tools,
+        task,
+        limits,
+    } = opening;
     let mut options = serde_json::Map::new();
     if tools.is_some() {
         let allowed = format!("mcp__{}", mcp::SERVER_NAME);
         options.insert("allowedTools".to_owned(), json!([allowed]));
     }
-    if !task {
-        options.insert("disallowedTools".to_owned(), json!(["Agent", "Task"]));
+    let mut disallowed: Vec<&str> = limits.claude_tools().to_vec();
+    if !task && !disallowed.contains(&"Task") {
+        disallowed.extend(["Agent", "Task"]);
+    }
+    if !disallowed.is_empty() {
+        options.insert("disallowedTools".to_owned(), json!(disallowed));
     }
     let mut params = json!({ "cwd": cwd, "mcpServers": Vec::from_iter(tools) });
     if !options.is_empty() {

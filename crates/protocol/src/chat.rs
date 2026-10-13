@@ -33,6 +33,62 @@ pub struct ChatNode {
     /// The other agents the chat could move to, and their models, for
     /// the model menu to offer beside its own agent's.
     pub providers: Vec<Provider>,
+    /// The chats its agent started, oldest first: clients show them as a
+    /// card in the turn that started them, and open one as a pane.
+    pub subagents: Vec<Subagent>,
+}
+
+/// A chat another chat's agent started, as the chat that started it shows
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subagent {
+    /// The chat.
+    pub chat: crate::TerminalId,
+    /// Its agent, as it's shown: "Claude Code".
+    pub agent: String,
+    /// The profile it was started with, such as `explore`, if one.
+    pub profile: Option<String>,
+    /// The model it runs on, as shown, once that's known.
+    pub model: Option<String>,
+    /// What it was asked to do: its first message's first line, cut short.
+    pub task: String,
+    /// How it's going.
+    pub status: SubagentStatus,
+    /// When it was started, in milliseconds since the Unix epoch.
+    pub started: u64,
+    /// When it last finished, if it isn't working now.
+    pub ended: Option<u64>,
+    /// The turn of the chat that started it that it was started in, by
+    /// its index: the card goes there.
+    pub turn: u32,
+    /// Whether it's in a pane of its own, rather than in the background.
+    pub shown: bool,
+}
+
+/// How a chat another chat's agent started is going.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubagentStatus {
+    /// Its agent is starting.
+    Starting,
+    /// Its agent is answering.
+    Working,
+    /// Its agent asks the user something, and waits: it must be opened to
+    /// answer.
+    Asking,
+    /// It finished, and waits for another message.
+    Done,
+    /// Its last turn went wrong, or its agent couldn't start: why.
+    Failed(String),
+    /// It was closed.
+    Closed,
+}
+
+impl SubagentStatus {
+    /// Whether it's still going: starting, working or asking.
+    #[must_use]
+    pub fn going(&self) -> bool {
+        matches!(self, Self::Starting | Self::Working | Self::Asking)
+    }
 }
 
 /// Another agent a chat could move to, and the models it offers.
@@ -468,6 +524,8 @@ pub enum ChatPatch {
     Agent(String),
     /// The other agents it could move to are now these.
     Providers(Vec<Provider>),
+    /// The chats its agent started are now these.
+    Subagents(Vec<Subagent>),
 }
 
 /// What a client asks of a chat.
@@ -525,6 +583,12 @@ pub enum ChatAction {
     /// Find out the models of the other agents the chat could move to,
     /// where they aren't known, as the model menu opens.
     LearnModels,
+    /// Show `chat`, one this chat's agent started, in a pane beside this
+    /// chat, or point it out if it's in one already.
+    Open {
+        /// The chat to show.
+        chat: crate::TerminalId,
+    },
 }
 
 /// The number turn `index` of `turns` goes by, as people count them: from
@@ -599,6 +663,7 @@ impl ChatNode {
             }
             ChatPatch::Agent(agent) => self.agent = agent,
             ChatPatch::Providers(providers) => self.providers = providers,
+            ChatPatch::Subagents(subagents) => self.subagents = subagents,
         }
     }
 

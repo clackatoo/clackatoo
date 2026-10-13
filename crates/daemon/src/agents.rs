@@ -42,6 +42,8 @@ use std::path::{Path, PathBuf};
 
 use clackatoo_syntax::servers::{KnownServer, Source};
 
+use crate::profiles::{self, Profile};
+
 /// The lockfile `npm ci` installs a known agent's adapter from, and the
 /// manifest beside it, by the agent's name, as `npm install
 /// --package-lock-only` wrote them for the version pinned.
@@ -384,6 +386,34 @@ impl AgentConfig {
         }
     }
 
+    /// Every profile chats can be started as: clackatoo's, changed by
+    /// `agents.toml`, then the user's own. Reads `agents.toml` once.
+    pub(crate) fn profiles(&self) -> Vec<Profile> {
+        let mut profiles = profiles::built_in();
+        if let Some(path) = self.file.as_deref()
+            && let Some(document) = read_document(path)
+            && let Err(err) = profiles::parse(&document, &mut profiles)
+        {
+            log::warn!("{}: {err}", path.display());
+        }
+        profiles
+    }
+
+    /// The profile called `name`, or why there isn't one.
+    pub(crate) fn profile(&self, name: &str) -> Result<Profile, String> {
+        let profiles = self.profiles();
+        if let Some(profile) = profiles.iter().find(|profile| profile.name == name) {
+            return Ok(profile.clone());
+        }
+        let names: Vec<&str> = (profiles.iter())
+            .map(|profile| profile.name.as_str())
+            .collect();
+        Err(format!(
+            "there's no profile called {name}: the profiles are {}",
+            names.join(", ")
+        ))
+    }
+
     /// The directories the user's agents are run from, as `agents.toml`
     /// and the daemon's own settings give their commands: an install
     /// never removes them.
@@ -512,23 +542,33 @@ fn is_program(path: &Path) -> bool {
 /// The agents `agents.toml` at `path` adds, or none if it isn't there or
 /// doesn't make sense, which is logged.
 fn read_file(path: &Path) -> Vec<CustomAgent> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(err) => {
-            log::warn!("{} couldn't be read: {err}", path.display());
-            return Vec::new();
-        }
+    let Some(document) = read_document(path) else {
+        return Vec::new();
     };
-    parse(&text).unwrap_or_else(|err| {
+    parse(&document).unwrap_or_else(|err| {
         log::warn!("{}: {err}", path.display());
         Vec::new()
     })
 }
 
+/// `agents.toml` at `path`, if it's there and is TOML: what's wrong
+/// otherwise is logged.
+fn read_document(path: &Path) -> Option<toml_edit::DocumentMut> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            log::warn!("{} couldn't be read: {err}", path.display());
+            return None;
+        }
+    };
+    (text.parse::<toml_edit::DocumentMut>())
+        .map_err(|err| log::warn!("{}: {err}", path.display()))
+        .ok()
+}
+
 /// The agents an `agents.toml` adds.
-fn parse(text: &str) -> Result<Vec<CustomAgent>, String> {
-    let document = (text.parse::<toml_edit::DocumentMut>()).map_err(|err| err.to_string())?;
+fn parse(document: &toml_edit::DocumentMut) -> Result<Vec<CustomAgent>, String> {
     let Some(agents) = document.get("agents") else {
         return Ok(Vec::new());
     };
@@ -564,6 +604,14 @@ fn parse(text: &str) -> Result<Vec<CustomAgent>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The agents `text`, an `agents.toml`, adds.
+    fn parse(text: &str) -> Result<Vec<CustomAgent>, String> {
+        let document = text
+            .parse()
+            .map_err(|err: toml_edit::TomlError| err.to_string())?;
+        super::parse(&document)
+    }
 
     fn custom(name: &str, command: &[&str]) -> CustomAgent {
         CustomAgent {

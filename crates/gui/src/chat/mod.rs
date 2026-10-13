@@ -140,6 +140,11 @@ enum Hit {
     /// The line a turn's work folds under, which opens and folds it, by
     /// the turn.
     Fold(usize),
+    /// The line of the card for the chats a turn's agent started, which
+    /// opens and folds it, by the turn.
+    Agents(usize),
+    /// A chat's line on that card, which opens the chat in a pane.
+    Subagent(clackatoo_protocol::TerminalId),
     /// The button that copies a block of code.
     CopyCode(TextKey),
 }
@@ -229,6 +234,9 @@ pub(crate) struct ChatView {
     /// which. A turn not here is open while it's going, and folded once
     /// it's done.
     folds: std::collections::HashMap<usize, bool>,
+    /// The turns whose card for the chats their agent started is open, by
+    /// their index.
+    open_agents: std::collections::HashSet<usize>,
     /// The time, as turns count it, if it's not the clock's, as for tests.
     clock: Option<u64>,
     /// When the next turn still going counts on to the next second, if one
@@ -296,6 +304,7 @@ impl ChatView {
             open_cards: std::collections::HashSet::new(),
             said: None,
             folds: std::collections::HashMap::new(),
+            open_agents: std::collections::HashSet::new(),
             clock: None,
             live: None,
             shown: Vec::new(),
@@ -334,6 +343,16 @@ impl ChatView {
                         clackatoo_protocol::Patch::Chat(patch) => {
                             if let Some(turn) = touches(patch) {
                                 self.restyled(turn);
+                            }
+                            // The turns with cards, before and after.
+                            if let clackatoo_protocol::ChatPatch::Subagents(new) = patch {
+                                let last = self.node.turns.len().saturating_sub(1);
+                                let turns: Vec<usize> = (self.node.subagents.iter().chain(new))
+                                    .map(|entry| (entry.turn as usize).min(last))
+                                    .collect();
+                                for turn in turns {
+                                    self.restyled(turn);
+                                }
                             }
                             self.node.apply(patch.clone());
                         }
@@ -993,6 +1012,8 @@ impl ChatView {
                 force: false,
             }),
             Some(Hit::Fold(turn)) => self.toggle_fold(turn),
+            Some(Hit::Agents(turn)) => self.toggle_agents(turn),
+            Some(Hit::Subagent(chat)) => settled.actions.push(ChatAction::Open { chat }),
             Some(Hit::CopyCode(key)) => {
                 if let Some(text) = self.text(key) {
                     settled.copied.push((text.text.to_owned(), Copy::Clipboard));
@@ -1201,7 +1222,8 @@ fn touches(patch: &clackatoo_protocol::ChatPatch) -> Option<usize> {
         | ChatPatch::Settings(_)
         | ChatPatch::Usage(_)
         | ChatPatch::Agent(_)
-        | ChatPatch::Providers(_) => None,
+        | ChatPatch::Providers(_)
+        | ChatPatch::Subagents(_) => None,
     }
 }
 

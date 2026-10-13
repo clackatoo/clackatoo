@@ -7095,10 +7095,12 @@ mod tests {
             PaneTerminal::Agent(new) => new.task,
             other => panic!("{other:?}"),
         };
+        // Off unless it's turned on: one way to hand work on, for every
+        // agent.
         let mut options = Options::default();
-        assert!(task(&options));
-        options.claudetask = false;
         assert!(!task(&options));
+        options.claudetask = true;
+        assert!(task(&options));
     }
 
     // --- Reviews of what agents changed ---------------------------------------

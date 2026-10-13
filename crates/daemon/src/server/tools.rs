@@ -45,6 +45,7 @@ use crate::chat::Choices;
 use crate::mcp::{self, Connection, Incoming, Tool};
 
 mod boards;
+mod subagents;
 mod talk;
 
 /// How long a command waits for the first prompt of a shell that isn't
@@ -121,6 +122,13 @@ enum Wait {
     /// Another chat finishing answering, every message waiting for it
     /// included, until `due`.
     Turn { chat: TerminalId, due: Instant },
+    /// Other chats finishing, all of them or with `first` any, until
+    /// `due`.
+    Chats {
+        chats: Vec<TerminalId>,
+        first: bool,
+        due: Instant,
+    },
     /// The boards being read, which takes a moment as the daemon starts:
     /// then it's carried out, unless they aren't read by `due`.
     Boards { tool: Tool, due: Instant },
@@ -227,14 +235,28 @@ impl Daemon {
     }
 
     /// What the chat `chat`'s agent is told about its tools when it
-    /// connects: what they're for, when to hand work to another chat,
-    /// which chat it is, and the boards it shares with other agents.
+    /// connects: what they're for, how to hand work on, as which profiles,
+    /// which chat it is, what it may do, and the boards it shares with
+    /// other agents.
     fn tools_instructions(&self, chat: TerminalId) -> String {
-        let task = self
-            .chat_ref(chat)
-            .is_none_or(crate::chat::HostedChat::task);
+        let own = self.chat_ref(chat);
+        let task = own.is_none_or(crate::chat::HostedChat::task);
+        let mut profiles = String::new();
+        for profile in self.config.agents.profiles() {
+            let about = if profile.about.is_empty() {
+                "the user's own"
+            } else {
+                &profile.about
+            };
+            let _ = write!(profiles, " {}: {about}.", profile.name);
+        }
+        let limits = own
+            .and_then(|own| own.limits().told())
+            .map(|told| format!(" {told}"))
+            .unwrap_or_default();
         format!(
-            "{} {} This chat is chat {chat}: other agents name it by that number.{}",
+            "{} {} The profiles are:{profiles} This chat is chat {chat}: other agents name it \
+             by that number.{limits}{}",
             mcp::INSTRUCTIONS,
             if task {
                 mcp::DELEGATING
@@ -243,6 +265,22 @@ impl Daemon {
             },
             self.boards_told(chat)
         )
+    }
+
+    /// Why the chat `chat`'s agent can't make `tool`, if its limits rule
+    /// it out: running or typing commands, for a chat with none.
+    fn limits_refused(&self, chat: TerminalId, tool: &Tool) -> Option<String> {
+        let limits = self.chat_ref(chat)?.limits();
+        let commands = matches!(
+            tool,
+            Tool::RunInTerminal { .. } | Tool::SendToTerminal { .. }
+        );
+        (commands && limits.no_commands()).then(|| {
+            format!(
+                "this chat is {}: it runs no commands, and types into no terminal",
+                limits.name()
+            )
+        })
     }
 
     /// Reads what an agent sent its tools, and writes what it can of the
@@ -369,7 +407,9 @@ impl Daemon {
             return;
         }
         // What would be refused anyway isn't asked about.
-        if let Some(why) = self.talk_refused(chat, &tool) {
+        if let Some(why) =
+            (self.limits_refused(chat, &tool)).or_else(|| self.talk_refused(chat, &tool))
+        {
             self.answer_tool(token, &id, Err(why));
             return;
         }
@@ -380,7 +420,7 @@ impl Daemon {
         let call = self.tools.next_call;
         self.tools.next_call += 1;
         let offered = match tool {
-            Tool::SendToChat { .. } | Tool::StartChat { .. } => Choices::Talk,
+            Tool::SendToChat { .. } | Tool::StartChat(_) | Tool::StartChats(_) => Choices::Talk,
             _ => Choices::Tool,
         };
         let asked = (self.chat(chat))
@@ -453,7 +493,7 @@ impl Daemon {
                     (what, None)
                 })
             }
-            Tool::SendToChat { .. } | Tool::StartChat { .. } => {
+            Tool::SendToChat { .. } | Tool::StartChat(_) | Tool::StartChats(_) => {
                 self.talk_question(chat, tool, tools)
             }
             _ => None,
@@ -576,15 +616,22 @@ impl Daemon {
             Tool::ListChats => Ok(self.list_chats(chat)),
             Tool::SendToChat { chat: to, message } => self.send_to_chat(chat, to, message),
             Tool::ReadChat { chat: to, turns } => self.read_chat(chat, to, turns),
-            Tool::StartChat { agent, prompt, cwd } => {
-                self.start_chat(chat, agent, prompt, cwd.as_deref())
-            }
+            Tool::StartChat(new) => self.start_chats(chat, vec![*new]),
+            Tool::StartChats(news) => self.start_chats(chat, news),
             Tool::WaitForChat { chat: to, timeout } => {
                 match self.wait_for_chat((token, id.clone()), chat, to, timeout) {
                     Some(result) => result,
                     None => return,
                 }
             }
+            Tool::WaitForChats {
+                chats,
+                first,
+                timeout,
+            } => match self.wait_for_chats((token, id.clone()), chat, chats, (first, timeout)) {
+                Some(result) => result,
+                None => return,
+            },
         };
         self.answer_tool(token, &id, result);
     }
@@ -595,8 +642,8 @@ impl Daemon {
     /// the last one it opened, if that's still in the chat's tab, or else
     /// to the chat's right.
     fn place_beside(&mut self, chat: TerminalId, content: PaneTerminal) -> Result<PaneId, String> {
+        let chat_pane = self.anchor_pane(chat).ok_or("the chat isn't in a pane")?;
         let workspaces = self.workspaces.get();
-        let chat_pane = (workspaces.pane_showing(chat)).ok_or("the chat isn't in a pane")?;
         let (_, tab, _) = workspaces
             .find_pane(chat_pane)
             .ok_or("the chat isn't in a pane")?;
@@ -657,7 +704,7 @@ impl Daemon {
         let Some((workspace, _, found)) = workspaces.find_pane(pane) else {
             return Err(format!("there's no pane {pane}: list_panes lists them"));
         };
-        let theirs = (workspaces.pane_showing(chat))
+        let theirs = (self.anchor_pane(chat))
             .and_then(|own| workspaces.find_pane(own))
             .is_some_and(|(own, _, _)| own.id == workspace.id);
         if theirs {
@@ -705,7 +752,7 @@ impl Daemon {
             .open_buffer(file.clone(), None)
             .map_err(|err| err.to_string())?;
         let workspaces = self.workspaces.get();
-        let tab = (workspaces.pane_showing(chat))
+        let tab = (self.anchor_pane(chat))
             .and_then(|own| workspaces.find_pane(own))
             .map(|(_, tab, _)| tab);
         let showing = tab.and_then(|tab| {
@@ -787,7 +834,7 @@ impl Daemon {
     /// `list_panes`: the panes of the chat's workspace, tab by tab.
     fn list_panes(&self, chat: TerminalId) -> Result<String, String> {
         let workspaces = self.workspaces.get();
-        let own = (workspaces.pane_showing(chat)).ok_or("the chat isn't in a pane")?;
+        let own = self.anchor_pane(chat).ok_or("the chat isn't in a pane")?;
         let (workspace, own_tab, _) = workspaces
             .find_pane(own)
             .ok_or("the chat isn't in a pane")?;
@@ -1181,9 +1228,10 @@ impl Daemon {
         let typing = (self.tools.commanded.values())
             .filter_map(|commanded| commanded.typing.as_ref().map(|typing| typing.due));
         let waits = (self.tools.waiting.iter()).filter_map(|waiting| match waiting.what {
-            Wait::Finish { due, .. } | Wait::Turn { due, .. } | Wait::Boards { due, .. } => {
-                Some(due)
-            }
+            Wait::Finish { due, .. }
+            | Wait::Turn { due, .. }
+            | Wait::Chats { due, .. }
+            | Wait::Boards { due, .. } => Some(due),
             Wait::Permission { .. } => None,
         });
         typing.chain(waits).min()
@@ -1231,7 +1279,7 @@ impl Daemon {
             .into_iter()
             .partition(|waiting| {
                 matches!(waiting.what, Wait::Finish { due, .. } | Wait::Turn { due, .. }
-                    | Wait::Boards { due, .. } if due <= now)
+                    | Wait::Chats { due, .. } | Wait::Boards { due, .. } if due <= now)
             });
         self.tools.waiting = kept;
         for waiting in timed_out {
@@ -1241,6 +1289,12 @@ impl Daemon {
                 } => (terminal, lines),
                 Wait::Turn { chat, .. } => {
                     self.chat_wait_timed_out(&waiting, chat);
+                    continue;
+                }
+                Wait::Chats { ref chats, .. } => {
+                    let summary = self.summary(waiting.chat, chats);
+                    let answer = format!("The wait timed out.\n{summary}");
+                    self.answer_tool(waiting.token, &waiting.id, Ok(answer));
                     continue;
                 }
                 Wait::Boards { .. } => {
@@ -1267,7 +1321,7 @@ impl Daemon {
     /// chat `chat`'s.
     fn shown_only_elsewhere(&self, chat: TerminalId, buffer: BufferId) -> bool {
         let workspaces = self.workspaces.get();
-        let own = (workspaces.pane_showing(chat))
+        let own = (self.anchor_pane(chat))
             .and_then(|pane| workspaces.find_pane(pane))
             .map(|(workspace, _, _)| workspace.id);
         let mut shown = (workspaces.list.iter()).filter(|workspace| {

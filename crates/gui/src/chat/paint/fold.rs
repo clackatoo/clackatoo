@@ -130,6 +130,7 @@ impl ChatView {
     /// counts on a second, if one was drawn, and counts.
     pub(super) fn note_live(&mut self) {
         let now = self.now();
+        let agents = self.agents_live();
         self.live = (self.shown.iter())
             .filter(|shown| shown.key.piece == FOLD && shown.at[1] < self.view_height)
             .filter_map(|shown| self.node.turns.get(shown.key.turn))
@@ -138,6 +139,7 @@ impl ChatView {
                 let into = now.saturating_sub(turn.sent) % 1000;
                 Instant::now() + Duration::from_millis(1000 - into)
             })
+            .chain(agents)
             .min();
     }
 

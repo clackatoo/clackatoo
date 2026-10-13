@@ -19,8 +19,9 @@ use clackatoo_protocol::{
     Found, FoundBuffer, FoundLine, GitMark, Item, Kind, Layout, Location, NewAgent, NewTerminal,
     OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece,
     ProviderModels, Query, Request, Response, Resume, Search, Selection, ServerFeatures,
-    ServerMessage, Side, Size, Span, TerminalId, TerminalStatus, TextChange, Tool, ToolContent,
-    ToolKind, ToolStatus, Trigger, TurnFiles, TurnFilesState, View, ViewUpdate, Workspaces,
+    ServerMessage, Side, Size, Span, SubagentStatus, TerminalId, TerminalStatus, TextChange, Tool,
+    ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles, TurnFilesState, View, ViewUpdate,
+    Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -69,6 +70,7 @@ impl TestDaemon {
             server_idle: Duration::ZERO,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
+            park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             rename_gate: None,
             boards: None,
             trash: Some(dir.path().join("trash")),
@@ -7440,7 +7442,9 @@ fn the_tools_speak_mcp_over_the_relays_stdio() {
             "send_to_chat",
             "read_chat",
             "start_chat",
+            "start_chats",
             "wait_for_chat",
+            "wait_for_chats",
             "board_list",
             "board_create",
             "board_post",
@@ -8327,12 +8331,12 @@ fn starting_a_chat_asks_then_opens_it_beside_with_the_message() {
     let daemon = TestDaemon::with_tools();
     let mut client = daemon.client();
     let a = start_tooled_chat(&mut client, AgentTools::Ask);
-    let prompt = "mcp start_chat {\"prompt\":\"hi kid\"}";
+    let prompt = "mcp start_chat {\"prompt\":\"hi kid\",\"show\":true}";
     client.chat(a, ChatAction::Send(prompt.to_owned())).unwrap();
     let asking = wait_for_chat(&mut client, a, |node| node.question.is_some());
     let title = asking.question.unwrap().title;
     assert!(
-        title.starts_with("send `hi kid` to a new Claude Code chat it starts, in /"),
+        title.starts_with("send `hi kid` to a new Claude Code chat it starts, as general, in /"),
         "{title}"
     );
     assert_eq!(tab_contents(&mut client).len(), 1, "nothing starts first");
@@ -8343,7 +8347,9 @@ fn starting_a_chat_asks_then_opens_it_beside_with_the_message() {
     assert_eq!(contents.len(), 2, "beside the chat: {words}");
     let kid = contents[1].terminal().unwrap();
     assert!(
-        words.contains(&format!("start_chat: Started chat {kid} (claude) in pane ")),
+        words.contains(&format!(
+            "start_chat: Started chat {kid} (claude, as general), in pane "
+        )),
         "{words}"
     );
     let started = wait_for_chat(&mut client, kid, |node| last_outcome(node).is_some());
@@ -8381,7 +8387,9 @@ fn chats_agents_start_are_limited_in_depth_and_number() {
     let node = ask_for(&mut client, a, &prompt, Duration::from_secs(20));
     let words = last_words(&node);
     assert!(
-        words.contains(&format!("start_chat: Started chat {grandchild} (claude)")),
+        words.contains(&format!(
+            "start_chat: Started chat {grandchild} (claude, as general)"
+        )),
         "{words}"
     );
     assert!(
@@ -8434,6 +8442,399 @@ fn chats_answering_each_other_stop_after_six_messages() {
         "{words}"
     );
     assert_eq!(chat_now(&mut client, b).turns.len(), 3);
+}
+
+// --- Subagents ---------------------------------------------------------------
+
+/// The chat `chat`'s card of the chats its agent started.
+fn card_of(client: &mut Client, chat: TerminalId) -> Vec<clackatoo_protocol::Subagent> {
+    chat_now(client, chat).subagents
+}
+
+#[test]
+fn a_chat_an_agent_starts_works_in_the_background_as_a_card_that_opens_as_a_pane() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let kid = TerminalId(a.0 + 1);
+    // Its tools reach what the chat that started it reaches.
+    let start = serde_json::json!({ "prompt": "mcp list_panes" });
+    let prompt = format!("mcp start_chat {start}\nmcp wait_for_chat {{\"chat\":{kid}}}");
+    let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
+    assert!(
+        words.contains(&format!(
+            "start_chat: Started chat {kid} (claude, as general), in the background, as a card"
+        )),
+        "{words}"
+    );
+    assert!(words.contains("list_panes: Workspace "), "{words}");
+    assert_eq!(tab_contents(&mut client).len(), 1, "it's in no pane");
+    let card = card_of(&mut client, a);
+    assert_eq!(card.len(), 1);
+    assert_eq!((card[0].chat, card[0].turn, card[0].shown), (kid, 0, false));
+    assert_eq!(card[0].status, SubagentStatus::Done);
+    assert_eq!(card[0].profile.as_deref(), Some("general"));
+    assert_eq!(card[0].model.as_deref(), Some("Haiku"));
+    assert_eq!(card[0].task, "mcp list_panes");
+    assert!(card[0].ended.is_some_and(|ended| ended >= card[0].started));
+
+    // Opened from the card, it's beside the chat, and the card says so.
+    client.chat(a, ChatAction::Open { chat: kid }).unwrap();
+    assert_eq!(tab_contents(&mut client)[1], Content::Terminal(kid));
+    assert!(card_of(&mut client, a)[0].shown);
+
+    // Closed, the card says so.
+    let other = TerminalId(a.0 + 2);
+    ask_for(
+        &mut client,
+        a,
+        "mcp start_chat {\"prompt\":\"hi\"}",
+        Duration::from_secs(10),
+    );
+    wait_for_chat(&mut client, other, |node| last_outcome(node).is_some());
+    client.close_terminal(other).unwrap();
+    let card = card_of(&mut client, a);
+    assert_eq!(
+        (card[1].chat, &card[1].status),
+        (other, &SubagentStatus::Closed)
+    );
+    // Chats in the background close with the chat that started them;
+    // those the user opened stay.
+    let third = TerminalId(a.0 + 3);
+    ask_for(
+        &mut client,
+        a,
+        "mcp start_chat {\"prompt\":\"hi\"}",
+        Duration::from_secs(10),
+    );
+    wait_for_chat(&mut client, third, |node| last_outcome(node).is_some());
+    client.close_terminal(a).unwrap();
+    let alive: Vec<TerminalId> = (client.list_terminals().unwrap().iter())
+        .map(|terminal| terminal.id)
+        .collect();
+    assert!(alive.contains(&kid), "{alive:?}");
+    assert!(!alive.contains(&third) && !alive.contains(&a), "{alive:?}");
+}
+
+#[test]
+fn start_chats_starts_several_and_wait_for_chats_sums_them_up_for_all_or_the_first() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let (one, two) = (TerminalId(a.0 + 1), TerminalId(a.0 + 2));
+    let file = daemon.dir.path().join("made.txt");
+    let chats = serde_json::json!({ "chats": [
+        { "prompt": format!("disk {}\nmade\n", file.display()) },
+        { "prompt": "wait" },
+    ] });
+    let prompt = format!(
+        "mcp start_chats {chats}\n\
+         mcp wait_for_chats {{\"chats\":[{one},{two}],\"mode\":\"first\",\"timeout\":10}}\n\
+         mcp wait_for_chats {{\"chats\":[{one},{two}],\"timeout\":0.3}}"
+    );
+    let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(20)));
+    for kid in [one, two] {
+        assert!(
+            words.contains(&format!("Started chat {kid} (claude, as general)")),
+            "{words}"
+        );
+    }
+    assert!(
+        words.contains("wait_for_chats waits for their answers"),
+        "{words}"
+    );
+    // The first to finish: its answer and what it changed; the other, how
+    // far it's got.
+    assert!(
+        words.contains("wait_for_chats: 2 chats: 1 finished, 1 not yet."),
+        "{words}"
+    );
+    assert!(
+        words.contains(&format!(
+            "Chat {one} (general · Claude Code · Haiku): finished, after "
+        )),
+        "{words}"
+    );
+    assert!(words.contains("done\nFiles changed: made.txt"), "{words}");
+    assert!(
+        words.contains(&format!(
+            "Chat {two} (general · Claude Code · Haiku): still working, after "
+        )),
+        "{words}"
+    );
+    // Waiting for all of them, it times out, and says so.
+    assert!(
+        words.contains("wait_for_chats: The wait timed out.\n2 chats: 1 finished, 1 not yet."),
+        "{words}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "made\n");
+    // The whole turns stay readable.
+    let read = format!("mcp read_chat {{\"chat\":{one}}}");
+    let read = last_words(&ask_for(&mut client, a, &read, Duration::from_secs(10)));
+    assert!(read.contains("[tool: Write "), "{read}");
+    // Too many at once are refused whole: two more would be five working.
+    let more = serde_json::json!({ "chats": [{ "prompt": "wait" }, { "prompt": "wait" },
+                                             { "prompt": "wait" }, { "prompt": "wait" }] });
+    let words = last_words(&ask_for(
+        &mut client,
+        a,
+        &format!("mcp start_chats {more}"),
+        Duration::from_secs(10),
+    ));
+    assert!(
+        words.contains("start_chats: failed: 1 chats started by agents are working already"),
+        "{words}"
+    );
+    assert_eq!(card_of(&mut client, a).len(), 2, "none started");
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one profile after another, each its own"
+)]
+fn a_profile_gives_a_chat_its_role_model_and_limits_and_agents_toml_adds_profiles() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let log = dir.join("claude.log");
+        config.agents.custom = vec![
+            custom_agent(
+                "claude",
+                vec![fake_agent().into(), "--log".into(), log.into()],
+            ),
+            custom_agent("codex", vec![fake_agent().into(), "--codex".into()]),
+        ];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        let file = dir.join("agents.toml");
+        std::fs::write(
+            &file,
+            "[profiles.deep]\nabout = \"thinks hard\"\nmodel = \"sonnet\"\n\
+             limits = \"no-commands\"\nprompt = \"You think deeply.\"\n",
+        )
+        .unwrap();
+        config.agents.file = Some(file);
+    });
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    // The user's own profile: its model, and its role before the first
+    // message, with what it may not do.
+    let deep = TerminalId(a.0 + 1);
+    let start = serde_json::json!({ "profile": "deep", "prompt": "settings" });
+    let prompt = format!("mcp start_chat {start}\nmcp wait_for_chat {{\"chat\":{deep}}}");
+    let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
+    assert!(
+        words.contains(&format!(
+            "Started chat {deep} (claude, as deep, no-commands)"
+        )),
+        "{words}"
+    );
+    assert!(words.contains(" sonnet\n"), "{words}");
+    let roles = carried(&daemon, "claude.log", "s2");
+    assert!(
+        roles
+            .iter()
+            .any(|role| role.contains("as its \"deep\" profile")
+                && role.contains("You think deeply.")
+                && role.contains("Don't run commands")),
+        "{roles:#?}"
+    );
+    // clackatoo's tools that run commands refuse it.
+    let run = serde_json::json!({ "chat": deep.0,
+                                  "message": "mcp run_in_terminal {\"command\":\"true\"}" });
+    let prompt = format!("mcp send_to_chat {run}\nmcp wait_for_chat {{\"chat\":{deep}}}");
+    let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
+    assert!(
+        words.contains("this chat is no-commands: it runs no commands"),
+        "{words}"
+    );
+    assert_eq!(tab_contents(&mut client).len(), 1, "no terminal opened");
+
+    // explore: read-only, so Claude Code loses its tools that change
+    // files or run commands, and clackatoo refuses its writes.
+    let explore = TerminalId(a.0 + 2);
+    let start = serde_json::json!({ "profile": "explore", "prompt": "meta" });
+    let prompt = format!("mcp start_chat {start}\nmcp wait_for_chat {{\"chat\":{explore}}}");
+    let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
+    assert!(
+        words.contains(&format!(
+            "Started chat {explore} (claude, as explore, read-only)"
+        )),
+        "{words}"
+    );
+    assert!(
+        words.contains(
+            r#""disallowedTools":["Bash","BashOutput","KillShell","Agent","Task","Edit""#
+        ),
+        "{words}"
+    );
+    let file = daemon.dir.path().join("notes.txt");
+    std::fs::write(&file, "hi\n").unwrap();
+    for (attempt, said) in [("write", "this chat is read-only, so"), ("edit", "")] {
+        let message = format!("{attempt} {}\nbye\n", file.display());
+        let send = serde_json::json!({ "chat": explore.0, "message": message });
+        let prompt = format!("mcp send_to_chat {send}\nmcp wait_for_chat {{\"chat\":{explore}}}");
+        let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
+        assert!(words.contains(said), "{attempt}: {words}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "hi\n",
+        "never written"
+    );
+    let node = chat_now(&mut client, explore);
+    assert!(
+        node.question.is_none(),
+        "the edit's question was turned down"
+    );
+    assert!(
+        node.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("this chat is read-only")),
+        "{:?}",
+        node.notice
+    );
+    // A chat it starts is read-only too, whatever its profile.
+    let grandchild = TerminalId(a.0 + 3);
+    let start = serde_json::json!({ "chat": explore.0, "message":
+        format!("mcp start_chat {{\"prompt\":\"meta\"}}\nmcp wait_for_chat {{\"chat\":{grandchild}}}") });
+    let prompt = format!("mcp send_to_chat {start}\nmcp wait_for_chat {{\"chat\":{explore}}}");
+    let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
+    assert!(
+        words.contains(&format!(
+            "Started chat {grandchild} (claude, as general, read-only)"
+        )),
+        "{words}"
+    );
+
+    // With Codex, explore takes its cheapest model, and its Read-only
+    // mode, whose sandbox holds.
+    let codex = TerminalId(a.0 + 4);
+    let start = serde_json::json!({ "profile": "explore", "agent": "codex", "prompt": "settings" });
+    let prompt = format!("mcp start_chat {start}\nmcp wait_for_chat {{\"chat\":{codex}}}");
+    let words = last_words(&ask_for(&mut client, a, &prompt, Duration::from_secs(10)));
+    assert!(words.contains("read-only gpt-6-luna"), "{words}");
+    let card = card_of(&mut client, a);
+    let entry = (card.iter()).find(|entry| entry.chat == codex).unwrap();
+    assert_eq!(
+        (entry.agent.as_str(), entry.model.as_deref()),
+        ("Codex", Some("6 Luna"))
+    );
+    // A profile there isn't is refused, saying which there are.
+    let start = serde_json::json!({ "profile": "nope", "prompt": "x" });
+    let words = last_words(&ask_for(
+        &mut client,
+        a,
+        &format!("mcp start_chat {start}"),
+        Duration::from_secs(10),
+    ));
+    assert!(
+        words.contains(
+            "there's no profile called nope: the profiles are explore, plan, general, deep"
+        ),
+        "{words}"
+    );
+}
+
+#[test]
+fn a_chat_finished_in_the_background_lets_its_session_go_and_opens_it_again_when_asked() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let log = dir.join("claude.log");
+        config.agents.custom = vec![custom_agent(
+            "claude",
+            vec![fake_agent().into(), "--log".into(), log.into()],
+        )];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        config.park_after = Duration::from_millis(200);
+    });
+    let mut client = daemon.client();
+    let a = start_tooled_chat(&mut client, AgentTools::Allow);
+    let kid = TerminalId(a.0 + 1);
+    let prompt =
+        format!("mcp start_chat {{\"prompt\":\"hi\"}}\nmcp wait_for_chat {{\"chat\":{kid}}}");
+    ask_for(&mut client, a, &prompt, Duration::from_secs(10));
+    // Idle a while, its session goes, and Claude Code's process with it.
+    wait_for_log(&daemon, "claude.log", "closed s2");
+    // Opened, it keeps its session; its next message opens it again, as
+    // it was.
+    client.chat(a, ChatAction::Open { chat: kid }).unwrap();
+    let more = format!(
+        "mcp send_to_chat {{\"chat\":{kid},\"message\":\"again\"}}\n\
+         mcp wait_for_chat {{\"chat\":{kid}}}"
+    );
+    let words = last_words(&ask_for(&mut client, a, &more, Duration::from_secs(10)));
+    assert!(words.contains("echo: again"), "{words}");
+    wait_for_log(&daemon, "claude.log", "resumed s2");
+    std::thread::sleep(Duration::from_millis(600));
+    let log = agent_log(&daemon, "claude.log");
+    assert_eq!(log.matches("closed s2").count(), 1, "{log}");
+}
+
+/// A chat on Haiku hands two questions to two explorers at once, and gets
+/// their answers back in one summary. Set `CLACKATOO_REAL_AGENT` to Claude
+/// Code's adapter's command, as for
+/// `a_real_agent_answers_and_asks_before_running_commands`.
+#[test]
+#[ignore = "talks to a real model: set CLACKATOO_REAL_AGENT and run with --ignored"]
+fn a_real_haiku_chat_fans_out_to_two_explorers_and_gets_one_summary() {
+    let Ok(command) = std::env::var("CLACKATOO_REAL_AGENT") else {
+        panic!("set CLACKATOO_REAL_AGENT to the adapter's command");
+    };
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let claude = ["env", "ANTHROPIC_MODEL=haiku"]
+            .into_iter()
+            .chain(command.split_whitespace())
+            .map(Into::into)
+            .collect();
+        config.agents.custom = vec![custom_agent("claude", claude)];
+        config.mcp = Some(vec![fake_agent().into(), "mcp".into()]);
+        std::fs::write(dir.join("a.txt"), "the alpha line\nmore\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "the beta line\nmore\n").unwrap();
+    });
+    let mut client = daemon.client();
+    let parent = start_new_chat(
+        &mut client,
+        NewAgent {
+            size: Size::new(80, 24).unwrap(),
+            cwd: Some(daemon.dir.path().display().to_string()),
+            agent: None,
+            tools: AgentTools::Allow,
+            task: false,
+        },
+    );
+    let prompt = "Call clackatoo's start_chats tool once, starting two chats with profile \
+                  explore: one asked for the first line of a.txt, the other for the first line \
+                  of b.txt, both in this directory. Then call wait_for_chats once with both \
+                  chats' numbers. Then reply with the two first lines, one a line, and nothing \
+                  else.";
+    let started = Instant::now();
+    let node = ask_for(&mut client, parent, prompt, Duration::from_mins(4));
+    let took = started.elapsed();
+    let words = last_words(&node);
+    assert!(words.contains("the alpha line"), "{node:#?}");
+    assert!(words.contains("the beta line"), "{node:#?}");
+    let tools: Vec<&str> = (node.turns.last().unwrap().items.iter())
+        .filter_map(|item| match item {
+            Item::Tool(called) => Some(called.title.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        tools.iter().any(|title| title.contains("start_chats")),
+        "{tools:?}"
+    );
+    assert!(
+        tools.iter().any(|title| title.contains("wait_for_chats")),
+        "{tools:?}"
+    );
+    let card = node.subagents;
+    assert_eq!(card.len(), 2, "{card:#?}");
+    for entry in &card {
+        assert_eq!(entry.profile.as_deref(), Some("explore"));
+        assert_eq!(entry.status, SubagentStatus::Done, "{entry:#?}");
+        assert!(!entry.shown);
+        let model = entry.model.as_deref().unwrap_or_default();
+        assert!(model.to_lowercase().contains("haiku"), "{entry:#?}");
+    }
+    eprintln!("two explorers, one summary, in {took:?}: {words}");
 }
 
 // --- Boards ----------------------------------------------------------------
@@ -8874,16 +9275,18 @@ fn an_agent_is_told_when_to_hand_work_to_another_chat() {
     let with = start_tooled_chat(&mut client, AgentTools::Ask);
     let told = told_on_connecting(&daemon, with);
     assert!(
-        told.contains("Claude Code's Task tool, suits quick, throwaway research within this turn"),
+        told.contains(
+            "For all subagent work, use start_chat, or start_chats for several at once, with a \
+             profile, rather than a subagent tool of your own, such as Claude Code's Task tool"
+        ),
         "{told}"
     );
-    for reason in [
-        "the user may want to watch or steer",
-        "should outlive this turn",
-        "needs another agent",
-        "edits files the user will review",
+    for profile in [
+        "explore: fast, cheap research",
+        "plan: a strong model",
+        "general: ",
     ] {
-        assert!(told.contains(reason), "{reason}: {told}");
+        assert!(told.contains(profile), "{profile}: {told}");
     }
     // Without the Task tool, it isn't told of it.
     let without = start_new_chat(
@@ -8898,7 +9301,10 @@ fn an_agent_is_told_when_to_hand_work_to_another_chat() {
     );
     let told = told_on_connecting(&daemon, without);
     assert!(!told.contains("Task"), "{told}");
-    assert!(told.contains("To hand work on, use start_chat"), "{told}");
+    assert!(
+        told.contains("For all subagent work, use start_chat, or start_chats"),
+        "{told}"
+    );
 }
 
 #[test]
@@ -9351,7 +9757,9 @@ fn a_chat_an_agent_started_keeps_its_place_and_its_messages_after_a_move() {
     let start = "mcp start_chat {\"prompt\":\"hi kid\"}";
     client.chat(a, ChatAction::Send(start.to_owned())).unwrap();
     wait_for_chat(&mut client, a, |node| last_outcome(node).is_some());
-    let kid = tab_contents(&mut client)[1].terminal().unwrap();
+    // In the background, it moves as a chat in a pane does.
+    assert_eq!(tab_contents(&mut client).len(), 1);
+    let kid = TerminalId(a.0 + 1);
     wait_for_chat(&mut client, kid, |node| last_outcome(node).is_some());
 
     switch_to(&mut client, kid, "codex", None);

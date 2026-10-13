@@ -123,7 +123,7 @@ pub(crate) const NEWS: &[News] = &[
         id: "claude-task",
         date: "2026-10-13",
         lesson: "agents",
-        what: ":set noclaudetask takes away Claude Code's hidden Task helpers, so it hands work on in chats you can watch",
+        what: "Claude Code's hidden Task helpers are off unless you :set claudetask, so it hands work on in chats you can watch",
     },
     News {
         id: "remote-reconnect",
@@ -136,6 +136,12 @@ pub(crate) const NEWS: &[News] = &[
         date: "2026-10-13",
         lesson: "remote",
         what: "Connect to… in the app launcher, :connect and Ctrl+B r pick a machine to open a window on",
+    },
+    News {
+        id: "subagents",
+        date: "2026-10-13",
+        lesson: "agents",
+        what: "Subagents: background chats agents start, several at once, as profiles like explore, shown as a card",
     },
 ];
 

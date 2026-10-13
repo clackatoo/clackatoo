@@ -63,6 +63,7 @@ impl TestDaemon {
             mcp: None,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
+            park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             boards: None,
         };
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");

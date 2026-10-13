@@ -6,6 +6,7 @@
 //! width, as they come into view, and again only when they change, as
 //! the turn being answered does, or are opened or folded.
 
+mod agents;
 mod cards;
 mod fold;
 mod select;
@@ -105,6 +106,15 @@ pub(super) const PROMPT: usize = 0;
 pub(super) const FOLD: usize = 1;
 /// Item `i` of a turn is its piece `ITEMS + i`.
 pub(super) const ITEMS: usize = 2;
+/// The card for the chats its agent started is its last piece: line 0 is
+/// the card's own, and line `n` the `n`th chat's.
+pub(super) const AGENTS: usize = usize::MAX;
+
+/// Whether `piece` is a line that opens and folds, rather than text the
+/// conversation says: what's selected and copied leaves it out.
+pub(super) fn control(piece: usize) -> bool {
+    piece == FOLD || piece == AGENTS
+}
 
 /// The turns, laid out for one width, kept while they stay the same.
 ///
@@ -144,6 +154,9 @@ pub(super) struct TurnSlot {
     /// The line its work folds under, laid out: what it says changes as
     /// the turn goes on.
     header: Option<Laid>,
+    /// The card for the chats its agent started, laid out, if it started
+    /// any: what it says changes as they go on.
+    agents: Option<agents::AgentsLaid>,
 }
 
 /// A turn, laid out.
@@ -391,6 +404,7 @@ impl ChatView {
         self.arrange(fonts, m, column);
         let shown = in_view(&self.cache.bounds, self.scroll, self.scroll + view_height);
         self.label_folds(fonts, m, self.near());
+        self.label_agents(fonts, m, self.near());
         let clip = [origin[0], origin[1], size[0], view_height];
         let top = origin[1] - self.scroll;
         let mut canvas = Canvas {
@@ -532,6 +546,7 @@ impl ChatView {
             if !near && let Some(slot) = cache.turns.get_mut(index) {
                 slot.laid = None;
                 slot.header = None;
+                slot.agents = None;
             }
             near
         });
@@ -670,6 +685,16 @@ impl ChatView {
             laid.spans.push(Span::of(Piece::Item(key), y, piece.height));
             y += piece.height;
             laid.pieces.insert(key, piece);
+        }
+        // The chats its agent started, as a card under its work.
+        let started = self.subagents_in(index).len();
+        if started > 0 {
+            if !laid.spans.is_empty() {
+                y += m.em(0.6);
+            }
+            let height = self.agents_height(m, index, started);
+            laid.spans.push(Span::of(Piece::Agents, y, height));
+            y += height;
         }
         y = self.lay_out_ending(fonts, (m, column), (index, turn), &mut laid, y);
         laid.height = y;
@@ -830,6 +855,7 @@ impl ChatView {
                     drawn.note_laid(prompt, at, (index, PROMPT));
                 }
                 Piece::Fold => self.draw_fold(canvas, m, index, [origin[0], top], drawn),
+                Piece::Agents => self.draw_agents(canvas, m, index, [origin[0], top], drawn),
                 Piece::Item(piece) => {
                     if let Some(item) = laid.pieces.get(&piece) {
                         draw_laid(canvas, m, item, [origin[0], top], column);
@@ -1713,6 +1739,8 @@ enum Piece {
     Files,
     /// Which chat sent its message, if another agent did.
     Badge,
+    /// The card for the chats its agent started.
+    Agents,
 }
 
 impl Span {

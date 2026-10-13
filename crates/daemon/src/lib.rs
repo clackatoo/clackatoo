@@ -29,6 +29,7 @@ pub mod launch;
 mod lsp;
 pub mod mcp;
 mod memory;
+mod profiles;
 mod pty;
 mod quic;
 pub mod remote;
@@ -96,6 +97,10 @@ pub struct DaemonConfig {
     /// How long an agent asked what models it has, for a chat's model
     /// menu, has to say, before it's given up on and stopped.
     pub probe_wait: std::time::Duration,
+    /// How long a chat an agent started, in the background, keeps its
+    /// session once it has finished, before letting it go until its next
+    /// message.
+    pub park_after: std::time::Duration,
     /// For tests: a file a rename's thread waits for once it has written
     /// the new text of the files not open beside them, before they're put
     /// in place, so a test can act while it's under way. `None`, but in
@@ -122,6 +127,13 @@ pub const DEFAULT_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_s
 /// How long an agent asked what models it has gets to say, unless the
 /// daemon is told otherwise.
 pub const DEFAULT_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long a chat an agent started keeps its session once it has
+/// finished in the background, unless the daemon is told otherwise.
+/// Claude Code's adapter runs a process of about 250 MB for each
+/// session; opening it again takes about half a second, with the chat's
+/// next message.
+pub const DEFAULT_PARK_AFTER: std::time::Duration = std::time::Duration::from_mins(2);
 
 /// The UDP ports a daemon uses unless told otherwise: mosh's, so a
 /// firewall opened for mosh lets clackatoo through too.
@@ -188,6 +200,7 @@ impl DaemonConfig {
             server_idle: DEFAULT_SERVER_IDLE,
             prompt_wait: DEFAULT_PROMPT_WAIT,
             probe_wait: DEFAULT_PROBE_WAIT,
+            park_after: DEFAULT_PARK_AFTER,
             rename_gate: None,
             trash: data_dir().map(|dir| dir.join("Trash")),
             boards: match non_empty("CLACKATOO_BOARDS") {

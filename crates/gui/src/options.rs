@@ -439,11 +439,12 @@ options! {
     /// tools. The chat's Tools setting changes it later.
     agenttools("agt"): AgentTools = AgentTools::Ask;
     /// A new chat with Claude Code keeps Claude Code's own Task tool,
-    /// which runs helpers you don't see, for quick research inside one
-    /// turn. Off, Claude hands work on only with clackatoo's
-    /// `start_chat`, in chats beside it that you can watch and steer.
-    /// Other agents have no Task tool.
-    claudetask("ct"): bool = true;
+    /// which runs helpers you don't see inside one turn. Off, as it is
+    /// unless you turn it on, Claude hands work on as every agent does,
+    /// with clackatoo's `start_chat` and `start_chats`, in chats you see
+    /// as cards and can open, steer and undo. Other agents have no Task
+    /// tool.
+    claudetask("ct"): bool = false;
     /// About the most of a conversation, in tokens, a chat tells an agent
     /// it moves to, as the model menu moves it from Claude Code to Codex,
     /// say: the newest turns whole, older ones a line each. An agent it

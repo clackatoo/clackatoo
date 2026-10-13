@@ -33,8 +33,10 @@ use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
 mod relations;
+mod subagent;
 
 pub(crate) use relations::{Cause, MAX_INBOX, Message, Relations};
+pub(crate) use subagent::{Wanted, role_for};
 
 /// The most characters of a title the agent gives a conversation that a
 /// chat keeps, for its tab.
@@ -92,10 +94,19 @@ const TOOLS_VALUES: [(AgentTools, &str, &str, &str); 3] = [
 /// Code reads it only as a session opens.
 const TASK_SETTING: &str = "clackatoo.task";
 
+/// The ID a chat started as a profile keeps, with the values chosen, the
+/// profile's name under (see [`crate::profiles`]).
+const PROFILE_SETTING: &str = "clackatoo.profile";
+
+/// The ID a chat keeps, with the values chosen, what it may do beyond its
+/// agent's own settings under, by [`Limits`](crate::profiles::Limits)'s
+/// names, so each session opens with them again.
+const LIMITS_SETTING: &str = "clackatoo.limits";
+
 /// Whether the setting with `id` is the chat's own, kept whichever agent
 /// it talks to, rather than one of an agent's.
 fn chat_wide(id: &str) -> bool {
-    id == TOOLS_SETTING || id == TASK_SETTING
+    [TOOLS_SETTING, TASK_SETTING, PROFILE_SETTING, LIMITS_SETTING].contains(&id)
 }
 
 /// The most questions a chat keeps waiting. Past it, a tool's question is
@@ -139,6 +150,9 @@ pub(crate) enum Choices {
 pub(crate) enum Action {
     /// Send the agent this message.
     Prompt(String),
+    /// Send the agent this message, after `role`, which says what it's
+    /// started as: the first message of a chat started as a profile.
+    Briefed { role: String, text: String },
     /// Send the agent this message, after a digest of the turns from
     /// `from` up to `to`, which its session hasn't seen, as the chat was
     /// with another agent then.
@@ -267,6 +281,12 @@ pub(crate) struct HostedChat {
     /// with a digest is answered: until it is, without failing, the next
     /// message carries the digest again.
     heard: Option<usize>,
+    /// What it's started as, to go before its first message, if it was
+    /// started as a profile with a role.
+    role: Option<String>,
+    /// The settings it was started wanting, to choose as its first
+    /// session opens.
+    wanted: Option<Wanted>,
 }
 
 /// A session a chat had with another agent, which it can go back to.
@@ -401,6 +421,8 @@ impl HostedChat {
             carry: None,
             plan_by: None,
             heard: None,
+            role: None,
+            wanted: None,
         }
     }
 
@@ -704,7 +726,8 @@ impl HostedChat {
             ChatAction::Undo { .. }
             | ChatAction::Redo { .. }
             | ChatAction::Switch { .. }
-            | ChatAction::LearnModels => {}
+            | ChatAction::LearnModels
+            | ChatAction::Open { .. } => {}
             // Only a value the agent offers is kept, and asked for.
             ChatAction::Set { setting, value } => {
                 if self.set_value(&setting, &value) {
@@ -942,9 +965,12 @@ impl HostedChat {
         {
             self.chosen.push((setting.id.clone(), mode));
         }
+        if let Some(wanted) = self.wanted.take() {
+            self.choose_wanted(wanted);
+        }
         let mut actions = Vec::new();
         for (setting, value) in self.chosen.clone() {
-            if setting == TOOLS_SETTING || setting == TASK_SETTING {
+            if chat_wide(&setting) {
                 continue;
             }
             let differs = (self.node.settings.iter())
@@ -969,6 +995,10 @@ impl HostedChat {
     /// without failing; a message sent with nothing to carry is seen as
     /// it's sent.
     fn prompt(&mut self, text: String) -> Action {
+        if let Some(role) = self.role.take() {
+            self.known = self.node.turns.len();
+            return Action::Briefed { role, text };
+        }
         let to = self.node.turns.len().saturating_sub(1);
         if self.known < to {
             self.heard = Some(self.node.turns.len());
@@ -1036,7 +1066,14 @@ impl HostedChat {
         if to.name == self.agent {
             return None;
         }
-        let (tools, task) = (self.tools(), self.task());
+        // The chat's own settings go with it to every agent: what it may
+        // do with clackatoo's tools, whether it keeps Claude Code's Task
+        // tool, which a session with Claude Code opens with, and the
+        // profile it was started as, with its limits.
+        let wide: Vec<(String, String)> = (self.chosen.iter())
+            .filter(|(id, _)| chat_wide(id))
+            .cloned()
+            .collect();
         let own = self.agent_settings();
         let of = |kind| own.iter().find(|setting| setting.kind == kind).cloned();
         let (mode, effort) = (of(SettingKind::Mode), of(SettingKind::Effort));
@@ -1078,16 +1115,11 @@ impl HostedChat {
                 (to.starting_mode.clone()).filter(|_| self.relations.parent.is_none());
             settings.map(<[Setting]>::to_vec).unwrap_or_default()
         };
-        // The chat's own settings go with it to every agent: what it may
-        // do with clackatoo's tools, and whether it keeps Claude Code's
-        // Task tool, which a session with Claude Code opens with.
         self.chosen.retain(|(id, _)| !chat_wide(id));
-        self.chosen
-            .push((TOOLS_SETTING.to_owned(), tools_value(tools).to_owned()));
-        self.chosen.push((
-            TASK_SETTING.to_owned(),
-            if task { "on" } else { "off" }.to_owned(),
-        ));
+        self.chosen.extend(wide);
+        if !resumed {
+            self.keep_read_only();
+        }
         let model_name = model.as_ref().and_then(|value| {
             let setting = shown
                 .iter()
@@ -1312,6 +1344,19 @@ impl HostedChat {
     /// Whether the chat's session is open.
     pub(crate) fn is_connected(&self) -> bool {
         self.link == Link::Open
+    }
+
+    /// Lets its session go while it has nothing to do, if it's open and
+    /// nothing waits on it, returning it for the server to close. The
+    /// chat keeps its ID: its next message opens it again, as after an
+    /// upgrade.
+    pub(crate) fn park(&mut self) -> Option<String> {
+        let idle = !self.answering() && self.asking.is_empty() && self.relations.inbox.is_empty();
+        if self.link != Link::Open || !idle {
+            return None;
+        }
+        self.link = Link::Closed;
+        self.session.clone()
     }
 
     /// The chat's agent runs, but not from where clackatoo installs it:
@@ -2193,7 +2238,7 @@ fn tools_value(tools: AgentTools) -> &'static str {
 }
 
 /// Now, in milliseconds since the Unix epoch.
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {

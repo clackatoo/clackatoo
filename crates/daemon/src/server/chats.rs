@@ -32,7 +32,7 @@ use mio::{Interest, Token};
 
 use super::language::Pipe;
 use super::{Daemon, Hosted, OUTPUT_BUDGET, Orphan, Slot, Source};
-use crate::agent::{Agent, Incoming, Opened, Refused};
+use crate::agent::{Agent, Incoming, Opened, Opening, Refused};
 use crate::agents::{self, AgentSpec, Launch, Start};
 use crate::chat::{Action, HostedChat, settings_of};
 
@@ -79,6 +79,10 @@ pub(super) struct Agents {
     /// How many tokens each agent's context holds, by its name, as its
     /// sessions last said, to keep a digest for it to a quarter of that.
     context: HashMap<String, u64>,
+    /// The chats in the background that have finished, and when each
+    /// lets its session go if it's still idle (see
+    /// [`Daemon::park_idle`]).
+    parking: BTreeMap<TerminalId, Instant>,
 }
 
 /// How long an agent that couldn't say what models it has isn't asked
@@ -106,8 +110,7 @@ impl Daemon {
     /// Starts a chat with the agent asked for, or the default, working in
     /// the directory asked for, or the one the pane `beside` is in.
     pub(super) fn new_chat(&mut self, request: NewAgent, beside: Option<PaneId>) -> TerminalId {
-        let id = TerminalId(self.next_id);
-        self.next_id += 1;
+        let id = self.next_terminal();
         let cwd = request
             .cwd
             .or_else(|| beside.and_then(|pane| self.working_directory(pane)))
@@ -116,10 +119,24 @@ impl Daemon {
         let spec = self.agent_spec(name);
         let chat = HostedChat::new(id, request.size, cwd, &spec, request.tools, request.task);
         log::info!("chat {id} started, with {name}");
+        self.start_hosted_chat(chat);
+        id
+    }
+
+    /// The ID the next terminal or chat gets.
+    pub(super) fn next_terminal(&mut self) -> TerminalId {
+        let id = TerminalId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    /// Adds `chat`, made with an ID from [`next_terminal`](Self::next_terminal),
+    /// and gets it a session.
+    pub(super) fn start_hosted_chat(&mut self, chat: HostedChat) {
+        let id = chat.info().id;
         self.add_chat(chat);
         self.offer_providers(Some(id));
         self.connect(id);
-        id
     }
 
     /// The agent called `name`, as it's set up now, or else one by that
@@ -184,15 +201,20 @@ impl Daemon {
             return;
         };
         let Some(chat) = self.chat(id) else { return };
-        let (cwd, session, task) = (
+        let (cwd, session, task, limits) = (
             chat.working_directory().to_owned(),
             chat.session().map(str::to_owned),
             chat.task(),
+            chat.limits(),
         );
-        let tools = self.tools_server(id);
+        let opening = Opening {
+            tools: self.tools_server(id),
+            task,
+            limits,
+        };
         if let Some(slot) = self.agents.running.get_mut(&agent) {
             slot.agent
-                .open_session(id, &cwd, session.as_deref(), tools, task);
+                .open_session(id, &cwd, session.as_deref(), opening);
         }
         self.flush_agent(agent);
     }
@@ -334,6 +356,9 @@ impl Daemon {
                 (Action::Install, _, _) => self.install_agent(id),
                 (Action::Prompt(text), Some(slot), Some(session)) => {
                     slot.agent.prompt(id, &session, &[&text]);
+                }
+                (Action::Briefed { role, text }, Some(slot), Some(session)) => {
+                    slot.agent.prompt(id, &session, &[&role, &text]);
                 }
                 (Action::Carry { text, from, to }, Some(_), Some(session)) => {
                     let files = self.agent_files.log.changed_in(id, from..to);
@@ -494,11 +519,15 @@ impl Daemon {
                     return;
                 };
                 // About clackatoo's own tools, which ask the user
-                // themselves.
-                if let Some(allow) = chat.about_own_tools(&tool, &options) {
+                // themselves, or ruled out by the chat's limits: answered
+                // at once.
+                let answered = (chat.about_own_tools(&tool, &options))
+                    .or_else(|| chat.turned_down(&tool, &options));
+                if let Some(option) = answered {
                     if let Some(slot) = self.agents.running.get_mut(&agent) {
-                        slot.agent.answer_permission(&request, Some(&allow));
+                        slot.agent.answer_permission(&request, Some(&option));
                     }
+                    self.collect_damage(id);
                     return;
                 }
                 chat.ask(request, &tool, &options);
@@ -852,11 +881,70 @@ impl Daemon {
     pub(super) fn agent_chores(&mut self) {
         self.take_agent_installs();
         self.time_out_probes();
+        self.park_idle();
+    }
+
+    /// The chat `chat`, an agent's, lets its session go in a while if
+    /// `idle`, having finished in the background; or else keeps it.
+    pub(super) fn park_later(&mut self, chat: TerminalId, idle: bool) {
+        if idle {
+            (self.agents.parking).insert(chat, Instant::now() + self.config.park_after);
+        } else {
+            self.agents.parking.remove(&chat);
+        }
+    }
+
+    /// When the next chat in the background lets its session go.
+    fn next_park_due(&self) -> Option<Instant> {
+        self.agents.parking.values().min().copied()
+    }
+
+    /// Lets the sessions go of the chats in the background that have been
+    /// idle a while, where their agent can close a session: they're opened
+    /// again with their next message. Cheap when none is due.
+    fn park_idle(&mut self) {
+        let now = Instant::now();
+        if self.next_park_due().is_none_or(|due| due > now) {
+            return;
+        }
+        let due: Vec<TerminalId> = (self.agents.parking.iter())
+            .filter(|(_, due)| **due <= now)
+            .map(|(&chat, _)| chat)
+            .collect();
+        for chat in due {
+            self.agents.parking.remove(&chat);
+            let Some(agent) = self.agent_of(chat) else {
+                continue;
+            };
+            let closes =
+                (self.agents.running.get(&agent)).is_some_and(|slot| slot.agent.can_close());
+            let background = self.workspaces.get().pane_showing(chat).is_none();
+            if !closes || !background {
+                continue;
+            }
+            let Some(session) = self.chat(chat).and_then(HostedChat::park) else {
+                continue;
+            };
+            log::info!("chat {chat}: its session is let go while it's idle in the background");
+            if let Some(slot) = self.agents.running.get_mut(&agent) {
+                slot.agent.close_session(&session);
+            }
+            self.flush_agent(agent);
+        }
+    }
+
+    /// When the agents next need the loop's attention: an agent asked for
+    /// its models is to have said, or a chat in the background lets its
+    /// session go.
+    pub(super) fn next_agent_due(&self) -> Option<Instant> {
+        (self.next_probe_due().into_iter())
+            .chain(self.next_park_due())
+            .min()
     }
 
     /// When the next agent asked for its models is to have said, if one
     /// is being asked.
-    pub(super) fn next_probe_due(&self) -> Option<Instant> {
+    fn next_probe_due(&self) -> Option<Instant> {
         (self.agents.learning.values().min()).map(|asked| *asked + self.config.probe_wait)
     }
 
@@ -901,6 +989,7 @@ impl Daemon {
         for waiting in self.agents.installing.values_mut() {
             waiting.retain(|&waiting| waiting != id);
         }
+        self.agents.parking.remove(&id);
         let Some(agent) = self.agents.named(chat.agent()) else {
             return;
         };

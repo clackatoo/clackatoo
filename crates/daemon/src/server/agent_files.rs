@@ -272,6 +272,18 @@ impl Daemon {
         content: &str,
     ) -> Result<(), (i64, String)> {
         let (chat, path) = self.agent_path(name, session, path)?;
+        if self
+            .chat(chat)
+            .is_some_and(|chat| chat.limits().read_only())
+        {
+            return Err((
+                FAILED,
+                format!(
+                    "this chat is read-only, so {} wasn't written",
+                    path.display()
+                ),
+            ));
+        }
         let (turn, tool) = (self.chat(chat))
             .map(|chat| chat.working_on())
             .unwrap_or_default();
@@ -895,6 +907,7 @@ pub(super) mod tests {
             server_idle: std::time::Duration::ZERO,
             prompt_wait: crate::DEFAULT_PROMPT_WAIT,
             probe_wait: crate::DEFAULT_PROBE_WAIT,
+            park_after: crate::DEFAULT_PARK_AFTER,
             rename_gate: None,
             trash: Some(dir.join("Trash")),
             boards: None,

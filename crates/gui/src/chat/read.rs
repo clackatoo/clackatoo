@@ -29,7 +29,7 @@ use clackatoo_protocol::{ChatAction, ChatNode, Item};
 use winit::keyboard::{Key, NamedKey};
 
 use super::card::Card;
-use super::paint::{FOLD, How, ITEMS, PROMPT, Picked, Position, TextKey};
+use super::paint::{AGENTS, FOLD, How, ITEMS, PROMPT, Picked, Position, TextKey, control};
 use super::{ChatView, Input};
 use crate::input::KeyPress;
 use crate::pane::{Copy, Selection};
@@ -125,11 +125,16 @@ impl ChatView {
                 }
             }
             (_, Key::Named(NamedKey::Enter)) => {
-                let Some(cursor) = self.cursor.filter(|cursor| cursor.text.piece == FOLD) else {
+                let Some(cursor) = self.cursor.filter(|cursor| control(cursor.text.piece)) else {
                     self.leave_visual();
                     return (true, true);
                 };
-                self.toggle_fold(cursor.text.turn);
+                let TextKey { turn, piece, part } = cursor.text;
+                match self.agent_on(turn, part).filter(|_| piece == AGENTS) {
+                    Some(chat) => self.queued.push(Input::Act(ChatAction::Open { chat })),
+                    None if piece == AGENTS => self.toggle_agents(turn),
+                    None => self.toggle_fold(turn),
+                }
             }
             (_, Key::Named(NamedKey::Escape)) => self.picked = None,
             (Some('v'), _) => self.visual_key(visual, Selection::Characters),
@@ -308,6 +313,7 @@ impl ChatView {
         let turn = self.node.turns.get(key.turn)?;
         match key.piece {
             PROMPT => Some(turn.prompt.clone()),
+            AGENTS => Some(self.agents_text(key.turn)),
             FOLD => {
                 let alone = ChatNode {
                     turns: vec![turn.clone()],
@@ -634,7 +640,7 @@ impl ChatView {
         };
         let height = self.view_height;
         let in_view = |shown: &&super::paint::Shown| {
-            shown.key.piece != FOLD && shown.at[1] >= 0.0 && shown.at[1] + shown.size[1] <= height
+            !control(shown.key.piece) && shown.at[1] >= 0.0 && shown.at[1] + shown.size[1] <= height
         };
         if self
             .shown

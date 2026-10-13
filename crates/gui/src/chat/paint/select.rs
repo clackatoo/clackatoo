@@ -18,7 +18,10 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::cards::CardLaid;
 use clackatoo_protocol::Item;
 
-use super::{Canvas, FOLD, Laid, Measures, PROMPT, Piece, fold, prompt_origin, rect_at};
+use super::{
+    AGENTS, Canvas, FOLD, Laid, Measures, PROMPT, Piece, agents, control, fold, prompt_origin,
+    rect_at,
+};
 use crate::chat::card::Card;
 use crate::chat::markdown::{self, BlockKind};
 use crate::chat::{Brush, ChatView, Hit, Tone};
@@ -183,9 +186,31 @@ impl ChatView {
         let span = (laid.spans.iter()).find(|span| match span.piece {
             Piece::Prompt => key.piece == PROMPT,
             Piece::Fold => key.piece == FOLD,
+            Piece::Agents => key.piece == AGENTS,
             Piece::Item(piece) | Piece::Card(piece) => key.piece == piece,
             Piece::Note | Piece::Files | Piece::Badge => false,
         })?;
+        if key.piece == AGENTS {
+            let card = slot.agents.as_ref()?;
+            let line = fold::height(m);
+            let laid = match key.part {
+                0 => &card.header,
+                part => &card.rows.get(part - 1)?.1,
+            };
+            let block = laid.blocks.first()?;
+            let left = if key.part == 0 {
+                0.0
+            } else {
+                m.em(agents::INDENT)
+            };
+            let top = span.top + agents::line_top(m, key.part) + (line - laid.height) / 2.0;
+            return Some(TextAt {
+                layout: &block.layout,
+                text: &block.text,
+                at: [left + block.left, top + block.top],
+                kind: None,
+            });
+        }
         if key.piece == FOLD {
             let header = slot.header.as_ref()?;
             let block = header.blocks.first().filter(|_| key.part == 0)?;
@@ -242,6 +267,10 @@ impl ChatView {
                     laid.pieces.get(&PROMPT).map_or(0, |laid| laid.blocks.len()),
                 ),
                 Piece::Fold => add(FOLD, usize::from(slot.header.is_some())),
+                Piece::Agents => add(
+                    AGENTS,
+                    slot.agents.as_ref().map_or(0, |card| 1 + card.rows.len()),
+                ),
                 Piece::Item(piece) => add(
                     piece,
                     laid.pieces.get(&piece).map_or(0, |laid| laid.blocks.len()),
@@ -361,7 +390,7 @@ impl ChatView {
         let mut copied = String::new();
         let mut last: Option<(TextKey, bool)> = None;
         for key in self.turn_texts(turn) {
-            if key < start.text || key > end.text || key.piece == FOLD {
+            if key < start.text || key > end.text || control(key.piece) {
                 continue;
             }
             let Some(text) = self.text(key) else {
@@ -448,7 +477,7 @@ impl ChatView {
         if !within_view && !nearest {
             return None;
         }
-        let texts = self.shown.iter().filter(|shown| shown.key.piece != FOLD);
+        let texts = self.shown.iter().filter(|shown| !control(shown.key.piece));
         let distance = |shown: &&Shown| {
             let [left, top] = shown.at;
             let [wide, high] = shown.size;
@@ -478,7 +507,7 @@ impl ChatView {
         at[1] >= 0.0
             && at[1] < self.view_height
             && (self.shown.iter()).any(|shown| {
-                shown.key.piece != FOLD
+                !control(shown.key.piece)
                     && crate::chat::contains(
                         [shown.at[0], shown.at[1], shown.size[0], shown.size[1]],
                         at,
@@ -548,7 +577,7 @@ impl ChatView {
     ) {
         if let Some((start, end)) = self.picked_range() {
             for shown in &self.shown {
-                if shown.key < start.text || shown.key > end.text || shown.key.piece == FOLD {
+                if shown.key < start.text || shown.key > end.text || control(shown.key.piece) {
                     continue;
                 }
                 let Some(text) = self.text(shown.key) else {
