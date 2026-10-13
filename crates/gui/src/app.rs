@@ -813,7 +813,13 @@ impl App {
         };
         match (asked, self.session.remote()) {
             (UpdateAsked::Here, _) => match &self.updates.program {
-                Some(program) => updates::update(program.clone(), self.session.proxy()),
+                Some(_) if self.updates.running => {
+                    self.desk.say("clackatoo is being updated already".into());
+                }
+                Some(program) => {
+                    self.updates.running = true;
+                    updates::update(program.clone(), updates::Asked::User, self.session.proxy());
+                }
                 None => self
                     .desk
                     .say("this program can't be found, to update it".into()),
@@ -1203,10 +1209,16 @@ impl App {
         let Some(program) = &self.updates.program else {
             return "this program can't be found, to open it again".into();
         };
+        // The build put in place: this one's, or if this is the build an
+        // update kept aside, the one that replaced it.
+        let program = clackatoo_update::install::installed(program);
         let args = reopen_args(std::env::args_os().skip(1), self.session.host());
         log::info!("opening the window again as the new build");
-        let err = std::process::Command::new(program).args(args).exec();
-        format!("couldn't open the window again as the new build: {err}")
+        let err = std::process::Command::new(&program).args(args).exec();
+        format!(
+            "clackatoo is updated, but the window couldn't open again as the new build: {err}. \
+             Open it again yourself."
+        )
     }
 
     /// Opens a new window on the daemon on `host`, as `clackatoo --remote
@@ -1372,8 +1384,10 @@ impl App {
             return;
         };
         let key = &event.logical_key;
-        let enter = matches!(key, Key::Named(NamedKey::Enter));
-        let escape = matches!(key, Key::Named(NamedKey::Escape));
+        // A held key, as Enter from the picker that chose the machine,
+        // never answers a notice that came up meanwhile.
+        let enter = matches!(key, Key::Named(NamedKey::Enter)) && !event.repeat;
+        let escape = matches!(key, Key::Named(NamedKey::Escape)) && !event.repeat;
         match notice {
             Notice::Ask { input, answer, .. } => {
                 if enter || escape {
@@ -1404,15 +1418,21 @@ impl App {
                 self.session.replace_daemon();
             }
             Notice::OtherDaemon { protocol } if enter && *protocol > PROTOCOL_VERSION => {
-                let Some(program) = self.updates.program.clone() else {
-                    self.notice = Some(Notice::Updating {
-                        failed: Some("this program can't be found, to update it".into()),
-                    });
-                    self.request_redraw();
-                    return;
+                let failed = match &self.updates.program {
+                    _ if self.updates.running => Some(
+                        "clackatoo is being updated already, as :update asked: open the window \
+                         again once it's done"
+                            .to_owned(),
+                    ),
+                    None => Some("this program can't be found, to update it".to_owned()),
+                    Some(program) => {
+                        self.updates.running = true;
+                        let proxy = self.session.proxy();
+                        updates::update(program.clone(), updates::Asked::ForDaemon, proxy);
+                        None
+                    }
                 };
-                self.notice = Some(Notice::Updating { failed: None });
-                updates::update(program, self.session.proxy());
+                self.notice = Some(Notice::Updating { failed });
             }
             Notice::Lost { .. } if enter => {
                 self.notice = Some(Notice::Connecting);
@@ -1429,10 +1449,16 @@ impl App {
                 self.session.forget();
                 self.open_picker(Purpose::ThisWindow, Some(why));
             }
+            Notice::Updating { failed: Some(why) } if escape && self.picked.is_some() => {
+                let why = why.clone();
+                self.picked = None;
+                self.session.forget();
+                self.open_picker(Purpose::ThisWindow, Some(why));
+            }
             Notice::OtherDaemon { .. }
             | Notice::Lost { .. }
             | Notice::Connecting
-            | Notice::Updating { failed: Some(_) }
+            | Notice::Updating { .. }
                 if escape =>
             {
                 event_loop.exit();
@@ -2136,8 +2162,9 @@ impl Notice {
                      It speaks protocol {protocol}, and this window speaks \
                      {PROTOCOL_VERSION}."
                 ),
-                "Updating this clackatoo to the latest release (`clackatoo update`) opens \
-                 the window again as the new build."
+                "Update this clackatoo to the latest release, and the window opens again as \
+                 the new build. This machine's own daemon moves onto it too, keeping its \
+                 terminals; its other windows ask to open again."
                     .into(),
                 "  Enter  update, and open the window again\n  Esc    quit".into(),
             ],
@@ -2172,15 +2199,7 @@ impl Notice {
             Self::Updating { failed: None } => {
                 vec!["Updating clackatoo to the latest release…".into()]
             }
-            Self::Updating { failed: Some(why) } => vec![
-                "clackatoo couldn't be updated.".into(),
-                why.clone(),
-                format!(
-                    "The daemon{on_host} may be from a build newer than any release: open a \
-                     window from that build instead."
-                ),
-                "  Esc    quit".into(),
-            ],
+            Self::Updating { failed: Some(why) } => vec![why.clone(), "  Esc    quit".into()],
             Self::Picking => Vec::new(),
             Self::Ask {
                 question,
@@ -2212,6 +2231,23 @@ impl Notice {
     }
 }
 
+/// Why the window can't open again as a new build, after `updated`, run
+/// for a daemon from a newer build on `host`, or this machine's: `None`
+/// if a new build was put in place.
+fn for_daemon_failure(updated: &updates::Updated, host: Option<&str>) -> Option<String> {
+    let on_host = host.map(|host| format!(" on {host}")).unwrap_or_default();
+    match &updated.said {
+        _ if updated.installed => None,
+        Ok(_) => Some(format!(
+            "clackatoo {} is the latest release, and the daemon{on_host} is from a build newer \
+             than that, speaking another protocol. Use a window from the daemon's build, or move \
+             the daemon onto a release.",
+            clackatoo_update::CURRENT
+        )),
+        Err(why) => Some(format!("clackatoo couldn't be updated: {why}")),
+    }
+}
+
 /// The arguments a window started with `args` opens again with, connected
 /// to the daemon on `host`, if it's on another machine: as it was, but a
 /// window that started as the picker of a machine goes to the one picked.
@@ -2228,9 +2264,13 @@ fn reopen_args(
             kept.push(arg);
         }
     }
-    if picker && let Some(host) = host {
-        kept.push("--remote".into());
-        kept.push(host.into());
+    match host {
+        Some(host) if picker => {
+            kept.push("--remote".into());
+            kept.push(host.into());
+        }
+        None if picker => kept.push("--connect-picker".into()),
+        _ => {}
     }
     kept
 }
@@ -2612,20 +2652,19 @@ impl App {
                 let news = self.updates.newer_out(version);
                 self.tell_updates(news);
             }
-            SessionEvent::Updated(outcome)
-                if matches!(self.notice, Some(Notice::Updating { failed: None })) =>
-            {
-                // Updated for a newer daemon: this window opens again as the
-                // new build, in this process, connecting where it did.
-                let why = match outcome {
-                    Ok(_) => self.reopen_as_new_build(),
-                    Err(why) => why,
-                };
+            SessionEvent::Updated(updated) if updated.asked == updates::Asked::ForDaemon => {
+                self.updates.running = false;
+                let why = for_daemon_failure(&updated, self.session.host());
+                // Installed: this window opens again as the new build, in
+                // this process, connecting where it did, even if moving this
+                // machine's daemon onto it failed, which that window says.
+                let why = why.unwrap_or_else(|| self.reopen_as_new_build());
                 self.notice = Some(Notice::Updating { failed: Some(why) });
                 self.request_redraw();
             }
-            SessionEvent::Updated(outcome) => {
-                let said = match outcome {
+            SessionEvent::Updated(updated) => {
+                self.updates.running = false;
+                let said = match updated.said {
                     Ok(said) => {
                         self.updates.updated();
                         said
@@ -2804,8 +2843,34 @@ mod tests {
         // With none picked yet, it's the picker again.
         assert_eq!(
             reopen_args(args(&["--connect-picker"]).into_iter(), None),
-            args(&[])
+            args(&["--connect-picker"])
         );
+    }
+
+    #[test]
+    fn only_a_build_put_in_place_opens_the_window_again() {
+        let updated = |said: Result<&str, &str>, installed| updates::Updated {
+            asked: updates::Asked::ForDaemon,
+            said: said.map(str::to_owned).map_err(str::to_owned),
+            installed,
+        };
+        assert_eq!(
+            for_daemon_failure(&updated(Ok("installed"), true), None),
+            None
+        );
+        // Installed, though this machine's daemon couldn't move onto it.
+        let daemon_failed = updated(Err("the daemon refused"), true);
+        assert_eq!(for_daemon_failure(&daemon_failed, None), None);
+        // Up to date: the daemon is newer than any release, and Enter
+        // again would only open the same build again.
+        let latest = for_daemon_failure(&updated(Ok("up to date"), false), Some("desk")).unwrap();
+        assert!(latest.contains("is the latest release"), "{latest}");
+        assert!(
+            latest.contains("the daemon on desk is from a build newer"),
+            "{latest}"
+        );
+        let failed = for_daemon_failure(&updated(Err("no network"), false), None).unwrap();
+        assert_eq!(failed, "clackatoo couldn't be updated: no network");
     }
 
     #[test]
@@ -2819,10 +2884,10 @@ mod tests {
             "{text}"
         );
         let failed = Notice::Updating {
-            failed: Some("no release is newer than 2026.10.4".into()),
+            failed: Some("clackatoo couldn't be updated: no network".into()),
         };
         let text = failed.lines(Some("desk"), 200).join("\n");
-        assert!(text.contains("no release is newer"), "{text}");
+        assert!(text.contains("no network"), "{text}");
         assert!(text.contains("Esc    quit"), "{text}");
     }
 

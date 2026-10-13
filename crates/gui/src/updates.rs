@@ -58,21 +58,52 @@ pub(crate) fn look(proxy: EventLoopProxy<SessionEvent>) {
     }
 }
 
-/// Runs `program update` on a thread of its own, and sends
+/// Who asked for an update: the user, with `:update`, or the window, for a
+/// daemon from a newer build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Asked {
+    User,
+    ForDaemon,
+}
+
+/// What came of `clackatoo update`.
+#[derive(Debug)]
+pub(crate) struct Updated {
+    pub(crate) asked: Asked,
+    /// What to say of it, or why it failed.
+    pub(crate) said: Result<String, String>,
+    /// Whether a new build was put in place, even if something after,
+    /// such as moving this machine's daemon onto it, failed.
+    pub(crate) installed: bool,
+}
+
+/// Runs `program update` on a thread of its own, for `asked`, and sends
 /// [`SessionEvent::Updated`] with what came of it.
-pub(crate) fn update(program: PathBuf, proxy: EventLoopProxy<SessionEvent>) {
+pub(crate) fn update(program: PathBuf, asked: Asked, proxy: EventLoopProxy<SessionEvent>) {
     let started = std::thread::Builder::new()
         .name("update".into())
         .spawn(move || {
-            let outcome = match Command::new(&program).arg("update").output() {
-                Ok(output) => outcome(
-                    output.status.success(),
-                    &String::from_utf8_lossy(&output.stdout),
-                    &String::from_utf8_lossy(&output.stderr),
+            let (said, installed) = match Command::new(&program).arg("update").output() {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let said = outcome(
+                        output.status.success(),
+                        &stdout,
+                        &String::from_utf8_lossy(&output.stderr),
+                    );
+                    (said, installed(&stdout))
+                }
+                Err(err) => (
+                    Err(format!("couldn't run {}: {err}", program.display())),
+                    false,
                 ),
-                Err(err) => Err(format!("couldn't run {}: {err}", program.display())),
             };
-            let _ = proxy.send_event(SessionEvent::Updated(outcome));
+            let updated = Updated {
+                asked,
+                said,
+                installed,
+            };
+            let _ = proxy.send_event(SessionEvent::Updated(updated));
         });
     if let Err(err) = started {
         log::warn!("couldn't update: {err}");
@@ -80,6 +111,14 @@ pub(crate) fn update(program: PathBuf, proxy: EventLoopProxy<SessionEvent>) {
 }
 
 /// What the bar says came of `clackatoo update`, from what it printed.
+/// Whether what `clackatoo update` printed, `stdout`, says it put a new
+/// build in place.
+fn installed(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .any(|line| line.starts_with("installed clackatoo "))
+}
+
 fn outcome(succeeded: bool, stdout: &str, stderr: &str) -> Result<String, String> {
     let last = |text: &str| {
         text.lines()
@@ -122,6 +161,9 @@ pub(crate) struct Known {
     /// The program `:update` runs: this one, as it was when the window
     /// opened, since updating renames the old one away.
     pub(crate) program: Option<PathBuf>,
+    /// Whether `clackatoo update` is running for the window: one at a
+    /// time, so two never race to put a build in place.
+    pub(crate) running: bool,
 }
 
 impl Known {
@@ -132,6 +174,7 @@ impl Known {
             program: std::env::current_exe()
                 .inspect_err(|err| log::warn!("`:update` can't find this program: {err}"))
                 .ok(),
+            running: false,
         }
     }
 

@@ -96,7 +96,7 @@ pub(crate) enum SessionEvent {
     NewRelease(String),
     /// `clackatoo update`, run by `:update`, has finished, and the bar
     /// should say this.
-    Updated(Result<String, String>),
+    Updated(crate::updates::Updated),
     /// Machines to connect to, for the picker of one. Sent from a thread
     /// finding them, not the session's (see [`crate::connect::gather`]).
     Hosts(crate::connect::Found),
