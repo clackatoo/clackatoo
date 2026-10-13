@@ -30,13 +30,15 @@ mod http;
 mod push;
 mod socket;
 
+use std::io;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mio::Waker;
-use mio::net::TcpListener;
+use mio::net::{TcpListener, UnixListener};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::json;
 
@@ -44,14 +46,14 @@ pub use auth::hash_password;
 pub use config::{WebConfig, WebMode};
 
 pub(crate) use auth::Refused;
-pub(crate) use conn::{HttpConn, REQUEST_WAIT, Read, State, WebLink};
+pub(crate) use conn::{Filled, HttpConn, Peer, Read, State, WebLink};
 pub(crate) use http::{Method, Request, Response};
 pub(crate) use push::payload as push_payload;
-pub(crate) use socket::Transport;
+pub(crate) use socket::{Stream, Transport};
 
 use push::{Gone, Push};
 
-use auth::Bucket;
+use auth::Buckets;
 use devices::{Devices, Subscription, millis};
 use push::{Pusher, Vapid};
 
@@ -61,10 +63,15 @@ pub(crate) const ASK_WAIT: Duration = Duration::from_mins(2);
 /// The most devices that may be asking at once.
 const MOST_ASKING: usize = 4;
 
-/// How many devices may ask in a burst, and how often one more may once
-/// they're used up: a scanner can't keep every window asking.
+/// How many devices may ask in a burst from one address, and how often
+/// one more may once they're used up: a scanner can't keep every window
+/// asking.
 const ASKS: u32 = 4;
 const ASK_EVERY: Duration = Duration::from_mins(2);
+
+/// The most passwords waiting to be checked, one after another: past it,
+/// a try is turned away to come back in a moment.
+const MOST_CHECKS_WAITING: usize = 8;
 
 /// The most a device's name may be, in characters.
 const MOST_NAME: usize = 40;
@@ -93,6 +100,63 @@ const NO_APP: &str = "<!doctype html><meta charset=utf-8>\
     <meta name=viewport content=\"width=device-width\"><title>clackatoo</title>\
     <p>This build of clackatoo was made without its web app. Build it with \
     wasm-bindgen-cli installed, as the docs say, and upgrade the daemon onto it.";
+
+/// Where the web app listens.
+#[derive(Debug)]
+pub(crate) enum Listener {
+    /// On the network, for public.
+    Tcp(TcpListener),
+    /// On a unix socket only the user and root can reach, for `tailscale
+    /// serve`, at this path, which is taken away when it closes.
+    Unix(UnixListener, PathBuf),
+}
+
+impl Listener {
+    /// Takes a connection waiting, if one is.
+    ///
+    /// # Errors
+    ///
+    /// If none is waiting (`WouldBlock`), or taking it failed.
+    pub(crate) fn accept(&self) -> io::Result<(Stream, Peer)> {
+        match self {
+            Self::Tcp(listener) => {
+                let (stream, address) = listener.accept()?;
+                let _ = stream.set_nodelay(true);
+                Ok((Stream::Tcp(stream), Peer::Tcp(address)))
+            }
+            Self::Unix(listener, _) => {
+                let (stream, _) = listener.accept()?;
+                Ok((Stream::Unix(stream), Peer::Local))
+            }
+        }
+    }
+
+    /// The socket, to register with the event loop.
+    pub(crate) fn source(&mut self) -> &mut dyn mio::event::Source {
+        match self {
+            Self::Tcp(listener) => listener,
+            Self::Unix(listener, _) => listener,
+        }
+    }
+
+    /// Where it listens, to say.
+    fn describe(&self) -> String {
+        match self {
+            Self::Tcp(listener) => listener
+                .local_addr()
+                .map_or_else(|_| "the network".to_owned(), |address| address.to_string()),
+            Self::Unix(_, path) => path.display().to_string(),
+        }
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        if let Self::Unix(_, path) = self {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
 
 /// A device asking to pair.
 #[derive(Debug)]
@@ -136,6 +200,34 @@ enum Pairing {
     Renew(u64),
 }
 
+/// The thread checking passwords, one after another.
+#[derive(Debug)]
+struct Checker {
+    /// Each password to check, numbered, with the hash it's checked
+    /// against.
+    jobs: Sender<(u64, String, String)>,
+    /// Whether each matched, by its number.
+    results: Receiver<(u64, bool)>,
+}
+
+impl Checker {
+    /// Starts the thread, which calls `wake` with each answer.
+    fn start(wake: impl Fn() + Send + 'static) -> Result<Self, String> {
+        let (jobs, inbox) = mpsc::channel::<(u64, String, String)>();
+        let (tell, results) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("password".to_owned())
+            .spawn(move || {
+                for (number, password, hash) in inbox {
+                    let _ = tell.send((number, auth::password_matches(&password, &hash)));
+                    wake();
+                }
+            })
+            .map_err(|err| format!("the thread checking passwords couldn't start: {err}"))?;
+        Ok(Self { jobs, results })
+    }
+}
+
 /// What came of a request, for the event loop to do.
 #[derive(Debug)]
 pub(crate) enum Handled {
@@ -153,8 +245,12 @@ pub(crate) enum Handled {
 #[derive(Debug)]
 pub(crate) struct Web {
     pub(crate) config: WebConfig,
-    pub(crate) listener: TcpListener,
+    pub(crate) listener: Listener,
     pub(crate) tls: Option<Arc<rustls::ServerConfig>>,
+    /// When the certificate's files were last changed, as last looked at.
+    certificate_changed: Option<(SystemTime, SystemTime)>,
+    /// When they're next looked at.
+    reload_at: Instant,
     random: SystemRandom,
     pub(crate) devices: Devices,
     vapid: Arc<Vapid>,
@@ -162,21 +258,17 @@ pub(crate) struct Web {
     pub(crate) asks: Vec<Ask>,
     /// The devices asking changed since the windows were told.
     pub(crate) asks_changed: bool,
-    tries: Bucket,
-    ask_tries: Bucket,
-    /// The password being checked, if one is.
-    checking: Option<Checking>,
+    tries: Buckets,
+    ask_tries: Buckets,
+    checker: Checker,
+    /// The passwords being checked, oldest first.
+    checking: Vec<Checking>,
     /// How many passwords have been checked, which numbers them.
     checks: u64,
-    checked: Receiver<bool>,
-    check_done: Sender<bool>,
-    waker: Arc<Waker>,
     /// The connections, HTTP and WebSocket, by their tokens.
     pub(crate) conns: Vec<mio::Token>,
     /// When something next needs doing, at the latest.
     pub(crate) next_due: Option<Instant>,
-    /// When devices unused too long were last let go.
-    expired_at: Instant,
 }
 
 impl Web {
@@ -186,52 +278,63 @@ impl Web {
     /// # Errors
     ///
     /// If it can't listen, or its directory or certificate can't be read.
-    pub(crate) fn start(config: WebConfig, waker: Arc<Waker>) -> Result<Self, String> {
-        let tls = match &config.mode {
-            WebMode::Tailscale => None,
-            WebMode::Public { certificate, key } => Some(tls_config(certificate, key)?),
+    pub(crate) fn start(config: WebConfig, waker: &Arc<Waker>) -> Result<Self, String> {
+        let (tls, certificate_changed) = match &config.mode {
+            WebMode::Tailscale => (None, None),
+            WebMode::Public { certificate, key } => (
+                Some(tls_config(certificate, key)?),
+                changed_at(certificate, key),
+            ),
         };
+        // Taken first: it says the directory, and so the socket, is ours.
         let devices = Devices::open(&config.data)?;
         let random = SystemRandom::new();
         let vapid = Arc::new(Vapid::open(&config.data, &random)?);
-        let listener = TcpListener::bind(config.address)
-            .map_err(|err| format!("can't listen on {}: {err}", config.address))?;
-        let pusher = {
-            let waker = Arc::clone(&waker);
-            Pusher::start(Arc::clone(&vapid), move || {
+        let listener = listen(&config)?;
+        let wake = |waker: &Arc<Waker>| {
+            let waker = Arc::clone(waker);
+            move || {
                 if let Err(err) = waker.wake() {
-                    log::warn!("waking the event loop for a notification failed: {err}");
+                    log::warn!("waking the event loop for the web app failed: {err}");
                 }
-            })
+            }
         };
-        let (check_done, checked) = mpsc::channel();
-        let now = Instant::now();
+        let pusher = Pusher::start(&vapid, wake(waker));
+        let checker = Checker::start(wake(waker))?;
+        let reload_at = Instant::now() + config.reload_every;
         Ok(Self {
             config,
             listener,
             tls,
+            certificate_changed,
+            reload_at,
             random,
             devices,
             vapid,
             pusher,
             asks: Vec::new(),
             asks_changed: false,
-            tries: Bucket::new(auth::TRIES, auth::TRY_EVERY, now),
-            ask_tries: Bucket::new(ASKS, ASK_EVERY, now),
-            checking: None,
+            tries: Buckets::new(auth::TRIES, auth::TRY_EVERY),
+            ask_tries: Buckets::new(ASKS, ASK_EVERY),
+            checker,
+            checking: Vec::new(),
             checks: 0,
-            checked,
-            check_done,
-            waker,
             conns: Vec::new(),
             next_due: None,
-            expired_at: now,
         })
     }
 
-    /// Where it listens.
+    /// Where it listens, if on the network.
     pub(crate) fn address(&self) -> Option<SocketAddr> {
-        self.listener.local_addr().ok()
+        match &self.listener {
+            Listener::Tcp(listener) => listener.local_addr().ok(),
+            Listener::Unix(..) => None,
+        }
+    }
+
+    /// Where it listens, to say.
+    pub(crate) fn describe(&self) -> String {
+        self.listener.describe()
     }
 
     /// Makes sure something is done by `at`.
@@ -303,6 +406,14 @@ impl Web {
         } else {
             None
         };
+        if !auth::host_allowed(
+            self.config.origin.as_deref(),
+            request.header("host"),
+            self.forwarded_host(request),
+        ) {
+            log::warn!("refused a request for another name, from {}", conn.peer);
+            return Handled::Close(Response::error(421, "this isn't the app's name"));
+        }
         match (request.method, request.path.as_str()) {
             (Method::Get, "/ws") => self.open_socket(conn, request, login.as_deref(), now),
             (Method::Get, "/session") => Handled::Respond(self.session(request, login.as_deref())),
@@ -321,31 +432,95 @@ impl Web {
         }
     }
 
+    /// The host `tailscale serve` says a request was sent to, trusted only
+    /// from it.
+    fn forwarded_host<'a>(&self, request: &'a Request) -> Option<&'a str> {
+        if self.config.tailscale() {
+            request.header("x-forwarded-host")
+        } else {
+            None
+        }
+    }
+
+    /// Who a request comes from, for limiting tries: its address, or
+    /// through Tailscale, the address `tailscale serve` says it came from,
+    /// or else its login.
+    fn who(conn: &HttpConn, request: &Request, login: Option<&str>) -> String {
+        match conn.peer {
+            Peer::Tcp(address) => address.ip().to_string(),
+            Peer::Local => (request.header("x-forwarded-for"))
+                .and_then(|addresses| addresses.split(',').next())
+                .map(str::trim)
+                .filter(|address| !address.is_empty())
+                .or(login)
+                .unwrap_or("local")
+                .to_owned(),
+        }
+    }
+
     /// Whether `login`, whom Tailscale says a request is from, is let in:
     /// the one the settings name, or else the first device's, or anyone
     /// until a device has paired.
     fn login_allowed(&self, login: &str) -> bool {
         match &self.config.login {
             Some(allowed) => allowed == login,
-            None => (self.devices.list.iter())
-                .find_map(|device| device.login.as_deref())
-                .is_none_or(|first| first == login),
+            None => self.first_login().is_none_or(|first| first == login),
         }
+    }
+
+    /// The login of the first device paired through Tailscale, if any has.
+    fn first_login(&self) -> Option<&str> {
+        (self.devices.list.iter()).find_map(|device| device.login.as_deref())
     }
 
     /// Whether a request came from a page of the app's own origin.
     fn is_from_app(&self, request: &Request) -> bool {
-        let forwarded = if self.config.tailscale() {
-            request.header("x-forwarded-host")
-        } else {
-            None
-        };
         auth::origin_allowed(
             request.header("origin"),
             self.config.origin.as_deref(),
             request.header("host"),
-            forwarded,
+            self.forwarded_host(request),
         )
+    }
+
+    /// Why the device with `id` isn't let in at `now`, in milliseconds
+    /// since the Unix epoch, if it isn't: it's gone unused too long, or
+    /// its password is to be given again.
+    pub(crate) fn lapsed(&self, id: u64, now: u64) -> Option<Denied> {
+        let Some(device) = self.devices.list.iter().find(|device| device.id == id) else {
+            return Some(Denied::Unpaired);
+        };
+        if device.used.saturating_add(millis(self.config.expire_after)) < now {
+            return Some(Denied::Unpaired);
+        }
+        if let (Some(every), Some(_)) = (self.config.password_every, &self.config.password) {
+            let given = device.password.unwrap_or(device.paired);
+            if given.saturating_add(millis(every)) < now {
+                return Some(Denied::Renew);
+            }
+        }
+        None
+    }
+
+    /// When a device next lapses, at the soonest: one of `connected`
+    /// whose password is to be given again, or any unused too long.
+    pub(crate) fn next_lapse(&self, connected: &[u64], now: Instant) -> Option<Instant> {
+        let now_ms = epoch_millis();
+        let at = |ms: u64| now + Duration::from_millis(ms.saturating_sub(now_ms));
+        let expiring = (self.devices.list.iter())
+            .map(|device| at(device.used.saturating_add(millis(self.config.expire_after)) + 1));
+        let renewing = (self.config.password.as_ref())
+            .and(self.config.password_every)
+            .into_iter()
+            .flat_map(|every| {
+                (self.devices.list.iter())
+                    .filter(|device| connected.contains(&device.id))
+                    .map(move |device| {
+                        let given = device.password.unwrap_or(device.paired);
+                        at(given.saturating_add(millis(every)) + 1)
+                    })
+            });
+        expiring.chain(renewing).min()
     }
 
     /// The device `request` carries the token of, if it's paired and let
@@ -353,25 +528,21 @@ impl Web {
     fn device(&mut self, request: &Request, login: Option<&str>) -> Result<u64, Denied> {
         let token = request.cookie(auth::COOKIE).ok_or(Denied::Unpaired)?;
         let device = (self.devices.by_token(&auth::token_hash(token))).ok_or(Denied::Unpaired)?;
-        let now = epoch_millis();
         let id = device.id;
-        if device.used < now.saturating_sub(millis(self.config.expire_after)) {
-            log::info!("device {id} ({}) expired, unused", device.name);
-            self.devices.remove(id);
-            return Err(Denied::Unpaired);
-        }
         if let (Some(paired), Some(login)) = (&device.login, login)
             && paired != login
         {
             return Err(Denied::Refused(Refused::OtherLogin));
         }
-        if let (Some(every), Some(_)) = (self.config.password_every, &self.config.password) {
-            let given = device.password.unwrap_or(device.paired);
-            if given.saturating_add(millis(every)) < now {
-                return Err(Denied::Renew);
+        match self.lapsed(id, epoch_millis()) {
+            Some(Denied::Unpaired) => {
+                log::info!("device {id} expired, unused");
+                self.devices.remove(id);
+                Err(Denied::Unpaired)
             }
+            Some(denied) => Err(denied),
+            None => Ok(id),
         }
-        Ok(id)
     }
 
     /// Answers `GET /session`: whether the device is paired and let in,
@@ -423,6 +594,7 @@ impl Web {
         let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
             return Handled::Respond(Response::error(400, "pairing asks in JSON"));
         };
+        let who = Self::who(conn, request, login.as_deref());
         let name = clean_name(body["name"].as_str().unwrap_or_default());
         let renew = body["renew"].as_bool().unwrap_or(false);
         let pairing = if renew {
@@ -443,10 +615,23 @@ impl Web {
             Pairing::New { name, login }
         };
         if let Some(password) = body["password"].as_str() {
-            return self.check_password(conn, token, password, pairing, now);
+            // Through Tailscale with no login named, the first device's
+            // login becomes the only one let in: that's for a window to
+            // allow, not for whoever guesses the password first.
+            let first = self.config.tailscale()
+                && self.config.login.is_none()
+                && self.first_login().is_none();
+            if first && matches!(pairing, Pairing::New { .. }) {
+                return Handled::Respond(Response::error(
+                    403,
+                    "the first device is allowed from a window: ask a window, or name the \
+                     login let in as login in web.toml",
+                ));
+            }
+            return self.check_password(conn, token, password, pairing, &who, now);
         }
         match (body["ask"].as_bool(), pairing) {
-            (Some(true), Pairing::New { name, login }) => self.ask(conn, name, login, now),
+            (Some(true), Pairing::New { name, login }) => self.ask(conn, name, login, &who, now),
             _ => Handled::Respond(Response::error(400, "pairing gives a password, or asks")),
         }
     }
@@ -458,14 +643,15 @@ impl Web {
         Some(self.devices.by_token(&auth::token_hash(token))?.id)
     }
 
-    /// Starts checking `password`, for `pairing`, on a thread, with `conn`
-    /// waiting for the answer, if a try is allowed now.
+    /// Queues `password` to be checked, for `pairing`, on the checking
+    /// thread, with `conn` waiting for the answer, if `who` may try now.
     fn check_password(
         &mut self,
         conn: &mut HttpConn,
         token: mio::Token,
         password: &str,
         pairing: Pairing,
+        who: &str,
         now: Instant,
     ) -> Handled {
         let Some(hash) = self.config.password.clone() else {
@@ -474,74 +660,75 @@ impl Web {
                 "no password is set: allow this device from a window instead",
             ));
         };
-        if self.checking.is_some() {
+        if self.checking.len() >= MOST_CHECKS_WAITING {
             return Handled::Respond(too_many(Duration::from_secs(1)));
         }
-        if let Err(wait) = self.tries.take(now) {
-            log::warn!("a password try from {} refused: too many tries", conn.peer);
+        if let Err(wait) = self.tries.take(who, now) {
+            log::warn!("a password try from {who} refused: too many tries");
             return Handled::Respond(too_many(wait));
-        }
-        let password = password.to_owned();
-        let done = self.check_done.clone();
-        let waker = Arc::clone(&self.waker);
-        let spawned = std::thread::Builder::new()
-            .name("password".to_owned())
-            .spawn(move || {
-                let _ = done.send(auth::password_matches(&password, &hash));
-                let _ = waker.wake();
-            });
-        if spawned.is_err() {
-            return Handled::Respond(Response::error(503, "the password can't be checked now"));
         }
         self.checks += 1;
         let number = self.checks;
-        self.checking = Some(Checking {
+        if (self.checker.jobs.send((number, password.to_owned(), hash))).is_err() {
+            return Handled::Respond(Response::error(503, "the password can't be checked now"));
+        }
+        self.checking.push(Checking {
             token,
             number,
             pairing,
         });
         conn.state = State::Verifying(number);
-        // As long as checking could take, and more.
-        conn.until = now + Duration::from_secs(30);
+        // As long as the checks before it could take, and more.
+        conn.until = now + Duration::from_mins(1);
         self.due_by(conn.until);
         Handled::Wait
     }
 
-    /// The connection waiting for a password's check, and the answer for
-    /// it, once the check is done, if `waiting` says the connection with
-    /// the token waits for the check with the number still: one that has
-    /// gone gets nothing, and pairs nothing.
+    /// The connections waiting for passwords' checks done since last
+    /// asked, and the answers for them, where `waiting` says the
+    /// connection with the token waits for the check with the number
+    /// still: one that has gone gets nothing, and pairs nothing.
     pub(crate) fn checked(
         &mut self,
-        waiting: impl FnOnce(mio::Token, u64) -> bool,
-    ) -> Option<(mio::Token, Response)> {
-        let matches = self.checked.try_recv().ok()?;
-        let checking = self.checking.take()?;
-        if !waiting(checking.token, checking.number) {
-            log::info!("a password was checked for a connection that has gone");
-            return None;
-        }
-        let response = if matches {
-            match checking.pairing {
-                Pairing::New { name, login } => {
-                    let response = self.paired(name.clone(), login, true);
-                    log::info!("{name} paired with the password");
-                    response
-                }
-                Pairing::Renew(id) => {
-                    if let Some(device) = self.devices.get_mut(id) {
-                        device.password = Some(epoch_millis());
-                        log::info!("device {id} ({}) gave the password again", device.name);
-                    }
-                    self.devices.save();
-                    Response::json(200, &json!({ "paired": true }))
-                }
+        waiting: impl Fn(mio::Token, u64) -> bool,
+    ) -> Vec<(mio::Token, Response)> {
+        let mut answers = Vec::new();
+        while let Ok((number, matches)) = self.checker.results.try_recv() {
+            let Some(at) = self
+                .checking
+                .iter()
+                .position(|check| check.number == number)
+            else {
+                continue;
+            };
+            let checking = self.checking.remove(at);
+            if !waiting(checking.token, checking.number) {
+                log::info!("a password was checked for a connection that has gone");
+                continue;
             }
-        } else {
-            log::warn!("a wrong password was given for pairing");
-            Response::error(403, "that isn't the password")
-        };
-        Some((checking.token, response))
+            let response = if matches {
+                match checking.pairing {
+                    Pairing::New { name, login } => {
+                        let response = self.paired(name.clone(), login, true);
+                        log::info!("{name} paired with the password");
+                        response
+                    }
+                    Pairing::Renew(id) => {
+                        if let Some(device) = self.devices.get_mut(id) {
+                            device.password = Some(epoch_millis());
+                            log::info!("device {id} ({}) gave the password again", device.name);
+                        }
+                        self.devices.save();
+                        Response::json(200, &json!({ "paired": true }))
+                    }
+                }
+            } else {
+                log::warn!("a wrong password was given for pairing");
+                Response::error(403, "that isn't the password")
+            };
+            answers.push((checking.token, response));
+        }
+        answers
     }
 
     /// Pairs a device called `name`, as `login`, its password given if
@@ -555,12 +742,14 @@ impl Web {
             .with("set-cookie", auth::set_cookie(&token))
     }
 
-    /// Asks every window to allow a device called `name`, as `login`.
+    /// Asks every window to allow a device called `name`, as `login`, for
+    /// `who`.
     fn ask(
         &mut self,
         conn: &HttpConn,
         name: String,
         login: Option<String>,
+        who: &str,
         now: Instant,
     ) -> Handled {
         if !self.config.ask {
@@ -573,7 +762,7 @@ impl Web {
         if self.asks.len() >= MOST_ASKING {
             return Handled::Respond(too_many(ASK_WAIT));
         }
-        if let Err(wait) = self.ask_tries.take(now) {
+        if let Err(wait) = self.ask_tries.take(who, now) {
             return Handled::Respond(too_many(wait));
         }
         let mut wait = [0; 16];
@@ -590,7 +779,11 @@ impl Web {
                 break code;
             }
         };
-        let from = login.clone().unwrap_or_else(|| conn.peer.ip().to_string());
+        let from = match (&login, conn.peer) {
+            (Some(login), _) => login.clone(),
+            (None, Peer::Tcp(address)) => address.ip().to_string(),
+            (None, Peer::Local) => who.to_owned(),
+        };
         let until = now + ASK_WAIT;
         let until_ms = epoch_millis() + millis(ASK_WAIT);
         log::info!("{name} ({from}) asks to pair");
@@ -756,6 +949,10 @@ impl Web {
             Err(denied) => return Handled::Close(denied.response()),
         };
         self.devices.used(device, epoch_millis());
+        // It's cut off when it next lapses, if it's still connected.
+        if let Some(lapse) = self.next_lapse(&[device], now) {
+            self.due_by(lapse);
+        }
         if let Some(found) = self.devices.list.iter().find(|found| found.id == device) {
             log::info!(
                 "device {device} ({}) connected from {}",
@@ -845,22 +1042,49 @@ impl Web {
         self.devices.save();
     }
 
-    /// Unpairs the devices unused too long, at most once a minute. Returns
-    /// those unpaired.
-    pub(crate) fn expire(&mut self, now: Instant) -> Vec<u64> {
-        if now.saturating_duration_since(self.expired_at) < Duration::from_mins(1) {
-            return Vec::new();
-        }
-        self.expired_at = now;
+    /// Unpairs the devices unused too long. Returns those unpaired.
+    pub(crate) fn expire(&mut self) -> Vec<u64> {
         let before = epoch_millis().saturating_sub(millis(self.config.expire_after));
         self.devices.expire(before)
+    }
+
+    /// Reads the certificate again if its files have changed since they
+    /// were last read, as when they're renewed, once `reload_every` has
+    /// passed since it was last looked at. New connections get it.
+    pub(crate) fn reload_certificate(&mut self, now: Instant) {
+        if now < self.reload_at {
+            return;
+        }
+        self.reload_at = now + self.config.reload_every;
+        let WebMode::Public { certificate, key } = &self.config.mode else {
+            return;
+        };
+        let changed = changed_at(certificate, key);
+        if changed == self.certificate_changed {
+            return;
+        }
+        match tls_config(certificate, key) {
+            Ok(tls) => {
+                log::info!("read the web app's certificate again, as it changed");
+                self.tls = Some(tls);
+                self.certificate_changed = changed;
+            }
+            // Perhaps half written: looked at again next time.
+            Err(err) => log::warn!("the web app's certificate changed, but: {err}"),
+        }
+    }
+
+    /// When the certificate is next looked at, in public.
+    pub(crate) fn reload_due(&self) -> Option<Instant> {
+        (!self.config.tailscale()).then_some(self.reload_at)
     }
 }
 
 /// Why a device isn't let in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Denied {
-    /// It has no token, or one no device has.
+pub(crate) enum Denied {
+    /// It has no token, or one no device has, or it's gone unused too
+    /// long.
     Unpaired,
     /// Its password must be given again.
     Renew,
@@ -876,6 +1100,16 @@ impl Denied {
             Self::Refused(refusal) => refused(refusal),
         }
     }
+
+    /// What closing a device's connection for it says: the WebSocket
+    /// status, and why.
+    pub(crate) fn close(self) -> (u16, &'static str) {
+        match self {
+            Self::Unpaired => (4001, "this device is no longer paired"),
+            Self::Renew => (4002, "enter the password again"),
+            Self::Refused(refusal) => (4003, refusal.reason()),
+        }
+    }
 }
 
 /// The answer refusing a request, saying why.
@@ -889,11 +1123,23 @@ fn too_many(wait: Duration) -> Response {
         .with("retry-after", wait.as_secs().max(1).to_string())
 }
 
+/// Whether `c` is a format character (Unicode's Cf), or a line or
+/// paragraph separator: invisible, and some turn text around, so a name
+/// could seem to say what it doesn't.
+fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{061C}' | '\u{06DD}' | '\u{070F}' | '\u{180E}'
+        | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{110BD}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
+}
+
 /// A device's name, as it asked to be called: trimmed, without control
-/// characters, and short.
+/// or format characters, and short.
 fn clean_name(name: &str) -> String {
     let name: String = (name.chars())
-        .filter(|c| !c.is_control())
+        .filter(|&c| !c.is_control() && !is_format(c))
         .take(MOST_NAME)
         .collect();
     match name.trim() {
@@ -934,12 +1180,44 @@ fn same16(a: &[u8; 16], b: &[u8; 16]) -> bool {
     a.iter().zip(b).fold(0, |differ, (a, b)| differ | (a ^ b)) == 0
 }
 
+/// Listens as `config` says: on its unix socket for Tailscale, which only
+/// the user and root can reach, or on the network for public.
+fn listen(config: &WebConfig) -> Result<Listener, String> {
+    if !config.tailscale() {
+        let listener = TcpListener::bind(config.address)
+            .map_err(|err| format!("can't listen on {}: {err}", config.address))?;
+        return Ok(Listener::Tcp(listener));
+    }
+    let path = &config.socket;
+    // One left by a daemon that stopped: the devices' lock, taken before
+    // this, says no daemon has it now.
+    match std::fs::remove_file(path) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => {
+            return Err(format!("{} couldn't be replaced: {err}", path.display()));
+        }
+        _ => {}
+    }
+    let listener = UnixListener::bind(path)
+        .map_err(|err| format!("can't listen on {}: {err}", path.display()))?;
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .map_err(|err| format!("{} couldn't be kept to you: {err}", path.display()))?;
+    Ok(Listener::Unix(listener, path.clone()))
+}
+
+/// When the certificate's files were last changed, if both can be
+/// looked at.
+fn changed_at(certificate: &Path, key: &Path) -> Option<(SystemTime, SystemTime)> {
+    let changed = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+    };
+    Some((changed(certificate)?, changed(key)?))
+}
+
 /// The TLS config for the certificate chain in `certificate` and its key
 /// in `key`, both PEM files.
-fn tls_config(
-    certificate: &std::path::Path,
-    key: &std::path::Path,
-) -> Result<Arc<rustls::ServerConfig>, String> {
+fn tls_config(certificate: &Path, key: &Path) -> Result<Arc<rustls::ServerConfig>, String> {
     use rustls::pki_types::pem::PemObject as _;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     let chain = CertificateDer::pem_file_iter(certificate)
@@ -970,6 +1248,10 @@ mod tests {
         assert_eq!(clean_name("\u{1b}[31mred"), "[31mred");
         assert_eq!(clean_name(""), "a device");
         assert_eq!(clean_name(&"x".repeat(100)).len(), MOST_NAME);
+        // Turned around, "iPhone" would read as "enohPi" in a window.
+        assert_eq!(clean_name("\u{202E}enohPi\u{202C}"), "enohPi");
+        assert_eq!(clean_name("a\u{200B}b\u{2066}c\u{FEFF}"), "abc");
+        assert_eq!(clean_name("\u{2069}\u{200D}"), "a device");
     }
 
     #[test]

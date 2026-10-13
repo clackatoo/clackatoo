@@ -1,5 +1,6 @@
 //! The `clackatoo` command, run as a real program.
 
+use std::io::Write as _;
 use std::path::Path;
 use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};
@@ -347,6 +348,36 @@ fn config_sets_shows_and_unsets_settings() {
     assert!(!refused.status.success());
     stdout(&config(&["--unset", "renderer"]));
     assert_eq!(stdout(&config(&["renderer"])), "vulkan (the default)\n");
+}
+
+#[test]
+fn web_password_keeps_only_a_hash_of_a_long_enough_password() {
+    let home = tempfile::tempdir().unwrap();
+    let password = |input: &str| {
+        let mut child = Command::new(BINARY)
+            .args(["web", "password"])
+            .env("XDG_CONFIG_HOME", home.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("clackatoo runs");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let settings = home.path().join("clackatoo/daemon/web.toml");
+    let short = password("hunter2\n");
+    assert!(!short.status.success(), "seven characters is too few");
+    assert!(!settings.exists());
+    stdout(&password("correct horse\n"));
+    let written = std::fs::read_to_string(&settings).unwrap();
+    assert!(written.contains("password = \"$argon2id$"), "{written}");
+    assert!(!written.contains("correct horse"));
 }
 
 /// Polls `check` until it holds, failing after a few seconds.

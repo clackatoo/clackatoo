@@ -15,11 +15,30 @@ use clackatoo_protocol::{
 use mio::{Interest, Token};
 
 use super::{Client, Daemon, Link, Source, WEB};
-use crate::web::{self, Handled, HttpConn, Read, State, Web};
+use crate::web::{self, Filled, Handled, HttpConn, Read, State, Web};
 
-/// The most HTTP connections open at once, WebSocket connections apart: past it, a
-/// new one is closed at once.
+/// The most HTTP connections open at once, WebSocket connections apart:
+/// past it, a new one is closed at once.
 const MOST_CONNECTIONS: usize = 64;
+
+/// The most HTTP connections open at once from one address, TLS
+/// handshakes under way among them.
+const MOST_FROM_ONE: usize = 8;
+
+/// The most requests a connection has answered in one turn of the event
+/// loop: the rest wait for the next.
+const MOST_REQUESTS_AT_ONCE: usize = 16;
+
+/// Why a connection's requests stopped being answered for now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stopped {
+    /// None more is whole, or one waits for an answer.
+    Done,
+    /// Enough for one turn.
+    Enough,
+    /// Its answers back up, unread.
+    BackedUp,
+}
 
 /// How long `here` from a client lasts unless it's said again.
 pub(super) const PRESENT_FOR: Duration = Duration::from_mins(5);
@@ -69,30 +88,28 @@ impl Daemon {
         let Some(config) = self.config.web.clone() else {
             return;
         };
-        let address = config.address;
-        match Web::start(config, std::sync::Arc::clone(&self.waker)) {
+        match Web::start(config, &self.waker) {
             Ok(mut web) => {
                 if let Err(err) =
                     self.poll
                         .registry()
-                        .register(&mut web.listener, WEB, Interest::READABLE)
+                        .register(web.listener.source(), WEB, Interest::READABLE)
                 {
                     log::error!("the web app couldn't be watched: {err}");
                     return;
                 }
-                log::info!(
-                    "the web app listens on {}",
-                    web.address()
-                        .map_or_else(|| address.to_string(), |a| a.to_string())
-                );
+                log::info!("the web app listens on {}", web.describe());
+                if let Some(due) = web.reload_due() {
+                    web.due_by(due);
+                }
                 self.web = Some(web);
             }
             Err(err) => log::error!("the web app is off: {err}"),
         }
     }
 
-    /// Where the web app listens, if it does: for tests, which ask it to
-    /// listen on any port.
+    /// Where the web app listens on the network, if it does: for tests,
+    /// which ask it to listen on any port.
     #[must_use]
     pub fn web_address(&self) -> Option<std::net::SocketAddr> {
         self.web.as_ref()?.address()
@@ -113,14 +130,17 @@ impl Daemon {
                     return;
                 }
             };
-            let open = (web.conns.iter())
-                .filter(|token| matches!(self.sources.get(token.0), Some(Source::Web(_))))
-                .count();
-            if open >= MOST_CONNECTIONS {
+            let (mut open, mut from_there) = (0, 0);
+            for token in &web.conns {
+                if let Some(Source::Web(conn)) = self.sources.get(token.0) {
+                    open += 1;
+                    from_there += usize::from(peer.ip().is_some() && conn.peer.ip() == peer.ip());
+                }
+            }
+            if open >= MOST_CONNECTIONS || from_there >= MOST_FROM_ONE {
                 log::warn!("a web connection from {peer} closed: too many are open");
                 continue;
             }
-            let _ = stream.set_nodelay(true);
             let transport = match web::Transport::new(stream, web.tls.as_ref()) {
                 Ok(transport) => transport,
                 Err(err) => {
@@ -129,7 +149,8 @@ impl Daemon {
                 }
             };
             let now = Instant::now();
-            let mut conn = HttpConn::new(transport, peer, now);
+            // Reached over HTTPS either way: TLS of its own, or Tailscale's.
+            let mut conn = HttpConn::new(transport, peer, now, web.config.head_wait, true);
             let entry = self.sources.vacant_entry();
             let token = Token(entry.key());
             if let Err(err) =
@@ -140,22 +161,55 @@ impl Daemon {
                 log::warn!("watching a web connection failed: {err}");
                 continue;
             }
-            web.due_by(conn.until);
+            web.due_by(conn.due());
             web.conns.push(token);
             entry.insert(Source::Web(Box::new(conn)));
         }
     }
 
-    /// Reads what an HTTP connection sent, answers it, and writes what it
-    /// can of the answers.
+    /// Reads what an HTTP connection sent, at most a turn's worth, answers
+    /// what's whole of it, and writes what it can of the answers.
     pub(super) fn serve_web(&mut self, token: Token) {
+        let now = Instant::now();
+        let Some(Source::Web(conn)) = self.sources.get_mut(token.0) else {
+            return;
+        };
+        match conn.fill(&mut self.buffer, now) {
+            Filled::Closed => {
+                self.drop_web(token);
+                return;
+            }
+            Filled::Open { more: true } => self.read_again(token),
+            Filled::Open { more: false } => {}
+        }
+        if let (Some(Source::Web(conn)), Some(web)) = (self.sources.get(token.0), self.web.as_mut())
+        {
+            web.due_by(conn.due());
+        }
+        self.answer_web(token, now);
+    }
+
+    /// Answers the requests whole of what an HTTP connection sent, a few
+    /// at a time, and not while its answers back up, then writes what it
+    /// can of them.
+    fn answer_web(&mut self, token: Token, now: Instant) {
+        let mut answered = 0;
+        let mut stopped = Stopped::Done;
         loop {
             let (Some(Source::Web(conn)), Some(web)) =
                 (self.sources.get_mut(token.0), self.web.as_mut())
             else {
                 return;
             };
-            let request = match conn.read(&mut self.buffer) {
+            if conn.backed_up() {
+                stopped = Stopped::BackedUp;
+                break;
+            }
+            if answered == MOST_REQUESTS_AT_ONCE {
+                stopped = Stopped::Enough;
+                break;
+            }
+            let request = match conn.next_request(now) {
                 Read::Request(request) => request,
                 Read::Nothing => break,
                 Read::Closed => {
@@ -163,29 +217,52 @@ impl Daemon {
                     return;
                 }
             };
-            let now = Instant::now();
+            answered += 1;
             let head_only = request.method == web::Method::Head;
-            let handled = web.handle(conn, token, &request, now);
-            match handled {
-                Handled::Respond(response) => {
-                    conn.respond(&response, head_only);
-                    conn.until = now + web::REQUEST_WAIT;
+            match web.handle(conn, token, &request, now) {
+                Handled::Respond(response) => conn.respond(&response, head_only, now),
+                // Nothing it sent after is answered.
+                Handled::Close(response) => {
+                    conn.respond_and_close(&response, now);
+                    break;
                 }
-                Handled::Close(response) => conn.respond_and_close(&response),
-                Handled::Wait => {}
+                Handled::Wait => break,
                 Handled::Upgrade { device, response } => {
-                    conn.respond(&response, false);
+                    conn.respond(&response, false, now);
                     self.become_web_client(token, device);
                     return;
                 }
             }
-            // A pairing settled at once may let the next request in.
-            if matches!(conn.state, State::Reading) {
-                continue;
-            }
-            break;
         }
         self.flush_web(token);
+        // What's waiting is looked at next turn: the socket won't say
+        // anything new, if it's all been read.
+        let backed_up = matches!(self.sources.get(token.0),
+            Some(Source::Web(conn)) if conn.backed_up());
+        if stopped == Stopped::Enough || (stopped == Stopped::BackedUp && !backed_up) {
+            self.read_again(token);
+        }
+    }
+
+    /// Serves the connection at `token` again on the loop's next turn: it
+    /// has more to read, or to answer, and won't say so again.
+    pub(super) fn read_again(&mut self, token: Token) {
+        if !self.web_unread.contains(&token) {
+            self.web_unread.push(token);
+        }
+    }
+
+    /// Serves the web connections that had more to read or answer.
+    pub(super) fn serve_web_unread(&mut self) {
+        for token in std::mem::take(&mut self.web_unread) {
+            match self.sources.get(token.0) {
+                Some(Source::Web(_)) => self.serve_web(token),
+                Some(Source::Client(Client {
+                    link: Link::Web(_), ..
+                })) => self.serve_client(token),
+                _ => {}
+            }
+        }
     }
 
     /// Writes what it can of an HTTP connection's answers, and drops it
@@ -253,8 +330,8 @@ impl Daemon {
 
     /// Does what the web app's threads and timers ask: answers passwords
     /// checked, gives up on connections waiting too long, pings quiet
-    /// devices, sends notifications due, and tells windows of devices
-    /// asking.
+    /// devices, cuts off those no longer let in, sends notifications due,
+    /// and tells windows of devices asking.
     pub(super) fn web_chores(&mut self) {
         // Any client may watch the chats, the web app on or not.
         self.send_chat_summaries();
@@ -267,14 +344,13 @@ impl Daemon {
             matches!(sources.get(token.0),
                 Some(Source::Web(conn)) if matches!(conn.state, State::Verifying(n) if n == number))
         };
-        if let Some((token, response)) = web.checked(waiting)
-            && let Some(Source::Web(conn)) = self.sources.get_mut(token.0)
-        {
-            conn.respond(&response, false);
-            conn.until = Instant::now() + web::REQUEST_WAIT;
-            self.serve_web(token);
-        }
         let now = Instant::now();
+        for (token, response) in web.checked(waiting) {
+            if let Some(Source::Web(conn)) = self.sources.get_mut(token.0) {
+                conn.respond(&response, false, now);
+                self.answer_web(token, now);
+            }
+        }
         if self.next_web_due().is_some_and(|due| due <= now) {
             self.web_timers(now);
         }
@@ -289,12 +365,21 @@ impl Daemon {
         };
         web.next_due = None;
         web.drop_old_asks(now);
-        for gone in web.expire(now) {
-            self.cut_off_device(
-                gone,
-                4001,
-                "this device was unpaired: it went unused too long",
-            );
+        web.reload_certificate(now);
+        // Devices whose password is to be given again, or unused too long,
+        // are cut off, telling them why; the latter are unpaired.
+        let connected = self.connected_devices();
+        if let Some(web) = self.web.as_mut() {
+            let now_ms = web::epoch_millis();
+            let lapsed: Vec<(u64, web::Denied)> = (connected.iter())
+                .filter_map(|&device| Some((device, web.lapsed(device, now_ms)?)))
+                .collect();
+            web.expire();
+            for (device, denied) in lapsed {
+                let (status, why) = denied.close();
+                log::info!("device {device} cut off: {why}");
+                self.cut_off_device(device, status, why);
+            }
         }
         self.settle_pairings(now);
         let tokens = self
@@ -306,11 +391,11 @@ impl Daemon {
         let mut soonest = |at: Instant| next = Some(next.map_or(at, |next| next.min(at)));
         for token in tokens {
             match self.sources.get_mut(token.0) {
-                Some(Source::Web(conn)) if now >= conn.until => {
+                Some(Source::Web(conn)) if now >= conn.due() => {
                     log::debug!("a web connection from {} timed out", conn.peer);
                     self.drop_web(token);
                 }
-                Some(Source::Web(conn)) => soonest(conn.until),
+                Some(Source::Web(conn)) => soonest(conn.due()),
                 Some(Source::Client(Client {
                     link: Link::Web(link),
                     ..
@@ -330,13 +415,16 @@ impl Daemon {
                 _ => {}
             }
         }
+        let connected = self.connected_devices();
         if let Some(web) = self.web.as_ref() {
             for ask in web.asks_until() {
                 soonest(ask);
             }
-            // Devices unused too long are let go, now and then.
-            if !web.devices.list.is_empty() {
-                soonest(now + Duration::from_hours(1));
+            if let Some(lapse) = web.next_lapse(&connected, now) {
+                soonest(lapse);
+            }
+            if let Some(reload) = web.reload_due() {
+                soonest(reload);
             }
         }
         self.notify_due(now);
@@ -345,6 +433,52 @@ impl Daemon {
         {
             web.due_by(next);
         }
+    }
+
+    /// The devices connected now.
+    fn connected_devices(&self) -> Vec<u64> {
+        let Some(web) = self.web.as_ref() else {
+            return Vec::new();
+        };
+        (web.conns.iter())
+            .filter_map(|token| match self.sources.get(token.0) {
+                Some(Source::Client(Client {
+                    link: Link::Web(link),
+                    ..
+                })) => Some(link.device),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Notes in the log what a device asks of a chat that answers or
+    /// sends something: a phone acts with the user's authority, and the
+    /// log says which phone did.
+    pub(super) fn note_device_action(
+        &self,
+        token: Token,
+        chat: TerminalId,
+        action: &clackatoo_protocol::ChatAction,
+    ) {
+        use clackatoo_protocol::ChatAction;
+        let Some(Source::Client(Client {
+            link: Link::Web(link),
+            ..
+        })) = self.sources.get(token.0)
+        else {
+            return;
+        };
+        let what = match action {
+            ChatAction::Answer { option, .. } => {
+                format!("answered chat {chat}'s question with {option:?}")
+            }
+            ChatAction::Send(text) => format!("sent chat {chat} a message of {} bytes", text.len()),
+            ChatAction::Stop => format!("stopped chat {chat}"),
+            ChatAction::Set { setting, value } => format!("set chat {chat}'s {setting} to {value}"),
+            ChatAction::Switch { agent, .. } => format!("moved chat {chat} to {agent}"),
+            _ => return,
+        };
+        log::info!("device {} {what}", link.device);
     }
 
     /// Answers the connections waiting for windows to answer their asks,
@@ -358,13 +492,12 @@ impl Daemon {
             if let Some(Source::Web(conn)) = self.sources.get_mut(token.0)
                 && let Some(response) = web.settle(conn, now)
             {
-                conn.respond(&response, false);
-                conn.until = now + web::REQUEST_WAIT;
+                conn.respond(&response, false, now);
                 settled.push(token);
             }
         }
         for token in settled {
-            self.serve_web(token);
+            self.answer_web(token, now);
         }
     }
 

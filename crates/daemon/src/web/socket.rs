@@ -1,9 +1,14 @@
-//! A web connection's bytes: plain TCP, or TLS over it, and WebSocket
-//! framing on top, once a request has asked for it.
+//! A web connection's bytes: the unix socket `tailscale serve` connects
+//! to, or TCP, plain or with TLS over it, and WebSocket framing on top,
+//! once a request has asked for it.
 //!
 //! TLS is rustls's, which does no I/O of its own, driven from the event
 //! loop like the rest: what arrives is handed to it, and what it has to
 //! send is written as the socket takes it.
+//!
+//! Reading takes at most a budget of bytes at a time, so one connection
+//! sending without pause can't keep the event loop to itself: what's
+//! left is read on the loop's next turn.
 //!
 //! WebSocket framing is RFC 6455's, as a server speaks it, with no
 //! extensions. The protocol's messages ride in binary messages, and their
@@ -14,7 +19,7 @@
 use std::io::{self, Read, Write};
 
 use base64::Engine as _;
-use mio::net::TcpStream;
+use mio::net::{TcpStream, UnixStream};
 
 /// The most a WebSocket frame from a client may carry: past any message
 /// the app sends, such as a long message pasted into a chat.
@@ -26,26 +31,99 @@ const TLS_AHEAD: usize = 256 * 1024;
 /// What WebSocket keys are hashed with, to show the server speaks it.
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/// A web connection: plain TCP, or TLS over it.
+/// A connection's socket.
+#[derive(Debug)]
+pub(crate) enum Stream {
+    Tcp(TcpStream),
+    /// To the unix socket `tailscale serve` connects to.
+    Unix(UnixStream),
+}
+
+impl Read for Stream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.read(buffer),
+            Self::Unix(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.write(bytes),
+            Self::Unix(stream) => stream.write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl mio::event::Source for Stream {
+    fn register(
+        &mut self,
+        registry: &mio::Registry,
+        token: mio::Token,
+        interests: mio::Interest,
+    ) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.register(registry, token, interests),
+            Self::Unix(stream) => stream.register(registry, token, interests),
+        }
+    }
+
+    fn reregister(
+        &mut self,
+        registry: &mio::Registry,
+        token: mio::Token,
+        interests: mio::Interest,
+    ) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.reregister(registry, token, interests),
+            Self::Unix(stream) => stream.reregister(registry, token, interests),
+        }
+    }
+
+    fn deregister(&mut self, registry: &mio::Registry) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.deregister(registry),
+            Self::Unix(stream) => stream.deregister(registry),
+        }
+    }
+}
+
+/// A web connection: its socket, plain, or TCP with TLS over it.
 #[derive(Debug)]
 pub(crate) enum Transport {
-    Plain(TcpStream),
+    Plain(Stream),
     Tls(Box<Tls>),
 }
 
 /// TLS over a TCP connection.
 #[derive(Debug)]
 pub(crate) struct Tls {
-    stream: TcpStream,
+    stream: Stream,
     connection: rustls::ServerConnection,
     /// It's said nothing more will be sent.
     ended: bool,
 }
 
+/// What came of reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Reading {
+    /// The peer has finished sending.
+    pub(crate) finished: bool,
+    /// The budget ran out with more maybe waiting: it's read on the loop's
+    /// next turn, as the socket won't say so again.
+    pub(crate) more: bool,
+}
+
 impl Transport {
     /// `stream`, with TLS if `tls` gives a config for it.
     pub(crate) fn new(
-        stream: TcpStream,
+        stream: Stream,
         tls: Option<&std::sync::Arc<rustls::ServerConfig>>,
     ) -> io::Result<Self> {
         Ok(match tls {
@@ -66,7 +144,7 @@ impl Transport {
     }
 
     /// The socket, to register with the event loop.
-    pub(crate) fn stream(&mut self) -> &mut TcpStream {
+    pub(crate) fn stream(&mut self) -> &mut Stream {
         match self {
             Self::Plain(stream) => stream,
             Self::Tls(tls) => &mut tls.stream,
@@ -74,25 +152,52 @@ impl Transport {
     }
 
     /// Reads what has arrived onto the end of `into`, as plain bytes,
-    /// using `buffer`, until the socket has no more. Returns whether the
-    /// peer has finished sending.
+    /// using `buffer`, until the socket has no more, or `budget` bytes
+    /// have been read from it.
     ///
     /// # Errors
     ///
     /// If reading fails, or what arrived isn't TLS that makes sense.
-    pub(crate) fn read(&mut self, buffer: &mut [u8], into: &mut Vec<u8>) -> io::Result<bool> {
-        match self {
-            Self::Plain(stream) => loop {
-                match stream.read(buffer) {
-                    Ok(0) => return Ok(true),
-                    Ok(n) => into.extend_from_slice(&buffer[..n]),
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(false),
-                    Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                    Err(err) => return Err(err),
+    pub(crate) fn read(
+        &mut self,
+        buffer: &mut [u8],
+        into: &mut Vec<u8>,
+        budget: usize,
+    ) -> io::Result<Reading> {
+        let Self::Plain(stream) = self else {
+            let Self::Tls(tls) = self else {
+                unreachable!("plain or TLS");
+            };
+            return tls.read(buffer, into, budget);
+        };
+        let mut read = 0;
+        while read < budget {
+            let room = buffer.len().min(budget - read);
+            match stream.read(&mut buffer[..room]) {
+                Ok(0) => {
+                    return Ok(Reading {
+                        finished: true,
+                        more: false,
+                    });
                 }
-            },
-            Self::Tls(tls) => tls.read(buffer, into),
+                Ok(n) => {
+                    read += n;
+                    into.extend_from_slice(&buffer[..n]);
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    return Ok(Reading {
+                        finished: false,
+                        more: false,
+                    });
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
         }
+        Ok(Reading {
+            finished: false,
+            more: true,
+        })
     }
 
     /// Writes what it can of `out`, taking what's written, or for TLS,
@@ -132,7 +237,7 @@ impl Transport {
     }
 
     /// Says, over TLS, that nothing more will be sent, once: a client then
-    /// knows the answer it read was all of it. Plain TCP says so by
+    /// knows the answer it read was all of it. Plain sockets say so by
     /// closing.
     ///
     /// # Errors
@@ -158,18 +263,35 @@ impl Transport {
             Self::Tls(tls) => tls.connection.wants_write(),
         }
     }
+
+    /// Whether it's still shaking hands: TLS that hasn't finished.
+    pub(crate) fn handshaking(&self) -> bool {
+        match self {
+            Self::Plain(_) => false,
+            Self::Tls(tls) => tls.connection.is_handshaking(),
+        }
+    }
 }
 
 impl Tls {
-    fn read(&mut self, buffer: &mut [u8], into: &mut Vec<u8>) -> io::Result<bool> {
+    fn read(
+        &mut self,
+        buffer: &mut [u8],
+        into: &mut Vec<u8>,
+        budget: usize,
+    ) -> io::Result<Reading> {
         let mut finished = false;
-        loop {
+        let mut read = 0;
+        let mut more = true;
+        while read < budget {
             match self.connection.read_tls(&mut self.stream) {
                 Ok(0) => {
                     finished = true;
+                    more = false;
                     break;
                 }
-                Ok(_) => {
+                Ok(n) => {
+                    read += n;
                     let state = (self.connection.process_new_packets()).map_err(|err| {
                         // Tell the peer why, if it can hear it.
                         let _ = self.connection.write_tls(&mut self.stream);
@@ -178,7 +300,10 @@ impl Tls {
                     finished |= state.peer_has_closed();
                     self.take_plain(buffer, into)?;
                 }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    more = false;
+                    break;
+                }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(err) => return Err(err),
             }
@@ -186,7 +311,7 @@ impl Tls {
         self.take_plain(buffer, into)?;
         // The handshake has answers to send.
         self.send()?;
-        Ok(finished)
+        Ok(Reading { finished, more })
     }
 
     /// Takes the plain bytes TLS has opened onto the end of `into`.
@@ -260,6 +385,10 @@ pub(crate) struct Broken {
 #[derive(Debug, Default)]
 pub(crate) struct Decoder {
     input: Vec<u8>,
+    /// Where the next frame starts in `input`: what's read is let go of
+    /// in batches, not after every frame, which would move what's left
+    /// each time.
+    start: usize,
     /// Whether a binary message has begun and not ended.
     in_message: bool,
 }
@@ -267,6 +396,13 @@ pub(crate) struct Decoder {
 impl Decoder {
     /// Adds bytes that arrived.
     pub(crate) fn push(&mut self, bytes: &[u8]) {
+        if self.start == self.input.len() {
+            self.input.clear();
+            self.start = 0;
+        } else if self.start > self.input.len() / 2 {
+            self.input.drain(..self.start);
+            self.start = 0;
+        }
         self.input.extend_from_slice(bytes);
     }
 
@@ -278,7 +414,8 @@ impl Decoder {
     /// with the status given.
     pub(crate) fn next(&mut self) -> Result<Option<Frame>, Broken> {
         let broken = |status, reason| Err(Broken { status, reason });
-        let [first, second, ..] = self.input[..] else {
+        let input = &self.input[self.start..];
+        let [first, second, ..] = input[..] else {
             return Ok(None);
         };
         let fin = first & 0x80 != 0;
@@ -290,11 +427,11 @@ impl Decoder {
             return broken(1002, "frames from a client are masked");
         }
         let (length, mut at) = match second & 0x7F {
-            126 => match self.input.get(2..4) {
+            126 => match input.get(2..4) {
                 Some(bytes) => (u64::from(u16::from_be_bytes([bytes[0], bytes[1]])), 4),
                 None => return Ok(None),
             },
-            127 => match self.input.get(2..10) {
+            127 => match input.get(2..10) {
                 Some(bytes) => (
                     u64::from_be_bytes(bytes.try_into().expect("eight bytes")),
                     10,
@@ -311,19 +448,19 @@ impl Decoder {
             Ok(length) if length <= MAX_WS_FRAME => length,
             _ => return broken(1009, "the frame is too big"),
         };
-        let Some(mask) = self.input.get(at..at + 4) else {
+        let Some(mask) = input.get(at..at + 4) else {
             return Ok(None);
         };
         let mask: [u8; 4] = mask.try_into().expect("four bytes");
         at += 4;
-        if self.input.len() < at + length {
+        if input.len() < at + length {
             return Ok(None);
         }
-        let mut payload: Vec<u8> = self.input[at..at + length].to_vec();
+        let mut payload: Vec<u8> = input[at..at + length].to_vec();
         for (index, byte) in payload.iter_mut().enumerate() {
             *byte ^= mask[index % 4];
         }
-        self.input.drain(..at + length);
+        self.start += at + length;
         let frame = match opcode {
             opcode::BINARY if self.in_message => return broken(1002, "a message is under way"),
             opcode::CONTINUATION if !self.in_message => {
@@ -464,6 +601,23 @@ mod tests {
         let mut huge = vec![0x82, 0xFF];
         huge.extend_from_slice(&(MAX_WS_FRAME as u64 + 1).to_be_bytes());
         assert_eq!(status(huge), 1009);
+    }
+
+    #[test]
+    fn many_small_frames_are_read_in_time_linear_in_their_bytes() {
+        let one = client_frame(0x82, b"x", [1, 2, 3, 4]);
+        let count = 200_000;
+        let mut decoder = Decoder::default();
+        decoder.push(&one.repeat(count));
+        let started = std::time::Instant::now();
+        let mut read = 0;
+        while let Some(frame) = decoder.next().unwrap() {
+            assert_eq!(frame, Frame::Data(b"x".to_vec()));
+            read += 1;
+        }
+        assert_eq!(read, count);
+        // Moving what's left after each frame would take minutes.
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

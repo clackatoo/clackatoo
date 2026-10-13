@@ -14,6 +14,9 @@ use toml_edit::DocumentMut;
 
 use crate::Connection;
 
+/// The fewest characters a password may have.
+const MIN_PASSWORD: usize = 8;
+
 /// What `clackatoo web` does.
 #[derive(Debug, Subcommand)]
 pub(crate) enum WebCommand {
@@ -159,9 +162,20 @@ fn write(path: &Path, text: &str) -> anyhow::Result<()> {
         .write(true)
         .mode(0o600)
         .open(&partial)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            // On disk before it takes the old one's place.
+            file.sync_all()
+        })
         .with_context(|| format!("couldn't write {}", partial.display()))?;
-    std::fs::rename(&partial, path).with_context(|| format!("couldn't write {}", path.display()))
+    std::fs::rename(&partial, path)
+        .with_context(|| format!("couldn't write {}", path.display()))?;
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)
+            .and_then(|dir| dir.sync_all())
+            .with_context(|| format!("couldn't write {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// The password: typed twice, without being shown, on a terminal, or else
@@ -172,13 +186,16 @@ fn read_password() -> anyhow::Result<String> {
         let mut line = String::new();
         stdin.lock().read_line(&mut line)?;
         let password = line.trim_end_matches(['\r', '\n']).to_owned();
-        anyhow::ensure!(!password.is_empty(), "no password on standard input");
+        anyhow::ensure!(
+            password.chars().count() >= MIN_PASSWORD,
+            "a password needs at least {MIN_PASSWORD} characters"
+        );
         return Ok(password);
     }
     let first = prompt("Password for devices: ")?;
     anyhow::ensure!(
-        first.chars().count() >= 8,
-        "a password needs at least 8 characters"
+        first.chars().count() >= MIN_PASSWORD,
+        "a password needs at least {MIN_PASSWORD} characters"
     );
     let again = prompt("Again: ")?;
     anyhow::ensure!(first == again, "the two didn't match");

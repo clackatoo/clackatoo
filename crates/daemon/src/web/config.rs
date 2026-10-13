@@ -4,24 +4,30 @@
 //! ```toml
 //! # Off unless this says otherwise.
 //! mode = "tailscale"        # or "public", or "off"
-//! port = 8765
-//! # tailscale: the Tailscale login allowed in; else the first device's.
-//! login = "jack@github"
+//! # tailscale: the unix socket `tailscale serve` connects to, which only
+//! # you and root can reach; by default, web.sock in the web app's data.
+//! socket = "/home/you/.local/share/clackatoo/web/web.sock"
+//! # tailscale: the Tailscale login allowed in; else the first device's,
+//! # which only a window can let in.
+//! login = "you@github"
 //! # Written by `clackatoo web password`: an Argon2id hash, never the
 //! # password itself. Optional with tailscale, required with public.
 //! password = "$argon2id$v=19$m=19456,t=2,p=1$…"
-//! # public: the address to listen on, and the certificate to show.
+//! # public: where to listen, and the certificate to show, read again
+//! # when its files change.
 //! address = "0.0.0.0"
+//! port = 8765
 //! certificate = "/etc/letsencrypt/live/example.com/fullchain.pem"
 //! key = "/etc/letsencrypt/live/example.com/privkey.pem"
-//! # The address the app is reached at, if not the one the browser asks
-//! # for: requests from any other page are refused.
+//! # The address the app is reached at: requests for any other name, or
+//! # from any other page, are refused. Required with public.
 //! origin = "https://example.com:8765"
 //! # A device unused this long is unpaired.
 //! expire_days = 90
 //! # Ask for the password again after this many days; 0 never does.
 //! password_days = 0
-//! # Whether a device may ask to be allowed from a window.
+//! # Whether a device may ask to be allowed from a window: by default
+//! # with tailscale, not with public.
 //! ask = true
 //! ```
 
@@ -31,19 +37,24 @@ use std::time::Duration;
 
 use super::Asset;
 
-/// The port the web app listens on unless told otherwise.
+/// The port the web app listens on in public, unless told otherwise.
 pub const DEFAULT_PORT: u16 = 8765;
 
 /// How long a device goes unused before it's unpaired, unless told
 /// otherwise.
 pub const DEFAULT_EXPIRY: Duration = Duration::from_hours(90 * 24);
 
+/// The unix socket's name in the web app's data directory, unless told
+/// otherwise.
+pub const SOCKET: &str = "web.sock";
+
 /// How the web app is reached, and so whom it trusts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WebMode {
     /// Through `tailscale serve`, which gives it HTTPS, and says who's
-    /// asking in headers it sets itself: it listens on this machine
-    /// only, and trusts those headers from there alone.
+    /// asking in headers it sets itself: it listens on a unix socket only
+    /// the user and root can reach, and trusts those headers from there
+    /// alone.
     Tailscale,
     /// Straight from the network, over TLS with the user's own
     /// certificate. A password is required.
@@ -60,16 +71,20 @@ pub enum WebMode {
 pub struct WebConfig {
     /// How it's reached.
     pub mode: WebMode,
-    /// Where it listens: on this machine only for Tailscale.
+    /// For public: where it listens.
     pub address: SocketAddr,
+    /// For Tailscale: the unix socket `tailscale serve` connects to.
+    pub socket: PathBuf,
     /// For Tailscale: the only login let in. Without one, the login of
-    /// the first device paired is the only one.
+    /// the first device paired is the only one, and only a window can
+    /// let that device in.
     pub login: Option<String>,
     /// The password, as an Argon2id hash in PHC form, if there's one.
     pub password: Option<String>,
-    /// The origin the app must be loaded from, such as
-    /// `https://example.com:8765`. Without one, the one the browser asked
-    /// for: a page anywhere else is refused.
+    /// The origin the app is reached at, such as
+    /// `https://example.com:8765`: a request for any other name, or from a
+    /// page anywhere else, is refused. Without one, a page must be of the
+    /// origin the browser asked for.
     pub origin: Option<String>,
     /// How long a device can go unused before it's unpaired.
     pub expire_after: Duration,
@@ -82,6 +97,12 @@ pub struct WebConfig {
     pub data: PathBuf,
     /// What's served: the app's files.
     pub assets: &'static [Asset],
+    /// How long a request has to arrive whole, from its first byte, and
+    /// TLS to shake hands.
+    pub head_wait: Duration,
+    /// How often the certificate's files are looked at, to read them again
+    /// if they've changed, as when they're renewed.
+    pub reload_every: Duration,
 }
 
 impl WebConfig {
@@ -89,21 +110,22 @@ impl WebConfig {
     /// keeping what it keeps in `data`.
     #[must_use]
     pub fn new(mode: WebMode, data: PathBuf) -> Self {
-        let address = match mode {
-            WebMode::Tailscale => SocketAddr::from((Ipv4Addr::LOCALHOST, DEFAULT_PORT)),
-            WebMode::Public { .. } => SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)),
-        };
+        let tailscale = mode == WebMode::Tailscale;
         Self {
             mode,
-            address,
+            address: SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)),
+            socket: data.join(SOCKET),
             login: None,
             password: None,
             origin: None,
             expire_after: DEFAULT_EXPIRY,
             password_every: None,
-            ask: true,
+            // On the open network, a stranger could keep asking windows.
+            ask: tailscale,
             data,
             assets: &[],
+            head_wait: super::conn::HEAD_WAIT,
+            reload_every: Duration::from_mins(1),
         }
     }
 
@@ -167,17 +189,30 @@ pub fn parse(text: &str, data: PathBuf) -> Result<Option<WebConfig>, String> {
         Some(other) => return Err(format!("mode is off, tailscale or public, not {other:?}")),
     };
     let mut config = WebConfig::new(mode, data);
-    if let Some(port) = number("port")? {
-        let port = u16::try_from(port).map_err(|_| "port is at most 65535".to_owned())?;
-        config.address.set_port(port);
-    }
-    if let Some(address) = text("address")? {
-        if config.tailscale() {
-            return Err("address is for public: tailscale listens on this machine only".into());
+    if config.tailscale() {
+        if document.contains_key("port") || document.contains_key("address") {
+            return Err(
+                "port and address are for public: tailscale listens on a unix socket, \
+                 which `tailscale serve --bg unix:PATH` serves"
+                    .into(),
+            );
         }
-        let ip: IpAddr = (address.parse())
-            .map_err(|_| format!("address is an IP address to listen on, not {address:?}"))?;
-        config.address.set_ip(ip);
+        if let Some(socket) = text("socket")? {
+            config.socket = PathBuf::from(socket);
+        }
+    } else {
+        if document.contains_key("socket") {
+            return Err("socket is for tailscale: public listens on address and port".into());
+        }
+        if let Some(port) = number("port")? {
+            let port = u16::try_from(port).map_err(|_| "port is at most 65535".to_owned())?;
+            config.address.set_port(port);
+        }
+        if let Some(address) = text("address")? {
+            let ip: IpAddr = (address.parse())
+                .map_err(|_| format!("address is an IP address to listen on, not {address:?}"))?;
+            config.address.set_ip(ip);
+        }
     }
     config.login = text("login")?.filter(|login| !login.is_empty());
     config.password = text("password")?.filter(|hash| !hash.is_empty());
@@ -194,6 +229,11 @@ pub fn parse(text: &str, data: PathBuf) -> Result<Option<WebConfig>, String> {
             ));
         }
         config.origin = Some(origin);
+    } else if !config.tailscale() {
+        return Err(
+            "public needs an origin: the address the app is reached at, as https://host:port"
+                .into(),
+        );
     }
     if let Some(days) = number("expire_days")? {
         if days == 0 {
@@ -226,21 +266,27 @@ mod tests {
     }
 
     #[test]
-    fn tailscale_listens_on_this_machine_only() {
-        let config = parse("mode = \"tailscale\"\nport = 9000\nlogin = \"jack@github\"")
+    fn tailscale_listens_on_a_unix_socket_only() {
+        let config = parse("mode = \"tailscale\"\nlogin = \"jack@github\"")
             .unwrap()
             .unwrap();
-        assert_eq!(config.address, "127.0.0.1:9000".parse().unwrap());
+        assert_eq!(config.socket, PathBuf::from("/data/web.sock"));
         assert_eq!(config.login.as_deref(), Some("jack@github"));
         assert!(config.password.is_none());
-        assert!(config.ask);
+        assert!(config.ask, "a window may let a device in by default");
         assert_eq!(config.expire_after, DEFAULT_EXPIRY);
-        let err = parse("mode = \"tailscale\"\naddress = \"0.0.0.0\"").unwrap_err();
-        assert!(err.contains("this machine only"), "{err}");
+        let config = parse("mode = \"tailscale\"\nsocket = \"/run/w.sock\"")
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.socket, PathBuf::from("/run/w.sock"));
+        for listening in ["port = 9000", "address = \"0.0.0.0\""] {
+            let err = parse(&format!("mode = \"tailscale\"\n{listening}")).unwrap_err();
+            assert!(err.contains("unix socket"), "{err}");
+        }
     }
 
     #[test]
-    fn public_needs_a_certificate_and_a_password() {
+    fn public_needs_a_certificate_a_password_and_its_origin() {
         let err = parse("mode = \"public\"").unwrap_err();
         assert!(err.contains("certificate"), "{err}");
         let base = "mode = \"public\"\ncertificate = \"c.pem\"\nkey = \"k.pem\"\n";
@@ -252,22 +298,22 @@ mod tests {
             "a plain password isn't a hash: {err}"
         );
         let hash = crate::web::hash_password("hunter2");
+        let err = parse(&format!("{base}password = \"{hash}\"")).unwrap_err();
+        assert!(err.contains("origin"), "{err}");
+        let base = format!("{base}password = \"{hash}\"\norigin = \"https://Example.com:8443/\"\n");
+        let config = parse(&base).unwrap().unwrap();
+        assert!(!config.ask, "strangers don't ask windows by default");
         let config = parse(&format!(
-            "{base}password = \"{hash}\"\naddress = \"::\"\norigin = \"https://Example.com:8443/\"\n\
-             expire_days = 7\npassword_days = 30\nask = false"
+            "{base}address = \"::\"\nport = 8443\nexpire_days = 7\npassword_days = 30\nask = true"
         ))
         .unwrap()
         .unwrap();
-        assert_eq!(config.address, "[::]:8765".parse().unwrap());
+        assert_eq!(config.address, "[::]:8443".parse().unwrap());
         assert_eq!(config.origin.as_deref(), Some("https://example.com:8443"));
         assert_eq!(config.expire_after, Duration::from_hours(7 * 24));
         assert_eq!(config.password_every, Some(Duration::from_hours(30 * 24)));
-        assert!(!config.ask);
-        assert!(
-            parse(&format!(
-                "{base}password = \"{hash}\"\norigin = \"http://x\""
-            ))
-            .is_err()
-        );
+        assert!(config.ask);
+        assert!(parse(&base.replace("https://Example.com:8443/", "http://x")).is_err());
+        assert!(parse(&format!("{base}socket = \"/s\"")).is_err());
     }
 }

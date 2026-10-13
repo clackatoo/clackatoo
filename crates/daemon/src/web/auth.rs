@@ -14,12 +14,17 @@
 //!   add nothing, and a leak of the devices' file gives no tokens away.
 //! - A request that changes something, and the WebSocket, must come from
 //!   a page of the app's own origin: see [`origin_allowed`].
-//! - Through Tailscale, a request must come from this machine, where
-//!   `tailscale serve` runs, with the login it sets: see
-//!   [`tailscale_login`].
+//! - Through Tailscale, a request must come through the unix socket only
+//!   the user and root can reach, which `tailscale serve` connects to,
+//!   with the login it sets: see [`tailscale_login`].
+//! - Tries of the password, and asks to be allowed from a window, are
+//!   limited for each address they come from (see [`Buckets`]), so one
+//!   client can't use up everyone's.
 
-use std::net::SocketAddr;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+use super::conn::Peer;
 
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use base64::Engine as _;
@@ -140,22 +145,43 @@ impl Refused {
 
 /// Who Tailscale says sent a request that came from `peer` saying
 /// `login` in `Tailscale-User-Login`. `tailscale serve` sets the header
-/// itself, taking away any the client sent, so it's trusted from this
-/// machine alone, and a request from there without it, as from a tagged
-/// device, through Funnel, or from another program on this machine, isn't
-/// let in.
+/// itself, taking away any the client sent, and connects through the
+/// unix socket only the user and root can reach, so the header is
+/// trusted from there alone: never from the network, nor from another
+/// user's program on this machine, which can reach any TCP port on it.
+/// A request without it, as from a tagged device or through Funnel,
+/// isn't let in.
 ///
 /// # Errors
 ///
 /// If the request didn't come through `tailscale serve`.
-pub(crate) fn tailscale_login(peer: SocketAddr, login: Option<&str>) -> Result<String, Refused> {
-    if !peer.ip().is_loopback() {
+pub(crate) fn tailscale_login(peer: Peer, login: Option<&str>) -> Result<String, Refused> {
+    if peer != Peer::Local {
         return Err(Refused::NotFromTailscale);
     }
     match login.map(str::trim) {
         Some(login) if !login.is_empty() => Ok(login.to_owned()),
         _ => Err(Refused::NotFromTailscale),
     }
+}
+
+/// Whether a request sent to `host`, or as `tailscale serve` says, to
+/// `forwarded`, was sent to the app's own name: the one in `allowed`, the
+/// origin the settings name, if they name one. A page elsewhere whose
+/// name was pointed at this machine (DNS rebinding) is refused.
+pub(crate) fn host_allowed(
+    allowed: Option<&str>,
+    host: Option<&str>,
+    forwarded: Option<&str>,
+) -> bool {
+    let Some(allowed) = allowed else {
+        return true;
+    };
+    let name = allowed.strip_prefix("https://").unwrap_or(allowed);
+    [host, forwarded]
+        .into_iter()
+        .flatten()
+        .any(|host| host.eq_ignore_ascii_case(name))
 }
 
 /// Whether a request saying it came from a page of `origin` may act: it
@@ -181,6 +207,44 @@ pub(crate) fn origin_allowed(
         .any(|host| origin == format!("https://{}", host.to_ascii_lowercase()))
 }
 
+/// The most addresses whose tries are kept apart: past it, those whose
+/// tries have all come back are forgotten, and if none have, a new one
+/// waits.
+const MOST_KEYS: usize = 4096;
+
+/// How many tries of something are allowed now from each address.
+#[derive(Debug)]
+pub(super) struct Buckets {
+    size: u32,
+    every: Duration,
+    by_key: HashMap<String, Bucket>,
+}
+
+impl Buckets {
+    /// A full bucket of `size` for each address, filling one each `every`.
+    pub(super) fn new(size: u32, every: Duration) -> Self {
+        Self {
+            size,
+            every,
+            by_key: HashMap::new(),
+        }
+    }
+
+    /// Takes a try for `key`, if one is allowed at `now`, or says how long
+    /// until one is.
+    pub(super) fn take(&mut self, key: &str, now: Instant) -> Result<(), Duration> {
+        if !self.by_key.contains_key(key) && self.by_key.len() >= MOST_KEYS {
+            self.by_key.retain(|_, bucket| !bucket.full(now));
+            if self.by_key.len() >= MOST_KEYS {
+                return Err(self.every);
+            }
+        }
+        (self.by_key.entry(key.to_owned()))
+            .or_insert_with(|| Bucket::new(self.size, self.every, now))
+            .take(now)
+    }
+}
+
 /// How many tries of something are allowed now: a few at once, then one
 /// each while.
 #[derive(Debug)]
@@ -203,6 +267,13 @@ impl Bucket {
             left: size,
             since: now,
         }
+    }
+
+    /// Whether every try has come back by `now`.
+    fn full(&self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.since);
+        let earned = elapsed.as_nanos() / self.every.as_nanos().max(1);
+        u128::from(self.left) + earned >= u128::from(self.size)
     }
 
     /// Takes a try, if one is allowed at `now`, or says how long until
@@ -265,28 +336,56 @@ mod tests {
     }
 
     #[test]
-    fn tailscales_word_is_taken_only_from_this_machine() {
-        let local: SocketAddr = "127.0.0.1:5000".parse().unwrap();
-        let local6: SocketAddr = "[::1]:5000".parse().unwrap();
-        let tailnet: SocketAddr = "100.64.0.7:5000".parse().unwrap();
-        let lan: SocketAddr = "192.168.1.20:5000".parse().unwrap();
+    fn tailscales_word_is_taken_only_through_the_local_socket() {
         assert_eq!(
-            tailscale_login(local, Some("jack@github")),
+            tailscale_login(Peer::Local, Some("jack@github")),
             Ok("jack@github".to_owned())
         );
-        assert!(tailscale_login(local6, Some("jack@github")).is_ok());
-        for peer in [tailnet, lan] {
+        for address in [
+            "127.0.0.1:5000",
+            "[::1]:5000",
+            "100.64.0.7:5000",
+            "192.168.1.20:5000",
+        ] {
+            let peer = Peer::Tcp(address.parse().unwrap());
             assert_eq!(
                 tailscale_login(peer, Some("jack@github")),
                 Err(Refused::NotFromTailscale),
-                "a header from {peer} is anyone's to write"
+                "a header from {address} is anyone's to write, other users' on this machine too"
             );
         }
-        assert_eq!(tailscale_login(local, None), Err(Refused::NotFromTailscale));
         assert_eq!(
-            tailscale_login(local, Some(" ")),
+            tailscale_login(Peer::Local, None),
             Err(Refused::NotFromTailscale)
         );
+        assert_eq!(
+            tailscale_login(Peer::Local, Some(" ")),
+            Err(Refused::NotFromTailscale)
+        );
+    }
+
+    #[test]
+    fn only_the_apps_own_name_is_answered_once_its_named() {
+        assert!(host_allowed(None, Some("anything"), None));
+        let allowed = Some("https://desk.tail1.ts.net");
+        assert!(host_allowed(allowed, Some("desk.tail1.ts.net"), None));
+        assert!(host_allowed(
+            allowed,
+            Some("127.0.0.1"),
+            Some("Desk.tail1.ts.net")
+        ));
+        assert!(!host_allowed(allowed, Some("evil.example"), None));
+        assert!(!host_allowed(allowed, None, None));
+    }
+
+    #[test]
+    fn each_address_has_tries_of_its_own() {
+        let start = Instant::now();
+        let mut buckets = Buckets::new(2, Duration::from_mins(1));
+        assert!(buckets.take("a", start).is_ok());
+        assert!(buckets.take("a", start).is_ok());
+        assert!(buckets.take("a", start).is_err());
+        assert!(buckets.take("b", start).is_ok(), "a's tries aren't b's");
     }
 
     #[test]

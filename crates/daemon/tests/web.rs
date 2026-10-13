@@ -1,11 +1,13 @@
 //! The web app, end to end: a real daemon, listening as it would behind
-//! `tailscale serve`, asked over HTTP and WebSocket connections as a phone would ask
-//! it, with someone else's WebSocket client (tungstenite).
+//! `tailscale serve`, on its unix socket, asked over HTTP and WebSocket
+//! connections as a phone would ask it, with someone else's WebSocket
+//! client (tungstenite).
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -28,24 +30,97 @@ const PASSWORD: &str = "correct horse battery staple";
 /// The Tailscale login the tests' requests come from.
 const LOGIN: &str = "jack@github";
 
+/// Where a test daemon's web app listens.
+#[derive(Clone, Debug)]
+enum Target {
+    /// Its unix socket, for `tailscale serve`.
+    Unix(PathBuf),
+    /// The network, for public.
+    Tcp(SocketAddr),
+}
+
+/// A connection to a test daemon's web app.
+#[derive(Debug)]
+enum Conn {
+    Unix(UnixStream),
+    Tcp(TcpStream),
+}
+
+impl Conn {
+    fn open(target: &Target) -> Self {
+        let conn = match target {
+            Target::Unix(path) => Self::Unix(UnixStream::connect(path).unwrap()),
+            Target::Tcp(address) => Self::Tcp(TcpStream::connect(address).unwrap()),
+        };
+        conn.set_read_timeout(Some(Duration::from_secs(10)));
+        conn
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) {
+        match self {
+            Self::Unix(stream) => stream.set_read_timeout(timeout).unwrap(),
+            Self::Tcp(stream) => stream.set_read_timeout(timeout).unwrap(),
+        }
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) {
+        match self {
+            Self::Unix(stream) => stream.set_write_timeout(timeout).unwrap(),
+            Self::Tcp(stream) => stream.set_write_timeout(timeout).unwrap(),
+        }
+    }
+}
+
+impl Read for Conn {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Unix(stream) => stream.read(buffer),
+            Self::Tcp(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for Conn {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Unix(stream) => stream.write(bytes),
+            Self::Tcp(stream) => stream.write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// A daemon with the web app on, on its own thread, in its own temporary
 /// directory.
 struct TestDaemon {
     dir: tempfile::TempDir,
-    web: SocketAddr,
+    web: Target,
     shutdown: ShutdownHandle,
     thread: Option<JoinHandle<()>>,
 }
 
 impl TestDaemon {
-    /// A daemon reached through Tailscale, with a password.
+    /// A daemon reached through Tailscale, letting in `LOGIN`, with a
+    /// password.
     fn start() -> Self {
         Self::start_with(|_| {})
     }
 
-    /// A daemon reached through Tailscale, with a password, and the web
-    /// app's settings changed by `change`.
+    /// A daemon reached through Tailscale, letting in `LOGIN`, with a
+    /// password, and the web app's settings changed by `change`.
     fn start_with(change: impl FnOnce(&mut WebConfig)) -> Self {
+        Self::start_daemon(change, |_| {})
+    }
+
+    /// As [`start_with`](Self::start_with), with the daemon's own settings
+    /// changed by `daemon`.
+    fn start_daemon(
+        change: impl FnOnce(&mut WebConfig),
+        daemon: impl FnOnce(&mut DaemonConfig),
+    ) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let agent = vec![
             example("fake_agent").into(),
@@ -54,9 +129,12 @@ impl TestDaemon {
         ];
         let mut web = WebConfig::new(WebMode::Tailscale, dir.path().join("web"));
         web.address = "127.0.0.1:0".parse().unwrap();
+        web.login = Some(LOGIN.to_owned());
         web.password = Some(clackatoo_daemon::web::hash_password(PASSWORD));
         change(&mut web);
-        let config = DaemonConfig {
+        let socket = web.socket.clone();
+        let tailscale = web.mode == WebMode::Tailscale;
+        let mut config = DaemonConfig {
             terminal: clackatoo_term::Config::default(),
             shell: "/bin/sh".into(),
             home: dir.path().to_owned(),
@@ -85,8 +163,13 @@ impl TestDaemon {
             browser: None,
             web: Some(web),
         };
+        daemon(&mut config);
         let mut daemon = Daemon::bind(&dir.path().join("daemon.sock"), config).expect("bind");
-        let web = daemon.web_address().expect("the web app listens");
+        let web = if tailscale {
+            Target::Unix(socket)
+        } else {
+            Target::Tcp(daemon.web_address().expect("the web app listens"))
+        };
         let shutdown = daemon.shutdown_handle();
         let thread = std::thread::spawn(move || drop(daemon.run().expect("daemon failed")));
         Self {
@@ -104,12 +187,13 @@ impl TestDaemon {
 
     /// The headers a page of the app sends, through `tailscale serve`.
     fn app(&self) -> Vec<(String, String)> {
+        let host = match &self.web {
+            Target::Unix(_) => "desk.tail1.ts.net".to_owned(),
+            Target::Tcp(address) => format!("localhost:{}", address.port()),
+        };
         vec![
-            ("Host".into(), format!("localhost:{}", self.web.port())),
-            (
-                "Origin".into(),
-                format!("https://localhost:{}", self.web.port()),
-            ),
+            ("Origin".into(), format!("https://{host}")),
+            ("Host".into(), host),
             ("Tailscale-User-Login".into(), LOGIN.into()),
         ]
     }
@@ -124,7 +208,7 @@ impl TestDaemon {
     ) -> Http {
         let mut sent = self.app();
         headers(&mut sent);
-        http(self.web, "POST", path, &sent, body)
+        http(&self.web, "POST", path, &sent, body)
     }
 
     /// Pairs a device with the password, returning its cookie.
@@ -142,24 +226,28 @@ impl TestDaemon {
         cookie: &str,
         headers: impl FnOnce(&mut Vec<(String, String)>),
     ) -> Result<Phone, u16> {
+        self.raw_socket(cookie, headers).map(Phone::new)
+    }
+
+    /// Opens a WebSocket as [`socket`](Self::socket) does, without saying
+    /// hello.
+    fn raw_socket(
+        &self,
+        cookie: &str,
+        headers: impl FnOnce(&mut Vec<(String, String)>),
+    ) -> Result<WebSocket<Conn>, u16> {
         let mut sent = self.app();
         sent.push(("Cookie".into(), cookie.to_owned()));
         headers(&mut sent);
-        let mut request = format!("ws://localhost:{}/ws", self.web.port())
-            .into_client_request()
-            .unwrap();
+        let mut request = "ws://desk.tail1.ts.net/ws".into_client_request().unwrap();
         for (name, value) in sent {
             let name: tungstenite::http::HeaderName = name.parse().unwrap();
             request
                 .headers_mut()
                 .insert(name, HeaderValue::from_str(&value).unwrap());
         }
-        let stream = TcpStream::connect(self.web).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        match tungstenite::client(request, stream) {
-            Ok((socket, _)) => Ok(Phone::new(socket)),
+        match tungstenite::client(request, Conn::open(&self.web)) {
+            Ok((socket, _)) => Ok(socket),
             Err(tungstenite::HandshakeError::Failure(tungstenite::Error::Http(response))) => {
                 Err(response.status().as_u16())
             }
@@ -231,27 +319,33 @@ impl Http {
     }
 }
 
-/// Asks the web app at `address` with `method`, `path`, `headers` and
+/// A request, as bytes: `method`, `path`, `headers` and `body`.
+fn request_bytes(method: &str, path: &str, headers: &[(String, String)], body: &str) -> String {
+    let mut request = format!("{method} {path} HTTP/1.1\r\n");
+    for (name, value) in headers {
+        let _ = write!(request, "{name}: {value}\r\n");
+    }
+    let _ = write!(request, "Content-Length: {}\r\n\r\n{body}", body.len());
+    request
+}
+
+/// Asks the web app at `target` with `method`, `path`, `headers` and
 /// `body`, on a connection of its own.
 fn http(
-    address: SocketAddr,
+    target: &Target,
     method: &str,
     path: &str,
     headers: &[(String, String)],
     body: &str,
 ) -> Http {
-    let mut stream = TcpStream::connect(address).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(150)))
+    let mut conn = Conn::open(target);
+    conn.set_read_timeout(Some(Duration::from_secs(150)));
+    let mut headers = headers.to_vec();
+    headers.push(("Connection".into(), "close".into()));
+    conn.write_all(request_bytes(method, path, &headers, body).as_bytes())
         .unwrap();
-    let mut request = format!("{method} {path} HTTP/1.1\r\nConnection: close\r\n");
-    for (name, value) in headers {
-        let _ = write!(request, "{name}: {value}\r\n");
-    }
-    let _ = write!(request, "Content-Length: {}\r\n\r\n{body}", body.len());
-    stream.write_all(request.as_bytes()).unwrap();
     let mut answer = Vec::new();
-    stream.read_to_end(&mut answer).unwrap();
+    conn.read_to_end(&mut answer).unwrap();
     let split = (answer.windows(4))
         .position(|window| window == b"\r\n\r\n")
         .expect("a head");
@@ -276,9 +370,35 @@ fn http(
     }
 }
 
+/// Whether the daemon closes `conn` within `limit`: reading ends, or
+/// fails as a reset does.
+fn closed_within(conn: &mut Conn, limit: Duration) -> bool {
+    conn.set_read_timeout(Some(limit));
+    let deadline = Instant::now() + limit;
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        match conn.read(&mut buffer) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return false;
+            }
+            Err(_) => return true,
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+    }
+}
+
 /// A device's WebSocket, speaking the protocol, as the app does.
 struct Phone {
-    socket: WebSocket<TcpStream>,
+    socket: WebSocket<Conn>,
     decoder: FrameDecoder,
     events: VecDeque<Event>,
     /// The view of the chat it follows, kept current.
@@ -287,7 +407,7 @@ struct Phone {
 
 impl Phone {
     /// A device that has said hello.
-    fn new(socket: WebSocket<TcpStream>) -> Self {
+    fn new(socket: WebSocket<Conn>) -> Self {
         let mut phone = Self {
             socket,
             decoder: FrameDecoder::new(),
@@ -389,7 +509,7 @@ impl Phone {
 #[test]
 fn the_app_is_served_with_a_strict_policy() {
     let daemon = TestDaemon::start();
-    let page = http(daemon.web, "GET", "/", &daemon.app(), "");
+    let page = http(&daemon.web, "GET", "/", &daemon.app(), "");
     assert_eq!(page.status, 200);
     let policy = page.header("content-security-policy").unwrap();
     assert!(policy.contains("default-src 'none'"), "{policy}");
@@ -399,14 +519,14 @@ fn the_app_is_served_with_a_strict_policy() {
         page.text().contains("without its web app"),
         "no app in tests"
     );
-    let missing = http(daemon.web, "GET", "/nothing.js", &daemon.app(), "");
+    let missing = http(&daemon.web, "GET", "/nothing.js", &daemon.app(), "");
     assert_eq!(missing.status, 404);
 }
 
 #[test]
 fn a_device_pairs_with_the_password_and_connects() {
     let daemon = TestDaemon::start();
-    let session = http(daemon.web, "GET", "/session", &daemon.app(), "").json();
+    let session = http(&daemon.web, "GET", "/session", &daemon.app(), "").json();
     assert_eq!(session["state"], "unpaired");
     assert_eq!(session["password"], true);
 
@@ -414,7 +534,7 @@ fn a_device_pairs_with_the_password_and_connects() {
     assert!(cookie.starts_with("__Host-clackatoo="), "{cookie}");
     let mut headers = daemon.app();
     headers.push(("Cookie".into(), cookie.clone()));
-    let session = http(daemon.web, "GET", "/session", &headers, "").json();
+    let session = http(&daemon.web, "GET", "/session", &headers, "").json();
     assert_eq!(session["state"], "paired");
     assert_eq!(session["name"], "phone");
 
@@ -483,14 +603,24 @@ fn a_revoked_device_is_cut_off_and_refused() {
     );
     let mut headers = daemon.app();
     headers.push(("Cookie".into(), cookie));
-    let session = http(daemon.web, "GET", "/session", &headers, "").json();
+    let session = http(&daemon.web, "GET", "/session", &headers, "").json();
     assert_eq!(session["state"], "unpaired");
 }
 
 #[test]
 fn a_page_elsewhere_is_refused() {
-    let daemon = TestDaemon::start();
+    let daemon =
+        TestDaemon::start_with(|web| web.origin = Some("https://desk.tail1.ts.net".into()));
     let cookie = daemon.pair();
+    // Sent to another name, as when a page's name is pointed at this
+    // machine: refused, whatever it asks.
+    let mut headers = daemon.app();
+    headers.retain(|(name, _)| name != "Host");
+    headers.push(("Host".into(), "evil.example".into()));
+    assert_eq!(
+        http(&daemon.web, "GET", "/session", &headers, "").status,
+        421
+    );
     let elsewhere = |headers: &mut Vec<(String, String)>| {
         headers.retain(|(name, _)| name != "Origin");
         headers.push(("Origin".into(), "https://evil.example".into()));
@@ -522,7 +652,7 @@ fn only_tailscale_and_the_login_let_in_reach_the_app() {
     let mut headers = daemon.app();
     anonymous(&mut headers);
     // Another program on this machine, not `tailscale serve`.
-    assert_eq!(http(daemon.web, "GET", "/", &headers, "").status, 403);
+    assert_eq!(http(&daemon.web, "GET", "/", &headers, "").status, 403);
     let body = format!(r#"{{"name":"phone","password":"{PASSWORD}"}}"#);
     assert_eq!(daemon.post("/pair", &body, anonymous).status, 403);
     let someone_else = |headers: &mut Vec<(String, String)>| {
@@ -558,10 +688,10 @@ fn a_device_is_allowed_from_a_window_by_its_code() {
 
     // The device waits for the answer meanwhile.
     let waiting = {
-        let daemon_web = daemon.web;
+        let daemon_web = daemon.web.clone();
         let headers = daemon.app();
         let body = format!(r#"{{"wait":"{wait}"}}"#);
-        std::thread::spawn(move || http(daemon_web, "POST", "/pair/wait", &headers, &body))
+        std::thread::spawn(move || http(&daemon_web, "POST", "/pair/wait", &headers, &body))
     };
     let wrong = if code == "0000" { "1111" } else { "0000" };
     assert!(matches!(
@@ -761,11 +891,11 @@ fn a_turn_ending_while_no_one_looks_is_unseen_until_someone_does() {
     assert!(!chats[0].unseen);
 }
 
-#[test]
-fn the_public_app_is_served_over_tls_with_its_own_certificate() {
-    let pems = tempfile::tempdir().unwrap();
+/// A self-signed certificate for `localhost`, written into `dir` as PEM
+/// files, as `cert.pem` and `key.pem`, renamed into place. Returns its
+/// paths and the certificate.
+fn make_certificate(dir: &Path) -> (PathBuf, PathBuf, rustls::pki_types::CertificateDer<'static>) {
     let certified = rcgen::generate_simple_self_signed(["localhost".to_owned()]).unwrap();
-    let (certificate, key) = (pems.path().join("cert.pem"), pems.path().join("key.pem"));
     let pem = |label: &str, der: &[u8]| {
         use base64::Engine as _;
         let text = base64::engine::general_purpose::STANDARD.encode(der);
@@ -777,15 +907,28 @@ fn the_public_app_is_served_over_tls_with_its_own_certificate() {
             lines.join("\n")
         )
     };
-    std::fs::write(&certificate, pem("CERTIFICATE", certified.cert.der())).unwrap();
-    let der = certified.signing_key.serialize_der();
-    std::fs::write(&key, pem("PRIVATE KEY", &der)).unwrap();
-    let daemon = TestDaemon::start_with(|web| {
-        web.mode = WebMode::Public { certificate, key };
-    });
+    let (certificate, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+    let write = |path: &Path, text: String| {
+        let partial = path.with_extension("partial");
+        std::fs::write(&partial, text).unwrap();
+        std::fs::rename(&partial, path).unwrap();
+    };
+    write(&certificate, pem("CERTIFICATE", certified.cert.der()));
+    write(
+        &key,
+        pem("PRIVATE KEY", &certified.signing_key.serialize_der()),
+    );
+    (certificate, key, certified.cert.der().clone())
+}
 
+/// `GET /session` from the web app at `address` over TLS, trusting only
+/// `trusted`.
+fn session_over_tls(
+    address: SocketAddr,
+    trusted: &rustls::pki_types::CertificateDer<'static>,
+) -> std::io::Result<String> {
     let mut roots = rustls::RootCertStore::empty();
-    roots.add(certified.cert.der().clone()).unwrap();
+    roots.add(trusted.clone()).unwrap();
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -795,23 +938,297 @@ fn the_public_app_is_served_over_tls_with_its_own_certificate() {
     let connection =
         rustls::ClientConnection::new(std::sync::Arc::new(config), "localhost".try_into().unwrap())
             .unwrap();
-    let stream = TcpStream::connect(daemon.web).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    let stream = TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut tls = rustls::StreamOwned::new(connection, stream);
-    let port = daemon.web.port();
+    let port = address.port();
     write!(
         tls,
         "GET /session HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
+    )?;
     let mut answer = String::new();
-    tls.read_to_string(&mut answer)
-        .expect("the whole answer, then TLS's close");
+    tls.read_to_string(&mut answer)?;
+    Ok(answer)
+}
+
+#[test]
+fn the_public_app_is_served_over_tls_and_its_certificate_read_again_when_renewed() {
+    let pems = tempfile::tempdir().unwrap();
+    let (certificate, key, first) = make_certificate(pems.path());
+    let daemon = TestDaemon::start_with(|web| {
+        web.mode = WebMode::Public { certificate, key };
+        web.reload_every = Duration::from_millis(100);
+    });
+    let Target::Tcp(address) = daemon.web else {
+        panic!("public listens on the network");
+    };
+    let answer = session_over_tls(address, &first).expect("the whole answer, then TLS's close");
     assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
     assert!(answer.contains("strict-transport-security"), "{answer}");
     assert!(answer.contains("\"state\":\"unpaired\""), "{answer}");
     // Tailscale's word means nothing here: it's anyone's to write.
     assert!(answer.contains("\"tailscale\":false"), "{answer}");
+
+    // Renewed: new connections are shown the new certificate.
+    let (_, _, renewed) = make_certificate(pems.path());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if session_over_tls(address, &renewed).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the certificate wasn't read again"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        session_over_tls(address, &first).is_err(),
+        "the old one's gone"
+    );
+}
+
+#[test]
+fn a_connection_waiting_for_a_window_cant_send_much() {
+    let daemon = TestDaemon::start();
+    let asked = daemon
+        .post("/pair", r#"{"name":"phone","ask":true}"#, |_| {})
+        .json();
+    let wait = asked["wait"].as_str().unwrap().to_owned();
+    let mut conn = Conn::open(&daemon.web);
+    let body = format!(r#"{{"wait":"{wait}"}}"#);
+    conn.write_all(request_bytes("POST", "/pair/wait", &daemon.app(), &body).as_bytes())
+        .unwrap();
+    // While it waits, a flood: it's cut off, not held.
+    conn.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = conn.write_all(&vec![b'x'; 1 << 20]);
+    assert!(closed_within(&mut conn, Duration::from_secs(3)));
+}
+
+#[test]
+fn a_request_trickling_in_is_given_up_on() {
+    let daemon = TestDaemon::start_with(|web| web.head_wait = Duration::from_millis(300));
+    let mut conn = Conn::open(&daemon.web);
+    conn.write_all(b"GET / HTTP/1.1\r\n").unwrap();
+    let started = Instant::now();
+    let mut closed = false;
+    while started.elapsed() < Duration::from_secs(3) {
+        if conn.write_all(b"X-Slow: y\r\n").is_err() {
+            closed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        conn.set_read_timeout(Some(Duration::from_millis(10)));
+        let mut byte = [0; 1];
+        if matches!(conn.read(&mut byte), Ok(0)) {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "a trickled request was waited for");
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn each_address_has_password_tries_of_its_own() {
+    let daemon = TestDaemon::start();
+    let from = |address: &'static str| {
+        move |headers: &mut Vec<(String, String)>| {
+            headers.push(("X-Forwarded-For".into(), address.into()));
+        }
+    };
+    let wrong = r#"{"name":"phone","password":"hunter2"}"#;
+    for _ in 0..5 {
+        assert_eq!(daemon.post("/pair", wrong, from("100.64.0.9")).status, 403);
+    }
+    assert_eq!(daemon.post("/pair", wrong, from("100.64.0.9")).status, 429);
+    // Someone else, elsewhere, isn't locked out by it.
+    let right = format!(r#"{{"name":"phone","password":"{PASSWORD}"}}"#);
+    let answer = daemon.post("/pair", &right, from("100.64.0.10"));
+    assert_eq!(answer.status, 200, "{}", answer.text());
+}
+
+#[test]
+fn the_first_login_is_let_in_only_from_a_window() {
+    let daemon = TestDaemon::start_with(|web| web.login = None);
+    let mut window = daemon.window();
+    let right = format!(r#"{{"name":"phone","password":"{PASSWORD}"}}"#);
+    let as_eve = |headers: &mut Vec<(String, String)>| {
+        headers.retain(|(name, _)| name != "Tailscale-User-Login");
+        headers.push(("Tailscale-User-Login".into(), "eve@github".into()));
+    };
+    // Whoever has the password first doesn't become the only login.
+    let grab = daemon.post("/pair", &right, as_eve);
+    assert_eq!(grab.status, 403, "{}", grab.text());
+    assert!(grab.cookie().is_none());
+    let asked = daemon
+        .post("/pair", r#"{"name":"phone","ask":true}"#, |_| {})
+        .json();
+    let (wait, code) = (
+        asked["wait"].as_str().unwrap(),
+        asked["code"].as_str().unwrap(),
+    );
+    window
+        .request(&Request::AnswerPairing {
+            code: Some(code.to_owned()),
+        })
+        .unwrap();
+    let paired = daemon.post("/pair/wait", &format!(r#"{{"wait":"{wait}"}}"#), |_| {});
+    assert_eq!(paired.status, 200, "{}", paired.text());
+    // Now the login a window let in pairs more with the password, and no
+    // one else does.
+    assert_eq!(daemon.post("/pair", &right, |_| {}).status, 200);
+    assert_eq!(daemon.post("/pair", &right, as_eve).status, 403);
+}
+
+#[test]
+fn a_device_pinging_without_reading_is_cut_off() {
+    let daemon = TestDaemon::start();
+    let cookie = daemon.pair();
+    let mut socket = daemon.raw_socket(&cookie, |_| {}).expect("let in");
+    socket
+        .get_mut()
+        .set_write_timeout(Some(Duration::from_millis(500)));
+    // Its pongs pile up unread, a few kilobytes at most before it's cut
+    // off: not as many as the daemon lets an unread client have of what
+    // it asked for.
+    let mut pings = 0;
+    loop {
+        assert!(
+            pings < 16_000,
+            "{pings} pings were taken while their pongs went unread"
+        );
+        let ping = Message::Ping(vec![7; 125].into());
+        match socket.send(ping) {
+            Ok(()) => pings += 1,
+            // Its own sending backs up, unread: it goes on trying.
+            Err(tungstenite::Error::Io(err))
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => break,
+        }
+    }
+}
+
+#[test]
+fn a_device_whose_password_lapses_is_cut_off_until_it_gives_it_again() {
+    let daemon = TestDaemon::start_with(|web| web.password_every = Some(Duration::from_secs(1)));
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    let started = Instant::now();
+    assert_eq!(phone.receive(), Err(Some(CloseCode::from(4002))));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(daemon.socket(&cookie, |_| {}).err(), Some(401));
+    let mut headers = daemon.app();
+    headers.push(("Cookie".into(), cookie.clone()));
+    assert_eq!(
+        http(&daemon.web, "GET", "/session", &headers, "").json()["state"],
+        "renew"
+    );
+    let renew = format!(r#"{{"password":"{PASSWORD}","renew":true}}"#);
+    let cookie_too = cookie.clone();
+    let answer = daemon.post("/pair", &renew, move |headers| {
+        headers.push(("Cookie".into(), cookie_too));
+    });
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    assert!(daemon.socket(&cookie, |_| {}).is_ok());
+}
+
+#[test]
+fn a_device_unused_too_long_is_cut_off_and_unpaired() {
+    let daemon = TestDaemon::start_with(|web| web.expire_after = Duration::from_secs(1));
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    let started = Instant::now();
+    assert_eq!(phone.receive(), Err(Some(CloseCode::from(4001))));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(daemon.socket(&cookie, |_| {}).err(), Some(401));
+    let Response::Devices(devices) = daemon.window().request(&Request::Devices).unwrap() else {
+        panic!("devices");
+    };
+    assert!(devices.is_empty(), "unpaired");
+}
+
+#[test]
+fn a_device_cant_upgrade_the_daemon_carry_quic_or_serve_tools() {
+    let daemon = TestDaemon::start_daemon(|_| {}, |config| config.mcp = Some(vec!["true".into()]));
+    let cookie = daemon.pair();
+    // Asking to upgrade in place of hello.
+    let mut socket = daemon.raw_socket(&cookie, |_| {}).expect("let in");
+    let upgrade = ClientMessage::Upgrade {
+        protocol_version: PROTOCOL_VERSION,
+        executable: b"/bin/true".to_vec(),
+    };
+    socket
+        .send(Message::binary(frame::encode(&upgrade).unwrap()))
+        .unwrap();
+    let mut decoder = FrameDecoder::new();
+    let refused = loop {
+        if let Some(message) = decoder.decode::<ServerMessage>().unwrap() {
+            break message;
+        }
+        if let Message::Binary(bytes) = socket.read().unwrap() {
+            decoder.push(&bytes);
+        }
+    };
+    assert!(
+        matches!(&refused, ServerMessage::NotUpgrading { reason } if reason.contains("machine")),
+        "{refused:?}"
+    );
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    assert!(matches!(
+        phone.request(Request::CarryQuic),
+        Response::Error(Error::CantCarry(_))
+    ));
+    let chat = PaneTerminal::Agent(NewAgent {
+        size: Size::new(40, 10).unwrap(),
+        cwd: None,
+        agent: None,
+        tools: AgentTools::Ask,
+        task: true,
+        browser: false,
+    });
+    phone.request(Request::NewWorkspace {
+        name: None,
+        terminal: chat,
+    });
+    let Response::Chats(chats) = phone.request(Request::WatchChats) else {
+        panic!("chats");
+    };
+    let refused = phone.request(Request::CarryMcp {
+        chat: chats[0].chat,
+    });
+    assert!(
+        matches!(&refused, Response::Error(Error::NoTools(why)) if why.contains("socket")),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn one_address_opens_only_so_many_connections() {
+    let pems = tempfile::tempdir().unwrap();
+    let (certificate, key, _) = make_certificate(pems.path());
+    let daemon = TestDaemon::start_with(|web| {
+        web.mode = WebMode::Public { certificate, key };
+    });
+    let Target::Tcp(address) = daemon.web else {
+        panic!("public listens on the network");
+    };
+    // Each starts TLS's handshake and goes no further.
+    let mut open: Vec<Conn> = (0..8)
+        .map(|_| Conn::Tcp(TcpStream::connect(address).unwrap()))
+        .collect();
+    let mut one_more = Conn::Tcp(TcpStream::connect(address).unwrap());
+    assert!(
+        closed_within(&mut one_more, Duration::from_secs(2)),
+        "a ninth from one address is closed at once"
+    );
+    assert!(!closed_within(&mut open[0], Duration::from_millis(200)));
+    // Once one closes, another may open.
+    drop(open.pop());
+    std::thread::sleep(Duration::from_millis(200));
+    let mut another = Conn::Tcp(TcpStream::connect(address).unwrap());
+    assert!(!closed_within(&mut another, Duration::from_millis(300)));
 }

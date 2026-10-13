@@ -16,10 +16,11 @@
 
 use std::fs;
 use std::io::Write as _;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -37,6 +38,12 @@ const RECORD_SIZE: u32 = 4096;
 /// The most a notification may say, sealed: what every push service
 /// takes.
 const MOST: usize = 3000;
+
+/// How many notifications are sent at once.
+const SENDERS: usize = 4;
+
+/// The longest sending one may take.
+const SEND_WAIT: Duration = Duration::from_secs(10);
 
 /// Who to tell if notifications go wrong, as push services ask a sender
 /// to say.
@@ -123,12 +130,22 @@ impl Vapid {
 
 /// The origin of `endpoint`, the audience its signature names, if it's
 /// a push service's address: HTTPS, at a host of one of
-/// [`PUSH_SERVICES`].
-pub(crate) fn audience(endpoint: &str) -> Option<&str> {
-    let rest = endpoint.strip_prefix("https://")?;
-    let end = rest.find('/').unwrap_or(rest.len());
-    let authority = &rest[..end];
-    let host = authority.split(':').next()?;
+/// [`PUSH_SERVICES`], with no port and no user, read by a real URL
+/// parser, so nothing unusual in it can mean one thing here and another
+/// to the client sending it.
+pub(crate) fn audience(endpoint: &str) -> Option<String> {
+    if endpoint.len() > 2048 {
+        return None;
+    }
+    let uri: ureq::http::Uri = endpoint.parse().ok()?;
+    let authority = uri.authority()?;
+    if uri.scheme_str() != Some("https") || authority.port().is_some() {
+        return None;
+    }
+    if authority.as_str().contains('@') {
+        return None;
+    }
+    let host = authority.host();
     let known = PUSH_SERVICES.iter().any(|service| {
         host == *service
             || host
@@ -136,7 +153,42 @@ pub(crate) fn audience(endpoint: &str) -> Option<&str> {
                 .is_some_and(|start| start.ends_with('.'))
     });
     let plain = (host.bytes()).all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte));
-    (known && plain && endpoint.len() <= 2048).then(|| &endpoint[..8 + end])
+    (known && plain).then(|| format!("https://{host}"))
+}
+
+/// Whether `ip` is an address on the internet: not this machine, a
+/// private or link-local network, Tailscale's, or anything reserved. A
+/// push service's name that resolves to one of those is refused, so a
+/// notification can't be aimed at a service on this side of the network.
+pub(crate) fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, ..] = ip.octets();
+            !(ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || a == 0
+                || a >= 240
+                // Shared address space, which Tailscale uses.
+                || (a == 100 && (64..128).contains(&b)))
+        }
+        IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_public(IpAddr::V4(v4));
+            }
+            let first = ip.segments()[0];
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                // Unique local, and link-local.
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80)
+        }
+    }
 }
 
 /// Seals `plaintext` for the browser whose public key is `ua_public` and
@@ -234,30 +286,48 @@ pub(crate) struct Pusher {
 }
 
 impl Pusher {
-    /// Starts the thread, signing with `vapid`, which calls `wake` when a
-    /// push service says a subscription is gone.
-    pub(crate) fn start(vapid: Arc<Vapid>, wake: impl Fn() + Send + 'static) -> Self {
+    /// Starts the threads, signing with `vapid`, which call `wake` when a
+    /// push service says a subscription is gone. Several send at once, so
+    /// a push service that's slow to answer holds up only its own.
+    pub(crate) fn start(vapid: &Arc<Vapid>, wake: impl Fn() + Send + Sync + 'static) -> Self {
         let (jobs, inbox) = mpsc::channel::<Push>();
         let (tell, gone) = mpsc::channel();
-        let spawned = std::thread::Builder::new()
-            .name("push".to_owned())
-            .spawn(move || {
-                let config = ureq::Agent::config_builder()
-                    .user_agent(concat!("clackatoo/", env!("CARGO_PKG_VERSION")))
-                    .timeout_connect(Some(Duration::from_secs(10)))
-                    .timeout_global(Some(Duration::from_secs(20)))
-                    .build();
-                let agent = ureq::Agent::new_with_config(config);
-                let random = SystemRandom::new();
-                for push in inbox {
-                    if let Some(gone) = send(&agent, &vapid, &random, &push) {
-                        let _ = tell.send(gone);
-                        wake();
+        let config = ureq::Agent::config_builder()
+            .user_agent(concat!("clackatoo/", env!("CARGO_PKG_VERSION")))
+            .https_only(true)
+            .max_redirects(0)
+            .timeout_connect(Some(Duration::from_secs(5)))
+            .timeout_global(Some(SEND_WAIT))
+            .build();
+        let agent = ureq::Agent::new_with_config(config);
+        let inbox = Arc::new(Mutex::new(inbox));
+        let wake = Arc::new(wake);
+        for _ in 0..SENDERS {
+            let (agent, vapid, inbox, tell, wake) = (
+                agent.clone(),
+                Arc::clone(vapid),
+                Arc::clone(&inbox),
+                tell.clone(),
+                Arc::clone(&wake),
+            );
+            let spawned = std::thread::Builder::new()
+                .name("push".to_owned())
+                .spawn(move || {
+                    let random = SystemRandom::new();
+                    loop {
+                        let next = inbox.lock().unwrap_or_else(PoisonError::into_inner).recv();
+                        let Ok(push) = next else {
+                            return;
+                        };
+                        if let Some(gone) = send(&agent, &vapid, &random, &push) {
+                            let _ = tell.send(gone);
+                            wake();
+                        }
                     }
-                }
-            });
-        if let Err(err) = spawned {
-            log::error!("the thread sending notifications couldn't start: {err}");
+                });
+            if let Err(err) = spawned {
+                log::error!("a thread sending notifications couldn't start: {err}");
+            }
         }
         Self { jobs, gone }
     }
@@ -293,6 +363,22 @@ fn send(agent: &ureq::Agent, vapid: &Vapid, random: &SystemRandom, push: &Push) 
         log::warn!("a notification for device {} couldn't be made", push.device);
         return None;
     };
+    // The name must lead to the internet, as a push service's does.
+    let resolved = audience(&subscription.endpoint)
+        .and_then(|origin| {
+            (origin.trim_start_matches("https://"), 443)
+                .to_socket_addrs()
+                .ok()
+        })
+        .map(|addresses| addresses.map(|address| address.ip()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if resolved.is_empty() || !resolved.iter().all(|&ip| is_public(ip)) {
+        log::warn!(
+            "device {}'s push service didn't resolve to the internet: {resolved:?}",
+            push.device
+        );
+        return None;
+    }
     let sent = agent
         .post(&subscription.endpoint)
         .header("TTL", "86400")
@@ -429,18 +515,20 @@ mod tests {
     #[test]
     fn notifications_go_only_to_browsers_push_services() {
         assert_eq!(
-            audience("https://web.push.apple.com/QGuQyavXutnMH"),
+            audience("https://web.push.apple.com/QGuQyavXutnMH").as_deref(),
             Some("https://web.push.apple.com")
         );
         assert_eq!(
-            audience("https://fcm.googleapis.com/fcm/send/abc"),
+            audience("https://fcm.googleapis.com/fcm/send/abc").as_deref(),
             Some("https://fcm.googleapis.com")
         );
         assert_eq!(
-            audience("https://updates.push.services.mozilla.com/wpush/v2/x"),
+            audience("https://updates.push.services.mozilla.com/wpush/v2/x").as_deref(),
             Some("https://updates.push.services.mozilla.com")
         );
         for refused in [
+            "https://web.push.apple.com:8443/x",
+            "https://web.push.apple.com@evil.example/x",
             "http://web.push.apple.com/x",
             "https://evilpush.apple.com.example/x",
             "https://notpush.apple.com/x",
@@ -449,6 +537,32 @@ mod tests {
             "https://user@web.push.apple.com/x",
         ] {
             assert_eq!(audience(refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn notifications_go_only_to_the_internet() {
+        for private in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.7",
+            "0.0.0.0",
+            "::1",
+            "fd7a:115c:a1e0::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(!is_public(private.parse().unwrap()), "{private}");
+        }
+        for public in [
+            "17.253.144.10",
+            "142.250.180.10",
+            "2a00:1450:4009:81f::200a",
+        ] {
+            assert!(is_public(public.parse().unwrap()), "{public}");
         }
     }
 

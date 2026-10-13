@@ -576,6 +576,8 @@ pub struct Daemon {
     web: Option<crate::web::Web>,
     /// The chats as a list, and the notifications they're to send.
     chat_watch: web::ChatWatch,
+    /// Web connections with more to read or answer than one turn takes.
+    web_unread: Vec<Token>,
 }
 
 /// Stops a running [`Daemon`] from another thread.
@@ -673,6 +675,7 @@ impl Daemon {
             upgrade_args: Vec::new(),
             web: None,
             chat_watch: web::ChatWatch::default(),
+            web_unread: Vec::new(),
         })
         .map(|mut daemon| {
             daemon.start_web();
@@ -883,32 +886,37 @@ impl Daemon {
             let agent_unread = self.agents.unread();
             let servers_unread = self.servers_unread();
             let tools_unread = self.tools_unread();
-            let timeout =
-                if self.unread.is_empty() && !agent_unread && !servers_unread && !tools_unread {
-                    let compaction = self.compactions.values().min().copied();
-                    let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
-                    let idle = self.next_idle_stop();
-                    let retry = self.next_retry();
-                    let clipboard = self.next_clipboard_timeout();
-                    let explore = self.next_explore();
-                    let tools = self.next_tool_due();
-                    let rewatch = self.next_rewatch();
-                    let reviews = self.next_review_due();
-                    let next = (compaction.into_iter().chain(quic).chain(idle))
-                        .chain(retry)
-                        .chain(clipboard)
-                        .chain(explore)
-                        .chain(tools)
-                        .chain(rewatch)
-                        .chain(reviews)
-                        .chain(self.next_agent_due())
-                        .chain(self.next_web_due())
-                        .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
-                        .min();
-                    next.map(|due| due.saturating_duration_since(Instant::now()))
-                } else {
-                    Some(Duration::ZERO)
-                };
+            let web_unread = !self.web_unread.is_empty();
+            let timeout = if self.unread.is_empty()
+                && !agent_unread
+                && !servers_unread
+                && !tools_unread
+                && !web_unread
+            {
+                let compaction = self.compactions.values().min().copied();
+                let quic = self.quic.as_mut().and_then(QuicServer::next_timeout);
+                let idle = self.next_idle_stop();
+                let retry = self.next_retry();
+                let clipboard = self.next_clipboard_timeout();
+                let explore = self.next_explore();
+                let tools = self.next_tool_due();
+                let rewatch = self.next_rewatch();
+                let reviews = self.next_review_due();
+                let next = (compaction.into_iter().chain(quic).chain(idle))
+                    .chain(retry)
+                    .chain(clipboard)
+                    .chain(explore)
+                    .chain(tools)
+                    .chain(rewatch)
+                    .chain(reviews)
+                    .chain(self.next_agent_due())
+                    .chain(self.next_web_due())
+                    .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
+                    .min();
+                next.map(|due| due.saturating_duration_since(Instant::now()))
+            } else {
+                Some(Duration::ZERO)
+            };
             match self.poll.poll(&mut events, timeout) {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -920,6 +928,9 @@ impl Daemon {
             self.drive_quic();
             for id in std::mem::take(&mut self.unread) {
                 self.read_output(id);
+            }
+            if web_unread {
+                self.serve_web_unread();
             }
             if agent_unread {
                 self.read_agents_unread();
@@ -1851,8 +1862,16 @@ impl Daemon {
                 }
             }
             Link::Web(link) => {
-                if link.receive(&mut self.buffer, &mut client.decoder, Instant::now()) {
-                    client.finished = true;
+                let received = link.receive(&mut self.buffer, &mut client.decoder, Instant::now());
+                if received.drop {
+                    self.drop_client(token);
+                    return None;
+                }
+                client.finished |= received.finished;
+                // The rest is read next turn, so no device has the loop to
+                // itself.
+                if received.more && !self.web_unread.contains(&token) {
+                    self.web_unread.push(token);
                 }
             }
         }
@@ -1946,6 +1965,7 @@ impl Daemon {
                 .grid(terminal)
                 .map(|grid| Response::Block(grid.block(line, which))),
             Request::Chat { terminal, action } => {
+                self.note_device_action(token, terminal, &action);
                 self.chat_action(terminal, action).map(|()| Response::Done)
             }
             request @ (Request::WatchWorkspaces
@@ -2230,11 +2250,14 @@ impl Daemon {
         // without a word has, would hold ever more: it starts again on a
         // new connection, from a snapshot.
         let remote = matches!(client.link, Link::Quic(_) | Link::Web(_));
-        if remote && client.outgoing.len() > MOST_UNSENT {
-            log::warn!(
-                "dropping a client on another machine {} B behind",
-                client.outgoing.len()
-            );
+        // A device's frames waiting count too, pongs among them.
+        let unsent = client.outgoing.len()
+            + match &client.link {
+                Link::Web(link) => link.unsent(),
+                _ => 0,
+            };
+        if remote && unsent > MOST_UNSENT {
+            log::warn!("dropping a client on another machine {unsent} B behind");
             self.drop_client_saying(token, "the window fell too far behind");
             return;
         }

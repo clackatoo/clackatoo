@@ -58,6 +58,8 @@ pub(crate) fn build() {
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo says"));
     let mode = std::env::var("CLACKATOO_WEB_APP").unwrap_or_default();
     let files = if mode == "off" {
+        // Said when the build script runs: once, until the setting changes.
+        println!("cargo::warning=built without the web app, as CLACKATOO_WEB_APP=off says");
         Vec::new()
     } else {
         for watched in [

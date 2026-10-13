@@ -674,8 +674,9 @@ impl App {
     /// The WebSocket closed, with `code`.
     fn closed(&mut self, code: u16) {
         self.socket = None;
-        // The device was unpaired, or the daemon refused it: it hears why.
-        if code == 4001 {
+        // The device was unpaired, its password is to be given again, or the
+        // daemon refused it: the daemon says which, and the app shows it.
+        if (4001..=4003).contains(&code) {
             self.state = State::default();
             spawn_local(boot());
             return;

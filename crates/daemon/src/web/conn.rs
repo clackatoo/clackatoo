@@ -2,21 +2,51 @@
 //! or to open a WebSocket, then, once a paired device has opened one, as
 //! a client of the daemon, its protocol's frames riding in WebSocket
 //! messages.
+//!
+//! No connection can make the daemon hold more than a little for it, or
+//! keep the event loop to itself: each turn reads at most
+//! [`READ_BUDGET`] from it; an HTTP connection holds at most a request's
+//! worth of what it sent ([`MOST_INPUT`]), and is closed past that, in
+//! whatever state it's in; no more of its requests are taken while
+//! [`MOST_OUTPUT`] of answers wait for it to read; and a request's head
+//! must arrive whole within a while of its first byte.
 
+use std::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::FrameDecoder;
 use mio::{Interest, Registry, Token};
 
 use super::http::{self, Parsed, Request, Response};
-use super::socket::{self, Frame, Transport};
+use super::socket::{self, Frame, Stream, Transport};
 
-/// How long a connection has to send a whole request once it opens, or
-/// once it was last answered: long enough for a phone on a poor network,
-/// short enough that idle connections don't pile up.
+/// How long a connection may sit idle between requests, once it opens or
+/// was last answered: long enough for a phone on a poor network, short
+/// enough that idle connections don't pile up.
 pub(crate) const REQUEST_WAIT: Duration = Duration::from_secs(30);
+
+/// How long a request has to arrive whole, from its first byte, unless
+/// the settings say otherwise: a connection trickling a byte at a time is
+/// closed.
+pub(crate) const HEAD_WAIT: Duration = Duration::from_secs(10);
+
+/// The most read from a connection in one turn of the event loop.
+pub(crate) const READ_BUDGET: usize = 64 * 1024;
+
+/// The most an HTTP connection may have sent and not had answered: a
+/// whole request, head and body.
+pub(crate) const MOST_INPUT: usize = http::MAX_HEAD + http::MAX_BODY;
+
+/// The most answers waiting for an HTTP connection to read before no
+/// more of its requests are taken.
+pub(crate) const MOST_OUTPUT: usize = 256 * 1024;
+
+/// The most pongs, and other frames of the daemon's own, waiting for a
+/// WebSocket to read before it's taken for one that pings without
+/// reading, and closed.
+const MOST_OWN_FRAMES: usize = 64 * 1024;
 
 /// How long a WebSocket goes without a word before the daemon pings it.
 pub(super) const PING_EVERY: Duration = Duration::from_secs(25);
@@ -24,6 +54,35 @@ pub(super) const PING_EVERY: Duration = Duration::from_secs(25);
 /// How long a WebSocket goes without a word, pings answered included,
 /// before it's taken for gone. Phones lose connections without a word.
 pub(super) const SILENT_LIMIT: Duration = Duration::from_secs(70);
+
+/// Where a connection comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Peer {
+    /// An address on the network.
+    Tcp(SocketAddr),
+    /// This machine, through the unix socket only the user and root can
+    /// reach: `tailscale serve`.
+    Local,
+}
+
+impl Peer {
+    /// The address it comes from, if it's from the network.
+    pub(crate) fn ip(self) -> Option<IpAddr> {
+        match self {
+            Self::Tcp(address) => Some(address.ip()),
+            Self::Local => None,
+        }
+    }
+}
+
+impl fmt::Display for Peer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp(address) => address.fmt(f),
+            Self::Local => f.write_str("the local socket"),
+        }
+    }
+}
 
 /// What an HTTP connection is doing.
 #[derive(Debug)]
@@ -40,7 +99,7 @@ pub(crate) enum State {
 #[derive(Debug)]
 pub(crate) struct HttpConn {
     pub(crate) transport: Transport,
-    pub(crate) peer: SocketAddr,
+    pub(crate) peer: Peer,
     /// What's been read and not yet taken as a request.
     input: Vec<u8>,
     /// What's waiting to be written.
@@ -48,6 +107,12 @@ pub(crate) struct HttpConn {
     pub(crate) state: State,
     /// When it's given up on, unless something happens.
     pub(crate) until: Instant,
+    /// When it opened: TLS must have shaken hands within `head_wait`.
+    opened: Instant,
+    /// When the request being read began to arrive, if one is.
+    head_started: Option<Instant>,
+    /// How long a request has to arrive whole.
+    head_wait: Duration,
     wants_writable: bool,
     /// It closes once what's waiting is written.
     closing: bool,
@@ -55,7 +120,16 @@ pub(crate) struct HttpConn {
     secure: bool,
 }
 
-/// What came of reading from an HTTP connection.
+/// What came of reading from a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Filled {
+    /// It's open; with `more`, more may wait to be read next turn.
+    Open { more: bool },
+    /// It's to be closed.
+    Closed,
+}
+
+/// What's next on an HTTP connection.
 #[derive(Debug)]
 pub(crate) enum Read {
     /// A request to answer.
@@ -67,8 +141,16 @@ pub(crate) enum Read {
 }
 
 impl HttpConn {
-    pub(crate) fn new(transport: Transport, peer: SocketAddr, now: Instant) -> Self {
-        let secure = matches!(transport, Transport::Tls(_));
+    /// A connection over `transport` from `peer`, opened `now`, whose
+    /// requests must each arrive within `head_wait`, and whose answers
+    /// say the app is to be reached over HTTPS only if `secure`.
+    pub(crate) fn new(
+        transport: Transport,
+        peer: Peer,
+        now: Instant,
+        head_wait: Duration,
+        secure: bool,
+    ) -> Self {
         Self {
             transport,
             peer,
@@ -76,35 +158,63 @@ impl HttpConn {
             output: Vec::new(),
             state: State::Reading,
             until: now + REQUEST_WAIT,
+            opened: now,
+            head_started: None,
+            head_wait,
             wants_writable: false,
             closing: false,
             secure,
         }
     }
 
-    /// Reads what's arrived, and takes the next request, if one is whole.
-    /// A connection waiting for an answer has its bytes kept for later.
-    pub(crate) fn read(&mut self, buffer: &mut [u8]) -> Read {
-        match self.transport.read(buffer, &mut self.input) {
-            Ok(false) => {}
-            // Gone, with nothing to answer, and nothing left to say.
-            Ok(true) if self.input.is_empty() && self.output.is_empty() => {
-                return Read::Closed;
-            }
-            // Half closed: what it asked is answered, then it's closed.
-            Ok(true) => self.closing = true,
-            Err(err) => {
-                log::debug!("a web connection failed: {err}");
-                return Read::Closed;
-            }
+    /// When it's next to be looked at: given up on, waiting or idle, or
+    /// with its request taking too long to arrive.
+    pub(crate) fn due(&self) -> Instant {
+        if self.transport.handshaking() {
+            return self.until.min(self.opened + self.head_wait);
         }
-        self.next_request()
+        match (self.head_started, &self.state) {
+            (Some(started), State::Reading) => self.until.min(started + self.head_wait),
+            _ => self.until,
+        }
     }
 
-    /// Takes the next request from what's been read, if one is whole and
-    /// the last is answered.
-    pub(crate) fn next_request(&mut self) -> Read {
-        if !matches!(self.state, State::Reading) || self.input.is_empty() {
+    /// Reads what's arrived, at most [`READ_BUDGET`] of it. A connection
+    /// that has sent more than a request's worth not yet answered, in any
+    /// state, is to be closed.
+    pub(crate) fn fill(&mut self, buffer: &mut [u8], now: Instant) -> Filled {
+        let reading = match self.transport.read(buffer, &mut self.input, READ_BUDGET) {
+            Ok(reading) => reading,
+            Err(err) => {
+                log::debug!("a web connection failed: {err}");
+                return Filled::Closed;
+            }
+        };
+        if self.input.len() > MOST_INPUT {
+            log::warn!(
+                "closed a web connection from {}: it sent too much",
+                self.peer
+            );
+            return Filled::Closed;
+        }
+        if !self.input.is_empty() && self.head_started.is_none() {
+            self.head_started = Some(now);
+        }
+        if reading.finished {
+            // Gone, with nothing to answer, and nothing left to say.
+            if self.input.is_empty() && self.output.is_empty() {
+                return Filled::Closed;
+            }
+            // Half closed: what it asked is answered, then it's closed.
+            self.closing = true;
+        }
+        Filled::Open { more: reading.more }
+    }
+
+    /// Takes the next request from what's been read, if one is whole, the
+    /// last is answered, and the answers waiting aren't too many.
+    pub(crate) fn next_request(&mut self, now: Instant) -> Read {
+        if !matches!(self.state, State::Reading) || self.input.is_empty() || self.backed_up() {
             return Read::Nothing;
         }
         match http::parse(&self.input) {
@@ -112,6 +222,8 @@ impl HttpConn {
             Parsed::Partial => Read::Nothing,
             Parsed::Done(request, used) => {
                 self.input.drain(..used);
+                // The next request, pipelined, began to arrive with this one.
+                self.head_started = (!self.input.is_empty()).then_some(now);
                 if request.closes() {
                     self.closing = true;
                 }
@@ -119,9 +231,11 @@ impl HttpConn {
             }
             Parsed::Bad(status) => {
                 self.input.clear();
+                self.head_started = None;
                 self.respond(
                     &Response::error(status, "that isn't a request the app takes"),
                     false,
+                    now,
                 );
                 self.closing = true;
                 Read::Nothing
@@ -129,16 +243,23 @@ impl HttpConn {
         }
     }
 
+    /// Whether answers wait that it hasn't read, too many to take another
+    /// request for now.
+    pub(crate) fn backed_up(&self) -> bool {
+        self.output.len() >= MOST_OUTPUT
+    }
+
     /// Queues `response`, leaving out its body if `head_only`, and reads
-    /// the next request after it.
-    pub(crate) fn respond(&mut self, response: &Response, head_only: bool) {
+    /// the next request after it, giving it a while from `now` to come.
+    pub(crate) fn respond(&mut self, response: &Response, head_only: bool, now: Instant) {
         response.write(&mut self.output, head_only, self.secure);
         self.state = State::Reading;
+        self.until = now + REQUEST_WAIT;
     }
 
     /// Answers with `response`, then closes.
-    pub(crate) fn respond_and_close(&mut self, response: &Response) {
-        self.respond(response, false);
+    pub(crate) fn respond_and_close(&mut self, response: &Response, now: Instant) {
+        self.respond(response, false, now);
         self.closing = true;
     }
 
@@ -196,11 +317,23 @@ impl HttpConn {
     }
 }
 
+/// What came of reading from a WebSocket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Received {
+    /// The device has finished, or broke the rules: it's to be closed.
+    pub(crate) finished: bool,
+    /// More may wait to be read next turn.
+    pub(crate) more: bool,
+    /// It broke the rules in a way that leaves nothing to tell it: it's
+    /// to be dropped at once, not once what's waiting is written.
+    pub(crate) drop: bool,
+}
+
 /// A paired device's WebSocket, carrying the protocol.
 #[derive(Debug)]
 pub(crate) struct WebLink {
     transport: Transport,
-    pub(crate) peer: SocketAddr,
+    pub(crate) peer: Peer,
     /// The device.
     pub(crate) device: u64,
     ws: socket::Decoder,
@@ -217,34 +350,48 @@ pub(crate) struct WebLink {
 
 impl WebLink {
     /// The socket, to register with the event loop.
-    pub(crate) fn stream(&mut self) -> &mut mio::net::TcpStream {
+    pub(crate) fn stream(&mut self) -> &mut Stream {
         self.transport.stream()
     }
 
-    /// Reads what's arrived, handing the protocol's bytes to `decoder`,
-    /// and answering pings. Returns whether the device has finished.
+    /// Reads what's arrived, at most [`READ_BUDGET`] of it, handing the
+    /// protocol's bytes to `decoder`, and answering pings.
     pub(crate) fn receive(
         &mut self,
         buffer: &mut [u8],
         decoder: &mut FrameDecoder,
         now: Instant,
-    ) -> bool {
+    ) -> Received {
         let mut arrived = Vec::new();
-        let finished = match self.transport.read(buffer, &mut arrived) {
-            Ok(finished) => finished,
+        let reading = match self.transport.read(buffer, &mut arrived, READ_BUDGET) {
+            Ok(reading) => reading,
             Err(err) => {
                 log::debug!("a device's connection failed: {err}");
-                return true;
+                return Received {
+                    finished: true,
+                    more: false,
+                    drop: true,
+                };
             }
         };
         if !arrived.is_empty() {
             self.heard = now;
             self.ws.push(&arrived);
         }
+        let mut drop = false;
         loop {
             match self.ws.next() {
                 Ok(Some(Frame::Data(bytes))) => decoder.push(&bytes),
-                Ok(Some(Frame::Ping(payload))) => socket::pong(&payload, &mut self.raw),
+                Ok(Some(Frame::Ping(payload))) => {
+                    // It doesn't read what's sent: nothing could tell it.
+                    if self.raw.len() > MOST_OWN_FRAMES {
+                        log::warn!("device {} pings without reading; dropping it", self.device);
+                        self.closing = true;
+                        drop = true;
+                        break;
+                    }
+                    socket::pong(&payload, &mut self.raw);
+                }
                 Ok(Some(Frame::Pong)) => {}
                 Ok(Some(Frame::Close(status))) => {
                     socket::close(status.unwrap_or(1000), "", &mut self.raw);
@@ -264,7 +411,11 @@ impl WebLink {
                 }
             }
         }
-        finished || self.closing
+        Received {
+            finished: reading.finished || self.closing,
+            more: reading.more && !self.closing,
+            drop,
+        }
     }
 
     /// Writes what it can: first what's waiting, then, once that's all
@@ -310,6 +461,11 @@ impl WebLink {
     /// Whether frames wait to be written.
     pub(crate) fn backlogged(&self) -> bool {
         !self.raw.is_empty() || self.transport.sending()
+    }
+
+    /// How many bytes of frames wait to be written.
+    pub(crate) fn unsent(&self) -> usize {
+        self.raw.len()
     }
 
     /// Queues a close saying `reason`, after what's waiting.
