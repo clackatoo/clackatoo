@@ -5,9 +5,10 @@
 //! line keeps its number as output scrolls it into history, so a cursor on
 //! a line stays on it. Motions follow Vim's.
 
+use std::ops::Deref;
 use std::rc::Rc;
 
-use clackatoo_term::Row;
+use clackatoo_term::{Cell, Row};
 
 /// A position in the document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -16,11 +17,96 @@ pub(crate) struct Point {
     pub(crate) col: usize,
 }
 
+/// One cell of a line, as the cursor reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Spot {
+    /// The character drawn there: a blank in a tab, or on a wide
+    /// character's right half.
+    pub(crate) ch: char,
+    /// Whether it's a wide character's left half.
+    pub(crate) wide: bool,
+    /// Whether it's a wide character's right half, with nothing of its own.
+    pub(crate) spacer: bool,
+}
+
+impl Spot {
+    /// A cell holding a character one cell wide.
+    pub(crate) const fn narrow(ch: char) -> Self {
+        Self {
+            ch,
+            wide: false,
+            spacer: false,
+        }
+    }
+
+    /// A wide character's right half.
+    pub(crate) const SPACER: Self = Self {
+        ch: ' ',
+        wide: false,
+        spacer: true,
+    };
+
+    fn of(cell: Cell) -> Self {
+        Self {
+            ch: cell.ch(),
+            wide: cell.is_wide(),
+            spacer: cell.is_wide_spacer(),
+        }
+    }
+
+    /// Whether it's blank: a space, or a tab's.
+    pub(crate) fn blank(self) -> bool {
+        self.ch == ' ' && !self.spacer
+    }
+}
+
+/// A line's cells, as the cursor reads them: a terminal's row, or a file's
+/// line laid out, which can be any length.
+pub(crate) trait Cells {
+    /// How many cells it has.
+    fn width(&self) -> usize;
+
+    /// Cell `col`, if it has one.
+    fn cell(&self, col: usize) -> Option<Spot>;
+
+    /// The cells from `col` on, in order, with their columns: quicker than
+    /// asking for each, as a long line's are.
+    fn on_from(&self, col: usize) -> impl Iterator<Item = (usize, Spot)>;
+
+    /// The cells from `col` back to the first, with their columns, from the
+    /// last if `col` is past it.
+    fn back_from(&self, col: usize) -> impl Iterator<Item = (usize, Spot)>;
+}
+
+impl Cells for Row {
+    fn width(&self) -> usize {
+        self.cells().len()
+    }
+
+    fn cell(&self, col: usize) -> Option<Spot> {
+        self.cells().get(col).copied().map(Spot::of)
+    }
+
+    fn on_from(&self, col: usize) -> impl Iterator<Item = (usize, Spot)> {
+        let cells = self.cells().get(col..).unwrap_or_default();
+        (cells.iter().enumerate()).map(move |(offset, &cell)| (col + offset, Spot::of(cell)))
+    }
+
+    fn back_from(&self, col: usize) -> impl Iterator<Item = (usize, Spot)> {
+        let cells = self.cells();
+        let cells = &cells[..cells.len().min(col.saturating_add(1))];
+        (cells.iter().enumerate().rev()).map(|(col, &cell)| (col, Spot::of(cell)))
+    }
+}
+
 /// The lines the cursor moves over.
 pub(crate) trait Lines {
+    /// How a line's cells are read.
+    type Line: Cells;
+
     /// A line: borrowed from a terminal's screen or history, or for a
     /// file's text, made as it's asked for.
-    type Row<'a>: std::ops::Deref<Target = Row>
+    type Row<'a>: Deref<Target = Self::Line>
     where
         Self: 'a;
 
@@ -40,13 +126,6 @@ pub(crate) trait Lines {
     /// wraps, as an editor's long lines do with `wrap`.
     fn screen_rows(&self, _line: u64) -> Rc<[ScreenRow]> {
         Rc::new([ScreenRow::WHOLE])
-    }
-
-    /// Where line `line`'s row stops, if the line goes on past it: an
-    /// editor's line longer than a row can hold. Motions that read the row
-    /// can't see past it.
-    fn overflows(&self, _line: u64) -> Option<usize> {
-        None
     }
 
     /// The column of line `line`'s last character, as `$` goes to, or 0 for
@@ -620,8 +699,8 @@ const MATCH_REACH: u64 = 10_000;
 /// bracket on its line after `at`, counting brackets of its kind between.
 fn pair(at: Point, lines: &impl Lines) -> Option<Point> {
     let row = lines.row(at.line)?;
-    let (col, ch) = (row.cells().iter().enumerate().skip(at.col))
-        .map(|(col, cell)| (col, cell.ch()))
+    let (col, ch) = (row.on_from(at.col))
+        .map(|(col, spot)| (col, spot.ch))
         .find(|(_, ch)| {
             PAIRS
                 .iter()
@@ -635,26 +714,29 @@ fn pair(at: Point, lines: &impl Lines) -> Option<Point> {
     let mut depth = 0_usize;
     let mut line = at.line;
     let mut from = Some(col);
+    // Counts the bracket at `col` in, if it's one, returning where the
+    // pair is if this is it.
+    let mut count = |line: u64, (col, spot): (usize, Spot)| {
+        if spot.ch == ch_of(forward, open, close) {
+            depth += 1;
+        } else if spot.ch == ch_of(!forward, open, close) {
+            depth -= 1;
+            if depth == 0 {
+                return Some(Point { line, col });
+            }
+        }
+        None
+    };
     loop {
         // A line not to hand might hold a bracket that pairs.
         let row = lines.row(line)?;
-        let cells = row.cells();
-        let cols: Box<dyn Iterator<Item = usize>> = match (forward, from) {
-            (true, Some(from)) => Box::new(from..cells.len()),
-            (true, None) => Box::new(0..cells.len()),
-            (false, Some(from)) => Box::new((0..=from).rev()),
-            (false, None) => Box::new((0..cells.len()).rev()),
+        let found = if forward {
+            (row.on_from(from.unwrap_or(0))).find_map(|cell| count(line, cell))
+        } else {
+            (row.back_from(from.unwrap_or(usize::MAX))).find_map(|cell| count(line, cell))
         };
-        for col in cols {
-            let ch = cells[col].ch();
-            if ch == ch_of(forward, open, close) {
-                depth += 1;
-            } else if ch == ch_of(!forward, open, close) {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(Point { line, col });
-                }
-            }
+        if found.is_some() {
+            return found;
         }
         from = None;
         let reach = line.abs_diff(at.line) >= MATCH_REACH;
@@ -698,14 +780,13 @@ fn paragraph_end(line: u64, forward: bool, lines: &impl Lines) -> u64 {
 }
 
 /// The class of the cell at `col`, with past a line's text blank.
-pub(crate) fn class_at(row: Option<&Row>, col: usize) -> Class {
-    let Some(cell) = row.and_then(|row| row.cells().get(col)) else {
+pub(crate) fn class_at(row: Option<&impl Cells>, col: usize) -> Class {
+    let Some(spot) = row.and_then(|row| row.cell(col)) else {
         return Class::Blank;
     };
-    let ch = cell.ch();
-    if ch == ' ' && !cell.is_wide_spacer() {
+    if spot.blank() {
         Class::Blank
-    } else if ch.is_alphanumeric() || ch == '_' || cell.is_wide() {
+    } else if spot.ch.is_alphanumeric() || spot.ch == '_' || spot.wide {
         Class::Word
     } else {
         Class::Punctuation
@@ -713,17 +794,16 @@ pub(crate) fn class_at(row: Option<&Row>, col: usize) -> Class {
 }
 
 /// Where the line's text ends: one past its last non-blank cell.
-pub(crate) fn text_end(row: Option<&Row>) -> usize {
+pub(crate) fn text_end(row: Option<&impl Cells>) -> usize {
     row.map_or(0, |row| {
-        row.cells()
-            .iter()
-            .rposition(|cell| cell.ch() != ' ' || cell.is_wide_spacer())
-            .map_or(0, |last| last + 1)
+        (row.back_from(usize::MAX))
+            .find(|(_, spot)| !spot.blank())
+            .map_or(0, |(last, _)| last + 1)
     })
 }
 
 /// The column of the line's last character, or 0 for a blank line.
-pub(crate) fn last_char(row: Option<&Row>) -> usize {
+pub(crate) fn last_char(row: Option<&impl Cells>) -> usize {
     start_of_cell(row, text_end(row).saturating_sub(1))
 }
 
@@ -740,32 +820,37 @@ fn on_row(lines: &impl Lines, line: u64, rows: &[ScreenRow], index: usize, col: 
 
 /// The cell after the one at `col`, stepping over a wide character's
 /// right half.
-pub(crate) fn next_cell(row: Option<&Row>, col: usize) -> Option<usize> {
-    let cells = row?.cells();
+pub(crate) fn next_cell(row: Option<&impl Cells>, col: usize) -> Option<usize> {
+    let row = row?;
     let mut next = col + 1;
-    while cells.get(next).is_some_and(|cell| cell.is_wide_spacer()) {
+    while row.cell(next).is_some_and(|spot| spot.spacer) {
         next += 1;
     }
-    (next <= cells.len()).then_some(next)
+    (next <= row.width()).then_some(next)
 }
 
 /// The cell before the one at `col`, landing on a wide character's left
 /// half.
-pub(crate) fn previous_cell(row: Option<&Row>, col: usize) -> Option<usize> {
+pub(crate) fn previous_cell(row: Option<&impl Cells>, col: usize) -> Option<usize> {
     let previous = col.checked_sub(1)?;
     Some(start_of_cell(row, previous))
 }
 
 /// The cell of `ch` after `col` on the row, or before it if not `forward`,
 /// or the cell next to that one, towards `col`, if `till`.
-fn find(row: Option<&Row>, col: usize, ch: char, forward: bool, till: bool) -> Option<usize> {
-    let cells = row?.cells();
-    let found = if forward {
-        (col + 1..cells.len()).find(|&at| cells[at].ch() == ch && !cells[at].is_wide_spacer())?
+fn find(
+    row: Option<&impl Cells>,
+    col: usize,
+    ch: char,
+    forward: bool,
+    till: bool,
+) -> Option<usize> {
+    let cells = row?;
+    let found = |(_, spot): &(usize, Spot)| spot.ch == ch && !spot.spacer;
+    let (found, _) = if forward {
+        cells.on_from(col + 1).find(found)?
     } else {
-        (0..col.min(cells.len()))
-            .rev()
-            .find(|&at| cells[at].ch() == ch && !cells[at].is_wide_spacer())?
+        cells.back_from(col.checked_sub(1)?).find(found)?
     };
     if !till {
         return Some(found);
@@ -799,10 +884,10 @@ pub(crate) fn before(lines: &impl Lines, start: Point, end: Point) -> Option<Poi
 
 /// `col`, moved left onto a wide character's left half if it's on the
 /// right.
-pub(crate) fn start_of_cell(row: Option<&Row>, col: usize) -> usize {
+pub(crate) fn start_of_cell(row: Option<&impl Cells>, col: usize) -> usize {
     let spacer = row
-        .and_then(|row| row.cells().get(col))
-        .is_some_and(|cell| cell.is_wide_spacer());
+        .and_then(|row| row.cell(col))
+        .is_some_and(|spot| spot.spacer);
     if spacer { col.saturating_sub(1) } else { col }
 }
 
@@ -831,6 +916,7 @@ pub(crate) mod tests {
     }
 
     impl Lines for Text {
+        type Line = Row;
         type Row<'a> = &'a Row;
 
         fn row(&self, line: u64) -> Option<&Row> {

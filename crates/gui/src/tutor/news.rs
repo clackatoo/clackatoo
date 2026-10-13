@@ -161,6 +161,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Chats show the time between turns far apart, Copy under each answer, and scroll as you select past them",
     },
+    News {
+        id: "long-lines",
+        date: "2026-10-13",
+        lesson: "wrap",
+        what: "w, f, % and other motions and text objects work on lines of any length, as a minified file's",
+    },
 ];
 
 impl News {

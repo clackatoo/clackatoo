@@ -9,19 +9,21 @@
 //!
 //! With `wrap`, a line too long for the pane is cut into screen rows (see
 //! [`wrap`]), which the Vim engine asks for with [`Lines::screen_rows`].
+//!
+//! The Vim engine reads a laid out line's cells straight from where its
+//! characters start (see [`Cells`]), as it reads a terminal's row, so it
+//! moves through a line of any length, and nothing is kept for each cell.
 
-use std::ops::Deref;
 use std::rc::Rc;
 
 use clackatoo_protocol::BufferId;
-use clackatoo_term::{Row, RowBuilder, Style, Underline};
+use clackatoo_term::{RowBuilder, Style, Underline};
 use clackatoo_text::{Diagnostic, Rope, Span};
 
 use super::kept::{Kept, LineLog};
 use super::wrap::Wrap;
 use crate::colors;
-use crate::motion::{self, Lines, Point, ScreenRow};
-use crate::objects::Object;
+use crate::motion::{Cells, Lines, Point, ScreenRow, Spot};
 
 /// The column after a tab that starts at column `col`, with tabs stopping
 /// at multiples of `tabstop`.
@@ -29,16 +31,11 @@ pub(crate) fn tab_end(col: usize, tabstop: usize) -> usize {
     (col / tabstop + 1) * tabstop
 }
 
-/// The most cells a laid out line's row holds for the Vim engine, as no row
-/// can be wider. Of a longer line, as a minified file has, motions that
-/// read the row, such as `w` and `f`, see only this far; drawing, `0`, `$`,
-/// moving by rows and clicks go by the whole line.
-const ROW_CELLS: usize = u16::MAX as usize;
-
-/// The cells `ch` takes, laid out at cell `col`, as a row lays it out:
-/// none if it's drawn in the cell before, as an accent is, or after a
-/// joiner. `joins` says whether the last character was a joiner, and is
-/// kept up to date.
+/// The cells `ch` takes, laid out at cell `col`, as a terminal's row lays
+/// it out ([`RowBuilder`]): none if it's drawn in the cell before, as an
+/// accent is, or after a joiner, or if there's no cell before for it to
+/// be drawn in. `joins` says whether the last character was a joiner, and
+/// is kept up to date.
 fn cells_of(ch: char, col: usize, tabstop: usize, joins: &mut bool) -> usize {
     let (width, joiner) = match ch {
         '\t' => (tab_end(col, tabstop) - col, false),
@@ -47,34 +44,12 @@ fn cells_of(ch: char, col: usize, tabstop: usize, joins: &mut bool) -> usize {
         ch if ch.is_control() => (1, false),
         ch => match clackatoo_term::char_width(ch) {
             Some(width) if width > 0 && !*joins => (width, false),
-            _ => (0, ch == '\u{200d}'),
+            // With no cell before, it's dropped, joiner or not.
+            _ => (0, col > 0 && ch == '\u{200d}'),
         },
     };
     *joins = joiner;
     width
-}
-
-/// The cells a row needs to hold `text`: at least as many as it fills,
-/// counted roughly, two for any character but a tab or plain ASCII, and
-/// never more than a row can have. Counted by the byte, a piece at a
-/// time, which is quicker than by the character.
-fn room_for(text: &str, tabstop: usize) -> usize {
-    let mut room = 0;
-    for piece in text.as_bytes().chunks(4096) {
-        room += (piece.iter())
-            .map(|&byte| match byte {
-                b'\t' => tabstop,
-                b' '..=b'~' => 1,
-                // A character's bytes after its first.
-                0x80..=0xbf => 0,
-                _ => 2,
-            })
-            .sum::<usize>();
-        if room >= ROW_CELLS {
-            return ROW_CELLS;
-        }
-    }
-    room
 }
 
 /// Whether `bytes` are all plain ASCII, one cell each: no tabs, no
@@ -88,7 +63,6 @@ fn plain(bytes: &[u8]) -> bool {
 pub(crate) struct Laid {
     /// The line's text, without its line break.
     text: String,
-    row: Row,
     /// Each character's first cell, and its byte in the line, in order.
     /// Characters drawn in the cell before, such as accents, have none.
     starts: Starts,
@@ -125,10 +99,6 @@ impl Starts {
                 (table.get(index)).map(|&(cell, byte)| (cell as usize, byte as usize))
             }
         }
-    }
-
-    fn last(&self) -> Option<(usize, usize)> {
-        self.get(self.len().checked_sub(1)?)
     }
 
     /// How many characters start at or before cell `col`.
@@ -181,67 +151,29 @@ impl Starts {
     }
 }
 
-/// How far a line being laid out has got: into its row while it fits,
-/// then only counted on past it.
-enum Laying {
-    /// Its row being filled, which has room for so many cells.
-    Row(RowBuilder, usize),
-    /// Its row, full, and the cells the line fills so far.
-    Past(Row, usize),
-}
-
 #[cfg(test)]
 thread_local! {
-    /// How many characters past lines' rows have been counted one by one,
-    /// for tests that check a line is laid out again only from where it
-    /// changed, and a plain one not even that.
+    /// How many characters have been laid out one by one, for tests that
+    /// check a line is laid out again only from where it changed, and a
+    /// plain one not even that.
     pub(super) static COUNTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Lays out `text` from byte `from`, where a character starts, going on
-/// from `laying`, with `starts` holding where the characters before
-/// start. The character before `from`, if there's one, isn't a joiner.
-/// From byte `plain` on, the text is known to be plain ASCII without tabs,
-/// so once the line is past its row, and as plain as that so far, the rest
-/// needn't be looked at.
+/// Lays out `text` from byte `from`, where a character starts, with
+/// `starts` holding where the characters before start, and the first
+/// `cells` cells theirs. The character before `from`, if there's one,
+/// isn't a joiner. From byte `plain` on, the text is known to be plain
+/// ASCII without tabs, so once the line is as plain as that so far, the
+/// rest needn't be looked at.
 fn lay(
     text: String,
     from: usize,
     plain: usize,
     tabstop: usize,
-    laying: Laying,
+    mut cells: usize,
     mut starts: Starts,
 ) -> Laid {
     let mut joins = false;
-    let (row, mut cells, from) = match laying {
-        Laying::Row(mut builder, room) => {
-            // Where the row's full, if the line goes on past it.
-            let mut over = None;
-            for (offset, ch) in text[from..].char_indices() {
-                let byte = from + offset;
-                let before = builder.filled();
-                let joined = joins;
-                let width = cells_of(ch, before, tabstop, &mut joins);
-                if before + width > room {
-                    // Counted again, past the row.
-                    joins = joined;
-                    over = Some(byte);
-                    break;
-                }
-                if ch == '\t' {
-                    builder.push(&" ".repeat(width), &Style::DEFAULT, true);
-                } else {
-                    push(&mut builder, ch);
-                }
-                if builder.filled() > before {
-                    starts.push(before, byte, ch == '\t');
-                }
-            }
-            let filled = builder.filled();
-            (builder.finish(false), filled, over.unwrap_or(text.len()))
-        }
-        Laying::Past(row, cells) => (row, cells, from),
-    };
     for (offset, ch) in text[from..].char_indices() {
         let byte = from + offset;
         if byte >= plain
@@ -280,7 +212,6 @@ fn lay(
     }
     Laid {
         text,
-        row,
         starts,
         cells,
     }
@@ -298,14 +229,18 @@ impl Laid {
     /// cursor never goes there. A line with any hidden is never plain, as
     /// its first character shown isn't at its first byte.
     pub(crate) fn hiding(text: String, tabstop: usize, hidden: usize) -> Self {
-        let room = room_for(&text, tabstop);
-        let plain = text.len();
         let hidden = (0..=hidden.min(text.len()))
             .rev()
             .find(|&at| text.is_char_boundary(at))
             .unwrap_or(0);
-        let laying = Laying::Row(RowBuilder::new(room), room);
-        lay(text, hidden, plain, tabstop, laying, Starts::Plain(0))
+        // Plain ASCII is seen at a glance, quicker than a character at a
+        // time.
+        let plain = if hidden == 0 && plain(text.as_bytes()) {
+            0
+        } else {
+            text.len()
+        };
+        lay(text, hidden, plain, tabstop, 0, Starts::Plain(0))
     }
 
     /// The line laid out again, its text now its first `from` bytes and
@@ -313,9 +248,8 @@ impl Laid {
     /// `tail` bytes, but may have changed between. What's laid out before
     /// the change is kept: the line is laid out afresh only from the last
     /// character to start before `from`, as a character after it, an
-    /// accent, may join it. A long line's row is kept if that's past it;
-    /// and a plain line is still one if what changed is, so its rest
-    /// needn't be looked at.
+    /// accent, may join it; and a plain line is still one if what changed
+    /// is, so its rest needn't be looked at.
     ///
     /// Returns the line, and the cell it's laid out afresh from: before
     /// it, everything is as it was. `from` must be where a character of
@@ -337,7 +271,6 @@ impl Laid {
         if from == 0 {
             return (Self::new(text, tabstop), 0);
         }
-        let room = room_for(&text, tabstop);
         // What's before and after the change is as plain as it was.
         let changed = (text.as_bytes()).get(from..text.len().saturating_sub(tail).max(from));
         let plain = if was_plain && changed.is_some_and(plain) {
@@ -351,18 +284,11 @@ impl Laid {
         };
         let (cell, byte) = self.starts.get(index).unwrap_or_default();
         let mut starts = self.starts;
-        if cell < room || room != self.row.width() {
-            // In the row, which can't be built from where it's up to: all
-            // of it again, though the rest of a plain line needn't be.
-            let laying = Laying::Row(RowBuilder::new(room), room);
-            return (lay(text, 0, plain, tabstop, laying, Starts::Plain(0)), cell);
-        }
         starts.truncate(index);
-        let laying = Laying::Past(self.row, cell);
-        (lay(text, byte, plain, tabstop, laying, starts), cell)
+        (lay(text, byte, plain, tabstop, cell, starts), cell)
     }
 
-    /// Checks it's laid out as `fresh` is, every cell, start and row.
+    /// Checks it's laid out as `fresh` is, every cell and start.
     #[cfg(test)]
     pub(super) fn assert_as(&self, fresh: &Self, context: &str) {
         assert_eq!(self.text, fresh.text, "{context}");
@@ -380,9 +306,11 @@ impl Laid {
                 && plain(laid.text.as_bytes());
             assert_eq!(laid.is_plain(), truly, "{context}: {:?}", laid.text);
         }
-        assert_eq!(self.row.width(), fresh.row.width(), "{context}");
-        assert_eq!(self.row.text(), fresh.row.text(), "{context}");
-        assert!(self.row.cells() == fresh.row.cells(), "{context}");
+        assert!(
+            self.on_from(0).eq(fresh.on_from(0)),
+            "{context}: {:?}",
+            self.text
+        );
     }
 
     /// Whether it keeps a table of where each character starts.
@@ -428,16 +356,9 @@ impl Laid {
         self.cells
     }
 
-    /// Where the Vim engine's row of it stops, if the line goes on past.
-    pub(crate) fn overflows(&self) -> Option<usize> {
-        (self.cells > self.row.width()).then(|| self.row.width())
-    }
-
     /// About how many bytes it takes.
     pub(super) fn size(&self) -> usize {
-        self.text.capacity()
-            + self.starts.size()
-            + self.row.width() * size_of::<clackatoo_term::Cell>()
+        self.text.capacity() + self.starts.size()
     }
 
     /// The byte, in the line, of the character at cell `col`, or the
@@ -469,11 +390,6 @@ impl Laid {
     pub(crate) fn col_before(&self, col: usize) -> Option<usize> {
         let index = self.starts.to_cell(col).checked_sub(2)?;
         self.starts.get(index).map(|(cell, _)| cell)
-    }
-
-    /// The first cell of the line's last character, or 0 for an empty one.
-    pub(crate) fn last_col(&self) -> usize {
-        self.starts.last().map_or(0, |(cell, _)| cell)
     }
 
     /// Each character's first cell, the cell after it, and the character,
@@ -577,11 +493,131 @@ impl Laid {
     }
 }
 
-impl Deref for Laid {
-    type Target = Row;
+/// The cells of a laid out line are those a terminal's row would have for
+/// it, worked out from where each character starts, as they're asked for.
+impl Cells for Laid {
+    fn width(&self) -> usize {
+        self.cells
+    }
 
-    fn deref(&self) -> &Row {
-        &self.row
+    fn cell(&self, col: usize) -> Option<Spot> {
+        if col >= self.cells {
+            return None;
+        }
+        match self.starts {
+            // Not the last, which may not be plain: one byte, one cell.
+            Starts::Plain(count) if col + 1 < count => {
+                Some(Spot::narrow(char::from(self.text.as_bytes()[col])))
+            }
+            _ => {
+                let (cell, next, ch) = self.piece(self.piece_at(col));
+                Some(spot_in(ch, cell, next, col))
+            }
+        }
+    }
+
+    fn on_from(&self, col: usize) -> impl Iterator<Item = (usize, Spot)> {
+        Scan::new(self, (col < self.cells).then_some(col), true)
+    }
+
+    fn back_from(&self, col: usize) -> impl Iterator<Item = (usize, Spot)> {
+        let col = self.cells.checked_sub(1).map(|last| col.min(last));
+        Scan::new(self, col, false)
+    }
+}
+
+/// Cell `col` of character `ch`, which takes the cells from `cell` to
+/// `next`, as a terminal's row has it ([`push`]): a tab's cells are blank,
+/// a control character is `^` and a letter, or U+FFFD, and a wide
+/// character's right half is a spacer.
+fn spot_in(ch: char, cell: usize, next: usize, col: usize) -> Spot {
+    match ch {
+        '\t' => Spot::narrow(' '),
+        '\0'..='\x1f' | '\x7f' if col == cell => Spot::narrow('^'),
+        '\0'..='\x1f' | '\x7f' => Spot::narrow(letter_of(ch)),
+        ch if ch.is_control() => Spot::narrow('\u{fffd}'),
+        ch if col == cell => Spot {
+            ch,
+            wide: next - cell == 2,
+            spacer: false,
+        },
+        _ => Spot::SPACER,
+    }
+}
+
+/// The letter after `^` that control character `ch` is drawn as.
+fn letter_of(ch: char) -> char {
+    char::from(u8::try_from(ch).unwrap_or(b'?') ^ 0x40)
+}
+
+/// A laid out line's cells, one after another from one of them, forward or
+/// back: a character at a time, which is quicker than finding each cell's.
+struct Scan<'a> {
+    laid: &'a Laid,
+    /// Whether it's plain, a byte to each cell.
+    plain: bool,
+    forward: bool,
+    /// The next cell, if there's one.
+    col: Option<usize>,
+    /// The character it's in: its index, then as [`Laid::piece`] has it.
+    index: usize,
+    piece: (usize, usize, char),
+}
+
+impl<'a> Scan<'a> {
+    /// From cell `col` of `laid`, if it has that cell.
+    fn new(laid: &'a Laid, col: Option<usize>, forward: bool) -> Self {
+        let plain = laid.is_plain();
+        let index = match col {
+            Some(col) if !plain => laid.piece_at(col),
+            _ => 0,
+        };
+        Self {
+            laid,
+            plain,
+            forward,
+            col,
+            index,
+            piece: laid.piece(index),
+        }
+    }
+}
+
+impl Iterator for Scan<'_> {
+    type Item = (usize, Spot);
+
+    fn next(&mut self) -> Option<(usize, Spot)> {
+        let col = self.col?;
+        if self.plain {
+            let byte = self.laid.text.as_bytes()[col];
+            self.col = if self.forward {
+                Some(col + 1).filter(|&next| next < self.laid.cells)
+            } else {
+                col.checked_sub(1)
+            };
+            return Some((col, Spot::narrow(char::from(byte))));
+        }
+        let (cell, next, ch) = self.piece;
+        self.col = if self.forward {
+            if col + 1 < next {
+                Some(col + 1)
+            } else if self.index + 1 < self.laid.count() {
+                self.index += 1;
+                self.piece = self.laid.piece(self.index);
+                Some(self.piece.0)
+            } else {
+                None
+            }
+        } else if col > cell {
+            Some(col - 1)
+        } else if let Some(index) = self.index.checked_sub(1) {
+            self.index = index;
+            self.piece = self.laid.piece(index);
+            Some(self.piece.1 - 1)
+        } else {
+            None
+        };
+        Some((col, spot_in(ch, cell, next, col)))
     }
 }
 
@@ -589,25 +625,13 @@ impl Deref for Laid {
 fn push(builder: &mut RowBuilder, ch: char) {
     match ch {
         '\0'..='\x1f' | '\x7f' => {
-            let letter = char::from(u8::try_from(ch).unwrap_or(b'?') ^ 0x40);
-            builder.push(&format!("^{letter}"), &Style::DEFAULT, true);
+            builder.push(&format!("^{}", letter_of(ch)), &Style::DEFAULT, true);
         }
         ch if ch.is_control() => builder.push("\u{fffd}", &Style::DEFAULT, true),
         ch => {
             let mut bytes = [0; 4];
             builder.push(ch.encode_utf8(&mut bytes), &Style::DEFAULT, false);
         }
-    }
-}
-
-/// A line of a [`Text`], as the Vim engine asks for it.
-pub(crate) struct LaidRow(Rc<Laid>);
-
-impl Deref for LaidRow {
-    type Target = Row;
-
-    fn deref(&self) -> &Row {
-        &self.0.row
     }
 }
 
@@ -801,46 +825,6 @@ impl<'a> Text<'a> {
         Point { line, col }
     }
 
-    /// Whether `at` is on the last cell of the row the Vim engine reads of
-    /// its line, or past it, on a line longer than a row holds: where what
-    /// reads the row, word motions, `f`, `%` and text objects, can't see.
-    pub(crate) fn past_row(&self, at: Point) -> bool {
-        self.overflows(at.line).is_some_and(|cut| at.col + 1 >= cut)
-    }
-
-    /// Whether the text from `start` to `end` goes as far as the last cell
-    /// of a row the Vim engine reads, on a line longer than a row holds: so
-    /// a motion or object found there by reading rows may have missed what
-    /// comes after, and mustn't be trusted.
-    pub(crate) fn past_rows(&self, start: Point, end: Point) -> bool {
-        (start.line..=end.line).any(|line| {
-            let to = if line == end.line {
-                end.col
-            } else {
-                usize::MAX
-            };
-            (self.overflows(line)).is_some_and(|cut| to.saturating_add(1) >= cut)
-        })
-    }
-
-    /// Where `object` around `at` starts and ends, as [`Object::find`]
-    /// finds it, unless reading the rows may have missed some of it, past
-    /// the end of a long line's.
-    pub(crate) fn object(&self, object: Object, at: Point, inner: bool) -> Option<(Point, Point)> {
-        if self.past_row(at) {
-            return None;
-        }
-        // An object looks at the cell after its end too, to see it ends.
-        let seen = |start: Point, last: Point| {
-            let after = Point {
-                col: last.col + 1,
-                ..last
-            };
-            !self.past_rows(start, after)
-        };
-        (object.find(self, at, inner)).filter(|&(start, last)| seen(start, last))
-    }
-
     /// The text from byte `start` to byte `end`.
     pub(crate) fn slice(&self, start: usize, end: usize) -> String {
         self.rope.byte_slice(start..end).to_string()
@@ -848,13 +832,14 @@ impl<'a> Text<'a> {
 }
 
 impl Lines for Text<'_> {
+    type Line = Laid;
     type Row<'r>
-        = LaidRow
+        = Rc<Laid>
     where
         Self: 'r;
 
-    fn row(&self, line: u64) -> Option<LaidRow> {
-        self.laid(line).map(LaidRow)
+    fn row(&self, line: u64) -> Option<Rc<Laid>> {
+        self.laid(line)
     }
 
     fn bounds(&self) -> (u64, u64) {
@@ -874,22 +859,6 @@ impl Lines for Text<'_> {
         self.kept.rows(line, &laid, wrap, typed_at_end)
     }
 
-    fn last_cell(&self, line: u64) -> usize {
-        match self.laid(line) {
-            // Longer than its row holds: its last character, past the row.
-            Some(laid) if laid.overflows().is_some() => laid.last_col(),
-            laid => motion::last_char(laid.as_deref().map(|laid| &laid.row)),
-        }
-    }
-
-    fn overflows(&self, line: u64) -> Option<usize> {
-        // A line too short to fill a row, however it's laid out, needn't be.
-        if self.line_len(line).saturating_mul(self.tabstop.max(2)) <= ROW_CELLS {
-            return None;
-        }
-        self.laid(line)?.overflows()
-    }
-
     fn row_width(&self) -> Option<usize> {
         self.wrap.map(|wrap| wrap.width)
     }
@@ -897,7 +866,12 @@ impl Lines for Text<'_> {
 
 #[cfg(test)]
 mod tests {
+    use clackatoo_term::Row;
+
+    use super::super::kept::tests::Random;
     use super::*;
+    use crate::motion::{Cursor, Motion, text_end};
+    use crate::objects::Object;
 
     #[test]
     fn lines_end_at_line_breaks_and_the_last_break_ends_the_last_line() {
@@ -923,7 +897,10 @@ mod tests {
         assert_eq!(laid.col_of(6), 9, "é");
         assert_eq!(laid.col_of(99), laid.cells());
         assert_eq!(laid.char_end(2), 5);
-        assert_eq!(laid.row.text().trim_start(), "x字^Aé");
+        assert_eq!(
+            shown(&laid, 0, laid.cells(), &[], 0).text().trim_start(),
+            "x字^Aé"
+        );
     }
 
     #[test]
@@ -1000,12 +977,32 @@ mod tests {
     }
 
     #[test]
-    fn a_line_longer_than_a_row_holds_is_laid_out_whole() {
+    fn a_line_longer_than_a_terminal_row_is_laid_out_whole() {
         let laid = Laid::new(format!("{}字\tb", "a".repeat(70_000)), 4);
         assert_eq!(laid.cells(), 70_000 + 2 + 2 + 1);
         assert_eq!(laid.col_of(70_004), 70_004, "b, after the tab");
         assert_eq!(laid.byte_at(70_001), 70_000, "字's second cell");
-        assert!(laid.row.width() <= ROW_CELLS);
+        // The Vim engine reads all its cells, past the 65,535 a terminal's
+        // row can have.
+        let wide = Spot {
+            ch: '字',
+            wide: true,
+            spacer: false,
+        };
+        assert_eq!(laid.cell(70_000), Some(wide));
+        assert_eq!(laid.cell(70_001), Some(Spot::SPACER));
+        assert_eq!(laid.cell(70_003), Some(Spot::narrow(' ')), "the tab");
+        assert_eq!(laid.cell(70_004), Some(Spot::narrow('b')));
+        assert_eq!(laid.cell(70_005), None);
+        let back: Vec<_> = laid.back_from(usize::MAX).take(3).collect();
+        assert_eq!(
+            back,
+            [
+                (70_004, Spot::narrow('b')),
+                (70_003, Spot::narrow(' ')),
+                (70_002, Spot::narrow(' '))
+            ]
+        );
         // Drawn from far along, as a row it wraps onto is.
         let mut builder = RowBuilder::new(5);
         laid.show(&mut builder, 69_998, 5, &[], &[], 0);
@@ -1017,14 +1014,212 @@ mod tests {
         // Plain ASCII needs no table of where characters start.
         let plain = Laid::new("ab c~".to_owned(), 4);
         assert!(matches!(plain.starts, Starts::Plain(5)));
-        assert_eq!(
-            (plain.byte_at(3), plain.col_of(4), plain.last_col()),
-            (3, 4, 4)
-        );
+        assert_eq!((plain.byte_at(3), plain.col_of(4)), (3, 4));
         let mixed = Laid::new("a\tb字".to_owned(), 4);
         assert!(matches!(mixed.starts, Starts::Table(_)));
         assert_eq!(mixed.col_before(5), Some(4));
         // A tab is never plain, even one a cell wide.
         assert!(!Laid::new("abc\td".to_owned(), 4).is_plain());
+    }
+
+    /// Characters of every kind the cells of a line are worked out for, and
+    /// those motions and objects look for.
+    const PIECES: &[&str] = &[
+        "a",
+        "bc",
+        " ",
+        "  ",
+        "\t",
+        "字",
+        "é",
+        "e\u{301}",
+        "\u{301}",
+        "\u{200d}",
+        "👩\u{200d}💻",
+        "\u{2764}\u{fe0f}",
+        "\u{fe0f}",
+        "🇬🇧",
+        "\x01",
+        "\x1c",
+        "\x7f",
+        "\u{85}",
+        "(",
+        ")",
+        "\"",
+        "\\",
+        "_",
+        "-",
+    ];
+
+    /// Plain ASCII, of the kinds motions look for.
+    const PLAIN: &[&str] = &["a", "bc", " ", "(", ")", "\"", "\\", "_", "-"];
+
+    /// A line of up to `most` pieces of `random`'s choosing: plain for
+    /// some seeds, or plain but for its last character.
+    fn line(random: &mut Random, seed: u64, most: usize) -> String {
+        let pieces = if seed.is_multiple_of(3) {
+            PLAIN
+        } else {
+            PIECES
+        };
+        let mut text: String = (0..random.below(most))
+            .map(|_| pieces[random.below(pieces.len())])
+            .collect();
+        if seed.is_multiple_of(6) {
+            text.push_str(PIECES[random.below(PIECES.len())]);
+        }
+        text
+    }
+
+    /// The row a terminal has for `text`, built as [`Laid::show`] draws
+    /// it, a character at a time, with how many cells it fills.
+    fn as_a_row(text: &str, tabstop: usize) -> (Row, usize) {
+        let mut builder = RowBuilder::new(u16::MAX.into());
+        for ch in text.chars() {
+            if ch == '\t' {
+                let col = builder.filled();
+                let tab = " ".repeat(tab_end(col, tabstop) - col);
+                builder.push(&tab, &Style::DEFAULT, true);
+            } else {
+                push(&mut builder, ch);
+            }
+        }
+        let filled = builder.filled();
+        (builder.finish(false), filled)
+    }
+
+    #[test]
+    fn the_cells_the_vim_engine_reads_of_a_line_are_a_terminal_rows() {
+        for seed in 1..=600_u64 {
+            let mut random = Random(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            let tabstop = 1 + random.below(8);
+            let text = line(&mut random, seed, 24);
+            let laid = Laid::new(text.clone(), tabstop);
+            let (row, filled) = as_a_row(&text, tabstop);
+            assert_eq!(laid.cells(), filled, "{text:?}");
+            let cells: Vec<_> = (0..=filled).map(|col| row.cell(col)).collect();
+            let each: Vec<_> = (0..=filled).map(|col| laid.cell(col)).collect();
+            assert_eq!(each[..filled], cells[..filled], "{text:?}");
+            assert_eq!(each[filled], None, "{text:?}");
+            assert_eq!(text_end(Some(&laid)), text_end(Some(&row)), "{text:?}");
+            // Read one after another, either way, from anywhere.
+            for col in 0..filled + 2 {
+                let on: Vec<_> = laid.on_from(col).collect();
+                let row_on: Vec<_> = (row.on_from(col))
+                    .take_while(|&(at, _)| at < filled)
+                    .collect();
+                assert_eq!(on, row_on, "{text:?} on from {col}");
+                let back: Vec<_> = laid.back_from(col).collect();
+                let row_back: Vec<_> = match filled {
+                    0 => Vec::new(),
+                    _ => row.back_from(col.min(filled - 1)).collect(),
+                };
+                assert_eq!(back, row_back, "{text:?} back from {col}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_lines_cells_motions_and_objects_are_a_short_ones_moved_along() {
+        // 66,360 cells, more than a terminal's row can have: a whole number
+        // of tab stops of any size, ending in a blank, so what's after it
+        // is laid out as it is alone.
+        let before = "ab cd ".repeat(66_360 / 6);
+        let shift = before.len();
+        let along = |at: Point| match at.line {
+            0 => Point {
+                line: 0,
+                col: at.col + shift,
+            },
+            _ => at,
+        };
+        let motions = [
+            Motion::Left,
+            Motion::Right,
+            Motion::LineEnd,
+            Motion::WordStart,
+            Motion::WordEnd,
+            Motion::WordBack,
+            Motion::BigWordStart,
+            Motion::BigWordEnd,
+            Motion::BigWordBack,
+            Motion::Match,
+            Motion::Find {
+                ch: 'a',
+                forward: true,
+                till: false,
+            },
+            Motion::Find {
+                ch: '(',
+                forward: false,
+                till: true,
+            },
+        ];
+        let objects = [
+            Object::Word,
+            Object::BigWord,
+            Object::Quote('"'),
+            Object::Bracket {
+                open: '(',
+                close: ')',
+            },
+        ];
+        for seed in 1..=60_u64 {
+            let mut random = Random(seed.wrapping_mul(0x2545_f491_4f6c_dd1d));
+            let tabstop = 1 + random.below(8);
+            // Starting with a character of its own, which nothing before
+            // it can join.
+            let text = format!("a{}", line(&mut random, seed, 16));
+            let short = Rope::from_str(&format!("{text}\nend\n"));
+            let long = Rope::from_str(&format!("{before}{text}\nend\n"));
+            let (short, long) = (Text::new(&short, tabstop), Text::new(&long, tabstop));
+            let (laid, long_laid) = (short.laid(0).unwrap(), long.laid(0).unwrap());
+            assert_eq!(long_laid.cells(), shift + laid.cells(), "{text:?}");
+            for col in 0..=laid.cells() {
+                assert_eq!(long_laid.cell(shift + col), laid.cell(col), "{text:?}");
+            }
+            let on = (long_laid.on_from(shift)).map(|(col, spot)| (col - shift, spot));
+            assert!(on.eq(laid.on_from(0)), "{text:?}");
+            let back = (long_laid.back_from(usize::MAX))
+                .take(laid.cells())
+                .map(|(col, spot)| (col - shift, spot));
+            assert!(back.eq(laid.back_from(usize::MAX)), "{text:?}");
+
+            // From a few of its characters; quotes from one, as they're
+            // looked for from the line's start, and brackets from one for
+            // some lines, as they're looked for a cell at a time through
+            // all that's before, which takes a while.
+            let starts: Vec<usize> = laid.pieces().map(|(cell, _, _)| cell).collect();
+            for step in 0..starts.len().min(4) {
+                let cell = starts[random.below(starts.len())];
+                let from = Point { line: 0, col: cell };
+                let context = format!("{text:?} from {cell}");
+                for motion in motions {
+                    let mut moved = Cursor::new(from);
+                    moved.apply(motion, &short);
+                    let mut far = Cursor::new(along(from));
+                    far.apply(motion, &long);
+                    // Unless it went back into what's before.
+                    if far.at.line > 0 || far.at.col >= shift {
+                        assert_eq!(along(moved.at), far.at, "{context}: {motion:?}");
+                    }
+                }
+                let objects = match step {
+                    0 if seed.is_multiple_of(3) => &objects[..],
+                    0 => &objects[..3],
+                    _ => &objects[..2],
+                };
+                for &object in objects {
+                    for inner in [true, false] {
+                        let found = object.find(&short, from, inner);
+                        let far = object.find(&long, along(from), inner);
+                        if far.is_none_or(|(start, _)| start.line > 0 || start.col >= shift) {
+                            let found = found.map(|(start, last)| (along(start), along(last)));
+                            assert_eq!(found, far, "{context}: {object:?}, {inner}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -1089,6 +1089,7 @@ impl<'a> Document<'a> {
 }
 
 impl<'d> Lines for Document<'d> {
+    type Line = Row;
     type Row<'a>
         = &'d Row
     where

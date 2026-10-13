@@ -14,10 +14,11 @@
 //! and `aa` an argument with its comma and `ia` the argument. Only the
 //! daemon has the syntax tree, so the editor asks it for those too.
 
-use clackatoo_term::Row;
 use clackatoo_text::Construct;
 
-use crate::motion::{Class, Lines, Point, Walk, class_at, next_cell, previous_cell, text_end};
+use crate::motion::{
+    Cells, Class, Lines, Point, Walk, class_at, next_cell, previous_cell, text_end,
+};
 
 /// How far a bracket object looks for each of its brackets, in cells.
 const BRACKET_SEARCH: usize = 100_000;
@@ -88,7 +89,7 @@ impl Object {
 /// `iw` and `aw`, or `iW` and `aW` with `classify` lumping punctuation in
 /// with letters.
 fn word(
-    row: Option<&Row>,
+    row: Option<&impl Cells>,
     at: Point,
     inner: bool,
     classify: impl Fn(Class) -> Class,
@@ -124,7 +125,7 @@ fn word(
 
 /// `start` to `last`, with the blanks after it, or if there are none, the
 /// blanks before it, as `aw` and `a"` take.
-fn with_blanks(row: Option<&Row>, start: usize, last: usize, end: usize) -> (usize, usize) {
+fn with_blanks(row: Option<&impl Cells>, start: usize, last: usize, end: usize) -> (usize, usize) {
     let blank = |col| class_at(row, col) == Class::Blank;
     let mut after = last;
     while let Some(next) = next_cell(row, after).filter(|&n| n < end && blank(n)) {
@@ -143,14 +144,15 @@ fn with_blanks(row: Option<&Row>, start: usize, last: usize, end: usize) -> (usi
 /// `i"` and `a"`: the quoted string the cursor is in or on, or else the
 /// next one on the line. Quotes pair up from the line's start, and one
 /// after a backslash doesn't count.
-fn quoted(row: Option<&Row>, at: Point, quote: char, inner: bool) -> Option<(Point, Point)> {
-    let cells = row?.cells();
-    let quotes: Vec<usize> = (0..cells.len())
-        .filter(|&col| cells[col].ch() == quote && (col == 0 || cells[col - 1].ch() != '\\'))
-        .collect();
-    let (open, close) = quotes
-        .chunks_exact(2)
-        .map(|pair| (pair[0], pair[1]))
+fn quoted(row: Option<&impl Cells>, at: Point, quote: char, inner: bool) -> Option<(Point, Point)> {
+    // The quotes, each with whether the cell before is a backslash.
+    let mut before = ' ';
+    let mut quotes = row?.on_from(0).filter_map(|(col, spot)| {
+        let escaped = before == '\\';
+        before = spot.ch;
+        (spot.ch == quote && !escaped).then_some(col)
+    });
+    let (open, close) = std::iter::from_fn(|| Some((quotes.next()?, quotes.next()?)))
         .find(|&(_, close)| at.col <= close)?;
     let point = |col| Point { line: at.line, col };
     if inner {
@@ -175,7 +177,7 @@ fn bracketed(
 ) -> Option<(Point, Point)> {
     let ch = |point: Point| {
         let row = lines.row(point.line)?;
-        row.cells().get(point.col).map(|cell| cell.ch())
+        row.cell(point.col).map(|spot| spot.ch)
     };
     // The opening bracket: the cursor's, or the first unmatched one before
     // it.
@@ -236,7 +238,11 @@ fn inside(lines: &impl Lines, open: Point, close: Point) -> Option<(Point, Point
         };
     }
     let row = lines.row(close.line);
-    let indented = (0..close.col).all(|col| class_at(row.as_deref(), col) == Class::Blank);
+    let indented = row.as_deref().is_none_or(|row| {
+        (row.on_from(0))
+            .take_while(|&(col, _)| col < close.col)
+            .all(|(_, spot)| spot.blank())
+    });
     let last = if indented && close.line > first.line {
         let line = close.line - 1;
         Point {

@@ -491,7 +491,7 @@ impl Kept {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::text::Text;
     use super::*;
     use crate::motion::{Lines, Point};
@@ -674,9 +674,9 @@ mod tests {
 
     #[test]
     fn what_is_kept_has_a_budget() {
-        // Lines of 70,000 é, each well over a megabyte laid out: those
+        // Lines of 150,000 é, each well over a megabyte laid out: those
         // furthest from the last asked for go, within the budget.
-        let edited = Edited::new(&format!("{}\n", "é".repeat(70_000)).repeat(20), 4, None);
+        let edited = Edited::new(&format!("{}\n", "é".repeat(150_000)).repeat(20), 4, None);
         let text = edited.text(None);
         for line in 0..20 {
             text.laid(line);
@@ -691,10 +691,10 @@ mod tests {
     }
 
     /// A xorshift generator, for repeatable edits.
-    struct Random(u64);
+    pub(in crate::editor) struct Random(pub(in crate::editor) u64);
 
     impl Random {
-        fn below(&mut self, n: usize) -> usize {
+        pub(in crate::editor) fn below(&mut self, n: usize) -> usize {
             self.0 ^= self.0 << 13;
             self.0 ^= self.0 >> 7;
             self.0 ^= self.0 << 17;
@@ -703,7 +703,7 @@ mod tests {
 
         /// Some text of tabs, wide characters, accents, joiners, controls,
         /// blanks, punctuation and line breaks.
-        fn text(&mut self) -> String {
+        pub(in crate::editor) fn text(&mut self) -> String {
             const PIECES: &[&str] = &[
                 "a", "bc", " ", "  ", "\t", "字", "é", "\u{301}", "\u{200d}", "\n", "-", ",", ".",
                 "\x01", "word", "👩",
@@ -823,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn a_line_longer_than_a_row_holds_is_kept_through_edits_past_its_row() {
+    fn a_long_line_is_kept_through_edits_far_along_it() {
         for seed in 1..=12_u64 {
             let mut random = Random(seed.wrapping_mul(0x2545_f491_4f6c_dd1d));
             // Plain, or not, or plain but for how it ends: in a character
@@ -840,8 +840,8 @@ mod tests {
             for step in 0..24 {
                 let context = format!("seed {seed}, step {step}");
                 let len = edited.text(None).line_end(0);
-                // Mostly far along the line, past its row, and sometimes
-                // anywhere in it.
+                // Mostly far along the line, past where a terminal's row
+                // would end, and sometimes anywhere in it.
                 let back = if random.below(4) == 0 {
                     random.below(len + 1)
                 } else {
@@ -869,29 +869,37 @@ mod tests {
     #[test]
     fn a_long_line_is_counted_again_only_from_where_it_changed() {
         use super::super::text::COUNTED;
-        // How many characters past the row laying out line 0 counts.
+        // How many characters laying out line 0 counts one by one.
         let counted = |edited: &Edited| {
             COUNTED.with(|counted| counted.set(0));
             edited.text(None).laid(0);
             COUNTED.with(std::cell::Cell::get)
         };
+        // A plain line is seen to be plain at a glance.
         let plain = "a=b(c,d);".repeat(11_000);
         let mut edited = Edited::new(&format!("{plain}\n"), 4, None);
-        assert!(counted(&edited) > 30_000, "laid out afresh");
-        // A plain line, typed into past its row, or in it, plainly: none.
+        assert_eq!(counted(&edited), 0, "laid out afresh");
+        assert!(edited.text(None).laid(0).unwrap().is_plain());
+        // Typed into plainly, anywhere: none.
         edited.replace(80_000, "", "x");
         assert_eq!(counted(&edited), 0);
         edited.replace(30_000, "", "y");
         assert_eq!(counted(&edited), 0);
         assert!(edited.text(None).laid(0).unwrap().is_plain());
-        // One that isn't plain, typed into near its end: only its end.
+        // One that isn't plain is counted afresh, then typed into near its
+        // start or its end, only from there on.
         let other = "ab字\tc,".repeat(14_000);
         let mut edited = Edited::new(&format!("{other}\n"), 4, None);
-        counted(&edited);
+        assert!(counted(&edited) > 80_000, "laid out afresh");
         let at = other.len() - 9;
         edited.replace(at, "", "z");
         assert!(counted(&edited) < 20);
         edited.check(0, None, "typed near the end");
+        // Typed at byte 9, in the second "ab": from its `a`, the seventh
+        // character, on, to the end, which has the first z too.
+        edited.replace(9, "", "z");
+        assert_eq!(counted(&edited), other.chars().count() + 2 - 6);
+        edited.check(0, None, "typed near the start");
     }
 
     #[test]
@@ -900,8 +908,8 @@ mod tests {
         let mut edited = Edited::new(&format!("{line}\n"), 4, Some(wrap(37)));
         edited.check(0, None, "first");
         assert!(edited.text(None).laid(0).unwrap().is_plain());
-        // An é typed past the row: no longer plain, and every character's
-        // start is kept.
+        // An é typed far along it: no longer plain, and every
+        // character's start is kept.
         edited.replace(80_000, "", "é");
         edited.check(0, None, "é typed");
         let laid = edited.text(None).laid(0).unwrap();

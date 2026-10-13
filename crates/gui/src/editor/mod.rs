@@ -1359,7 +1359,7 @@ impl Editor {
             return self.select_piece(construct, inner, times, copy);
         }
         let text = self.text(copy);
-        if let Some((start, last)) = text.object(object, self.cursor.at, inner) {
+        if let Some((start, last)) = object.find(&text, self.cursor.at, inner) {
             self.mode = Mode::Visual(Selection::Characters);
             self.anchor = Some(start);
             self.cursor = Cursor::new(last);
@@ -1467,14 +1467,6 @@ impl Editor {
 
     /// The cursor moved by `motion`, `times` times.
     fn moved(&self, copy: &BufferCopy, motion: Motion, times: usize) -> Cursor {
-        self.moved_seeing(copy, motion, times)
-            .unwrap_or(self.cursor)
-    }
-
-    /// The cursor moved by `motion`, `times` times, or `None` if it reads the
-    /// rows, and might not have seen where it should go, past the end of a
-    /// long line's row.
-    fn moved_seeing(&self, copy: &BufferCopy, motion: Motion, times: usize) -> Option<Cursor> {
         let text = self.text(copy);
         let mut cursor = self.cursor;
         match motion {
@@ -1514,11 +1506,11 @@ impl Editor {
                 }
             }
             // A character at a time, however many cells it takes, as a tab
-            // does, and on a line longer than a row holds, past the row.
+            // does.
             Motion::Left | Motion::Right => {
                 let line = cursor.at.line;
                 let Some(laid) = text.laid(line) else {
-                    return Some(cursor);
+                    return cursor;
                 };
                 for _ in 0..times {
                     let byte = laid.byte_at(cursor.at.col);
@@ -1536,20 +1528,13 @@ impl Editor {
                     cursor = Cursor::new(Point { line, col });
                 }
             }
-            // What reads the Vim engine's rows can't see past the end of a
-            // long line's: it goes nowhere, rather than somewhere wrong.
-            _ if reads_row(motion) && text.past_row(cursor.at) => return None,
             _ => {
                 for _ in 0..times {
                     cursor.apply(motion, &text);
                 }
-                let (start, end) = (cursor.at.min(self.cursor.at), cursor.at.max(self.cursor.at));
-                if reads_row(motion) && text.past_rows(start, end) {
-                    return None;
-                }
             }
         }
-        Some(cursor)
+        cursor
     }
 
     // --- Operators ----------------------------------------------------------
@@ -1857,7 +1842,7 @@ impl Editor {
                 })
             }
             Target::Object { object, inner } => {
-                let Some((start, last)) = text.object(object, at, inner) else {
+                let Some((start, last)) = object.find(&text, at, inner) else {
                     self.status = Some(match object {
                         Object::Block => "a file has no shell blocks".into(),
                         _ => "nothing there".into(),
@@ -1898,12 +1883,9 @@ impl Editor {
                             cursor.apply(end, &text);
                         }
                     }
-                    // Not past the end of a long line's row, which it
-                    // can't see.
-                    let seen = !text.past_row(at) && !text.past_rows(at, cursor.at);
-                    return seen.then(|| chars(at, cursor.at));
+                    return Some(chars(at, cursor.at));
                 }
-                let moved = self.moved_seeing(copy, motion, times)?;
+                let moved = self.moved(copy, motion, times);
                 // `dj` on the last line has no line to take with it.
                 if matches!(motion, Motion::Up(_) | Motion::Down(_)) && moved.at.line == at.line {
                     return None;
@@ -4668,23 +4650,6 @@ pub(crate) fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
 /// jump, by either name.
 fn previous(mark: char) -> char {
     if mark == '`' { '\'' } else { mark }
-}
-
-/// Whether `motion` reads the Vim engine's row of a line, character by
-/// character, so can't see past the end of a long line's (see
-/// [`Lines::overflows`]): word motions, `f` and its kin, and `%`.
-fn reads_row(motion: Motion) -> bool {
-    matches!(
-        motion,
-        Motion::WordStart
-            | Motion::WordBack
-            | Motion::WordEnd
-            | Motion::BigWordStart
-            | Motion::BigWordBack
-            | Motion::BigWordEnd
-            | Motion::Find { .. }
-            | Motion::Match
-    )
 }
 
 /// Whether `motion` fails when it doesn't move the cursor, which stops a

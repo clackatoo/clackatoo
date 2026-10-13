@@ -371,7 +371,7 @@ fn a_piece_the_grammar_answers_with_is_selected_on_wrapped_rows() {
 
 #[test]
 fn a_line_longer_than_a_row_holds_is_drawn_and_moved_through_to_its_end() {
-    // 70,000 cells: more than the Vim engine's row of a line holds.
+    // 70,000 cells: more than a terminal's row can have.
     let line = "a=b(c,d);".repeat(70_000 / 9);
     let mut setup = Setup::new(&format!("{line}\nend\n"));
     setup.keys("$");
@@ -389,12 +389,12 @@ fn a_line_longer_than_a_row_holds_is_drawn_and_moved_through_to_its_end() {
     assert_eq!(setup.cursor(), (1, 2));
 }
 
-/// Somewhere past the 65,535 cells of a laid out line's row.
+/// Somewhere past the 65,535 cells a terminal's row can have.
 const ROW_CELLS_ABOUT: usize = 65_600;
 
 /// A line of 69,999 cells, words of four letters and a space, and a short
 /// one after it, in a pane wide enough not to matter.
-fn past_the_cut() -> (Setup, String) {
+fn past_a_rows_end() -> (Setup, String) {
     let line = "abcd ".repeat(14_000).trim_end().to_owned();
     let text = format!("{line}\nend\n");
     (Setup::new(&text), text)
@@ -407,53 +407,65 @@ fn at(setup: &mut Setup, col: usize) {
 }
 
 #[test]
-fn what_reads_rows_past_a_long_lines_row_fails_and_changes_nothing() {
-    let (mut setup, text) = past_the_cut();
+fn motions_and_objects_act_past_where_a_terminals_row_would_end() {
+    // Words of four letters from every fifth cell: the last at 69,995.
+    let (mut setup, text) = past_a_rows_end();
+    let moved = |setup: &mut Setup, from: usize, keys: &str| {
+        at(setup, from);
+        setup.keys(keys);
+        setup.cursor()
+    };
     // f and its kin, ; and , once there's one to do again.
-    setup.keys("fd");
-    for keys in ["$Fa", "$Tb", "$;", "$,", "$fa", "$%"] {
-        setup.keys(keys);
-        assert_eq!(setup.cursor(), (0, 69_998), "{keys}");
-    }
-    // Words and objects, and the operators given them.
-    for keys in [
-        "$w", "$b", "$e", "$W", "$B", "$diw", "$daw", "$db", "$dw", "$de", "$cw<Esc>",
-    ] {
-        setup.keys(keys);
-        assert!(setup.text() == text, "{keys}");
-        assert_eq!(setup.cursor(), (0, 69_998), "{keys}");
-    }
-    // From past the cut, a cell further on: the same.
-    at(&mut setup, 66_000);
-    setup.keys("dbdwdiw");
-    assert!(setup.text() == text, "past the cut");
+    assert_eq!(moved(&mut setup, 69_998, "Fa"), (0, 69_995));
+    assert_eq!(moved(&mut setup, 69_998, "Tb"), (0, 69_997));
+    assert_eq!(moved(&mut setup, 66_000, "fd"), (0, 66_003));
+    assert_eq!(moved(&mut setup, 66_000, ";"), (0, 66_003));
+    assert_eq!(moved(&mut setup, 66_000, ","), (0, 65_998));
+    // Words, across the cell a terminal's row would end at, 65,535, and
+    // over the last word to the next line.
+    assert_eq!(moved(&mut setup, 65_530, "w"), (0, 65_535));
+    assert_eq!(moved(&mut setup, 65_530, "2e"), (0, 65_538));
+    assert_eq!(moved(&mut setup, 65_536, "b"), (0, 65_535));
+    assert_eq!(moved(&mut setup, 65_536, "2B"), (0, 65_530));
+    assert_eq!(moved(&mut setup, 69_996, "W"), (1, 0));
+    assert_eq!(moved(&mut setup, 0, "jb"), (0, 69_995));
+    assert_eq!(moved(&mut setup, 0, "13107w"), (0, 65_535));
+    // Objects and the operators given motions.
+    at(&mut setup, 65_536);
+    setup.keys("diw");
+    assert_eq!(setup.text().len(), text.len() - 4);
+    setup.keys("u");
+    at(&mut setup, 66_001);
+    setup.keys("daw");
+    assert_eq!(setup.text().len(), text.len() - 5);
+    setup.keys("u");
+    at(&mut setup, 69_990);
+    setup.keys("dw");
+    assert_eq!(setup.text().len(), text.len() - 5);
+    setup.keys("u$db");
+    assert_eq!(setup.text().len(), text.len() - 3);
+    setup.keys("u");
+    at(&mut setup, 69_995);
+    setup.keys("cwxy<Esc>");
+    assert!(setup.text().starts_with(&text[..69_995]));
+    assert_eq!(&setup.text()[69_995..], "xy\nend\n");
 
-    // The last word before the cut, at cells 65,530 to 65,533: as far as
-    // it can see, as Vim does, and where it can't, nothing.
-    at(&mut setup, 65_530);
-    setup.keys("e");
-    assert_eq!(setup.cursor(), (0, 65_533));
-    at(&mut setup, 65_530);
-    setup.keys("b");
-    assert_eq!(setup.cursor(), (0, 65_525));
-    at(&mut setup, 65_530);
-    setup.keys("dwwdawdiw");
-    assert!(
-        setup.text() == text,
-        "the blank after it is the row's last cell"
-    );
-    assert_eq!(setup.cursor(), (0, 65_530));
-    // The word before it is seen whole.
-    setup.keys("bdiw");
-    assert_eq!(setup.text().len(), text.len() - 4, "just the word");
-    // b from the next line doesn't go back into it.
-    setup.keys("jb");
-    assert_eq!(setup.cursor(), (1, 0));
+    // Brackets and quotes far apart, on one line.
+    let inside = "x".repeat(80_000);
+    let mut setup = Setup::new(&format!("f({inside}) \"{inside}\"\n"));
+    setup.keys("%");
+    assert_eq!(setup.cursor(), (0, 80_002));
+    setup.keys("%");
+    assert_eq!(setup.cursor(), (0, 1));
+    setup.keys("$F(di(");
+    assert_eq!(setup.text(), format!("f() \"{inside}\"\n"));
+    setup.keys("$di\"");
+    assert_eq!(setup.text(), "f() \"\"\n");
 }
 
 #[test]
 fn l_crosses_a_long_lines_row_end_as_h_does() {
-    let (mut setup, _) = past_the_cut();
+    let (mut setup, _) = past_a_rows_end();
     at(&mut setup, 65_533);
     setup.keys("lll");
     assert_eq!(setup.cursor(), (0, 65_536));
@@ -721,19 +733,6 @@ fn scroll_times() {
 #[test]
 #[ignore = "a timing, run by hand"]
 fn long_line_times() {
-    use std::time::Instant;
-
-    fn time(setup: &mut Setup, name: &str, times: usize, act: &dyn Fn(&mut Setup)) {
-        let started = Instant::now();
-        for _ in 0..times {
-            act(setup);
-            setup.editor.settle(&setup.copy);
-        }
-        #[allow(clippy::cast_precision_loss)]
-        let each = started.elapsed().as_secs_f64() * 1e3 / times as f64;
-        eprintln!("{name}: {each:.2} ms");
-    }
-
     let line = "a=b(c,d);".repeat(5_000_000 / 9);
     let mut setup = sized(&format!("{line}\n"), 160, 50);
     time(&mut setup, "first frame", 1, &|_| {});
@@ -794,6 +793,75 @@ fn long_line_times() {
     }
 }
 
+/// Prints how long `act` takes, with the frame after it, on average over
+/// `times` goes, in milliseconds.
+fn time(setup: &mut Setup, name: &str, times: usize, act: &dyn Fn(&mut Setup)) {
+    let started = std::time::Instant::now();
+    for _ in 0..times {
+        act(setup);
+        setup.editor.settle(&setup.copy);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let each = started.elapsed().as_secs_f64() * 1e3 / times as f64;
+    eprintln!("{name}: {each:.3} ms");
+}
+
+/// How long motions take on a 5 MB line, as a minified file has, wrapped
+/// in a pane 160 by 50: word motions, `f`, `%` and `yiw` near its start
+/// and in its middle, `$`, and a search for a word at its end. Then the
+/// same on one that isn't plain ASCII. A measurement, not a check: run it
+/// by hand with `cargo test -p clackatoo-gui --release
+/// long_line_motion_times -- --ignored --nocapture`.
+#[test]
+#[ignore = "a timing, run by hand"]
+fn long_line_motion_times() {
+    let line = "a=b(c,d);".repeat(5_000_000 / 9);
+    // Each with the cells before the repeats start.
+    for (kind, text, before) in [
+        ("plain", format!("{line} needle\n"), 0),
+        ("with an é", format!("é{line} needle\n"), 1),
+    ] {
+        let mut setup = sized(&text, 160, 50);
+        setup.editor.settle(&setup.copy);
+        for (place, col) in [("near its start", 1000), ("in its middle", line.len() / 2)] {
+            for (name, keys) in [
+                ("w", "w"),
+                ("e", "e"),
+                ("b", "b"),
+                ("f(", "f("),
+                ("%", "%"),
+                ("yiw", "yiw"),
+            ] {
+                setup.editor.go_to(0, col, &setup.copy);
+                let name = format!("{kind}, {place}: {name}");
+                time(&mut setup, &name, 20, &|setup| setup.keys(keys));
+            }
+        }
+        // Reading far along it: to a letter at its end, quotes it has none
+        // of, and brackets around an `a`, which none are, looked for as
+        // far as they're looked for.
+        let middle = line.len() / 2;
+        let a = middle - middle % 9 + before;
+        for (name, col, keys) in [
+            ("fn, to its end", middle, "fn"),
+            ("yi\", none", middle, "yi\""),
+            ("yi(, none", a, "yi("),
+        ] {
+            let name = format!("{kind}, in its middle: {name}");
+            time(&mut setup, &name, 5, &|setup| {
+                setup.editor.go_to(0, col, &setup.copy);
+                setup.keys(keys);
+            });
+        }
+        time(&mut setup, &format!("{kind}: $"), 20, &|setup| {
+            setup.keys("0$");
+        });
+        time(&mut setup, &format!("{kind}: / to its end"), 5, &|setup| {
+            setup.keys("0/needle<CR>");
+        });
+    }
+}
+
 /// How long editing keys take, laying out what's shown after them, in a
 /// file of 100,000 lines of 150 to 450 characters, wrapped in a pane 160
 /// by 50: `o` and a word typed, a key typed at a line's end, and `dd`. A
@@ -817,6 +885,9 @@ fn edit_times() {
         ("o, a word and Esc", "oword<Esc>", 500),
         ("a key typed at the end", "Ax<Esc>", 500),
         ("dd", "dd", 1000),
+        ("w", "w", 2000),
+        ("e", "e", 2000),
+        ("b", "b", 2000),
     ] {
         let mut took: Vec<f64> = (0..times)
             .map(|_| {
