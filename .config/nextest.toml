@@ -1,0 +1,26 @@
+# How CI runs the tests (cargo nextest run --profile ci). Locally, plain
+# `cargo test --workspace` runs the same tests.
+#
+# Tests marked #[ignore] need the network or real language servers and
+# agents, and are skipped, as cargo test skips them.
+
+[profile.ci]
+fail-fast = false
+# A test that hangs is reported after a minute and stopped after five.
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The daemon's tests that time real things against a clock: a flood of
+# output, a daemon going out of contact and back, QUIC falling back to ssh.
+# They pass on a quiet machine, but a shared CI runner can be busy enough
+# to miss their deadlines, so each gets two more tries before it fails.
+# Add a test here only when it has failed under load and passed on its
+# own, and say so in the commit.
+[[profile.ci.overrides]]
+filter = """
+package(clackatoo-daemon) & kind(test) & (
+    test(=a_flood_of_output_does_not_starve_other_clients)
+    | test(=a_daemon_that_stops_answering_is_out_of_contact_until_it_answers_again)
+    | test(=quic_stays_in_ssh_when_udp_doesnt_get_through)
+)
+"""
+retries = 2
