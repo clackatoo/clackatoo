@@ -8064,6 +8064,7 @@ mod tests {
             }],
             comments: Vec::new(),
             note: None,
+            chats: Vec::new(),
         };
         assert!(desk.review_event(clackatoo_protocol::Event::Review {
             review: ReviewId(1),

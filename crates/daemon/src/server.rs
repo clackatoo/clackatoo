@@ -1351,7 +1351,7 @@ impl Daemon {
                     self.workspaces_changed();
                 }
                 log::info!("chat {id} closed");
-                self.subagent_closed(id, chat.relations().parent);
+                self.subagent_closed(id, chat.relations().parent, &chat.node().subagents);
                 return Ok(());
             }
         };

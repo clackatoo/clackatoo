@@ -81,8 +81,8 @@ pub use files::{
 };
 pub use find::{Done, Found, FoundBuffer, FoundLine, Search};
 pub use review::{
-    ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewComment, ReviewFile,
-    ReviewHunk, ReviewId, ReviewList, ReviewScope,
+    ChatName, CommentPlace, Hunks, Made, NewReview, ReviewAction, ReviewChat, ReviewComment,
+    ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
 };
 pub use view::{
     CursorState, GridNode, GridState, HistoryLine, HistoryLines, Line, LinkTarget, Links, Node,
@@ -95,7 +95,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any incompatible
 /// change to a message.
-pub const PROTOCOL_VERSION: u32 = 67;
+pub const PROTOCOL_VERSION: u32 = 69;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

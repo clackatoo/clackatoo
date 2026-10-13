@@ -28,7 +28,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{PaneId, PaneTerminal, SettingKind, SubagentStatus, TerminalId};
+use clackatoo_protocol::{PaneId, PaneTerminal, SettingKind, Subagent, SubagentStatus, TerminalId};
 use mio::Token;
 use serde_json::Value;
 
@@ -107,18 +107,27 @@ impl Daemon {
         }
     }
 
-    /// The chat `chat`, which `parent`'s agent started, has closed: its
-    /// card says so, and the chats it started that are in the background
-    /// close with it.
+    /// The chat `chat`, which `parent`'s agent started, has closed, with
+    /// `cards` for the chats it started: its card says so, and the chats
+    /// it started that are in the background close with it.
+    ///
+    /// Those in a pane, and those still going or with changes waiting for
+    /// review, themselves or in a chat under them, go to the chat above
+    /// instead, under the turn `chat` was started in, so a review of that
+    /// turn still lists their changes; as do those closed already whose
+    /// changes wait for review, by their cards.
     pub(in crate::server) fn subagent_closed(
         &mut self,
         chat: TerminalId,
         parent: Option<TerminalId>,
+        cards: &[Subagent],
     ) {
+        let mut started_in = None;
         if let Some(parent) = parent
             && let Some(of) = self.chat(parent)
             && let Some(mut entry) = of.subagent(chat).cloned()
         {
+            started_in = Some(entry.turn);
             entry.status = SubagentStatus::Closed;
             entry.shown = false;
             entry.ended = entry.ended.or_else(|| Some(crate::chat::now()));
@@ -126,29 +135,56 @@ impl Daemon {
             self.collect_damage(parent);
         }
         let workspaces = self.workspaces.get();
-        let background: Vec<TerminalId> = (self.terminals.iter())
-            .filter(|(id, slot)| {
+        let children: Vec<(TerminalId, bool)> = (self.terminals.iter())
+            .filter(|(_, slot)| {
                 (slot.terminal.chat_ref())
                     .is_some_and(|child| child.relations().parent == Some(chat))
-                    && workspaces.pane_showing(**id).is_none()
             })
-            .map(|(&id, _)| id)
+            .map(|(&id, _)| (id, workspaces.pane_showing(id).is_some()))
             .collect();
-        // One still going, or with changes waiting for review, goes to the
-        // chat above, if there is one, rather than lose its work: the
-        // user's own chat closing ends everything under it.
+        // One in a pane, or still going, or with changes waiting for
+        // review, goes to the chat above, if there is one, rather than
+        // lose its work: the user's own chat closing ends everything under
+        // it but what's in panes.
         let above = parent.filter(|&parent| self.chat_ref(parent).is_some());
-        for child in background {
-            let going = (self.chat_ref(child)).is_some_and(|kid| !super::talk::idle(kid));
+        if let (Some(above), Some(turn)) = (above, started_in) {
+            let waiting: Vec<Subagent> = (cards.iter())
+                .filter(|card| card.status == SubagentStatus::Closed)
+                .filter(|card| self.awaits_review(card.chat))
+                .map(|card| Subagent {
+                    turn,
+                    ..card.clone()
+                })
+                .collect();
+            if let Some(of) = self.chat(above)
+                && !waiting.is_empty()
+            {
+                for card in waiting {
+                    of.set_subagent(card);
+                }
+                self.collect_damage(above);
+            }
+        }
+        for (child, shown) in children {
             if let Some(above) = above
-                && (going || self.awaits_review(child))
+                && (shown || self.keeps_work(child, 0))
                 && let Some(kid) = self.chat(child)
             {
                 log::info!(
                     "chat {child} goes to chat {above}, as chat {chat}, which started it, closed"
                 );
                 kid.adopted_by(above);
+                if let Some(turn) = started_in
+                    && let Some(card) =
+                        (self.chat_ref(child)).map(|kid| kid.as_subagent(turn, shown))
+                    && let Some(of) = self.chat(above)
+                {
+                    of.set_subagent(card);
+                }
                 self.note_subagent(child);
+                continue;
+            }
+            if shown {
                 continue;
             }
             log::info!("chat {child} closes with chat {chat}, which started it");
@@ -156,6 +192,35 @@ impl Daemon {
                 log::warn!("chat {child} couldn't be closed: {err}");
             }
         }
+        // Cards have moved, and a chat has closed.
+        self.note_chats_above();
+    }
+
+    /// Whether chat `chat`, or a chat under it, open or closed, is still
+    /// going or has changes waiting for review: closing it would lose
+    /// them, or the cards that find them. `depth` is how far down from the
+    /// first it's looked; past [`MAX_ANCHOR`] it says yes, to keep what
+    /// it can't see.
+    fn keeps_work(&self, chat: TerminalId, depth: usize) -> bool {
+        let Some(open) = self.chat_ref(chat) else {
+            return self.awaits_review(chat);
+        };
+        if !super::talk::idle(open) || self.awaits_review(chat) {
+            return true;
+        }
+        if depth >= MAX_ANCHOR {
+            return true;
+        }
+        let carded = open.node().subagents.iter().map(|card| card.chat);
+        let started = (self.terminals.iter())
+            .filter(|(_, slot)| {
+                (slot.terminal.chat_ref()).is_some_and(|kid| kid.relations().parent == Some(chat))
+            })
+            .map(|(&id, _)| id);
+        let mut under: Vec<TerminalId> = carded.chain(started).collect();
+        under.sort_unstable();
+        under.dedup();
+        (under.into_iter()).any(|kid| self.keeps_work(kid, depth + 1))
     }
 
     /// Shows the chat `child`, which the chat `chat`'s agent started, in a

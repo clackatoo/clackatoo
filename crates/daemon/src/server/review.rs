@@ -17,6 +17,14 @@
 //! lines have changed since. It's one undo step of the agent's, and the
 //! file gets it under any changes not saved.
 //!
+//! A review of a turn or a chat takes in the chats under it too: the
+//! subagents its agent started, and theirs, open or closed. Their cards in
+//! the chat above say which turn started each, so a review of that turn
+//! lists their hunks, each said to be the subagent's. Keeping or rejecting
+//! one is as for any hunk: rejecting is a step of the subagent's agent,
+//! not the reviewed chat's, for it to take back. Undoing the reviewed
+//! chat's turn leaves them, as the review says.
+//!
 //! A review of everything since the branch's base asks git, on a thread of
 //! its own, for the commit the branch started from and the files changed
 //! since, and compares each with the text now: the buffer's, if it's open.
@@ -31,9 +39,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    BufferId, BufferUpdate, ChatAction, ChatName, CommentPlace, Error, Event, Hunks, NewReview,
-    PaneId, Response, ReviewAction, ReviewComment, ReviewFile, ReviewId, ReviewList, ReviewScope,
-    TerminalId,
+    Author, BufferId, BufferUpdate, ChatAction, ChatName, CommentPlace, Error, Event, Hunks,
+    NewReview, PaneId, Response, ReviewAction, ReviewChat, ReviewComment, ReviewFile, ReviewId,
+    ReviewList, ReviewScope, Subagent, TerminalId,
 };
 use clackatoo_text::{AgentHunk, AgentHunks, Bias, Edit, Maker, Rope};
 use mio::Token;
@@ -51,6 +59,11 @@ const MOST_READ: u64 = 4 * 1024 * 1024;
 /// How long after a change reviews' lists are sent again, so a burst of
 /// typing or an agent's many edits cost one each.
 const SETTLE: Duration = Duration::from_millis(100);
+
+/// How many chats deep under the chat a review is of it looks: further
+/// than chats go deep, so a loop in a confused handover can't hang the
+/// daemon.
+const MAX_FAMILY: usize = 8;
 
 /// What agents changed in files, and the reviews of it.
 #[derive(Debug, Default)]
@@ -70,6 +83,11 @@ pub(super) struct Reviews {
     next: u32,
     /// The chat whose agent last changed a file.
     last_chat: Option<TerminalId>,
+    /// The chat whose card shows each subagent that's closed, as found
+    /// when a chat last closed, which is when they change: asked on every
+    /// edit to a closed subagent's lines, it mustn't look through every
+    /// card.
+    above: HashMap<TerminalId, TerminalId>,
     /// When the reviews whose lists may have changed are sent again: a
     /// moment after the first change, so typing costs one list, not one a
     /// key.
@@ -159,6 +177,51 @@ enum Place {
     Closed(PathBuf),
 }
 
+/// Whose steps rejecting a file's hunks makes in its buffer: the chat the
+/// plan's change is a step of, and the other chats' steps after it, each
+/// its own agent's, as a subagent's are in its parent's review.
+#[derive(Debug)]
+struct Steps {
+    chat: TerminalId,
+    more: Vec<(TerminalId, Edit)>,
+}
+
+/// A chat a review is of, and the chats under it: the subagents its agent
+/// started, and theirs, open or closed, each with the turn of the chat
+/// that it, or the subagent above it, was started in.
+#[derive(Debug, Default)]
+struct Family {
+    chat: Option<TerminalId>,
+    under: HashMap<TerminalId, u32>,
+}
+
+impl Family {
+    /// The turn of the chat `hunk` counts under: its own, if the chat's
+    /// agent made it, or the one that started the subagent that did.
+    /// `None` if it's of neither.
+    fn turn_of(&self, hunk: &AgentHunk) -> Option<u32> {
+        let chat = self.chat?;
+        if hunk.chat == chat.0 {
+            Some(hunk.turn)
+        } else {
+            self.under.get(&TerminalId(hunk.chat)).copied()
+        }
+    }
+
+    /// Whether a review of `scope` lists `hunk`: one not yet reviewed, of
+    /// the chat's or a subagent's under it, and of the turn if it's of one.
+    fn takes(&self, hunk: &AgentHunk, scope: ReviewScope) -> bool {
+        if hunk.reviewed {
+            return false;
+        }
+        match scope {
+            ReviewScope::Turn(turn) => turn.is_some() && self.turn_of(hunk) == turn,
+            ReviewScope::Chat => self.turn_of(hunk).is_some(),
+            ReviewScope::Base => false,
+        }
+    }
+}
+
 impl Daemon {
     // --- Hunks as files change -------------------------------------------
 
@@ -232,10 +295,24 @@ impl Daemon {
         chats
     }
 
-    /// Marks the reviews of `chats` stale, to be sent again in a moment:
+    /// Marks the reviews of `chats`, and of the chats above them, which
+    /// list their subagents' hunks, stale, to be sent again in a moment:
     /// but reviews of changes since a base only if `bases`, as those are
     /// worked out again on `R`, or when hunks are kept or rejected.
     fn review_stale(&mut self, chats: &[TerminalId], bases: bool) {
+        if self.reviews.list.is_empty() {
+            return;
+        }
+        let mut chats = chats.to_vec();
+        let mut at = 0;
+        while at < chats.len() {
+            if let Some(above) = self.chat_above(chats[at])
+                && !chats.contains(&above)
+            {
+                chats.push(above);
+            }
+            at += 1;
+        }
         let mut any = false;
         for review in self.reviews.list.values_mut() {
             let wanted = bases || review.scope != ReviewScope::Base;
@@ -501,9 +578,15 @@ impl Daemon {
         }
     }
 
-    /// What chat `chat` is called: its title, or its agent's name.
-    fn chat_name(&mut self, chat: TerminalId) -> String {
-        match self.chat(chat) {
+    /// What chat `chat` is called: for a subagent, open or closed, its
+    /// profile, or else its agent, and its number, as its card says, as
+    /// `explore (chat 7)`; for another, its title, or its agent's name.
+    fn chat_name(&self, chat: TerminalId) -> String {
+        if let Some(card) = self.card(chat) {
+            let name = card.profile.as_deref().unwrap_or(&card.agent);
+            return format!("{name} (chat {chat})");
+        }
+        match self.chat_ref(chat) {
             Some(hosted) => {
                 let title = hosted.info().title;
                 if title.trim().is_empty() {
@@ -514,6 +597,120 @@ impl Daemon {
             }
             None => format!("chat {chat}"),
         }
+    }
+
+    /// The card of the subagent `chat` in the chat above it, open or
+    /// closed, if it's a subagent.
+    fn card(&self, chat: TerminalId) -> Option<&Subagent> {
+        let above = self.chat_above(chat)?;
+        self.chat_ref(above)?.subagent(chat)
+    }
+
+    /// The chat above chat `chat`: the one whose agent started it, or that
+    /// took it on; for a chat that's closed, the one whose card shows it.
+    fn chat_above(&self, chat: TerminalId) -> Option<TerminalId> {
+        match self.chat_ref(chat) {
+            Some(open) => open.relations().parent,
+            None => self.reviews.above.get(&chat).copied(),
+        }
+    }
+
+    /// Finds again which chat's card shows each subagent that's closed,
+    /// as when a chat has closed and cards have moved; and as reviews say
+    /// which of their chats have closed, has them sent again.
+    pub(super) fn note_chats_above(&mut self) {
+        let mut above = HashMap::new();
+        for (&id, slot) in &self.terminals {
+            let Some(chat) = slot.terminal.chat_ref() else {
+                continue;
+            };
+            for card in &chat.node().subagents {
+                if self.chat_ref(card.chat).is_none() {
+                    above.insert(card.chat, id);
+                }
+            }
+        }
+        self.reviews.above = above;
+        self.reviews_stale();
+    }
+
+    /// Chat `chat` and the chats under it, open or closed: those its
+    /// agent started, as its cards show them, and those open that it took
+    /// on from a chat that closed; and theirs, and so on.
+    fn family_of(&self, chat: Option<TerminalId>) -> Family {
+        let mut family = Family {
+            chat,
+            under: HashMap::new(),
+        };
+        let Some(chat) = chat else {
+            return family;
+        };
+        // A chat open with no card yet, as for a moment as it starts, is
+        // found by the chat above it.
+        let mut open: HashMap<TerminalId, Vec<TerminalId>> = HashMap::new();
+        for (&id, slot) in &self.terminals {
+            if let Some(parent) = (slot.terminal.chat_ref()).and_then(|kid| kid.relations().parent)
+            {
+                open.entry(parent).or_default().push(id);
+            }
+        }
+        let mut level = vec![(chat, None)];
+        for _ in 0..MAX_FAMILY {
+            let mut next = Vec::new();
+            for (above, turn) in level {
+                let Some(hosted) = self.chat_ref(above) else {
+                    continue;
+                };
+                let carded = (hosted.node().subagents.iter()).map(|card| (card.chat, card.turn));
+                let uncarded = (open.get(&above).into_iter().flatten())
+                    .filter(|kid| hosted.subagent(**kid).is_none())
+                    .map(|&kid| {
+                        let started = (self.chat_ref(kid))
+                            .and_then(|kid| kid.node().turns.first())
+                            .map_or(u64::MAX, |turn| turn.sent);
+                        (kid, hosted.turn_at(started))
+                    });
+                for (kid, started_in) in carded.chain(uncarded) {
+                    if kid == chat || family.under.contains_key(&kid) {
+                        continue;
+                    }
+                    let turn = turn.unwrap_or(started_in);
+                    family.under.insert(kid, turn);
+                    next.push((kid, Some(turn)));
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            level = next;
+        }
+        family
+    }
+
+    /// The chats whose agents made the hunks in `files`, as a review of
+    /// `family` says who made each.
+    fn review_chats(&self, files: &[ReviewFile], family: &Family) -> Vec<ReviewChat> {
+        let mut chats: Vec<TerminalId> = (files.iter())
+            .flat_map(|file| &file.hunks)
+            .filter_map(|hunk| Some(hunk.by?.chat))
+            .collect();
+        chats.sort_unstable();
+        chats.dedup();
+        (chats.into_iter())
+            .map(|chat| {
+                let turn = family.under.get(&chat).copied();
+                let task = turn
+                    .and_then(|_| self.card(chat))
+                    .map(|card| card.task.clone());
+                ReviewChat {
+                    chat,
+                    name: self.chat_name(chat),
+                    task,
+                    turn,
+                    closed: self.chat_ref(chat).is_none(),
+                }
+            })
+            .collect()
     }
 
     // --- Keeping, rejecting and comments ---------------------------------
@@ -547,14 +744,19 @@ impl Daemon {
     }
 
     /// Every agent hunk `hunks` names, with where it is, in order of
-    /// files and places.
+    /// files and places: a turn's or a chat's take in its subagents', as
+    /// its review lists them.
     fn hunks_named(&self, hunks: &Hunks) -> Vec<(Place, AgentHunk)> {
+        let (family, scope) = match hunks {
+            Hunks::Ids(_) => (Family::default(), ReviewScope::Base),
+            Hunks::Turn { chat, turn } => {
+                (self.family_of(Some(*chat)), ReviewScope::Turn(Some(*turn)))
+            }
+            Hunks::Chat(chat) => (self.family_of(Some(*chat)), ReviewScope::Chat),
+        };
         let wanted = |hunk: &AgentHunk| match hunks {
             Hunks::Ids(ids) => ids.contains(&hunk.id),
-            Hunks::Turn { chat, turn } => {
-                hunk.chat == chat.0 && hunk.turn == *turn && !hunk.reviewed
-            }
-            Hunks::Chat(chat) => hunk.chat == chat.0 && !hunk.reviewed,
+            Hunks::Turn { .. } | Hunks::Chat(_) => family.takes(hunk, scope),
         };
         let open = (self.buffers.iter()).flat_map(|(&id, slot)| {
             (slot.agents.all().iter())
@@ -641,17 +843,24 @@ impl Daemon {
                 refused.join("; ")
             )));
         }
+        let (plans, steps): (Vec<Plan>, Vec<Steps>) = plans.into_iter().unzip();
         let staged = self
             .stage_plans(&plans)
             .map_err(|why| Error::Review(format!("Couldn't reject, so nothing was: {why}.")))?;
         let mut rejected = 0;
         let mut failed = Vec::new();
-        for (plan, staged) in plans.into_iter().zip(staged) {
+        for ((plan, staged), steps) in plans.into_iter().zip(staged).zip(steps) {
             let (place, list) = &files[plan.index];
-            let chat = TerminalId(list[0].chat);
-            let done = self.put_in_place(chat, vec![plan], vec![staged], None);
+            let done = self.put_in_place(steps.chat, vec![plan], vec![staged], None);
             match done.into_iter().next() {
                 Some(Ok(_)) => {
+                    // The other chats' steps, each its own agent's.
+                    if let Place::Open(id) = place {
+                        for (chat, edit) in steps.more {
+                            let author = (Author::Agent(chat), None);
+                            self.put_buffer_in_place(*id, edit, None, author);
+                        }
+                    }
                     rejected += list.len();
                     self.rejected(place, list);
                 }
@@ -694,13 +903,17 @@ impl Daemon {
     }
 
     /// Works out what rejecting `hunks`, all at `place`, does to their
-    /// file, the `index`th, changing nothing, or says why it can't be.
+    /// file, the `index`th, changing nothing, or says why it can't be: the
+    /// whole file at once, refused if any of it can't be, with the change
+    /// to an open buffer cut into a step for each chat whose hunks they
+    /// are.
     fn plan_reject(
         &self,
         place: &Place,
         hunks: &[AgentHunk],
         index: usize,
-    ) -> Result<Plan, String> {
+    ) -> Result<(Plan, Steps), String> {
+        let chat = TerminalId(hunks.first().ok_or("there's nothing to reject")?.chat);
         match place {
             Place::Open(id) => {
                 let slot = self.buffers.get(id).ok_or("its buffer has closed")?;
@@ -715,6 +928,12 @@ impl Daemon {
                 let text = buffer.text().to_string();
                 let pairs = [self.reject_pair(hunks, &text, None)?];
                 let (text_after, edit) = take_out(&pairs, &text)?;
+                let mut steps = self.steps_by_chat(hunks, &text, &text_after)?;
+                let (chat, edit) = if steps.is_empty() {
+                    (chat, edit)
+                } else {
+                    steps.remove(0)
+                };
                 let saved = buffer.saved().to_string();
                 let saved_after = if saved == text {
                     text_after
@@ -728,12 +947,13 @@ impl Daemon {
                 } else {
                     Disk::Write(saved_after)
                 };
-                Ok(Plan {
+                let plan = Plan {
                     index,
                     path: buffer.path().to_owned(),
                     target: Target::Buffer { id: *id, edit },
                     disk,
-                })
+                };
+                Ok((plan, Steps { chat, more: steps }))
             }
             Place::Closed(path) => {
                 let dir = path.parent().unwrap_or(path).to_owned();
@@ -752,14 +972,105 @@ impl Daemon {
                 }
                 let pairs = [self.reject_pair(hunks, &now, None)?];
                 let (text, _) = take_out(&pairs, &now)?;
-                Ok(Plan {
+                // A file not open has no undo steps to cut it into.
+                let plan = Plan {
                     index,
                     path: path.clone(),
                     disk: Disk::Write(text.clone()),
                     target: Target::File { file, text },
-                })
+                };
+                Ok((
+                    plan,
+                    Steps {
+                        chat,
+                        more: Vec::new(),
+                    },
+                ))
             }
         }
+    }
+
+    /// The change rejecting `hunks` makes to `now`, which comes to
+    /// `whole`, cut into a step for each chat whose hunks they are, in
+    /// order of their first, if they're more than one chat's: else none.
+    ///
+    /// Each step puts its chat's hunks' lines back as taking them out
+    /// alone would, with what anyone typed in them since kept, and
+    /// leaves the rest as it is. They're made from the hunks' places, not
+    /// by comparing texts, which can slide a change onto a line of
+    /// another chat's that reads the same. Errs if they don't come to
+    /// `whole`, as when one hunk's lines and another's are too close to
+    /// take out one at a time.
+    fn steps_by_chat(
+        &self,
+        hunks: &[AgentHunk],
+        now: &str,
+        whole: &str,
+    ) -> Result<Vec<(TerminalId, Edit)>, String> {
+        let mut chats: Vec<TerminalId> = Vec::new();
+        for hunk in hunks {
+            if !chats.contains(&TerminalId(hunk.chat)) {
+                chats.push(TerminalId(hunk.chat));
+            }
+        }
+        if chats.len() < 2 {
+            return Ok(Vec::new());
+        }
+        let too_close = || {
+            "its chats' changes are too close to take out one at a time: reject each chat's alone"
+                .to_owned()
+        };
+        // The text between hunks, and each hunk's lines now and what
+        // they come to.
+        let rope = Rope::from_str(now);
+        let mut between = Vec::with_capacity(hunks.len() + 1);
+        let mut lines = Vec::with_capacity(hunks.len());
+        let mut at = 0;
+        for hunk in hunks {
+            let made =
+                (self.reviews.made.get(&hunk.id)).ok_or("what the agent made of it isn't known")?;
+            let range = if hunk.deleted() {
+                hunk.start..hunk.start
+            } else {
+                hunk.whole_lines(&rope)
+            };
+            if range.start < at {
+                return Err(too_close());
+            }
+            let was = &now[range.clone()];
+            let (comes_to, _) =
+                take_out(&[(made.clone(), hunk.base.clone())], was).map_err(|_| too_close())?;
+            between.push(&now[at..range.start]);
+            lines.push((TerminalId(hunk.chat), was.to_owned(), comes_to));
+            at = range.end;
+        }
+        between.push(&now[at..]);
+        let mut steps = Vec::with_capacity(chats.len());
+        for chat in chats {
+            let mut edit = Edit::new();
+            for (gap, (by, was, comes_to)) in between.iter().zip(&mut lines) {
+                edit.retain(gap.len());
+                if *by == chat && was != comes_to {
+                    edit.delete(was);
+                    edit.insert(comes_to);
+                    *was = std::mem::take(comes_to);
+                } else {
+                    edit.retain(was.len());
+                }
+            }
+            edit.retain(between.last().map_or(0, |gap| gap.len()));
+            steps.push((chat, edit));
+        }
+        let mut made = String::with_capacity(whole.len());
+        for (gap, (_, was, _)) in between.iter().zip(&lines) {
+            made.push_str(gap);
+            made.push_str(was);
+        }
+        made.push_str(between.last().copied().unwrap_or_default());
+        if made != whole {
+            return Err(too_close());
+        }
+        Ok(steps)
     }
 
     /// The change rejecting `hunks`, in order, takes out of `now`, as turn
@@ -991,6 +1302,7 @@ impl Daemon {
         }
         let scope = match new.scope {
             ReviewScope::Turn(None) => {
+                let family = self.family_of(chat);
                 let latest = (self.buffers.values())
                     .flat_map(|slot| slot.agents.all())
                     .chain(
@@ -999,8 +1311,8 @@ impl Daemon {
                             .values()
                             .flat_map(|closed| closed.hunks.all()),
                     )
-                    .filter(|hunk| chat.is_some_and(|chat| hunk.chat == chat.0) && !hunk.reviewed)
-                    .map(|hunk| hunk.turn)
+                    .filter(|hunk| !hunk.reviewed)
+                    .filter_map(|hunk| family.turn_of(hunk))
                     .max();
                 let turns =
                     (chat.and_then(|chat| self.chat(chat))).map_or(0, |hosted| hosted.turns());
@@ -1128,27 +1440,20 @@ impl Daemon {
             return ReviewList::default();
         };
         let (chat, scope, root) = (found.chat, found.scope, found.root.clone());
-        let (files, note) = match (&found.base.found, scope) {
-            (Some(Ok(files)), ReviewScope::Base) => (self.marked_again(files.clone()), None),
-            (Some(Err(why)), ReviewScope::Base) => (Vec::new(), Some(why.clone())),
+        let base = found.base.found.clone();
+        let family = self.family_of(chat);
+        let (files, note) = match (base, scope) {
+            (Some(Ok(files)), ReviewScope::Base) => (self.marked_again(files), None),
+            (Some(Err(why)), ReviewScope::Base) => (Vec::new(), Some(why)),
             (None, ReviewScope::Base) => {
                 (Vec::new(), Some("Finding the branch's base…".to_owned()))
             }
-            (_, ReviewScope::Turn(turn)) => {
-                let files = self.agent_files_listed(&root, |hunk| {
-                    chat.is_some_and(|chat| hunk.chat == chat.0)
-                        && Some(hunk.turn) == turn
-                        && !hunk.reviewed
-                });
-                (files, None)
-            }
-            (_, ReviewScope::Chat) => {
-                let files = self.agent_files_listed(&root, |hunk| {
-                    chat.is_some_and(|chat| hunk.chat == chat.0) && !hunk.reviewed
-                });
+            (_, ReviewScope::Turn(_) | ReviewScope::Chat) => {
+                let files = self.agent_files_listed(&root, |hunk| family.takes(hunk, scope));
                 (files, None)
             }
         };
+        let chats = self.review_chats(&files, &family);
         let lost = chat
             .and_then(|chat| self.reviews.lost.get(&chat))
             .map(|&count| {
@@ -1174,6 +1479,7 @@ impl Daemon {
             files,
             comments,
             note,
+            chats,
         }
     }
 
@@ -2158,5 +2464,494 @@ mod tests {
         };
         let c = world.daemon.open_buffer(file, None).unwrap();
         assert_eq!(hunks(&world, c), [("C\n".into(), "c\n".into(), false)]);
+    }
+
+    /// A subagent of chat `parent`'s, numbered `id`, on session `s{id}`,
+    /// started as `profile` in `parent`'s turn going now, its agent
+    /// answering its first message.
+    fn subagent(world: &mut World, parent: TerminalId, id: u32, profile: &str) -> TerminalId {
+        use crate::agent::Opened;
+        use crate::chat::{HostedChat, Wanted};
+        use crate::profiles::Limits;
+
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let size = clackatoo_protocol::Size::new(40, 10).unwrap();
+        let cwd = world.root.display().to_string();
+        let tools = clackatoo_protocol::AgentTools::Ask;
+        let mut chat = HostedChat::new(TerminalId(id), size, cwd, &agent, tools, true, false);
+        chat.connected(Opened {
+            session: format!("s{id}"),
+            settings: None,
+        });
+        let depth = world.daemon.chat_ref(parent).unwrap().relations().depth;
+        chat.started_by(parent, world.chat, depth + 1, None);
+        chat.start_as(profile, Limits::None, None, Wanted::default());
+        chat.act(ChatAction::Send("look into it".into()));
+        world.daemon.add_chat(chat);
+        world.daemon.note_subagent(TerminalId(id));
+        TerminalId(id)
+    }
+
+    /// A review's hunks, each as its file, its text and the chat that
+    /// made it.
+    fn by_chat(list: &ReviewList) -> Vec<(String, String, TerminalId)> {
+        (list.files.iter())
+            .flat_map(|file| {
+                (file.hunks.iter()).map(|hunk| {
+                    let by = hunk.by.expect("an agent's").chat;
+                    (file.shown.clone(), hunk.text.clone(), by)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_parents_turn_review_lists_its_subagents_hunks_with_their_chat() {
+        let mut world = World::new();
+        let parent = world.chat;
+        std::fs::write(world.path("a.txt"), "a\n").unwrap();
+        std::fs::write(world.path("b.txt"), "b\n").unwrap();
+        std::fs::write(world.path("c.txt"), "c\n").unwrap();
+        world.write("a.txt", "A\n");
+        world.end_turn();
+        // Turn 2 starts a subagent, which starts one of its own.
+        world.next_turn();
+        let child = subagent(&mut world, parent, 7, "explore");
+        let new = NewReview {
+            chat: Some(parent),
+            scope: ReviewScope::Chat,
+            cwd: None,
+        };
+        let review = world.daemon.new_review(new, None).unwrap();
+        world.write_as(child, "s7", "b.txt", "B\n");
+        // The parent's review is sent again for the subagent's change.
+        assert!(world.daemon.reviews.list[&review].stale);
+        let grandchild = subagent(&mut world, child, 8, "general");
+        world.write_as(grandchild, "s8", "c.txt", "C\n");
+
+        let turn = listed_files(&mut world, ReviewScope::Turn(Some(1)));
+        assert_eq!(
+            by_chat(&turn),
+            [
+                ("b.txt".into(), "B\n".into(), child),
+                ("c.txt".into(), "C\n".into(), grandchild)
+            ]
+        );
+        assert_eq!(
+            turn.chats,
+            [
+                ReviewChat {
+                    chat: child,
+                    name: "explore (chat 7)".into(),
+                    task: Some("look into it".into()),
+                    turn: Some(1),
+                    closed: false,
+                },
+                ReviewChat {
+                    chat: grandchild,
+                    name: "general (chat 8)".into(),
+                    task: Some("look into it".into()),
+                    turn: Some(1),
+                    closed: false,
+                },
+            ]
+        );
+        // Their own turns are their first, not the parent's.
+        assert_eq!(turn.files[0].hunks[0].by.unwrap().turn, 0);
+        // Turn 1 is the parent's alone; the latest turn is the one that
+        // started them; the chat takes in all of it.
+        let first = listed_files(&mut world, ReviewScope::Turn(Some(0)));
+        assert_eq!(by_chat(&first), [("a.txt".into(), "A\n".into(), parent)]);
+        assert_eq!(first.chats.len(), 1);
+        let latest = listed_files(&mut world, ReviewScope::Turn(None));
+        assert_eq!(latest.scope, Some(ReviewScope::Turn(Some(1))));
+        assert_eq!(listed_files(&mut world, ReviewScope::Chat).files.len(), 3);
+        // Kept from the parent's review, the subagents' go with its turn.
+        let kept = act(
+            &mut world,
+            ReviewAction::Keep(Hunks::Turn {
+                chat: parent,
+                turn: 1,
+            }),
+        );
+        assert_eq!(kept, Ok("Kept 2 hunks.".into()));
+        assert_eq!(listed_files(&mut world, ReviewScope::Chat).files.len(), 1);
+        // A review of the subagent itself is called by its card.
+        let new = NewReview {
+            chat: Some(child),
+            scope: ReviewScope::Chat,
+            cwd: None,
+        };
+        let own = world.daemon.new_review(new, None).unwrap();
+        assert_eq!(world.daemon.review_list(own).chat_name, "explore (chat 7)");
+    }
+
+    #[test]
+    fn rejecting_a_subagents_hunk_from_its_parents_review_is_undone_as_the_subagent() {
+        let mut world = World::new();
+        let parent = world.chat;
+        std::fs::write(world.path("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        let id = world.open("a.txt");
+        world.write("a.txt", "ONE\ntwo\nthree\nfour\n");
+        let child = subagent(&mut world, parent, 7, "general");
+        world.write_as(child, "s7", "a.txt", "ONE\ntwo\nthree\nFOUR\n");
+        let list = listed_files(&mut world, ReviewScope::Turn(Some(0)));
+        let theirs = &list.files[0].hunks[1];
+        assert_eq!(theirs.by.unwrap().chat, child);
+        assert_eq!(
+            reject(&mut world, theirs.agents.clone(), false),
+            Ok("Rejected 1 hunk.".into())
+        );
+        assert_eq!(world.text(id), "ONE\ntwo\nthree\nfour\n");
+        assert_eq!(
+            world.disk("a.txt").as_deref(),
+            Some("ONE\ntwo\nthree\nfour\n")
+        );
+        // The subagent takes it back; the parent's last step is its edit.
+        let buffer = &mut world.daemon.buffers.get_mut(&id).unwrap().buffer;
+        assert!(
+            buffer
+                .reverse(Author::Agent(child), false)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(buffer.text().to_string(), "ONE\ntwo\nthree\nFOUR\n");
+        assert!(
+            buffer
+                .reverse(Author::Agent(parent), false)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(buffer.text().to_string(), "one\ntwo\nthree\nFOUR\n");
+    }
+
+    #[test]
+    fn rejecting_a_turn_from_the_parents_review_is_a_step_of_each_chats() {
+        let mut world = World::new();
+        let parent = world.chat;
+        std::fs::write(world.path("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        std::fs::write(world.path("d.txt"), "d\n").unwrap();
+        let id = world.open("a.txt");
+        world.write("a.txt", "ONE\ntwo\nthree\nfour\n");
+        let child = subagent(&mut world, parent, 7, "general");
+        world.write_as(child, "s7", "a.txt", "ONE\ntwo\nthree\nFOUR\n");
+        world.write_as(child, "s7", "d.txt", "D\n");
+        let turn = Hunks::Turn {
+            chat: parent,
+            turn: 0,
+        };
+        let rejected = act(
+            &mut world,
+            ReviewAction::Reject {
+                hunks: turn,
+                force: false,
+            },
+        );
+        assert_eq!(rejected, Ok("Rejected 3 hunks.".into()));
+        assert_eq!(world.text(id), "one\ntwo\nthree\nfour\n");
+        assert_eq!(
+            world.disk("a.txt").as_deref(),
+            Some("one\ntwo\nthree\nfour\n")
+        );
+        assert_eq!(world.disk("d.txt").as_deref(), Some("d\n"));
+        assert!(listed_files(&mut world, ReviewScope::Chat).files.is_empty());
+        // Each chat takes back its own.
+        let buffer = &mut world.daemon.buffers.get_mut(&id).unwrap().buffer;
+        assert!(
+            buffer
+                .reverse(Author::Agent(child), false)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(buffer.text().to_string(), "one\ntwo\nthree\nFOUR\n");
+        assert!(
+            buffer
+                .reverse(Author::Agent(parent), false)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(buffer.text().to_string(), "ONE\ntwo\nthree\nFOUR\n");
+    }
+
+    #[test]
+    fn a_closed_subagents_hunks_still_appear_by_its_card() {
+        let mut world = World::new();
+        let parent = world.chat;
+        std::fs::write(world.path("b.txt"), "b\n").unwrap();
+        std::fs::write(world.path("c.txt"), "c\n").unwrap();
+        let child = subagent(&mut world, parent, 7, "explore");
+        let grandchild = subagent(&mut world, child, 8, "plan");
+        world.write_as(child, "s7", "b.txt", "B\n");
+        world.write_as(grandchild, "s8", "c.txt", "C\n");
+        // The user closes the one under the subagent, then the subagent:
+        // the closed one's card goes up to the parent.
+        world.daemon.close_terminal(grandchild).unwrap();
+        world.daemon.close_terminal(child).unwrap();
+        assert!(world.daemon.chat_ref(child).is_none());
+        let list = listed_files(&mut world, ReviewScope::Turn(Some(0)));
+        assert_eq!(
+            by_chat(&list),
+            [
+                ("b.txt".into(), "B\n".into(), child),
+                ("c.txt".into(), "C\n".into(), grandchild)
+            ]
+        );
+        let shown: Vec<(&str, Option<&str>, Option<u32>, bool)> = (list.chats.iter())
+            .map(|chat| {
+                (
+                    chat.name.as_str(),
+                    chat.task.as_deref(),
+                    chat.turn,
+                    chat.closed,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("explore (chat 7)", Some("look into it"), Some(0), true),
+                ("plan (chat 8)", Some("look into it"), Some(0), true),
+            ]
+        );
+        // Rejected from there, as the closed subagent's.
+        let ids = list.files[0].hunks[0].agents.clone();
+        assert_eq!(
+            reject(&mut world, ids, false),
+            Ok("Rejected 1 hunk.".into())
+        );
+        assert_eq!(world.disk("b.txt").as_deref(), Some("b\n"));
+    }
+
+    /// The parent puts a `}` line in `name`, which reads `X\ny\nZ\n`,
+    /// and a subagent turns the `y` below it into another: two hunks
+    /// whose lines read the same. Returns the subagent.
+    fn same_lines(world: &mut World, name: &str) -> TerminalId {
+        let parent = world.chat;
+        world.write(name, "X\n}\ny\nZ\n");
+        let child = subagent(world, parent, 7, "general");
+        world.write_as(child, "s7", name, "X\n}\n}\nZ\n");
+        child
+    }
+
+    #[test]
+    fn rejecting_two_chats_lines_that_read_the_same_takes_both_out_whole() {
+        let reject_turn = |world: &mut World| {
+            let hunks = Hunks::Turn {
+                chat: world.chat,
+                turn: 0,
+            };
+            act(
+                world,
+                ReviewAction::Reject {
+                    hunks,
+                    force: false,
+                },
+            )
+        };
+        // Open, by turn.
+        let mut world = World::new();
+        std::fs::write(world.path("a.txt"), "X\ny\nZ\n").unwrap();
+        let id = world.open("a.txt");
+        let child = same_lines(&mut world, "a.txt");
+        let made: Vec<u32> = (world.daemon.buffers[&id].agents.all().iter())
+            .map(|hunk| hunk.chat)
+            .collect();
+        assert_eq!(made, [world.chat.0, child.0]);
+        assert_eq!(reject_turn(&mut world), Ok("Rejected 2 hunks.".into()));
+        assert_eq!(world.text(id), "X\ny\nZ\n");
+        assert_eq!(world.disk("a.txt").as_deref(), Some("X\ny\nZ\n"));
+        assert!(!world.daemon.buffers[&id].buffer.modified());
+        assert!(ids(&world, id).is_empty());
+        // Each takes back its own: the subagent's `}` is the second line.
+        let buffer = &mut world.daemon.buffers.get_mut(&id).unwrap().buffer;
+        assert!(
+            buffer
+                .reverse(Author::Agent(child), false)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(buffer.text().to_string(), "X\n}\nZ\n");
+        assert!(
+            buffer
+                .reverse(Author::Agent(world.chat), false)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(buffer.text().to_string(), "X\n}\n}\nZ\n");
+
+        // Open, by their numbers.
+        let mut world = World::new();
+        std::fs::write(world.path("a.txt"), "X\ny\nZ\n").unwrap();
+        let id = world.open("a.txt");
+        same_lines(&mut world, "a.txt");
+        let both = ids(&world, id);
+        assert_eq!(
+            reject(&mut world, both, false),
+            Ok("Rejected 2 hunks.".into())
+        );
+        assert_eq!(world.text(id), "X\ny\nZ\n");
+
+        // Not open: one write.
+        let mut world = World::new();
+        std::fs::write(world.path("c.txt"), "X\ny\nZ\n").unwrap();
+        same_lines(&mut world, "c.txt");
+        assert_eq!(reject_turn(&mut world), Ok("Rejected 2 hunks.".into()));
+        assert_eq!(world.disk("c.txt").as_deref(), Some("X\ny\nZ\n"));
+        assert!(world.daemon.reviews.closed.is_empty());
+    }
+
+    #[test]
+    fn rejecting_two_chats_changes_puts_each_back_where_it_was_after_lines_move() {
+        let mut world = World::new();
+        let parent = world.chat;
+        std::fs::write(world.path("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let id = world.open("a.txt");
+        // The parent's two lines move the subagent's down.
+        world.write("a.txt", "p\nq\none\ntwo\nthree\n");
+        let child = subagent(&mut world, parent, 7, "general");
+        world.write_as(child, "s7", "a.txt", "p\nq\none\nTWO\nthree\n");
+        // And one of yours, not saved, between them.
+        world.type_in(id, 4, "one", "ONE");
+        let hunks = Hunks::Turn {
+            chat: parent,
+            turn: 0,
+        };
+        let rejected = act(
+            &mut world,
+            ReviewAction::Reject {
+                hunks,
+                force: false,
+            },
+        );
+        assert_eq!(rejected, Ok("Rejected 2 hunks.".into()));
+        assert_eq!(world.text(id), "ONE\ntwo\nthree\n");
+        assert_eq!(world.disk("a.txt").as_deref(), Some("one\ntwo\nthree\n"));
+        let buffer = &mut world.daemon.buffers.get_mut(&id).unwrap().buffer;
+        assert!(
+            buffer
+                .reverse(Author::Agent(child), false)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(buffer.text().to_string(), "ONE\nTWO\nthree\n");
+        assert!(
+            buffer
+                .reverse(Author::Agent(parent), false)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(buffer.text().to_string(), "p\nq\nONE\nTWO\nthree\n");
+    }
+
+    #[test]
+    fn a_reject_that_cant_all_be_done_changes_nothing_in_a_file_of_two_chats() {
+        let mut world = World::new();
+        let parent = world.chat;
+        std::fs::write(world.path("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        std::fs::write(world.path("b.txt"), "b\n").unwrap();
+        std::fs::write(world.path("c.txt"), "X\ny\nZ\n").unwrap();
+        let a = world.open("a.txt");
+        let b = world.open("b.txt");
+        world.write("a.txt", "ONE\ntwo\nthree\nfour\n");
+        world.write("c.txt", "X\n}\ny\nZ\n");
+        let child = subagent(&mut world, parent, 7, "general");
+        world.write_as(child, "s7", "a.txt", "ONE\ntwo\nthree\nFOUR\n");
+        world.write_as(child, "s7", "b.txt", "B\n");
+        world.write_as(child, "s7", "c.txt", "X\n}\n}\nZ\n");
+        // Yours on the subagent's line in b.txt.
+        world.type_in(b, 0, "B", "Bee");
+        let hunks = Hunks::Turn {
+            chat: parent,
+            turn: 0,
+        };
+        let refused = act(
+            &mut world,
+            ReviewAction::Reject {
+                hunks,
+                force: false,
+            },
+        );
+        assert_eq!(
+            refused,
+            Err(
+                "Couldn't reject, so nothing was: in b.txt, line 1 has changed since. \
+                 `:ReviewReject!` does the rest."
+                    .into()
+            )
+        );
+        assert_eq!(world.text(a), "ONE\ntwo\nthree\nFOUR\n");
+        assert_eq!(
+            world.disk("a.txt").as_deref(),
+            Some("ONE\ntwo\nthree\nFOUR\n")
+        );
+        assert_eq!(world.disk("c.txt").as_deref(), Some("X\n}\n}\nZ\n"));
+        assert_eq!(ids(&world, a).len(), 2);
+        assert_eq!(
+            listed_files(&mut world, ReviewScope::Turn(Some(0)))
+                .files
+                .len(),
+            3
+        );
+    }
+
+    /// Ends the turn chat `chat`'s agent is answering.
+    fn end_turn_of(world: &mut World, chat: TerminalId) {
+        use agent_client_protocol_schema::v1::StopReason;
+
+        let hosted = world.daemon.chat(chat).unwrap();
+        hosted.answered(Ok(StopReason::EndTurn));
+        world.daemon.settle_turn(chat);
+    }
+
+    #[test]
+    fn a_subagent_in_a_pane_stays_in_the_family_when_the_chat_that_started_it_closes() {
+        let mut world = World::new();
+        let parent = world.chat;
+        std::fs::write(world.path("c.txt"), "c\n").unwrap();
+        let child = subagent(&mut world, parent, 7, "general");
+        let shown = subagent(&mut world, child, 8, "general");
+        let name = world.daemon.workspaces.name_for_new(None).unwrap();
+        let content = clackatoo_protocol::Content::Terminal(shown);
+        world.daemon.workspaces.new_workspace(name, content);
+        world.write_as(shown, "s8", "c.txt", "C\n");
+        end_turn_of(&mut world, shown);
+        world.daemon.close_terminal(child).unwrap();
+        // It's the parent's now, under the turn that started the one that
+        // closed.
+        let kid = world.daemon.chat_ref(shown).unwrap();
+        assert_eq!(kid.relations().parent, Some(parent));
+        let list = listed_files(&mut world, ReviewScope::Turn(Some(0)));
+        assert_eq!(by_chat(&list), [("c.txt".into(), "C\n".into(), shown)]);
+    }
+
+    #[test]
+    fn closing_a_chat_keeps_an_idle_subagent_whose_closed_subagent_awaits_review() {
+        let mut world = World::new();
+        let parent = world.chat;
+        std::fs::write(world.path("c.txt"), "c\n").unwrap();
+        let middle = subagent(&mut world, parent, 7, "general");
+        let idle = subagent(&mut world, middle, 8, "general");
+        let below = subagent(&mut world, idle, 9, "explore");
+        world.write_as(below, "s9", "c.txt", "C\n");
+        world.daemon.close_terminal(below).unwrap();
+        end_turn_of(&mut world, idle);
+        let new = NewReview {
+            chat: Some(parent),
+            scope: ReviewScope::Chat,
+            cwd: None,
+        };
+        let review = world.daemon.new_review(new, None).unwrap();
+        world.daemon.reviews.list.get_mut(&review).unwrap().stale = false;
+        world.daemon.close_terminal(middle).unwrap();
+        // The idle one, with nothing of its own to review, is kept for the
+        // closed one under it, which the parent's review still lists.
+        let kept = world.daemon.chat_ref(idle).unwrap();
+        assert_eq!(kept.relations().parent, Some(parent));
+        let list = world.daemon.review_list(review);
+        assert_eq!(by_chat(&list), [("c.txt".into(), "C\n".into(), below)]);
+        assert_eq!(list.chats[0].name, "explore (chat 9)");
+        // And the parent's review was due to be sent again, as a chat of it
+        // closed.
+        assert!(world.daemon.reviews.list[&review].stale);
     }
 }

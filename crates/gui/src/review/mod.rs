@@ -26,6 +26,12 @@
 //! `a` is "accept"; `x` is Vim's delete, for a change rather than a
 //! character, where `d` would wait for a motion, by habit. Keeping or
 //! rejecting a whole turn is `:ReviewKeep turn` or `:ReviewReject turn`.
+//!
+//! A review of a turn or a chat lists its subagents' changes too, each
+//! hunk saying whose, as `· explore (chat 7)`. The subagents are listed
+//! under the heading, with what each was asked, and a line saying that
+//! undoing the turn leaves their changes: rejecting them here takes them
+//! out.
 
 use clackatoo_protocol::{
     Attributes, Hunks, ReviewAction, ReviewFile, ReviewHunk, ReviewId, ReviewList, ReviewScope,
@@ -79,6 +85,11 @@ enum Line {
     Keys,
     /// What the daemon says, as why there's nothing to show.
     Note(String),
+    /// A subagent whose changes are listed, by its place among the
+    /// list's chats: who it is, and what it was asked.
+    Subagent {
+        chat: usize,
+    },
     Blank,
     /// A file's path, and how many hunks it has.
     File {
@@ -266,10 +277,15 @@ impl Review {
             .unwrap_or_default()
     }
 
-    /// The turn of the hunk at the cursor, if an agent made it.
+    /// The turn of the hunk at the cursor, if an agent made it: for a
+    /// subagent's, the turn of the review's chat that started it.
     pub(crate) fn turn_here(&self) -> Option<u32> {
         let (file, hunk) = self.lines.get(self.cursor)?.hunk()?;
-        Some(self.list.files[file].hunks[hunk].by?.turn)
+        let made = self.list.files[file].hunks[hunk].by?;
+        let started_in = (self.list.chats.iter())
+            .find(|chat| chat.chat == made.chat)
+            .and_then(|chat| chat.turn);
+        Some(started_in.unwrap_or(made.turn))
     }
 
     // --- The daemon's news --------------------------------------------------
@@ -334,6 +350,23 @@ impl Review {
             lines.push(Line::Note("Waiting for the daemon…".to_owned()));
         } else if let Some(note) = &self.list.note {
             lines.push(Line::Note(note.clone()));
+        }
+        let subagents: Vec<usize> = (self.list.chats.iter().enumerate())
+            .filter(|(_, chat)| chat.turn.is_some())
+            .map(|(index, _)| index)
+            .collect();
+        if !subagents.is_empty() {
+            lines.extend(subagents.into_iter().map(|chat| Line::Subagent { chat }));
+            let undoing = match self.list.scope {
+                Some(ReviewScope::Turn(Some(turn))) => Some(format!("Undoing turn {}", turn + 1)),
+                Some(ReviewScope::Chat) => Some("Undoing the chat's turns".to_owned()),
+                _ => None,
+            };
+            if let Some(undoing) = undoing {
+                lines.push(Line::Note(format!(
+                    "{undoing} leaves subagents' changes: reject them here."
+                )));
+            }
         }
         for (index, file) in self.list.files.iter().enumerate() {
             if index > 0 || lines.len() > 3 {
@@ -676,6 +709,7 @@ impl Review {
                 builder.push(keys, &faint, true);
             }
             Line::Note(note) => builder.push(note, &faint, true),
+            Line::Subagent { chat } => self.draw_subagent(&mut builder, *chat, &faint),
             Line::Blank => {}
             Line::File { file } => {
                 let file = &self.list.files[*file];
@@ -740,9 +774,29 @@ impl Review {
         (builder.finish(false), kind, col)
     }
 
+    /// Draws the `chat`th of the list's chats, a subagent: its name in its
+    /// colour, what it was asked, and whether it has closed, `faint`.
+    fn draw_subagent(&self, builder: &mut RowBuilder, chat: usize, faint: &Style) {
+        let chat = &self.list.chats[chat];
+        let style = Style {
+            fg: colors::agent(chat.chat.0),
+            ..Style::DEFAULT
+        };
+        builder.push("↳ ", faint, true);
+        builder.push(&chat.name, &style, true);
+        if let Some(task) = &chat.task {
+            builder.push(&format!(": {task}"), &Style::DEFAULT, true);
+        }
+        if chat.closed {
+            builder.push("  closed", faint, true);
+        }
+    }
+
     /// What chat `chat` is called, as far as the review knows.
     fn chat_name(&self, chat: TerminalId) -> String {
-        if self.list.chat == Some(chat) && !self.list.chat_name.is_empty() {
+        if let Some(named) = self.list.chats.iter().find(|named| named.chat == chat) {
+            named.name.clone()
+        } else if self.list.chat == Some(chat) && !self.list.chat_name.is_empty() {
             self.list.chat_name.clone()
         } else {
             format!("chat {chat}")

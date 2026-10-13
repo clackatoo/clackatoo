@@ -31,12 +31,18 @@ impl fmt::Display for ReviewId {
 }
 
 /// What a review lists.
+///
+/// A review of a turn or of a chat takes in the chats under the chat too,
+/// subagents started by its agent and theirs, open or closed: their
+/// changes are part of its work, though undoing its turn leaves them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReviewScope {
     /// The hunks not yet reviewed that one turn of the chat changed last,
-    /// by its index; or with `None`, its latest turn that changed any.
+    /// by its index, with those of the subagents started in that turn; or
+    /// with `None`, its latest turn that changed any.
     Turn(Option<u32>),
-    /// The hunks not yet reviewed that the chat's agent changed.
+    /// The hunks not yet reviewed that the chat's agent changed, or its
+    /// subagents'.
     Chat,
     /// Everything changed since the branch's base, the commit `git
     /// merge-base` finds with `main`, `master` or the branch's upstream:
@@ -62,7 +68,8 @@ pub struct NewReview {
 pub struct ReviewList {
     /// The chat it's of, if any.
     pub chat: Option<TerminalId>,
-    /// What the chat's called, as its pane's title.
+    /// What the chat's called: its pane's title, or for a subagent, its
+    /// profile and number, as `explore (chat 7)`.
     pub chat_name: String,
     /// What it lists, with a turn's index worked out.
     pub scope: Option<ReviewScope>,
@@ -73,6 +80,27 @@ pub struct ReviewList {
     /// Anything to say instead of, or as well as, the hunks, such as that
     /// the base is still being worked out, or why it can't be.
     pub note: Option<String>,
+    /// The chats whose agents made the hunks listed, by their numbers,
+    /// for saying who made each.
+    pub chats: Vec<ReviewChat>,
+}
+
+/// A chat whose agent made hunks a review lists.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewChat {
+    /// The chat.
+    pub chat: TerminalId,
+    /// What it's called: for a subagent, its profile and number, as
+    /// `explore (chat 7)`.
+    pub name: String,
+    /// For a subagent of the review's chat, or one under it: what it was
+    /// asked to do, as the card that started it says.
+    pub task: Option<String>,
+    /// For a subagent of the review's chat, or one under it: the turn of
+    /// the review's chat it was started in, by its index.
+    pub turn: Option<u32>,
+    /// Whether it has closed, its changes left for review.
+    pub closed: bool,
 }
 
 /// One file's hunks in a review.
@@ -153,14 +181,16 @@ pub struct ReviewComment {
 pub enum Hunks {
     /// These, by their numbers.
     Ids(Vec<u64>),
-    /// Every one not yet reviewed that this turn of the chat changed last.
+    /// Every one not yet reviewed that this turn of the chat changed last,
+    /// or the subagents started in it, as a review of the turn lists them.
     Turn {
         /// The chat.
         chat: TerminalId,
         /// The turn's index.
         turn: u32,
     },
-    /// Every one not yet reviewed that the chat's agent changed.
+    /// Every one not yet reviewed that the chat's agent changed, or its
+    /// subagents', as a review of the chat lists them.
     Chat(TerminalId),
 }
 

@@ -393,6 +393,7 @@ fn a_review_draws_old_lines_on_red_and_new_on_green() {
         }],
         comments: Vec::new(),
         note: None,
+        chats: Vec::new(),
     });
     review.settle();
     let (shown, cursor) = review.scene();

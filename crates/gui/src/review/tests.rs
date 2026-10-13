@@ -53,6 +53,7 @@ fn list() -> ReviewList {
             in_change: true,
         }],
         note: None,
+        chats: Vec::new(),
     }
 }
 
@@ -172,6 +173,47 @@ fn keys_keep_reject_comment_send_and_go_to_the_line() {
         keys(&mut review, "x"),
         [Ask::Act(ReviewAction::Uncomment { chat: CHAT, id: 9 })]
     );
+}
+
+#[test]
+fn a_subagents_hunks_say_whose_and_the_heading_says_undoing_leaves_them() {
+    let mut review = review();
+    let mut with = list();
+    with.scope = Some(ReviewScope::Turn(Some(1)));
+    let sub = TerminalId(7);
+    with.files[1].hunks[0].by = Some(Made { chat: sub, turn: 0 });
+    with.chats = vec![
+        clackatoo_protocol::ReviewChat {
+            chat: CHAT,
+            name: "Claude Code".to_owned(),
+            task: None,
+            turn: None,
+            closed: false,
+        },
+        clackatoo_protocol::ReviewChat {
+            chat: sub,
+            name: "explore (chat 7)".to_owned(),
+            task: Some("find the parser".to_owned()),
+            turn: Some(1),
+            closed: true,
+        },
+    ];
+    review.update(with);
+    let shown = rows(&mut review);
+    assert_eq!(
+        &shown[3..5],
+        [
+            "↳ explore (chat 7): find the parser  closed",
+            "Undoing turn 2 leaves subagents' changes: reject them here.",
+        ]
+    );
+    assert!(shown.contains(&"@@ line 5 · explore (chat 7), turn 1".to_owned()));
+    // On its hunk, the turn is the review's chat's that started it.
+    keys(&mut review, "]h]h");
+    assert_eq!(review.label(), "b.rs  hunk 3 of 3");
+    assert_eq!(review.turn_here(), Some(1));
+    keys(&mut review, "]h");
+    assert_eq!(review.turn_here(), Some(0));
 }
 
 #[test]

@@ -1059,7 +1059,7 @@ mod tests {
         kid.started_by(b, a, 2, None);
         drop(kid.deliver(message(b.0, "dig")).unwrap());
         let done = answered_chat(&mut daemon, 4, (b, a, 2));
-        daemon.subagent_closed(b, Some(a));
+        daemon.subagent_closed(b, Some(a), &[]);
         assert_eq!(daemon.chat_ref(going).unwrap().relations().parent, Some(a));
         assert!(daemon.chat_ref(a).unwrap().subagent(going).is_some());
         assert!(daemon.chat_ref(done).is_none());

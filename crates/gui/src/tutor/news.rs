@@ -179,6 +179,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "font",
         what: "The font and its size as options: :set font and :set fontsize as you go, client.opt.font in config",
     },
+    News {
+        id: "review-subagents",
+        date: "2026-10-13",
+        lesson: "agents",
+        what: "A chat's :Review takes in its subagents' changes, open or closed, each hunk saying whose",
+    },
 ];
 
 impl News {

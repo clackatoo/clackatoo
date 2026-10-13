@@ -415,7 +415,7 @@ impl Daemon {
     /// Edits buffer `id` with `edit`, as `author`, an agent's own change
     /// again if `maker` says whose, and takes `written`, the text and stamp
     /// its file was given, if it was. Returns the changes, for the log.
-    fn put_buffer_in_place(
+    pub(super) fn put_buffer_in_place(
         &mut self,
         id: BufferId,
         edit: Edit,
@@ -692,10 +692,22 @@ pub(in crate::server) mod tests {
         /// The agent writes `text` to `name` through the daemon, in a tool
         /// call of its own.
         pub(in crate::server) fn write(&mut self, name: &str, text: &str) {
+            self.write_as(self.chat, "s1", name, text);
+        }
+
+        /// The agent of chat `chat`, whose session is `session`, writes
+        /// `text` to `name` through the daemon, in a tool call of its own.
+        pub(in crate::server) fn write_as(
+            &mut self,
+            chat: TerminalId,
+            session: &str,
+            name: &str,
+            text: &str,
+        ) {
             self.tools += 1;
-            start_tool(&mut self.daemon, self.chat, &format!("w{}", self.tools));
+            start_tool(&mut self.daemon, chat, &format!("w{}", self.tools));
             let path = self.path(name);
-            (self.daemon).write_for_agent(AGENT, "s1", &json!(1), &path, text);
+            (self.daemon).write_for_agent(AGENT, session, &json!(1), &path, text);
         }
 
         /// Ends the turn being answered.
