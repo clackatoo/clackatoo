@@ -47,8 +47,12 @@ impl Grammar {
     ///
     /// Where captures nest, as an escape in a string, the inner one is
     /// what's seen. Where one piece of text is captured more than once,
-    /// the first pattern in the query to capture it wins, as in
-    /// tree-sitter's own highlighter.
+    /// the first pattern in the query to capture it wins, as the queries
+    /// in grammars' own repositories are written (and as Helix reads
+    /// them): tree-sitter-rust's names `FOO` a constant before it can be
+    /// a constructor. Neovim, and tree-sitter's own highlighter as of
+    /// 0.27, let the last win instead, which nvim-treesitter's queries
+    /// expect.
     pub(crate) fn highlight(
         &self,
         cursor: &mut QueryCursor,
