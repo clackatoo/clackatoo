@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026.10.1 (2026-10-13)
+
+### Features
+
+- agents message, start, read and wait for each other's chats, and share boards (3efd5a7)
+- :Tutor lessons that teach clackatoo, and what's new after an upgrade (d1590ca)
+- **cli:** desktop install puts clackatoo in the app launcher, and update keeps it current (15b1680)
+- predictive local echo in terminals, as mosh does it, over slow links (a652a2c)
+- claudetask option takes Claude Code's Task tool away, and agents are told when to use start_chat (040eab2)
+- remote diagnostics: timestamped logs with every close's reason, ping --soak, and a network-impairment harness (ccd83ff)
+- remote windows reconnect by themselves, keeping their panes (2c8d623)
+- **tutor:** the remote lesson and what's new tell of reconnecting, and edits kept across drops (70f4806)
+
+### Fixes
+
+- remote sessions ride out outages, lossy links and ssh dying, and hear when the daemon goes (8921708)
+- what an editor types while a remote connection is down is made once it's back (2f18731)
+- keys for terminals that can't reach the daemon in time are turned down, not sent late (4541db1)
+- a remote connection that drops soon after it's made counts as a failed try (c2417e9)
+- the daemon lets go of remote clients that vanish or fall behind, and sends twice only to checked addresses (8f63410)
+- a window's log is moved aside as soon as it passes 8 MB, not only at startup (38ca4d4)
+- edits kept across a reconnect come back exactly as live, or are kept, never garbled (6c03159)
+
 ## 2026.10.0 (2026-10-13)
 
 ### Features
