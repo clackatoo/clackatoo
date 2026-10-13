@@ -69,19 +69,29 @@ impl HostedTerminal {
 
         // The user's own shell gets its integration, if it has one.
         let integration = match (&request.command, &config.shell_integration) {
-            (None, Some(scripts)) => shell::args(&config.shell, scripts),
-            _ => Vec::new(),
+            (None, Some(scripts)) => shell::integration(
+                &config.shell,
+                scripts,
+                std::env::var_os("ZDOTDIR").as_deref(),
+            ),
+            _ => shell::Integration::default(),
         };
         let (path, args) = match request.command.as_deref() {
             Some([program, args @ ..]) => (program.as_ref(), args),
             Some([]) => return Err(Error::SpawnFailed("the command is empty".to_owned())),
-            None => (config.shell.as_os_str(), integration.as_slice()),
+            None => (config.shell.as_os_str(), integration.args.as_slice()),
         };
         let cwd = request
             .cwd
             .as_deref()
             .map_or(config.home.as_path(), Path::new);
-        let spawned = pty::spawn(&Program { path, args, cwd }, request.size)
+        let program = Program {
+            path,
+            args,
+            env: &integration.env,
+            cwd,
+        };
+        let spawned = pty::spawn(&program, request.size)
             .map_err(|err| Error::SpawnFailed(err.to_string()))?;
         let pid = spawned.process.pid().as_raw_pid().cast_unsigned();
         log::info!("terminal {id} started: pid {pid}");

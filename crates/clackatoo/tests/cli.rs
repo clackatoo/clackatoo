@@ -584,14 +584,145 @@ fn a_failed_upgrade_says_why_and_changes_nothing() {
     wait(daemon);
 }
 
+/// A daemon running `shell` as the user's shell, in one terminal, with
+/// `home` as its home and `env` set. Stops the daemon when dropped.
+struct UserShell {
+    shell: String,
+    client: clackatoo_daemon::Client,
+    terminal: clackatoo_protocol::TerminalId,
+    daemon: Child,
+    runtime: Runtime,
+}
+
+impl UserShell {
+    /// Starts it, and waits for its first prompt.
+    fn start(shell: &Path, home: &Path, env: &[(&str, &Path)]) -> Self {
+        use clackatoo_protocol::{NewTerminal, Which};
+
+        let runtime = Runtime::new();
+        let daemon = Command::new(BINARY)
+            .arg("daemon")
+            .env("XDG_RUNTIME_DIR", runtime.path())
+            .env("SHELL", shell)
+            .env("HOME", home)
+            .env_remove("ZDOTDIR")
+            .envs(env.iter().copied())
+            .spawn()
+            .unwrap();
+        let socket = runtime.path().join("clackatoo/daemon.sock");
+        eventually("the daemon answers", || {
+            clackatoo(runtime.path(), &["list"]).status.success()
+        });
+        let mut client = clackatoo_daemon::Client::connect(&socket).unwrap();
+        let terminal = client
+            .new_terminal(NewTerminal {
+                size: clackatoo_protocol::Size::new(120, 20).unwrap(),
+                command: None,
+                cwd: None,
+                record_to: None,
+            })
+            .unwrap();
+        let mut user = Self {
+            shell: shell.display().to_string(),
+            client,
+            terminal,
+            daemon,
+            runtime,
+        };
+        user.until("shows a prompt", |client, terminal| {
+            (client.block(terminal, u64::MAX, Which::Before).unwrap()).is_some()
+        });
+        user
+    }
+
+    /// Polls `check` until it holds, failing with what's on the screen
+    /// after several seconds: startup files can take a while.
+    fn until(
+        &mut self,
+        what: &str,
+        mut check: impl FnMut(&mut clackatoo_daemon::Client, clackatoo_protocol::TerminalId) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !check(&mut self.client, self.terminal) {
+            if Instant::now() > deadline {
+                let screen = self.screen();
+                panic!("{} never {what}; the screen:\n{screen}", self.shell);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Runs `command` at the prompt, and returns its block once it has
+    /// finished, and the next prompt is marked.
+    fn run(&mut self, command: &str) -> clackatoo_protocol::Block {
+        use clackatoo_protocol::Which;
+
+        let (client, terminal) = (&mut self.client, self.terminal);
+        let prompt = (client.block(terminal, u64::MAX, Which::Before).unwrap())
+            .expect("a prompt")
+            .first;
+        client
+            .send_input(terminal, format!("{command}\r").as_bytes())
+            .unwrap();
+        let mut ran = None;
+        self.until(&format!("runs {command}"), |client, terminal| {
+            let next = client.block(terminal, u64::MAX, Which::Before).unwrap();
+            ran = next.filter(|next| next.first > prompt).and_then(|next| {
+                (client.block(terminal, next.first, Which::Before).unwrap())
+                    .filter(|block| block.exit.is_some())
+            });
+            ran.is_some()
+        });
+        ran.unwrap()
+    }
+
+    /// The text of `block`'s output.
+    fn output(&mut self, block: &clackatoo_protocol::Block) -> String {
+        use clackatoo_protocol::{Position, Request, Response};
+
+        let Some(output) = block.output else {
+            return String::new();
+        };
+        let request = Request::Text {
+            terminal: self.terminal,
+            from: Position {
+                line: output,
+                col: 0,
+            },
+            to: Position {
+                line: block.last,
+                col: 0,
+            },
+            whole_lines: true,
+        };
+        match self.client.request(&request).unwrap() {
+            Response::Text(text) => text,
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+impl UserShell {
+    /// The text on the screen.
+    fn screen(&mut self) -> String {
+        let view = self.client.capture(self.terminal).unwrap();
+        let grid = view.grid().expect("terminals show a grid");
+        grid.lines.iter().map(|line| line.text() + "\n").collect()
+    }
+}
+
+impl Drop for UserShell {
+    fn drop(&mut self) {
+        clackatoo(self.runtime.path(), &["stop"]);
+        let _ = self.daemon.wait();
+    }
+}
+
 /// The shell's own commands are marked: bash through the script the daemon
 /// gives it, fish by itself. Each shell runs with an empty home, so no
 /// one's own startup files get in the way.
 #[test]
 fn shells_mark_their_commands() {
-    use clackatoo_daemon::Client;
-    use clackatoo_protocol::{NewTerminal, Position, Request, Response, Which};
-
     for shell in ["/bin/bash", "/usr/bin/fish"] {
         if !Path::new(shell).exists() {
             eprintln!("{shell} isn't installed: skipped");
@@ -606,75 +737,181 @@ fn shells_mark_their_commands() {
                 continue;
             }
         }
-        let runtime = Runtime::new();
         let home = tempfile::tempdir().unwrap();
-        let mut daemon = Command::new(BINARY)
-            .arg("daemon")
-            .env("XDG_RUNTIME_DIR", runtime.path())
-            .env("SHELL", shell)
-            .env("HOME", home.path())
-            .spawn()
-            .unwrap();
-        let socket = runtime.path().join("clackatoo/daemon.sock");
-        eventually("the daemon answers", || {
-            clackatoo(runtime.path(), &["list"]).status.success()
-        });
-        let mut client = Client::connect(&socket).unwrap();
-        let terminal = client
-            .new_terminal(NewTerminal {
-                size: clackatoo_protocol::Size::new(60, 20).unwrap(),
-                command: None,
-                cwd: None,
-                record_to: None,
-            })
-            .unwrap();
-        let mut last_block = || client.block(terminal, u64::MAX, Which::Before).unwrap();
-        eventually(&format!("{shell} shows a prompt"), || {
-            last_block().is_some()
-        });
-
-        client
-            .send_input(terminal, b"echo one; echo two; false\r")
-            .unwrap();
-        let mut ran = None;
-        eventually(&format!("{shell} runs the command"), || {
-            let prompt = client.block(terminal, u64::MAX, Which::Before).unwrap();
-            ran = prompt.and_then(|prompt| {
-                client
-                    .block(terminal, prompt.first, Which::Before)
-                    .unwrap()
-                    .filter(|block| block.exit.is_some())
-            });
-            ran.is_some()
-        });
-        let ran = ran.unwrap();
+        let mut user = UserShell::start(Path::new(shell), home.path(), &[]);
+        let ran = user.run("echo one; echo two; false");
         assert_eq!(ran.exit, Some(1), "{shell}: {ran:?}");
-        let output = ran.output.expect("it printed");
-        let text = match client
-            .request(&Request::Text {
-                terminal,
-                from: Position {
-                    line: output,
-                    col: 0,
-                },
-                to: Position {
-                    line: ran.last,
-                    col: 0,
-                },
-                whole_lines: true,
-            })
-            .unwrap()
-        {
-            Response::Text(text) => text,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(text, "one\ntwo", "{shell}");
+        assert_eq!(user.output(&ran), "one\ntwo", "{shell}");
         assert_eq!(ran.cwd.as_deref(), home.path().to_str(), "{shell}");
         if shell.ends_with("fish") {
             assert_eq!(ran.command.as_deref(), Some("echo one; echo two; false"));
         }
-        drop(client);
-        clackatoo(runtime.path(), &["stop"]);
-        let _ = daemon.wait();
+    }
+}
+
+/// `program`, if it's on `PATH`.
+fn on_path(program: &str) -> Option<std::path::PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(program))
+        .find(|path| path.is_file())
+}
+
+/// zsh marks its commands through the `ZDOTDIR` the daemon gives it,
+/// which runs the user's own startup files as zsh would have: with none;
+/// with a `ZDOTDIR` set in `~/.zshenv`, a `.zshrc` that sets the hooks'
+/// lists afresh, a theme that sets the prompt afresh before each one, and
+/// stdout pointed at a file while `.zshrc` runs, as powerlevel10k's
+/// instant prompt does; and with a `ZDOTDIR` set before the daemon
+/// started.
+#[test]
+fn zsh_marks_its_commands_through_the_users_own_startup_files() {
+    let Some(zsh) = on_path("zsh") else {
+        eprintln!("zsh isn't on PATH: skipped");
+        return;
+    };
+    let rc = r#"
+        echo $0 > ~/rc-ran
+        # As powerlevel10k's instant prompt: stdout goes to a file while
+        # .zshrc runs, and comes back after the hooks before the first
+        # prompt.
+        exec {__stdout}>&1 >~/startup-output
+        zmodload zsh/sched
+        __first() {
+            precmd_functions=(${precmd_functions:#__first})
+            sched +0 __restore
+        }
+        __restore() { exec >&$__stdout {__stdout}>&- }
+        # As some configs do: the hooks' lists set afresh.
+        precmd_functions=(__first)
+        preexec_functions=()
+        # As themes do: the prompt is set before each one.
+        __theme() { PS1="theme %~ > " }
+        autoload -Uz add-zsh-hook
+        add-zsh-hook precmd __theme
+    "#;
+    for case in ["none", "zshenv", "daemon"] {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let zdotdir = home.join(".config/zsh");
+        std::fs::create_dir_all(&zdotdir).unwrap();
+        std::fs::create_dir(home.join("a%b c")).unwrap();
+        let mut env = Vec::new();
+        match case {
+            "zshenv" => {
+                let set = format!("export ZDOTDIR='{}'\n", zdotdir.display());
+                std::fs::write(home.join(".zshenv"), set).unwrap();
+                std::fs::write(zdotdir.join(".zshrc"), rc).unwrap();
+            }
+            "daemon" => {
+                std::fs::write(zdotdir.join(".zshrc"), rc).unwrap();
+                env.push(("ZDOTDIR", zdotdir.as_path()));
+            }
+            _ => {}
+        }
+        let mut user = UserShell::start(&zsh, home, &env);
+        // At the first prompt, before which .zshrc's hooks run first.
+        let ran = user.run("echo one; echo two; false");
+        let moved = user.run("cd 'a%b c'");
+        let asked = user.run("print -r -- ${ZDOTDIR-unset} ${CLACKATOO_ZSH_ZDOTDIR-unset}");
+        // A command is sent byte by byte, whatever its characters.
+        let unicode = user.run("echo é%;  :");
+        assert_eq!(unicode.command.as_deref(), Some("echo é%;  :"), "{case}");
+        assert_eq!(user.output(&unicode), "é%", "{case}");
+        for block in [&ran, &asked] {
+            // The prompt is marked as well as the output, which starts on
+            // the line after it.
+            assert_eq!(block.output, Some(block.first + 1), "{case}: {block:?}");
+        }
+        assert_eq!(ran.exit, Some(1), "{case}: {ran:?}");
+        assert_eq!(user.output(&ran), "one\ntwo", "{case}");
+        assert_eq!(ran.command.as_deref(), Some("echo one; echo two; false"));
+        assert_eq!(ran.cwd.as_deref(), home.to_str(), "{case}");
+        assert_eq!(moved.exit, Some(0), "{case}: {moved:?}");
+        assert_eq!(moved.command.as_deref(), Some("cd 'a%b c'"), "{case}");
+        let moved_to = home.join("a%b c");
+        assert_eq!(asked.cwd.as_deref(), moved_to.to_str(), "{case}");
+        // The shell has ZDOTDIR as it would have had it.
+        let zdotdir = zdotdir.display().to_string();
+        let expected = match case {
+            "none" => "unset unset".to_owned(),
+            _ => format!("{zdotdir} unset"),
+        };
+        assert_eq!(user.output(&asked), expected, "{case}");
+        if case != "none" {
+            assert!(home.join("rc-ran").exists(), "{case}: .zshrc ran");
+            let leaked = std::fs::read(home.join("startup-output")).unwrap();
+            assert!(
+                leaked.is_empty(),
+                "{case}: written while .zshrc ran: {:?}",
+                String::from_utf8_lossy(&leaked)
+            );
+        }
+    }
+}
+
+/// zsh marks its commands under oh-my-zsh with powerlevel10k as its
+/// theme, its instant prompt and all. Needs zsh on `PATH`, and checkouts
+/// of oh-my-zsh and powerlevel10k named by `CLACKATOO_OH_MY_ZSH` and
+/// `CLACKATOO_POWERLEVEL10K`.
+#[test]
+#[ignore = "needs zsh, and oh-my-zsh and powerlevel10k checked out (see its doc comment)"]
+fn zsh_marks_its_commands_under_oh_my_zsh_and_powerlevel10k() {
+    let zsh = on_path("zsh").expect("zsh on PATH");
+    let checkout = |name: &str| {
+        let path = std::env::var_os(name).unwrap_or_else(|| panic!("{name} isn't set"));
+        std::fs::canonicalize(path).unwrap()
+    };
+    let (omz, p10k) = (
+        checkout("CLACKATOO_OH_MY_ZSH"),
+        checkout("CLACKATOO_POWERLEVEL10K"),
+    );
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    std::fs::create_dir_all(home.join("custom/themes")).unwrap();
+    std::os::unix::fs::symlink(&p10k, home.join("custom/themes/powerlevel10k")).unwrap();
+    std::fs::copy(p10k.join("config/p10k-lean.zsh"), home.join(".p10k.zsh")).unwrap();
+    // As powerlevel10k's wizard writes it, but for what keeps oh-my-zsh
+    // and powerlevel10k from writing outside the home or going online.
+    let rc = format!(
+        r#"
+        if [[ -r "${{XDG_CACHE_HOME:-$HOME/.cache}}/p10k-instant-prompt-${{(%):-%n}}.zsh" ]]; then
+          source "${{XDG_CACHE_HOME:-$HOME/.cache}}/p10k-instant-prompt-${{(%):-%n}}.zsh"
+        fi
+        export ZSH='{omz}'
+        ZSH_CUSTOM=~/custom
+        ZSH_CACHE_DIR=~/.cache/oh-my-zsh
+        DISABLE_AUTO_UPDATE=true
+        ZSH_DISABLE_COMPFIX=true
+        POWERLEVEL9K_DISABLE_GITSTATUS=true
+        ZSH_THEME=powerlevel10k/powerlevel10k
+        plugins=(git)
+        source $ZSH/oh-my-zsh.sh
+        source ~/.p10k.zsh
+        "#,
+        omz = omz.display()
+    );
+    std::fs::write(home.join(".zshrc"), rc).unwrap();
+
+    // The first shell writes the instant prompt the second shows.
+    for round in ["first", "instant prompt"] {
+        let mut user = UserShell::start(&zsh, home, &[]);
+        let ran = user.run("echo one; echo two; false");
+        let output = ran.output.expect("it printed");
+        assert!(output > ran.first, "{round}: the prompt is marked: {ran:?}");
+        assert_eq!(ran.exit, Some(1), "{round}: {ran:?}");
+        assert_eq!(user.output(&ran), "one\ntwo", "{round}");
+        assert_eq!(ran.command.as_deref(), Some("echo one; echo two; false"));
+        assert_eq!(ran.cwd.as_deref(), home.to_str(), "{round}");
+        let screen = user.screen();
+        assert!(
+            !screen.contains("Console output during zsh initialization"),
+            "{round}:\n{screen}"
+        );
+        let cache = std::fs::read_dir(home.join(".cache")).unwrap();
+        let instant = cache
+            .flatten()
+            .any(|entry| (entry.file_name().to_string_lossy()).starts_with("p10k-instant-prompt-"));
+        assert!(instant, "{round}: powerlevel10k wrote its instant prompt");
     }
 }

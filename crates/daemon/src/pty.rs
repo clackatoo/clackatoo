@@ -5,7 +5,7 @@
 //! editing, job control, window size). We keep the "master" end: reading it
 //! gives us what the program printed, and writing to it is typing.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -100,6 +100,8 @@ impl AsRawFd for Process {
 pub(crate) struct Program<'a> {
     pub(crate) path: &'a OsStr,
     pub(crate) args: &'a [String],
+    /// Variables to set in its environment, besides the daemon's own.
+    pub(crate) env: &'a [(&'static str, OsString)],
     pub(crate) cwd: &'a Path,
 }
 
@@ -132,7 +134,8 @@ pub(crate) fn spawn(program: &Program<'_>, size: Size) -> io::Result<Spawned> {
         .env("TERM", "xterm-256color")
         .env("COLORTERM", "truecolor")
         .env("TERM_PROGRAM", "clackatoo")
-        .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))
+        .envs(program.env.iter().map(|(name, value)| (name, value)));
 
     // SAFETY: the closure runs in the child between fork and exec, where only
     // async-signal-safe operations are allowed. It makes two raw system calls
