@@ -58,6 +58,20 @@ impl Desk {
         self.explorers.panes.get(&pane)
     }
 
+    /// Keeps the explorer `pane` in `dir`, if it's rooted there and not
+    /// kept somewhere already, as a lesson's explorer is kept in the
+    /// lesson's folder.
+    pub(super) fn fence_explorer(&mut self, pane: PaneId, dir: &str) {
+        if let Some(explorer) = self.explorers.panes.get_mut(&pane)
+            && !explorer.fenced()
+            && explorer
+                .root()
+                .is_some_and(|root| std::path::Path::new(root).starts_with(dir))
+        {
+            explorer.fence(dir.to_owned());
+        }
+    }
+
     /// The focused pane's explorer, if it's one.
     pub(super) fn focused_explorer(&self) -> Option<&Explorer> {
         self.explorers.panes.get(&self.shown?.pane)
@@ -194,6 +208,7 @@ impl Desk {
         {
             explorer.restore(view);
         }
+        self.settle_lesson();
         self.shown_tab()
             .is_some_and(|tab| tab.layout.contains(pane))
     }
@@ -350,9 +365,20 @@ impl Desk {
     }
 
     /// Asks the daemon to do `op`, for the explorer `pane`.
-    fn file_op(&mut self, pane: PaneId, op: FileOp) {
+    pub(super) fn file_op(&mut self, pane: PaneId, op: FileOp) {
         if !self.connected {
             return;
+        }
+        // A lesson's explorer touches nothing outside the lesson's folder.
+        if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
+            let paths: Vec<&str> = match &op {
+                FileOp::Create { path, .. } | FileOp::Delete { path, .. } => vec![path],
+                FileOp::Move { from, to, .. } | FileOp::Copy { from, to, .. } => vec![from, to],
+            };
+            if paths.iter().any(|path| explorer.fenced_out(path)) {
+                explorer.say(crate::explorer::FENCED.to_owned());
+                return;
+            }
         }
         let id = self.explorers.next_op;
         self.explorers.next_op += 1;
@@ -376,7 +402,7 @@ impl Desk {
             };
             return self.request(request, Asked::Pane);
         }
-        let editor = self.recent_in_tab(explorer, |desk, pane| desk.editor(pane).is_some());
+        let editor = self.recent_in_tab(explorer, Self::takes_files);
         match (how, editor) {
             (Opening::Here, Some(editor)) => {
                 self.show_pane(editor);
@@ -452,7 +478,7 @@ impl Desk {
 
     /// The share of the tab's width an explorer opened down its left
     /// takes, in thousandths, for `explorerwidth` cells.
-    fn explorer_share(&self) -> u16 {
+    pub(super) fn explorer_share(&self) -> u16 {
         let cols = self.area.map_or(0, |area| {
             let whole = clackatoo_protocol::Layout::Pane(clackatoo_protocol::Pane {
                 id: PaneId(0),

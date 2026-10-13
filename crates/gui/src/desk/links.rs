@@ -86,7 +86,7 @@ impl Desk {
             (tab.layout.panes().iter())
                 .filter(|pane| matches!(pane.content, Content::Buffer(_)))
                 .map(|pane| pane.id)
-                .find(|&pane| self.editor(pane).is_some())
+                .find(|&pane| self.takes_files(pane))
         });
         if let Some(editor) = editor.filter(|_| known) {
             self.record_jump(shown.pane, None);

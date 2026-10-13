@@ -1,6 +1,7 @@
 //! The finder: a picker over the panes, as Telescope's and fzf's are, for
 //! the files in a project, the lines in them a pattern matches, the files
-//! open, and the places a language server's answer gives.
+//! open, and the places a language server's answer gives; and for the
+//! tutor's lessons, and what's new, which the window lists itself.
 //!
 //! The daemon owns the files, so it lists and greps them, and sends what it
 //! finds a batch at a time (see `clackatoo_protocol::Found`). The finder
@@ -51,6 +52,10 @@ pub(crate) enum Kind {
     Marks,
     /// The boards the workspace shown sees.
     Boards,
+    /// The tutor's lessons.
+    Lessons,
+    /// What's new, each line going to the lesson that teaches it.
+    News,
 }
 
 impl Kind {
@@ -63,7 +68,15 @@ impl Kind {
             Self::Diagnostics => "Diagnostics",
             Self::Marks => "Marks",
             Self::Boards => "Boards",
+            Self::Lessons => "Lessons",
+            Self::News => "What's new",
         }
+    }
+
+    /// Whether the window lists it itself, previews and all, with no help
+    /// from the daemon.
+    fn local(self) -> bool {
+        matches!(self, Self::Lessons | Self::News)
     }
 }
 
@@ -152,6 +165,20 @@ pub(crate) struct Finder {
     /// How many things the list showed last, for paging.
     rows: usize,
     preview: Preview,
+    /// The preview of each thing, by its index, for a list the window
+    /// makes itself.
+    local_previews: Vec<Vec<String>>,
+}
+
+/// Something for a list the window makes itself: what [`Opening::path`]
+/// says when it's picked, its text, how much of the text is its name,
+/// which is drawn plainly and the rest quieter, and its preview.
+#[derive(Debug, Clone)]
+pub(crate) struct LocalItem {
+    pub(crate) name: String,
+    pub(crate) text: String,
+    pub(crate) name_len: usize,
+    pub(crate) preview: Vec<String>,
 }
 
 impl Finder {
@@ -178,7 +205,27 @@ impl Finder {
             top: 0,
             rows: 1,
             preview: Preview::default(),
+            local_previews: Vec::new(),
         }
+    }
+
+    /// A finder of `kind` listing `items`, in their order, made by the
+    /// window rather than found by the daemon.
+    pub(crate) fn local(kind: Kind, items: Vec<LocalItem>, case: Case) -> Self {
+        let mut finder = Self::new(kind, String::new(), case);
+        for item in items {
+            finder.items.push(&item.text);
+            finder.entries.push(Entry {
+                path: item.name,
+                at: None,
+                path_len: item.name_len,
+                matched: Vec::new(),
+            });
+            finder.local_previews.push(item.preview);
+        }
+        finder.ranking.add(&finder.items);
+        finder.done = Some(Done::All);
+        finder
     }
 
     /// A finder of `kind` listing `found`, places given it about the file
@@ -475,8 +522,8 @@ impl Finder {
     /// The file and line the preview should show, for the thing picked, if
     /// what's shown or asked for doesn't already have it.
     pub(crate) fn preview_wanted(&mut self) -> Option<(String, u64)> {
-        // A board is no file to preview.
-        if self.kind == Kind::Boards {
+        // A board is no file to preview, and a lesson's is its own.
+        if self.kind == Kind::Boards || self.kind.local() {
             return None;
         }
         let entry = self.picked()?.clone();
@@ -593,14 +640,24 @@ impl Finder {
                 }
             })
             .collect();
-        // A path too long keeps its end, where its name is; a line, its
-        // start.
-        Some(view::fit(text, &inks, cols, entry.at.is_none()))
+        // A path too long keeps its end, where its name is; a line, or a
+        // lesson, its start.
+        Some(view::fit(
+            text,
+            &inks,
+            cols,
+            entry.at.is_none() && !self.kind.local(),
+        ))
     }
 
     /// The preview of the thing picked, `rows` lines tall and `cols` wide,
     /// if it's come.
     fn preview_view(&mut self, (rows, cols): (usize, usize)) -> Option<PreviewView> {
+        if self.kind.local() {
+            let index = self.ranking.get(self.selected)?;
+            let lines = self.local_previews.get(index)?;
+            return Some(PreviewView::new(0, lines, None, (rows, cols)));
+        }
         let entry = self.picked()?.clone();
         let path = self.absolute(&entry);
         let shown = self.preview.shown.as_ref()?;

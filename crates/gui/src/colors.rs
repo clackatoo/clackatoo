@@ -286,6 +286,8 @@ impl Theme {
             HighlightKind::CursorLine => white(0.035),
             HighlightKind::ColorColumn => white(0.05),
             HighlightKind::Link => self.accent,
+            HighlightKind::LessonStep => white(0.04),
+            HighlightKind::LessonDone => faint(self.added, 0.14),
         }
     }
 

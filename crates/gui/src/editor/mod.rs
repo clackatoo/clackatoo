@@ -555,6 +555,20 @@ pub(crate) struct Editor {
     /// Whether the grammar put the last new line's indent right, so a
     /// snippet's keys in a macro leave indents to it.
     indents_by_grammar: bool,
+    /// Whether it shows one of the tutor's lessons, which is prose, drawn
+    /// as such whatever the options say for files.
+    lesson: bool,
+    /// Lines lit as the tutor says, while it shows a lesson.
+    lit: Vec<Lit>,
+}
+
+/// Lines of a lesson lit, as the tutor says: a step done, or being done.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Lit {
+    pub(crate) lines: std::ops::Range<u64>,
+    pub(crate) kind: HighlightKind,
+    /// When it goes, if it's lit for a moment.
+    pub(crate) until: Option<Instant>,
 }
 
 impl Editor {
@@ -636,7 +650,30 @@ impl Editor {
             snippet_keys: None,
             snippet_lit: None,
             indents_by_grammar: false,
+            lesson: false,
+            lit: Vec::new(),
         }
+    }
+
+    /// Shows one of the tutor's lessons from now on: prose, drawn without
+    /// line numbers, signs, marked columns or the cursor's line lit, and
+    /// wrapped between words, whatever `options` say for files.
+    pub(crate) fn show_lesson(&mut self, options: &Options, copy: &BufferCopy) {
+        if !self.lesson {
+            self.lesson = true;
+            self.set_options(options, copy);
+        }
+    }
+
+    /// Whether it shows one of the tutor's lessons.
+    pub(crate) fn shows_lesson(&self) -> bool {
+        self.lesson
+    }
+
+    /// Lights `lit` lines of the lesson it shows, in place of those lit
+    /// before.
+    pub(crate) fn light(&mut self, lit: Vec<Lit>) {
+        self.lit = lit;
     }
 
     pub(crate) fn buffer(&self) -> BufferId {
@@ -667,6 +704,24 @@ impl Editor {
 
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options, copy: &BufferCopy) {
+        let as_prose;
+        let options = if self.lesson {
+            as_prose = Options {
+                number: false,
+                relativenumber: false,
+                cursorline: false,
+                colorcolumn: crate::options::List::new(),
+                virtualtext: false,
+                gitsigns: false,
+                wrap: true,
+                linebreak: true,
+                breakindent: true,
+                ..options.clone()
+            };
+            &as_prose
+        } else {
+            options
+        };
         self.inccommand = options.inccommand == crate::options::InCommand::NoSplit;
         self.tildeop = options.tildeop;
         let indent = Indent::of(options);
@@ -3627,6 +3682,13 @@ impl Editor {
         self.follow(copy);
     }
 
+    /// Puts the cursor at the start of `line`, and that line at the top of
+    /// the view, as `zt` does, as a lesson's next step is shown.
+    pub(crate) fn go_to_top(&mut self, line: u64, copy: &BufferCopy) {
+        self.go_to(line, 0, copy);
+        self.view_at(ViewAt::Top, copy);
+    }
+
     /// The point on `line`, `col` bytes into it, as far as the text goes,
     /// on a character's start.
     fn point_at(&self, line: u64, col: usize, copy: &BufferCopy) -> Point {
@@ -4284,7 +4346,13 @@ impl Editor {
 
     /// When the highlight on text just copied goes.
     pub(crate) fn flash_ends(&self) -> Option<Instant> {
-        self.flash.map(|(_, _, _, until)| until)
+        let now = Instant::now();
+        let lit = (self.lit.iter()).filter_map(|lit| lit.until.filter(|&until| until > now));
+        self.flash
+            .map(|(_, _, _, until)| until)
+            .into_iter()
+            .chain(lit)
+            .min()
     }
 
     /// What's highlighted in view: the cursor's line and the columns
@@ -4293,6 +4361,18 @@ impl Editor {
     pub(crate) fn highlights(&self) -> Vec<Highlight> {
         let mut highlights = Vec::new();
         let width = self.text_width();
+        let now = Instant::now();
+        for lit in (self.lit.iter()).filter(|lit| lit.until.is_none_or(|until| until > now)) {
+            for (line, _) in
+                (self.shown.iter().enumerate()).filter(|(_, shown)| lit.lines.contains(&shown.line))
+            {
+                highlights.push(Highlight {
+                    line,
+                    cols: self.gutter..self.width,
+                    kind: lit.kind,
+                });
+            }
+        }
         // Every row of the cursor's line, as Vim's `cursorlineopt` has it.
         if self.cursorline {
             for (line, _) in (self.shown.iter().enumerate())

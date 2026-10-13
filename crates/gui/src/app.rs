@@ -859,6 +859,11 @@ impl App {
         self.desk.start_lua(start);
     }
 
+    /// Starts the tutor, with what it remembers.
+    pub(crate) fn start_tutor(&mut self, start: crate::tutor::Start) {
+        self.desk.start_tutor(start);
+    }
+
     /// Sends what the desk has for the daemon, and tells the config's Lua
     /// what's changed.
     fn send_outbox(&mut self) {
@@ -875,6 +880,11 @@ impl App {
             if let Err(err) = copy_text(&mut self.clipboard, text, to) {
                 log::warn!("copying failed: {err:#}");
             }
+        }
+        // The tutor's files, before the daemon's asked to open them. They're
+        // a few small files in the scratch directory.
+        for io in self.desk.take_tutor_io() {
+            io.run();
         }
         let messages = self.desk.take_outbox();
         let Some(sender) = &mut self.sender else {
@@ -1887,6 +1897,12 @@ fn padding(window: &Window) -> u32 {
 }
 
 impl ApplicationHandler<SessionEvent> for App {
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // A lesson goes with the window, and its scratch files with it.
+        self.desk.tutor_exiting();
+        self.send_outbox();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let Some(startup) = self.startup.take() else {
             return;

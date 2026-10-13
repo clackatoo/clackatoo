@@ -722,12 +722,36 @@ impl Daemon {
 }
 
 /// Where an agent working in `cwd` may read and write files through the
-/// daemon: the git worktree `cwd` is in, or else `cwd`.
+/// daemon: the git worktree `cwd` is in, or else `cwd`. A chat working in
+/// the cache directory, as the tutor's lessons do in their scratch
+/// directories, looks for its worktree no higher than inside the cache,
+/// so it never takes in a repository the cache happens to be in.
 pub(super) fn agent_root(cwd: &Path) -> PathBuf {
+    root_below(cwd, cache_dir().as_deref())
+}
+
+/// The git worktree `cwd` is in, or else `cwd`, looking no higher than
+/// inside `stop` when `cwd` is in it.
+fn root_below(cwd: &Path, stop: Option<&Path>) -> PathBuf {
     let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
+    let stop = stop
+        .map(|stop| stop.canonicalize().unwrap_or_else(|_| stop.to_owned()))
+        .filter(|stop| cwd.starts_with(stop));
     (cwd.ancestors())
+        .take_while(|dir| stop.as_deref() != Some(*dir))
         .find(|dir| dir.join(".git").exists())
         .map_or_else(|| cwd.clone(), Path::to_path_buf)
+}
+
+/// Where programs keep files they can do without: `$XDG_CACHE_HOME`, or
+/// else `~/.cache`. A relative path in either is ignored.
+fn cache_dir() -> Option<PathBuf> {
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    absolute("XDG_CACHE_HOME").or_else(|| absolute("HOME").map(|home| home.join(".cache")))
 }
 
 /// `text` with the changes a tool said it made, in order: each `old`
@@ -1066,6 +1090,24 @@ pub(super) mod tests {
         std::fs::create_dir_all(real.join("repo/src")).unwrap();
         assert_eq!(agent_root(&real.join("repo/src")), real.join("repo"));
         assert_eq!(agent_root(&real), real);
+    }
+
+    #[test]
+    fn an_agent_in_the_cache_never_climbs_out_of_it_to_a_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        // A home that's a repository, with the cache in it.
+        std::fs::create_dir_all(real.join(".git")).unwrap();
+        let scratch = real.join(".cache/clackatoo/tutor/7/agents");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let cache = real.join(".cache");
+        assert_eq!(root_below(&scratch, Some(&cache)), scratch);
+        // A repository inside the cache is still one.
+        std::fs::create_dir_all(cache.join("clackatoo/.git")).unwrap();
+        assert_eq!(root_below(&scratch, Some(&cache)), cache.join("clackatoo"));
+        // Outside the cache, nothing changes.
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        assert_eq!(root_below(&real.join("src"), Some(&cache)), real);
     }
 
     #[test]

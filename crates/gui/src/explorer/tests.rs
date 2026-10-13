@@ -628,3 +628,37 @@ fn deleting_a_folder_for_good_says_it_deletes_everything_in_it() {
     keys(&mut explorer, "jd");
     assert_eq!(explorer.label(), "delete ~/p/linked, to the trash? (y/n)");
 }
+
+#[test]
+fn an_explorer_kept_in_a_directory_goes_no_higher() {
+    let mut explorer = explorer(10);
+    rooted(&mut explorer, project());
+    explorer.fence("/p".into());
+    keys(&mut explorer, "-");
+    assert_eq!(explorer.take_outbox(), []);
+    assert_eq!(explorer.label(), FENCED);
+    explorer.root_at("/etc".into());
+    assert_eq!(explorer.take_outbox(), []);
+    explorer.root_at("src".into());
+    assert_eq!(explorer.take_outbox(), [FilesAction::Root("/p/src".into())]);
+    assert!(explorer.fenced_out("/home"));
+    assert!(!explorer.fenced_out("/p/src/main.rs"));
+}
+
+#[test]
+fn what_the_daemon_has_listed_is_looked_up_by_its_path_from_the_root() {
+    let mut explorer = explorer(10);
+    assert!(
+        !explorer.lists("Cargo.toml"),
+        "nothing's listed before a root"
+    );
+    rooted(&mut explorer, project());
+    assert!(explorer.lists("Cargo.toml"));
+    assert!(explorer.lists("src"));
+    assert!(!explorer.lists("src/main.rs"), "src isn't listed yet");
+    keys(&mut explorer, "l");
+    assert_eq!(at(&mut explorer), "/p/src");
+    listed(&mut explorer, "/p/src", vec![file("main.rs")]);
+    assert!(explorer.lists("src/main.rs"));
+    assert!(!explorer.lists("main.rs"));
+}

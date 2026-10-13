@@ -186,7 +186,13 @@ pub(crate) struct Explorer {
     /// What the bar says until the next key, such as why a key did
     /// nothing.
     message: Option<String>,
+    /// The directory it may not go above, nor change anything outside, as
+    /// a lesson's explorer may not leave the lesson's scratch directory.
+    fence: Option<String>,
 }
+
+/// What an explorer says when it's asked to leave its fence.
+pub(crate) const FENCED: &str = "a lesson's explorer stays in the lesson's folder";
 
 impl Explorer {
     pub(crate) fn new(files: FilesId, options: &Options) -> Self {
@@ -220,6 +226,7 @@ impl Explorer {
             outbox: Vec::new(),
             asks: Vec::new(),
             message: None,
+            fence: None,
         }
     }
 
@@ -230,6 +237,20 @@ impl Explorer {
     /// The directory at its root, once the daemon has said.
     pub(crate) fn root(&self) -> Option<&str> {
         self.root.as_deref()
+    }
+
+    /// Whether the daemon has listed `path`, from the root, in a directory
+    /// it's listing.
+    pub(crate) fn lists(&self, path: &str) -> bool {
+        let Some(root) = &self.root else {
+            return false;
+        };
+        let (dir, name) = match path.rsplit_once('/') {
+            Some((dir, name)) => (join(root, dir), name),
+            None => (root.clone(), path),
+        };
+        (self.listings.get(&dir))
+            .is_some_and(|listing| listing.entries.iter().any(|entry| entry.name == name))
     }
 
     /// Takes in the options, as they've changed.
@@ -265,7 +286,27 @@ impl Explorer {
             Some(root) if !dir.starts_with('/') && !dir.starts_with('~') => join(root, &dir),
             _ => dir,
         };
+        if self.fenced_out(&dir) {
+            self.say(FENCED.to_owned());
+            return;
+        }
         self.outbox.push(FilesAction::Root(dir));
+    }
+
+    /// Keeps it in `dir` from now on: it can't go above it, and nothing
+    /// outside it can be made, moved, copied or deleted from it.
+    pub(crate) fn fence(&mut self, dir: String) {
+        self.fence = Some(dir);
+    }
+
+    /// Whether it's kept in a directory `path` isn't in.
+    pub(crate) fn fenced_out(&self, path: &str) -> bool {
+        (self.fence.as_deref()).is_some_and(|fence| !std::path::Path::new(path).starts_with(fence))
+    }
+
+    /// Whether it's kept in a directory, as a lesson's explorer is.
+    pub(crate) fn fenced(&self) -> bool {
+        self.fence.is_some()
     }
 
     /// Puts the cursor on the file at `path` once it shows, expanding the
@@ -1013,6 +1054,9 @@ impl Explorer {
             return;
         }
         let parent = parent_of(&root).to_owned();
+        if self.fenced_out(&parent) {
+            return self.say(FENCED.to_owned());
+        }
         self.view.expanded.insert(root.clone());
         self.reveal = Some(root);
         self.outbox.push(FilesAction::Root(parent));

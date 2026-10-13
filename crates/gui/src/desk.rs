@@ -98,6 +98,8 @@ enum Asked {
     /// A new file explorer, to switch to once made, showing the file at
     /// this path once it can.
     Explorer(Option<String>),
+    /// Something for the tutor's lesson.
+    Lesson(lessons::Serial, lessons::LessonAsked),
 }
 
 mod bindings;
@@ -108,6 +110,7 @@ mod explorers;
 mod finding;
 mod formatting;
 mod jumps;
+mod lessons;
 mod links;
 mod macros;
 mod offers;
@@ -233,6 +236,8 @@ pub(crate) struct Desk {
     notice: Option<String>,
     /// `:update`, asked for and waiting for the window to carry out.
     update_asked: Option<UpdateAsked>,
+    /// The tutor's lessons, and the lesson open.
+    tutor: lessons::Tutor,
 }
 
 impl Desk {
@@ -882,6 +887,7 @@ impl Desk {
             pane.reconnected();
         }
         self.workspaces_changed(workspaces);
+        self.tutor_connected();
     }
 
     /// The connection was lost: nothing is attached, and nothing asked
@@ -939,6 +945,8 @@ impl Desk {
         self.attach_shown();
         self.fit_panes();
         self.forget_gone_handlers();
+        self.close_leftovers();
+        self.settle_lesson();
     }
 
     /// Applies a view update for `terminal`. Returns whether it's shown,
@@ -950,6 +958,8 @@ impl Desk {
         if !pane.view_changed(update) {
             return false;
         }
+        self.lesson_view_changed(terminal);
+        self.settle_lesson();
         // Tabs not shown wait, undrawn, until they are.
         self.shown_tab().is_some_and(|tab| {
             tab.layout
@@ -979,7 +989,9 @@ impl Desk {
         if asked_by_macro && self.shown != shown {
             self.macro_follows_focus();
         }
-        redraw | self.type_macros()
+        let typed = self.type_macros();
+        self.settle_lesson();
+        redraw | typed
     }
 
     /// Hands the daemon's answer to whoever asked. Returns whether the
@@ -1045,6 +1057,9 @@ impl Desk {
                     _ => {}
                 }
                 true
+            }
+            Some(Asker::Window(Asked::Lesson(serial, asked))) => {
+                self.lesson_answered(serial, asked, response)
             }
             Some(Asker::Window(Asked::OpenedHere(pane))) => {
                 let failed = match response {
@@ -1137,6 +1152,7 @@ impl Desk {
         let redraw = self.key_with(press, true);
         let typed = self.type_macros();
         self.recorded_press();
+        self.settle_lesson();
         redraw || typed
     }
 
@@ -1193,6 +1209,10 @@ impl Desk {
             // The config's keypress handlers come first, then the bindings.
             if handlers && !self.script.typing && self.keypress_handled(chord, press) {
                 return true;
+            }
+            // In a lesson's tab, `]s` and `[s` step through the lesson.
+            if let Some(redraw) = self.lesson_bracket(press) {
+                return redraw;
             }
             let mode = self.key_mode();
             // A key a half-typed command in the pane waits for is the
@@ -1815,6 +1835,7 @@ impl Desk {
             }
             Command::Edit { place, path } => self.open_file(place, path),
             Command::Quit { force } => self.quit(force),
+            Command::Tutor(topic) => self.tutor(topic.as_deref()),
             Command::Write { force, quit } => self.write_file(force, quit),
             Command::Discard => self.discard_changes(),
             Command::Format => self.format_file(),
@@ -1916,6 +1937,8 @@ fn mode_name(mode: Mode) -> ModeName {
 
 #[cfg(test)]
 mod tests {
+    mod lessons;
+
     use clackatoo_protocol::{Layout, Pane as LayoutPane, View, Workspace};
     use clackatoo_term::mouse::{MouseAction, MouseButton};
     use clackatoo_term::{Config, Terminal};

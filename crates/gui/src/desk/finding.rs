@@ -44,8 +44,11 @@ impl Desk {
             return;
         }
         let case = Case::of(&self.options);
-        if kind == Kind::Marks {
-            return self.pick_mark();
+        match kind {
+            Kind::Marks => return self.pick_mark(),
+            Kind::Lessons => return self.tutor(None),
+            Kind::News => return self.tutor(Some("new")),
+            _ => {}
         }
         self.finder = Some(Finder::new(kind, query, case));
         match kind {
@@ -55,7 +58,7 @@ impl Desk {
             Kind::Diagnostics => self.search(Search::Diagnostics),
             Kind::Boards => self.search(Search::Boards),
             // Their places are given them.
-            Kind::Places | Kind::Marks => {}
+            Kind::Places | Kind::Marks | Kind::Lessons | Kind::News => {}
         }
     }
 
@@ -146,6 +149,9 @@ impl Desk {
                 self.close_finder();
                 if kind == Some(Kind::Boards) {
                     self.open_picked_board(&opening);
+                } else if matches!(kind, Some(Kind::Lessons | Kind::News)) {
+                    // A lesson, or what's new, goes to the lesson.
+                    self.open_lesson(&opening.path);
                 } else {
                     self.open_picked(opening);
                 }
@@ -258,6 +264,7 @@ impl Desk {
         } else {
             return false;
         }
+        self.settle_lesson();
         true
     }
 

@@ -125,6 +125,76 @@ impl Desk {
         self.editors.panes.get(&pane)
     }
 
+    /// Whether `pane` is an editor a file opened from a link or an
+    /// explorer can go in: any but a lesson's.
+    pub(super) fn takes_files(&self, pane: PaneId) -> bool {
+        self.editor(pane).is_some() && !self.is_lesson_pane(pane)
+    }
+
+    /// The window's copy of `buffer`, if an editor shows it.
+    pub(super) fn buffer_copy(&self, buffer: BufferId) -> Option<&BufferCopy> {
+        self.editors.buffers.get(&buffer)
+    }
+
+    /// The registers every editor shares.
+    pub(super) fn registers(&self) -> &crate::editor::Registers {
+        &self.editors.shared.registers
+    }
+
+    /// Has `act` done to the editor `pane`, with its buffer, if it's an
+    /// editor whose buffer has come.
+    pub(super) fn with_editor(&mut self, pane: PaneId, act: impl FnOnce(&mut Editor, &BufferCopy)) {
+        let editors = &mut self.editors;
+        if let Some(editor) = editors.panes.get_mut(&pane)
+            && let Some(copy) = editors
+                .buffers
+                .get(&editor.buffer())
+                .filter(|copy| copy.loaded())
+        {
+            act(editor, copy);
+        }
+    }
+
+    /// Puts `text` in place of all of `buffer`'s, unless it's that
+    /// already, as one change of the user's, as the tutor sets a practice
+    /// file's text: the editors showing it follow, as they do your typing.
+    pub(super) fn replace_text(&mut self, buffer: BufferId, text: &str) {
+        let editors = &mut self.editors;
+        let Some(copy) = editors
+            .buffers
+            .get_mut(&buffer)
+            .filter(|copy| copy.loaded())
+        else {
+            return;
+        };
+        if copy.text() == text {
+            return;
+        }
+        let showing: Vec<PaneId> = (editors.panes.iter())
+            .filter(|(_, editor)| editor.buffer() == buffer)
+            .map(|(&pane, _)| pane)
+            .collect();
+        for pane in &showing {
+            editors.panes.get_mut(pane).expect("just found").hold(copy);
+        }
+        let old = copy.text().to_string();
+        copy.edit(Edit::replace(old.len(), 0, &old, text), true);
+        let made = copy.take_made();
+        for pane in &showing {
+            let editor = editors.panes.get_mut(pane).expect("just found");
+            for edit in &made {
+                editor.follow_edit(edit, copy);
+            }
+        }
+        follow_places(
+            &mut self.jumps,
+            &mut editors.shared.marks,
+            copy,
+            &made,
+            false,
+        );
+    }
+
     /// The focused pane's editor and buffer, if it's an editor.
     pub(super) fn focused_editor(&self) -> Option<(&Editor, &BufferCopy)> {
         let editor = self.editors.panes.get(&self.shown?.pane)?;
@@ -330,6 +400,19 @@ impl Desk {
     /// Takes in a change to `buffer`. Returns whether a pane showing it is
     /// shown, and so the window must be redrawn.
     pub(crate) fn buffer_changed(&mut self, buffer: BufferId, update: BufferUpdate) -> bool {
+        let loaded = matches!(update, BufferUpdate::Snapshot(_));
+        let redraw = self.take_buffer_update(buffer, update);
+        // A file's path is first known as its text comes.
+        if loaded {
+            self.close_leftovers();
+        }
+        self.settle_lesson();
+        redraw
+    }
+
+    /// Takes in a change to `buffer`, as [`buffer_changed`](Self::buffer_changed)
+    /// does.
+    fn take_buffer_update(&mut self, buffer: BufferId, update: BufferUpdate) -> bool {
         // What the window asks and says, not the editor.
         match update {
             BufferUpdate::Offer {
@@ -1124,6 +1207,10 @@ impl Desk {
     /// with changes not saved, or if `force`, throwing them away.
     pub(super) fn quit(&mut self, force: bool) {
         let Some(shown) = self.shown else { return };
+        // In a lesson's panes, `:q` ends the lesson.
+        if self.in_lesson_pane(shown.pane) {
+            return self.end_lesson();
+        }
         if let Some((editor, copy)) = self.focused_editor() {
             let buffer = editor.buffer();
             let last = !(self.workspaces.list.iter())

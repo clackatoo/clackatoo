@@ -263,13 +263,20 @@ pub(crate) enum HighlightKind {
     ColorColumn,
     /// It's the link under the mouse, which a click opens: underlined.
     Link,
+    /// It's the step of a lesson being done.
+    LessonStep,
+    /// It's a step of a lesson that's done.
+    LessonDone,
 }
 
 impl HighlightKind {
     /// Whether it's drawn behind the text's own backgrounds and the
     /// cursor, as a mark of where things are rather than of the text.
     fn behind(self) -> bool {
-        matches!(self, Self::CursorLine | Self::ColorColumn)
+        matches!(
+            self,
+            Self::CursorLine | Self::ColorColumn | Self::LessonStep | Self::LessonDone
+        )
     }
 }
 

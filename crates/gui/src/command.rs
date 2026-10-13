@@ -16,7 +16,8 @@
 //! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
 //! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
 //! `prev_hunk`. `Explore`, or `Ex`, opens the tab's file explorer, with a
-//! directory for its root after it if wanted. In a chat, `AgentUndo`
+//! directory for its root after it if wanted. `Tutor` opens the tutor's
+//! lessons, a lesson by its name, or with `new`, what's new. In a chat, `AgentUndo`
 //! undoes what a turn of the agent's changed in files, the turn's number
 //! after it, or else the last, and `AgentRedo` makes it again; with `!`,
 //! in the files that can be, though others can't.
@@ -91,6 +92,9 @@ pub(crate) enum Command {
     /// `:Explore`: the tab's file explorer, rooted at this directory if
     /// given.
     Explore(Option<String>),
+    /// `:Tutor`: the lessons, to pick one; with a lesson's name, that
+    /// lesson; with `new`, what's new.
+    Tutor(Option<String>),
     /// `:AgentUndo`: undo what turn `turn` of the focused chat changed in
     /// files, counting from 0, or the last that can be; or with `redo`,
     /// `:AgentRedo`, make it again. With `force`, in the files that can be
@@ -183,6 +187,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "marks" => return Ok(Command::Marks),
         "Explore" | "Ex" => return Ok(Command::Explore(argument.map(str::to_owned))),
         "update" => return Ok(Command::Update(argument.map(str::to_owned))),
+        "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
         _ => {}
     }
     if let Some(command) = file_command(word, argument).or_else(|| agent_undo(word, argument)) {

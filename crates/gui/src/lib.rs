@@ -41,6 +41,7 @@ mod pane;
 mod render;
 mod screen;
 mod session;
+mod tutor;
 mod updates;
 
 #[cfg(test)]
@@ -121,6 +122,8 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         .context("could not open a window")?;
     // The GPU thread has finished without it if this fails.
     let _ = display.send(event_loop.owned_display_handle());
+    // A small file read, and a directory or so looked at.
+    let tutor = tutor::Start::read(options.remote.is_some());
     let location = match options.remote {
         Some(remote) => session::Location::Remote(remote),
         None => session::Location::Local(options.runtime.clone()),
@@ -142,6 +145,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     if let Some(start) = lua_start {
         app.start_lua(start);
     }
+    app.start_tutor(tutor);
     event_loop.run_app(&mut app)?;
     app.result
 }

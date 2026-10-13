@@ -201,6 +201,13 @@ impl Pane {
         self.screen.as_ref()
     }
 
+    /// The line after the document's last, its history then its screen, as
+    /// a request numbers lines, once there's a screen.
+    pub(crate) fn document_end(&self) -> Option<u64> {
+        self.screen.as_ref()?;
+        Some(self.history_end() + self.height())
+    }
+
     /// Whether the pane shows a chat, rather than a terminal's screen.
     pub(crate) fn is_chat(&self) -> bool {
         self.chat.is_some()

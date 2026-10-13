@@ -1,0 +1,27 @@
+# Another machine
+
+Using the daemon on another machine, your desktop from your laptop or a server, with its terminals running there and carrying on when you disconnect. This lesson is to read; the terminal beside it is for trying the commands, if you've a machine to try them on.
+
+```setup
+terminal
+```
+
+## A window on another machine
+
+`clackatoo --remote HOST` opens a window on HOST's workspaces, through ssh: a hostname, `user@host`, or a name from your `~/.ssh/config`. The `clackatoo` command takes `--remote` too: `clackatoo list --remote desktop` lists its terminals.
+
+It runs `ssh HOST clackatoo bridge`, which starts the daemon there if it isn't running. ssh does the logging in, and the daemon only takes connections that come through it.
+
+## What the other machine needs
+
+The same build of clackatoo, on the `PATH` ssh's commands get, which is often shorter than your shell's: `--remote-command` names it otherwise, as `--remote-command ~/.cargo/bin/clackatoo`. On a server nobody's logged in to, run `loginctl enable-linger` there once, so the daemon's socket stays.
+
+## Surviving the network
+
+Once connected, the connection moves out of ssh onto UDP if it can, so it carries on when your network changes or your laptop sleeps a moment. A firewall on the other machine has to let UDP in on ports 60000 to 61000, as for mosh. `clackatoo ping --remote HOST` says how long the daemon takes to answer, and which way each round went.
+
+When the other machine stops answering, a red notice in the top bar counts the seconds, and what you type waits. When the connection drops, Enter reconnects, and nothing on the other machine has stopped meanwhile.
+
+## Panes from several machines
+
+`:connect HOST`, to bring another machine's workspaces into this daemon, and `:Terminal@host`, for a pane on another machine beside your own, aren't built yet, as `:Terminal@host` says. Until then, a window with `--remote` shows one machine.
