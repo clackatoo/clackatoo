@@ -23,10 +23,12 @@
 //! are acted on at once.
 //!
 //! A file git converts on its way in and out of the index, by a filter
-//! such as Git LFS's or by line ends, is compared with its text as git
-//! would check it out, so only what's really changed is signed. Hunks of
-//! it aren't staged: `git apply --cached` would put the work tree's bytes
-//! in the index unconverted.
+//! or by line ends, is compared with its text as git would check it out,
+//! so only what's really changed is signed. Hunks of it aren't staged:
+//! `git apply --cached` would put the work tree's bytes in the index
+//! unconverted. git never runs the repository's own filter drivers here
+//! (see [`git_filtering`]), and unless every driver is allowed, Git
+//! LFS's files have no signs: checking one out could fetch it.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -40,6 +42,8 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::{Answer, GitMark};
 use clackatoo_text::{Difference, Hunks, Rope, diff, line_starts};
 
+mod filters;
+
 /// How long edits must pause before a buffer is compared again...
 pub(crate) const PAUSE: Duration = Duration::from_millis(100);
 
@@ -49,6 +53,10 @@ const MOST_WAIT: Duration = Duration::from_secs(1);
 /// Texts bigger than this aren't compared: they're data, or built, not
 /// written, as the finder doesn't grep them.
 const MAX_TEXT: usize = 8 * 1024 * 1024;
+
+/// How a Git LFS pointer starts: the text git keeps for a file Git LFS
+/// keeps elsewhere, which is no base for the file's own text.
+const LFS_POINTER: &str = "version https://git-lfs.github.com/spec/";
 
 /// How many lines either side of a hunk a patch to stage it shows, as
 /// `git diff` does, so git checks the index still has them there.
@@ -455,6 +463,9 @@ fn base_text(tracked: &Tracked) -> Option<&str> {
 /// git, to run in `dir`, reading nothing, seeing no repository but the
 /// one `dir` is in, and taking none of the locks it can do without, so
 /// reading never writes the index it's watched for.
+///
+/// A command that can run files through filter drivers, comparing the
+/// work tree or checking a file out, is made with [`git_filtering`].
 pub(crate) fn git(dir: &Path) -> Command {
     let mut command = Command::new("git");
     command
@@ -462,6 +473,9 @@ pub(crate) fn git(dir: &Path) -> Command {
         // it looks at the work tree: `core.fsmonitor`. Opening a folder
         // cloned from anyone must never run it.
         .args(["-c", "core.fsmonitor=false"])
+        // Nor its hooks, which staging a hunk would run, as the index
+        // changes: no path is a directory under /dev/null.
+        .args(["-c", "core.hooksPath=/dev/null"])
         .current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
         // Paths are paths, never patterns.
@@ -471,6 +485,25 @@ pub(crate) fn git(dir: &Path) -> Command {
         .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null());
     command
+}
+
+/// git, as [`git`] has it, to run in the work tree whose top is `top` a
+/// command that can run files through filter drivers: with every driver
+/// the repository's own config defines turned off, unless it's Git LFS's
+/// or `$CLACKATOO_GITFILTERS` allows it (see [`filters`]). `None` if git
+/// couldn't say what drivers there are, so the command can't be made
+/// safe.
+pub(crate) fn git_filtering(top: &Path) -> Option<Command> {
+    let allowed = filters::Allowed::chosen();
+    let mut command = git(top);
+    if allowed != filters::Allowed::All {
+        let config = output_within(
+            git(top).args(["config", "--list", "-z", "--show-scope"]),
+            PATIENCE,
+        )?;
+        filters::set(&mut command, &filters::turned_off(&config, allowed));
+    }
+    Some(command)
 }
 
 /// What git printed, if it ran and succeeded.
@@ -607,7 +640,7 @@ pub(crate) fn work_tree(dir: &Path) -> Option<(PathBuf, PathBuf)> {
 /// every submodule's whole tree.
 pub(crate) fn status(top: &Path) -> Option<Vec<(String, GitMark)>> {
     let printed = output_within(
-        git(top).args([
+        git_filtering(top)?.args([
             "status",
             "--porcelain=v1",
             "-z",
@@ -651,20 +684,34 @@ fn base_of(top: &Path, path: &str, converted: bool) -> Option<Base> {
 /// tree whose top is `top`: as it's kept, or as git would check it out if
 /// it's `converted`.
 fn read_base(top: &Path, path: &str, entry: Entry, converted: bool) -> Base {
-    let mut command = git(top);
-    if converted {
-        command.args([
-            "cat-file",
-            "--filters",
-            &format!("--path={path}"),
-            &entry.object,
-        ]);
+    let command = if converted {
+        git_filtering(top).map(|mut command| {
+            command.args([
+                "cat-file",
+                "--filters",
+                &format!("--path={path}"),
+                &entry.object,
+            ]);
+            // Git LFS fetches what it doesn't have, and fetching runs
+            // what the repository's config says to fetch or log in with:
+            // reading a base must never do that. So it's told to check
+            // nothing out: its files read as their pointers, and have no
+            // base.
+            if filters::Allowed::chosen() != filters::Allowed::All {
+                command.env("GIT_LFS_SKIP_SMUDGE", "1");
+            }
+            command
+        })
     } else {
+        let mut command = git(top);
         command.args(["cat-file", "blob", &entry.object]);
-    }
-    let text = output(&mut command)
+        Some(command)
+    };
+    let text = command
+        .and_then(|mut command| output(&mut command))
         .filter(|blob| blob.len() <= MAX_TEXT && !blob.contains(&0))
-        .and_then(|blob| String::from_utf8(blob).ok());
+        .and_then(|blob| String::from_utf8(blob).ok())
+        .filter(|text| !(converted && text.starts_with(LFS_POINTER)));
     // Kept with CRLF, it's compared as the buffer keeps it, with `\n`.
     let crlf = text.as_ref().is_some_and(|text| text.contains("\r\n"));
     let text = text.map(crate::buffer::lf);
@@ -863,21 +910,157 @@ fn apply(top: &Path, patch: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// Runs git in `top`, as a person would but with none of their own
+    /// config, and checks it worked.
+    fn by_hand(top: &Path, args: &[&str]) {
+        let done = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(top)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        assert!(done.status.success(), "{args:?}: {done:?}");
+    }
+
+    /// A command that leaves a file called `name` in `dir` when it runs,
+    /// passing what it's given through, as a filter driver would.
+    fn leaves(dir: &Path, name: &str) -> String {
+        format!("touch '{}'; cat", dir.join(name).display())
+    }
+
+    /// The files commands have left in `dir`, by name.
+    fn left(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = (std::fs::read_dir(dir).unwrap())
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("ran-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_repositorys_own_filter_drivers_never_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = &dir.path().canonicalize().unwrap();
+        let run = |args: &[&str]| by_hand(top, args);
+        run(&["init", "-q", "-b", "main"]);
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(top.join(name), "was\n").unwrap();
+        }
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "a"]);
+        // As a folder copied from anyone could have it: a driver for each
+        // file, one called something `-c` can't name, one from a file
+        // the repository's config includes, and Git LFS's, which no file
+        // names here, as git-lfs may not be installed where tests run.
+        let outside = tempfile::tempdir().unwrap();
+        let ran = outside.path();
+        let required = |name: &str| run(&["config", &format!("filter.{name}.required"), "true"]);
+        run(&["config", "filter.evil.clean", &leaves(ran, "ran-clean")]);
+        run(&["config", "filter.evil.smudge", &leaves(ran, "ran-smudge")]);
+        required("evil");
+        run(&["config", "filter.a=b.clean", &leaves(ran, "ran-equals")]);
+        required("a=b");
+        let included = ran.join("included");
+        let driver = format!(
+            "[filter \"inc\"]\n\tclean = {}\n",
+            leaves(ran, "ran-included")
+        );
+        std::fs::write(&included, driver).unwrap();
+        run(&["config", "include.path", &included.display().to_string()]);
+        run(&["config", "filter.lfs.process", "git-lfs filter-process"]);
+        run(&["config", "filter.lfs.clean", "git-lfs clean -- %f"]);
+        let attributes = "a.txt filter=evil\nb.txt filter=a=b\nc.txt filter=inc\n";
+        std::fs::write(top.join(".gitattributes"), attributes).unwrap();
+        // Changed since they were added, but not in size, so git has to
+        // clean them to compare them.
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(top.join(name), "new\n").unwrap();
+        }
+        // Git LFS's driver is left as it is; the rest are turned off.
+        let command = git_filtering(top).unwrap();
+        let mut named: Vec<String> = (command.get_envs())
+            .filter_map(|(_, value)| value?.to_str())
+            .filter_map(|key| {
+                Some(
+                    key.strip_prefix("filter.")?
+                        .strip_suffix(".process")?
+                        .to_owned(),
+                )
+            })
+            .collect();
+        named.sort();
+        assert_eq!(named, ["a=b", "evil", "inc"]);
+
+        let marks = status(top).expect("git says");
+        let modified = |name: &str| (name.to_owned(), GitMark::Modified);
+        assert_eq!(
+            marks,
+            [
+                modified("a.txt"),
+                modified("b.txt"),
+                modified("c.txt"),
+                (".gitattributes".to_owned(), GitMark::Untracked),
+            ]
+        );
+        let files = crate::changes::changes_since_base(top, &[]).expect("git says");
+        assert_eq!(files.len(), 4, "{files:?}");
+        let entry = list_index(top, &["a.txt"]).remove("a.txt").unwrap();
+        let object = entry.object.clone();
+        let base = read_base(top, "a.txt", entry, true);
+        assert_eq!(base.text.as_deref(), Some("was\n"));
+        assert!(left(ran).is_empty(), "the repository's drivers ran");
+
+        // Each would have run, without what turned it off.
+        run(&["status", "--porcelain"]);
+        run(&["cat-file", "--filters", "--path=a.txt", &object]);
+        assert_eq!(
+            left(ran),
+            ["ran-clean", "ran-equals", "ran-included", "ran-smudge"]
+        );
+    }
+
+    #[test]
+    fn a_repositorys_own_hooks_never_run_as_a_hunk_is_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = &dir.path().canonicalize().unwrap();
+        let run = |args: &[&str]| by_hand(top, args);
+        run(&["init", "-q"]);
+        let base = "1\n2\n3\n";
+        std::fs::write(top.join("a.txt"), base).unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "a"]);
+        // As a copied folder could have it: git runs it whenever the
+        // index is written.
+        let outside = tempfile::tempdir().unwrap();
+        let ran = outside.path();
+        let hook = top.join(".git/hooks/post-index-change");
+        let script = format!("#!/bin/sh\ntouch '{}'\n", ran.join("ran-hook").display());
+        std::fs::write(&hook, script).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let text = "1\ntwo\n3\n";
+        let differences = diff(base, text);
+        apply(top, &patch("a.txt", base, text, &differences[0])).expect("staged");
+        let staged = list_index(top, &["a.txt"]).remove("a.txt").unwrap();
+        let staged = read_base(top, "a.txt", staged, false);
+        assert_eq!(staged.text.as_deref(), Some(text));
+        assert!(left(ran).is_empty(), "the repository's hook ran");
+        // It would have run, without what turned it off.
+        run(&["reset", "-q"]);
+        assert_eq!(left(ran), ["ran-hook"]);
+    }
+
     #[test]
     fn a_repositorys_own_fsmonitor_command_is_never_run() {
         let dir = tempfile::tempdir().unwrap();
         let top = dir.path();
-        let run = |args: &[&str]| {
-            let done = Command::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-                .args(args)
-                .current_dir(top)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .output()
-                .unwrap();
-            assert!(done.status.success(), "{args:?}: {done:?}");
-        };
+        let run = |args: &[&str]| by_hand(top, args);
         run(&["init", "-q"]);
         std::fs::write(top.join("a.txt"), "a\n").unwrap();
         run(&["add", "a.txt"]);

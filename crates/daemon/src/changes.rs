@@ -15,7 +15,7 @@ use clackatoo_protocol::{BufferId, Made, ReviewFile, ReviewHunk, TerminalId};
 use clackatoo_text::{AgentHunk, AgentHunks, Hunks, Rope};
 
 use crate::buffer::{self, DiskStamp};
-use crate::git::{git, output_fed, output_within, work_tree};
+use crate::git::{git, git_filtering, output_fed, output_within, work_tree};
 
 /// How many lines either side of a hunk a review shows.
 pub(crate) const CONTEXT: usize = 3;
@@ -199,21 +199,27 @@ fn changed_paths(
     known: &[Compared],
 ) -> Result<Vec<(PathBuf, String)>, String> {
     let mut paths = BTreeSet::new();
-    let changed = output_within(
-        git(top).args([
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            // Nor any differ or converter a repository names.
-            "--no-ext-diff",
-            "--no-textconv",
-            base,
-            "--",
-        ]),
-        PATIENCE,
-    )
-    .ok_or("git couldn't say what's changed since the base")?;
+    let changed = git_filtering(top)
+        .and_then(|mut command| {
+            output_within(
+                command.args([
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    "--no-renames",
+                    // Nor any differ or converter a repository names.
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    // Nor look inside submodules, which would run `git
+                    // status` in each, with drivers of their own.
+                    "--ignore-submodules=dirty",
+                    base,
+                    "--",
+                ]),
+                PATIENCE,
+            )
+        })
+        .ok_or("git couldn't say what's changed since the base")?;
     let untracked = output_within(
         git(top).args(["ls-files", "--others", "--exclude-standard", "-z"]),
         PATIENCE,
@@ -441,6 +447,37 @@ mod tests {
         );
         assert_eq!(files[1].hunks[0].base, "b\n");
         assert_eq!(files[2].hunks[0].text, "new\n");
+    }
+
+    #[test]
+    fn a_submodules_own_filter_drivers_never_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        run(&sub, &["init", "-q", "-b", "main"]);
+        std::fs::write(sub.join(".gitattributes"), "a.txt filter=evil\n").unwrap();
+        std::fs::write(sub.join("a.txt"), "was\n").unwrap();
+        run(&sub, &["add", "."]);
+        run(&sub, &["commit", "-q", "-m", "first"]);
+        run(&root, &["init", "-q", "-b", "main"]);
+        run(&root, &["add", "sub"]);
+        run(&root, &["commit", "-q", "-m", "first"]);
+        // The submodule's config names a driver the work tree's doesn't,
+        // and its file has changed, but not in size, so `git status` in
+        // it would have to clean the file to compare it.
+        let outside = tempfile::tempdir().unwrap();
+        let ran = outside.path().join("ran");
+        let driver = format!("touch '{}'; cat", ran.display());
+        run(&sub, &["config", "filter.evil.clean", &driver]);
+        std::fs::write(sub.join("a.txt"), "new\n").unwrap();
+        assert_eq!(changes_since_base(&root, &[]), Ok(Vec::new()));
+        // Nor as an explorer asks.
+        assert_eq!(crate::git::status(&root), Some(Vec::new()));
+        assert!(!ran.exists(), "the submodule's driver ran");
+        // It would have run, looking inside the submodule.
+        run(&root, &["diff", "--name-only", "HEAD", "--"]);
+        assert!(ran.exists());
     }
 
     #[test]
