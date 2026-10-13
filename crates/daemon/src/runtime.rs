@@ -150,6 +150,14 @@ mod tests {
         let lock = dir.lock().unwrap();
         assert!(matches!(dir.lock(), Err(LockError::AlreadyRunning)));
         drop(lock);
+        // A process another test is starting holds a copy of the lock's
+        // descriptor between its fork and its exec: free again in a moment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while matches!(dir.lock(), Err(LockError::AlreadyRunning))
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         dir.lock().unwrap();
     }
 
