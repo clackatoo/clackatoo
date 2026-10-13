@@ -418,8 +418,8 @@ mod tests {
     #[test]
     fn a_daemon_follows_the_kind_after_an_at() {
         assert_eq!(
-            parse("|Terminal@jack@10.10.100.0").unwrap(),
-            open(Place::Beside(Side::Right), Some("jack@10.10.100.0"))
+            parse("|Terminal@jack@192.0.2.10").unwrap(),
+            open(Place::Beside(Side::Right), Some("jack@192.0.2.10"))
         );
         assert_eq!(
             parse("Terminal@desktop").unwrap(),

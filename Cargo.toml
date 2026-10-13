@@ -21,7 +21,7 @@ clackatoo-gui = { path = "crates/gui" }
 clackatoo-update = { path = "crates/update" }
 
 # The types of ACP, the Agent Client Protocol, which chats with agents
-# speak (CLACKA-7). Only the types: the daemon frames the messages itself,
+# speak. Only the types: the daemon frames the messages itself,
 # in its own event loop. Without schemars, which only describes them.
 agent-client-protocol-schema = { version = "1.10", default-features = false }
 anyhow = "1.0"
@@ -65,7 +65,7 @@ parley = { version = "0.11", default-features = false, features = ["std"] }
 mio = { version = "1.2", features = ["os-poll", "os-ext", "net"] }
 pollster = "1.0"
 # The QUIC engine with no networking of its own, driven from our own event
-# loops (CLACKA-6). ring rather than aws-lc-rs, which needs cmake to build.
+# loops. ring rather than aws-lc-rs, which needs cmake to build.
 quinn-proto = { version = "0.11", default-features = false, features = ["rustls-ring", "log"] }
 # A self-signed certificate for each daemon's QUIC endpoint.
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
@@ -93,7 +93,7 @@ thiserror = "2.0"
 # of a big file is cheap. Lines end at \n only, as Vim's do.
 ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
 # Parses buffers, with grammars loaded at runtime as WebAssembly and run by
-# wasmtime (CLACKA-32), so a new language never needs a new clackatoo.
+# wasmtime, so a new language never needs a new clackatoo.
 tree-sitter = { version = "=0.27.0", features = ["wasm"] }
 # Edits keep a config file's comments and layout.
 toml_edit = "0.25"

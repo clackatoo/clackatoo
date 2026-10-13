@@ -5,8 +5,10 @@
 //! ```
 //!
 //! plays `dense` for 20 seconds. Point a profiler at it. Where `perf` is
-//! locked down, sampling backtraces with gdb works; see the
-//! `profiling-without-perf` memory in Acta.
+//! locked down (`kernel.perf_event_paranoid` above 2), gdb can sample
+//! instead: run it under gdb, interrupt it every 20 ms or so, note the
+//! innermost frame of each backtrace (`#0`), and count which functions
+//! come up most.
 
 use std::time::{Duration, Instant};
 
