@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.10.8 (2026-10-13)
+
+### Fixes
+
+- **text:** refuse edits whose pieces add up past any text's length (ddf8c8d)
+- **protocol:** refuse layouts nested too deeply to read (3bd8de7)
+- **daemon:** numbers from a window at the end of their range no longer overflow (9f09174)
+- **daemon:** refuse splits deeper than a window can read (fed79a7)
+- **remote:** the loss log says packets found lost, and starts again on a new path (c11b852)
+
 ## 2026.10.7 (2026-10-13)
 
 ### Features
