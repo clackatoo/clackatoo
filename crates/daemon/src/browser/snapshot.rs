@@ -18,8 +18,9 @@
 //! insides moved up; text that only repeats the name of what it's in is
 //! left out too.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use serde_json::Value;
 
@@ -41,25 +42,60 @@ const SILENT: &[&str] = &[
     "presentation",
 ];
 
+/// How deep in the tree the outline goes: what's deeper is left out.
+const MAX_DEPTH: usize = 256;
+
 /// The outline of the tree `nodes`, at most `limit` bytes: past that, it
-/// says how many lines were left out.
+/// says how many lines were left out. The tree is walked without
+/// recursion, as deep as [`MAX_DEPTH`], each node once, so no page's tree
+/// can take the daemon down, however deep, or even if it loops.
 pub(super) fn outline(nodes: &[Value], limit: usize) -> String {
     let by_id: HashMap<&str, &Value> = (nodes.iter())
         .filter_map(|node| Some((node["nodeId"].as_str()?, node)))
         .collect();
     let mut writer = Writer {
-        by_id: &by_id,
         out: String::new(),
         limit,
         left_out: 0,
     };
     // The root is the node with no parent; Chromium lists it first.
-    if let Some(root) = nodes.iter().find(|node| node.get("parentId").is_none()) {
-        writer.write(root, 0, "");
+    let root = nodes.iter().find(|node| node.get("parentId").is_none());
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut left: Vec<(&Value, usize, usize, Rc<str>)> = (root.into_iter())
+        .map(|root| (root, 0, 0, Rc::from("")))
+        .collect();
+    let mut too_deep = false;
+    while let Some((node, levels, depth, around)) = left.pop() {
+        if let Some(id) = node["nodeId"].as_str()
+            && !seen.insert(id)
+        {
+            continue;
+        }
+        if levels > MAX_DEPTH {
+            too_deep = true;
+            continue;
+        }
+        let Some((inner_depth, inner_around)) = writer.write(node, depth, &around) else {
+            continue;
+        };
+        let children = node["childIds"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        // Last first, so the first comes off the stack first.
+        for child in children.iter().rev() {
+            if let Some(&child) = child.as_str().and_then(|id| by_id.get(id)) {
+                let around = inner_around.clone().unwrap_or_else(|| Rc::clone(&around));
+                left.push((child, levels + 1, inner_depth, around));
+            }
+        }
     }
     let Writer {
         mut out, left_out, ..
     } = writer;
+    if too_deep {
+        let _ = writeln!(out, "… and what's more than {MAX_DEPTH} levels deep");
+    }
     if left_out > 0 {
         let _ = writeln!(
             out,
@@ -73,39 +109,44 @@ pub(super) fn outline(nodes: &[Value], limit: usize) -> String {
 }
 
 /// Writes nodes out, keeping count of what didn't fit.
-struct Writer<'a> {
-    by_id: &'a HashMap<&'a str, &'a Value>,
+struct Writer {
     out: String,
     limit: usize,
     left_out: usize,
 }
 
-impl Writer<'_> {
-    /// Writes `node` at `depth`, and its insides. `around` is the name of
-    /// what it's in, whose repeats are left out.
-    fn write(&mut self, node: &Value, depth: usize, around: &str) {
+impl Writer {
+    /// Writes `node` at `depth`. `around` is the name of what it's in,
+    /// whose repeats are left out. Returns the depth its insides go at,
+    /// and their `around` if it's another, or `None` if they're left out.
+    fn write(
+        &mut self,
+        node: &Value,
+        depth: usize,
+        around: &str,
+    ) -> Option<(usize, Option<Rc<str>>)> {
         let role = text_of(&node["role"]);
         let name = text_of(&node["name"]);
         let ignored = node["ignored"].as_bool().unwrap_or(false);
         let mut inner_depth = depth;
-        let mut inner_around = around.to_owned();
+        let mut inner_around = None;
         match role {
             _ if ignored => {}
-            "InlineTextBox" => return,
+            "InlineTextBox" => return None,
             "StaticText" => {
                 let text = name.trim();
                 if !text.is_empty() && !around.contains(text) {
                     let line = format!("- text \"{}\"", clipped(text));
                     self.line(depth, &line);
                 }
-                return;
+                return None;
             }
             role if SILENT.contains(&role) && name.trim().is_empty() => {}
             role => {
                 let mut line = format!("- {}", shown_role(role));
                 if !name.trim().is_empty() {
                     let _ = write!(line, " \"{}\"", clipped(name.trim()));
-                    name.clone_into(&mut inner_around);
+                    inner_around = Some(Rc::from(name));
                 }
                 let value = text_of(&node["value"]);
                 if !value.is_empty() && value != name {
@@ -121,15 +162,7 @@ impl Writer<'_> {
                 inner_depth = depth + 1;
             }
         }
-        let children = node["childIds"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        for child in children {
-            if let Some(child) = child.as_str().and_then(|id| self.by_id.get(id)) {
-                self.write(child, inner_depth, &inner_around);
-            }
-        }
+        Some((inner_depth, inner_around))
     }
 
     fn line(&mut self, depth: usize, line: &str) {
@@ -249,6 +282,40 @@ mod tests {
             \x20 - paragraph [ref=105]\n\
             \x20   - text \"Some \\\"quoted\\\" words\"\n\
             \x20 - textbox \"Name\": \"Ada\" [focused] [ref=107]\n"
+        );
+    }
+
+    #[test]
+    fn a_tree_however_deep_or_looping_is_outlined_without_recursion() {
+        // Far deeper than any stack would take, one node in the next.
+        let depth = 200_000;
+        let mut nodes = Vec::with_capacity(depth);
+        for id in 1..=depth {
+            let children: Vec<String> = if id < depth {
+                vec![(id + 1).to_string()]
+            } else {
+                Vec::new()
+            };
+            let children: Vec<&str> = children.iter().map(String::as_str).collect();
+            let parent = (id - 1).to_string();
+            let parent = (id > 1).then_some(parent.as_str());
+            nodes.push(node(&id.to_string(), parent, "group", "g", &children));
+        }
+        let deep = outline(&nodes, 1_000_000);
+        assert!(
+            deep.ends_with("… and what's more than 256 levels deep\n"),
+            "{deep}"
+        );
+        assert_eq!(deep.lines().count(), MAX_DEPTH + 2);
+        // A node that's its own child, and two that are each other's.
+        let looping = [
+            node("1", None, "list", "a", &["2"]),
+            node("2", Some("1"), "listitem", "b", &["1", "2", "3"]),
+            node("3", Some("2"), "listitem", "c", &["2"]),
+        ];
+        assert_eq!(
+            outline(&looping, 10_000),
+            "- list \"a\" [ref=101]\n  - listitem \"b\" [ref=102]\n    - listitem \"c\" [ref=103]\n"
         );
     }
 

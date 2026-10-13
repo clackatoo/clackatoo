@@ -38,8 +38,9 @@ pub(super) const ANSWER_WAIT: Duration = Duration::from_secs(30);
 const START_WAIT: Duration = Duration::from_secs(20);
 
 /// The most a message from the browser may be, in bytes: a picture of a
-/// big page, as base64, is a few megabytes.
-const MAX_MESSAGE: usize = 64 * 1024 * 1024;
+/// big page, as base64, is a few megabytes. A bigger one is skipped, and
+/// the command it answers fails, as the pipe goes on.
+const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 
 /// The arguments Chromium is run with, beside its profile and the pipe.
 /// Headless, with nothing of its own going on in the background: no
@@ -78,9 +79,11 @@ pub(super) struct Cdp {
 impl Cdp {
     /// Runs `program` with `profile` as its profile directory, and talks
     /// to it, sending its events to `inputs`, and saying it's gone as
-    /// `launch`. Its process goes in `running` as soon as it's started. Checks the browser uses that
-    /// profile, as a confined one (a snap) silently falls back on the
-    /// user's own if it can't reach it, and refuses it if not.
+    /// `launch`. Its process goes in `running` as soon as it's started.
+    /// Checks the browser uses that profile, as a confined one (a snap)
+    /// silently falls back on the user's own if it can't reach it, and if
+    /// not, kills it there and then: asked to close, it would write to
+    /// whichever profile it's using.
     pub(super) fn launch(
         program: &Path,
         profile: &Path,
@@ -114,14 +117,14 @@ impl Cdp {
             .spawn(move || reader.run(events))
             .map_err(failed)?;
         if let Err(why) = cdp.call(None, "Browser.getVersion", json!({}), START_WAIT) {
-            cdp.stop();
+            cdp.kill();
             return Err(format!(
                 "{} started, but didn't answer: {why}",
                 program.display()
             ));
         }
         if !uses(profile, cdp.child.id()) {
-            cdp.stop();
+            cdp.kill();
             return Err(format!(
                 "{} didn't use the profile clackatoo gave it, {}, and may have fallen back on \
                  yours, so it was stopped. A snap can't reach hidden folders: set \
@@ -189,6 +192,21 @@ impl Cdp {
     /// Whether the browser is still running.
     pub(super) fn running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Kills the browser, without a word to it, and waits for it to go.
+    pub(super) fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Waits up to `grace` for the browser, told to stop already, to go,
+    /// then kills it.
+    pub(super) fn stop_within(&mut self, grace: Duration) {
+        if !wait_for_exit(&mut self.child, grace) {
+            log::warn!("the browser didn't stop when told: killing it");
+        }
+        self.kill();
     }
 
     /// Closes the browser, asking first, and waits for it to go.
@@ -301,9 +319,14 @@ impl Reader {
                 .read_until(0, &mut message)
             {
                 Ok(0) | Err(_) => break,
-                Ok(_) if message.last() != Some(&0) => {
-                    log::warn!("the browser sent a message too big or cut off");
+                Ok(_) if message.last() != Some(&0) && message.len() < MAX_MESSAGE => {
+                    log::warn!("the browser's pipe closed in the middle of a message");
                     break;
+                }
+                Ok(_) if message.last() != Some(&0) => {
+                    if !self.skip_too_big(&mut events, &mut message) {
+                        break;
+                    }
                 }
                 Ok(_) => {
                     message.pop();
@@ -318,6 +341,30 @@ impl Reader {
         // going.
         (self.waiting.lock().unwrap_or_else(PoisonError::into_inner)).clear();
         let _ = self.inputs.send(Input::Gone(self.launch));
+    }
+
+    /// Skips the rest of a message too big to take, whose start is in
+    /// `message`, failing the command it answers, if it answers one.
+    /// Returns whether the pipe goes on.
+    fn skip_too_big(&self, events: &mut BufReader<PipeReader>, message: &mut Vec<u8>) -> bool {
+        let id = answered_id(&message[..message.len().min(256)]);
+        log::warn!("the browser sent a message over {MAX_MESSAGE} bytes: skipping it");
+        loop {
+            message.clear();
+            match events.by_ref().take(64 * 1024).read_until(0, message) {
+                Ok(0) | Err(_) => return false,
+                Ok(_) if message.last() == Some(&0) => break,
+                Ok(_) => {}
+            }
+        }
+        let waiting = id.and_then(|id| {
+            (self.waiting.lock().unwrap_or_else(PoisonError::into_inner)).remove(&id)
+        });
+        if let Some(waiting) = waiting {
+            let why = format!("the browser's answer was over {} MB", MAX_MESSAGE >> 20);
+            let _ = waiting.send(Err(why));
+        }
+        true
     }
 
     fn receive(&self, mut message: Value) {
@@ -364,9 +411,28 @@ impl Reader {
     }
 }
 
+/// The number of the command a message answers, from its start, as
+/// Chromium writes answers: `{"id":12,` first.
+fn answered_id(start: &[u8]) -> Option<u64> {
+    let start = std::str::from_utf8(start).ok().or_else(|| {
+        // Cut in the middle of a character: what's before it.
+        std::str::from_utf8(&start[..start.len().saturating_sub(3)]).ok()
+    })?;
+    let rest = start.strip_prefix("{\"id\":")?;
+    let digits = rest.split(|ch: char| !ch.is_ascii_digit()).next()?;
+    digits.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answers_number_is_read_from_its_start() {
+        assert_eq!(answered_id(b"{\"id\":12,\"result\":{\"x\":"), Some(12));
+        assert_eq!(answered_id(b"{\"method\":\"Page.x\""), None);
+        assert_eq!(answered_id(b"{\"id\":"), None);
+    }
 
     #[test]
     fn a_profile_is_the_browsers_only_if_its_lock_names_it() {

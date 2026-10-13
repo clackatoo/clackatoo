@@ -975,7 +975,7 @@ fn browser_tools() -> Value {
                 watches it in a pane beside this chat. The user is asked before the chat's first page. \
                 Then browser_snapshot shows what's on it.",
             "inputSchema": { "type": "object", "properties": {
-                "url": { "type": "string", "description": "The address: http, https, file or data. One with no scheme gets https." },
+                "url": { "type": "string", "description": "The address: http, https or data, never a file. One with no scheme gets https." },
             }, "required": ["url"] },
             "annotations": { "readOnlyHint": false, "openWorldHint": true },
         },

@@ -2362,4 +2362,19 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     picture.images = &placed;
     let pixels = draw_with(&gpu, &mut renderer, size, &picture, &mut fonts);
     assert_eq!(pixel(&pixels, [2, 10]), [0, 255, 0, 255]);
+    // One wider than any window draws isn't drawn.
+    let wide = Image {
+        id: 3,
+        width: crate::render::MAX_IMAGE_SIDE + 1,
+        height: 1,
+        rgba: [255, 0, 0, 255].repeat(crate::render::MAX_IMAGE_SIDE as usize + 1),
+    };
+    let placed = [PlacedImage {
+        slot: 8,
+        rect: [0.0, 0.0, 20.0, 20.0],
+        image: &wide,
+    }];
+    picture.images = &placed;
+    let pixels = draw_with(&gpu, &mut renderer, size, &picture, &mut fonts);
+    assert_eq!(pixel(&pixels, [2, 10])[3], 0, "nothing drawn");
 }

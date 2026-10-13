@@ -46,7 +46,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 pub use agents::{AgentConfig, CustomAgent};
-pub use browser::BrowserConfig;
+pub use browser::{BrowserConfig, check_browser, snap_of};
 pub use client::{Client, ClientError, Receiver, Sender, UdpTarget, random_window};
 pub use quic::{Contact, Redial, Redialed, Route};
 pub use runtime::{DaemonLock, LockError, RuntimeDir};

@@ -27,8 +27,9 @@ use crate::render::Image;
 /// How many lines the pane's words take, above the picture.
 pub(crate) const STATUS_ROWS: u16 = 2;
 
-/// The most a picture may be, in pixels each way: bigger isn't decoded.
-const MAX_SIDE: usize = 8192;
+/// The most a picture may be, in pixels each way: bigger isn't decoded,
+/// as the renderer wouldn't draw it (see `render::MAX_IMAGE_SIDE`).
+const MAX_SIDE: usize = crate::render::MAX_IMAGE_SIDE as usize;
 
 /// What the pane asks of the desk, which it can't do itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +254,18 @@ mod tests {
         assert!(left[0] > 200 && left[2] < 60, "{left:?}");
         assert!(right[2] > 200 && right[0] < 60, "{right:?}");
         assert_eq!(left[3], 255);
+    }
+
+    #[test]
+    fn a_picture_wider_than_the_window_draws_isnt_decoded() {
+        let mut jpeg = include_bytes!("../tests/fixtures/red-blue.jpg").to_vec();
+        // The frame's header: its height, then its width, after the
+        // marker, the header's length and the sample precision.
+        let at = (jpeg.windows(2))
+            .position(|pair| pair == [0xFF, 0xC0])
+            .expect("a baseline JPEG");
+        jpeg[at + 7..at + 9].copy_from_slice(&4097_u16.to_be_bytes());
+        assert_eq!(decode(&jpeg), None);
     }
 
     #[test]

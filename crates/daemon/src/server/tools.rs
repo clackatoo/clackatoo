@@ -60,29 +60,6 @@ const MAX_OUTPUT: usize = 16 * 1024;
 /// The most diagnostics `get_diagnostics` gives back.
 const MAX_DIAGNOSTICS: usize = 200;
 
-/// The URL's path `path` with its `%XX` escapes decoded; one that isn't
-/// UTF-8 decoded is left as it was, as it names no file the agent could
-/// mean.
-fn percent_decoded(path: &str) -> String {
-    let bytes = path.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        let escaped = (bytes[at] == b'%')
-            .then(|| path.get(at + 1..at + 3))
-            .flatten()
-            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
-        if let Some(byte) = escaped {
-            decoded.push(byte);
-            at += 3;
-        } else {
-            decoded.push(bytes[at]);
-            at += 1;
-        }
-    }
-    String::from_utf8(decoded).unwrap_or_else(|_| path.to_owned())
-}
-
 /// The most of what would be typed that a question shows itself, in
 /// bytes. More goes in the conversation, in full, for the user to read
 /// first.
@@ -320,6 +297,25 @@ impl Daemon {
         }
         if !on {
             self.close_page(chat);
+            // Its questions about the browser go: the answer can't let it.
+            let (asked, kept) = std::mem::take(&mut self.tools.waiting)
+                .into_iter()
+                .partition(|waiting| {
+                    waiting.chat == chat
+                        && matches!(
+                            waiting.what,
+                            Wait::Permission {
+                                tool: Tool::Browser(_),
+                                ..
+                            }
+                        )
+                });
+            self.tools.waiting = kept;
+            for waiting in asked {
+                self.forget_call(&waiting);
+                let refused = Err("the user turned this chat's browser off".to_owned());
+                self.answer_tool(waiting.token, &waiting.id, refused);
+            }
         }
     }
 
@@ -371,6 +367,18 @@ impl Daemon {
         if acting && limits.no_commands() {
             return Some(format!(
                 "this chat is {}: it reads pages, but clicks and types in none",
+                limits.name()
+            ));
+        }
+        // A data: page is whatever the agent wrote, scripts and all, which
+        // could change what's behind a page as a click could.
+        if let Tool::Browser(Act::Navigate { url }) = tool
+            && limits.no_commands()
+            && (url.get(..5)).is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+        {
+            return Some(format!(
+                "this chat is {}: it opens web pages, but no data: ones, which run what's \
+                 written in them",
                 limits.name()
             ));
         }
@@ -519,12 +527,6 @@ impl Daemon {
             self.answer_tool(token, &id, Err(refused.to_owned()));
             return;
         }
-        if let Tool::Browser(Act::Navigate { url }) = &tool
-            && let Some(why) = self.file_out_of_reach(chat, url)
-        {
-            self.answer_tool(token, &id, Err(why));
-            return;
-        }
         // What would be refused anyway isn't asked about.
         if let Some(why) =
             (self.limits_refused(chat, &tool)).or_else(|| self.talk_refused(chat, &tool))
@@ -632,28 +634,6 @@ impl Daemon {
             }
             _ => None,
         }
-    }
-
-    /// Why the browser won't open `url` for the chat `chat`'s agent, if
-    /// it's a file outside the chat's project: one the user hasn't shown
-    /// it, which the browser would read with no question asked.
-    fn file_out_of_reach(&mut self, chat: TerminalId, url: &str) -> Option<String> {
-        let scheme = url.get(..5)?;
-        if !scheme.eq_ignore_ascii_case("file:") {
-            return None;
-        }
-        let rest = url[5..].trim_start_matches('/');
-        let rest = rest.strip_prefix("localhost/").unwrap_or(rest);
-        let path = PathBuf::from(format!("/{}", percent_decoded(rest)));
-        let path = path.canonicalize().unwrap_or(path);
-        let root = self.project_root(chat)?;
-        (!path.starts_with(&root)).then(|| {
-            format!(
-                "{} is outside this chat's project ({}): the browser opens only files in it",
-                visible(url),
-                root.display()
-            )
-        })
     }
 
     /// `path`, as the chat `chat`'s agent names it: from the chat's
@@ -769,6 +749,13 @@ impl Daemon {
                     return;
                 }
             },
+            Tool::Browser(_)
+                if !self
+                    .chat_ref(chat)
+                    .is_some_and(crate::chat::HostedChat::browser) =>
+            {
+                Err("this chat's browser was turned off".to_owned())
+            }
             Tool::Browser(act) => {
                 self.browse(token, chat, id, act);
                 return;
@@ -1785,14 +1772,6 @@ mod tests {
             "{question}"
         );
         assert_eq!(whole, Some(long));
-    }
-
-    #[test]
-    fn a_files_address_is_decoded_to_its_path() {
-        assert_eq!(percent_decoded("home/me/a%20b.html"), "home/me/a b.html");
-        assert_eq!(percent_decoded("x%2"), "x%2");
-        assert_eq!(percent_decoded("%2e%2E/etc"), "../etc");
-        assert_eq!(percent_decoded("%ff"), "%ff", "not UTF-8: left as it was");
     }
 
     #[test]

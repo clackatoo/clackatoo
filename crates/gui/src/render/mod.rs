@@ -46,6 +46,10 @@ pub(crate) struct Picture<'a> {
     pub(crate) images: &'a [PlacedImage<'a>],
 }
 
+/// The most a picture is drawn, in pixels each way: a page's picture is
+/// no bigger than the screen it's drawn on, and a bigger one isn't drawn.
+pub(crate) const MAX_IMAGE_SIDE: u32 = 4096;
+
 /// A picture, decoded, as the GPU takes it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Image {
@@ -479,6 +483,9 @@ pub(crate) struct Renderer {
     sampler: wgpu::Sampler,
     /// The pictures drawn last frame, by slot.
     images: std::collections::HashMap<u64, GpuImage>,
+    /// The most a picture is drawn, each way: [`MAX_IMAGE_SIDE`], or less
+    /// if the GPU takes no bigger texture.
+    image_side: u32,
     image_buffer: InstanceBuffer,
     bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
@@ -628,6 +635,7 @@ impl Renderer {
             layout,
             sampler,
             images: std::collections::HashMap::new(),
+            image_side: MAX_IMAGE_SIDE.min(device.limits().max_texture_dimension_2d),
             image_buffer: InstanceBuffer::new("images"),
             bind_group,
             uniforms,
@@ -797,7 +805,8 @@ impl Renderer {
         for placed in placed {
             let image = placed.image;
             let expected = (image.width as usize) * (image.height as usize) * 4;
-            if image.width == 0 || image.height == 0 || image.rgba.len() != expected {
+            let too_big = image.width > self.image_side || image.height > self.image_side;
+            if image.width == 0 || image.height == 0 || too_big || image.rgba.len() != expected {
                 continue;
             }
             let size = [image.width, image.height];
