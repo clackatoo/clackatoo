@@ -25,9 +25,11 @@ use super::Daemon;
 use crate::boards::disk::{Disk, Reading, Record};
 use crate::boards::{self, Board, Boards};
 
-/// The longest an upgrade, or the daemon stopping, waits for the boards'
-/// last changes to be written.
-const STOP_WAIT: Duration = Duration::from_secs(2);
+/// The longest the daemon, stopping, waits for the boards' last changes to
+/// be written: past it, they may be lost, and the thread writing them
+/// still holds the boards' lock as the daemon goes. A disk busy with other
+/// work can take seconds to sync.
+const STOP_WAIT: Duration = Duration::from_secs(10);
 
 /// The boards, and what's needed to keep and show them.
 #[derive(Debug)]

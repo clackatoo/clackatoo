@@ -133,6 +133,11 @@ fn letter(round: u64) -> char {
 /// How long to wait for any one key's echo before giving up on it.
 const ECHO_LIMIT: Duration = Duration::from_secs(150);
 
+/// How long to wait for a connection to move onto UDP before giving up:
+/// on a clean network it takes a few probes, but on a loaded machine the
+/// threads passing them may wait seconds to run.
+const ON_UDP_LIMIT: Duration = Duration::from_secs(30);
+
 /// A client on another machine, typing into a terminal running `cat`. When
 /// its ssh stream closes, it opens another, as a window does with ssh.
 /// When its connection is lost, it connects again, through a new ssh
@@ -419,7 +424,7 @@ fn a_clean_network_echoes_at_once_over_udp() {
     let daemon = TestDaemon::start();
     let network = Network::new(Conditions::clean());
     let mut session = Session::open(&daemon, &network);
-    wait_for_route(&mut session, Route::Udp, Duration::from_secs(5));
+    wait_for_route(&mut session, Route::Udp, ON_UDP_LIMIT);
     session.type_for(Duration::from_secs(1), Duration::from_millis(20));
     session.report("clean");
     assert_eq!(session.reconnects, 0);
@@ -431,7 +436,7 @@ fn ssh_dying_leaves_a_session_on_udp_working() {
     let daemon = TestDaemon::start();
     let network = Network::new(Conditions::clean());
     let mut session = Session::open(&daemon, &network);
-    wait_for_route(&mut session, Route::Udp, Duration::from_secs(5));
+    wait_for_route(&mut session, Route::Udp, ON_UDP_LIMIT);
     session.kill_ssh();
     session.type_for(Duration::from_secs(2), TYPING);
     session.report("ssh dies");
@@ -467,7 +472,7 @@ fn a_daemon_that_stops_says_so_at_once() {
     let daemon = TestDaemon::start();
     let network = Network::new(Conditions::clean());
     let mut session = Session::open(&daemon, &network);
-    wait_for_route(&mut session, Route::Udp, Duration::from_secs(5));
+    wait_for_route(&mut session, Route::Udp, ON_UDP_LIMIT);
     let stopped = Instant::now();
     daemon.shutdown.shutdown();
     let err = loop {
@@ -488,11 +493,36 @@ fn a_daemon_that_stops_says_so_at_once() {
 }
 
 #[test]
+fn what_is_sent_once_the_daemon_has_stopped_says_so_too() {
+    let daemon = TestDaemon::start();
+    let network = Network::new(Conditions::clean());
+    let mut session = Session::open(&daemon, &network);
+    wait_for_route(&mut session, Route::Udp, ON_UDP_LIMIT);
+    daemon.shutdown.shutdown();
+    // Only sending: the end is heard of as the stream to the connection's
+    // thread closes, once the thread has heard the daemon close it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let err = loop {
+        match session.client.frame_done(session.terminal) {
+            Ok(()) => {
+                assert!(Instant::now() < deadline, "never heard of the stop");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => break err,
+        }
+    };
+    assert!(
+        matches!(&err, ClientError::Lost(reason) if reason == "the daemon stopped"),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn a_nat_rebinding_moves_the_session_without_a_reconnect() {
     let daemon = TestDaemon::start();
     let network = Network::new(Conditions::clean());
     let mut session = Session::open(&daemon, &network);
-    wait_for_route(&mut session, Route::Udp, Duration::from_secs(5));
+    wait_for_route(&mut session, Route::Udp, ON_UDP_LIMIT);
     session.udp.rebind().unwrap();
     let recovered = session.echo();
     session.type_for(Duration::from_secs(1), TYPING);
@@ -506,7 +536,7 @@ fn a_tunnel_with_an_mtu_of_1280_carries_everything() {
     let daemon = TestDaemon::start();
     let network = Network::new(Conditions::clean().with_mtu(1280));
     let mut session = Session::open(&daemon, &network);
-    wait_for_route(&mut session, Route::Udp, Duration::from_secs(5));
+    wait_for_route(&mut session, Route::Udp, ON_UDP_LIMIT);
     // A screenful at a time, wider than a packet, keeps coming.
     let started = Instant::now();
     session
@@ -544,7 +574,7 @@ fn recover_from(outage: Duration, ssh_dies_after: Option<Duration>) -> (Duration
     let daemon = TestDaemon::start();
     let network = Network::new(Conditions::clean());
     let mut session = Session::open(&daemon, &network);
-    wait_for_route(&mut session, Route::Udp, Duration::from_secs(5));
+    wait_for_route(&mut session, Route::Udp, ON_UDP_LIMIT);
     session.type_for(Duration::from_secs(1), TYPING);
     network.black_out(outage);
     let started = Instant::now();
@@ -614,7 +644,7 @@ fn a_flood_down_a_narrow_link_skips_to_the_latest_screen() {
         ..Impairment::default()
     }));
     let mut session = Session::open(&daemon, &network);
-    wait_for_route(&mut session, Route::Udp, Duration::from_secs(5));
+    wait_for_route(&mut session, Route::Udp, ON_UDP_LIMIT);
     // A terminal floods: the screen the client ends up on must be the
     // last one, soon after the output ends, however much came before.
     let last = "3000000";

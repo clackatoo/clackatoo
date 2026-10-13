@@ -795,16 +795,21 @@ impl Daemon {
     }
 
     /// Forgets the watches `gone`, which the kernel has taken away, as when
-    /// their directories went: their parents' listings say so. One made
-    /// again is watched again when it's next listed.
+    /// their directories went: their parents' listings say so. Each of
+    /// their directories is listed again, which collapses one that's gone,
+    /// and watches one made again. That isn't left to the events that came
+    /// with the deletion: a listing they asked for may have run before the
+    /// watch was taken away, with nothing left to list it after.
     fn forget_watches(&mut self, gone: &[i32]) {
         let explorers = &mut self.explorers;
+        let now = Instant::now();
         let mut buffers = Vec::new();
         for wd in gone {
             if let Some(watched) = explorers.watches.remove(wd) {
                 for dir in watched.dirs {
                     if let Some(entry) = explorers.dirs.get_mut(&dir) {
                         entry.watched = false;
+                        entry.due.get_or_insert(now);
                     }
                 }
                 buffers.extend(watched.buffers);
@@ -927,9 +932,15 @@ impl Daemon {
             self.tell_files(viewer, files, update.clone());
         }
         // Made again since its watch went, or listed when there was no
-        // room: watched now, if there's room.
+        // room: watched now, if there's room, and listed again, as what
+        // changed between the listing and the watch wasn't heard of.
         if rewatch {
             self.watch(dir, None);
+            if let Some(entry) = self.explorers.dirs.get_mut(dir)
+                && entry.watched
+            {
+                entry.due.get_or_insert(Instant::now());
+            }
         }
         self.nest(dir, holds_git);
     }

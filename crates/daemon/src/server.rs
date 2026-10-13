@@ -105,6 +105,12 @@ const COMPACT_AFTER: Duration = Duration::from_millis(100);
 /// written, before it's refused.
 const UPGRADE_BOARDS_WAIT: Duration = Duration::from_secs(10);
 
+/// The longest the daemon waits, as it stops or upgrades, for the packets
+/// closing its QUIC connections to go: one QUIC holds back goes once the
+/// client is next heard from, which is soon, as a client answers the check
+/// of a new path at once.
+const CLOSING_WAIT: Duration = Duration::from_millis(500);
+
 /// What a token refers to.
 #[derive(Debug)]
 enum Source {
@@ -2378,16 +2384,69 @@ impl Daemon {
     }
 
     /// Closes every QUIC connection, telling its client `reason`, and sends
-    /// what says so as far as the sockets take it now: the daemon is about
-    /// to stop or become another build, and nobody would answer after.
-    /// Without it, a client on UDP would go on sending to a connection
-    /// nobody knows, out of contact, until its idle timeout.
+    /// what says so: the daemon is about to stop or become another build,
+    /// and nobody would answer after. Without it, a client on UDP would go
+    /// on sending to a connection nobody knows, out of contact, until its
+    /// idle timeout.
+    ///
+    /// It waits, up to [`CLOSING_WAIT`], for each packet saying so to go,
+    /// and for the carriers to take them. QUIC doesn't always send one at
+    /// once: a connection just moved onto UDP may send only three times
+    /// what has come from there until the client answers the check of its
+    /// new path, and the close waits for the client to be heard from.
+    /// Meanwhile, only what comes over UDP and the carriers is taken.
+    /// Everything else waits for the next build, which hears of it anew, or
+    /// is dropped with the daemon.
     fn close_remotes(&mut self, reason: &str) {
         let Some(quic) = self.quic.as_mut() else {
             return;
         };
-        quic.close_all(Instant::now(), reason);
-        self.transmit_quic();
+        let started = Instant::now();
+        quic.close_all(started, reason);
+        let deadline = started + CLOSING_WAIT;
+        let mut events = Events::with_capacity(64);
+        loop {
+            self.transmit_quic();
+            let carrying = (self.sources.iter())
+                .any(|(_, source)| matches!(source, Source::Carrier(c) if !c.outgoing.is_empty()));
+            let Some(quic) = self.quic.as_mut() else {
+                return;
+            };
+            if !carrying && !quic.closes_waiting() {
+                return;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                log::info!("stopping without some QUIC connections' clients told why");
+                return;
+            }
+            let due = quic
+                .next_timeout()
+                .map_or(deadline, |due| due.min(deadline));
+            match self
+                .poll
+                .poll(&mut events, Some(due.saturating_duration_since(now)))
+            {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => {
+                    log::warn!("waiting for QUIC connections to close failed: {err}");
+                    return;
+                }
+            }
+            for event in &events {
+                match event.token() {
+                    UDP => self.receive_udp(),
+                    token if matches!(self.sources.get(token.0), Some(Source::Carrier(_))) => {
+                        self.serve_carrier(token, event);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(quic) = self.quic.as_mut() {
+                quic.handle_timeouts(Instant::now());
+            }
+        }
     }
 
     /// Sends the packets the QUIC endpoint has ready, each on its carrier.

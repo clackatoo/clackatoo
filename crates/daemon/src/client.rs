@@ -513,9 +513,12 @@ impl Client {
         self.stream.set_read_timeout(timeout)
     }
 
+    /// Sends `message`. If the QUIC connection under the stream has ended,
+    /// as when the daemon stopped, the error says why, as receiving would:
+    /// what's sent after its thread hung up finds the stream closed.
     fn send(&mut self, message: &ClientMessage) -> Result<(), ClientError> {
-        self.stream.write_all(&frame::encode(message)?)?;
-        Ok(())
+        let bytes = frame::encode(message)?;
+        (self.stream.write_all(&bytes)).map_err(|err| why(err.into(), self.carried.as_ref()))
     }
 
     fn receive(&mut self) -> Result<ServerMessage, ClientError> {

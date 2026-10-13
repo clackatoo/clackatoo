@@ -13,7 +13,8 @@
 //! it's changed.
 //!
 //! A change is an agent's if it's heard of while a tool of the agent's
-//! that may change files is running, or as it finishes, in the one chat
+//! that may change files is running, or as it finishes (inotify is read
+//! again then, for what the tool wrote last), in the one chat
 //! whose project the file is in that has one running: an edit, or a
 //! command, as `cargo fmt` or `sed -i`. It waits for the tool to finish,
 //! or the turn to end. Then a change a tool said it made is left to what
@@ -192,7 +193,17 @@ impl Daemon {
     /// A tool of the agent in `chat` that may change files has finished,
     /// or its turn ended with one running: the changes it made on disk are
     /// taken, late in this pass, with any heard of meanwhile.
+    ///
+    /// Called as the agent's message saying so is read, before anything is
+    /// made of it, it first reads what inotify has to say. The kernel queues
+    /// an event as a file is written, so what the tool wrote is queued
+    /// before the agent said it finished. But the agent's pipe and inotify
+    /// are read as the loop hears of each, and the finish may come first,
+    /// leaving the change to be heard of in a later pass, with the tool no
+    /// longer running, and taken for one from outside. Nothing changed
+    /// after the finish is heard of here: nobody has been told of it yet.
     pub(super) fn writing_ended(&mut self, chat: TerminalId) {
+        self.read_files_changes();
         if !self.disk.ran.contains(&chat) {
             self.disk.ran.push(chat);
         }
@@ -437,12 +448,10 @@ mod tests {
     /// Has the agent in `chat` say `update`, as the event loop hears it.
     fn says(daemon: &mut Daemon, chat: TerminalId, update: Value) {
         let update = serde_json::from_value(update).unwrap();
-        let hosted = daemon.chat(chat).unwrap();
-        let ran = hosted.finishes_writing(&update);
-        hosted.update(update);
-        if ran {
+        if daemon.chat(chat).unwrap().finishes_writing(&update) {
             daemon.writing_ended(chat);
         }
+        daemon.chat(chat).unwrap().update(update);
     }
 
     /// Has the agent in `chat` start running a command, as tool call `c`.
@@ -570,6 +579,34 @@ mod tests {
         daemon.undo_turn(chat, 0, false, false);
         assert_eq!(text(&daemon), "> one\ntwo\nthree\n");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn a_change_inotify_tells_of_after_its_command_finished_is_still_the_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap().join("a.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        let (mut daemon, chat) = daemon_with_chat(dir.path());
+        let id = open(&mut daemon, &path);
+
+        // The change is queued in inotify, unread, as the agent's pipe is
+        // read first in the pass that hears the command finish.
+        start_command(&mut daemon, chat);
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        finish_command(&mut daemon, chat);
+        daemon.check_disk();
+        assert_eq!(daemon.buffers[&id].buffer.text().to_string(), "one\ntwo\n");
+        assert!(!daemon.buffers[&id].stale());
+        let buffer = &mut daemon.buffers.get_mut(&id).unwrap().buffer;
+        buffer.reverse(Author::Agent(chat), false).unwrap().unwrap();
+        assert_eq!(buffer.text().to_string(), "one\n");
+
+        // A change after the finish, heard of in the next pass, isn't its.
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        daemon.read_files_changes();
+        daemon.check_disk();
+        assert!(!daemon.disk.noted.contains_key(&id));
+        assert!(daemon.buffers[&id].stale());
     }
 
     /// Redoes the last step of the agent in `chat` in buffer `id`.

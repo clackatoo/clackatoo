@@ -433,6 +433,33 @@ impl Daemon {
         }
     }
 
+    /// Hands `update`, from agent `name` about `session`, to its chat.
+    /// Returns the chat, if there is one.
+    fn session_updated(
+        &mut self,
+        name: &str,
+        session: &str,
+        update: SessionUpdate,
+    ) -> Option<TerminalId> {
+        if let SessionUpdate::UsageUpdate(usage) = &update {
+            self.agents.context.insert(name.to_owned(), usage.size);
+        }
+        let (id, chat) = self.chat_in(name, session)?;
+        // Before anything is made of it: see `writing_ended`.
+        if chat.finishes_writing(&update) {
+            self.writing_ended(id);
+        }
+        let chat = self.chat(id)?;
+        let settings = matches!(update, SessionUpdate::ConfigOptionUpdate(_));
+        if let Some(wrote) = chat.update(update) {
+            self.take_written(id, &wrote);
+        }
+        if settings {
+            self.note_settings(id);
+        }
+        Some(id)
+    }
+
     fn receive_from_agent(&mut self, agent: AgentId, name: &str, message: Incoming) {
         let id = match message {
             Incoming::Session { terminal, result } => {
@@ -455,23 +482,9 @@ impl Daemon {
                 terminal
             }
             Incoming::Update { session, update } => {
-                if let SessionUpdate::UsageUpdate(usage) = &*update {
-                    self.agents.context.insert(name.to_owned(), usage.size);
-                }
-                let Some((id, chat)) = self.chat_in(name, &session) else {
+                let Some(id) = self.session_updated(name, &session, *update) else {
                     return;
                 };
-                let ran = chat.finishes_writing(&update);
-                let settings = matches!(*update, SessionUpdate::ConfigOptionUpdate(_));
-                if let Some(wrote) = chat.update(*update) {
-                    self.take_written(id, &wrote);
-                }
-                if ran {
-                    self.writing_ended(id);
-                }
-                if settings {
-                    self.note_settings(id);
-                }
                 id
             }
             Incoming::ReadFile {
@@ -498,13 +511,16 @@ impl Daemon {
                 let Some(chat) = self.chat(terminal) else {
                     return;
                 };
-                // A tool still running as the turn ends finishes with it.
-                let ran = chat.writing();
-                chat.answered(result);
-                self.settle_turn(terminal);
-                if ran {
+                // A tool still running as the turn ends finishes with it,
+                // before anything is made of the end: see `writing_ended`.
+                if chat.writing() {
                     self.writing_ended(terminal);
                 }
+                let Some(chat) = self.chat(terminal) else {
+                    return;
+                };
+                chat.answered(result);
+                self.settle_turn(terminal);
                 terminal
             }
             Incoming::Permission {

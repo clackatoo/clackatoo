@@ -96,6 +96,10 @@ struct Remote {
     /// Whether it has been said to be [`Silent`](QuicEvent::Silent),
     /// since last heard.
     silent: bool,
+    /// Whether it has been closed, and the packet saying so hasn't gone
+    /// yet: QUIC may hold it back, as it does anything past three times
+    /// what came from an address it hasn't checked yet.
+    closing: bool,
 }
 
 /// Setting up the endpoint failed.
@@ -201,6 +205,7 @@ impl QuicServer {
                                 validated: Some(from),
                                 heard: now,
                                 silent: false,
+                                closing: false,
                             },
                         );
                         self.touched.push(handle);
@@ -399,6 +404,7 @@ impl QuicServer {
             remote
                 .connection
                 .close(now, VarInt::from_u32(0), reason.as_bytes().to_vec().into());
+            remote.closing = true;
             self.touched.push(handle);
         }
     }
@@ -432,6 +438,12 @@ impl QuicServer {
         }
     }
 
+    /// Whether a connection has been closed, and the packet saying so
+    /// hasn't gone yet.
+    pub(crate) fn closes_waiting(&self) -> bool {
+        self.connections.values().any(|remote| remote.closing)
+    }
+
     /// Hands each packet ready to go to `send`, with where it goes.
     pub(crate) fn transmit(&mut self, now: Instant, mut send: impl FnMut(SocketAddr, &[u8])) {
         for (address, packet) in self.answers.drain(..) {
@@ -447,6 +459,9 @@ impl QuicServer {
                 };
                 let packet = &self.buffer[..transmit.size];
                 send(transmit.destination, packet);
+                // Once closed, all a connection sends is the packet saying
+                // so, but for a check of a new path it had waiting.
+                remote.closing = false;
                 // A carrier loses nothing.
                 if carrier_id(transmit.destination).is_none()
                     && remote.validated == Some(transmit.destination)
