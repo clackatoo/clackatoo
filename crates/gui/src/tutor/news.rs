@@ -125,6 +125,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: ":set noclaudetask takes away Claude Code's hidden Task helpers, so it hands work on in chats you can watch",
     },
+    News {
+        id: "remote-reconnect",
+        date: "2026-10-13",
+        lesson: "remote",
+        what: "Remote windows ride out bad networks, reconnect by themselves, and keep what you typed into editors",
+    },
 ];
 
 impl News {
