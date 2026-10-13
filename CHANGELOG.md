@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026.10.5 (2026-10-13)
+
+### Features
+
+- **remote:** a window meeting a newer daemon updates clackatoo with Enter, and opens again connected where it was (6cefcbd)
+- **chat:** the time between turns sent far apart, Copy under each answer, and drag-selecting past the edge scrolls (c06d0e7)
+
+### Fixes
+
+- **remote:** updating for a newer daemon reopens only once a build is put in place, ignores held keys, and runs one update at a time (3e8e7f4)
+- **remote:** a window whose program an earlier update replaced opens again as it, rather than saying nothing is newer (ea7c529)
+- **chat:** losing the focus ends a drag, the files line fits after Copy, the time zone is kept, and no time over a move to another agent (424dac8)
+
 ## 2026.10.4 (2026-10-13)
 
 ### Features
