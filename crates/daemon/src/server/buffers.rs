@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use clackatoo_protocol::{
     Author, BufferId, BufferSnapshot, BufferUpdate, Change, Content, Edit, Error, Event, OpenFile,
-    PaneId, Response, ServerMessage, frame,
+    PaneId, Response, Resume, ServerMessage, frame,
 };
 use clackatoo_syntax::{Found, Highlighted, Syntax};
 use clackatoo_text::{Highlights, Hunks};
@@ -48,11 +48,20 @@ pub(super) struct BufferSlot {
     /// it's no longer UTF-8: windows aren't asked to read it again until
     /// it changes.
     pub(super) unreadable: Option<DiskStamp>,
-    /// For each window that has sent it changes, the number of the last
-    /// one dealt with, made or not: a window that lost its connection
-    /// learns from it which of its changes arrived (see
+    /// For each window that has sent it changes, the last one dealt with,
+    /// made or not: a window that lost its connection learns from it which
+    /// of its changes arrived (see
     /// [`BufferSnapshot::applied`](clackatoo_protocol::BufferSnapshot)).
-    pub(super) applied: HashMap<u64, u64>,
+    pub(super) applied: HashMap<u64, WindowChange>,
+}
+
+/// The last change a window sent a buffer that the daemon dealt with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WindowChange {
+    /// The window's number for it.
+    pub(super) seq: u64,
+    /// The version it made, if it made one.
+    pub(super) landed: Option<u64>,
 }
 
 /// What a buffer knew of its file when something other than an agent
@@ -133,8 +142,15 @@ impl Daemon {
         Ok(id)
     }
 
-    /// Starts sending `id` to the client at `token`, with a snapshot.
-    pub(super) fn attach_buffer(&mut self, token: Token, id: BufferId) -> Result<(), Error> {
+    /// Starts sending `id` to the client at `token`, with a snapshot, or,
+    /// for a window attaching again with `resume`, the edits since what it
+    /// knew, if they're still to hand.
+    pub(super) fn attach_buffer(
+        &mut self,
+        token: Token,
+        id: BufferId,
+        resume: Option<Resume>,
+    ) -> Result<(), Error> {
         let slot = self.buffers.get_mut(&id).ok_or(Error::NoSuchBuffer(id))?;
         if !slot.viewers.contains(&token) {
             slot.viewers.push(token);
@@ -148,15 +164,17 @@ impl Daemon {
         self.open_in_server(id);
         // It came through an upgrade, which the thread comparing doesn't.
         self.compare_buffer(id);
-        self.send_snapshot(token, id);
+        self.send_snapshot(token, id, resume);
         self.offer_install(token, id);
         self.tell_if_changed_on_disk(token, id);
         Ok(())
     }
 
-    /// Sends the client at `token` all of buffer `id`: its text, then its
-    /// highlights, diagnostics and hunks.
-    fn send_snapshot(&mut self, token: Token, id: BufferId) {
+    /// Sends the client at `token` all of buffer `id`: its text, or with
+    /// `resume`, from this daemon, the edits since the version it knew if
+    /// the history still reaches it; then its highlights, diagnostics and
+    /// hunks.
+    fn send_snapshot(&mut self, token: Token, id: BufferId, resume: Option<Resume>) {
         let Some(slot) = self.buffers.get(&id) else {
             return;
         };
@@ -165,10 +183,27 @@ impl Daemon {
             Some(Source::Client(client)) => client.window,
             _ => None,
         };
-        let snapshot = BufferUpdate::Snapshot(BufferSnapshot {
-            applied: window.and_then(|window| slot.applied.get(&window).copied()),
-            ..slot.buffer.snapshot()
-        });
+        let change = window.and_then(|window| slot.applied.get(&window).copied());
+        let since = (resume)
+            .filter(|resume| resume.daemon == self.id)
+            .and_then(|resume| slot.buffer.edits_since(resume.version))
+            .map(|edits| edits.cloned().collect::<Vec<_>>());
+        let snapshot = match since {
+            Some(edits) => BufferUpdate::Resumed {
+                daemon: self.id,
+                path: slot.buffer.path().display().to_string(),
+                edits,
+                applied: change.map(|change| change.seq),
+                landed: change.and_then(|change| change.landed),
+                modified: slot.buffer.modified(),
+            },
+            None => BufferUpdate::Snapshot(BufferSnapshot {
+                applied: change.map(|change| change.seq),
+                landed: change.and_then(|change| change.landed),
+                daemon: self.id,
+                ..slot.buffer.snapshot()
+            }),
+        };
         let highlights = (!slot.highlights.spans().is_empty()).then(|| BufferUpdate::Highlights {
             version,
             start: 0,
@@ -187,6 +222,27 @@ impl Daemon {
         let after = (highlights.into_iter()).chain(diagnostics).chain(hunks);
         for update in after.chain(features) {
             self.tell(token, id, update);
+        }
+    }
+
+    /// Takes off buffer `id`'s viewers any other connection that attached
+    /// as `window`, which the client at `token` is: one the window lost.
+    /// Anything still on its way from it, such as a change sent just as it
+    /// went, is no longer taken, as the window sends it again.
+    pub(super) fn forget_lost_connections(&mut self, token: Token, id: BufferId, window: u64) {
+        let lost: Vec<Token> = (self.buffers.get(&id))
+            .map(|slot| slot.viewers.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&viewer| {
+                viewer != token
+                    && matches!(self.sources.get(viewer.0),
+                        Some(Source::Client(client)) if client.window == Some(window))
+            })
+            .collect();
+        for viewer in lost {
+            log::info!("buffer {id}: a connection its window lost is no longer followed");
+            self.detach_buffer(viewer, id);
         }
     }
 
@@ -212,10 +268,13 @@ impl Daemon {
             return;
         }
         // Dealt with, whatever comes of it, so it's never sent again.
-        if let Some(Source::Client(client)) = self.sources.get(token.0)
-            && let Some(window) = client.window
-        {
-            slot.applied.insert(window, seq);
+        let window = match self.sources.get(token.0) {
+            Some(Source::Client(client)) => client.window,
+            _ => None,
+        };
+        if let Some(window) = window {
+            slot.applied
+                .insert(window, WindowChange { seq, landed: None });
         }
         let buffer = &mut slot.buffer;
         let made = match change {
@@ -228,6 +287,12 @@ impl Daemon {
         };
         match made {
             Ok((Some(Made { version, edit }), acked)) => {
+                if let Some(window) = window
+                    && let Some(change) =
+                        (self.buffers.get_mut(&id)).and_then(|slot| slot.applied.get_mut(&window))
+                {
+                    change.landed = Some(version);
+                }
                 self.edited(id, version, &edit);
                 let answer = if acked {
                     BufferUpdate::Acked { version, seq }
@@ -253,7 +318,7 @@ impl Daemon {
             Err(err) => {
                 // The client's copy is wrong somehow: start it again.
                 log::warn!("buffer {id}: an edit couldn't be made: {err}");
-                self.send_snapshot(token, id);
+                self.send_snapshot(token, id, None);
             }
         }
     }

@@ -270,7 +270,15 @@ impl Desk {
         for buffer in new {
             self.editors.attached.insert(buffer);
             let window = self.editors.window.0;
-            self.request(Request::AttachBuffer { buffer, window }, Asked::Quiet);
+            // A copy the window had before it lost a connection is brought
+            // up to date from what it knew.
+            let resume = (self.editors.buffers.get(&buffer)).and_then(BufferCopy::resume);
+            let attach = Request::AttachBuffer {
+                buffer,
+                window,
+                resume,
+            };
+            self.request(attach, Asked::Quiet);
         }
     }
 
@@ -460,6 +468,7 @@ impl Desk {
         for pane in &showing {
             editors.panes.get_mut(pane).expect("just found").hold(copy);
         }
+        let was = copy.path().to_owned();
         let mut heard = copy.update(update);
         // Completions, which may be thousands, are no format's answer.
         let answered = match &heard {
@@ -474,6 +483,11 @@ impl Desk {
                 let ours = matches!(heard, Heard::Reversed(_));
                 let made = std::slice::from_ref(edit);
                 follow_places(&mut self.jumps, marks, copy, made, ours);
+                // Moved too, while disconnected.
+                if copy.path() != was {
+                    self.jumps.moved(&was, copy.path());
+                    marks.moved(&was, copy.path());
+                }
             }
             Heard::Replaced => {
                 self.jumps.replaced(copy.path(), copy.text());
@@ -482,6 +496,9 @@ impl Desk {
             Heard::Moved { from } => {
                 self.jumps.moved(from, copy.path());
                 marks.moved(from, copy.path());
+            }
+            Heard::Kept { .. } | Heard::Rejoined => {
+                self.message = kept_across_a_reconnect(&heard, copy.path());
             }
             _ => {}
         }
@@ -868,7 +885,12 @@ impl Desk {
         // Attaching again sends a fresh snapshot, which puts it right.
         if astray && self.connected {
             let window = self.editors.window.0;
-            self.request(Request::AttachBuffer { buffer, window }, Asked::Quiet);
+            let attach = Request::AttachBuffer {
+                buffer,
+                window,
+                resume: None,
+            };
+            self.request(attach, Asked::Quiet);
         }
         if let Some((keys, times)) = asked_macro {
             self.type_macro(&keys, times);
@@ -1209,10 +1231,32 @@ impl Desk {
             self.message = Some("this pane has no file to write".into());
             return;
         };
+        let buffer = editor.buffer();
+        // Text the window kept in place of the daemon's, after a lost
+        // connection, replaces it only if asked, as the daemon's may have
+        // changes the window hasn't: then it goes first, as one change, for
+        // the file to have it.
+        if let Some(copy) = self.editors.buffers.get_mut(&buffer)
+            && let Some(why) = copy.kept_why()
+        {
+            if !force {
+                self.message = Some(format!(
+                    "{why}: `:w!` to replace it with this window's text, or `:e!` to take the \
+                     daemon's"
+                ));
+                return;
+            }
+            if !self.connected {
+                self.message = Some("not connected: the file can't be written yet".into());
+                return;
+            }
+            copy.resend_kept();
+            let change = copy.take_outbox();
+            self.outbox.extend(change);
+        }
         if self.options.formatonsave {
             return self.format_then_write(force, quit);
         }
-        let buffer = editor.buffer();
         let then_close = quit.then_some(shown.pane);
         self.request(
             Request::Save { buffer, force },
@@ -1271,6 +1315,13 @@ impl Desk {
         match self.focused_editor() {
             Some((editor, _)) => {
                 let buffer = editor.buffer();
+                // Text the window kept in place of the daemon's gives way to
+                // it.
+                let copy = self.editors.buffers.get_mut(&buffer);
+                if let Some(snapshot) = copy.and_then(BufferCopy::take_daemons) {
+                    self.copy_changed(buffer, BufferUpdate::Snapshot(snapshot));
+                    return;
+                }
                 self.request(Request::Discard { buffer }, Asked::Command);
             }
             None => self.message = Some("this pane has no file".into()),
@@ -1308,5 +1359,20 @@ impl Desk {
     /// Forgets what was attached on the last connection.
     pub(super) fn editors_reconnected(&mut self) {
         self.editors.reconnected();
+    }
+}
+
+/// What the bar says of the window's unsaved changes to the file at
+/// `path`, kept across a lost connection, as `heard` says.
+fn kept_across_a_reconnect(heard: &Heard, path: &str) -> Option<String> {
+    match heard {
+        Heard::Kept { why } => Some(format!(
+            "{why}; your unsaved changes to {path} are kept in this window: `:w!` to replace it \
+             with them, or `:e!` to take the daemon's"
+        )),
+        Heard::Rejoined => Some(format!(
+            "reconnected; your unsaved changes to {path} were kept"
+        )),
+        _ => None,
     }
 }

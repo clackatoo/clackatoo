@@ -3477,7 +3477,7 @@ impl Editor {
                     self.signed(answer);
                 }
             }
-            Heard::Nothing | Heard::Moved { .. } => {}
+            Heard::Nothing | Heard::Moved { .. } | Heard::Kept { .. } | Heard::Rejoined => {}
         }
         // A new text, or the window's own undo, closes the panel, as an
         // edit typed does, and the menu.

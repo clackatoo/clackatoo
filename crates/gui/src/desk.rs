@@ -3008,6 +3008,27 @@ mod tests {
         );
     }
 
+    /// The changes `buffer_changes` found, without their numbers, which
+    /// are counted for the whole window, across tests too.
+    fn changes_only(
+        sent: Vec<(u64, clackatoo_protocol::Change)>,
+    ) -> Vec<clackatoo_protocol::Change> {
+        sent.into_iter().map(|(_, change)| change).collect()
+    }
+
+    /// A buffer's first snapshot: `text`, from the file at `path`.
+    fn snapshot_of(path: &str, text: &str) -> clackatoo_protocol::BufferUpdate {
+        clackatoo_protocol::BufferUpdate::Snapshot(clackatoo_protocol::BufferSnapshot {
+            path: path.into(),
+            text: text.into(),
+            version: 0,
+            modified: false,
+            applied: None,
+            landed: None,
+            daemon: 0,
+        })
+    }
+
     /// Types `text`, a character at a time.
     fn type_text(desk: &mut Desk, text: &str) {
         for ch in text.chars() {
@@ -3049,6 +3070,8 @@ mod tests {
                 version,
                 modified: false,
                 applied,
+                landed: None,
+                daemon: 5,
             })
         };
         let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
@@ -3067,9 +3090,25 @@ mod tests {
         assert!(buffer_changes(&mut desk).is_empty(), "nowhere to send it");
         desk.connected(list(), false);
         let window = desk.editors.window.0;
-        assert!(answer_all(&mut desk).contains(&Request::AttachBuffer { buffer, window }));
+        let resume = Some(clackatoo_protocol::Resume {
+            daemon: 5,
+            version: 0,
+        });
+        assert!(answer_all(&mut desk).contains(&Request::AttachBuffer {
+            buffer,
+            window,
+            resume
+        }));
         // The first change never arrived; someone else's did.
-        desk.buffer_changed(buffer, snapshot("Yx\n", 1, None));
+        let resumed = BufferUpdate::Resumed {
+            daemon: 5,
+            path: "/notes".into(),
+            edits: vec![clackatoo_protocol::Edit::replace(2, 0, "", "Y")],
+            applied: None,
+            landed: None,
+            modified: true,
+        };
+        desk.buffer_changed(buffer, resumed);
         assert_eq!(editor_text(&desk), "Yxab\n", "both, once");
         let resent: Vec<Change> = buffer_changes(&mut desk)
             .into_iter()
@@ -3079,6 +3118,120 @@ mod tests {
             matches!(&resent[..], [Change::Edit { base: 1, .. }]),
             "{resent:?}"
         );
+    }
+
+    /// A window with buffer 7 open at "x\n", from daemon 5, which typed
+    /// `typed` and lost its connection; then daemon 6, restarted, which
+    /// has `text` for it.
+    fn typed_across_a_restart(typed: &str, text: &str) -> Desk {
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+        });
+        let snapshot = |text: &str, daemon| {
+            clackatoo_protocol::BufferUpdate::Snapshot(clackatoo_protocol::BufferSnapshot {
+                path: "/notes".into(),
+                text: text.into(),
+                version: 0,
+                modified: false,
+                applied: None,
+                landed: None,
+                daemon,
+            })
+        };
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        desk.buffer_changed(buffer, snapshot("x\n", 5));
+        type_text(&mut desk, typed);
+        normal_mode(&mut desk);
+        desk.lost();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        desk.buffer_changed(buffer, snapshot(text, 6));
+        desk
+    }
+
+    /// What a window sent of its changes to buffers, and whether it asked
+    /// to save, and if so, forced.
+    fn edits_and_save(desk: &mut Desk) -> (Vec<clackatoo_protocol::Change>, Option<bool>) {
+        let mut save = None;
+        let mut edits = Vec::new();
+        for message in desk.take_outbox() {
+            match message {
+                ClientMessage::Edit { change, .. } => {
+                    assert!(save.is_none(), "an edit after the save");
+                    edits.push(change);
+                }
+                ClientMessage::Request(Request::Save { force, .. }) => save = Some(force),
+                _ => {}
+            }
+        }
+        (edits, save)
+    }
+
+    #[test]
+    fn after_a_daemon_restarts_an_editors_changes_go_again_if_the_file_is_as_it_was() {
+        let mut desk = typed_across_a_restart("Aa", "x\n");
+        assert_eq!(editor_text(&desk), "xa\n");
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("reconnected; your unsaved changes to /notes were kept")
+        );
+        let (edits, save) = edits_and_save(&mut desk);
+        assert_eq!(edits.len(), 1, "sent, with no :w");
+        assert_eq!(save, None);
+    }
+
+    #[test]
+    fn two_windows_keeping_their_text_after_a_restart_never_write_over_each_other() {
+        use clackatoo_protocol::{Author, BufferUpdate, Change};
+
+        let mut first = typed_across_a_restart("Aa", "other\n");
+        let mut second = typed_across_a_restart("Ab", "other\n");
+        assert_eq!(editor_text(&first), "xa\n", "kept");
+        assert_eq!(
+            first.message.as_deref(),
+            Some(
+                "the file changed since the daemon restarted; your unsaved changes to /notes are \
+                 kept in this window: `:w!` to replace it with them, or `:e!` to take the daemon's"
+            )
+        );
+        assert_eq!(
+            edits_and_save(&mut first),
+            (vec![], None),
+            "nothing unasked"
+        );
+        let refused = "the file changed since the daemon restarted: `:w!` to replace it with this \
+                       window's text, or `:e!` to take the daemon's";
+        command(&mut first, "w");
+        assert_eq!(first.message.as_deref(), Some(refused));
+        assert_eq!(edits_and_save(&mut first), (vec![], None));
+        // Asked to, the first replaces the daemon's text with its own.
+        command(&mut first, "w!");
+        let (edits, save) = edits_and_save(&mut first);
+        assert_eq!(save, Some(true));
+        let [Change::Edit { edit, .. }] = &edits[..] else {
+            panic!("one edit: {edits:?}");
+        };
+        let edited = BufferUpdate::Edited {
+            version: 1,
+            edit: edit.clone(),
+            author: Author::User,
+            answers: None,
+        };
+        second.buffer_changed(BufferId(7), edited);
+        // The second's `:w` can't put the first's back as it was.
+        command(&mut second, "w");
+        assert_eq!(second.message.as_deref(), Some(refused));
+        assert_eq!(edits_and_save(&mut second), (vec![], None));
+        assert_eq!(editor_text(&second), "xb\n");
+        // `:e!` takes the daemon's, the first's.
+        command(&mut second, "e!");
+        assert_eq!(editor_text(&second), "xa\n");
+        assert_eq!(edits_and_save(&mut second), (vec![], None));
     }
 
     #[test]
@@ -3122,6 +3275,8 @@ mod tests {
                 version: 0,
                 modified: false,
                 applied: None,
+                landed: None,
+                daemon: 0,
             }),
         );
         let features = ServerFeatures {
@@ -3282,7 +3437,7 @@ mod tests {
 
     #[test]
     fn a_file_is_edited_written_and_kept_open_while_it_has_changes() {
-        use clackatoo_protocol::{BufferSnapshot, BufferUpdate, Change, Edit};
+        use clackatoo_protocol::{BufferUpdate, Change, Edit};
 
         let buffer = BufferId(7);
         let layout = Layout::Pane(LayoutPane {
@@ -3305,24 +3460,15 @@ mod tests {
             workspaces(vec![workspace(1, "w", vec![tab(1, layout)])]),
             false,
         );
-        let asked = answer_all(&mut desk);
-        assert!(
-            asked.contains(&Request::AttachBuffer {
-                buffer,
-                window: desk.editors.window.0
-            }),
-            "{asked:?}"
-        );
-        desk.buffer_changed(
+        let window = desk.editors.window.0;
+        let attach = Request::AttachBuffer {
             buffer,
-            BufferUpdate::Snapshot(BufferSnapshot {
-                path: "/src/notes.txt".into(),
-                text: "notes\n".into(),
-                version: 0,
-                modified: false,
-                applied: None,
-            }),
-        );
+            window,
+            resume: None,
+        };
+        let asked = answer_all(&mut desk);
+        assert!(asked.contains(&attach), "{asked:?}");
+        desk.buffer_changed(buffer, snapshot_of("/src/notes.txt", "notes\n"));
         assert_eq!(desk.title(), Some("notes.txt"));
 
         type_text(&mut desk, "A!");
@@ -3335,18 +3481,24 @@ mod tests {
         );
         let sent = buffer_changes(&mut desk);
         let edit = Edit::replace(6, 5, "", "!");
+        let [(seq, change)] = &sent[..] else {
+            panic!("one change: {sent:?}");
+        };
         assert_eq!(
-            sent,
-            [(
-                0,
-                Change::Edit {
-                    edit,
-                    base: 0,
-                    step: true
-                }
-            )]
+            *change,
+            Change::Edit {
+                edit,
+                base: 0,
+                step: true
+            }
         );
-        desk.buffer_changed(buffer, BufferUpdate::Acked { version: 1, seq: 0 });
+        desk.buffer_changed(
+            buffer,
+            BufferUpdate::Acked {
+                version: 1,
+                seq: *seq,
+            },
+        );
         desk.buffer_changed(buffer, BufferUpdate::Modified(true));
         let Status::Tabs { mode, note, .. } = desk.status() else {
             panic!("the tabs");
@@ -3416,6 +3568,8 @@ mod tests {
             version: 0,
             modified: false,
             applied: None,
+            landed: None,
+            daemon: 0,
         };
         desk.buffer_changed(
             BufferId(buffer),
@@ -3568,8 +3722,15 @@ mod tests {
         let mut desk = desk(one_tab(side_by_side(vec![file_pane(1, 7), pane(2)])));
         load(&mut desk, 7, "/t.txt", "abc\nxyz\n");
         type_text(&mut desk, "Ad");
-        assert_eq!(buffer_changes(&mut desk).len(), 1);
-        desk.buffer_changed(BufferId(7), BufferUpdate::Acked { version: 1, seq: 0 });
+        let sent = buffer_changes(&mut desk);
+        assert_eq!(sent.len(), 1);
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Acked {
+                version: 1,
+                seq: sent[0].0,
+            },
+        );
         // To the terminal and back, still in insert mode.
         ctrl_b(&mut desk, "l");
         assert_eq!(shown_pane(&desk), PaneId(2));
@@ -3852,6 +4013,8 @@ mod tests {
                 version: 0,
                 modified: false,
                 applied: None,
+                landed: None,
+                daemon: 0,
             }),
         );
         answer_all(&mut desk);
@@ -3890,8 +4053,22 @@ mod tests {
         // Its edit first, which the question waits behind.
         let changes = buffer_changes(&mut desk);
         assert_eq!(changes.len(), 1, "{changes:?}");
-        desk.buffer_changed(BufferId(7), BufferUpdate::Acked { version: 1, seq: 0 });
-        let asked: Vec<(u64, usize, Query)> = (desk.take_outbox().into_iter())
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Acked {
+                version: 1,
+                seq: changes[0].0,
+            },
+        );
+        let outbox = desk.take_outbox();
+        // The x's edit goes on, after the first.
+        let x = (outbox.iter())
+            .find_map(|message| match message {
+                ClientMessage::Edit { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .expect("the x's edit");
+        let asked: Vec<(u64, usize, Query)> = (outbox.into_iter())
             .filter_map(|message| match message {
                 ClientMessage::Query { id, at, query, .. } => Some((id, at, query)),
                 _ => None,
@@ -3913,9 +4090,9 @@ mod tests {
         assert!(desk.buffer_changed(BufferId(7), answer));
         assert_eq!(editor_text(&desk), "{\n    x\n}\n");
         // Sent once the x is, as part of the same change.
-        desk.buffer_changed(BufferId(7), BufferUpdate::Acked { version: 2, seq: 1 });
+        desk.buffer_changed(BufferId(7), BufferUpdate::Acked { version: 2, seq: x });
         let changes = buffer_changes(&mut desk);
-        let [(2, Change::Edit { step: false, .. })] = changes[..] else {
+        let [(_, Change::Edit { step: false, .. })] = changes[..] else {
             panic!("sent {changes:?}");
         };
     }
@@ -4692,15 +4869,12 @@ mod tests {
         type_keys(&mut desk, " hr");
         let edit = Edit::replace(4, 2, "B\n", "b\n");
         assert_eq!(
-            buffer_changes(&mut desk),
-            [(
-                0,
-                Change::Edit {
-                    edit,
-                    base: 0,
-                    step: true
-                }
-            )]
+            changes_only(buffer_changes(&mut desk)),
+            [Change::Edit {
+                edit,
+                base: 0,
+                step: true
+            }]
         );
         // And from the command line, as gitsigns.nvim's command.
         command(&mut desk, "Gitsigns preview_hunk");
@@ -4717,15 +4891,12 @@ mod tests {
         assert!(desk.finder_view((10, 60), None).is_none());
         let edit = Edit::replace(12, 0, "a", "");
         assert_eq!(
-            buffer_changes(&mut desk),
-            [(
-                0,
-                Change::Edit {
-                    edit,
-                    base: 0,
-                    step: true
-                }
-            )]
+            changes_only(buffer_changes(&mut desk)),
+            [Change::Edit {
+                edit,
+                base: 0,
+                step: true
+            }]
         );
         // And so `f:` finds a colon rather than opening the command line.
         let mut desk = editing("/p/b.txt", "a:b\n");

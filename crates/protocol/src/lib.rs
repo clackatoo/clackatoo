@@ -61,7 +61,7 @@ pub use board::{
 };
 pub use buffer::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, CodeAction, CompletionItem,
-    FileLocation, OpenFile, Query, ServerFeatures, TextChange, Trigger,
+    FileLocation, OpenFile, Query, Resume, ServerFeatures, TextChange, Trigger,
 };
 pub use chat::{
     ChatAction, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind, Diff, Item, Location, Outcome,
@@ -584,8 +584,14 @@ pub enum Request {
         /// says in the snapshot, so a window that lost its connection with
         /// changes waiting knows which arrived (see
         /// [`BufferSnapshot::applied`]). A change's number (`seq` in
-        /// [`ClientMessage::Edit`]) only ever goes up, for a window.
+        /// [`ClientMessage::Edit`]) only ever goes up, for a window,
+        /// across every buffer. Any other connection that attached as the
+        /// same window is one it lost: the daemon takes no more changes
+        /// from it.
         window: u64,
+        /// What the window knew of the buffer before it lost a connection,
+        /// to be brought up to date from: see [`BufferUpdate::Resumed`].
+        resume: Option<Resume>,
     },
     /// Stops sending the buffer.
     DetachBuffer {

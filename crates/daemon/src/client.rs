@@ -298,7 +298,11 @@ impl Client {
     ///
     /// See [`ClientError`].
     pub fn attach_buffer_as(&mut self, buffer: BufferId, window: u64) -> Result<(), ClientError> {
-        match self.request(&Request::AttachBuffer { buffer, window })? {
+        match self.request(&Request::AttachBuffer {
+            buffer,
+            window,
+            resume: None,
+        })? {
             Response::Done => Ok(()),
             other => Err(unexpected(other)),
         }

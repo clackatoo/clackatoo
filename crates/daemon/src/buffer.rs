@@ -194,6 +194,8 @@ impl Buffer {
             version: self.history.version(),
             modified: self.modified,
             applied: None,
+            landed: None,
+            daemon: 0,
         }
     }
 

@@ -18,7 +18,7 @@ use clackatoo_protocol::{
     Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
     Found, FoundBuffer, FoundLine, GitMark, Item, Kind, Layout, Location, NewAgent, NewTerminal,
     OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, Query,
-    Request, Response, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span,
+    Request, Response, Resume, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span,
     TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger,
     TurnFiles, TurnFilesState, View, ViewUpdate, Workspaces,
 };
@@ -2659,6 +2659,84 @@ fn a_window_attaching_again_hears_which_of_its_changes_arrived() {
     // Another window hears nothing of the first's.
     let mut other = daemon.client();
     assert_eq!(attach_buffer(&mut other, buffer).applied, None);
+}
+
+#[test]
+fn a_window_attaching_again_gets_the_edits_since_and_its_lost_connection_is_let_go() {
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("notes.txt"), "one\n").unwrap();
+    let window = clackatoo_daemon::random_window();
+    let mut first = daemon.client();
+    let buffer = open_attached(&mut first, dir, "notes.txt");
+    first
+        .request(&Request::AttachBuffer {
+            buffer,
+            window,
+            resume: None,
+        })
+        .unwrap();
+    let snapshot = loop {
+        if let BufferUpdate::Snapshot(snapshot) = next_buffer_update(&mut first) {
+            break snapshot;
+        }
+    };
+    send_change(&mut first, buffer, 10, insert(4, 0, "a", snapshot.version));
+    let landed = loop {
+        if let BufferUpdate::Acked { version, seq: 10 } = next_buffer_update(&mut first) {
+            break version;
+        }
+    };
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    send_change(&mut other, buffer, 0, insert(5, 5, "b", landed));
+
+    // The window, on a new connection, is sent the edits since what it
+    // knew, its own among them.
+    let mut again = daemon.client();
+    let attach = |again: &mut Client, daemon_id| {
+        again
+            .request(&Request::AttachBuffer {
+                buffer,
+                window,
+                resume: Some(Resume {
+                    daemon: daemon_id,
+                    version: snapshot.version,
+                }),
+            })
+            .unwrap();
+        next_buffer_update(again)
+    };
+    match attach(&mut again, snapshot.daemon) {
+        BufferUpdate::Resumed {
+            daemon: id,
+            edits,
+            applied,
+            landed: own,
+            path,
+            ..
+        } => {
+            assert_eq!(id, snapshot.daemon);
+            assert_eq!(path, snapshot.path);
+            assert_eq!(edits.len(), 2);
+            assert_eq!((applied, own), (Some(10), Some(landed)));
+        }
+        other => panic!("expected the edits since, got {other:?}"),
+    }
+    // Asked as of another daemon, it's the whole buffer.
+    let mut stranger = daemon.client();
+    assert!(matches!(
+        attach(&mut stranger, snapshot.daemon ^ 1),
+        BufferUpdate::Snapshot(_)
+    ));
+
+    // A change from the connection the window lost, arriving late, isn't
+    // made: the window sends it again itself.
+    send_change(&mut first, buffer, 11, insert(6, 0, "late", landed + 1));
+    // Dealt with, as the daemon answers in order.
+    first.list_terminals().unwrap();
+    let mut later = daemon.client();
+    assert_eq!(attach_buffer(&mut later, buffer).text, "aone\nb");
 }
 
 #[test]
@@ -5553,7 +5631,11 @@ fn a_buffer_wont_write_over_changes_made_on_disk_and_outlives_its_panes_while_mo
     assert_eq!(attach_buffer(&mut client, buffer).text, "fn b() {}\n");
     client.close_pane(reopened).unwrap();
     let gone = client
-        .request(&Request::AttachBuffer { buffer, window: 1 })
+        .request(&Request::AttachBuffer {
+            buffer,
+            window: 1,
+            resume: None,
+        })
         .unwrap();
     assert_eq!(gone, Response::Error(Error::NoSuchBuffer(buffer)));
 }
@@ -5591,6 +5673,7 @@ fn a_pane_shows_another_file_in_place_as_e_does() {
         .request(&Request::AttachBuffer {
             buffer: a,
             window: 1,
+            resume: None,
         })
         .unwrap();
     assert_eq!(gone, Response::Error(Error::NoSuchBuffer(a)));
@@ -5603,6 +5686,7 @@ fn a_pane_shows_another_file_in_place_as_e_does() {
         .request(&Request::AttachBuffer {
             buffer: b,
             window: 1,
+            resume: None,
         })
         .unwrap();
     assert_eq!(kept, Response::Done);
@@ -7047,6 +7131,7 @@ fn a_file_moved_over_one_open_takes_its_panes_and_one_with_changes_is_never_writ
     let gone = client.request(&Request::AttachBuffer {
         buffer: over,
         window: 1,
+        resume: None,
     });
     assert!(
         matches!(gone, Ok(Response::Error(Error::NoSuchBuffer(_)))),

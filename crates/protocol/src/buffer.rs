@@ -94,6 +94,25 @@ pub struct BufferSnapshot {
     /// up to it are in the text, or were nothing to make, and any after it
     /// never arrived, as when a connection was lost with one on its way.
     pub applied: Option<u64>,
+    /// The version the change numbered `applied` made, if it made one. An
+    /// edit dealt with that made none couldn't be made: it isn't in the
+    /// text.
+    pub landed: Option<u64>,
+    /// The daemon's own number, chosen at random when it first started
+    /// and kept through upgrades: a window that sees another knows the
+    /// daemon was restarted, and its buffers are no longer the ones it had.
+    pub daemon: u64,
+}
+
+/// What a window that lost its connection knows of a buffer, to be
+/// brought up to date from rather than sent the whole buffer again (see
+/// [`BufferUpdate::Resumed`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resume {
+    /// The daemon it knew the buffer from: see [`BufferSnapshot::daemon`].
+    pub daemon: u64,
+    /// The last version of the buffer it heard of.
+    pub version: u64,
 }
 
 /// A change a window makes to a buffer.
@@ -123,6 +142,27 @@ pub enum BufferUpdate {
     /// couldn't be made. Changes it sent and hadn't heard back about are
     /// gone.
     Snapshot(BufferSnapshot),
+    /// What changed since the version a window attaching again knew (see
+    /// [`Resume`]): every edit since, in order, the first making the
+    /// version after it, so the window can bring its copy, and the changes
+    /// it still has waiting, up to date as if it had never been away.
+    /// Sent in place of a snapshot when the daemon still has the edits.
+    Resumed {
+        /// The daemon's number: see [`BufferSnapshot::daemon`].
+        daemon: u64,
+        /// The file's path, which may have moved meanwhile.
+        path: String,
+        /// The edits, each made to the text the one before made.
+        edits: Vec<Edit>,
+        /// As [`BufferSnapshot::applied`].
+        applied: Option<u64>,
+        /// The version the window's change numbered `applied` made, if it
+        /// made one: that edit is among `edits`, and is the window's own.
+        /// An edit dealt with that made none couldn't be made.
+        landed: Option<u64>,
+        /// Whether the buffer has changes that aren't saved.
+        modified: bool,
+    },
     /// The window's own edit, which it numbered `seq`, has been made, and
     /// made `version`.
     Acked {

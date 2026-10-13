@@ -114,6 +114,10 @@ pub(crate) struct State {
     pub(crate) edits: EditLog,
     /// The last change each window sent each buffer. Since version 14.
     pub(crate) applied: Vec<Applied>,
+    /// The daemon's own number, chosen at random when it first started:
+    /// see [`BufferSnapshot::daemon`](clackatoo_protocol::BufferSnapshot).
+    /// Since version 14; 0 before, for the build reading it to choose one.
+    pub(crate) daemon: u64,
 }
 
 /// The number of the last change window `window` sent buffer `buffer`
@@ -123,6 +127,8 @@ pub(crate) struct Applied {
     pub(crate) buffer: u32,
     pub(crate) window: u64,
     pub(crate) seq: u64,
+    /// The version it made, if it made one.
+    pub(crate) landed: Option<u64>,
 }
 
 /// What agents changed in files, by chat and turn. Since version 12.
@@ -1051,6 +1057,7 @@ mod v7 {
                 explorers: Vec::new(),
                 edits: super::EditLog::default(),
                 applied: Vec::new(),
+                daemon: 0,
             }
         }
     }
@@ -1122,6 +1129,7 @@ mod v8 {
                 explorers: Vec::new(),
                 edits: super::EditLog::default(),
                 applied: Vec::new(),
+                daemon: 0,
             }
         }
     }
@@ -1163,6 +1171,7 @@ mod v9 {
                 explorers: Vec::new(),
                 edits: super::EditLog::default(),
                 applied: Vec::new(),
+                daemon: 0,
             }
         }
     }
@@ -1206,6 +1215,7 @@ mod v11 {
                 explorers: state.explorers,
                 edits: super::EditLog::default(),
                 applied: Vec::new(),
+                daemon: 0,
             }
         }
     }
@@ -1249,6 +1259,7 @@ mod v13 {
                 explorers: state.explorers,
                 edits: state.edits,
                 applied: Vec::new(),
+                daemon: 0,
             }
         }
     }
@@ -1328,6 +1339,7 @@ mod v12 {
                 explorers: state.explorers,
                 edits: state.edits,
                 applied: Vec::new(),
+                daemon: 0,
             }
         }
     }
@@ -1405,6 +1417,7 @@ mod v10 {
                 explorers: state.explorers,
                 edits: super::EditLog::default(),
                 applied: Vec::new(),
+                daemon: 0,
             }
         }
     }
@@ -1530,7 +1543,9 @@ mod tests {
                 buffer: 1,
                 window: 0xfeed,
                 seq: 7,
+                landed: Some(3),
             }],
+            daemon: 0xd43,
         }
     }
 
@@ -1996,9 +2011,11 @@ mod tests {
             [Applied {
                 buffer: 1,
                 window: 0xfeed,
-                seq: 7
+                seq: 7,
+                landed: Some(3)
             }]
         );
+        assert_eq!(state.daemon, 0xd43);
         assert_eq!(state.buffers[0].text, "new");
     }
 
@@ -2008,7 +2025,9 @@ mod tests {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(include_bytes!("../tests/fixtures/handover-v13.bin"))
             .unwrap();
-        assert!(State::read(&mut file).unwrap().applied.is_empty());
+        let state = State::read(&mut file).unwrap();
+        assert!(state.applied.is_empty());
+        assert_eq!(state.daemon, 0, "none: the build reading it chooses one");
     }
 
     #[test]

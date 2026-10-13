@@ -70,7 +70,7 @@ mod signs;
 mod tools;
 mod turn_undo;
 
-use buffers::BufferSlot;
+use buffers::{BufferSlot, WindowChange};
 use chats::AgentId;
 use explorers::Explorers;
 use finder::Finds;
@@ -445,6 +445,9 @@ pub struct Daemon {
     /// Files being edited.
     buffers: BTreeMap<BufferId, BufferSlot>,
     next_buffer: u32,
+    /// The daemon's own number, chosen at random when it first started and
+    /// kept through upgrades: see [`BufferSnapshot::daemon`](clackatoo_protocol::BufferSnapshot).
+    id: u64,
     /// The language packs buffers are parsed with, if they're looked for.
     languages: Option<Languages>,
     /// The thread parsing buffers, once one is in a language there's a
@@ -575,6 +578,7 @@ impl Daemon {
             workspaces: WorkspaceState::new(),
             buffers: BTreeMap::new(),
             next_buffer: 1,
+            id: crate::client::random_window(),
             languages: config.languages.clone().map(Languages::new),
             syntax: None,
             servers: Servers::default(),
@@ -648,12 +652,22 @@ impl Daemon {
             daemon.add_chat(HostedChat::resume(chat, &agent));
         }
         daemon.next_buffer = state.next_buffer;
+        // Older builds had none, and keep the one just chosen.
+        if state.daemon != 0 {
+            daemon.id = state.daemon;
+        }
         for buffer in buffers {
             let id = BufferId(buffer.id);
             let mut slot = BufferSlot::new(Buffer::resume(buffer));
             slot.applied = (state.applied.iter())
                 .filter(|applied| applied.buffer == id.0)
-                .map(|applied| (applied.window, applied.seq))
+                .map(|applied| {
+                    let change = WindowChange {
+                        seq: applied.seq,
+                        landed: applied.landed,
+                    };
+                    (applied.window, change)
+                })
                 .collect();
             daemon.buffers.insert(id, slot);
             daemon.parse_buffer(id);
@@ -750,13 +764,15 @@ impl Daemon {
                 edits: self.agent_files.log.hand_over(),
                 applied: (self.buffers.iter())
                     .flat_map(|(id, slot)| {
-                        (slot.applied.iter()).map(|(&window, &seq)| handover::Applied {
+                        (slot.applied.iter()).map(|(&window, change)| handover::Applied {
                             buffer: id.0,
                             window,
-                            seq,
+                            seq: change.seq,
+                            landed: change.landed,
                         })
                     })
                     .collect(),
+                daemon: self.id,
             },
             fds,
         })
@@ -1774,11 +1790,17 @@ impl Daemon {
             | Request::OpenHere { .. }
             | Request::SplitTab { .. }) => self.respond_about_workspaces(request, token),
             asked @ (Request::CarryQuic | Request::CarryMcp { .. }) => self.carry(token, &asked),
-            Request::AttachBuffer { buffer, window } => {
+            Request::AttachBuffer {
+                buffer,
+                window,
+                resume,
+            } => {
                 if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {
                     client.window = Some(window);
                 }
-                self.attach_buffer(token, buffer).map(|()| Response::Done)
+                self.forget_lost_connections(token, buffer, window);
+                self.attach_buffer(token, buffer, resume)
+                    .map(|()| Response::Done)
             }
             Request::DetachBuffer { buffer } => {
                 self.detach_buffer(token, buffer);
