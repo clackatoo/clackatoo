@@ -15,23 +15,33 @@ Code, Codex and Gemini CLI.
 ## Install
 
 Each release has a build for `x86_64` and `aarch64` Linux, gzipped, and
-checksums signed with [minisign](https://jedisct1.github.io/minisign/).
-The key's public half is [`crates/update/release-key.pub`](crates/update/release-key.pub).
+checksums signed with [minisign](https://jedisct1.github.io/minisign/) by
+the release key, whose public half is:
 
-```sh
-arch=x86_64   # or aarch64
-base=https://github.com/clackatoo/clackatoo/releases/latest/download
-curl -LO "$base/clackatoo-$arch-linux.gz" -LO "$base/SHA256SUMS" -LO "$base/SHA256SUMS.minisig"
-curl -LO https://raw.githubusercontent.com/clackatoo/clackatoo/main/crates/update/release-key.pub
-
-minisign -Vm SHA256SUMS -p release-key.pub
-sha256sum -c --ignore-missing SHA256SUMS
-gunzip "clackatoo-$arch-linux.gz"
-install -m 755 "clackatoo-$arch-linux" ~/.local/bin/clackatoo
+```
+RWTx1sQF7KMKtpn+w/3hupcC6cdxdWFs4eggGaTWFEXYfB2dFKNXx4/7
 ```
 
-Check the signature first: the checksums only mean something once it's
-good.
+With `minisign` and `curl` installed, this downloads the latest release,
+checks the signature and then the checksum, and installs it in
+`~/.local/bin`. It stops at the first step that fails:
+
+```sh
+(
+  set -euo pipefail
+  arch=$(uname -m)   # x86_64 or aarch64
+  base=https://github.com/clackatoo/clackatoo/releases/latest/download
+  cd "$(mktemp -d)"
+  curl -fLO "$base/clackatoo-$arch-linux.gz" -fLO "$base/SHA256SUMS" -fLO "$base/SHA256SUMS.minisig"
+  minisign -Vm SHA256SUMS -P RWTx1sQF7KMKtpn+w/3hupcC6cdxdWFs4eggGaTWFEXYfB2dFKNXx4/7
+  sha256sum -c --ignore-missing SHA256SUMS
+  gunzip "clackatoo-$arch-linux.gz"
+  install -D -m 755 "clackatoo-$arch-linux" ~/.local/bin/clackatoo
+)
+```
+
+The checksums only mean something once the signature on them is good,
+so the signature is checked first.
 
 Run `clackatoo` to open a window. It starts the daemon if it isn't
 running.
@@ -43,8 +53,22 @@ clackatoo update
 ```
 
 installs the latest release, checking its signature the same way, and
-moves the running daemon onto it, keeping its terminals. The window says
-when a new release is out. `clackatoo update --rollback` goes back.
+moves the running daemon onto it, keeping its terminals.
+`clackatoo update --rollback` goes back.
+
+The window looks for a new release once a day, a while after it opens,
+and says in its bar when one is out. It never installs one by itself:
+`:update` or `clackatoo update` does. Looking is one HTTPS request to
+`https://api.github.com/repos/clackatoo/clackatoo/releases/latest`, which
+says nothing about you but a User-Agent of `clackatoo/<version>`; GitHub
+sees your address, as it would for any request. To turn it off, put this
+in `~/.config/clackatoo/client/init.lua`:
+
+```lua
+client.opt.updatecheck = false
+```
+
+or type `:set noupdatecheck` in a window, for that window.
 
 ## Build
 
