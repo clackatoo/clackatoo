@@ -56,6 +56,35 @@ const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
 /// sent: often enough to keep a home router's mapping for UDP open.
 const KEEP_ALIVE: Duration = Duration::from_secs(25);
 
+/// How often each end logs how its connection is going, while it's open.
+const STATS_EVERY: Duration = Duration::from_mins(5);
+
+/// What `connection`'s numbers say about how it's going, for the log: the
+/// round trip, how much may be in flight, how many packets were lost, and
+/// the largest packet sent.
+pub(crate) fn describe(connection: &quinn_proto::Connection) -> String {
+    let stats = connection.stats();
+    let path = stats.path;
+    // Tenths of a percent, without floating point.
+    let lost = (path.lost_packets * 1000)
+        .checked_div(path.sent_packets)
+        .unwrap_or(0);
+    format!(
+        "round trip {:?} (least {:?}), window {} B, {} of {} packets lost ({}.{}%), \
+         {} congestion events, packets up to {} B, {} received",
+        path.rtt,
+        path.min_rtt,
+        path.cwnd,
+        path.lost_packets,
+        path.sent_packets,
+        lost / 10,
+        lost % 10,
+        path.congestion_events,
+        path.current_mtu,
+        stats.udp_rx.datagrams,
+    )
+}
+
 /// How both ends' connections behave.
 fn transport() -> TransportConfig {
     let mut transport = TransportConfig::default();
@@ -125,6 +154,19 @@ pub(crate) fn carrier_id(address: SocketAddr) -> Option<CarrierId> {
             generation: join(generation_high, generation_low),
         }),
         _ => None,
+    }
+}
+
+/// Names the way packets from `address` come, for the log: through a
+/// carrier, or over UDP.
+pub(crate) struct Way(pub(crate) SocketAddr);
+
+impl std::fmt::Display for Way {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match carrier_id(self.0) {
+            Some(id) => write!(f, "carrier {}.{}", id.key, id.generation),
+            None => write!(f, "UDP {}", self.0),
+        }
     }
 }
 

@@ -33,7 +33,10 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{self, DigitallySignedStruct, SignatureScheme};
 
 use super::path::{Action, Path, Route, Sending};
-use super::{CarrierId, KEEP_ALIVE, SERVER_NAME, carrier_address, frame_packet, transport};
+use super::{
+    CarrierId, KEEP_ALIVE, SERVER_NAME, STATS_EVERY, carrier_address, describe, frame_packet,
+    transport,
+};
 use crate::remote::Ssh;
 
 const CARRIER: Token = Token(0);
@@ -301,6 +304,8 @@ struct Driver {
     on_udp: Arc<AtomicBool>,
     /// Whether the daemon is in contact, for [`Carried::contact`].
     contact: Contact,
+    /// When to log how the connection is going next.
+    stats_due: Instant,
 }
 
 /// A client's socket for UDP, and where the daemon takes packets.
@@ -381,14 +386,30 @@ impl Driver {
             udp,
             on_udp: Arc::new(AtomicBool::new(false)),
             contact: Contact::default(),
+            stats_due: Instant::now() + STATS_EVERY,
         })
     }
 
     /// Relays until the client hangs up, or the connection ends.
     fn run(&mut self) -> io::Result<()> {
+        match &self.udp {
+            Some(udp) => log::info!(
+                "QUIC connecting through ssh, to try UDP to {} once connected",
+                udp.daemon
+            ),
+            None => log::info!("QUIC connecting through ssh, with no UDP to try"),
+        }
         let mut events = Events::with_capacity(8);
         loop {
             let now = Instant::now();
+            if now >= self.stats_due {
+                self.stats_due = now + STATS_EVERY;
+                log::info!(
+                    "QUIC connection {}: {}",
+                    self.route_name(),
+                    describe(&self.connection)
+                );
+            }
             if self.connection.poll_timeout().is_some_and(|due| due <= now) {
                 self.connection.handle_timeout(now);
             }
@@ -404,8 +425,9 @@ impl Driver {
             let on_udp = self.path.route() == Route::Udp;
             if self.on_udp.swap(on_udp, Ordering::Relaxed) != on_udp {
                 log::info!(
-                    "the QUIC connection moved {}",
-                    if on_udp { "onto UDP" } else { "back into SSH" }
+                    "the QUIC connection moved {}; {}",
+                    if on_udp { "onto UDP" } else { "back into ssh" },
+                    describe(&self.connection)
                 );
             }
             let silent_since = self.path.silent_since();
@@ -427,6 +449,7 @@ impl Driver {
             let next = self.connection.poll_timeout().into_iter();
             let timeout = next
                 .chain(self.path.next_tick())
+                .chain([self.stats_due])
                 .min()
                 .map(|due| due.saturating_duration_since(Instant::now()));
             match self.poll.poll(&mut events, timeout) {
@@ -434,6 +457,16 @@ impl Driver {
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(err) => return Err(err),
             }
+        }
+    }
+
+    /// How packets go, for the log.
+    fn route_name(&self) -> &'static str {
+        match (self.path.route(), self.carrier.is_some()) {
+            (Route::Udp, true) => "over UDP, with ssh open",
+            (Route::Udp, false) => "over UDP, with ssh closed",
+            (Route::Ssh, true) => "through ssh",
+            (Route::Ssh, false) => "trying UDP, with ssh closed",
         }
     }
 
@@ -455,26 +488,27 @@ impl Driver {
                 }
                 Ok(())
             }
-            Action::Lost => Err(io::Error::other("the carrier closed")),
+            Action::Lost => Err(io::Error::other(
+                "the ssh connection closed, and UDP never got through",
+            )),
         }
     }
 
     /// Hands the connection every packet the carrier, or UDP, has brought.
     fn receive_packets(&mut self, now: Instant) -> io::Result<()> {
         if let Some(carrier) = &mut self.carrier {
-            let mut closed = false;
+            let mut closed = None;
             loop {
                 match carrier.read(&mut self.read_buffer) {
                     Ok(0) => {
-                        closed = true;
+                        closed = Some("ssh exited".to_owned());
                         break;
                     }
                     Ok(n) => self.packets.push(&self.read_buffer[..n]),
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                     Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                     Err(err) => {
-                        log::debug!("the carrier failed: {err}");
-                        closed = true;
+                        closed = Some(format!("reading from ssh failed: {err}"));
                         break;
                     }
                 }
@@ -493,11 +527,8 @@ impl Driver {
                     self.connection.handle_event(event);
                 }
             }
-            if closed {
-                self.carrier = None;
-                log::info!("the carrier closed");
-                let action = self.path.carrier_closed(now);
-                self.act(action)?;
+            if let Some(why) = closed {
+                self.carrier_closed(now, &why)?;
             }
         }
         if let Some(udp) = &self.udp {
@@ -569,7 +600,11 @@ impl Driver {
                 }
                 Event::Stream(StreamEvent::Readable { id }) => self.readable.push(id),
                 Event::ConnectionLost { reason } => {
-                    log::info!("the QUIC connection closed: {reason}");
+                    log::info!(
+                        "the QUIC connection {} closed: {reason}; {}",
+                        self.route_name(),
+                        describe(&self.connection)
+                    );
                     return Ok(false);
                 }
                 _ => {}
@@ -679,12 +714,22 @@ impl Driver {
         if let Some(carrier) = &mut self.carrier
             && let Err(err) = write_some(carrier, &mut self.to_carrier)
         {
-            log::debug!("the carrier failed: {err}");
-            self.carrier = None;
-            let action = self.path.carrier_closed(now);
-            self.act(action)?;
+            self.carrier_closed(now, &format!("writing to ssh failed: {err}"))?;
         }
         Ok(())
+    }
+
+    /// Lets go of the carrier, which closed `why`, and goes on without it,
+    /// if there's a way.
+    fn carrier_closed(&mut self, now: Instant, why: &str) -> io::Result<()> {
+        self.carrier = None;
+        self.to_carrier.clear();
+        log::info!(
+            "the ssh connection carrying QUIC closed: {why}; {}",
+            describe(&self.connection)
+        );
+        let action = self.path.carrier_closed(now);
+        self.act(action)
     }
 
     /// Tells the client the connection has ended, after anything the

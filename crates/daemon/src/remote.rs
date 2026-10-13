@@ -220,7 +220,7 @@ pub fn through(mut command: Command, host: &str) -> Result<Client, RemoteError> 
     let greeting = &greeting[..greeting.len() - ANNOUNCEMENT.len()];
     Ok(Client::over_carrier(
         stream,
-        announced_address(greeting),
+        announced_address(greeting).map(crate::client::UdpTarget::Host),
         Some(ssh),
     )?)
 }

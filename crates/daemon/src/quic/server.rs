@@ -19,7 +19,7 @@ use quinn_proto::{
     StreamEvent, StreamId, Transmit, VarInt, WriteError,
 };
 
-use super::SERVER_NAME;
+use super::{SERVER_NAME, STATS_EVERY, Way, describe};
 
 /// How long a connection whose carrier closed has to move onto UDP before
 /// it's dropped: a client that has only just found UDP gets through, and
@@ -80,6 +80,10 @@ struct Remote {
     /// The carrier it was on closed: its address, and when the connection
     /// goes too, if it hasn't moved by then.
     orphaned: Option<(SocketAddr, Instant)>,
+    /// Where its packets last came from, as last logged.
+    address: SocketAddr,
+    /// When to log how it's going next.
+    stats_due: Instant,
 }
 
 /// Setting up the endpoint failed.
@@ -164,6 +168,7 @@ impl QuicServer {
                 self.buffer.clear();
                 match self.endpoint.accept(incoming, now, &mut self.buffer, None) {
                     Ok((handle, connection)) => {
+                        log::info!("QUIC connection {} opened, through {}", handle.0, Way(from));
                         self.connections.insert(
                             handle,
                             Remote {
@@ -171,6 +176,8 @@ impl QuicServer {
                                 stream: None,
                                 client: None,
                                 orphaned: None,
+                                address: from,
+                                stats_due: now + STATS_EVERY,
                             },
                         );
                         self.touched.push(handle);
@@ -202,7 +209,9 @@ impl QuicServer {
             .values_mut()
             .flat_map(|remote| {
                 let orphaned = remote.orphaned.map(|(_, until)| until);
-                remote.connection.poll_timeout().into_iter().chain(orphaned)
+                (remote.connection.poll_timeout().into_iter())
+                    .chain(orphaned)
+                    .chain([remote.stats_due])
             })
             .min()
     }
@@ -218,6 +227,15 @@ impl QuicServer {
             {
                 remote.connection.handle_timeout(now);
                 self.touched.push(handle);
+            }
+            if now >= remote.stats_due {
+                remote.stats_due = now + STATS_EVERY;
+                log::info!(
+                    "QUIC connection {} on {}: {}",
+                    handle.0,
+                    Way(remote.address),
+                    describe(&remote.connection)
+                );
             }
             if let Some((address, until)) = remote.orphaned
                 && now >= until
@@ -237,7 +255,11 @@ impl QuicServer {
     /// left to send one, and has its client dropped too.
     fn forget(&mut self, handle: ConnectionHandle) {
         if let Some(remote) = self.connections.remove(&handle) {
-            log::info!("a QUIC connection whose carrier closed never moved");
+            log::info!(
+                "QUIC connection {} dropped: its carrier closed, and it never moved; {}",
+                handle.0,
+                describe(&remote.connection)
+            );
             self.forgotten.extend(remote.client);
             self.endpoint
                 .handle_event(handle, quinn_proto::EndpointEvent::drained());
@@ -262,6 +284,16 @@ impl QuicServer {
             }
             while let Some(event) = remote.connection.poll() {
                 remote.event(handle, event, events);
+            }
+            let address = remote.connection.remote_address();
+            if address != remote.address {
+                log::info!(
+                    "QUIC connection {} moved from {} to {}",
+                    handle.0,
+                    Way(remote.address),
+                    Way(address)
+                );
+                remote.address = address;
             }
             if drained {
                 self.connections.remove(&handle);
@@ -353,6 +385,12 @@ impl QuicServer {
     /// Closes the connection with `handle`, telling the client why.
     pub(crate) fn close(&mut self, handle: ConnectionHandle, now: Instant, reason: &str) {
         if let Some(remote) = self.connections.get_mut(&handle) {
+            log::info!(
+                "closing QUIC connection {}{}{reason}; {}",
+                handle.0,
+                if reason.is_empty() { "" } else { ": " },
+                describe(&remote.connection)
+            );
             remote.client = None;
             remote
                 .connection
@@ -365,8 +403,13 @@ impl QuicServer {
     /// while to move onto UDP, as a client may have only just started to:
     /// those still on it after that are dropped.
     pub(crate) fn carrier_closed(&mut self, address: SocketAddr, now: Instant) {
-        for remote in self.connections.values_mut() {
+        for (handle, remote) in &mut self.connections {
             if remote.connection.remote_address() == address {
+                log::info!(
+                    "QUIC connection {} lost its carrier, and has {ORPHAN_GRACE:?} to be heard \
+                     from another way",
+                    handle.0
+                );
                 remote.orphaned = Some((address, now + ORPHAN_GRACE));
             }
         }
@@ -392,6 +435,7 @@ impl QuicServer {
 
 impl Remote {
     fn event(&mut self, handle: ConnectionHandle, event: Event, events: &mut Vec<QuicEvent>) {
+        let id = handle.0;
         match event {
             Event::Stream(StreamEvent::Opened { dir: Dir::Bi }) => {
                 while let Some(stream) = self.connection.streams().accept(Dir::Bi) {
@@ -414,7 +458,11 @@ impl Remote {
                 events.extend(self.client.map(QuicEvent::Writable));
             }
             Event::ConnectionLost { reason } => {
-                log::debug!("a QUIC connection closed: {reason}");
+                log::info!(
+                    "QUIC connection {id} on {} closed: {reason}; {}",
+                    Way(self.address),
+                    describe(&self.connection)
+                );
                 events.extend(self.client.take().map(QuicEvent::Closed));
             }
             _ => {}

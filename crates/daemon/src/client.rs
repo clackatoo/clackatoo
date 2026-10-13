@@ -20,6 +20,17 @@ use crate::remote::Ssh;
 /// How long the daemon may take to answer a new connection's hello.
 const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Where a client on another machine sends what goes to the daemon over
+/// UDP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UdpTarget {
+    /// The daemon's machine, at this address, on the port the daemon names.
+    Host(IpAddr),
+    /// Exactly here, whatever port the daemon names: a relay in between,
+    /// as tests use (see `clackatoo-netem`).
+    Exactly(SocketAddr),
+}
+
 /// A connection to the daemon that sends one request at a time and waits for
 /// each answer. Events that arrive while it waits are kept for
 /// [`next_event`](Self::next_event).
@@ -94,20 +105,34 @@ impl Client {
     ///
     /// As [`over_quic`](Self::over_quic).
     pub fn over_quic_via(stream: UnixStream, daemon_ip: IpAddr) -> Result<Self, ClientError> {
-        Self::over_carrier(stream, Some(daemon_ip), None)
+        Self::over_carrier(stream, Some(UdpTarget::Host(daemon_ip)), None)
     }
 
-    /// As [`over_quic_via`](Self::over_quic_via), with `ssh` carrying
+    /// As [`over_quic`](Self::over_quic), moving the connection onto UDP
+    /// to `udp` when it can be reached there.
+    ///
+    /// # Errors
+    ///
+    /// As [`over_quic`](Self::over_quic).
+    pub fn over_quic_to(stream: UnixStream, udp: UdpTarget) -> Result<Self, ClientError> {
+        Self::over_carrier(stream, Some(udp), None)
+    }
+
+    /// As [`over_quic_to`](Self::over_quic_to), with `ssh` carrying
     /// `stream`, kept running as long as the connection is open.
     pub(crate) fn over_carrier(
         mut stream: UnixStream,
-        daemon_ip: Option<IpAddr>,
+        udp_target: Option<UdpTarget>,
         ssh: Option<Ssh>,
     ) -> Result<Self, ClientError> {
         let (certificate, udp) = open_carrier(&mut stream)?;
-        let udp = daemon_ip
-            .zip(udp)
-            .map(|(ip, udp)| (SocketAddr::new(ip, udp.port), udp.probe_key));
+        let udp = udp_target.zip(udp).map(|(target, udp)| {
+            let address = match target {
+                UdpTarget::Host(ip) => SocketAddr::new(ip, udp.port),
+                UdpTarget::Exactly(address) => address,
+            };
+            (address, udp.probe_key)
+        });
         let (local, carried) = quic::carry(stream, certificate, udp, ssh)?;
         let mut client = Self::over(local)?;
         client.carried = Some(carried);

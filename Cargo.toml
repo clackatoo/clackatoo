@@ -19,6 +19,7 @@ clackatoo-daemon = { path = "crates/daemon" }
 clackatoo-bench = { path = "crates/bench" }
 clackatoo-gui = { path = "crates/gui" }
 clackatoo-update = { path = "crates/update" }
+clackatoo-netem = { path = "crates/netem" }
 
 # The types of ACP, the Agent Client Protocol, which chats with agents
 # speak. Only the types: the daemon frames the messages itself,
@@ -35,7 +36,9 @@ bitflags = "2.13"
 bytes = "1.10"
 bytemuck = { version = "1.25", features = ["derive"] }
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions"] }
-env_logger = { version = "0.11", default-features = false }
+# Timestamps on every line (humantime), so logs from two machines can be
+# laid side by side.
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
 # Unpacks the releases `clackatoo update` downloads, which are gzipped to
 # about a third of their size. Pure Rust (miniz_oxide).
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }

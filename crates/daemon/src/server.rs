@@ -2118,11 +2118,17 @@ impl Daemon {
             wants_writable: false,
             generation: self.carriers_made,
         }));
-        log::info!("a connection now carries QUIC");
+        log::info!(
+            "a connection now carries QUIC, as {}",
+            quic::Way(quic::carrier_address(CarrierId {
+                key: carrier.0,
+                generation: self.carriers_made,
+            }))
+        );
         self.flush_carrier(carrier);
         // The client waits for the answer before sending packets, but
         // anything already here is a packet.
-        self.receive_packets(carrier, false);
+        self.receive_packets(carrier, None);
     }
 
     /// Reads the packets a carrier has brought, and writes what it can of
@@ -2134,19 +2140,18 @@ impl Daemon {
         let Some(Source::Carrier(carrier)) = self.sources.get_mut(token.0) else {
             return;
         };
-        let mut closed = false;
+        let mut closed = None;
         loop {
             match carrier.stream.read(&mut self.buffer) {
                 Ok(0) => {
-                    closed = true;
+                    closed = Some("its ssh session ended".to_owned());
                     break;
                 }
                 Ok(n) => carrier.packets.push(&self.buffer[..n]),
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(err) => {
-                    log::debug!("carrier read failed: {err}");
-                    closed = true;
+                    closed = Some(format!("reading from it failed: {err}"));
                     break;
                 }
             }
@@ -2155,9 +2160,9 @@ impl Daemon {
     }
 
     /// Hands the QUIC endpoint the packets the carrier at `token` has
-    /// brought, then closes the carrier if it has `closed`, or its packets
-    /// are malformed.
-    fn receive_packets(&mut self, token: Token, mut closed: bool) {
+    /// brought, then closes the carrier if it has `closed`, saying why, or
+    /// if its packets are malformed.
+    fn receive_packets(&mut self, token: Token, mut closed: Option<String>) {
         let (Some(Source::Carrier(carrier)), Some(quic)) =
             (self.sources.get_mut(token.0), self.quic.as_mut())
         else {
@@ -2173,16 +2178,15 @@ impl Daemon {
                 Ok(Some(packet)) => quic.receive(now, from, packet),
                 Ok(None) => break,
                 Err(err) => {
-                    log::warn!("closing a carrier that sent a bad frame: {err}");
-                    closed = true;
+                    closed = Some(format!("it sent a bad frame: {err}"));
                     break;
                 }
             }
         }
-        if closed {
+        if let Some(why) = closed {
             self.sources.remove(token.0);
+            log::info!("{} closed: {why}", quic::Way(from));
             quic.carrier_closed(from, now);
-            log::info!("a carrier closed");
         }
     }
 
@@ -2199,8 +2203,7 @@ impl Daemon {
             &mut carrier.outgoing,
             &mut carrier.wants_writable,
         ) {
-            log::debug!("carrier write failed: {err}");
-            self.receive_packets(token, true);
+            self.receive_packets(token, Some(format!("writing to it failed: {err}")));
         }
     }
 

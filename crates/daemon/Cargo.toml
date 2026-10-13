@@ -37,6 +37,7 @@ toml_edit.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+clackatoo-netem.workspace = true
 tempfile.workspace = true
 
 [lints]

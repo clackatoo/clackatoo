@@ -42,7 +42,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 pub use agents::{AgentConfig, CustomAgent};
-pub use client::{Client, ClientError, Receiver, Sender};
+pub use client::{Client, ClientError, Receiver, Sender, UdpTarget};
 pub use quic::{Contact, Route};
 pub use runtime::{DaemonLock, LockError, RuntimeDir};
 pub use server::{Daemon, ShutdownHandle};
@@ -204,6 +204,18 @@ fn data_dir() -> Option<PathBuf> {
     non_empty("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+}
+
+/// clackatoo's state directory, for what it keeps between runs that isn't
+/// worth backing up, such as windows' logs: `clackatoo` in
+/// `$XDG_STATE_HOME`, or else in `~/.local/state`.
+#[must_use]
+pub fn state_dir() -> Option<PathBuf> {
+    let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let state = non_empty("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".local/state")))?;
+    Some(state.join("clackatoo"))
 }
 
 /// clackatoo's config directory: `clackatoo` in `$XDG_CONFIG_HOME`, or

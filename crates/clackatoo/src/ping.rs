@@ -192,3 +192,104 @@ impl Display for Summary<'_> {
         )
     }
 }
+
+/// How long a soak waits for a key's echo before counting the connection
+/// as dropped: far longer than any blackout it should ride out.
+const SOAK_ECHO_LIMIT: Duration = Duration::from_mins(2);
+
+/// How many rounds a soak sums up at a time.
+const SOAK_SUMMARY_EVERY: usize = 60;
+
+/// How long a soak's terminal lives, if nothing closes it.
+const SOAK_TERMINAL_LIFE: Duration = Duration::from_hours(24);
+
+/// Keeps a connection made by `connect` open until interrupted, typing a
+/// key every `interval` and timing its echo, as someone typing into a
+/// window would. Logs every round, a summary of each minute or so, and
+/// every drop with its reason, then connects again and carries on in the
+/// same terminal, as a window does. For finding out how a real network
+/// treats a connection.
+pub(crate) fn soak(
+    mut connect: impl FnMut() -> anyhow::Result<Client>,
+    daemon: &str,
+    interval: Duration,
+) -> anyhow::Result<()> {
+    let mut terminal = None;
+    let mut drops = 0_u32;
+    let mut connected_since = Instant::now();
+    loop {
+        let started = Instant::now();
+        let mut client = match connect() {
+            Ok(client) => client,
+            Err(err) => {
+                log::warn!("couldn't connect to {daemon}: {err:#}");
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+        };
+        log::info!(
+            "connected to {daemon} in {}{}",
+            Millis(started.elapsed()),
+            route(&client)
+        );
+        let Err(err) = soak_connected(&mut client, &mut terminal, interval);
+        drops += 1;
+        log::warn!(
+            "drop {drops}: lost {daemon} after {:.0?}: {err:#}",
+            connected_since.elapsed()
+        );
+        connected_since = Instant::now();
+    }
+}
+
+/// Soaks one connection, in `terminal` if it's still running, or else a
+/// new one, until the connection fails.
+fn soak_connected(
+    client: &mut Client,
+    terminal: &mut Option<TerminalId>,
+    interval: Duration,
+) -> anyhow::Result<std::convert::Infallible> {
+    client.set_read_timeout(Some(SOAK_ECHO_LIMIT))?;
+    let running = client.list_terminals()?;
+    let still_running = terminal.filter(|id| running.iter().any(|info| info.id == *id));
+    let id = if let Some(id) = still_running {
+        id
+    } else {
+        let script = format!(
+            "stty raw -echo; printf '\\033]0;{READY}\\007'; exec timeout {} cat",
+            SOAK_TERMINAL_LIFE.as_secs()
+        );
+        client.new_terminal(NewTerminal {
+            size: Size::new(20, 1).expect("20x1 is a valid size"),
+            command: Some(vec!["sh".into(), "-c".into(), script]),
+            cwd: None,
+            record_to: None,
+        })?
+    };
+    *terminal = Some(id);
+    client.attach(id)?;
+    let mut view = next_view(client, id, None)?;
+    while view.title != READY {
+        view = next_view(client, id, Some(view))?;
+    }
+    let mut echoes = Vec::new();
+    let mut round = 0_u64;
+    // Until the connection fails.
+    loop {
+        round += 1;
+        std::thread::sleep(interval);
+        let letter = char::from(b'a' + u8::try_from(round % 26)?);
+        let started = Instant::now();
+        client.send_input(id, format!("\r{letter}").as_bytes())?;
+        while !first_line(&view).starts_with(letter) {
+            view = next_view(client, id, Some(view))?;
+        }
+        let echo = started.elapsed();
+        log::info!("round {round}: key echo {}{}", Millis(echo), route(client));
+        echoes.push(echo);
+        if echoes.len() == SOAK_SUMMARY_EVERY {
+            log::info!("last {SOAK_SUMMARY_EVERY} key echoes: {}", Summary(&echoes));
+            echoes.clear();
+        }
+    }
+}

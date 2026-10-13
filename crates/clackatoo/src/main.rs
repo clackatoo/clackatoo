@@ -5,6 +5,7 @@
 mod config;
 mod desktop;
 mod language;
+mod logs;
 mod ping;
 mod render;
 mod update;
@@ -283,6 +284,12 @@ struct Ping {
     /// the gap between keys when typing.
     #[arg(short, long, value_name = "MS", default_value_t = 200)]
     interval: u64,
+    /// Keep going until interrupted, typing a key each interval, logging
+    /// each echo's time, how the connection goes, and every drop with its
+    /// reason, and connecting again after one. For testing how a network
+    /// treats a connection to another machine.
+    #[arg(long, conflicts_with = "count")]
+    soak: bool,
     #[command(flatten)]
     connection: Connection,
 }
@@ -385,6 +392,16 @@ fn run(command: Command) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Update(args) => update::run(&args),
+        Command::Ping(args) if args.soak => {
+            logs::command("info");
+            let daemon =
+                (args.connection.remote.remote.clone()).unwrap_or_else(|| "the daemon".into());
+            ping::soak(
+                || connect(&args.connection),
+                &daemon,
+                Duration::from_millis(args.interval),
+            )
+        }
         Command::Ping(args) => {
             let started = Instant::now();
             let mut client = connect(&args.connection)?;
@@ -447,7 +464,7 @@ fn agent_tools() -> Option<Vec<OsString>> {
 }
 
 fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    logs::window();
     let config = config::load();
     clackatoo_gui::run(clackatoo_gui::Options {
         runtime: RuntimeDir::for_current_user(),
@@ -474,7 +491,7 @@ fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
         println!("{}", versions.join(" "));
         return Ok(());
     }
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    logs::daemon();
     let runtime = RuntimeDir::for_current_user();
     let mut config = DaemonConfig::from_env();
     config.terminal.scrollback_compaction = args.scrollback_compaction.into();

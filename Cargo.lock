@@ -569,6 +569,7 @@ version = "2026.10.0"
 dependencies = [
  "agent-client-protocol-schema",
  "bytes",
+ "clackatoo-netem",
  "clackatoo-protocol",
  "clackatoo-syntax",
  "clackatoo-term",
@@ -621,6 +622,10 @@ dependencies = [
  "wgpu",
  "winit",
 ]
+
+[[package]]
+name = "clackatoo-netem"
+version = "2026.10.0"
 
 [[package]]
 name = "clackatoo-protocol"
@@ -1342,6 +1347,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
 dependencies = [
  "env_filter",
+ "jiff",
  "log",
 ]
 
