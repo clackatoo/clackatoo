@@ -1,6 +1,6 @@
 //! Turning a cell's style into the colours it's drawn in.
 
-use clackatoo_protocol::{Attributes, Color, Kind, Severity, Style};
+use clackatoo_protocol::{Attributes, Color, InlayHintKind, Kind, Severity, Style};
 use clackatoo_text::Sign;
 
 /// A colour as red, green, blue and alpha, each from 0 to 1, in sRGB.
@@ -181,6 +181,22 @@ pub(crate) const fn virtual_text(severity: Severity) -> Style {
     Style {
         fg: diagnostic(severity),
         attributes: Attributes::DIM,
+        ..Style::DEFAULT
+    }
+}
+
+/// How an inlay hint is written between a line's text: in the palette's
+/// grey, italic, so it reads as a note on the code rather than code; a
+/// parameter's name a little dimmer than a type, as it's said more often.
+#[must_use]
+pub(crate) const fn inlay_hint(kind: InlayHintKind) -> Style {
+    let attributes = match kind {
+        InlayHintKind::Parameter => Attributes::ITALIC.union(Attributes::DIM),
+        InlayHintKind::Type | InlayHintKind::Other => Attributes::ITALIC,
+    };
+    Style {
+        fg: Color::Indexed(8),
+        attributes,
         ..Style::DEFAULT
     }
 }

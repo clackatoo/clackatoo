@@ -61,7 +61,7 @@ use std::time::Instant;
 use anyhow::Context;
 use clackatoo_daemon::RuntimeDir;
 use clackatoo_daemon::remote::Remote;
-pub use editor::Ranking;
+pub use editor::{EditorBench, Ranking};
 pub use fonts::FontOptions;
 use winit::event_loop::EventLoop;
 

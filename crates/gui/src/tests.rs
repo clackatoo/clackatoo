@@ -1752,6 +1752,7 @@ fn an_editors_completion_menu_and_signature_are_drawn_by_its_cursor() {
         signature_again: vec![')'],
         prepare_rename: false,
         uses: false,
+        inlay_hints: false,
     }));
     let (cols, rows) = (84u16, 14u16);
     let mut editor = Editor::new(BufferId(1), &crate::options::Options::default());

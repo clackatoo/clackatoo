@@ -95,9 +95,14 @@ impl Editors {
         }
     }
 
-    /// Passes the options on to every editor, as they've changed.
+    /// Passes the options on to every editor, as they've changed. Inlay
+    /// hints turned off are forgotten, and asked for afresh once they're
+    /// turned on.
     pub(super) fn set_options(&mut self, options: &Options) {
         self.shared.registers.set_sync(options.clipboard);
+        if !options.inlayhints {
+            self.buffers.values_mut().for_each(BufferCopy::forget_hints);
+        }
         for editor in self.panes.values_mut() {
             if let Some(copy) = self.buffers.get(&editor.buffer()) {
                 editor.set_options(options, copy);
@@ -520,7 +525,12 @@ impl Desk {
     }
 
     /// Takes in a change to `buffer` that its copy, and the editors showing
-    /// it, take in. Returns whether a pane showing it is shown.
+    /// it, take in. Returns whether a pane showing it is shown, and what
+    /// it shows may have changed.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each thing an update can do, seen to in turn"
+    )]
     fn copy_changed(&mut self, buffer: BufferId, update: BufferUpdate) -> bool {
         let focused = self.shown.map(|shown| shown.pane);
         let editors = &mut self.editors;
@@ -536,6 +546,8 @@ impl Desk {
         }
         let was = copy.path().to_owned();
         let mut heard = copy.update(update);
+        // Inlay hints the copy had already change nothing on screen.
+        let unchanged = matches!(heard, Heard::Hinted { changed: false, .. });
         let filled = fill_finder(self.finder.as_mut(), &mut heard, copy.path());
         // Completions and uses, which may be thousands, are no format's
         // answer.
@@ -630,9 +642,10 @@ impl Desk {
         typed
             || filled
             || formatted
-            || self.shown_tab().is_some_and(|tab| {
-                (tab.layout.panes().iter()).any(|pane| pane.content == Content::Buffer(buffer))
-            })
+            || (!unchanged
+                && self.shown_tab().is_some_and(|tab| {
+                    (tab.layout.panes().iter()).any(|pane| pane.content == Content::Buffer(buffer))
+                }))
     }
 
     /// Holds `held`, if an editor's command is waiting for the grammar, or
@@ -1343,12 +1356,21 @@ impl Desk {
         // Only the focused editor asks where a name is used, of a daemon
         // that reads the question.
         let focused = (self.shown.map(|shown| shown.pane)).filter(|_| self.daemon_has(wire::USES));
+        // Every editor shown asks for the inlay hints of the part of its
+        // file it shows, of a daemon that reads the question.
+        let hinting: Vec<PaneId> = match self.shown_tab() {
+            Some(tab) if self.daemon_has(wire::INLAY_HINTS) => {
+                tab.layout.panes().iter().map(|pane| pane.id).collect()
+            }
+            _ => Vec::new(),
+        };
         let editors = &mut self.editors;
         let mut gave_up = false;
         for (pane, editor) in &mut editors.panes {
             if let Some(copy) = editors.buffers.get_mut(&editor.buffer()) {
                 asked |= editor.tick(now, copy);
                 asked |= editor.watch_uses(now, focused == Some(*pane), copy);
+                asked |= editor.watch_hints(now, hinting.contains(pane), copy);
             }
             // Given up on, as it waited too long, with no key to see to it.
             gave_up |= editor.take_gave_up();

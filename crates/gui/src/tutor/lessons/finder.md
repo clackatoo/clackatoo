@@ -89,3 +89,21 @@ These text files have no language server, so here the list says so. Press `<Spac
 ```check
 finder symbols
 ```
+
+## Inlay hints
+
+A language server that can also writes notes between the code, muted and italic: the type of a name bound without one written, as `: u32` after `let total`, and the name of the parameter an argument is for, as `count:` before it. They're never part of the text: the cursor steps over them, motions, searches and yanks don't see them, a click on one lands on the character after it, and long lines wrap with them. While you type, the cursor's line shows none, so the text doesn't shift about; they come back once typing pauses. They're asked for the part of the file in view, and a screenful either side.
+
+`<Space>th` turns them off, as `:set noinlayhints` does (`ih` for short). Press it.
+
+```check
+option noinlayhints
+```
+
+## And on again
+
+Press `<Space>th` again to turn them back on.
+
+```check
+option inlayhints
+```

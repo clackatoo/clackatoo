@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
-    Answer, BufferId, BufferUpdate, ClientMessage, CompletionItem, Edit, FileLocation, Query,
-    ServerFeatures, Symbol, TextChange, Use,
+    Answer, BufferId, BufferUpdate, ClientMessage, CompletionItem, Edit, FileLocation, InlayHint,
+    Query, ServerFeatures, Symbol, TextChange, Use,
 };
 use clackatoo_text::{Bias, Diagnostic, Diagnostics, Rope};
 use mio::unix::SourceFd;
@@ -115,6 +115,10 @@ pub(super) struct Servers {
     /// The code actions last answered to each client about each buffer,
     /// as their servers sent them, to do one when it's picked.
     offered: Vec<Offered>,
+    /// Servers that have said their inlay hints may be out of date, whose
+    /// windows are yet to hear of it, and when each's last heard.
+    hints_stale: Vec<ServerId>,
+    hints_told: BTreeMap<ServerId, Instant>,
 }
 
 /// The code actions answered to a client's code actions query, as the
@@ -329,6 +333,15 @@ const MAX_NEW_NAME: usize = 256;
 /// The most uses of a name passed on: far more than a screen shows, but
 /// short of a server's flood, which a window would draw a frame at a time.
 pub(super) const MAX_USES: usize = 4000;
+
+/// The least time between telling windows a server's inlay hints may be
+/// out of date: a server that says so again and again, as one reading a
+/// project may, has them ask at most this often.
+const HINTS_TOLD_EVERY: Duration = Duration::from_millis(100);
+
+/// The most inlay hints passed on for one range: a few screens' worth,
+/// more than a pane asks for shows, but short of a server's flood.
+pub(super) const MAX_HINTS: usize = 2000;
 
 /// A buffer as its language server knows it.
 #[derive(Debug)]
@@ -659,12 +672,42 @@ impl Daemon {
     /// When the next query to ask again is due.
     pub(super) fn next_retry(&self) -> Option<Instant> {
         let query = self.servers.again.iter().map(|(due, _)| *due).min();
-        query.into_iter().chain(self.next_symbols_retry()).min()
+        (query.into_iter())
+            .chain(self.next_symbols_retry())
+            .chain(
+                (self.servers.hints_stale.iter())
+                    .map(|&server| self.hints_due(server).unwrap_or_else(Instant::now)),
+            )
+            .min()
     }
 
-    /// Asks again the queries that are due.
+    /// When windows may next hear that server `server`'s inlay hints may
+    /// be out of date: at once, unless they heard less than
+    /// [`HINTS_TOLD_EVERY`] ago.
+    fn hints_due(&self, server: ServerId) -> Option<Instant> {
+        (self.servers.hints_told.get(&server)).map(|told| *told + HINTS_TOLD_EVERY)
+    }
+
+    /// Tells the windows of the servers whose inlay hints may be out of
+    /// date, that are due, by telling them what the server does again,
+    /// which a window takes as its cue to ask afresh.
+    fn tell_stale_hints(&mut self) {
+        let now = Instant::now();
+        let due: Vec<ServerId> = (self.servers.hints_stale.iter().copied())
+            .filter(|&server| self.hints_due(server).is_none_or(|due| due <= now))
+            .collect();
+        for server in due {
+            self.servers.hints_stale.retain(|&stale| stale != server);
+            self.servers.hints_told.insert(server, now);
+            self.tell_features(server);
+        }
+    }
+
+    /// Asks again the queries that are due, and tells windows of inlay
+    /// hints out of date.
     pub(super) fn ask_again(&mut self) {
         self.ask_symbols_again();
+        self.tell_stale_hints();
         let now = Instant::now();
         if self.servers.again.iter().all(|(due, _)| *due > now) {
             return;
@@ -790,7 +833,13 @@ impl Daemon {
                 self.symbols_outdated(server, id);
             }
             Incoming::Outdated { id } => self.outdated(server, id),
-            Incoming::Ready => self.server_ready(server),
+            Incoming::Ready => self.tell_features(server),
+            // Told later, once however often it says so meanwhile.
+            Incoming::HintsStale => {
+                if !self.servers.hints_stale.contains(&server) {
+                    self.servers.hints_stale.push(server);
+                }
+            }
             Incoming::ApplyEdit { id, edit } => self.apply_edit(server, id, &edit),
             Incoming::Watch { id, watchers } => self.watch_for_server(server, id, &watchers),
             Incoming::Unwatch { id } => self.unwatch_for_server(server, &id),
@@ -799,9 +848,11 @@ impl Daemon {
         }
     }
 
-    /// Server `server` is ready: every client following one of its
-    /// buffers is told what it does as you type.
-    fn server_ready(&mut self, server: ServerId) {
+    /// Tells every client following one of server `server`'s buffers what
+    /// it does as you type: once it's ready, and again whenever it says
+    /// its inlay hints may be out of date, which a window takes as its cue
+    /// to ask for them afresh.
+    fn tell_features(&mut self, server: ServerId) {
         let Some(running) = self.servers.slots.get(&server) else {
             return;
         };
@@ -886,7 +937,7 @@ impl Daemon {
             Ask::Action(action) => {
                 return self.take_action(server, (token, buffer, id), action, &[]);
             }
-            Ask::Query(query) => self.supersede(token, buffer, query),
+            Ask::Query(query) => self.supersede(token, buffer, query, at),
             Ask::Rename(_) => {}
         }
         let (Some(slot), Some(running)) = (
@@ -976,9 +1027,19 @@ impl Daemon {
     /// is told it needn't answer, and an answer that comes anyway is let
     /// go. No other client was waiting for it: each question is one
     /// client's, asked of the server on its own.
-    fn supersede(&mut self, token: Token, buffer: BufferId, query: Query) {
-        let same_kind = |asked: Query| {
-            matches!(
+    ///
+    /// Inlay hints asked about from byte `at` take the place only of
+    /// those asked about a range they cover, as an editor asks again after
+    /// an edit: two panes showing other parts of a file each ask for their
+    /// own, and neither is left without an answer. Places asked before are
+    /// compared as they were counted, which is near enough: a question
+    /// left is answered, and its answer is put in its place.
+    fn supersede(&mut self, token: Token, buffer: BufferId, query: Query, at: usize) {
+        let same_kind = |asked: Query, asked_at: usize| match (query, asked) {
+            (Query::InlayHints { end }, Query::InlayHints { end: asked_end }) => {
+                at <= asked_at && asked_end <= end
+            }
+            _ => matches!(
                 (query, asked),
                 (Query::Hover, Query::Hover)
                     | (Query::Completion(_), Query::Completion(_))
@@ -986,13 +1047,13 @@ impl Daemon {
                     | (Query::Symbols, Query::Symbols)
                     | (Query::PrepareRename, Query::PrepareRename)
                     | (Query::Uses, Query::Uses)
-            )
+            ),
         };
         let mut cancelled = Vec::new();
         self.servers.asked.retain(|asked| {
             let replaced = asked.token == token
                 && asked.buffer == buffer
-                && matches!(asked.what, Asking::Query(asked) if same_kind(asked));
+                && matches!(asked.what, Asking::Query(query) if same_kind(query, asked.at));
             if replaced {
                 cancelled.push((asked.server, asked.request));
             }
@@ -1001,7 +1062,7 @@ impl Daemon {
         self.servers.again.retain(|(_, again)| {
             !(again.token == token
                 && again.buffer == buffer
-                && matches!(again.ask, Ask::Query(asked) if same_kind(asked)))
+                && matches!(again.ask, Ask::Query(query) if same_kind(query, again.place.2)))
         });
         for (server, request) in cancelled {
             if let Some(running) = self.servers.slots.get_mut(&server) {
@@ -1143,6 +1204,9 @@ impl Daemon {
                 self.renamable(server, &asked, &value)
             }
             (Ok(value), Asking::Query(Query::Uses)) => self.uses_in(server, &asked, &value),
+            (Ok(value), Asking::Query(Query::InlayHints { end })) => {
+                self.hints_in(server, &asked, *end, &value)
+            }
             (Ok(value), Asking::Query(Query::SignatureHelp { .. })) => {
                 let encoding = self.server_encoding(server).unwrap_or(lsp::Encoding::Utf16);
                 lsp::signature(&value, encoding).map_or(Answer::Nothing, |signature| {
@@ -1308,6 +1372,52 @@ impl Daemon {
         uses.sort_unstable_by_key(|used| (used.start, used.end));
         uses.dedup_by_key(|used| used.start);
         Answer::Uses(uses)
+    }
+
+    /// What server `server` says, in `value`, to write inline between the
+    /// text from the place `asked` asked about to byte `end`, as many as
+    /// are passed on, in the order of the text: counted in the text it was
+    /// asked about, and moved along with edits made since, with the range.
+    /// One outside the range, or that an edit since has touched or put
+    /// text in beside, is left out: the window asks again after an edit.
+    fn hints_in(&self, server: ServerId, asked: &Asked, end: usize, value: &Value) -> Answer {
+        let (Some(encoding), Some(slot)) = (
+            self.server_encoding(server),
+            self.buffers.get(&asked.buffer),
+        ) else {
+            return Answer::Failed("its language server has stopped".into());
+        };
+        let Some(edits) = slot.buffer.edits_since(asked.version) else {
+            return Answer::Failed("the file has changed since".into());
+        };
+        let edits: Vec<&Edit> = edits.collect();
+        let start = asked.at;
+        let mut hints: Vec<InlayHint> = (lsp::inlay_hints(value, MAX_HINTS).into_iter())
+            .filter_map(|hinted| {
+                let at = lsp::place(&asked.text, hinted.at, encoding);
+                if at < start || at > end {
+                    return None;
+                }
+                Some(InlayHint {
+                    at,
+                    label: hinted.label,
+                    kind: hinted.kind,
+                    pad_left: hinted.pad_left,
+                    pad_right: hinted.pad_right,
+                })
+            })
+            .collect();
+        // In order, so each edit moves them all in one pass.
+        hints.sort_by_key(|hint| hint.at);
+        for edit in &edits {
+            let mut untouched = edit.untouched();
+            hints.retain_mut(|hint| untouched.place(hint.at).map(|at| hint.at = at).is_some());
+        }
+        let (start, end) = (edits.iter()).fold((start, end), |(start, end), edit| {
+            let start = edit.map(start, Bias::After);
+            (start, edit.map(end, Bias::Before).max(start))
+        });
+        Answer::InlayHints { start, end, hints }
     }
 
     /// What server `server` says, in `value`, of renaming what's at the
@@ -1855,6 +1965,8 @@ impl Daemon {
             .retain(|_, (server, _)| *server != id);
         // Its code actions can't be done now.
         self.servers.offered.retain(|offered| offered.server != id);
+        self.servers.hints_stale.retain(|&stale| stale != id);
+        self.servers.hints_told.remove(&id);
         self.unwatch_files_for(id);
         Some(slot)
     }
@@ -2026,8 +2138,9 @@ fn resolve(
 }
 
 /// `query`, asked about byte `at`, with the end of the range it formats,
-/// if it formats one, moved by `moved` as `at` was, and never before it:
-/// so text typed inside the range meanwhile is formatted too.
+/// or asks inlay hints for, if it has one, moved by `moved` as `at` was,
+/// and never before it: so text typed inside the range meanwhile is
+/// formatted, or hinted, too.
 fn end_moved(query: Query, moved: impl Fn(usize) -> usize, at: usize) -> Query {
     match query {
         Query::FormatRange {
@@ -2039,6 +2152,9 @@ fn end_moved(query: Query, moved: impl Fn(usize) -> usize, at: usize) -> Query {
             tab_size,
             spaces,
         },
+        Query::InlayHints { end } => Query::InlayHints {
+            end: moved(end).max(at),
+        },
         query => query,
     }
 }
@@ -2049,6 +2165,7 @@ fn cannot(query: Query) -> &'static str {
         Query::Format { .. } => "its language server doesn't format files",
         Query::FormatRange { .. } => "its language server can't format a selection",
         Query::Uses => "its language server doesn't say where names are used",
+        Query::InlayHints { .. } => "its language server gives no inlay hints",
         Query::Completion(_) | Query::Resolve { .. } => {
             "its language server doesn't complete what's typed"
         }

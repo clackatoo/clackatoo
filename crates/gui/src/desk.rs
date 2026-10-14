@@ -6133,6 +6133,93 @@ mod tests {
     }
 
     #[test]
+    fn shown_editors_ask_for_inlay_hints_and_the_same_hints_again_draw_nothing() {
+        use clackatoo_protocol::{
+            Answer, BufferUpdate, InlayHint, InlayHintKind, Query, ServerFeatures,
+        };
+        let mut desk = editing("/p/a.rs", "let x = 1;\n");
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Features(ServerFeatures {
+                inlay_hints: true,
+                ..ServerFeatures::default()
+            }),
+        );
+        let hints_asked = |desk: &mut Desk| -> Vec<(u64, usize, usize)> {
+            (desk.take_outbox().into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::Query {
+                        id,
+                        at,
+                        query: Query::InlayHints { end },
+                        ..
+                    } => Some((id, at, end)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let rest = |desk: &mut Desk| {
+            desk.settle_editors();
+            let now = std::time::Instant::now();
+            desk.tick_editors(now);
+            let due = desk.editor_wakes().expect("the window wakes to ask");
+            assert!(due >= now + crate::editor::HINTS_WAIT);
+            desk.tick_editors(due);
+        };
+        rest(&mut desk);
+        let asked = hints_asked(&mut desk);
+        assert_eq!(
+            asked
+                .iter()
+                .map(|&(_, at, end)| (at, end))
+                .collect::<Vec<_>>(),
+            [(0, 10)]
+        );
+        let answer = || BufferUpdate::Answer {
+            id: asked[0].0,
+            version: 0,
+            answer: Answer::InlayHints {
+                start: 0,
+                end: 10,
+                hints: vec![InlayHint {
+                    at: 5,
+                    label: ": i32".into(),
+                    kind: InlayHintKind::Type,
+                    pad_left: false,
+                    pad_right: false,
+                }],
+            },
+        };
+        assert!(desk.buffer_changed(BufferId(7), answer()), "drawn");
+        assert!(
+            !desk.buffer_changed(BufferId(7), answer()),
+            "the same hints draw nothing"
+        );
+        // `<Space>th` turns them off, and says so; on again, they're asked
+        // for afresh.
+        type_keys(&mut desk, " th");
+        assert!(!desk.options.inlayhints);
+        assert_eq!(desk.message.as_deref(), Some("inlay hints off"));
+        let idle = |desk: &mut Desk| {
+            desk.settle_editors();
+            let now = std::time::Instant::now();
+            desk.tick_editors(now);
+            desk.tick_editors(now + crate::editor::HINTS_WAIT);
+        };
+        idle(&mut desk);
+        assert!(hints_asked(&mut desk).is_empty());
+        type_keys(&mut desk, " th");
+        assert_eq!(desk.message.as_deref(), Some("inlay hints on"));
+        rest(&mut desk);
+        assert_eq!(hints_asked(&mut desk).len(), 1);
+        // A daemon too old to say is never asked.
+        type_keys(&mut desk, "x");
+        desk.daemon_is(clackatoo_protocol::wire::INLAY_HINTS - 1, None);
+        idle(&mut desk);
+        assert!(hints_asked(&mut desk).is_empty());
+    }
+
+    #[test]
     fn several_places_an_answer_gives_are_picked_from_in_the_finder() {
         use clackatoo_protocol::{Answer, BufferUpdate, FileLocation, OpenFile};
         let mut desk = editing("/p/a.rs", "one\ntwo\nthree\n");

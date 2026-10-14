@@ -16,6 +16,7 @@ use crate::options::{CompleteAccept, Options};
 use crate::pane::Selection;
 use crate::render::{HighlightKind, Ink};
 
+mod hints;
 mod indent;
 mod snippets;
 mod substitute;
@@ -1819,6 +1820,7 @@ impl Setup {
             signature_again: vec![')'],
             prepare_rename: false,
             uses: false,
+            inlay_hints: false,
         }));
     }
 

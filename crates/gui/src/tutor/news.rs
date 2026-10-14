@@ -263,6 +263,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "A chat at work says above its box what the agent is doing, with pulsing dots, and its tab shows ⋯",
     },
+    News {
+        id: "inlayhints",
+        date: "2026-10-14",
+        lesson: "finder",
+        what: "Language servers' inlay hints, types and parameter names, are written between the code; <Space>th toggles them",
+    },
 ];
 
 impl News {

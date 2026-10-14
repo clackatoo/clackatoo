@@ -17,12 +17,12 @@ use clackatoo_protocol::{
     AgentTools, Answer, Author, Axis, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction,
     ChatNode, ChatState, ClientMessage, CompletionItem, Construct, Content, Diff, Done, Edit,
     Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
-    Found, FoundBuffer, FoundLine, FoundSymbol, GitMark, Item, Kind, Layout, Location, NewAgent,
-    NewTerminal, OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch,
-    Piece, ProviderModels, Query, Request, Response, Resume, Search, Selection, ServerFeatures,
-    ServerMessage, Side, Size, Span, SubagentStatus, Symbol, TerminalId, TerminalStatus,
-    TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles, TurnFilesState, Use,
-    UseKind, View, ViewUpdate, Workspaces,
+    Found, FoundBuffer, FoundLine, FoundSymbol, GitMark, InlayHint, InlayHintKind, Item, Kind,
+    Layout, Location, NewAgent, NewTerminal, OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION,
+    PaneId, PaneTerminal, Patch, Piece, ProviderModels, Query, Request, Response, Resume, Search,
+    Selection, ServerFeatures, ServerMessage, Side, Size, Span, SubagentStatus, Symbol, TerminalId,
+    TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles,
+    TurnFilesState, Use, UseKind, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -4802,9 +4802,37 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
     };
     assert!(markdown && said.contains("pub fn f() -> u32"), "{said}");
     rust_analyzer_completes_and_helps(&mut client, buffer, text);
+    rust_analyzer_hints(&mut client, buffer, text);
     rust_analyzer_lists_symbols_and_checks_a_rename(&mut client, buffer, text);
     let (version, text) = rust_analyzer_finds_renames_and_formats(&mut client, buffer, text);
     rust_analyzer_acts(&mut client, buffer, (version, &text));
+}
+
+/// The inlay hints rust-analyzer gives for all of `text`, buffer `buffer`:
+/// the type of `two`, bound in m without one written, and the name of h's
+/// first parameter before the argument k gives it.
+fn rust_analyzer_hints(client: &mut Client, buffer: BufferId, text: &str) {
+    client
+        .query(buffer, 20, (0, 0), Query::InlayHints { end: text.len() })
+        .unwrap();
+    let (_, answer) = next_answer(client);
+    let Answer::InlayHints { hints, .. } = answer else {
+        panic!("{answer:?}");
+    };
+    let two = text.find("let two").unwrap() + "let two".len();
+    assert!(
+        (hints.iter()).any(|hint| hint.at == two
+            && hint.kind == InlayHintKind::Type
+            && hint.label.contains("u32")),
+        "{hints:?}"
+    );
+    let first = text.find("h(1, val)").unwrap() + "h(".len();
+    assert!(
+        (hints.iter()).any(|hint| hint.at == first
+            && hint.kind == InlayHintKind::Parameter
+            && hint.label.starts_with('a')),
+        "{hints:?}"
+    );
 }
 
 /// The symbols rust-analyzer lists in `text`, buffer `buffer`, and what
@@ -5797,6 +5825,216 @@ fn asking_for_the_uses_of_a_name_again_cancels_the_last_at_the_server() {
     assert_eq!(next_answer(&mut client).0, 3);
 }
 
+/// Asks for the inlay hints of bytes `start` to `end` of `buffer`, as
+/// query `id`.
+fn ask_hints(client: &mut Client, buffer: BufferId, id: u64, (start, end): (usize, usize)) {
+    let query = Query::InlayHints { end };
+    client.query(buffer, id, (0, start), query).unwrap();
+}
+
+/// An inlay hint, as the daemon passes it on.
+fn hint(
+    at: usize,
+    label: &str,
+    kind: InlayHintKind,
+    (pad_left, pad_right): (bool, bool),
+) -> InlayHint {
+    InlayHint {
+        at,
+        label: label.into(),
+        kind,
+        pad_left,
+        pad_right,
+    }
+}
+
+#[test]
+fn inlay_hints_are_said_where_they_go_with_their_kinds_padding_and_labels() {
+    let daemon = with_fake_language_server(|_| vec!["--utf16".to_owned()]);
+    // "é" is two bytes and one UTF-16 column.
+    let text = "let é = call(maybe 1)\nbad\nlet y = 2\n";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    ask_hints(&mut client, buffer, 1, (0, text.len()));
+    let after_call = "let é = call(".len();
+    let second = text.find("let y").unwrap() + "let y".len();
+    assert_eq!(
+        next_answer(&mut client),
+        (
+            1,
+            Answer::InlayHints {
+                start: 0,
+                end: text.len(),
+                hints: vec![
+                    hint("let é".len(), ": num", InlayHintKind::Type, (false, false)),
+                    // Its parts joined, with a blank after it.
+                    hint(
+                        after_call,
+                        "value:",
+                        InlayHintKind::Parameter,
+                        (false, true)
+                    ),
+                    // The line break in it a blank, as it's drawn in a row.
+                    hint(after_call, "? NO TE", InlayHintKind::Other, (true, false)),
+                    hint(second, ": num", InlayHintKind::Type, (false, false)),
+                ],
+            }
+        )
+    );
+    // Those of the range asked about, and no others.
+    let (start, end) = (text.find("bad").unwrap(), text.len());
+    ask_hints(&mut client, buffer, 2, (start, end));
+    let hints = vec![hint(second, ": num", InlayHintKind::Type, (false, false))];
+    assert_eq!(
+        next_answer(&mut client),
+        (2, Answer::InlayHints { start, end, hints })
+    );
+}
+
+#[test]
+fn inlay_hints_land_past_edits_made_while_the_server_worked() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        vec!["--queue-hints".to_owned(), gate]
+    });
+    let text = "let x = call(bad)\n";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    ask_hints(&mut client, buffer, 1, (0, text.len()));
+    // While the server works, another window types at the file's start,
+    // and just where the argument's name goes.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    send_change(&mut other, buffer, 0, insert(text.len(), 0, "zz ", 0));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    let call = "zz let x = call(".len();
+    send_change(&mut other, buffer, 1, insert(text.len() + 3, call, "q", 1));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    std::fs::write(daemon.dir.path().join("gate"), "").unwrap();
+    let (updates, (id, answer)) = updates_to_answer(&mut client);
+    assert_eq!(id, 1);
+    assert!(
+        (updates.iter()).any(|update| matches!(update, BufferUpdate::Edited { version: 2, .. })),
+        "the edits come first"
+    );
+    // The type moved past what was typed; the argument's name, which text
+    // was put in at, is left out, as it may be wrong now. The range moved
+    // as highlights' do: what was typed at its start is outside it.
+    let hints = vec![hint(
+        "zz let x".len(),
+        ": num",
+        InlayHintKind::Type,
+        (false, false),
+    )];
+    assert_eq!(
+        answer,
+        Answer::InlayHints {
+            start: 3,
+            end: text.len() + 4,
+            hints,
+        }
+    );
+}
+
+#[test]
+fn asking_for_inlay_hints_again_cancels_only_those_of_a_range_it_covers() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        let log = dir.join("log").display().to_string();
+        vec!["--queue-hints".to_owned(), gate, "--log".to_owned(), log]
+    });
+    let text = format!("bad\n{}", "let x = 1\n".repeat(10));
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", &text)]);
+    let log = daemon.dir.path().join("log");
+    let asked = |said: &str| {
+        said.lines()
+            .filter(|line| line.starts_with("hints "))
+            .count()
+    };
+    let cancelled = |said: &str| {
+        (said.lines())
+            .filter(|line| {
+                line.starts_with("cancelled ") && line.ends_with(" textDocument/inlayHint")
+            })
+            .count()
+    };
+    // The server's log once it's been asked `count` questions of hints.
+    let asked_so_far = |count: usize| loop {
+        let said = wait_for_server_log(&log, |line| line.starts_with("hints "));
+        if asked(&said) >= count {
+            return said;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // Two panes, showing two parts of the file: neither takes the other's
+    // place.
+    ask_hints(&mut client, buffer, 1, (0, 20));
+    asked_so_far(1);
+    ask_hints(&mut client, buffer, 2, (60, 90));
+    let said = asked_so_far(2);
+    assert_eq!(cancelled(&said), 0, "{said}");
+    // One pane asks again for all of both, as after an edit.
+    ask_hints(&mut client, buffer, 3, (0, 100));
+    let said = asked_so_far(3);
+    assert_eq!(cancelled(&said), 2, "{said}");
+    std::fs::write(daemon.dir.path().join("gate"), "").unwrap();
+    // Only the last is answered, though the server answered all three.
+    let (id, answer) = next_answer(&mut client);
+    assert_eq!(id, 3);
+    let Answer::InlayHints { hints, .. } = answer else {
+        panic!("{answer:?}");
+    };
+    assert_eq!(hints.len(), 10);
+    client.query(buffer, 4, (0, 0), Query::Definition).unwrap();
+    assert_eq!(next_answer(&mut client).0, 4);
+}
+
+#[test]
+fn a_flood_of_inlay_hints_is_cut_to_a_few_screens_of_short_labels() {
+    let daemon = with_fake_language_server(|_| vec!["--hint-flood".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    ask_hints(&mut client, buffer, 1, (0, 4));
+    let (id, answer) = next_answer(&mut client);
+    assert_eq!(id, 1);
+    let Answer::InlayHints { hints, .. } = answer else {
+        panic!("{answer:?}");
+    };
+    assert_eq!(hints.len(), 2000);
+    let cut = format!("{}…", "y".repeat(59));
+    assert!(hints.iter().all(|hint| hint.label == cut), "{:?}", hints[0]);
+}
+
+#[test]
+fn a_server_that_says_its_hints_are_stale_again_and_again_has_its_features_told_seldom() {
+    let daemon = with_fake_language_server(|_| vec!["--refresh-hints".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "let x = bad\n")]);
+    // Told what it does as it started, if not before attaching.
+    ask_hints(&mut client, buffer, 1, (0, 12));
+    while !matches!(
+        next_buffer_update(&mut client),
+        BufferUpdate::Answer { id: 1, .. }
+    ) {}
+    // Once it's answered, the cue to ask afresh: though it said so fifty
+    // times at once, once, or twice if they came in two reads, and never
+    // twice within a tenth of a second.
+    let mut told = Vec::new();
+    client
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    while let Ok(event) = client.next_event() {
+        if let Event::Buffer {
+            update: BufferUpdate::Features(features),
+            ..
+        } = event
+        {
+            assert!(features.inlay_hints, "{features:?}");
+            told.push(Instant::now());
+        }
+    }
+    assert!((1..=2).contains(&told.len()), "{told:?}");
+    for pair in told.windows(2) {
+        assert!(pair[1] - pair[0] >= Duration::from_millis(80), "{told:?}");
+    }
+}
+
 #[test]
 fn completions_that_arent_all_say_so_and_too_many_are_cut() {
     let daemon = with_fake_language_server(|_| vec!["--incomplete".to_owned()]);
@@ -5903,6 +6141,7 @@ fn windows_are_told_what_a_server_does_as_you_type() {
         signature_again: vec![')'],
         prepare_rename: false,
         uses: true,
+        inlay_hints: true,
     };
     // A window attaching once it's ready is told after the snapshot.
     let mut other = daemon.client();

@@ -23,14 +23,15 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{
-    Answer, BufferId, BufferSnapshot, BufferUpdate, Change, ChatName, ClientMessage, Edit, Query,
-    Resume, ServerFeatures, Use,
+    Answer, BufferId, BufferSnapshot, BufferUpdate, Change, ChatName, ClientMessage, Edit,
+    InlayHint, Query, Resume, ServerFeatures, Use,
 };
 use clackatoo_text::{
     AgentHunk, AgentHunks, Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span,
     compose, line_start_through, transform,
 };
 
+use super::hints::Hints;
 use super::kept::{LineChange, LineLog};
 use super::scratch::Scratch;
 use crate::motion::Words;
@@ -87,6 +88,10 @@ pub(crate) enum Heard {
     NothingToReverse { undo: bool },
     /// The language server answered the query numbered `id`.
     Answer { id: u64, answer: Answer },
+    /// The language server answered the query numbered `id` with inlay
+    /// hints, which the copy has taken in: `changed` if they're not those
+    /// it had.
+    Hinted { id: u64, changed: bool },
     /// The code in the hover answered to the query numbered `id` is
     /// coloured so, as bytes of its text.
     Coloured { id: u64, spans: Vec<Span> },
@@ -170,6 +175,12 @@ pub(crate) struct BufferCopy {
     chats: Vec<ChatName>,
     /// What its language server does as you type.
     features: ServerFeatures,
+    /// How many times the daemon has said so, which it says again when the
+    /// server says its inlay hints may be out of date.
+    features_told: u64,
+    /// What its language server would have written inline between its
+    /// text, as editors showing it asked.
+    hints: Hints,
     /// What its words are made of besides letters, digits and `_`, as its
     /// language says.
     words: Words,
@@ -222,6 +233,8 @@ impl BufferCopy {
             agents: AgentHunks::new(),
             chats: Vec::new(),
             features: ServerFeatures::default(),
+            features_told: 0,
+            hints: Hints::default(),
             words: Words::NONE,
             macro_edited: false,
             steps: 0,
@@ -260,6 +273,34 @@ impl BufferCopy {
     /// daemon has said.
     pub(crate) fn features(&self) -> &ServerFeatures {
         &self.features
+    }
+
+    /// How many times the daemon has said what the buffer's language
+    /// server does: once it's ready, and again whenever the server says
+    /// its inlay hints may be out of date, as a cue to ask afresh.
+    pub(crate) fn features_told(&self) -> u64 {
+        self.features_told
+    }
+
+    /// What the buffer's language server would have written inline
+    /// between its text, as far as editors have asked.
+    pub(crate) fn hints(&self) -> &Hints {
+        &self.hints
+    }
+
+    /// Forgets the inlay hints, as when they're turned off.
+    pub(crate) fn forget_hints(&mut self) {
+        self.hints.clear();
+    }
+
+    /// Takes the server's features, as the daemon says them: once it's
+    /// ready, and again when its hints may be out of date.
+    fn told_features(&mut self, features: ServerFeatures) {
+        if !features.inlay_hints {
+            self.hints.clear();
+        }
+        self.features = features;
+        self.features_told += 1;
     }
 
     /// What the buffer's words are made of besides letters, digits and
@@ -382,6 +423,7 @@ impl BufferCopy {
         }
         self.highlights.map(edit);
         self.diagnostics.map(edit);
+        self.hints.map(edit);
         self.hunks.map(edit);
         // Without their bases, which the daemon keeps: it says when one
         // goes.
@@ -485,6 +527,7 @@ impl BufferCopy {
         }
         self.highlights.map(&edit);
         self.diagnostics.map(&edit);
+        self.hints.map(&edit);
         self.hunks.map(&edit);
         self.agents.map(&edit, None);
         self.steps += u64::from(step);
@@ -600,6 +643,7 @@ impl BufferCopy {
         self.sent = None;
         self.highlights.clear();
         self.diagnostics = Diagnostics::new();
+        self.hints.clear();
         self.hunks = Hunks::new();
         self.agents = AgentHunks::new();
         // Told again after the snapshot, if there's a server.
@@ -844,7 +888,7 @@ impl BufferCopy {
                 from: std::mem::replace(&mut self.path, path),
             },
             BufferUpdate::Features(features) => {
-                self.features = features;
+                self.told_features(features);
                 Heard::Nothing
             }
             _ => Heard::Nothing,
@@ -971,17 +1015,14 @@ impl BufferCopy {
             | BufferUpdate::ChangedOnDisk
             | BufferUpdate::Language { .. } => Heard::Nothing,
             BufferUpdate::Features(features) => {
-                self.features = features;
+                self.told_features(features);
                 Heard::Nothing
             }
             BufferUpdate::Answer {
                 id,
                 version,
                 answer,
-            } => Heard::Answer {
-                id,
-                answer: self.past_waiting(version, answer),
-            },
+            } => self.answered(id, version, answer),
             BufferUpdate::Hunks { version, hunks } => {
                 self.take_hunks(version, hunks);
                 Heard::Nothing
@@ -1017,6 +1058,49 @@ impl BufferCopy {
             });
         }
         uses
+    }
+
+    /// Takes in the answer to the query numbered `id`, about the daemon's
+    /// text at `version`: inlay hints the copy keeps, and the rest the
+    /// editors see to, moved past the window's edits waiting.
+    fn answered(&mut self, id: u64, version: u64, answer: Answer) -> Heard {
+        match self.past_waiting(version, answer) {
+            Answer::InlayHints { start, end, hints } => Heard::Hinted {
+                id,
+                changed: self.hints.replace(start, end, hints),
+            },
+            answer => Heard::Answer { id, answer },
+        }
+    }
+
+    /// Inlay hints for bytes `start` to `end` of the daemon's text at
+    /// `version`, moved past the window's edits `waiting`, with the range,
+    /// as highlights are: one an edit has touched, or put text in beside,
+    /// may be wrong now, and is left out; and none, for no range, for a
+    /// version the copy isn't at.
+    fn hints_past_waiting(
+        &self,
+        version: u64,
+        (start, end): (usize, usize),
+        mut hints: Vec<InlayHint>,
+        waiting: &[&Edit],
+    ) -> Answer {
+        if version != self.version {
+            log::debug!("buffer {}: inlay hints for version {version}", self.id);
+            return Answer::Nothing;
+        }
+        // In order, as the daemon sends them, so each edit moves them all
+        // in one pass.
+        hints.sort_by_key(|hint| hint.at);
+        for edit in waiting {
+            let mut untouched = edit.untouched();
+            hints.retain_mut(|hint| untouched.place(hint.at).map(|at| hint.at = at).is_some());
+        }
+        let (start, end) = (waiting.iter()).fold((start, end), |(start, end), edit| {
+            let start = edit.map(start, Bias::After);
+            (start, edit.map(end, Bias::Before).max(start))
+        });
+        Answer::InlayHints { start, end, hints }
     }
 
     /// `answer`, with places in this buffer, counted in the daemon's text
@@ -1100,6 +1184,10 @@ impl BufferCopy {
         if let Answer::Uses(uses) = answer {
             let waiting: Vec<&Edit> = waiting.collect();
             return Answer::Uses(self.uses_past_waiting(version, uses, &waiting));
+        }
+        if let Answer::InlayHints { start, end, hints } = answer {
+            let waiting: Vec<&Edit> = waiting.collect();
+            return self.hints_past_waiting(version, (start, end), hints, &waiting);
         }
         let waiting: Vec<&Edit> = waiting.collect();
         let moved = |offset: &mut Option<usize>, line: &mut u64, col: &mut usize| {
@@ -1309,7 +1397,10 @@ impl BufferCopy {
                 // does the end of what's asked about from it.
                 Waiting::Query {
                     at,
-                    query: Query::CodeActions { end } | Query::FormatRange { end, .. },
+                    query:
+                        Query::CodeActions { end }
+                        | Query::FormatRange { end, .. }
+                        | Query::InlayHints { end },
                     ..
                 } => {
                     *at = edit.map(*at, Bias::Before);
@@ -2153,6 +2244,56 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn inlay_hints_move_past_the_windows_edits_waiting_and_go_with_the_server() {
+        let daemon = Daemon::new("let ab = cd(ef);\n");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        let id = copy.ask(Query::InlayHints { end: 16 }, 0);
+        copy.take_outbox();
+        // Typed at the start, and where the argument's name goes, and not
+        // yet made by the daemon.
+        typed(&mut copy, 0, "!", true);
+        typed(&mut copy, 13, "?", true);
+        let hint = |at, label: &str| InlayHint {
+            at,
+            label: label.into(),
+            kind: clackatoo_protocol::InlayHintKind::Type,
+            pad_left: false,
+            pad_right: false,
+        };
+        let answered = |version| BufferUpdate::Answer {
+            id,
+            version,
+            answer: Answer::InlayHints {
+                start: 0,
+                end: 16,
+                hints: vec![hint(6, ": u8"), hint(12, "x:")],
+            },
+        };
+        let heard = copy.update(answered(0));
+        assert_eq!(heard, Heard::Hinted { id, changed: true });
+        // The one text was put in at may be wrong now, and is left out;
+        // the other moves past what was typed, as the range does.
+        let kept: Vec<(usize, &str)> = (copy.hints().within(0, usize::MAX).iter())
+            .map(|hint| (hint.at, &*hint.label))
+            .collect();
+        assert_eq!(kept, [(7, ": u8")]);
+        // None for a version the copy isn't at.
+        let heard = copy.update(answered(3));
+        assert_eq!(
+            heard,
+            Heard::Answer {
+                id,
+                answer: Answer::Nothing
+            }
+        );
+        assert_eq!(copy.hints().within(0, usize::MAX).len(), 1);
+        // A server that stops giving them takes them away.
+        copy.update(BufferUpdate::Features(ServerFeatures::default()));
+        assert!(copy.hints().is_empty());
+    }
+
+    #[test]
     fn a_query_waits_for_the_edits_before_it_and_moves_with_others() {
         let mut daemon = Daemon::new("abc");
         let mut copy = BufferCopy::new(BufferId(1));
@@ -2314,6 +2455,8 @@ pub(super) mod tests {
         for (asked, moved) in [
             (Query::CodeActions { end: 5 }, Query::CodeActions { end: 7 }),
             (format(5), format(7)),
+            // And the part of the file inlay hints are asked for.
+            (Query::InlayHints { end: 5 }, Query::InlayHints { end: 7 }),
         ] {
             let mut daemon = Daemon::new("abcdef");
             let mut copy = BufferCopy::new(BufferId(1));

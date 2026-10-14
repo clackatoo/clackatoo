@@ -105,6 +105,8 @@ pub(crate) enum Action {
     Review(ReviewKey),
     /// Sends Ctrl+B to the focused pane's program.
     SendCtrlB,
+    /// Turns inlay hints off, or on, as `:set ih!` does.
+    ToggleInlayHints,
 }
 
 /// What a key does in reviewing what agents changed.
@@ -217,6 +219,13 @@ fn defaults() -> Keymap<Binding> {
     bind("nv", "<Space>hs", Action::Hunk(HunkAction::Stage), hunk);
     // As nvim-tree's and neo-tree's are often bound.
     bind("nv", "<Space>e", Action::Explore, Some("explorer"));
+    // As kickstart.nvim's `<leader>th`.
+    bind(
+        "nv",
+        "<Space>th",
+        Action::ToggleInlayHints,
+        Some("inlay hints"),
+    );
     for (letter, direction) in DIRECTIONS {
         bind(
             "nv",
@@ -344,6 +353,18 @@ impl Desk {
                 if let Some(pane) = self.focused_pane() {
                     pane.send_bytes(vec![0x02]);
                 }
+            }
+            Action::ToggleInlayHints => {
+                self.run_set("inlayhints!");
+                let on = self.options.inlayhints;
+                self.message = Some(
+                    if on {
+                        "inlay hints on"
+                    } else {
+                        "inlay hints off"
+                    }
+                    .into(),
+                );
             }
         }
     }

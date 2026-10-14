@@ -12,6 +12,13 @@
 //! Rows are worked out a line at a time, as they're needed, from the
 //! view's top or the cursor, never from the file's start, so a long file
 //! scrolls as fast as a short one.
+//!
+//! An inlay hint takes cells on a row without being any of the line's
+//! (see [`hints`](super::hints)): it goes with the character it's drawn
+//! before, the two never split between rows, and one after the line's
+//! end with its last character. A row's start is still one of the line's
+//! cells, and the hints on it those drawn before its characters, from its
+//! first to its last, and on its last row, those after the line's end.
 
 use clackatoo_term::{RowBuilder, Style};
 
@@ -92,12 +99,18 @@ const BREAK_AFTER: &[char] = &[
 /// `breakindentopt` does by default.
 const LEAST_TEXT: usize = 20;
 
-/// The screen rows `laid` goes on over, wrapped as `wrap` says. If
-/// `room_after`, the cell after the line's last has to fit too, for the
-/// cursor typing there.
-pub(crate) fn rows(laid: &Laid, wrap: Wrap, room_after: bool) -> Vec<ScreenRow> {
-    match Rows::of(laid, wrap, room_after) {
-        Some(rows) => rows.go_on(laid, vec![ScreenRow::WHOLE]),
+/// The screen rows `laid` goes on over, wrapped as `wrap` says, with
+/// `inlays`, its inlay hints, each the cell it's drawn before and the
+/// cells it takes, in order. If `room_after`, the cell after the line's
+/// last has to fit too, for the cursor typing there.
+pub(crate) fn rows(
+    laid: &Laid,
+    wrap: Wrap,
+    room_after: bool,
+    inlays: &[(usize, usize)],
+) -> Vec<ScreenRow> {
+    match Rows::of(laid, wrap, room_after, inlays) {
+        Some(rows) => rows.go_on(laid, vec![ScreenRow::WHOLE], inlays),
         None => vec![ScreenRow::WHOLE],
     }
 }
@@ -107,30 +120,40 @@ pub(crate) fn rows(laid: &Laid, wrap: Wrap, room_after: bool) -> Vec<ScreenRow> 
 /// rest against.
 #[cfg(test)]
 pub(crate) fn rows_by_cells(laid: &Laid, wrap: Wrap, room_after: bool) -> Vec<ScreenRow> {
-    match Rows::of(laid, wrap, room_after) {
-        Some(rows) => rows.go_on_cells(laid, vec![ScreenRow::WHOLE]),
+    match Rows::of(laid, wrap, room_after, &[]) {
+        Some(rows) => rows.go_on_cells(laid, vec![ScreenRow::WHOLE], &[]),
         None => vec![ScreenRow::WHOLE],
     }
 }
 
-/// The screen rows `laid` goes on over, as [`rows`] has them, given `old`,
-/// its rows before what's from cell `changed` on changed. Each row starts
-/// where what was on the row before it decided, looking no further than
-/// that row's edge: those whose rows before end before `changed` are
-/// kept, and only the rest worked out again.
+/// The screen rows `laid` goes on over, with `inlays`, as [`rows`] has
+/// them, given `old`, its rows before what's from cell `changed` on
+/// changed, its text or its inlay hints. Each row starts where what was on
+/// the row before it decided, looking no further than that row's edge:
+/// those whose rows before end before `changed` are kept, and only the
+/// rest worked out again, so an edit far along a long line with hints
+/// wraps only from there.
 pub(crate) fn rows_again(
     laid: &Laid,
     wrap: Wrap,
     room_after: bool,
     old: &[ScreenRow],
-    changed: usize,
+    (changed, inlays): (usize, &[(usize, usize)]),
 ) -> Vec<ScreenRow> {
-    let Some(rows) = Rows::of(laid, wrap, room_after) else {
+    let Some(rows) = Rows::of(laid, wrap, room_after, inlays) else {
         return vec![ScreenRow::WHOLE];
     };
     if old.first() != Some(&ScreenRow::WHOLE) {
-        return rows.go_on(laid, vec![ScreenRow::WHOLE]);
+        return rows.go_on(laid, vec![ScreenRow::WHOLE], inlays);
     }
+    // Hints after the line's end go with its last character, wherever an
+    // edit has left it.
+    let changed = match laid.count().checked_sub(1) {
+        Some(last) if inlays.last().is_some_and(|&(col, _)| col >= laid.cells()) => {
+            changed.min(laid.piece(last).0)
+        }
+        _ => changed,
+    };
     let mut kept = 1;
     while let Some(row) = old.get(kept)
         && row.indent == rows.indent
@@ -138,7 +161,7 @@ pub(crate) fn rows_again(
     {
         kept += 1;
     }
-    rows.go_on(laid, old[..kept].to_vec())
+    rows.go_on(laid, old[..kept].to_vec(), inlays)
 }
 
 /// How a line goes on over rows.
@@ -154,10 +177,16 @@ struct Rows {
 
 impl Rows {
     /// How `laid` goes on over rows, wrapped as `wrap` says, if it doesn't
-    /// fit on one.
-    fn of(laid: &Laid, wrap: Wrap, room_after: bool) -> Option<Self> {
+    /// fit on one with `inlays`.
+    fn of(laid: &Laid, wrap: Wrap, room_after: bool, inlays: &[(usize, usize)]) -> Option<Self> {
         let width = wrap.width.max(1);
-        if laid.cells() + usize::from(room_after) <= width {
+        // The hints counted only for a line that might fit without them.
+        let fits = laid.cells() + usize::from(room_after) <= width
+            && laid.cells()
+                + usize::from(room_after)
+                + inlays.iter().map(|&(_, cells)| cells).sum::<usize>()
+                <= width;
+        if fits {
             return None;
         }
         let indent = if wrap.breakindent {
@@ -187,22 +216,34 @@ impl Rows {
     }
 
     /// `rows`, the first of the line's, worked out on from the last of
-    /// them.
-    fn go_on(&self, laid: &Laid, rows: Vec<ScreenRow>) -> Vec<ScreenRow> {
+    /// them, with `inlays`, its inlay hints, in order.
+    fn go_on(
+        &self,
+        laid: &Laid,
+        rows: Vec<ScreenRow>,
+        inlays: &[(usize, usize)],
+    ) -> Vec<ScreenRow> {
         if laid.is_plain() {
-            self.go_on_plain(laid, rows)
+            self.go_on_plain(laid, rows, inlays)
         } else {
-            self.go_on_cells(laid, rows)
+            self.go_on_cells(laid, rows, inlays)
         }
     }
 
     /// [`go_on`](Self::go_on), character by character. A row ends at the
-    /// first character that doesn't fit, or with `linebreak`, after the
-    /// last blank or punctuation before it, not in the blanks the row
-    /// starts with, which would leave it empty. The next row starts afresh
-    /// from there, so where each starts depends only on what's from there
-    /// to its edge.
-    fn go_on_cells(&self, laid: &Laid, mut rows: Vec<ScreenRow>) -> Vec<ScreenRow> {
+    /// first character that doesn't fit, with the inlay hints drawn before
+    /// it, or with `linebreak`, after the last blank or punctuation before
+    /// it, not in the blanks the row starts with, which would leave it
+    /// empty. The next row starts afresh from there, so where each starts
+    /// depends only on what's from there to its edge. Hints after the
+    /// line's end go with its last character: a row of nothing but them
+    /// would be one the cursor couldn't stop on, and `gj` would stick.
+    fn go_on_cells(
+        &self,
+        laid: &Laid,
+        mut rows: Vec<ScreenRow>,
+        inlays: &[(usize, usize)],
+    ) -> Vec<ScreenRow> {
         let end = laid.cells();
         let count = laid.count() + usize::from(self.room_after);
         let piece = |index| {
@@ -212,18 +253,43 @@ impl Rows {
                 (end, end + 1, 'x')
             }
         };
+        let last = laid.count().checked_sub(1);
+        let after_end: usize = (inlays[inlays.partition_point(|&(col, _)| col < end)..].iter())
+            .map(|&(_, cells)| cells)
+            .sum();
         let Some(&ScreenRow { mut start, .. }) = rows.last() else {
             return rows;
         };
+        // The first hint not before the character being looked at: it only
+        // moves on along a row, and is found afresh for each row.
+        let mut hint = inlays.partition_point(|&(col, _)| col < start);
         let mut room = self.room(rows.len() - 1);
         // With `linebreak`, the cell after the last character on the row
-        // that it can end after, and whether there's been a word yet.
-        let (mut break_at, mut words) = (None, false);
+        // that it can end after, and whether there's been a word yet; and
+        // the cells the hints on the row so far take.
+        let (mut break_at, mut words, mut used) = (None, false, 0);
         let mut index = laid.piece_at(start);
         while index < count {
             let (cell, next, ch) = piece(index);
-            if next > start + room {
-                let edge = start + room;
+            // Those before a character the row starts in the middle of are
+            // on the row before.
+            // The cell after the end, typed at, has none: those after the
+            // end go with the last character.
+            let extra = if cell >= start && index < laid.count() && !inlays.is_empty() {
+                while inlays.get(hint).is_some_and(|&(col, _)| col < cell) {
+                    hint += 1;
+                }
+                let before: usize = (inlays[hint..].iter())
+                    .take_while(|&&(col, _)| col == cell)
+                    .map(|&(_, cells)| cells)
+                    .sum();
+                before + if Some(index) == last { after_end } else { 0 }
+            } else {
+                0
+            };
+            if next + used + extra > start + room {
+                // The line's cells the rest of the row has room for.
+                let edge = (start + room).saturating_sub(used + extra);
                 let to = if ch == '\t' && cell < edge {
                     Some(edge)
                 } else if let Some(at) = break_at.filter(|&at| at > start && at <= cell) {
@@ -238,11 +304,13 @@ impl Rows {
                         start: to,
                         indent: self.indent,
                     });
-                    (start, room, break_at, words) = (to, self.room(1), None, false);
+                    (start, room, break_at, words, used) = (to, self.room(1), None, false, 0);
                     index = laid.piece_at(to);
+                    hint = inlays.partition_point(|&(col, _)| col < to);
                     continue;
                 }
             }
+            used += extra;
             words |= ch != ' ' && ch != '\t';
             if self.linebreak && words && BREAK_AFTER.contains(&ch) {
                 break_at = Some(next);
@@ -254,17 +322,71 @@ impl Rows {
 
     /// [`go_on`](Self::go_on) for a plain line, every character a byte and
     /// a cell, a row at a time: the same rows, without looking at every
-    /// character of a long line.
-    fn go_on_plain(&self, laid: &Laid, mut rows: Vec<ScreenRow>) -> Vec<ScreenRow> {
+    /// character of a long line, only at its inlay hints, `inlays`.
+    fn go_on_plain(
+        &self,
+        laid: &Laid,
+        mut rows: Vec<ScreenRow>,
+        inlays: &[(usize, usize)],
+    ) -> Vec<ScreenRow> {
         let bytes = laid.text().as_bytes();
-        let count = bytes.len() + usize::from(self.room_after);
+        let len = bytes.len();
+        let count = len + usize::from(self.room_after);
+        // Those after the line's end go with its last character.
+        let (inlays, after) = inlays.split_at(inlays.partition_point(|&(col, _)| col < len));
+        let after_end: usize = after.iter().map(|&(_, cells)| cells).sum();
         let Some(&ScreenRow { mut start, .. }) = rows.last() else {
             return rows;
         };
         let mut room = self.room(rows.len() - 1);
-        while start + room < count {
-            let edge = start + room;
-            let on = &bytes[start..edge.min(bytes.len())];
+        loop {
+            // The first cell that doesn't fit on the row, given the hints
+            // before the characters that do: each hinted character, in
+            // order, as far as the row's edge, less what hints before it
+            // take.
+            let mut hint = inlays.partition_point(|&(col, _)| col < start);
+            let mut end_hinted = after_end > 0 && len > start;
+            let mut used = 0;
+            let to = loop {
+                // At least the row's first character, wider than the row
+                // with its hints as it may be.
+                let edge = (start + room).saturating_sub(used).max(start + 1);
+                let next = inlays.get(hint).map(|&(col, _)| col);
+                let (cell, cells) = match next {
+                    Some(col) if !end_hinted || col < len - 1 => {
+                        let mut cells = 0;
+                        while let Some(&(_, more)) = inlays.get(hint).filter(|&&(at, _)| at == col)
+                        {
+                            cells += more;
+                            hint += 1;
+                        }
+                        if col == len - 1 && end_hinted {
+                            end_hinted = false;
+                            (col, cells + after_end)
+                        } else {
+                            (col, cells)
+                        }
+                    }
+                    _ if end_hinted => {
+                        end_hinted = false;
+                        (len - 1, after_end)
+                    }
+                    _ => break edge,
+                };
+                if cell >= edge {
+                    break edge;
+                }
+                // Unless it's wider than a whole row, and has one to
+                // itself.
+                if cell + 1 + used + cells > start + room && cell > start {
+                    break cell;
+                }
+                used += cells;
+            };
+            if to >= count {
+                return rows;
+            }
+            let on = &bytes[start..to.min(len)];
             // With `linebreak`, after the last blank or punctuation, if
             // there's a word at or before it.
             let last = self.linebreak.then(|| {
@@ -272,14 +394,13 @@ impl Rows {
                     .rposition(|&byte| BREAK_AFTER.contains(&char::from(byte)))
                     .filter(|&last| on[..=last].iter().any(|&byte| byte != b' '))
             });
-            let to = last.flatten().map_or(edge, |last| start + last + 1);
+            let to = last.flatten().map_or(to, |last| start + last + 1);
             rows.push(ScreenRow {
                 start: to,
                 indent: self.indent,
             });
             (start, room) = (to, self.room(1));
         }
-        rows
     }
 }
 
@@ -344,6 +465,16 @@ impl Top {
     }
 }
 
+/// An inlay hint on a row shown: drawn before the line's cell `col`, or
+/// after its end, taking `cells` cells. It's the `hint`th of the
+/// buffer's, as [`Text::inlays_in`] counts them, until they change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Placed {
+    pub(crate) col: usize,
+    pub(crate) cells: usize,
+    pub(crate) hint: usize,
+}
+
 /// One screen row of an editor's view, showing part of a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Shown {
@@ -357,6 +488,9 @@ pub(crate) struct Shown {
     pub(crate) indent: usize,
     /// The cell the line's next row starts at, or `None` on its last.
     pub(crate) next: Option<usize>,
+    /// The inlay hints on it, in order, as the range of them in the view's
+    /// list (see [`view`]).
+    pub(crate) hints: (u32, u32),
 }
 
 impl Shown {
@@ -366,39 +500,155 @@ impl Shown {
         self.next.unwrap_or(usize::MAX)
     }
 
+    /// Its inlay hints, of `placed`, the view's.
+    pub(crate) fn hints<'p>(&self, placed: &'p [Placed]) -> &'p [Placed] {
+        let (first, after) = (self.hints.0 as usize, self.hints.1 as usize);
+        placed.get(first..after).unwrap_or_default()
+    }
+
+    /// Where cell `cell` of the line, on this row, is drawn, counting from
+    /// the gutter: after the inlay hints before it if `after_hints`, or
+    /// else where they start. Past the line's end, as a whole line's
+    /// selection reaches, as far as there is.
+    fn drawn_at(&self, cell: usize, placed: &[Placed], after_hints: bool) -> usize {
+        let hinted: usize = (self.hints(placed).iter())
+            .filter(|hint| hint.col < cell || (after_hints && hint.col == cell))
+            .map(|hint| hint.cells)
+            .sum();
+        (self.indent + hinted).saturating_add(cell - self.start)
+    }
+
+    /// The screen column, counting from the gutter, that the line's column
+    /// `column` is at on this row, as if it had no inlay hints, if it's on
+    /// the row and in the `width` cells right of the gutter: as
+    /// `colorcolumn` marks it, a straight line down the pane, as Neovim
+    /// keeps it past virtual text.
+    pub(crate) fn column(&self, column: usize, width: usize) -> Option<usize> {
+        let col = self.indent + column.checked_sub(self.start)?;
+        (column < self.end() && col < width).then_some(col)
+    }
+
     /// Where cell `cell` of the line is drawn, counting from the gutter,
-    /// if it's on this row and in the `width` cells right of the gutter.
-    pub(crate) fn col_of(&self, cell: usize, width: usize) -> Option<usize> {
-        let col = self.indent + cell.checked_sub(self.start)?;
-        (cell < self.end() && col < width).then_some(col)
+    /// if it's on this row and in the `width` cells right of the gutter,
+    /// after any inlay hints, of `placed`, the view's, before it.
+    pub(crate) fn col_of(&self, cell: usize, width: usize, placed: &[Placed]) -> Option<usize> {
+        if cell < self.start || cell >= self.end() {
+            return None;
+        }
+        let col = self.drawn_at(cell, placed, true);
+        (col < width).then_some(col)
+    }
+
+    /// The cells, counting from the gutter and in the `width` right of it,
+    /// that the line's cells from `from` to before `to` are drawn in on
+    /// this row, given to `each` as runs: one, or more where inlay hints,
+    /// of `placed`, the view's, between them split it. Past the row's end,
+    /// to the pane's edge.
+    pub(crate) fn runs(
+        &self,
+        (from, to): (usize, usize),
+        width: usize,
+        placed: &[Placed],
+        mut each: impl FnMut(std::ops::Range<usize>),
+    ) {
+        let from = from.max(self.start);
+        if from >= to.min(self.end()) {
+            return;
+        }
+        let mut first = self.drawn_at(from, placed, true);
+        // The cell the hints last passed are drawn before: several at one
+        // place are drawn one after another.
+        let mut at = None;
+        for hint in (self.hints(placed).iter()).filter(|hint| from < hint.col && hint.col < to) {
+            if at != Some(hint.col) {
+                let before = self.drawn_at(hint.col, placed, false);
+                if first < before.min(width) {
+                    each(first..before.min(width));
+                }
+                (first, at) = (before, Some(hint.col));
+            }
+            first += hint.cells;
+        }
+        let end = if to > self.end() {
+            width
+        } else {
+            self.drawn_at(to, placed, false).min(width)
+        };
+        if first < end {
+            each(first..end);
+        }
+    }
+
+    /// The line's cell at `col`, counting from the row's text, as a click
+    /// there finds it: on an inlay hint, the character it's drawn before,
+    /// or after the line's end, its end.
+    pub(crate) fn cell_at(&self, col: usize, placed: &[Placed]) -> usize {
+        let mut col = col.saturating_sub(self.indent);
+        for hint in self.hints(placed) {
+            let drawn = hint.col - self.start;
+            if col < drawn {
+                break;
+            }
+            if col < drawn + hint.cells {
+                return hint.col;
+            }
+            col -= hint.cells;
+        }
+        self.start + col
     }
 }
 
 /// The rows of `text` in a view `height` rows high whose top row is
-/// `top`, as far as line `end`. When lines don't wrap, `left` is the
-/// first cell shown.
+/// `top`, as far as line `end`, with the inlay hints on them put in
+/// `placed`, which each row has a range of. When lines don't wrap, `left`
+/// is the first cell shown, and the hints before it aren't.
 pub(crate) fn view(
     text: &Text<'_>,
-    top: RowAt,
-    height: usize,
+    (top, height): (RowAt, usize),
     end: u64,
     left: usize,
+    placed: &mut Vec<Placed>,
 ) -> Vec<Shown> {
+    placed.clear();
     let mut shown = Vec::with_capacity(height);
     let mut line = top.line;
     while shown.len() < height && line <= end {
         let rows = text.screen_rows(line);
+        // Asked only of a text with hints, so lines without cost nothing.
+        let laid = if text.has_hints() {
+            text.laid(line)
+        } else {
+            None
+        };
         let first = if line == top.line { top.row } else { 0 };
         for (row, screen) in rows.iter().enumerate().skip(first) {
             if shown.len() == height {
                 break;
             }
+            let start = if text.wraps() { screen.start } else { left };
+            let next = rows.get(row + 1).map(|next| next.start);
+            let from = placed.len();
+            // Those of the row alone, found by halving: a long line's
+            // thousands aren't all looked at for each of its rows.
+            if let Some(laid) = &laid {
+                placed.extend(
+                    text.inlays_in(line, laid, (start, next))
+                        .into_iter()
+                        .map(|inlay| Placed {
+                            col: inlay.col,
+                            cells: inlay.hint.cells,
+                            hint: inlay.index,
+                        }),
+                );
+            }
+            let index = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
             shown.push(Shown {
                 line,
                 row,
-                start: if text.wraps() { screen.start } else { left },
+                start,
                 indent: screen.indent,
-                next: rows.get(row + 1).map(|next| next.start),
+                next,
+                hints: (index(from), index(placed.len())),
             });
         }
         line += 1;
@@ -423,7 +673,7 @@ mod tests {
     /// says.
     fn starts(text: &str, wrap: Wrap) -> Vec<(usize, usize)> {
         let laid = Laid::new(text.to_owned(), 4);
-        (rows(&laid, wrap, false).iter())
+        (rows(&laid, wrap, false, &[]).iter())
             .map(|row| (row.start, row.indent))
             .collect()
     }
@@ -447,7 +697,7 @@ mod tests {
     fn a_tab_goes_on_over_the_row_after() {
         // "ab" and a tab to cell 8, in rows of 5: the tab goes on over.
         let laid = Laid::new("ab\tc".to_owned(), 8);
-        let rows = rows(&laid, wrap(5), false);
+        let rows = rows(&laid, wrap(5), false, &[]);
         assert_eq!(
             rows,
             [
@@ -563,13 +813,27 @@ mod tests {
                 showbreak: below(4),
             };
             let room_after = below(2) == 0;
-            let Some(rows) = Rows::of(&laid, wrap, room_after) else {
+            // With hints before some characters, and after the end.
+            let mut inlays: Vec<(usize, usize)> = Vec::new();
+            for col in 0..laid.cells() {
+                if below(5) == 0 {
+                    inlays.push((col, 1 + below(5)));
+                    if below(4) == 0 {
+                        inlays.push((col, 1 + below(3)));
+                    }
+                }
+            }
+            if below(2) == 0 {
+                inlays.push((laid.cells(), 1 + below(5)));
+            }
+            let inlays = if below(2) == 0 { &inlays[..] } else { &[] };
+            let Some(rows) = Rows::of(&laid, wrap, room_after, inlays) else {
                 continue;
             };
             assert_eq!(
-                rows.go_on(&laid, vec![ScreenRow::WHOLE]),
-                rows.go_on_cells(&laid, vec![ScreenRow::WHOLE]),
-                "{:?} in {wrap:?}, room after: {room_after}",
+                rows.go_on(&laid, vec![ScreenRow::WHOLE], inlays),
+                rows.go_on_cells(&laid, vec![ScreenRow::WHOLE], inlays),
+                "{:?} with {inlays:?} in {wrap:?}, room after: {room_after}",
                 laid.text(),
             );
         }
@@ -580,10 +844,137 @@ mod tests {
     }
 
     #[test]
+    fn lines_with_hints_wrap_inside_the_width_with_text_on_every_row() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut below = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            usize::try_from(seed % n as u64).unwrap()
+        };
+        let pieces = ["a", "b", " ", ",", "字", "\t", "é"];
+        for _ in 0..3000 {
+            let text: String = (0..below(40))
+                .map(|_| pieces[below(pieces.len())])
+                .collect();
+            let laid = Laid::new(text, 4);
+            // Hints before some characters, and after the end.
+            let mut inlays: Vec<(usize, usize)> = Vec::new();
+            for (cell, _, _) in laid.pieces() {
+                if below(4) == 0 {
+                    inlays.push((cell, 1 + below(6)));
+                }
+            }
+            if below(2) == 0 {
+                inlays.push((laid.cells(), 1 + below(6)));
+            }
+            let wrap = Wrap {
+                width: 1 + below(16),
+                linebreak: below(2) == 0,
+                breakindent: below(2) == 0,
+                showbreak: below(3),
+            };
+            let rows = rows(&laid, wrap, false, &inlays);
+            let context = format!("{:?} with {inlays:?} in {wrap:?}: {rows:?}", laid.text());
+            assert_eq!(rows[0], ScreenRow::WHOLE, "{context}");
+            for (index, row) in rows.iter().enumerate() {
+                let next = rows.get(index + 1).map_or(usize::MAX, |next| next.start);
+                assert!(row.start < next, "{context}");
+                // A row of its own text, never of hints alone.
+                assert!(row.start < laid.cells() || laid.cells() == 0, "{context}");
+                // As wide as the row, but for a character and its hints
+                // too wide for any row, which has one to itself.
+                let on = |col: usize| row.start <= col && (col < next || next == usize::MAX);
+                let hinted: usize = (inlays.iter())
+                    .filter(|&&(col, _)| on(col))
+                    .map(|&(_, cells)| cells)
+                    .sum();
+                let end = next.min(laid.cells());
+                let room = wrap.width - if index == 0 { 0 } else { row.indent };
+                let alone = laid.piece_at(row.start) == laid.piece_at(end.max(1) - 1);
+                assert!(
+                    end - row.start + hinted <= room || alone,
+                    "row {index}: {context}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_with_hints_wraps_again_from_where_it_changed_as_it_would_afresh() {
+        use super::super::kept::tests::Random;
+        const PIECES: [&str; 8] = ["a", "b", " ", ",", "字", "\t", "é", "-"];
+        fn text(random: &mut Random, most: usize) -> String {
+            (0..random.below(most))
+                .map(|_| PIECES[random.below(PIECES.len())])
+                .collect()
+        }
+        // Those of `keep` before cell `from`, and some of the line's own
+        // from there on, after its end too.
+        fn hints(
+            random: &mut Random,
+            laid: &Laid,
+            keep: &[(usize, usize)],
+            from: usize,
+        ) -> Vec<(usize, usize)> {
+            let mut inlays: Vec<(usize, usize)> = (keep.iter().copied())
+                .filter(|&(col, _)| col < from)
+                .collect();
+            for (cell, _, _) in laid.pieces().filter(|&(cell, _, _)| cell >= from) {
+                if random.below(3) == 0 {
+                    inlays.push((cell, 1 + random.below(5)));
+                }
+            }
+            if random.below(2) == 0 {
+                inlays.push((laid.cells(), 1 + random.below(5)));
+            }
+            inlays
+        }
+        let mut random = Random(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..3000 {
+            let before = text(&mut random, 60);
+            let cut = (0..=random.below(before.len() + 1))
+                .rev()
+                .find(|&at| before.is_char_boundary(at))
+                .unwrap_or(0);
+            let after = format!("{}{}", &before[..cut], text(&mut random, 20));
+            let (old, new) = (Laid::new(before, 4), Laid::new(after, 4));
+            // What's laid out again of the new text starts from the
+            // character before the cut, which an accent may join.
+            let from = old.col_before(old.col_of(cut)).unwrap_or(0);
+            let old_inlays = hints(&mut random, &old, &[], 0);
+            let new_inlays = hints(&mut random, &new, &old_inlays, from);
+            let wrap = Wrap {
+                width: 2 + random.below(14),
+                linebreak: random.below(2) == 0,
+                breakindent: random.below(2) == 0,
+                showbreak: random.below(3),
+            };
+            let rows_before = rows(&old, wrap, false, &old_inlays);
+            // As kept rows find it: where the text changed, or the first
+            // hint that isn't as it was.
+            let differ = (old_inlays.iter().zip(&new_inlays))
+                .position(|(was, now)| was != now)
+                .unwrap_or_else(|| old_inlays.len().min(new_inlays.len()));
+            let changed = (old_inlays.get(differ).into_iter())
+                .chain(new_inlays.get(differ))
+                .map(|&(col, _)| col)
+                .fold(from, usize::min);
+            assert_eq!(
+                rows_again(&new, wrap, false, &rows_before, (changed, &new_inlays)),
+                rows(&new, wrap, false, &new_inlays),
+                "{:?} to {:?}, {old_inlays:?} to {new_inlays:?}, in {wrap:?}",
+                old.text(),
+                new.text(),
+            );
+        }
+    }
+
+    #[test]
     fn the_cell_after_the_end_fits_while_its_typed_at() {
         let laid = Laid::new("abcd".to_owned(), 4);
-        assert_eq!(rows(&laid, wrap(4), false).len(), 1);
-        let rows = rows(&laid, wrap(4), true);
+        assert_eq!(rows(&laid, wrap(4), false, &[]).len(), 1);
+        let rows = rows(&laid, wrap(4), true, &[]);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].start, 4);
     }

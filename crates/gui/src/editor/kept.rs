@@ -171,7 +171,7 @@ struct KeptLine {
     changed: Option<Changed>,
     /// Its rows, without and with room after its end for the cursor
     /// typing there, if they've been asked for.
-    rows: [Option<Rows>; 2],
+    rows: [Option<KeptRows>; 2],
     /// About how many bytes it takes.
     size: usize,
 }
@@ -185,12 +185,24 @@ struct Changed {
     len: usize,
 }
 
-/// A line's rows, and the cell they're out of date from, if they are.
+/// A line's rows, and the cell they're out of date from, if they are,
+/// and the inlay hints they were worked out with: each the cell it's drawn
+/// before and the cells it takes, and which of the buffer's hints those
+/// were, as [`Kept::rows`] is given them. A line whose hints change has
+/// its rows worked out again; one with none, as most lines have, keeps
+/// them.
 #[derive(Debug)]
-struct Rows {
+struct KeptRows {
     rows: Rc<[ScreenRow]>,
     stale: Option<usize>,
+    inlays: Box<[(usize, usize)]>,
+    hinted: Hinted,
 }
+
+/// Which of a buffer's inlay hints a line's are from, if it has any: the
+/// [`Hints`](super::hints::Hints)' generation, and whether the line hides
+/// them, as the one typed on does.
+pub(super) type Hinted = Option<(u64, bool)>;
 
 impl KeptLine {
     fn new(laid: Rc<Laid>) -> Self {
@@ -207,7 +219,10 @@ impl KeptLine {
     /// Works out about how many bytes it takes.
     fn measure(&mut self) {
         let rows = (self.rows.iter().flatten())
-            .map(|rows| rows.rows.len() * size_of::<ScreenRow>())
+            .map(|rows| {
+                rows.rows.len() * size_of::<ScreenRow>()
+                    + rows.inlays.len() * size_of::<(usize, usize)>()
+            })
             .sum::<usize>();
         self.size = self.laid.size() + rows;
     }
@@ -455,31 +470,65 @@ impl Kept {
     }
 
     /// Line `line`'s rows, `laid` as [`laid`](Self::laid) gave it, wrapped
-    /// as `wrap` says, with room after its end if `room_after`: as kept, or
-    /// else worked out now, from those kept if they're out of date.
+    /// as `wrap` says, with room after its end if `room_after`, and its
+    /// inlay hints, `hinted` says which, each the cell it's drawn before
+    /// and the cells it takes, in order, as `inlays` gives them: as kept,
+    /// if they were worked out with the same hints, or else worked out
+    /// now, from those kept if they're out of date and the line had no
+    /// hints, nor has. The hints are asked for only if the buffer's have
+    /// changed since, so a frame with nothing changed asks nothing.
     pub(super) fn rows(
         &self,
         line: u64,
         laid: &Laid,
         wrap: Wrap,
         room_after: bool,
+        (hinted, inlays): (Hinted, impl FnOnce() -> Vec<(usize, usize)>),
     ) -> Rc<[ScreenRow]> {
         let mut kept = self.0.borrow_mut();
         let Some(old) = kept.lines.get_mut(&line) else {
-            return wrap::rows(laid, wrap, room_after).into();
+            return wrap::rows(laid, wrap, room_after, &inlays()).into();
         };
         let slot = &mut old.rows[usize::from(room_after)];
-        let rows: Rc<[ScreenRow]> = match slot {
-            Some(Rows { rows, stale: None }) => return Rc::clone(rows),
-            Some(Rows {
-                rows,
-                stale: Some(stale),
-            }) => wrap::rows_again(laid, wrap, room_after, rows, *stale).into(),
-            None => wrap::rows(laid, wrap, room_after).into(),
+        if let Some(rows) = slot.as_ref().filter(|rows| rows.stale.is_none())
+            && rows.hinted == hinted
+        {
+            return Rc::clone(&rows.rows);
+        }
+        let inlays = if hinted.is_some() {
+            inlays()
+        } else {
+            Vec::new()
         };
-        *slot = Some(Rows {
+        let rows: Rc<[ScreenRow]> = match slot {
+            Some(KeptRows {
+                rows,
+                stale,
+                inlays: was,
+                hinted: kept_for,
+            }) => {
+                // Out of date from where the text changed, or from the
+                // first hint that isn't as it was.
+                let differ = (was.iter().zip(&inlays))
+                    .position(|(was, now)| was != now)
+                    .unwrap_or_else(|| was.len().min(inlays.len()));
+                let hints_changed = (was.get(differ).into_iter())
+                    .chain(inlays.get(differ))
+                    .map(|&(col, _)| col)
+                    .min();
+                let Some(changed) = stale.iter().copied().chain(hints_changed).min() else {
+                    *kept_for = hinted;
+                    return Rc::clone(rows);
+                };
+                wrap::rows_again(laid, wrap, room_after, rows, (changed, &inlays)).into()
+            }
+            None => wrap::rows(laid, wrap, room_after, &inlays).into(),
+        };
+        *slot = Some(KeptRows {
             rows: Rc::clone(&rows),
             stale: None,
+            inlays: inlays.into(),
+            hinted,
         });
         let was = old.size;
         old.measure();

@@ -137,6 +137,10 @@ gates! {
     /// `Query::Uses` and `Answer::Uses`; `Query::FormatRange`; and
     /// `ServerFeatures`' `uses`.
     USES = 79,
+    /// Inlay hints: `Query::InlayHints` and `Answer::InlayHints`
+    /// (`InlayHint`, `InlayHintKind`), and `ServerFeatures`'
+    /// `inlay_hints`.
+    INLAY_HINTS = 80,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -349,6 +353,7 @@ impl Since for Answer {
             | Self::Staged => EARLIER,
             Self::Symbols { .. } | Self::Renamable { .. } => SYMBOLS,
             Self::Uses(_) => USES,
+            Self::InlayHints { .. } => INLAY_HINTS,
         }
     }
 }
@@ -934,6 +939,12 @@ mod tests {
         assert_eq!(Answer::Staged.since(), EARLIER);
         assert_eq!(Answer::Renamable { name: None }.since(), SYMBOLS);
         assert_eq!(Answer::Uses(Vec::new()).since(), USES);
+        let hints = Answer::InlayHints {
+            start: 0,
+            end: 0,
+            hints: Vec::new(),
+        };
+        assert_eq!(hints.since(), INLAY_HINTS);
         assert_eq!(Found::Done(Done::All).since(), EARLIER);
         assert_eq!(Found::Symbols(Vec::new()).since(), SYMBOLS);
         let language = BufferUpdate::Language { word: "-".into() };

@@ -286,19 +286,14 @@ impl Editor {
             } else {
                 usize::MAX
             };
-            let (from, to) = (from.max(shown.start), to.min(shown.end()));
-            if from >= to {
-                continue;
-            }
-            let cells = (shown.indent + (from - shown.start)).min(width)
-                ..(shown.indent.saturating_add(to - shown.start)).min(width);
-            if !cells.is_empty() {
+            let to = to.min(shown.end());
+            shown.runs((from, to), width, &self.placed, |cells| {
                 into.push(Highlight {
                     line: row,
                     cols: self.gutter + cells.start..self.gutter + cells.end,
                     kind: why,
                 });
-            }
+            });
         }
     }
 }

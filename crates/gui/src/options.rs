@@ -527,6 +527,12 @@ options! {
     /// other places it's used in the file are lit, as its language server
     /// says: where it's written a little brighter than where it's read.
     highlightuses("hlu"): bool = true;
+    /// What the language server would have written inline between a
+    /// file's text is drawn there, muted: the types of names bound without
+    /// one written, and the names of the parameters arguments are for.
+    /// They're never part of the text: the cursor, motions, searches and
+    /// yanks pass them by. `<Space>th` toggles it.
+    inlayhints("ih"): bool = true;
     /// Which of the desktop's the unnamed register goes along with, as in
     /// Neovim: the clipboard, so what's yanked or deleted in an editor can
     /// be pasted anywhere, and `p` puts what was copied anywhere; the

@@ -243,29 +243,28 @@ impl Edit {
     /// Each change it makes, as where it is in the text before the edit,
     /// the text taken away there and the text put in its place.
     pub fn changes(&self) -> impl Iterator<Item = (usize, &str, &str)> {
-        let mut at = 0;
-        let mut ops = self.ops.iter().peekable();
-        std::iter::from_fn(move || {
-            loop {
-                match ops.next()? {
-                    Op::Retain(len) => at += len,
-                    Op::Insert(inserted) => {
-                        let removed = match ops.next_if(|op| matches!(op, Op::Delete(_))) {
-                            Some(Op::Delete(removed)) => removed.as_str(),
-                            _ => "",
-                        };
-                        let change = (at, removed, inserted.as_str());
-                        at += removed.len();
-                        return Some(change);
-                    }
-                    Op::Delete(removed) => {
-                        let change = (at, removed.as_str(), "");
-                        at += removed.len();
-                        return Some(change);
-                    }
-                }
-            }
-        })
+        self.walk()
+    }
+
+    /// Moves places through it as [`map_untouched`](Self::map_untouched)
+    /// moves one, `start` and `end` the same, but going through the edit
+    /// once for them all, if they're asked for in order: so moving each of
+    /// thousands of places through an edit of thousands of changes, as
+    /// `:%s` makes, costs as much as both, not their product.
+    #[must_use]
+    pub fn untouched(&self) -> Untouched<'_> {
+        Untouched {
+            changes: self.walk().peekable(),
+            moved: 0,
+        }
+    }
+
+    /// [`changes`](Self::changes), as a type that can be kept.
+    fn walk(&self) -> Changes<'_> {
+        Changes {
+            ops: self.ops.iter().peekable(),
+            at: 0,
+        }
     }
 
     /// Checks it can be made to `rope`, without changing it.
@@ -477,6 +476,68 @@ impl<'a> Pieces<'a> {
             self.head = Some(rest);
         }
         Ok(taken)
+    }
+}
+
+/// The changes an edit makes, in order: see [`Edit::changes`].
+#[derive(Debug)]
+struct Changes<'a> {
+    ops: std::iter::Peekable<std::slice::Iter<'a, Op>>,
+    /// Where the next is looked for from, in the text before the edit.
+    at: usize,
+}
+
+impl<'a> Iterator for Changes<'a> {
+    type Item = (usize, &'a str, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.ops.next()? {
+                Op::Retain(len) => self.at += len,
+                Op::Insert(inserted) => {
+                    let removed = match self.ops.next_if(|op| matches!(op, Op::Delete(_))) {
+                        Some(Op::Delete(removed)) => removed.as_str(),
+                        _ => "",
+                    };
+                    let change = (self.at, removed, inserted.as_str());
+                    self.at += removed.len();
+                    return Some(change);
+                }
+                Op::Delete(removed) => {
+                    let change = (self.at, removed.as_str(), "");
+                    self.at += removed.len();
+                    return Some(change);
+                }
+            }
+        }
+    }
+}
+
+/// Places moved through an edit one after another, in order, as
+/// [`Edit::untouched`] makes it.
+#[derive(Debug)]
+pub struct Untouched<'a> {
+    changes: std::iter::Peekable<Changes<'a>>,
+    /// How far the changes passed so far moved what's after them.
+    moved: isize,
+}
+
+impl Untouched<'_> {
+    /// Where `place` goes, if no change touches it, at it or beside it, as
+    /// [`Edit::map_untouched`] has it. Places must be asked for in order,
+    /// none before the last.
+    pub fn place(&mut self, place: usize) -> Option<usize> {
+        let signed = |len: usize| isize::try_from(len).unwrap_or(isize::MAX);
+        while let Some(&(start, removed, inserted)) = self.changes.peek()
+            && start + removed.len() < place
+        {
+            self.moved += signed(inserted.len()) - signed(removed.len());
+            self.changes.next();
+        }
+        match self.changes.peek() {
+            Some(&(start, removed, _)) if start <= place && place <= start + removed.len() => None,
+            _ => Some(place.saturating_add_signed(self.moved)),
+        }
     }
 }
 
@@ -828,6 +889,17 @@ mod tests {
             let both = compose(&a, &b).unwrap();
             let one_by_one = b.apply_to(&a.apply_to(&text).unwrap()).unwrap();
             prop_assert_eq!(both.apply_to(&text).unwrap(), one_by_one);
+        }
+
+        #[test]
+        fn places_moved_in_order_go_where_each_alone_would(
+            (text, a) in text().prop_flat_map(edit_of)
+        ) {
+            let mut untouched = a.untouched();
+            for place in 0..=text.len() {
+                let alone = a.map_untouched(place, place).map(|(at, _)| at);
+                prop_assert_eq!(untouched.place(place), alone, "at {}", place);
+            }
         }
 
         #[test]

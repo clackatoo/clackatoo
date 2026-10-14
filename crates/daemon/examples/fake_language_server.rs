@@ -22,6 +22,14 @@
 //! same text, with no kind, on a line starting `//`, and read elsewhere.
 //! It writes `uses ID` to the `--log` file for each such question.
 //!
+//! Asked what to write inline in a range, it gives `: num` after the name
+//! after each `let ` (a type, its label a string), `value:` before what's
+//! in the brackets after each `call(` (a parameter's name, its label in
+//! two parts, with a blank after it), and `? NOTE`, with a line break in
+//! it, before each `maybe` (of no kind, with a blank before it): those in
+//! the range only. It writes `hints FIRST LAST` to the `--log` file for
+//! each such question, the range's first and last lines.
+//!
 //! Asked to format a file, it puts each `bad` in capitals and, if asked
 //! for spaces, makes each tab that starts a line that many; asked to
 //! format part of one, it does that only to what touches the range.
@@ -66,6 +74,9 @@
 //! | `--hold-symbols FILE` | Answers what symbols are in a file or the project only once FILE exists, taking nothing else in meanwhile |
 //! | `--queue-symbols FILE` | Holds questions of what symbols are in a file or the project until FILE exists, taking everything else in meanwhile, then answers them in order |
 //! | `--queue-uses FILE` | Holds questions of where a name is used until FILE exists, taking everything else in meanwhile, then answers them in order |
+//! | `--queue-hints FILE` | Holds questions of what to write inline until FILE exists, taking everything else in meanwhile, then answers them in order |
+//! | `--hint-flood` | Answers what to write inline with 100,000 hints with labels of 300 characters, then one whose label has 100,000 parts |
+//! | `--refresh-hints` | Asks its client to ask for inlay hints again, fifty times at once, after it's answered the first question of them |
 //! | `--format-error` | Answers formatting a file, or part of one, with an error, `RequestFailed`, as `gcsl lsp` does for a file with a syntax error |
 //! | `--prepare HOW` | Checks a rename first, answering as HOW says: `range` with the word's range, `placeholder` with its range and the word in capitals, `default` leaving it to its client, `error` with an error; and with `null` where there's no word |
 //!
@@ -102,6 +113,7 @@ use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
 
+#[allow(clippy::too_many_lines, reason = "a line for each flag, most short")]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str| args.iter().any(|arg| arg == name);
@@ -140,6 +152,10 @@ fn main() {
         hold_symbols: value("--hold-symbols"),
         queue_uses: value("--queue-uses"),
         queued_uses: Vec::new(),
+        queue_hints: value("--queue-hints"),
+        queued_hints: Vec::new(),
+        hint_flood: flag("--hint-flood"),
+        refresh_hints: flag("--refresh-hints"),
         format_error: flag("--format-error"),
         prepare: value("--prepare"),
         action_files: flag("--action-files"),
@@ -263,6 +279,13 @@ struct Fake {
     /// the text as it was asked about, held, in order, until `queue_uses`
     /// exists.
     queued_uses: Vec<Value>,
+    queue_hints: Option<String>,
+    /// The answers to questions of what to write inline, held, in order,
+    /// until `queue_hints` exists.
+    queued_hints: Vec<Value>,
+    hint_flood: bool,
+    /// It's yet to ask its client to ask for inlay hints again.
+    refresh_hints: bool,
     format_error: bool,
     /// How it answers a rename checked first, if it checks them.
     prepare: Option<String>,
@@ -443,6 +466,7 @@ impl Fake {
                 if held(&mut self.queued)
                     .or_else(|| held(&mut self.queued_symbols))
                     .or_else(|| held(&mut self.queued_uses))
+                    .or_else(|| held(&mut self.queued_hints))
                     .is_some()
                 {
                     send(&json!({
@@ -498,6 +522,23 @@ impl Fake {
                     send(&answer);
                 }
             }
+            "textDocument/inlayHint" => {
+                let answer = self.inlay_hints(message);
+                if self.queue_hints.is_some() {
+                    self.queued_hints.push(answer);
+                } else {
+                    send(&answer);
+                }
+                if std::mem::take(&mut self.refresh_hints) {
+                    for refresh in 0..50 {
+                        send(&json!({
+                            "jsonrpc": "2.0",
+                            "id": format!("refresh {refresh}"),
+                            "method": "workspace/inlayHint/refresh",
+                        }));
+                    }
+                }
+            }
             "textDocument/codeAction" => self.code_actions(message),
             "codeAction/resolve" => {
                 if let Some(gate) = &self.hold_resolve {
@@ -543,6 +584,80 @@ impl Fake {
                 send(&answer);
             }
         }
+        let open =
+            (self.queue_hints.as_ref()).is_some_and(|gate| std::path::Path::new(gate).exists());
+        if open && !self.queued_hints.is_empty() {
+            for answer in std::mem::take(&mut self.queued_hints) {
+                send(&answer);
+            }
+        }
+    }
+
+    /// The answer to what to write inline in the range `message` asks
+    /// about, worked out in the text as it is now: see the module's
+    /// documentation. Or, with `--hint-flood`, a flood.
+    fn inlay_hints(&self, message: &Value) -> Value {
+        let params = &message["params"];
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let text = &self.files[uri];
+        let range = &params["range"];
+        let (start, end) = (
+            byte(text, &range["start"], self.utf16),
+            byte(text, &range["end"], self.utf16),
+        );
+        self.note(&format!(
+            "hints {} {}",
+            range["start"]["line"], range["end"]["line"]
+        ));
+        if self.hint_flood {
+            let label = "y".repeat(300);
+            let mut flood: Vec<Value> = (0..100_000)
+                .map(|_| json!({ "position": place(text, 0, self.utf16), "label": label }))
+                .collect();
+            let parts: Vec<Value> = (0..100_000).map(|_| json!({ "value": "zz" })).collect();
+            flood.push(json!({ "position": place(text, 0, self.utf16), "label": parts }));
+            return json!({ "jsonrpc": "2.0", "id": message["id"], "result": flood });
+        }
+        let mut hints: Vec<(usize, Value)> = Vec::new();
+        for (at, _) in text.match_indices("let ") {
+            let after = at + "let ".len();
+            let (_, name) = word_at(text, after);
+            let at = after + name.len();
+            if !name.is_empty() {
+                let position = place(text, at, self.utf16);
+                hints.push((
+                    at,
+                    json!({ "position": position, "label": ": num", "kind": 1 }),
+                ));
+            }
+        }
+        for (at, _) in text.match_indices("call(") {
+            let at = at + "call(".len();
+            let label = json!([{ "value": "val" }, { "value": "ue:" }]);
+            hints.push((
+                at,
+                json!({
+                    "position": place(text, at, self.utf16),
+                    "label": label,
+                    "kind": 2,
+                    "paddingRight": true,
+                }),
+            ));
+        }
+        for (at, _) in text.match_indices("maybe") {
+            hints.push((
+                at,
+                json!({
+                    "position": place(text, at, self.utf16),
+                    "label": "? NO\nTE",
+                    "paddingLeft": true,
+                }),
+            ));
+        }
+        hints.retain(|(at, _)| (start..=end).contains(at));
+        hints.sort_by_key(|(at, _)| *at);
+        let result: Vec<Value> = hints.into_iter().map(|(_, hint)| hint).collect();
+        json!({ "jsonrpc": "2.0", "id": message["id"], "result": result })
     }
 
     /// The answer to where the word at the place `message` asks about is
@@ -1106,6 +1221,7 @@ impl Fake {
             capabilities["documentFormattingProvider"] = json!(true);
             capabilities["documentRangeFormattingProvider"] = json!(true);
             capabilities["documentHighlightProvider"] = json!(true);
+            capabilities["inlayHintProvider"] = json!({ "resolveProvider": false });
             capabilities["completionProvider"] = json!({
                 "triggerCharacters": ["."],
                 "resolveProvider": !self.no_resolve,

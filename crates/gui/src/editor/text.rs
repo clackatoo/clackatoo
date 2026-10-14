@@ -10,6 +10,11 @@
 //! With `wrap`, a line too long for the pane is cut into screen rows (see
 //! [`wrap`]), which the Vim engine asks for with [`Lines::screen_rows`].
 //!
+//! Inlay hints take cells on screen, but none of a line laid out: the Vim
+//! engine never sees them (see [`hints`](super::hints)). Where a line's
+//! are drawn, in its cells, is [`Text::inlay_cells`] and
+//! [`Text::inlays_in`].
+//!
 //! The Vim engine reads a laid out line's cells straight from where its
 //! characters start (see [`Cells`]), as it reads a terminal's row, so it
 //! moves through a line of any length, and nothing is kept for each cell.
@@ -20,8 +25,9 @@ use clackatoo_protocol::BufferId;
 use clackatoo_term::{MAX_EXTRA, RowBuilder, Style, Underline};
 use clackatoo_text::{Diagnostic, Rope, Span};
 
+use super::hints::{Hint, Hints};
 use super::kept::{Kept, LineLog};
-use super::wrap::Wrap;
+use super::wrap::{Placed, Wrap};
 use crate::colors;
 use crate::motion::{Cells, Lines, Point, ScreenRow, Spot, Words};
 
@@ -84,6 +90,16 @@ fn plain(bytes: &[u8]) -> bool {
 pub(crate) struct Underlines<'a> {
     pub(crate) diagnostics: &'a [&'a Diagnostic],
     pub(crate) hovered: Option<(usize, usize)>,
+}
+
+/// An inlay hint, placed on a laid out line: drawn just before the
+/// character at cell `col`, or after the line's end if that's its end.
+/// It's the `index`th of the buffer's.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Inlay<'h> {
+    pub(crate) col: usize,
+    pub(crate) hint: &'h Hint,
+    pub(crate) index: usize,
 }
 
 /// One line, laid out in cells.
@@ -435,16 +451,23 @@ impl Laid {
 
     /// Appends the line to `builder` as drawn in `width` cells from cell
     /// `left`, coloured as `spans` say, with the lines under it
-    /// `underlines` says. The line starts at byte `start` of the text
-    /// they're for.
+    /// `underlines` says, and `inlays`, those from cell `left` on, in
+    /// order, each before the character it's at, or after the last. The
+    /// line starts at byte `start` of the text they're for.
     pub(crate) fn show(
         &self,
         builder: &mut RowBuilder,
         (left, width): (usize, usize),
         spans: &[Span],
         underlines: &Underlines<'_>,
+        inlays: &[Inlay<'_>],
         start: usize,
     ) {
+        // The cell the next hint is drawn before: one number to look at
+        // for each character, as most lines have none.
+        let mut inlays = inlays.iter();
+        let mut next_inlay = inlays.next();
+        let mut hinted_at = next_inlay.map_or(usize::MAX, |inlay| inlay.col);
         let Underlines {
             diagnostics,
             hovered,
@@ -495,6 +518,13 @@ impl Laid {
             if cell >= left + width {
                 break;
             }
+            while cell >= hinted_at {
+                if let Some(inlay) = next_inlay {
+                    inlay.hint.draw(builder);
+                }
+                next_inlay = inlays.next();
+                hinted_at = next_inlay.map_or(usize::MAX, |inlay| inlay.col);
+            }
             let piece = &self.text[byte..next_byte];
             while spans.next_if(|span| span.end <= start + byte).is_some() {}
             let style = match spans.peek() {
@@ -534,6 +564,11 @@ impl Laid {
                 Some(ch) if ch.is_control() => push(builder, ch),
                 _ => builder.push(piece, &style, false),
             }
+        }
+        // After the line's end, or past the row's edge, where nothing
+        // shows.
+        for inlay in next_inlay.into_iter().chain(inlays) {
+            inlay.hint.draw(builder);
         }
     }
 }
@@ -696,6 +731,8 @@ pub(crate) struct Text<'a> {
     hide: Option<fn(&str) -> usize>,
     /// What words are made of besides letters, digits and `_`.
     words: Words,
+    /// The inlay hints drawn between the text, if they're shown.
+    hints: Option<&'a Hints>,
     kept: Kept,
 }
 
@@ -709,8 +746,82 @@ impl<'a> Text<'a> {
             typing: None,
             hide: None,
             words: Words::NONE,
+            hints: None,
             kept: Kept::default(),
         }
+    }
+
+    /// The text with `hints` drawn between it, if they're shown: but on
+    /// the line the cursor types on, if it does, which shows none (see
+    /// [`wrapping`](Self::wrapping)).
+    pub(crate) fn hinted(self, hints: Option<&'a Hints>) -> Self {
+        Self {
+            hints: hints.filter(|hints| !hints.is_empty()),
+            ..self
+        }
+    }
+
+    /// Whether it has inlay hints drawn between it.
+    pub(crate) fn has_hints(&self) -> bool {
+        self.hints.is_some()
+    }
+
+    /// Where the inlay hints drawn on line `line`, laid out as `laid`, go,
+    /// in order: each the cell it's drawn before, and the cells it takes,
+    /// as its rows are wrapped with. None, at no cost, for a line with
+    /// none, or for the line the cursor types on in insert mode.
+    pub(crate) fn inlay_cells(&self, line: u64, laid: &Laid) -> Vec<(usize, usize)> {
+        let Some(hints) = self.hints else {
+            return Vec::new();
+        };
+        if self.typing.is_some_and(|at| at.line == line) {
+            return Vec::new();
+        }
+        let start = self.line_start(line);
+        (hints.all()[hints.range(start, start + laid.text().len())].iter())
+            .map(|hint| (laid.col_of(hint.at - start), hint.cells))
+            .collect()
+    }
+
+    /// The inlay hints drawn on line `line`, laid out as `laid`, before its
+    /// cells from `from` to before `to`, or to its end and after it: those
+    /// of one row, found by halving, so a long line's thousands aren't all
+    /// looked at for each row it goes on over.
+    pub(crate) fn inlays_in(
+        &self,
+        line: u64,
+        laid: &Laid,
+        (from, to): (usize, Option<usize>),
+    ) -> Vec<Inlay<'a>> {
+        let Some(hints) = self.hints else {
+            return Vec::new();
+        };
+        if self.typing.is_some_and(|at| at.line == line) {
+            return Vec::new();
+        }
+        let start = self.line_start(line);
+        // The bytes of the characters those cells are in, both counted:
+        // one that starts before `from`, or at `to`, is left out below.
+        let last = to.map_or(laid.text().len(), |to| laid.byte_at(to));
+        let on = hints.range(start + laid.byte_at(from), start + last);
+        (hints.all()[on.clone()].iter().zip(on))
+            .map(|(hint, index)| Inlay {
+                col: laid.col_of(hint.at - start),
+                hint,
+                index,
+            })
+            .filter(|inlay| from <= inlay.col && to.is_none_or(|to| inlay.col < to))
+            .collect()
+    }
+
+    /// The `index`th of its inlay hints, as [`inlays_in`](Self::inlays_in)
+    /// and [`Inlay::index`] count them, if it has them.
+    pub(crate) fn inlay(&self, Placed { col, hint, .. }: Placed) -> Option<Inlay<'a>> {
+        Some(Inlay {
+            col,
+            hint: self.hints?.all().get(hint)?,
+            index: hint,
+        })
     }
 
     /// The text with `words` part of words, as its language says, for
@@ -908,9 +1019,14 @@ impl Lines for Text<'_> {
         let Some((wrap, laid)) = self.wrap.and_then(|wrap| Some((wrap, self.laid(line)?))) else {
             return Rc::new([ScreenRow::WHOLE]);
         };
-        let typed_at_end =
-            (self.typing).is_some_and(|at| at.line == line && at.col >= laid.cells());
-        self.kept.rows(line, &laid, wrap, typed_at_end)
+        let typing = self.typing.filter(|at| at.line == line);
+        let typed_at_end = typing.is_some_and(|at| at.col >= laid.cells());
+        // Which hints there are, and whether the line hides them, as its
+        // rows are kept for.
+        let hinted = (self.hints).map(|hints| (hints.generation(), typing.is_some()));
+        let inlays = || self.inlay_cells(line, &laid);
+        self.kept
+            .rows(line, &laid, wrap, typed_at_end, (hinted, inlays))
     }
 
     fn row_width(&self) -> Option<usize> {
@@ -982,7 +1098,14 @@ mod tests {
     /// `laid` as drawn in a row of `width` cells of its own.
     fn shown(laid: &Laid, left: usize, width: usize, spans: &[Span], start: usize) -> Row {
         let mut builder = RowBuilder::new(width);
-        laid.show(&mut builder, (left, width), spans, &NO_UNDERLINES, start);
+        laid.show(
+            &mut builder,
+            (left, width),
+            spans,
+            &NO_UNDERLINES,
+            &[],
+            start,
+        );
         builder.finish(false)
     }
 
@@ -1069,7 +1192,7 @@ mod tests {
         );
         // Drawn from far along, as a row it wraps onto is.
         let mut builder = RowBuilder::new(5);
-        laid.show(&mut builder, (69_998, 5), &[], &NO_UNDERLINES, 0);
+        laid.show(&mut builder, (69_998, 5), &[], &NO_UNDERLINES, &[], 0);
         assert_eq!(builder.finish(false).text(), "aa字");
     }
 

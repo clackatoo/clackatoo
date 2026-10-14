@@ -336,6 +336,14 @@ pub struct ServerFeatures {
         deserialize_with = "wire::since::<{ wire::USES }, _, _>"
     )]
     pub uses: bool,
+    /// It says what to write inline between a file's text (see
+    /// [`Query::InlayHints`]): the types of names and the names of
+    /// arguments. `false` from a daemon older than protocol 80.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::INLAY_HINTS }, _>",
+        deserialize_with = "wire::since::<{ wire::INLAY_HINTS }, _, _>"
+    )]
+    pub inlay_hints: bool,
 }
 
 /// What a client asks about a place in a buffer: most questions are for
@@ -471,6 +479,17 @@ pub enum Query {
         tab_size: u32,
         /// Whether to indent with spaces rather than tabs.
         spaces: bool,
+    },
+    /// What to write inline from the place to byte `end`, as an editor
+    /// asks for the part of the file it shows, of a server that says (see
+    /// [`ServerFeatures::inlay_hints`]). Answered with
+    /// [`Answer::InlayHints`]. Asked again about a range that covers the
+    /// one asked before, it takes its place, and the server is told it
+    /// needn't answer. Only for a daemon of protocol 80 or later.
+    InlayHints {
+        /// The byte after the last asked about, in the same text as the
+        /// place, which the daemon moves along with it.
+        end: usize,
     },
 }
 
@@ -638,6 +657,21 @@ pub enum Answer {
     /// none if the server says nothing of it. Only from a daemon of
     /// protocol 79 or later.
     Uses(Vec<Use>),
+    /// What to write inline between the text from byte `start` to byte
+    /// `end`, as [`Query::InlayHints`] asks, in the order of the text, as
+    /// many as the daemon passes on: these, and no others, are there. The
+    /// range and the hints are counted in the text at the answer's
+    /// version, which a client moves past its own changes that haven't
+    /// been made yet. Only from a daemon of protocol 80 or later.
+    InlayHints {
+        /// The first byte asked about.
+        start: usize,
+        /// The byte after the last, though a hint may be there, at the
+        /// end of the last line asked about.
+        end: usize,
+        /// The hints.
+        hints: Vec<InlayHint>,
+    },
 }
 
 /// Something a language server could do to some text, such as fix what's
@@ -766,4 +800,35 @@ pub enum UseKind {
     Read,
     /// It's written, as a variable is when it's given a value.
     Write,
+}
+
+/// Something a language server would have written inline between a file's
+/// text, as [`Query::InlayHints`] finds them: a name's type after it, or
+/// an argument's name before it. It's never part of the text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlayHint {
+    /// The byte it's written before, in the text at the answer's version,
+    /// which a client moves past its own changes that haven't been made
+    /// yet: at a line's end, it's written after the line.
+    pub at: usize,
+    /// What it says, on one line, without control characters, at most 60
+    /// characters, as the daemon cuts it.
+    pub label: String,
+    /// What it is.
+    pub kind: InlayHintKind,
+    /// A blank goes before it, as the server says.
+    pub pad_left: bool,
+    /// A blank goes after it.
+    pub pad_right: bool,
+}
+
+/// What an inlay hint is, as LSP's `InlayHintKind` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InlayHintKind {
+    /// The server doesn't say, or says what LSP hasn't.
+    Other,
+    /// A type, as of a name bound without one written.
+    Type,
+    /// The name of the parameter an argument is for.
+    Parameter,
 }

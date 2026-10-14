@@ -50,5 +50,9 @@ tempfile.workspace = true
 name = "completion"
 harness = false
 
+[[bench]]
+name = "layout"
+harness = false
+
 [lints]
 workspace = true

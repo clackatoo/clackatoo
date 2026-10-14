@@ -26,7 +26,7 @@ use clackatoo_text::{
 };
 
 use crate::frame::{self, FrameDecoder, FrameError};
-use crate::wire::{EXITED, FALLBACKS, HOVER, PHONE_TERMINALS, SYMBOLS, USES, WORDS};
+use crate::wire::{EXITED, FALLBACKS, HOVER, INLAY_HINTS, PHONE_TERMINALS, SYMBOLS, USES, WORDS};
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
     Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
@@ -43,10 +43,10 @@ use crate::{
     Answer, BoardAction, BoardAuthor, BoardEntry, BoardLink, BoardScope, BoardSummary, BoardUpdate,
     BrowserFrame, BrowserStatus, BrowserUpdate, ChatChoices, ChatSummary, CodeAction, CommentPlace,
     CompletionItem, Device, Done, Entry, EntryKind, Expect, FileLocation, FileOp, FileOpError,
-    FileStamp, FilesAction, FilesUpdate, Found, FoundLine, FoundSymbol, GitMark, Hunks, Made,
-    OpenBoard, OpenFile, OpenFiles, PairingAsk, PairingState, PostKind, Query, ReviewAction,
-    ReviewChat, ReviewComment, ReviewFile, ReviewHunk, ReviewList, ReviewScope, Search,
-    ServerFeatures, Symbol, TextChange, Trigger, Udp, Use, UseKind,
+    FileStamp, FilesAction, FilesUpdate, Found, FoundLine, FoundSymbol, GitMark, Hunks, InlayHint,
+    InlayHintKind, Made, OpenBoard, OpenFile, OpenFiles, PairingAsk, PairingState, PostKind, Query,
+    ReviewAction, ReviewChat, ReviewComment, ReviewFile, ReviewHunk, ReviewList, ReviewScope,
+    Search, ServerFeatures, Symbol, TextChange, Trigger, Udp, Use, UseKind,
 };
 
 /// One sample: a message either side sends.
@@ -691,7 +691,61 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         })),
     ));
     samples.extend(uses(buffer).into_iter().map(|sample| (USES, sample)));
+    samples.extend(
+        inlay_hints(buffer)
+            .into_iter()
+            .map(|sample| (INLAY_HINTS, sample)),
+    );
     samples
+}
+
+/// Samples of protocol 80: inlay hints asked for, and answered with one of
+/// every kind, padded and not.
+fn inlay_hints(buffer: BufferId) -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let hint = |at, label: &str, kind, (pad_left, pad_right)| InlayHint {
+        at,
+        label: label.into(),
+        kind,
+        pad_left,
+        pad_right,
+    };
+    vec![
+        Server(ServerMessage::Event(Event::Buffer {
+            buffer,
+            update: BufferUpdate::Features(ServerFeatures {
+                completion: None,
+                signature: None,
+                signature_again: Vec::new(),
+                prepare_rename: true,
+                uses: true,
+                inlay_hints: true,
+            }),
+        })),
+        Client(ClientMessage::Query {
+            buffer,
+            id: 13,
+            version: 8,
+            at: 0,
+            query: Query::InlayHints { end: 400 },
+        }),
+        Server(ServerMessage::Event(Event::Buffer {
+            buffer,
+            update: BufferUpdate::Answer {
+                id: 13,
+                version: 8,
+                answer: Answer::InlayHints {
+                    start: 0,
+                    end: 400,
+                    hints: vec![
+                        hint(9, ": Vec<u8>", InlayHintKind::Type, (false, false)),
+                        hint(40, "value:", InlayHintKind::Parameter, (false, true)),
+                        hint(77, "impl Fn", InlayHintKind::Other, (true, false)),
+                    ],
+                },
+            },
+        })),
+    ]
 }
 
 /// Samples of protocol 79: the other uses of a name, of every kind, and
@@ -721,6 +775,8 @@ fn uses(buffer: BufferId) -> Vec<Sample> {
                 signature_again: Vec::new(),
                 prepare_rename: false,
                 uses: true,
+                // Not on the wire before protocol 80.
+                inlay_hints: false,
             }),
         })),
         query(11, 4, Query::Uses),
@@ -790,6 +846,8 @@ fn symbols(buffer: BufferId) -> Vec<Sample> {
                 prepare_rename: true,
                 // Not on the wire before protocol 79.
                 uses: false,
+                // Nor this before protocol 80.
+                inlay_hints: false,
             }),
         })),
         query(8, Query::Symbols),
@@ -1042,6 +1100,8 @@ fn more() -> Vec<Sample> {
             prepare_rename: false,
             // Nor this before protocol 79.
             uses: false,
+            // Nor this before protocol 80.
+            inlay_hints: false,
         })),
         buffer_update(BufferUpdate::Offer {
             language: "rust".into(),

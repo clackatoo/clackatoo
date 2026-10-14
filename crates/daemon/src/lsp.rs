@@ -21,7 +21,7 @@ use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use clackatoo_protocol::{CodeAction, Query, ServerFeatures, Trigger, UseKind};
+use clackatoo_protocol::{CodeAction, InlayHintKind, Query, ServerFeatures, Trigger, UseKind};
 use clackatoo_text::{Edit, Rope, Severity};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -129,6 +129,9 @@ pub(crate) enum Incoming {
     Unwatch { id: String },
     /// It has answered `shutdown`, and so may be told to exit.
     ShutDown,
+    /// It says the inlay hints it gave may be out of date, as once it's
+    /// read the whole project, so they're to be asked for again.
+    HintsStale,
 }
 
 /// A change on disk to a file, as LSP numbers them in a `FileEvent`.
@@ -310,6 +313,8 @@ struct Offers {
     format_range: bool,
     /// Says where else in a file the name at a place is used.
     uses: bool,
+    /// Says what to write inline between a file's text.
+    inlay_hints: bool,
     /// Completes what's typed, and these characters ask it to.
     completion: Option<Vec<char>>,
     /// Says more about a completion item when asked.
@@ -429,6 +434,8 @@ impl LanguageServer {
                         "codeAction": code_action,
                         "rangeFormatting": {},
                         "documentHighlight": {},
+                        // Labels are taken as they come, not resolved.
+                        "inlayHint": {},
                     },
                     "workspace": {
                         "workspaceFolders": true,
@@ -442,6 +449,8 @@ impl LanguageServer {
                         "applyEdit": true,
                         "executeCommand": {},
                         "symbol": { "symbolKind": { "valueSet": symbol_kinds } },
+                        // Hints are asked for again when it says.
+                        "inlayHint": { "refreshSupport": true },
                     },
                     "window": { "workDoneProgress": true },
                 },
@@ -558,6 +567,7 @@ impl LanguageServer {
             Query::Format { .. } => self.offers.format,
             Query::FormatRange { .. } => self.offers.format_range,
             Query::Uses => self.offers.uses,
+            Query::InlayHints { .. } => self.offers.inlay_hints,
             Query::Completion(_) | Query::Resolve { .. } => self.offers.completion.is_some(),
             Query::SignatureHelp { .. } => self.offers.signature.is_some(),
             Query::CodeActions { .. } | Query::Act { .. } => self.offers.code_actions,
@@ -586,6 +596,7 @@ impl LanguageServer {
             signature_again: self.offers.signature_again.clone(),
             prepare_rename: self.offers.rename && self.offers.prepare_rename,
             uses: self.offers.uses,
+            inlay_hints: self.offers.inlay_hints,
         }
     }
 
@@ -625,6 +636,7 @@ impl LanguageServer {
             Query::PrepareRename => "textDocument/prepareRename",
             Query::Uses => "textDocument/documentHighlight",
             Query::FormatRange { .. } => "textDocument/rangeFormatting",
+            Query::InlayHints { .. } => "textDocument/inlayHint",
             Query::Resolve { .. } => unreachable!("resolved with the item, by resolve"),
             Query::CodeActions { .. } => unreachable!("asked with what's wrong, by code_actions"),
             Query::Act { .. } => unreachable!("done by the daemon, with the action"),
@@ -663,6 +675,16 @@ impl LanguageServer {
                         "end": position(text, end.max(at), self.encoding),
                     },
                     "options": { "tabSize": tab_size, "insertSpaces": spaces },
+                });
+            }
+            // From the place to `end`, moved as the place was.
+            Query::InlayHints { end } => {
+                params = json!({
+                    "textDocument": { "uri": uri(path) },
+                    "range": {
+                        "start": position(text, at, self.encoding),
+                        "end": position(text, end.max(at), self.encoding),
+                    },
                 });
             }
             Query::Completion(trigger) => {
@@ -917,6 +939,10 @@ impl LanguageServer {
                         Value::Null
                     }
                     "window/workDoneProgress/create" | "window/showMessageRequest" => Value::Null,
+                    "workspace/inlayHint/refresh" => {
+                        incoming.push(Incoming::HintsStale);
+                        Value::Null
+                    }
                     _ => {
                         self.peer.send(&json!({
                             "jsonrpc": "2.0",
@@ -1008,6 +1034,7 @@ impl LanguageServer {
             format: offered(&capabilities["documentFormattingProvider"]),
             format_range: offered(&capabilities["documentRangeFormattingProvider"]),
             uses: offered(&capabilities["documentHighlightProvider"]),
+            inlay_hints: offered(&capabilities["inlayHintProvider"]),
             completion: (completion.is_object())
                 .then(|| characters(&completion["triggerCharacters"])),
             resolve: completion["resolveProvider"].as_bool() == Some(true),
@@ -1163,6 +1190,82 @@ pub(crate) fn uses(answer: &Value, max: usize) -> Vec<(Position, Position, UseKi
         })
         .take(max)
         .collect()
+}
+
+/// An inlay hint as a server gives it, in lines and columns: see
+/// [`inlay_hints`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Hinted {
+    pub(crate) at: Position,
+    pub(crate) label: String,
+    pub(crate) kind: InlayHintKind,
+    pub(crate) pad_left: bool,
+    pub(crate) pad_right: bool,
+}
+
+/// The most characters of an inlay hint's label kept: a type longer than
+/// that would push the code it's about off the screen.
+pub(crate) const MAX_HINT_LABEL: usize = 60;
+
+/// What an answer to `textDocument/inlayHint` says to write inline, at
+/// most `max` hints, in the order given. A label is a string, or parts
+/// whose `value`s are joined; it's cut to [`MAX_HINT_LABEL`] characters,
+/// ending in `…` if it was longer, and every control character in it, such
+/// as a line break, becomes a blank, as it's drawn into one row. A hint
+/// with no place or no label is left out. At most [`LOOKED_AT_EACH`]
+/// entries are looked at for each of `max`, and as many parts for each
+/// character of a label, so the work is bounded by `max`, not by the
+/// answer. `null`, or anything but a list, is none.
+pub(crate) fn inlay_hints(answer: &Value, max: usize) -> Vec<Hinted> {
+    let Some(list) = answer.as_array() else {
+        return Vec::new();
+    };
+    (list.iter())
+        .take(max.saturating_mul(LOOKED_AT_EACH))
+        .filter_map(|item| {
+            let at: Position = serde_json::from_value(item.get("position")?.clone()).ok()?;
+            let label = hint_label(item.get("label")?)?;
+            let kind = match item.get("kind").and_then(Value::as_u64) {
+                Some(1) => InlayHintKind::Type,
+                Some(2) => InlayHintKind::Parameter,
+                _ => InlayHintKind::Other,
+            };
+            let padded = |key| item.get(key).and_then(Value::as_bool) == Some(true);
+            Some(Hinted {
+                at,
+                label,
+                kind,
+                pad_left: padded("paddingLeft"),
+                pad_right: padded("paddingRight"),
+            })
+        })
+        .take(max)
+        .collect()
+}
+
+/// An inlay hint's label, `label`, as [`inlay_hints`] takes it, if it has
+/// any text.
+fn hint_label(label: &Value) -> Option<String> {
+    let parts: Box<dyn Iterator<Item = &str>> = match label {
+        Value::String(text) => Box::new(std::iter::once(text.as_str())),
+        Value::Array(parts) => Box::new(
+            (parts.iter())
+                .take(MAX_HINT_LABEL * LOOKED_AT_EACH)
+                .filter_map(|part| part.get("value")?.as_str()),
+        ),
+        _ => return None,
+    };
+    let mut text = String::new();
+    for (count, ch) in parts.flat_map(str::chars).enumerate() {
+        if count == MAX_HINT_LABEL {
+            // One more than fits: the last that does gives way to `…`.
+            text.pop();
+            text.push('…');
+            return Some(text);
+        }
+        text.push(if ch.is_control() { ' ' } else { ch });
+    }
+    (!text.is_empty()).then_some(text)
 }
 
 /// How many kinds of symbol LSP has (`SymbolKind`), numbered from 1.
@@ -2379,6 +2482,78 @@ mod tests {
         assert!(uses(&flood, 100).is_empty());
         let took = started.elapsed();
         assert!(took < std::time::Duration::from_millis(50), "{took:?}");
+    }
+
+    #[test]
+    fn inlay_hints_are_taken_with_their_kinds_padding_and_labels_cut_and_cleaned() {
+        let long = "x".repeat(MAX_HINT_LABEL + 1);
+        let answer = json!([
+            { "position": spot(0, 4), "label": ": u32", "kind": 1 },
+            // Parts joined; a blank after it.
+            {
+                "position": spot(1, 2),
+                "label": [{ "value": "na" }, { "tooltip": "no value" }, { "value": "me:" }],
+                "kind": 2,
+                "paddingRight": true,
+            },
+            // Control characters are blanks; no kind, or one LSP hasn't,
+            // is other.
+            { "position": spot(2, 0), "label": "a\nb\tc", "paddingLeft": true },
+            { "position": spot(3, 0), "label": "z", "kind": 7 },
+            // Just fits, and one character too long.
+            { "position": spot(4, 0), "label": &long[1..] },
+            { "position": spot(5, 0), "label": long },
+            // No place, no label, or an empty one: left out.
+            { "label": "x" },
+            { "position": spot(6, 0) },
+            { "position": spot(6, 0), "label": [] },
+            { "position": spot(6, 0), "label": 3 },
+        ]);
+        let hinted = |line, character, label: &str, kind, pads: (bool, bool)| Hinted {
+            at: at(line, character),
+            label: label.to_owned(),
+            kind,
+            pad_left: pads.0,
+            pad_right: pads.1,
+        };
+        let cut = format!("{}…", "x".repeat(MAX_HINT_LABEL - 1));
+        assert_eq!(
+            inlay_hints(&answer, 10),
+            [
+                hinted(0, 4, ": u32", InlayHintKind::Type, (false, false)),
+                hinted(1, 2, "name:", InlayHintKind::Parameter, (false, true)),
+                hinted(2, 0, "a b c", InlayHintKind::Other, (true, false)),
+                hinted(3, 0, "z", InlayHintKind::Other, (false, false)),
+                hinted(4, 0, &long[1..], InlayHintKind::Other, (false, false)),
+                hinted(5, 0, &cut, InlayHintKind::Other, (false, false)),
+            ]
+        );
+        assert_eq!(inlay_hints(&answer, 2).len(), 2, "no more than asked");
+        assert!(inlay_hints(&Value::Null, 10).is_empty());
+        assert!(inlay_hints(&json!({ "position": spot(0, 0), "label": "x" }), 10).is_empty());
+    }
+
+    #[test]
+    fn a_flood_of_inlay_hints_is_looked_at_only_so_far() {
+        // A million entries that make no sense, the one that does after
+        // them never reached.
+        let mut flood = vec![json!({}); 1_000_000];
+        flood.push(json!({ "position": spot(0, 0), "label": "x" }));
+        let flood = Value::Array(flood);
+        // A label of a million parts, most empty, and a million characters.
+        let mut parts = vec![json!({ "value": "" }); 1_000_000];
+        parts.push(json!({ "value": "late" }));
+        let answer = json!([
+            { "position": spot(0, 0), "label": parts },
+            { "position": spot(0, 0), "label": "y".repeat(1_000_000) },
+        ]);
+        let started = std::time::Instant::now();
+        assert!(inlay_hints(&flood, 100).is_empty());
+        let hints = inlay_hints(&answer, 100);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_millis(50), "{took:?}");
+        assert_eq!(hints.len(), 1, "the parts looked at hold nothing");
+        assert_eq!(hints[0].label.chars().count(), MAX_HINT_LABEL);
     }
 
     #[test]

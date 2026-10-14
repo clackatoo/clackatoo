@@ -39,10 +39,12 @@
 //! drawn in place, never made to the text (see [`preview`]).
 
 mod actions;
+mod bench;
 mod case;
 mod complete;
 mod copy;
 mod ex;
+mod hints;
 mod indent;
 mod kept;
 mod keys;
@@ -68,6 +70,7 @@ use clackatoo_text::{Bias, Diagnostic, Hunk};
 use winit::keyboard::{Key, NamedKey};
 
 use actions::{ActionMenu, MenuKey, MenuStroke};
+pub use bench::EditorBench;
 use case::Recase;
 pub use complete::Ranking;
 use complete::{Completion, Resolved};
@@ -76,6 +79,8 @@ use complete::{Completion, Resolved};
 pub(crate) use copy::tests::Daemon;
 pub(crate) use copy::{BufferCopy, Heard, queries_asked};
 pub(crate) use ex::is_editor_command;
+#[cfg(test)]
+pub(crate) use hints::HINTS_WAIT;
 use kept::Kept;
 pub(crate) use keys::Stroke;
 use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
@@ -92,7 +97,7 @@ pub(crate) use registers::{Register, Registers};
 use text::{Text, Underlines, tab_end};
 #[cfg(test)]
 pub(crate) use uses::USES_WAIT;
-use wrap::{Shown, Top, Wrapping};
+use wrap::{Placed, Shown, Top, Wrapping};
 
 use crate::colors;
 use crate::input::KeyPress;
@@ -439,6 +444,8 @@ pub(crate) struct Editor {
     /// The rows shown that are the file's, not past its end, as laid out
     /// last.
     shown: Vec<Shown>,
+    /// The inlay hints on those rows, each row's a range of them.
+    placed: Vec<Placed>,
     /// Where the cursor was drawn, in cells of the pane, as laid out last.
     cursor_cell: Option<(usize, usize)>,
     /// The keys of a command being typed in normal or visual mode.
@@ -596,6 +603,12 @@ pub(crate) struct Editor {
     /// The bytes a command asked to have formatted, for the desk to ask
     /// the language server.
     format_asked: Option<(usize, usize)>,
+    /// What the language server would have written inline between the
+    /// text is drawn there (`inlayhints`).
+    inlay_hints: bool,
+    /// When to ask for those of the part of the file shown (see
+    /// [`hints`]).
+    hints: hints::HintWatch,
 }
 
 /// Lines of a lesson lit, as the tutor says: a step done, or being done.
@@ -635,6 +648,7 @@ impl Editor {
             wrapping: Wrapping::of(options),
             case: Case::of(options),
             shown: Vec::new(),
+            placed: Vec::new(),
             cursor_cell: None,
             typed: Vec::new(),
             new_step: true,
@@ -696,6 +710,8 @@ impl Editor {
             highlight_uses: options.highlightuses,
             uses: uses::Uses::default(),
             format_asked: None,
+            inlay_hints: options.inlayhints,
+            hints: hints::HintWatch::default(),
         }
     }
 
@@ -777,6 +793,10 @@ impl Editor {
         if !self.highlight_uses {
             self.forget_uses();
         }
+        self.inlay_hints = options.inlayhints;
+        if !self.inlay_hints {
+            self.hints = hints::HintWatch::default();
+        }
         let indent = Indent::of(options);
         if indent.tabstop != self.indent.tabstop {
             // A column is a cell, and tabs take more or fewer of them now:
@@ -817,12 +837,15 @@ impl Editor {
     }
 
     /// The buffer's text, laid out as the options say, wrapped at the
-    /// pane's width right of the gutter.
+    /// pane's width right of the gutter, with its inlay hints, if they're
+    /// shown: never in a lesson, which is prose.
     fn text<'c>(&self, copy: &'c BufferCopy) -> Text<'c> {
         let typing = (self.mode == Mode::Insert).then_some(self.cursor.at);
+        let hints = (self.inlay_hints && !self.lesson).then(|| copy.hints());
         Text::new(copy.text(), self.indent.tabstop)
             .hiding(self.hide)
             .with_words(copy.words())
+            .hinted(hints)
             .wrapping(self.wrapping.at(self.text_width().max(1)), typing)
             .keeping(&self.kept, self.buffer, copy.revision(), copy.line_log())
     }
@@ -3038,6 +3061,7 @@ impl Editor {
             .chain(self.resolve_due)
             .chain(self.grammar_deadline())
             .chain(self.uses_due())
+            .chain(self.hints_due())
             .min()
     }
 
@@ -3674,7 +3698,12 @@ impl Editor {
                     panel.colour(*id, spans);
                 }
             }
-            Heard::Nothing | Heard::Moved { .. } | Heard::Kept { .. } | Heard::Rejoined => {}
+            // Drawn as the rows are next laid out.
+            Heard::Hinted { .. }
+            | Heard::Nothing
+            | Heard::Moved { .. }
+            | Heard::Kept { .. }
+            | Heard::Rejoined => {}
         }
         // A new text, or the window's own undo, closes the panel, as an
         // edit typed does, and the menu.
@@ -3880,6 +3909,7 @@ impl Editor {
             | Answer::Symbols { .. }
             | Answer::Renamable { .. }
             | Answer::Uses(_)
+            | Answer::InlayHints { .. }
             | Answer::Renamed { .. }
             | Answer::Formatted { .. }
             | Answer::Staged
@@ -4166,10 +4196,26 @@ impl Editor {
         }
         let col = self.cursor.at.col;
         let width = self.text_width().max(1);
+        // The inlay hints drawn from the view's left to the cursor push it
+        // right.
+        let line = self.cursor.at.line;
+        let laid = if text.has_hints() {
+            text.laid(line)
+        } else {
+            None
+        };
+        let hinted: usize = laid.map_or(0, |laid| {
+            (text
+                .inlays_in(line, &laid, (self.left, Some(col + 1)))
+                .iter())
+            .map(|inlay| inlay.hint.cells)
+            .sum()
+        });
         if col < self.left {
             self.left = col;
-        } else if col >= self.left + width {
-            self.left = col + 1 - width;
+        } else if col + hinted >= self.left + width {
+            // Far enough, though moving past a hint may leave room.
+            self.left = (col + hinted + 1 - width).min(col);
         }
     }
 
@@ -4249,20 +4295,22 @@ impl Editor {
         self.place_gutter(copy);
         let text = self.text(copy);
         self.clamp_top(&text);
+        let mut placed = Vec::new();
         let shown = wrap::view(
             &text,
-            self.top.row(&text),
-            self.height.max(1),
+            (self.top.row(&text), self.height.max(1)),
             self.view_end(&text),
             self.left,
+            &mut placed,
         );
         let Some(&row) = shown.get(line).or(shown.last()) else {
             return;
         };
         let col = match col.checked_sub(self.gutter) {
-            // Past the row's end, its last character.
+            // Past the row's end, its last character; on an inlay hint,
+            // the character it's drawn before.
             Some(col) => {
-                let cell = row.start + col.saturating_sub(row.indent);
+                let cell = row.cell_at(col, &placed);
                 cell.min(row.end().saturating_sub(1)).max(row.start)
             }
             None if row.row == 0 => 0,
@@ -4393,10 +4441,10 @@ impl Editor {
         let width = self.text_width();
         self.shown = wrap::view(
             &text,
-            self.top.row(&text),
-            self.height,
+            (self.top.row(&text), self.height),
             self.view_end(&text),
             self.left,
+            &mut self.placed,
         );
         let preview = self.preview.as_ref().filter(|_| previewed.is_some());
         // What's wrong in view, moved onto the preview's text.
@@ -4459,15 +4507,22 @@ impl Editor {
                 diagnostics,
                 hovered,
             };
+            // The inlay hints on the row, as the view placed them.
+            let on_row: Vec<text::Inlay<'_>> = (shown.hints(&self.placed).iter())
+                .filter_map(|&placed| text.inlay(placed))
+                .collect();
             laid.show(
                 &mut builder,
                 (shown.start, cells),
                 spans,
                 &underlines,
+                &on_row,
                 start,
             );
             if shown.next.is_none() {
-                let end = self.gutter + shown.indent + laid.cells().saturating_sub(shown.start);
+                let hints: usize = on_row.iter().map(|inlay| inlay.hint.cells).sum();
+                let end =
+                    self.gutter + shown.indent + laid.cells().saturating_sub(shown.start) + hints;
                 self.write_after_line(&mut builder, end, (line, *worst), copy);
             }
             rows.push(builder.finish(false));
@@ -4586,7 +4641,12 @@ impl Editor {
         let width = self.text_width();
         (self.shown.iter().enumerate())
             .filter(|(_, shown)| shown.line == at.line)
-            .find_map(|(row, shown)| Some((row, self.gutter + shown.col_of(at.col, width)?)))
+            .find_map(|(row, shown)| {
+                Some((
+                    row,
+                    self.gutter + shown.col_of(at.col, width, &self.placed)?,
+                ))
+            })
     }
 
     /// Closes the panel by the cursor, and the completion menu and
@@ -4686,10 +4746,11 @@ impl Editor {
             }
         }
         // Down the file's rows, not those past its end, as in Vim. Where
-        // lines wrap, it marks the cell that column of the line is in.
+        // lines wrap, it marks the cell that column of the line is in, as
+        // if the line had no inlay hints, so the guide runs straight.
         for &column in &self.columns {
             for (line, shown) in self.shown.iter().enumerate() {
-                if let Some(col) = shown.col_of(column, width) {
+                if let Some(col) = shown.column(column, width) {
                     let col = self.gutter + col;
                     highlights.push(Highlight {
                         line,
@@ -4766,23 +4827,14 @@ impl Editor {
                     },
                 ),
             };
-            let from = from.max(shown.start);
-            if from >= to.min(shown.end()) {
-                continue;
-            }
-            let first = shown.indent + (from - shown.start);
-            let end = if to > shown.end() {
-                width
-            } else {
-                (shown.indent.saturating_add(to - shown.start)).min(width)
-            };
-            if first < end {
+            // Around the inlay hints inside it, which aren't the text.
+            shown.runs((from, to), width, &self.placed, |cells| {
                 into.push(Highlight {
                     line: row,
-                    cols: self.gutter + first..self.gutter + end,
+                    cols: self.gutter + cells.start..self.gutter + cells.end,
                     kind: why,
                 });
-            }
+            });
         }
     }
 }
