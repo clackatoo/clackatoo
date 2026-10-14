@@ -391,6 +391,12 @@ impl Desk {
     /// The macros being typed are done, and nothing waits: the buffers
     /// they edited start a new undo step with the next.
     fn macro_done(&mut self) {
+        // A selection made from insert mode with the mouse that a macro or
+        // a binding ended goes back there now, so their keys weren't typed
+        // into it.
+        if let Some(pane) = self.shown.map(|shown| shown.pane) {
+            self.with_editor(pane, |editor, _| editor.back_to_insert());
+        }
         self.macros.typed = 0;
         self.macros.paused = None;
         self.macros.waiting_in = None;

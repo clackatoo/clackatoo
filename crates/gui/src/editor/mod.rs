@@ -43,6 +43,7 @@ mod bench;
 mod case;
 mod complete;
 mod copy;
+mod drag;
 mod ex;
 mod hints;
 mod indent;
@@ -609,6 +610,18 @@ pub(crate) struct Editor {
     /// When to ask for those of the part of the file shown (see
     /// [`hints`]).
     hints: hints::HintWatch,
+    /// The mouse selecting, while its button is held (see [`drag`]).
+    drag: Option<drag::Drag>,
+    /// The byte of the character the last plain click was on, until a
+    /// key, moved with edits: a double or triple click goes on from it,
+    /// though letting go of the first may have scrolled the view.
+    clicked: Option<usize>,
+    /// Visual mode came from insert mode, by the mouse, as Neovim's
+    /// "(insert) VISUAL" does: insert mode comes back once it ends.
+    insert_after: bool,
+    /// The keys come from a binding or a macro being typed: going back to
+    /// insert mode waits until they're all done, as the desk sees to.
+    framed: bool,
 }
 
 /// Lines of a lesson lit, as the tutor says: a step done, or being done.
@@ -712,6 +725,10 @@ impl Editor {
             format_asked: None,
             inlay_hints: options.inlayhints,
             hints: hints::HintWatch::default(),
+            drag: None,
+            clicked: None,
+            insert_after: false,
+            framed: false,
         }
     }
 
@@ -861,6 +878,7 @@ impl Editor {
     /// Enters normal mode, as the focus arriving here does while the
     /// window is in normal mode.
     pub(crate) fn enter_normal_mode(&mut self, copy: &mut BufferCopy) {
+        self.insert_after = false;
         if self.mode == Mode::Insert {
             self.leave_insert(copy);
         }
@@ -871,6 +889,7 @@ impl Editor {
     /// is a new undo step, but not a change `.` does again: no key here
     /// asked for it.
     pub(crate) fn enter_insert_mode(&mut self) {
+        self.insert_after = false;
         if self.mode == Mode::Insert {
             return;
         }
@@ -887,9 +906,12 @@ impl Editor {
     /// and waiting for what's at the cursor, which the daemon cancels if
     /// another pane of the same file asks with `K`, so a macro isn't left
     /// waiting for it. The cursor stays where it is, and insert mode stays
-    /// insert mode.
+    /// insert mode; a selection made from it with the mouse leaves it, in
+    /// normal mode, as any selection does. A drag ends.
     pub(crate) fn leave(&mut self) {
         self.leave_visual();
+        self.insert_after = false;
+        self.drag = None;
         self.typed.clear();
         self.prompt = None;
         self.actions = None;
@@ -984,10 +1006,23 @@ impl Editor {
     ) -> Done {
         self.menu_keys = None;
         self.failed = false;
+        // A key ends a drag, and what a click left behind.
+        self.clicked = None;
+        self.drag = None;
+        let framed = replaying || self.framed;
+        if !framed {
+            self.forget_stale_insert();
+        }
         self.replaying = replaying;
         self.snippet_before_key(copy);
         let done = self.stroke(stroke, copy, shared);
         self.snippet_record(stroke);
+        // A macro or a binding goes back to insert mode once it's done
+        // (see `desk::macros`), not after the command that ended a
+        // selection.
+        if !framed {
+            self.back_to_insert();
+        }
         self.replaying = false;
         // Its command waits for the grammar: it's done as the macro's,
         // in its undo step, when the answer comes, and the desk types the
@@ -3013,11 +3048,12 @@ impl Editor {
     }
 
     /// Asks what's due to be asked of the language server, now typing has
-    /// paused, as of `now`. Returns whether it asked anything.
+    /// paused, as of `now`, and scrolls the view on for a drag past its
+    /// edge. Returns whether it asked anything, or scrolled.
     pub(crate) fn tick(&mut self, now: Instant, copy: &mut BufferCopy) -> bool {
         // A command waiting too long for the grammar is given up on, with
-        // no key to wait for.
-        let mut asked = self.tick_grammar(now);
+        // no key to wait for; and a drag past the view's edge scrolls it.
+        let mut asked = self.tick_grammar(now) | self.tick_drag(now, copy);
         if self.mode != Mode::Insert {
             self.completion_due = None;
             self.signature_due = None;
@@ -3052,8 +3088,9 @@ impl Editor {
         asked
     }
 
-    /// When something's next due to be asked of the language server, or
-    /// a command waiting for the grammar given up on, if anything is.
+    /// When something's next due to be asked of the language server, a
+    /// command waiting for the grammar given up on, or the view scrolled
+    /// on for a drag past its edge, if anything is.
     pub(crate) fn wakes(&self) -> Option<Instant> {
         let completion = self.completion_due.map(|(due, _)| due);
         (completion.into_iter())
@@ -3062,6 +3099,7 @@ impl Editor {
             .chain(self.grammar_deadline())
             .chain(self.uses_due())
             .chain(self.hints_due())
+            .chain(self.drag_wakes())
             .min()
     }
 
@@ -3574,15 +3612,7 @@ impl Editor {
     /// past the line's end, and onto the start of a wide or tab character.
     fn normal_cursor(&mut self, copy: &BufferCopy) {
         let text = self.text(copy);
-        let at = &mut self.cursor.at;
-        at.line = at.line.min(text.last_line());
-        let laid = text.laid(at.line);
-        let cells = laid.as_ref().map_or(0, |laid| laid.cells());
-        if cells == 0 {
-            at.col = 0;
-        } else if let Some(laid) = laid {
-            at.col = laid.col_of(laid.byte_at(at.col.min(cells - 1)));
-        }
+        self.cursor.at = on_character(self.cursor.at, &text);
         if let Some(anchor) = &mut self.anchor {
             anchor.line = anchor.line.min(text.last_line());
         }
@@ -3601,6 +3631,7 @@ impl Editor {
     /// since [`hold`](Self::hold).
     pub(crate) fn follow_edit(&mut self, edit: &Edit, copy: &BufferCopy) {
         self.edited(edit, snippet::Grows::Nothing);
+        self.drag_follows(edit);
         self.awaiting_follows(edit);
         if let Some(Prompt::Confirm(confirming)) = &mut self.prompt {
             confirming.edited(edit);
@@ -3621,6 +3652,9 @@ impl Editor {
         match heard {
             Heard::Replaced => {
                 self.text_replaced();
+                // What the mouse held is gone with the text.
+                self.drag = None;
+                self.clicked = None;
                 self.corrections.clear();
                 self.held = None;
                 // What `:s///c` was asking about is gone.
@@ -3721,7 +3755,11 @@ impl Editor {
         if self.mode != Mode::Insert {
             self.normal_cursor(copy);
         }
-        self.follow(copy);
+        // While the mouse drags, it puts the cursor where it is, and the
+        // view stays as it is under it.
+        if self.drag.is_none() {
+            self.follow(copy);
+        }
         // Others' edits move the cursor with the text, and the panel with
         // it.
         if let Some(panel) = &mut self.panel {
@@ -3996,13 +4034,15 @@ impl Editor {
 
     /// The command line is opened, with `:`: in visual mode, the
     /// selection's lines are marked and left, and the command line starts
-    /// with them, `'<,'>`, as in Vim.
+    /// with them, `'<,'>`, as in Vim. A selection the mouse made from
+    /// insert mode leaves the editor in normal mode.
     pub(crate) fn command_line(&mut self, copy: &BufferCopy, marks: &mut Marks) -> &'static str {
         if !matches!(self.mode, Mode::Visual(_)) {
             return "";
         }
         self.mark_selection(copy, marks);
         self.leave_visual();
+        self.insert_after = false;
         "'<,'>"
     }
 
@@ -4285,51 +4325,12 @@ impl Editor {
         }
     }
 
-    /// Puts the cursor at `line` and `col` of the pane, as a click does. A
-    /// click on a line's number goes to the line's start, and beside a row
-    /// the line goes on over, to the row's.
-    pub(crate) fn click(&mut self, line: usize, col: usize, copy: &BufferCopy) {
-        self.panel = None;
-        self.actions = None;
-        self.close_completion();
-        self.place_gutter(copy);
-        let text = self.text(copy);
-        self.clamp_top(&text);
-        let mut placed = Vec::new();
-        let shown = wrap::view(
-            &text,
-            (self.top.row(&text), self.height.max(1)),
-            self.view_end(&text),
-            self.left,
-            &mut placed,
-        );
-        let Some(&row) = shown.get(line).or(shown.last()) else {
-            return;
-        };
-        let col = match col.checked_sub(self.gutter) {
-            // Past the row's end, its last character; on an inlay hint,
-            // the character it's drawn before.
-            Some(col) => {
-                let cell = row.cell_at(col, &placed);
-                cell.min(row.end().saturating_sub(1)).max(row.start)
-            }
-            None if row.row == 0 => 0,
-            None => row.start,
-        };
-        let line = row.line.min(text.last_line());
-        self.cursor = Cursor::new(Point { line, col });
-        drop(text);
-        if self.mode == Mode::Insert {
-            let byte = self.insert_byte(copy);
-            self.cursor = Cursor::new(self.text(copy).point_of(byte));
-            // It moved, as the arrow keys move it.
-            self.moved_while_inserting(copy);
-        } else {
-            self.normal_cursor(copy);
-        }
-        // Near the view's edge, it scrolls to keep `scrolloff` lines in
-        // view, as in Vim, rather than on the next key.
-        self.follow(copy);
+    /// Puts the cursor at `line` and `col` of the pane, as a click does
+    /// (see [`press`](Self::press)).
+    #[cfg(test)]
+    pub(crate) fn click(&mut self, line: usize, col: usize, copy: &mut BufferCopy) {
+        self.press((line, col), 1, copy);
+        self.release(true, copy);
     }
 
     // --- Drawing ------------------------------------------------------------
@@ -4934,6 +4935,20 @@ pub(crate) fn strokes(press: &KeyPress<'_>, typing: bool) -> Vec<Stroke> {
         .filter(|ch| !ch.is_control())
         .map(Stroke::char)
         .collect()
+}
+
+/// `at`, put on a character of `text`, as the cursor is in normal and
+/// visual mode: back from past the line's end, and onto the start of a
+/// wide or tab character.
+fn on_character(at: Point, text: &Text<'_>) -> Point {
+    let line = at.line.min(text.last_line());
+    let laid = text.laid(line);
+    let cells = laid.as_ref().map_or(0, |laid| laid.cells());
+    let col = match laid {
+        Some(laid) if cells > 0 => laid.col_of(laid.byte_at(at.col.min(cells - 1))),
+        _ => 0,
+    };
+    Point { line, col }
 }
 
 /// The mark `mark` is kept as: `` ` `` is `'`, the place before the last

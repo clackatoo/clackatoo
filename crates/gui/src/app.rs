@@ -774,12 +774,20 @@ impl App {
         if button == MouseButton::Left && self.desk.drop_divider() {
             return;
         }
-        let (Some(point), Some(button)) = (self.pointer, mouse_button(button)) else {
+        let over_panes = match self.pointer {
+            Some(point) => self.notice.is_none() && !matches!(self.hit(point), Hit::Finder(_)),
+            None => false,
+        };
+        let (true, Some(point), Some(button)) = (over_panes, self.pointer, mouse_button(button))
+        else {
+            // Off the window, or over the finder, a drag in an editor ends
+            // all the same, or its view would go on scrolling by itself.
+            if button == MouseButton::Left && self.desk.editor_released() {
+                self.send_outbox();
+                self.request_redraw();
+            }
             return;
         };
-        if self.notice.is_some() || matches!(self.hit(point), Hit::Finder(_)) {
-            return;
-        }
         let outcome = self
             .desk
             .mouse(point, MouseAction::Release(button), 1, self.modifiers);

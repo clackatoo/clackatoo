@@ -60,7 +60,7 @@ impl Setup {
 
     /// [`TEXT`]'s hints, for all of it, in a pane wide enough for them,
     /// with lines numbered from the first.
-    fn with_hints() -> Self {
+    pub(super) fn with_hints() -> Self {
         let mut setup = Self::new(TEXT);
         setup.set(|options| options.relativenumber = false);
         setup.editor.resize(Size::new(60, 10).unwrap());
@@ -344,7 +344,7 @@ fn a_click_on_a_hint_puts_the_cursor_on_the_character_its_drawn_before() {
         (46, 28),
         (2, 0),
     ] {
-        setup.editor.click(0, col, &setup.copy);
+        setup.editor.click(0, col, &mut setup.copy);
         assert_eq!(setup.cursor(), (0, at), "a click at {col}");
     }
 }

@@ -145,16 +145,34 @@ pub(crate) enum ModeName {
     Normal,
     Visual,
     VisualLine,
+    /// Visual mode the mouse started from insert mode, which goes back
+    /// there once it ends, as Neovim's "(insert) VISUAL".
+    InsertVisual,
+    InsertVisualLine,
 }
 
 impl ModeName {
+    /// The modes the bar names most of the time, whose pill keeps one
+    /// width: not the brief `(insert)` ones, which widen it while shown.
+    const ORDINARY: [Self; 4] = [Self::Insert, Self::Normal, Self::Visual, Self::VisualLine];
+
     fn text(self) -> &'static str {
         match self {
             Self::Insert => "INSERT",
             Self::Normal => "NORMAL",
             Self::Visual => "VISUAL",
             Self::VisualLine => "V-LINE",
+            Self::InsertVisual => "(insert) VISUAL",
+            Self::InsertVisualLine => "(insert) V-LINE",
         }
+    }
+
+    /// Where its name starts in its pill, `rect`: in the middle of the
+    /// room kept for the widest ordinary name.
+    fn text_x(self, rect: Rect, metrics: Metrics) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let width = crate::render::mono_width(self.text()) as f32 * metrics.cell[0];
+        (rect.x + (rect.width - width) / 2.0).round()
     }
 
     /// Which of the theme's mode colours it's drawn on.
@@ -162,7 +180,7 @@ impl ModeName {
         match self {
             Self::Insert => 0,
             Self::Normal => 1,
-            Self::Visual | Self::VisualLine => 2,
+            Self::Visual | Self::VisualLine | Self::InsertVisual | Self::InsertVisualLine => 2,
         }
     }
 
@@ -170,7 +188,11 @@ impl ModeName {
     fn hint(self) -> &'static str {
         match self {
             Self::Insert => "^; normal mode",
-            Self::Normal | Self::Visual | Self::VisualLine => ": command",
+            Self::Normal
+            | Self::Visual
+            | Self::VisualLine
+            | Self::InsertVisual
+            | Self::InsertVisualLine => ": command",
         }
     }
 }
@@ -550,7 +572,7 @@ impl Chrome {
             if let Some((mode, rect)) = self.mode {
                 self.push_bottom_fill(rect, Paint::Mode(mode), &mut painted.fills);
                 painted.texts.push(Text {
-                    origin: [rect.x + 3.0 * metrics.padding, text_y],
+                    origin: [mode.text_x(rect, metrics), text_y],
                     content: mode.text(),
                     ink: Ink::OnColor,
                     font: TextFont::Mono,
@@ -796,11 +818,17 @@ fn lay_out_bottom(
         let cells = crate::render::mono_width(text) as f32;
         cells * metrics.cell[0]
     };
+    // As wide as the widest of the ordinary names, whichever is shown, so
+    // nothing after it moves as the mode changes; wider only for a longer
+    // name, while it's shown.
+    let ordinary = (ModeName::ORDINARY.iter())
+        .map(|mode| mono(mode.text()))
+        .fold(0.0, f32::max);
     let mode = mode.map(|mode| {
         let rect = Rect {
             x: 0.0,
             y: bottom.y,
-            width: (mono(mode.text()) + 6.0 * padding).round(),
+            width: (ordinary.max(mono(mode.text())) + 6.0 * padding).round(),
             height: bottom.height,
         };
         (mode, rect)
@@ -1556,6 +1584,29 @@ mod tests {
         );
         // 100 × 30 cells, inset 12 in the pane, and the lines.
         assert_eq!(Geometry::window_size(100, 30, METRICS), [1024.0, 688.0]);
+    }
+
+    #[test]
+    fn the_mode_keeps_its_width_but_for_visual_mode_from_insert_mode() {
+        let width = |mode| {
+            let status = Status::Tabs {
+                mode: Some(mode),
+                note: None,
+                panes: 1,
+            };
+            chrome(status, &ButtonLayout::default())
+                .mode
+                .unwrap()
+                .1
+                .width
+        };
+        for mode in ModeName::ORDINARY {
+            assert_eq!(width(mode), width(ModeName::Normal), "{mode:?}");
+        }
+        // The names of visual mode from insert mode widen it, while shown.
+        for mode in [ModeName::InsertVisual, ModeName::InsertVisualLine] {
+            assert_eq!(width(mode), 15.0 * 10.0 + 24.0, "{mode:?}");
+        }
     }
 
     #[test]

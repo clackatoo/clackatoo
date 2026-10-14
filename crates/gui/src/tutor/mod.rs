@@ -36,6 +36,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("text-objects", include_str!("lessons/text-objects.md")),
     ("words", include_str!("lessons/words.md")),
     ("registers", include_str!("lessons/registers.md")),
+    ("mouse", include_str!("lessons/mouse.md")),
     ("substitute", include_str!("lessons/substitute.md")),
     ("wrap", include_str!("lessons/wrap.md")),
     ("font", include_str!("lessons/font.md")),

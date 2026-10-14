@@ -215,26 +215,26 @@ fn a_line_taller_than_the_pane_scrolls_through_its_rows() {
 fn a_click_on_a_row_a_line_goes_on_over_lands_on_its_character() {
     let mut setup = Setup::new(&format!("{}\nshort\n", "a".repeat(80)));
     setup.editor.settle(&setup.copy);
-    setup.editor.click(1, 4 + 3, &setup.copy);
+    setup.editor.click(1, 4 + 3, &mut setup.copy);
     assert_eq!(setup.cursor(), (0, 39));
     // On the blank numbers: the row's start.
-    setup.editor.click(2, 1, &setup.copy);
+    setup.editor.click(2, 1, &mut setup.copy);
     assert_eq!(setup.cursor(), (0, 72));
     // Past the end of the line's last row: its last character.
-    setup.editor.click(2, 30, &setup.copy);
+    setup.editor.click(2, 30, &mut setup.copy);
     assert_eq!(setup.cursor(), (0, 79));
-    setup.editor.click(3, 6, &setup.copy);
+    setup.editor.click(3, 6, &mut setup.copy);
     assert_eq!(setup.cursor(), (1, 2));
 
     // Past a row that ends early, at a word: its last character.
     let mut setup = sized("the quick brown fox\n", 19, 4);
     setup.editor.settle(&setup.copy);
-    setup.editor.click(0, 18, &setup.copy);
+    setup.editor.click(0, 18, &mut setup.copy);
     assert_eq!(setup.cursor(), (0, 9));
     // In the indent, the row's first character.
     let mut setup = Setup::new(&format!("    {}\n", "b".repeat(40)));
     setup.editor.settle(&setup.copy);
-    setup.editor.click(1, 5, &setup.copy);
+    setup.editor.click(1, 5, &mut setup.copy);
     assert_eq!(setup.cursor(), (0, 36));
 }
 

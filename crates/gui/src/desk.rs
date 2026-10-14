@@ -265,6 +265,9 @@ pub(crate) struct Desk {
     /// The terminal whose pane a mouse button went down in, and the
     /// button: it gets the drag, wherever the pointer goes.
     dragging: Option<(TerminalId, MouseButton)>,
+    /// The editor whose pane the left button went down in: it gets the
+    /// drag, wherever the pointer goes, until the button comes up.
+    editor_drag: Option<PaneId>,
     /// The cell the mouse was last over, so motion is passed on once per
     /// cell, not once per pixel.
     mouse_cell: Option<(TerminalId, [i64; 2])>,
@@ -693,7 +696,7 @@ impl Desk {
                 None => note,
             };
             return Status::Tabs {
-                mode: Some(mode_name(editor.mode)),
+                mode: Some(editor_mode_name(editor)),
                 note: Some(note),
                 panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
             };
@@ -1744,12 +1747,17 @@ impl Desk {
         if let MouseAction::Press(_) = action {
             self.stop_waiting_to_insert(None);
         }
+        // A drag that began in an editor is its, wherever it goes.
+        if let Some(redraw) = self.editor_drag_mouse(point, action) {
+            outcome.redraw = redraw;
+            return outcome;
+        }
         if self.dragging.is_none()
             && let Some((pane, cell)) = self.editor_at(point)
         {
             outcome.redraw |= self.mouse_left();
             if let MouseAction::Press(MouseButton::Left) = action {
-                outcome.redraw = self.focus_at(point) | self.editor_click(pane, cell);
+                outcome.redraw = self.focus_at(point) | self.editor_press(pane, cell, clicks);
             }
             return outcome;
         }
@@ -2022,6 +2030,9 @@ impl Desk {
         {
             pane.drag_lost();
         }
+        if !focused {
+            self.editor_drag_lost();
+        }
         if let Some(pane) = self.focused_pane() {
             pane.focus_changed(focused);
         }
@@ -2086,6 +2097,22 @@ impl Desk {
         self.cell_in(point, |desk, pane| desk.board(pane).is_some())
     }
 
+    /// The cell of `pane`'s tile at `point`, as its line and column, which
+    /// is off the tile if `point` is, as a drag out of it goes: if the pane
+    /// is shown.
+    fn cell_of(&self, point: [f32; 2], pane: PaneId) -> Option<[i64; 2]> {
+        let area = self.area.as_ref()?;
+        let tile = (self.placement()?.panes.iter())
+            .find(|(id, _)| *id == pane)?
+            .1;
+        #[allow(clippy::cast_possible_truncation)]
+        let cell = |offset: f32, size: f32| (offset / size).floor() as i64;
+        Some([
+            cell(point[1] - tile.origin[1], area.cell[1]),
+            cell(point[0] - tile.origin[0], area.cell[0]),
+        ])
+    }
+
     /// The pane at `point`, if `wanted` takes it, and the cell of it there,
     /// as its line and column.
     fn cell_in(
@@ -2093,20 +2120,11 @@ impl Desk {
         point: [f32; 2],
         wanted: impl Fn(&Self, PaneId) -> bool,
     ) -> Option<(PaneId, [i64; 2])> {
-        let area = self.area.as_ref()?;
-        let placement = self.placement()?;
-        let id = placement.pane_at(point)?;
+        let id = self.placement()?.pane_at(point)?;
         if !wanted(self, id) {
             return None;
         }
-        let tile = placement.panes.iter().find(|(pane, _)| *pane == id)?.1;
-        #[allow(clippy::cast_possible_truncation)]
-        let cell = |offset: f32, size: f32| (offset / size).floor() as i64;
-        let pixel = [point[0] - tile.origin[0], point[1] - tile.origin[1]];
-        Some((
-            id,
-            [cell(pixel[1], area.cell[1]), cell(pixel[0], area.cell[0])],
-        ))
+        Some((id, self.cell_of(point, id)?))
     }
 
     /// Focuses the pane beside the focused one towards `direction`, if
@@ -2370,6 +2388,16 @@ fn new_pane(kind: Kind, agent: Option<String>, size: Size, options: &Options) ->
     }
 }
 
+/// The bar's name for `editor`'s mode: visual mode the mouse started
+/// from insert mode is `(insert) VISUAL`, as in Neovim.
+fn editor_mode_name(editor: &crate::editor::Editor) -> ModeName {
+    match mode_name(editor.mode) {
+        ModeName::Visual if editor.visual_from_insert() => ModeName::InsertVisual,
+        ModeName::VisualLine if editor.visual_from_insert() => ModeName::InsertVisualLine,
+        name => name,
+    }
+}
+
 /// The bar's name for `mode`.
 fn mode_name(mode: Mode) -> ModeName {
     match mode {
@@ -2385,6 +2413,7 @@ mod tests {
     mod folders;
     mod lessons;
     mod mode;
+    mod mouse;
 
     use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};
     use clackatoo_term::mouse::{MouseAction, MouseButton};

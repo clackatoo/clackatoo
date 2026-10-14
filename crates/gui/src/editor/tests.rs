@@ -18,6 +18,7 @@ use crate::render::{HighlightKind, Ink};
 
 mod hints;
 mod indent;
+mod mouse;
 mod snippets;
 mod substitute;
 mod uses;
@@ -427,9 +428,9 @@ fn the_numbers_widen_with_the_file_and_go_in_a_narrow_pane() {
 fn clicks_and_selections_are_beside_the_numbers() {
     let mut setup = Setup::new("hello\nworld\n");
     setup.editor.settle(&setup.copy);
-    setup.editor.click(1, 6, &setup.copy);
+    setup.editor.click(1, 6, &mut setup.copy);
     assert_eq!(setup.cursor(), (1, 2));
-    setup.editor.click(0, 1, &setup.copy);
+    setup.editor.click(0, 1, &mut setup.copy);
     assert_eq!(setup.cursor(), (0, 0), "on a number, the line's start");
     setup.keys("vl");
     let selected = (setup.editor.highlights().into_iter())
@@ -635,7 +636,7 @@ fn the_view_never_jumps_on_the_key_after_a_scroll_or_a_click() {
     // A click near the view's edge scrolls on the click.
     setup.keys("gg");
     setup.editor.wheel(-10, &setup.copy);
-    setup.editor.click(1, 4, &setup.copy);
+    setup.editor.click(1, 4, &mut setup.copy);
     let clicked = setup.view();
     assert_eq!(clicked.1, clicked.0 + 2, "scrolloff lines above");
     setup.keys("l");
@@ -1569,7 +1570,7 @@ fn signs_are_drawn_left_of_the_numbers_and_can_be_turned_off() {
     assert_eq!(fg(rows[4]), crate::colors::sign(Sign::Deleted).1.fg);
     assert_eq!(cursor.unwrap().col, 5, "right of the signs and numbers");
     // A click lands on the text beside them.
-    setup.editor.click(1, 5, &setup.copy);
+    setup.editor.click(1, 5, &mut setup.copy);
     assert_eq!(setup.cursor(), (1, 0));
 
     // They move with typing until the daemon compares again.

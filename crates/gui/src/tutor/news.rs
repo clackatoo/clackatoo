@@ -281,6 +281,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "A .. line tops the explorer's tree: Enter or a double click on it goes up a folder",
     },
+    News {
+        id: "editor-drag",
+        date: "2026-10-14",
+        lesson: "mouse",
+        what: "Drag the mouse in an editor to select, by words after a double click and by lines after a triple",
+    },
 ];
 
 impl News {

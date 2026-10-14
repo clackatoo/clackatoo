@@ -12,11 +12,13 @@
 
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 use clackatoo_protocol::{
     Answer, BufferId, BufferUpdate, ClientMessage, Content, FileLocation, OpenFile, PaneId,
     PaneTerminal, Request, Size, wire,
 };
+use clackatoo_term::mouse::{MouseAction, MouseButton};
 use clackatoo_text::Edit;
 
 use super::jumps::{FilePlace, Jump, Jumps};
@@ -26,7 +28,7 @@ use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Marks, 
 use crate::explorer::Explorer;
 use crate::finder::Finder;
 use crate::input::{KeptPress, KeyPress};
-use crate::options::Options;
+use crate::options::{Clipboard, Options};
 use crate::pane::Copy;
 
 /// The editors, by the pane each is, and the buffers they show.
@@ -966,6 +968,7 @@ impl Desk {
         focused: PaneId,
         act: impl FnOnce(&mut Editor, &mut BufferCopy, &mut Shared) -> Done,
     ) -> Option<bool> {
+        let framed = self.key_from_frame();
         let editors = &mut self.editors;
         let buffer = editors.panes.get(&focused).map(Editor::buffer)?;
         let copy = editors.buffers.get_mut(&buffer)?;
@@ -977,7 +980,14 @@ impl Desk {
             editors.panes.get_mut(pane).expect("just found").hold(copy);
         }
         let editor = editors.panes.get_mut(&focused).expect("just found");
+        editor.typing_framed(framed);
         let done = act(editor, copy, &mut editors.shared);
+        // What ended a selection the mouse made from insert mode goes back
+        // there, however it was done: a key, a command or the config's
+        // Lua. A macro or a binding typing keys goes back once it's done.
+        if !framed {
+            editor.back_to_insert();
+        }
         let left = editor.take_left();
         let opening = editor.take_opening();
         let failed = editor.take_failed();
@@ -1258,6 +1268,10 @@ impl Desk {
         if let Some(editor) = self.editors.panes.get_mut(&pane) {
             editor.leave();
         }
+        // Its drag ends with it, so the mouse is the panes' again.
+        if self.editor_drag == Some(pane) {
+            self.editor_drag = None;
+        }
     }
 
     /// Scrolls the editor `pane` by `lines`, as the wheel does.
@@ -1273,20 +1287,100 @@ impl Desk {
         true
     }
 
-    /// Puts the editor `pane`'s cursor where it was clicked.
-    pub(super) fn editor_click(&mut self, pane: PaneId, [line, col]: [i64; 2]) -> bool {
+    /// The mouse button went down at `cell` of the editor `pane`, the
+    /// `clicks`th time in a row: the cursor goes there, or a word or line
+    /// is selected, and the drag that follows is the editor's until
+    /// [`editor_released`](Self::editor_released). In a folder's listing,
+    /// a double click opens what's clicked, as Enter does, as the
+    /// explorer's does.
+    pub(super) fn editor_press(&mut self, pane: PaneId, [line, col]: [i64; 2], clicks: u8) -> bool {
+        if clicks == 2 && self.is_explorer(pane) {
+            return self.listing_enter(pane);
+        }
         let editors = &mut self.editors;
         let Some(editor) = editors.panes.get_mut(&pane) else {
             return false;
         };
-        let Some(copy) = editors.buffers.get(&editor.buffer()) else {
+        let Some(copy) = editors.buffers.get_mut(&editor.buffer()) else {
             return false;
         };
         let (Ok(line), Ok(col)) = (usize::try_from(line), usize::try_from(col)) else {
             return false;
         };
-        editor.click(line, col, copy);
+        editor.press((line, col), clicks, copy);
+        self.editor_drag = Some(pane);
         true
+    }
+
+    /// The mouse moved to `point`, or a button went down or came up there,
+    /// while dragging in an editor, if one is: whether the window must be
+    /// redrawn, if it's the drag's. A press meanwhile means the release
+    /// was missed: the drag ends, and the press is had as any is.
+    pub(super) fn editor_drag_mouse(
+        &mut self,
+        point: [f32; 2],
+        action: MouseAction,
+    ) -> Option<bool> {
+        let pane = self.editor_drag?;
+        let moved = |desk: &mut Self| {
+            (desk.cell_of(point, pane)).is_some_and(|cell| desk.editor_dragged(pane, cell))
+        };
+        Some(match action {
+            MouseAction::Motion(_) => moved(self),
+            MouseAction::Release(MouseButton::Left) => moved(self) | self.editor_released(),
+            MouseAction::Release(_) => false,
+            MouseAction::Press(_) => {
+                self.editor_drag_lost();
+                return None;
+            }
+        })
+    }
+
+    /// The mouse moved to `cell` of the editor being dragged in, which may
+    /// be off it. Returns whether the window must be redrawn.
+    fn editor_dragged(&mut self, pane: PaneId, cell: [i64; 2]) -> bool {
+        let editors = &mut self.editors;
+        let Some(editor) = editors.panes.get_mut(&pane) else {
+            return false;
+        };
+        let Some(copy) = editors.buffers.get_mut(&editor.buffer()) else {
+            return false;
+        };
+        editor.drag_to((cell[0], cell[1]), Instant::now(), copy)
+    }
+
+    /// The mouse button came up, ending the drag in an editor, if one was
+    /// being dragged in: what it selected stays selected, and goes on the
+    /// primary selection, as a terminal's does, unless the unnamed
+    /// register goes along with that, as `clipboard=unnamed` makes it:
+    /// then `p` over the selection would put the selection itself. Nothing
+    /// selected, as in an empty file, leaves the primary selection as it
+    /// was.
+    /// Returns whether one was.
+    pub(crate) fn editor_released(&mut self) -> bool {
+        let Some(pane) = self.editor_drag.take() else {
+            return false;
+        };
+        let wanted = self.options.clipboard != Clipboard::Unnamed;
+        let editors = &mut self.editors;
+        let selected = (editors.panes.get_mut(&pane)).and_then(|editor| {
+            let copy = editors.buffers.get(&editor.buffer())?;
+            editor.release(wanted, copy)
+        });
+        if let Some(text) = selected {
+            self.copied(text, Copy::Primary);
+        }
+        true
+    }
+
+    /// The window lost the focus mid-drag in an editor, so the button's
+    /// release may never come: the drag ends, leaving what it selected.
+    pub(super) fn editor_drag_lost(&mut self) {
+        if let Some(pane) = self.editor_drag.take()
+            && let Some(editor) = self.editors.panes.get_mut(&pane)
+        {
+            editor.drag_lost();
+        }
     }
 
     /// Lays out the shown editors' lines, before the window is drawn.

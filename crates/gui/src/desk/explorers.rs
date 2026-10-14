@@ -742,6 +742,19 @@ impl Desk {
         if strokes != [Stroke::Enter] && strokes != char('-') {
             return false;
         }
+        self.listing_go(pane, strokes == [Stroke::Enter])
+    }
+
+    /// Opens what the line under the cursor of the explorer or folder
+    /// `pane` names, as Enter does there, and a double click. Returns
+    /// whether `pane` shows a listing to open from.
+    pub(super) fn listing_enter(&mut self, pane: PaneId) -> bool {
+        self.is_explorer(pane) && self.listing_go(pane, true)
+    }
+
+    /// Goes from the listing the editor `pane` shows: into what the
+    /// cursor's line names, if `enter`, or else up a folder.
+    fn listing_go(&mut self, pane: PaneId, enter: bool) -> bool {
         let line = self.listing_cursor_line(pane).unwrap_or_default();
         // Where it was, for the jump list, if it goes anywhere.
         let from = (self.is_folder(pane))
@@ -750,7 +763,7 @@ impl Desk {
         let Some(explorer) = self.explorers.panes.get_mut(&pane) else {
             return false;
         };
-        if strokes == [Stroke::Enter] {
+        if enter {
             explorer.enter_line(&line);
         } else {
             explorer.edit_above();

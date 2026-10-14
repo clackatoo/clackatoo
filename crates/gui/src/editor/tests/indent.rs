@@ -290,7 +290,7 @@ fn only_a_word_typed_and_ended_asks_again() {
     setup.editor.settle(&setup.copy);
     setup.keys("Aelse");
     let before = setup.indents.len();
-    setup.editor.click(1, 4 + 30, &setup.copy);
+    setup.editor.click(1, 4 + 30, &mut setup.copy);
     assert_eq!(setup.cursor(), (1, 9), "after the end");
     setup.keys("<Esc>");
     assert_eq!(setup.indents.len() - before, 0);

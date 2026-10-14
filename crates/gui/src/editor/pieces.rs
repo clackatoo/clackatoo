@@ -292,12 +292,19 @@ impl Editor {
         self.answered = awaiting.answer;
         let again = awaiting.again.is_some();
         // A macro's key is done as one, in its undo step.
-        self.replaying = std::mem::take(&mut self.resume_replaying);
+        let replaying = std::mem::take(&mut self.resume_replaying);
+        self.replaying = replaying;
         let mut done = self.execute(awaiting.command, copy, shared, again);
         self.replaying = false;
         self.answered = None;
         if let Some(change) = awaiting.again {
             self.finish_repeat(change, copy);
+        }
+        // Ending a selection the mouse made from insert mode, it goes back
+        // there, for the keys typed meanwhile; a macro's or a binding's,
+        // once they're done.
+        if !replaying && !self.framed {
+            self.back_to_insert();
         }
         for stroke in awaiting.strokes {
             // Held again if a command starts waiting.
