@@ -398,6 +398,151 @@ fn a_flood_of_output_does_not_starve_other_clients() {
 }
 
 #[test]
+fn keys_echo_at_once_while_another_terminal_floods() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let typed = spawn(
+        &mut client,
+        &["sh", "-c", "stty raw -echo; printf ready; exec cat"],
+    );
+    wait_for_screen(&mut client, typed, |text| text.starts_with("ready"));
+    let mut view = attach(&mut client, typed);
+    client.frame_done(typed).unwrap();
+    let flood = spawn(&mut client, &["yes", "flood"]);
+    wait_for_screen(&mut client, flood, |text| text.contains("flood"));
+
+    // Each key goes back to the start of the line and types a letter,
+    // which cat echoes, timed until the update showing it comes.
+    let mut times = Vec::new();
+    for letter in b'a'..=b'z' {
+        let started = Instant::now();
+        client.send_input(typed, &[b'\r', letter]).unwrap();
+        loop {
+            view.apply(next_update(&mut client, typed));
+            client.frame_done(typed).unwrap();
+            if screen_text(&view).starts_with(char::from(letter)) {
+                break;
+            }
+        }
+        times.push(started.elapsed());
+    }
+    times.sort();
+    // Waiting behind the flood's reads, echoes took milliseconds in a
+    // release build, and in a debug build didn't come for seconds.
+    let median = times[times.len() / 2];
+    assert!(median < Duration::from_millis(50), "{times:?}");
+}
+
+#[test]
+fn a_paste_reaches_a_terminal_flooding_with_its_echo() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    // Every byte pasted comes straight back, so the terminal floods while
+    // the rest of the paste waits for its program to read it.
+    let script = r#"stty raw -echo; printf ready; printf '\r\ncount %s\r\n' "$(head -c 2000000 | tee /dev/tty | wc -c)"; exec cat"#;
+    let terminal = spawn(&mut client, &["sh", "-c", script]);
+    wait_for_screen(&mut client, terminal, |text| text.starts_with("ready"));
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut sent = 0;
+    while sent < 2_000_000 {
+        let len = chunk.len().min(2_000_000 - sent);
+        client.send_input(terminal, &chunk[..len]).unwrap();
+        sent += len;
+    }
+    wait_for_screen_for(&mut client, terminal, Duration::from_mins(1), |text| {
+        text.contains("count 2000000")
+    });
+}
+
+#[test]
+fn a_full_screen_program_s_redraw_is_shown_at_once_and_whole() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    // Each key has the program redraw its screen from a file of its own,
+    // in one write, as a full-screen program does: 12 KB of drawing over
+    // the top line, which never scrolls, then a line naming the key.
+    let letters = b"abcde";
+    for &letter in letters {
+        let letter = char::from(letter);
+        let drawing = (0..300).map(|i| format!("\x1b[Hdrawing {letter} {i:05}{:20}", ""));
+        let text: String = drawing.chain([format!("\x1b[2Jend {letter}")]).collect();
+        std::fs::write(daemon.dir.path().join(letter.to_string()), text).unwrap();
+    }
+    let script =
+        r#"stty raw -echo; printf '\033[?1049hready'; while k=$(head -c 1); do cat "$1/$k"; done"#;
+    let dir = daemon.dir.path().to_str().unwrap();
+    let terminal = spawn(&mut client, &["sh", "-c", script, "sh", dir]);
+    wait_for_screen(&mut client, terminal, |text| text.starts_with("ready"));
+    let mut view = attach(&mut client, terminal);
+
+    // Nothing else happens meanwhile, so no other event wakes the daemon
+    // to send what's left. The first update after each key shows all of
+    // its file, or nearly always: a read can still outrun the kernel
+    // passing output along.
+    client
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut whole = 0;
+    for &letter in letters {
+        client.frame_done(terminal).unwrap();
+        client.send_input(terminal, &[letter]).unwrap();
+        let end = format!("end {}", char::from(letter));
+        let mut first = true;
+        while !screen_text(&view).contains(&end) {
+            if !first {
+                client.frame_done(terminal).unwrap();
+            }
+            match client.next_event() {
+                Ok(Event::View { update, .. }) => view.apply(update),
+                other => panic!("the redraw wasn't shown within a second: {other:?}"),
+            }
+            whole += usize::from(first && screen_text(&view).contains(&end));
+            first = false;
+        }
+    }
+    assert!(whole >= 3, "only {whole} of {} came whole", letters.len());
+}
+
+#[test]
+fn a_program_s_last_output_is_kept_as_its_pane_closes() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    // A burst bigger than a first look, just before the program exits, so
+    // the exit can come while the rest waits to be read.
+    let script = r"sleep 0.2; head -c 60000 /dev/zero | tr '\0' x; printf END";
+    let paths: Vec<_> = (0..40)
+        .map(|i| daemon.dir.path().join(format!("{i}.rec")))
+        .collect();
+    for path in &paths {
+        let made = client.request(&Request::NewWorkspace {
+            name: None,
+            terminal: PaneTerminal::New(NewTerminal {
+                size: Size::new(40, 10).unwrap(),
+                command: Some(vec!["sh".into(), "-c".into(), script.into()]),
+                cwd: None,
+                record_to: Some(path.to_str().unwrap().to_owned()),
+            }),
+        });
+        assert!(matches!(made, Ok(Response::PaneCreated(_))), "{made:?}");
+    }
+    // Each pane closes as its program exits.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !client.list_terminals().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the programs never exited");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let printed = [vec![b'x'; 60_000], b"END".to_vec()].concat();
+    let short: Vec<usize> = (paths.iter())
+        .map(|path| std::fs::read(path).unwrap())
+        .filter_map(|bytes| {
+            let output = Recording::parse(&bytes).unwrap().output;
+            (output != printed).then_some(output.len())
+        })
+        .collect();
+    assert!(short.is_empty(), "recordings cut short, at {short:?} bytes");
+}
+
+#[test]
 fn recordings_replay_to_the_same_screen() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();

@@ -25,9 +25,10 @@ const MAX_PENDING_INPUT: usize = 8 * 1024 * 1024;
 pub(crate) enum ReadOutcome {
     /// Everything available was read.
     Drained,
-    /// The budget ran out before the PTY was drained, so more is waiting.
-    /// The PTY is edge-triggered and won't signal again, so the caller must
-    /// come back without waiting for an event.
+    /// The budget ran out, or the caller asked to stop, before the PTY was
+    /// drained, so more may be waiting. The PTY is edge-triggered and won't
+    /// signal again, so the caller must come back without waiting for an
+    /// event.
     BudgetExhausted,
     /// The PTY is closed: nothing holds its slave end any more.
     Closed,
@@ -253,8 +254,14 @@ impl HostedTerminal {
     }
 
     /// Reads and processes the program's output until the PTY has nothing
-    /// more or `budget` bytes have been read, whichever comes first.
-    pub(crate) fn read_output(&mut self, buffer: &mut [u8], budget: usize) -> ReadOutcome {
+    /// more, `budget` bytes have been read, or `stop` says to, whichever
+    /// comes first. `stop` is asked after each read.
+    pub(crate) fn read_output(
+        &mut self,
+        buffer: &mut [u8],
+        budget: usize,
+        mut stop: impl FnMut() -> bool,
+    ) -> ReadOutcome {
         // Taken out so processing can borrow the rest of `self`. Put back
         // unless the PTY turns out to be closed.
         let Some(pty) = self.pty.take() else {
@@ -267,7 +274,7 @@ impl HostedTerminal {
                 Ok(n) => {
                     self.process_output(&buffer[..n]);
                     total += n;
-                    if total >= budget {
+                    if total >= budget || stop() {
                         break ReadOutcome::BudgetExhausted;
                     }
                 }
