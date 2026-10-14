@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.25 (2026-10-14)
+
+### Speed
+
+- **daemon:** let a flood give way to keys and echoes in other terminals (d1dc1cf)
+
 ## 2026.10.24 (2026-10-14)
 
 ### Features
