@@ -53,6 +53,10 @@ use crate::pane::Selection;
 /// What the bar says when a change would join a listing's lines.
 pub(super) const JOINS_ENTRIES: &str = "a listing's lines can't be joined: act on whole lines";
 
+/// What the bar says when `>` or `<` is pressed in a listing.
+pub(super) const INDENTS_ENTRIES: &str =
+    "a listing's lines can't be indented: a name may start with a space";
+
 /// How much a change made in visual mode took, for `.` to take as much
 /// from the cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -322,10 +326,15 @@ impl Editor {
         false
     }
 
-    /// Refuses a change that would join a listing's lines, saying why: it
-    /// isn't one for `.` to make again, and a selection goes.
+    /// Refuses a change that would join a listing's lines, saying why.
     pub(super) fn refuse_join(&mut self) {
-        self.status = Some(JOINS_ENTRIES.to_owned());
+        self.refuse(JOINS_ENTRIES);
+    }
+
+    /// Refuses a change, saying `why`: it isn't one for `.` to make again,
+    /// and a selection goes.
+    pub(super) fn refuse(&mut self, why: &str) {
+        self.status = Some(why.to_owned());
         self.changing = None;
         self.leave_visual();
         self.fail();

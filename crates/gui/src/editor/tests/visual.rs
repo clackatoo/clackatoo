@@ -547,3 +547,32 @@ fn joining_a_listings_lines_is_refused_and_whole_lines_go() {
         format!("..\n{one}--pha\n{two}beta/\n{three}--mma\n")
     );
 }
+
+#[test]
+fn indenting_a_listings_lines_is_refused() {
+    let refused = |keys: &str| {
+        let (mut setup, [one, two, three]) = listing();
+        setup.keys(keys);
+        let text = format!("..\n{one}alpha\n{two}beta/\n{three}gamma\n");
+        assert_eq!(setup.text(), text, "{keys}");
+        assert_eq!(
+            setup.editor.status.as_deref(),
+            Some(super::super::visual::INDENTS_ENTRIES),
+            "{keys}"
+        );
+        assert_eq!(setup.editor.mode, Mode::Normal, "{keys}");
+    };
+    // `..` too, which has no mark, alone or with entries.
+    for keys in [
+        "j>>", "j<<", "j2>>", "j>j", ">>", "<<", "Vj>", "jVj>", "jVj<", "jVj3>", "jvl>",
+    ] {
+        refused(keys);
+    }
+    // A refused one isn't a change for `.`: it makes the one before again.
+    let (mut setup, [one, two, three]) = listing();
+    setup.keys("jx>>j.");
+    assert_eq!(
+        setup.text(),
+        format!("..\n{one}lpha\n{two}eta/\n{three}gamma\n")
+    );
+}

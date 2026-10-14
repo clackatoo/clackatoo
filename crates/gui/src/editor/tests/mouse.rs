@@ -656,6 +656,44 @@ fn gv_selects_what_was_dragged_again() {
 }
 
 #[test]
+fn gv_swaps_a_double_or_triple_click_made_in_visual_mode_with_what_it_ended() {
+    let word = ((1, 7), (1, 10), Selection::Characters);
+    // Each press of a double or triple click comes, and goes, in turn.
+    for (clicks, clicked) in [(2, word), (3, ((1, 8), (1, 8), Selection::Lines))] {
+        let mut setup = Setup::new("hello world\nsecond line\n");
+        setup.editor.settle(&setup.copy);
+        setup.keys("wve");
+        for click in 1..=clicks {
+            setup.press(1, 8, click);
+            setup.release();
+        }
+        assert_eq!(setup.selected(), Some(clicked), "{clicks}");
+        setup.keys("gv");
+        assert_eq!(
+            setup.selected(),
+            Some(((0, 6), (0, 10), Selection::Characters)),
+            "{clicks}"
+        );
+        setup.keys("gv");
+        assert_eq!(setup.selected(), Some(clicked), "{clicks}");
+    }
+    // A drag, then a press soon after where it began, which the window
+    // counts as a double click, made in the visual mode the drag left.
+    let mut setup = Setup::new("hello world\nsecond line\n");
+    setup.editor.settle(&setup.copy);
+    setup.press(1, 8, 1);
+    setup.drag(0, 2, Instant::now());
+    setup.release();
+    let dragged = setup.selected();
+    assert!(dragged.is_some());
+    setup.press(1, 8, 2);
+    setup.release();
+    assert_eq!(setup.selected(), Some(word));
+    setup.keys("gv");
+    assert_eq!(setup.selected(), dragged);
+}
+
+#[test]
 fn dot_changes_as_much_as_was_dragged_over_typing_the_same() {
     let mut setup = Setup::new("hello world\nsecond line\nthird row\n");
     setup.editor.settle(&setup.copy);

@@ -219,7 +219,7 @@ impl Selected {
         self.start.byte = self.start.byte.min(len);
         self.end.byte = self.end.byte.clamp(self.start.byte, len);
         self.last.byte = if self.end.byte > self.start.byte {
-            text.char_to_byte(text.byte_to_char(self.end.byte) - 1)
+            text.char_to_byte(text.byte_to_char(self.end.byte).saturating_sub(1))
                 .max(self.start.byte)
         } else {
             self.start.byte

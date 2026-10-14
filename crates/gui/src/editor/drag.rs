@@ -119,8 +119,13 @@ impl Editor {
             return;
         };
         // A click ends a selection, and one the mouse made from insert
-        // mode goes back to it.
+        // mode goes back to it. What a double click selects is a new go of
+        // visual mode, so `gv` swaps it with the one ended, as after a
+        // drag; a triple click goes on with the double click's.
         self.leave_visual();
+        if clicks < 3 {
+            self.selecting = false;
+        }
         self.back_to_insert();
         let text = self.text(copy);
         let on = on_character(at, &text);

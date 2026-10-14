@@ -567,7 +567,8 @@ fn read_line(
         at: Some((folder, line)),
         why,
     };
-    // A line indented, as `>>` does, is read as if it weren't.
+    // A line indented before its mark is read as if it weren't: `>` is
+    // refused in a listing, but other edits can still put blanks there.
     let text = text.trim_start_matches([' ', '\t']);
     let (id, rest) = match read_mark(text) {
         Some((of, id, rest)) if of == session => (Some(id), rest),

@@ -1786,6 +1786,13 @@ impl Editor {
             return true;
         }
         if let Operator::Indent | Operator::Dedent = operator {
+            // Not in a listing: indented after its hidden mark, a name
+            // that starts with a space or a tab would be another name,
+            // and `<` would take its blanks as an indent.
+            if self.hide.is_some() {
+                self.refuse(visual::INDENTS_ENTRIES);
+                return true;
+            }
             // A count is how many lines, or for a selection, how many steps.
             let steps = if target == Target::Selection {
                 times

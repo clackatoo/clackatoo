@@ -9769,11 +9769,11 @@ mod tests {
         assert!(modified(&desk));
         type_keys(&mut desk, "u");
         assert!(!modified(&desk));
-        // Put three times more, or indented, it's still nothing.
+        // Put three times more, it's still nothing; `>>` isn't done.
         type_keys(&mut desk, "ggyy3p>>");
         assert_eq!(
             listing_shown(&desk),
-            ["..", "    ..", "..", "..", "src/", "a.txt"]
+            ["..", "..", "..", "..", "src/", "a.txt"]
         );
         assert!(!modified(&desk));
         command(&mut desk, "w");
@@ -9840,6 +9840,62 @@ mod tests {
             !desk.explorer(PaneId(2)).unwrap().editing(),
             "back to the tree"
         );
+    }
+
+    #[test]
+    fn indenting_a_listings_lines_is_refused_and_writing_does_nothing() {
+        use crate::explorer::listing::mark_len;
+        use clackatoo_protocol::{FilesId, FilesUpdate};
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "e");
+        enter(&mut desk);
+        // A name that starts with a space, which an indent after its mark
+        // would make another, and `<` would take as an indent.
+        let listed = FilesUpdate::Listed {
+            dir: "/p/src".into(),
+            entries: vec![
+                entry(" foo", false),
+                entry("lib", true),
+                entry("main.rs", false),
+            ],
+            cut_short: false,
+        };
+        desk.files_changed(FilesId(1), listed);
+        assert_eq!(listing_shown(&desk), ["..", " foo", "lib/", "main.rs"]);
+        let text = editor_text(&desk);
+        let mode = |desk: &Desk| desk.focused_editor().expect("an editor").0.mode;
+        // `.` after each has no change to make again: none was made.
+        for (keys, refused) in [
+            ("gg>>", true),
+            ("j>>", true),
+            ("j.", false),
+            ("gg<<", true),
+            ("j<<", true),
+            ("gg0Vj>", true),
+            ("jVj<", true),
+            ("j.", false),
+            ("gg3>>", true),
+        ] {
+            type_keys(&mut desk, keys);
+            assert_eq!(editor_text(&desk), text, "{keys}");
+            if refused {
+                assert_eq!(
+                    note(&desk),
+                    "a listing's lines can't be indented: a name may start with a space",
+                    "{keys}"
+                );
+            }
+            assert_eq!(mode(&desk), Mode::Normal, "{keys}");
+        }
+        // Each entry's mark still starts its line.
+        let marked: Vec<bool> = text.lines().map(|line| mark_len(line) > 0).collect();
+        assert_eq!(marked, [false, true, true, true]);
+        assert!(!modified(&desk));
+        command(&mut desk, "w");
+        assert_eq!(note(&desk), "nothing has changed");
+        assert_eq!(file_ops(&mut desk), []);
     }
 
     #[test]
