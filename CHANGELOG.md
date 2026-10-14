@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.14 (2026-10-14)
+
+### Fixes
+
+- **lsp:** shut servers down before exit, stop them with the daemon, keep their last words, and watch files for them (ec16dbd)
+
 ## 2026.10.13 (2026-10-14)
 
 ### Features
