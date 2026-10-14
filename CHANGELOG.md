@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.27 (2026-10-14)
+
+### Features
+
+- **explorer:** a .. line tops every folder listing, going up on Enter and naming nothing (df3d046)
+
 ## 2026.10.26 (2026-10-14)
 
 ### Features
