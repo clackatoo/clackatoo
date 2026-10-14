@@ -64,6 +64,7 @@ mod disk;
 mod edit_log;
 mod explorers;
 mod finder;
+mod fits;
 mod language;
 mod offers;
 mod pieces;
@@ -217,6 +218,13 @@ impl Hosted {
         }
     }
 
+    fn size(&self) -> Size {
+        match self {
+            Self::Pty(terminal) => terminal.emulator().size(),
+            Self::Chat(chat) => chat.size(),
+        }
+    }
+
     fn scrollback_needs_compaction(&mut self) -> bool {
         match self {
             Self::Pty(terminal) => terminal.scrollback_needs_compaction(),
@@ -285,6 +293,9 @@ struct Slot {
     /// What the program asked about the clipboard, while the client
     /// asked hasn't answered.
     clipboard: Option<clipboard::Asked>,
+    /// The client it's fitted to for now, as a phone fits one, and the
+    /// size it goes back to.
+    fit: Option<fits::Fit>,
 }
 
 /// A connected client.
@@ -930,6 +941,7 @@ impl Daemon {
         let mut terminals = Vec::new();
         let mut chats = Vec::new();
         self.abandon_clipboard_asks();
+        self.put_back_fits();
         for slot in std::mem::take(&mut self.terminals).into_values() {
             match slot.terminal {
                 Hosted::Pty(terminal) => terminals.push(terminal.hand_over(&mut fds)),
@@ -1049,6 +1061,7 @@ impl Daemon {
                     .chain(self.next_file_changes_due())
                     .chain(self.next_agent_due())
                     .chain(self.next_web_due())
+                    .chain(self.next_fit_due())
                     .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
                     .min();
                 next.map(|due| due.saturating_duration_since(Instant::now()))
@@ -1098,6 +1111,7 @@ impl Daemon {
             self.tell_file_changes();
             self.compact_scrollbacks();
             self.time_out_clipboard_asks();
+            self.lapse_fits();
             self.time_out_tools();
             self.relay_chats();
             self.take_browser();
@@ -1501,6 +1515,7 @@ impl Daemon {
                         viewers: Vec::new(),
                         typist: None,
                         clipboard: None,
+                        fit: None,
                     },
                 );
                 // Input left over from before an upgrade.
@@ -1804,6 +1819,13 @@ impl Daemon {
             let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
                 return;
             };
+            // A device being cut off, as when it's unpaired, has nothing
+            // more done for it, even what it sent before it heard. (A
+            // socket's client that hung up is still answered what it asked
+            // before: it may be waiting for the answers.)
+            if client.finished && matches!(client.link, Link::Web(_)) {
+                break;
+            }
             let greeted = client.greeted;
             let reply = match message {
                 // A request it couldn't read, from a newer client: answered
@@ -2110,16 +2132,9 @@ impl Daemon {
             Request::CloseTerminal { terminal } => {
                 self.close_terminal(terminal).map(|()| Response::Done)
             }
-            Request::Resize { terminal, size } => match self.terminals.get_mut(&terminal) {
-                Some(slot) => {
-                    slot.terminal.resize(size);
-                    // Rewrapping may have pushed rows into scrollback.
-                    self.schedule_compaction(terminal);
-                    self.collect_damage(terminal);
-                    Ok(Response::Done)
-                }
-                None => Err(Error::NoSuchTerminal(terminal)),
-            },
+            Request::Resize { terminal, size } => {
+                self.resize_asked(terminal, size).map(|()| Response::Done)
+            }
             Request::Attach { terminal } => self.attach(token, terminal).map(|()| Response::Done),
             Request::Detach { terminal } => {
                 self.detach(token, terminal);
@@ -2208,6 +2223,13 @@ impl Daemon {
             Request::Review(action) => self.serve_review(action),
             Request::WatchChats => Ok(self.watch_chats(token)),
             Request::ChatChoices { pane } => Ok(Response::ChatChoices(self.chat_choices(pane))),
+            Request::Fit {
+                terminal,
+                size,
+                renew,
+            } => self
+                .fit(token, terminal, size, renew)
+                .map(|()| Response::Done),
             Request::Devices => Ok(self.devices()),
             Request::RevokeDevice { device } => self.revoke_device(device),
             Request::AnswerPairing { code } => self.answer_pairing(token, code.as_deref()),
@@ -2338,21 +2360,24 @@ impl Daemon {
             client.views.remove(&id);
         }
         self.forget_clipboard_asks(token, Some(id));
+        self.forget_fits(token, Some(id));
     }
 
     /// Writes `bytes` to terminal `id`, as typed by the client at `token`.
     fn send_input(&mut self, token: Token, id: TerminalId, bytes: &[u8]) -> Result<(), Error> {
-        let slot = self
-            .terminals
-            .get_mut(&id)
-            .ok_or(Error::NoSuchTerminal(id))?;
-        match &mut slot.terminal {
-            Hosted::Pty(terminal) => {
-                terminal.send_input(bytes)?;
-                slot.typist = Some(token);
-                self.update_pty_interest(id);
-            }
-            Hosted::Chat(_) => return Err(Error::IsAChat(id)),
+        let slot = self.terminals.get(&id).ok_or(Error::NoSuchTerminal(id))?;
+        if slot.terminal.is_chat() {
+            return Err(Error::IsAChat(id));
+        }
+        self.typing_ends_fit(token, id);
+        let Some(slot) = self.terminals.get_mut(&id) else {
+            return Err(Error::NoSuchTerminal(id));
+        };
+        if let Some(terminal) = slot.terminal.pty() {
+            terminal.send_input(bytes)?;
+            slot.typist = Some(token);
+            self.update_pty_interest(id);
+            self.note_device_typing(token, id);
         }
         Ok(())
     }
@@ -2493,6 +2518,8 @@ impl Daemon {
     /// Forgets a client, as [`drop_client`](Self::drop_client) does,
     /// telling one over QUIC `why`.
     fn drop_client_saying(&mut self, token: Token, why: &str) {
+        // Before it's forgotten, so the log can say which device it was.
+        self.forget_fits(token, None);
         if let Some(Source::Client(client)) = self.sources.try_remove(token.0) {
             // An upgrade it asked for, still waiting, is given up: no one
             // is left to hear how it went, and its token may be another

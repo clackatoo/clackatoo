@@ -179,6 +179,8 @@ impl HostedTerminal {
             size: self.emulator.size(),
             title: self.emulator.title().to_owned(),
             status: self.status,
+            cwd: self.emulator.cwd().map(str::to_owned),
+            command: (self.emulator.running_command()).map(str::to_owned),
         }
     }
 

@@ -4,6 +4,8 @@
 
 use clackatoo_protocol::TerminalId;
 
+use crate::keys::{Key, Modifiers};
+
 /// What tapping something does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -30,6 +32,125 @@ pub enum Action {
     /// Pairs here, in the browser, though an app on the home screen
     /// wouldn't share what pairing here stores.
     PairHere,
+    /// Shows a terminal.
+    OpenTerminal(TerminalId),
+    /// Fits the terminal shown to the phone, for now.
+    Fit,
+    /// Puts the terminal shown back to its own size.
+    Unfit,
+    /// Brings up the keyboard, to type into the terminal shown.
+    Type,
+    /// A key on the row above the keyboard.
+    Key(RowKey),
+}
+
+/// The keys on the row above the phone's keyboard: those a phone's
+/// keyboard hasn't, or hides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowKey {
+    Escape,
+    Tab,
+    /// Ctrl, for the next key.
+    Ctrl,
+    Left,
+    Up,
+    Down,
+    Right,
+    Pipe,
+    Tilde,
+    Slash,
+    Dash,
+    /// Ctrl+C, at one tap.
+    CtrlC,
+    /// Pastes what's on the clipboard.
+    Paste,
+}
+
+impl RowKey {
+    /// Every key on the row, in its order.
+    pub const ALL: [Self; 13] = [
+        Self::Escape,
+        Self::Tab,
+        Self::Ctrl,
+        Self::CtrlC,
+        Self::Left,
+        Self::Up,
+        Self::Down,
+        Self::Right,
+        Self::Pipe,
+        Self::Tilde,
+        Self::Slash,
+        Self::Dash,
+        Self::Paste,
+    ];
+
+    /// Its name, in `data-action`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Escape => "esc",
+            Self::Tab => "tab",
+            Self::Ctrl => "ctrl",
+            Self::Left => "left",
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Right => "right",
+            Self::Pipe => "pipe",
+            Self::Tilde => "tilde",
+            Self::Slash => "slash",
+            Self::Dash => "dash",
+            Self::CtrlC => "ctrl-c",
+            Self::Paste => "paste",
+        }
+    }
+
+    /// What it says on it.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Escape => "Esc",
+            Self::Tab => "Tab",
+            Self::Ctrl => "Ctrl",
+            Self::Left => "←",
+            Self::Up => "↑",
+            Self::Down => "↓",
+            Self::Right => "→",
+            Self::Pipe => "|",
+            Self::Tilde => "~",
+            Self::Slash => "/",
+            Self::Dash => "-",
+            Self::CtrlC => "^C",
+            Self::Paste => "Paste",
+        }
+    }
+
+    /// The key it types, with what it holds, unless it types none of its
+    /// own, as Ctrl and Paste don't.
+    #[must_use]
+    pub fn key(self) -> Option<(Key, Modifiers)> {
+        let text = |text: &str| Key::Text(text.to_owned());
+        let key = match self {
+            Self::Escape => Key::Escape,
+            Self::Tab => Key::Tab,
+            Self::Left => Key::Left,
+            Self::Up => Key::Up,
+            Self::Down => Key::Down,
+            Self::Right => Key::Right,
+            Self::Pipe => text("|"),
+            Self::Tilde => text("~"),
+            Self::Slash => text("/"),
+            Self::Dash => text("-"),
+            Self::CtrlC => {
+                let ctrl = Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                };
+                return Some((text("c"), ctrl));
+            }
+            Self::Ctrl | Self::Paste => return None,
+        };
+        Some((key, Modifiers::default()))
+    }
 }
 
 impl Action {
@@ -48,6 +169,11 @@ impl Action {
             Self::Renew => "renew".to_owned(),
             Self::Again => "again".to_owned(),
             Self::PairHere => "pair-here".to_owned(),
+            Self::OpenTerminal(terminal) => format!("term:{terminal}"),
+            Self::Fit => "fit".to_owned(),
+            Self::Unfit => "unfit".to_owned(),
+            Self::Type => "type".to_owned(),
+            Self::Key(key) => format!("key:{}", key.name()),
         }
     }
 
@@ -73,6 +199,11 @@ impl Action {
             ("renew", "") => Self::Renew,
             ("again", "") => Self::Again,
             ("pair-here", "") => Self::PairHere,
+            ("term", terminal) => Self::OpenTerminal(TerminalId(terminal.parse().ok()?)),
+            ("fit", "") => Self::Fit,
+            ("unfit", "") => Self::Unfit,
+            ("type", "") => Self::Type,
+            ("key", name) => Self::Key(RowKey::ALL.into_iter().find(|key| key.name() == name)?),
             _ => return None,
         })
     }
@@ -144,12 +275,20 @@ mod tests {
             Action::Renew,
             Action::Again,
             Action::PairHere,
-        ] {
+            Action::OpenTerminal(TerminalId(3)),
+            Action::Fit,
+            Action::Unfit,
+            Action::Type,
+        ]
+        .into_iter()
+        .chain(RowKey::ALL.map(Action::Key))
+        {
             assert_eq!(Action::decode(&action.encode()), Some(action));
         }
         assert_eq!(Action::decode("open:x"), None);
         assert_eq!(Action::decode("answer:1"), None);
         assert_eq!(Action::decode("explode"), None);
+        assert_eq!(Action::decode("key:f13"), None);
     }
 
     #[test]

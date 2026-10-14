@@ -26,7 +26,7 @@ use clackatoo_text::{
 };
 
 use crate::frame::{self, FrameDecoder, FrameError};
-use crate::wire::{EXITED, FALLBACKS};
+use crate::wire::{EXITED, FALLBACKS, PHONE_TERMINALS};
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
     Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
@@ -189,6 +189,8 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     size: size(),
                     title: "vim".into(),
                     status: TerminalStatus::Running,
+                    cwd: None,
+                    command: None,
                 },
             ]))),
         ),
@@ -599,6 +601,53 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         EXITED,
         Server(ServerMessage::Event(Event::Exited { terminal })),
     ));
+    // Terminals from a phone: the list says where each is and what it
+    // runs, and a phone fits one to its screen for a while, then puts it
+    // back.
+    samples.extend([
+        (
+            PHONE_TERMINALS,
+            Server(ServerMessage::Response(Response::Terminals(vec![
+                TerminalInfo {
+                    id: terminal,
+                    pid: Some(4242),
+                    size: size(),
+                    title: "make".into(),
+                    status: TerminalStatus::Running,
+                    cwd: Some("/home/jack/clackatoo".into()),
+                    command: Some("cargo test".into()),
+                },
+            ]))),
+        ),
+        (
+            PHONE_TERMINALS,
+            Client(ClientMessage::Request(Request::Fit {
+                terminal,
+                size: Some(size()),
+                renew: true,
+            })),
+        ),
+        (
+            PHONE_TERMINALS,
+            Client(ClientMessage::Request(Request::Fit {
+                terminal,
+                size: None,
+                renew: false,
+            })),
+        ),
+        (
+            PHONE_TERMINALS,
+            Server(ServerMessage::Response(Response::Error(
+                Error::NotFollowing(terminal),
+            ))),
+        ),
+        (
+            PHONE_TERMINALS,
+            Server(ServerMessage::Response(Response::Error(Error::NotFitted(
+                terminal,
+            )))),
+        ),
+    ]);
     samples
 }
 
@@ -650,6 +699,8 @@ fn more() -> Vec<Sample> {
             size: size(),
             title: String::new(),
             status: TerminalStatus::Killed(9),
+            cwd: None,
+            command: None,
         }])),
         response(Response::View(View {
             title: "t".into(),

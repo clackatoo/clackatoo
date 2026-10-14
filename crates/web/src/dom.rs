@@ -4,7 +4,7 @@
 //! `innerHTML`, so nothing from the daemon is ever read as markup.
 
 use wasm_bindgen::JsCast as _;
-use web_sys::{Document, Element as DomElement};
+use web_sys::{Document, Element as DomElement, HtmlElement};
 
 use crate::ui::{Element, Node};
 
@@ -25,6 +25,14 @@ pub(crate) fn element_of(document: &Document, element: &Element) -> DomElement {
         // `value` and `selected` are properties too, which an element's
         // first drawing takes from the attributes.
         let _ = made.set_attribute(name, value);
+    }
+    if !element.styles.is_empty()
+        && let Some(html) = made.dyn_ref::<HtmlElement>()
+    {
+        let style = html.style();
+        for (name, value) in &element.styles {
+            let _ = style.set_property(name, value);
+        }
     }
     for child in &element.children {
         let _ = made.append_child(&build(document, child));

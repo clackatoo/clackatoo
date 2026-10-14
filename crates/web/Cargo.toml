@@ -1,6 +1,6 @@
 [package]
 name = "clackatoo-web"
-description = "clackatoo's web app: chats and their questions from a phone, in WebAssembly, served by the daemon."
+description = "clackatoo's web app: chats, their questions and terminals from a phone, in WebAssembly, served by the daemon."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,6 +16,8 @@ bench = false
 
 [dependencies]
 clackatoo-protocol.workspace = true
+# Lays a terminal's lines out cell by cell, as the emulator does.
+clackatoo-term.workspace = true
 # Reads the agents' words as Markdown, as the window does, laid out here
 # as the page's own elements, never as HTML.
 pulldown-cmark.workspace = true
@@ -26,10 +28,14 @@ wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4.79"
 js-sys = "0.3.106"
 web-sys = { version = "0.3.106", features = [
+    "AddEventListenerOptions",
     "BinaryType",
+    "Clipboard",
     "CloseEvent",
+    "CompositionEvent",
     "console",
     "CssStyleDeclaration",
+    "DataTransfer",
     "Document",
     "DomTokenList",
     "Element",
@@ -41,6 +47,7 @@ web-sys = { version = "0.3.106", features = [
     "HtmlInputElement",
     "HtmlSelectElement",
     "HtmlTextAreaElement",
+    "InputEvent",
     "KeyboardEvent",
     "Location",
     "MediaQueryList",
@@ -60,7 +67,11 @@ web-sys = { version = "0.3.106", features = [
     "ServiceWorkerContainer",
     "ServiceWorkerRegistration",
     "Text",
+    "Touch",
+    "TouchEvent",
+    "TouchList",
     "VisibilityState",
+    "VisualViewport",
     "WebSocket",
     "Window",
 ] }

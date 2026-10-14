@@ -113,7 +113,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 74;
+pub const PROTOCOL_VERSION: u32 = 75;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -854,6 +854,30 @@ pub enum Request {
         /// directory.
         pane: Option<PaneId>,
     },
+    /// Sizes a terminal to the client for a while, as a phone does to
+    /// show it at its own width, or with no size, puts it back. Only a
+    /// client following the terminal may fit it ([`Error::NotFollowing`]
+    /// otherwise). The size holds until the client puts it back, stops
+    /// following the terminal, or goes, or another client types into it,
+    /// or a minute goes by without the client asking for it again; the
+    /// terminal then takes the size it had, or the latest any client asked
+    /// for meanwhile, as [`Request::Resize`]s are kept for then rather
+    /// than made. A client that fits a terminal fitted by another takes
+    /// the fit over. With `renew`, it only asks for its fit again, to keep
+    /// it: never a fit back once it's been put back, which is answered
+    /// with [`Error::NotFitted`]. Answered with [`Response::Done`]. New in
+    /// protocol 75: a client asks
+    /// [`wire::daemon_has`] with [`wire::PHONE_TERMINALS`] before sending
+    /// it.
+    Fit {
+        /// The terminal.
+        terminal: TerminalId,
+        /// Its size for now, or `None` to put it back.
+        size: Option<Size>,
+        /// Only keep the fit this client has, asking for it again: the
+        /// size is left as it is.
+        renew: bool,
+    },
 }
 
 /// How to start a terminal.
@@ -1122,6 +1146,15 @@ pub enum Error {
     /// what went wrong.
     #[error("{0}")]
     Other(String),
+    /// The client asked something of a terminal it doesn't follow, which
+    /// it must, as to fit it ([`Request::Fit`]). New in protocol 75.
+    #[error("terminal {0} isn't followed: attach to it first")]
+    NotFollowing(TerminalId),
+    /// The client asked to keep a fit it no longer has: it was put back,
+    /// as when a window typed into the terminal ([`Request::Fit`]). New in
+    /// protocol 75.
+    #[error("terminal {0} isn't fitted to this client any more")]
+    NotFitted(TerminalId),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while
@@ -1149,6 +1182,20 @@ pub struct TerminalInfo {
     pub title: String,
     /// Whether the program is still running.
     pub status: TerminalStatus,
+    /// The working directory its shell last reported (OSC 7), if it has.
+    /// `None` from a daemon older than protocol 75.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::PHONE_TERMINALS }, _>",
+        deserialize_with = "wire::since::<{ wire::PHONE_TERMINALS }, _, _>"
+    )]
+    pub cwd: Option<String>,
+    /// The command its shell is running, as the shell's marks said, if
+    /// one is. `None` from a daemon older than protocol 75.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::PHONE_TERMINALS }, _>",
+        deserialize_with = "wire::since::<{ wire::PHONE_TERMINALS }, _, _>"
+    )]
+    pub command: Option<String>,
 }
 
 /// Whether a terminal's program is still running.

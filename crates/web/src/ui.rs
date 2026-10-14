@@ -16,11 +16,16 @@ pub enum Node {
     Text(String),
 }
 
-/// An element: its tag, attributes and children.
+/// An element: its tag, attributes, styles and children.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Element {
     pub tag: &'static str,
     pub attrs: Vec<(&'static str, String)>,
+    /// CSS properties set on the element itself, as a terminal's colours
+    /// outside the palette the style sheet has. Set through the element's
+    /// style object, never a `style` attribute, which the page's policy
+    /// refuses.
+    pub styles: Vec<(&'static str, String)>,
     pub children: Vec<Node>,
 }
 
@@ -57,6 +62,13 @@ impl Element {
     #[must_use]
     pub fn attr(mut self, name: &'static str, value: impl Into<String>) -> Self {
         self.attrs.push((name, value.into()));
+        self
+    }
+
+    /// The same, with its CSS property `name` set to `value`.
+    #[must_use]
+    pub fn style(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.styles.push((name, value.into()));
         self
     }
 

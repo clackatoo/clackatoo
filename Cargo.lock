@@ -747,6 +747,7 @@ name = "clackatoo-web"
 version = "2026.10.14"
 dependencies = [
  "clackatoo-protocol",
+ "clackatoo-term",
  "js-sys",
  "pulldown-cmark",
  "wasm-bindgen",

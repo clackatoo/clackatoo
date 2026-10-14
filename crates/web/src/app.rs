@@ -7,8 +7,14 @@
 //! to two more. So the page's elements need no closures of their own.
 //! The few closures the app keeps (the WebSocket's, and the page's
 //! listeners) live as long as the page, or as their socket.
+//!
+//! Keys typed into a terminal come from the box under it, as the phone's
+//! keyboard types them: text as it's put in, Enter and Backspace, and
+//! keys a keyboard attached to the phone has, each sent at once.
 
 use std::cell::RefCell;
+
+mod terminal;
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{ChatAction, PROTOCOL_VERSION, TerminalId};
@@ -17,14 +23,18 @@ use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    Document, Element as DomElement, Event, HtmlInputElement, HtmlSelectElement,
-    HtmlTextAreaElement, MessageEvent, Notification, NotificationPermission,
-    PushSubscriptionOptionsInit, RequestInit, VisibilityState, WebSocket, Window,
+    AddEventListenerOptions, Document, Element as DomElement, Event, HtmlInputElement,
+    HtmlSelectElement, HtmlTextAreaElement, InputEvent, KeyboardEvent, MessageEvent, Notification,
+    NotificationPermission, PushSubscriptionOptionsInit, RequestInit, TouchEvent, VisibilityState,
+    WebSocket, Window,
 };
 
-use crate::action::{Action, Pick};
+use self::terminal::TermPage;
+use crate::action::{Action, Pick, RowKey};
 use crate::dom;
+use crate::keys::{Key, Modifiers};
 use crate::state::{Received, State};
+use crate::term::Fit;
 use crate::ui::el;
 use crate::view::{self, Notifications, pairing};
 
@@ -38,6 +48,15 @@ const MOST_RETRY: u32 = 30;
 /// How often taps say again that the user is there, in milliseconds.
 const PRESENT_EVERY: f64 = 60_000.0;
 
+/// How often the list of terminals is asked for again while it's shown,
+/// in milliseconds, for what each is running and where; and how often a
+/// fit is looked at, to ask for it again.
+const LIST_EVERY: i32 = 5_000;
+
+/// How long the phone's screen stays the same size, in milliseconds,
+/// before a fitted terminal is fitted again to it.
+const REFIT_AFTER: i32 = 300;
+
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
@@ -47,7 +66,9 @@ thread_local! {
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|app| {
         let mut app = app.try_borrow_mut().ok()?;
-        app.as_mut().map(f)
+        let app = app.as_mut()?;
+        app.state.now = js_sys::Date::now();
+        Some(f(app))
     })
 }
 
@@ -112,6 +133,15 @@ struct App {
     /// Seconds to wait before connecting again.
     retry: u32,
     page: Option<ChatPage>,
+    /// The page showing a terminal, while one is shown.
+    term_page: Option<TermPage>,
+    /// When the app looks again at whether keys go, if it's to.
+    check_at: f64,
+    /// The key on the row of keys a finger is on, and where it came down.
+    pressed: Option<(RowKey, (f64, f64))>,
+    /// Counts the phone's screen changes, so the terminal is fitted again
+    /// only once it settles.
+    refits: u32,
     /// A frame is asked for, to draw in.
     frame_asked: bool,
     /// The user chose to pair in Safari, not in the app on the home
@@ -158,12 +188,25 @@ pub(crate) fn start() {
             socket: None,
             retry: 1,
             page: None,
+            term_page: None,
+            check_at: 0.0,
+            pressed: None,
+            refits: 0,
             frame_asked: false,
             pair_here: false,
             present_said: 0.0,
         });
     });
     listen_to_page(&window, &document, &root);
+    listen_for_typing(&root);
+    let tick = Closure::<dyn FnMut()>::new(|| {
+        with_app(App::tick);
+    });
+    let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+        tick.as_ref().unchecked_ref(),
+        LIST_EVERY,
+    );
+    tick.forget();
     spawn_local(boot());
 }
 
@@ -230,18 +273,29 @@ fn listen_to_page(window: &Window, document: &Document, root: &DomElement) {
         }
     });
     listen(root, "keydown", false, |event| {
-        let Some(key) = event.dyn_ref::<web_sys::KeyboardEvent>() else {
+        let Some(key) = event.dyn_ref::<KeyboardEvent>() else {
             return;
         };
-        let in_message = (event
-            .target()
-            .and_then(|target| target.dyn_into::<DomElement>().ok()))
-        .is_some_and(|target| target.id() == "message");
+        let in_message = target_id(&event).is_some_and(|id| id == "message");
         if in_message && key.key() == "Enter" && (key.meta_key() || key.ctrl_key()) {
             event.prevent_default();
             with_app(|app| app.act(Action::Send));
         }
     });
+    // Scrolling doesn't bubble: heard on the way down.
+    listen(root, "scroll", true, |_| {
+        with_app(App::scrolled);
+    });
+    listen(window, "resize", false, |_| {
+        with_app(App::viewport_changed);
+    });
+    if let Some(viewport) = window.visual_viewport() {
+        for kind in ["resize", "scroll"] {
+            listen(&viewport, kind, false, |_| {
+                with_app(App::viewport_changed);
+            });
+        }
+    }
     listen(document, "visibilitychange", false, |_| {
         with_app(App::visibility_changed);
     });
@@ -258,6 +312,300 @@ fn listen_to_page(window: &Window, document: &Document, root: &DomElement) {
             }
         });
     }
+}
+
+/// The ID of the element `event` happened to, if it has one.
+fn target_id(event: &Event) -> Option<String> {
+    let target = event.target()?.dyn_into::<DomElement>().ok()?;
+    Some(target.id())
+}
+
+/// Listens for what's typed into the box under a terminal: keys a
+/// keyboard attached to the phone has, as they're pressed; text, Enter
+/// and Backspace as the phone's keyboard puts them in, and what it puts
+/// in after composing, as accents and other scripts are typed. The box
+/// holds only a zero-width space, so the keyboard has nothing to correct.
+fn listen_for_typing(root: &DomElement) {
+    listen(root, "keydown", false, |event| {
+        let Some(key) = event.dyn_ref::<KeyboardEvent>() else {
+            return;
+        };
+        // Mid-composition, or a phone's keyboard saying only that a key
+        // was pressed: what it types comes as input.
+        if target_id(&event).as_deref() != Some("keys")
+            || key.is_composing()
+            || key.key_code() == 229
+        {
+            return;
+        }
+        let name = key.key();
+        let modifiers = Modifiers {
+            shift: key.shift_key(),
+            ctrl: key.ctrl_key(),
+            alt: key.alt_key(),
+        };
+        let typed = match Key::named(&name) {
+            Some(named) => Some(named),
+            // Text with Ctrl or Alt held, which input never carries. Cmd
+            // is the system's, as Cmd+V to paste.
+            None if (modifiers.ctrl || modifiers.alt)
+                && !key.meta_key()
+                && name.chars().count() == 1 =>
+            {
+                Some(Key::Text(name))
+            }
+            None => None,
+        };
+        if let Some(typed) = typed {
+            event.prevent_default();
+            with_app(|app| app.typed(&typed, modifiers));
+        }
+    });
+    listen(root, "beforeinput", false, |event| {
+        let Some(input) = event.dyn_ref::<InputEvent>() else {
+            return;
+        };
+        // What can't be kept out of the box, mid-composition or otherwise,
+        // is sent once it's landed there (see `input` below), and only
+        // then, so nothing goes twice.
+        if target_id(&event).as_deref() != Some("keys")
+            || input.is_composing()
+            || !event.cancelable()
+        {
+            return;
+        }
+        let data = input.data().unwrap_or_default();
+        let none = Modifiers::default();
+        let ctrl = Modifiers { ctrl: true, ..none };
+        let typed = match input.input_type().as_str() {
+            "insertText" | "insertReplacementText" => Some((Key::Text(data), none)),
+            "insertLineBreak" | "insertParagraph" => Some((Key::Enter, none)),
+            "deleteContentBackward" => Some((Key::Backspace, none)),
+            "deleteContentForward" => Some((Key::Delete, none)),
+            // As shells take Ctrl+W.
+            "deleteWordBackward" => Some((Key::Text("w".to_owned()), ctrl)),
+            "insertFromPaste" | "insertFromDrop" | "insertFromPasteAsQuotation" => {
+                let text = (input.data_transfer())
+                    .and_then(|transfer| transfer.get_data("text/plain").ok())
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or(data);
+                event.prevent_default();
+                with_app(|app| app.pasted(&text));
+                return;
+            }
+            _ => None,
+        };
+        // Nothing is left in the box: it's what's sent that counts.
+        event.prevent_default();
+        if let Some((typed, modifiers)) = typed {
+            with_app(|app| app.typed(&typed, modifiers));
+        }
+    });
+    listen_for_landed_text(root);
+}
+
+/// Listens for what lands in the box under a terminal all the same, as
+/// composing ends, or as a phone types what can't be kept out, and keeps
+/// the one character the box always holds.
+fn listen_for_landed_text(root: &DomElement) {
+    // The box always holds one character, for Backspace to take, with the
+    // caret after it: put back as it's focused or tapped, and again once
+    // the browser has placed the caret itself.
+    for kind in ["focusin", "click"] {
+        listen(root, kind, false, |event| {
+            let Some(input) = event
+                .target()
+                .and_then(|target| target.dyn_into::<HtmlInputElement>().ok())
+                .filter(|input| input.id() == "keys")
+            else {
+                return;
+            };
+            terminal::keep_sentinel(&input);
+            let again = Closure::once_into_js(move || terminal::keep_sentinel(&input));
+            if let Some(window) = web_sys::window() {
+                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    again.unchecked_ref(),
+                    0,
+                );
+            }
+        });
+    }
+    // What got into the box all the same, as composing ends or as a phone
+    // types what can't be kept out: sent as it landed, and taken out.
+    for kind in ["input", "compositionend"] {
+        listen(root, kind, false, |event| {
+            let Some(input) = event
+                .target()
+                .and_then(|target| target.dyn_into::<HtmlInputElement>().ok())
+                .filter(|input| input.id() == "keys")
+            else {
+                return;
+            };
+            let typed = event.dyn_ref::<InputEvent>();
+            if typed.is_some_and(InputEvent::is_composing) {
+                return;
+            }
+            let value = input.value();
+            terminal::keep_sentinel(&input);
+            // Something deleted what the box holds: the key that did.
+            let deleted = typed
+                .map(InputEvent::input_type)
+                .and_then(|kind| match kind.as_str() {
+                    "deleteContentBackward" => Some((Key::Backspace, Modifiers::default())),
+                    "deleteContentForward" => Some((Key::Delete, Modifiers::default())),
+                    "deleteWordBackward" => Some((
+                        Key::Text("w".to_owned()),
+                        Modifiers {
+                            ctrl: true,
+                            ..Modifiers::default()
+                        },
+                    )),
+                    _ => None,
+                });
+            if let Some((key, modifiers)) = deleted.filter(|_| value != terminal::SENTINEL) {
+                with_app(|app| app.typed(&key, modifiers));
+                return;
+            }
+            let text = value.replace(terminal::SENTINEL, "");
+            if !text.is_empty() {
+                with_app(|app| app.typed(&Key::Text(text), Modifiers::default()));
+            }
+        });
+    }
+}
+
+/// How far a finger on a key may move, in CSS pixels, and still press it
+/// when it lifts: further, and it was a swipe.
+const PRESS_SLOP: f64 = 10.0;
+
+/// Listens for fingers on a terminal's page, for as long as the page
+/// lives: two on the rows, `scroller`, pinch to zoom them, and one on the
+/// row of keys, `keys`, presses a key, without taking the keyboard away,
+/// as a tap would. Only these elements wait to hear about touches before
+/// scrolling, so chats and the list scroll as the browser scrolls them.
+fn touch_listeners(
+    scroller: &web_sys::EventTarget,
+    keys: &web_sys::EventTarget,
+) -> Vec<Closure<dyn FnMut(Event)>> {
+    let apart = |event: &TouchEvent| {
+        let touches = event.touches();
+        let (Some(a), Some(b)) = (touches.item(0), touches.item(1)) else {
+            return None;
+        };
+        let dx = f64::from(a.client_x() - b.client_x());
+        let dy = f64::from(a.client_y() - b.client_y());
+        Some(dx.hypot(dy))
+    };
+    let first = |event: &TouchEvent| {
+        let touch = event.touches().item(0)?;
+        Some((f64::from(touch.client_x()), f64::from(touch.client_y())))
+    };
+    let mut kept = Vec::new();
+    kept.push(listen_kept(scroller, "touchstart", move |event| {
+        let Some(apart) = event.dyn_ref::<TouchEvent>().and_then(apart) else {
+            return;
+        };
+        with_app(|app| {
+            if let Some(page) = &mut app.term_page {
+                page.pinch_started(apart);
+            }
+        });
+    }));
+    kept.push(listen_kept(scroller, "touchmove", move |event| {
+        let Some(apart) = event.dyn_ref::<TouchEvent>().and_then(apart) else {
+            return;
+        };
+        let pinching =
+            with_app(|app| (app.term_page.as_mut()).is_some_and(|page| page.pinched(apart)));
+        if pinching == Some(true) {
+            event.prevent_default();
+        }
+    }));
+    for kind in ["touchend", "touchcancel"] {
+        kept.push(listen_kept(scroller, kind, |_| {
+            with_app(|app| {
+                if let Some(page) = &mut app.term_page {
+                    page.pinch_ended();
+                }
+            });
+        }));
+    }
+    // iOS zooms the page on a pinch whatever `touch-action` says.
+    kept.push(listen_kept(scroller, "gesturestart", |event| {
+        event.prevent_default();
+    }));
+    kept.push(listen_kept(keys, "touchstart", move |event| {
+        let key = (event.target())
+            .and_then(|target| target.dyn_into::<DomElement>().ok())
+            .and_then(|target| target.closest(".key").ok().flatten())
+            .and_then(|key| key.get_attribute("data-action"))
+            .and_then(|action| match Action::decode(&action) {
+                Some(Action::Key(key)) => Some(key),
+                _ => None,
+            });
+        let at = event.dyn_ref::<TouchEvent>().and_then(first);
+        if let (Some(key), Some(at)) = (key, at) {
+            // Keeps the box focused, and the keyboard up.
+            event.prevent_default();
+            with_app(|app| app.pressed = Some((key, at)));
+        }
+    }));
+    kept.push(listen_kept(keys, "touchmove", move |event| {
+        let Some((x, y)) = event.dyn_ref::<TouchEvent>().and_then(first) else {
+            return;
+        };
+        with_app(|app| {
+            let moved = (app.pressed)
+                .is_some_and(|(_, (from_x, from_y))| (x - from_x).hypot(y - from_y) > PRESS_SLOP);
+            if moved {
+                app.pressed = None;
+            }
+        });
+    }));
+    for kind in ["touchend", "touchcancel"] {
+        kept.push(listen_kept(keys, kind, |event| {
+            let ended = event.type_() == "touchend";
+            with_app(|app| {
+                // On the finger's lifting, which lets Paste read the
+                // clipboard.
+                if let Some((key, _)) = app.pressed.take()
+                    && ended
+                {
+                    app.act(Action::Key(key));
+                }
+            });
+        }));
+    }
+    // With a mouse, a key pressed keeps the box focused too.
+    kept.push(listen_kept(keys, "mousedown", |event| {
+        let on_key = (event.target())
+            .and_then(|target| target.dyn_into::<DomElement>().ok())
+            .and_then(|target| target.closest(".key").ok().flatten())
+            .is_some();
+        if on_key {
+            event.prevent_default();
+        }
+    }));
+    kept
+}
+
+/// Listens for `kind` on `target`, able to keep the browser from doing
+/// what it does by default, as scrolling, which it otherwise may not wait
+/// to hear about. The listener lasts as long as what's returned is kept.
+fn listen_kept(
+    target: &web_sys::EventTarget,
+    kind: &str,
+    f: impl FnMut(Event) + 'static,
+) -> Closure<dyn FnMut(Event)> {
+    let closure = Closure::<dyn FnMut(Event)>::new(f);
+    let options = AddEventListenerOptions::new();
+    options.set_passive(false);
+    let _ = target.add_event_listener_with_callback_and_add_event_listener_options(
+        kind,
+        closure.as_ref().unchecked_ref(),
+        &options,
+    );
+    closure
 }
 
 /// Listens for `kind` on `target`, for as long as the page lives, on the
@@ -737,6 +1085,40 @@ impl App {
             }
         }
         let _ = socket.ws.send_with_u8_array(&bytes);
+        self.check_keys_later();
+    }
+
+    /// Looks again at whether keys go once what's waited for has gone
+    /// unanswered too long, if it has by then, to say so: a terminal shown
+    /// says keys aren't sent before any is turned down.
+    fn check_keys_later(&mut self) {
+        if self.state.term.is_none() {
+            return;
+        }
+        let Some(at) = self.state.keys_stop_at() else {
+            return;
+        };
+        if at <= self.check_at {
+            return;
+        }
+        self.check_at = at;
+        let check = Closure::once_into_js(|| {
+            with_app(|app| {
+                if let Some(term) = &mut app.state.term {
+                    term.dirty.header = true;
+                }
+                app.draw_soon();
+            });
+        });
+        let wait = (at - self.state.now).max(0.0) + 20.0;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "milliseconds, at most a few thousand"
+        )]
+        let wait = wait as i32;
+        let _ = self
+            .window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(check.unchecked_ref(), wait);
     }
 
     /// Asks for a frame to draw what changed in, if one isn't asked for.
@@ -758,14 +1140,148 @@ impl App {
             return;
         }
         let now = epoch_millis();
-        if self.state.open.is_some() {
-            self.draw_chat(now);
-        } else if self.state.dirty.home || self.page.is_some() {
+        if self.state.term.is_some() {
             self.page = None;
+            self.draw_terminal();
+        } else if self.state.open.is_some() {
+            self.term_page = None;
+            self.draw_chat(now);
+        } else if self.state.dirty.home || self.page.is_some() || self.term_page.is_some() {
+            self.page = None;
+            self.term_page = None;
             let home = view::home(&self.state, self.notifications(), now);
             dom::replace_children(&self.document, &self.root, &el("div").child(home));
         }
         self.state.drawn();
+        self.send();
+    }
+
+    /// Draws what changed in the terminal shown, then asks for older
+    /// history if the user is near the top of what's held.
+    fn draw_terminal(&mut self) {
+        let Some(term) = &self.state.term else {
+            return;
+        };
+        let fresh = self.term_page.is_none();
+        let page =
+            (self.term_page).get_or_insert_with(|| TermPage::new(&self.document, &self.root));
+        if fresh && let Some(viewport) = self.window.visual_viewport() {
+            page.place(viewport.offset_top(), viewport.height());
+        }
+        page.draw(&self.document, &self.state, term);
+        if page.near_top() {
+            self.state.older_history();
+        }
+    }
+
+    /// The terminal's rows were scrolled: older history is asked for as
+    /// the top of what's held nears.
+    fn scrolled(&mut self) {
+        if self.term_page.as_ref().is_some_and(TermPage::near_top) {
+            self.state.older_history();
+            self.send();
+        }
+    }
+
+    /// The phone's screen changed size, or its keyboard came or went: the
+    /// terminal's page is put above the keyboard, its font fitted again.
+    fn viewport_changed(&mut self) {
+        let Some(page) = &mut self.term_page else {
+            return;
+        };
+        if let Some(viewport) = self.window.visual_viewport() {
+            page.place(viewport.offset_top(), viewport.height());
+        }
+        page.fit_font();
+        // Fitted, it's fitted again to the space left, once the screen
+        // settles: the keyboard coming up takes rows away.
+        if !self
+            .state
+            .term
+            .as_ref()
+            .is_some_and(|term| term.fit != Fit::Off)
+        {
+            return;
+        }
+        self.refits = self.refits.wrapping_add(1);
+        let refit = self.refits;
+        let settled = Closure::once_into_js(move || {
+            with_app(|app| {
+                if app.refits != refit {
+                    return;
+                }
+                if let Some(size) = app.term_page.as_ref().and_then(TermPage::phone_size) {
+                    app.state.refit(size);
+                    app.send();
+                    app.draw_soon();
+                }
+            });
+        });
+        let _ = self
+            .window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                settled.unchecked_ref(),
+                REFIT_AFTER,
+            );
+    }
+
+    /// `key` was typed into the terminal shown, with `modifiers` held.
+    fn typed(&mut self, key: &Key, modifiers: Modifiers) {
+        self.state.type_key(key, modifiers);
+        self.send();
+        self.draw_soon();
+    }
+
+    /// `text` was pasted into the terminal shown. Lines a program would
+    /// take as typed, one command each, go only once the user says so.
+    fn pasted(&mut self, text: &str) {
+        if let Some(lines) = self.state.paste_runs_lines(text) {
+            let ask = format!(
+                "Paste {lines} lines? The program hasn't asked for pastes to be marked, so \
+                 each line runs as if typed."
+            );
+            if self.window.confirm_with_message(&ask) != Ok(true) {
+                return;
+            }
+        }
+        self.state.paste(text);
+        self.send();
+        self.draw_soon();
+    }
+
+    /// Pastes what's on the clipboard into the terminal shown, as the
+    /// browser lets it be read, once the user says so.
+    fn paste_clipboard(&mut self) {
+        let read = self.window.navigator().clipboard().read_text();
+        spawn_local(async move {
+            let text = JsFuture::from(read).await;
+            with_app(|app| {
+                if let Some(text) = text.ok().and_then(|text| text.as_string()) {
+                    app.pasted(&text);
+                    return;
+                }
+                app.state.note =
+                    Some("The clipboard couldn't be read: paste into the box instead".to_owned());
+                if let Some(term) = &mut app.state.term {
+                    term.dirty.header = true;
+                }
+                app.draw_soon();
+            });
+        });
+    }
+
+    /// Asks for the list of terminals again, every so often, while it's
+    /// shown.
+    fn tick(&mut self) {
+        let home = self.state.term.is_none() && self.state.open.is_none();
+        let shown = self.document.visibility_state() == VisibilityState::Visible;
+        if home && shown && matches!(self.screen, Screen::App) {
+            self.state.list_terminals();
+        }
+        // A fit lasts only while it's asked for again.
+        if shown {
+            self.state.renew_fit();
+        }
         self.send();
     }
 
@@ -925,6 +1441,26 @@ impl App {
         match action {
             Action::Home => self.go(""),
             Action::Open(chat) => self.go(&format!("#chat/{chat}")),
+            Action::OpenTerminal(terminal) => self.go(&format!("#term/{terminal}")),
+            Action::Fit => {
+                let size = self.term_page.as_ref().and_then(TermPage::phone_size);
+                if size.is_some() {
+                    self.state.fit(size);
+                }
+            }
+            Action::Unfit => self.state.fit(None),
+            Action::Type => {
+                if let Some(page) = &self.term_page {
+                    let _ = page.input.focus();
+                }
+            }
+            Action::Key(RowKey::Ctrl) => self.state.tap_ctrl(),
+            Action::Key(RowKey::Paste) => self.paste_clipboard(),
+            Action::Key(key) => {
+                if let Some((typed, modifiers)) = key.key() {
+                    self.state.type_key(&typed, modifiers);
+                }
+            }
             Action::Answer { question, choice } => {
                 let option = (self.state.open.as_ref())
                     .and_then(|open| open.view.as_ref()?.chat()?.question.clone())
@@ -1040,18 +1576,32 @@ impl App {
         let _ = self.window.location().set_hash(hash);
     }
 
-    /// Shows what the address says: a chat, or the list.
+    /// Shows what the address says: a chat, a terminal, or the list.
     fn route(&mut self) {
         let hash = self.window.location().hash().unwrap_or_default();
-        let chat = hash
-            .strip_prefix("#chat/")
-            .and_then(|chat| chat.parse().ok())
-            .map(TerminalId);
-        if let Some(chat) = chat {
+        let id = |prefix: &str| {
+            (hash.strip_prefix(prefix))
+                .and_then(|id| id.parse().ok())
+                .map(TerminalId)
+        };
+        if let Some(chat) = id("#chat/") {
             self.state.open_chat(chat);
+        } else if let Some(terminal) = id("#term/") {
+            if self
+                .state
+                .term
+                .as_ref()
+                .is_none_or(|term| term.id != terminal)
+            {
+                self.term_page = None;
+            }
+            self.state.open_terminal(terminal);
         } else {
             self.state.close_chat();
+            self.state.close_terminal();
+            self.state.list_terminals();
             self.page = None;
+            self.term_page = None;
         }
         self.send();
         self.draw_soon();
@@ -1062,6 +1612,7 @@ impl App {
     fn visibility_changed(&mut self) {
         let here = self.document.visibility_state() == VisibilityState::Visible;
         self.state.present(here);
+        self.state.terminal_hidden(!here);
         self.present_said = if here { js_sys::Date::now() } else { 0.0 };
         if here && matches!(self.screen, Screen::App) && self.socket.is_none() {
             self.retry = 1;

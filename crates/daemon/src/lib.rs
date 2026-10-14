@@ -113,6 +113,9 @@ pub struct DaemonConfig {
     /// session once it has finished, before letting it go until its next
     /// message.
     pub park_after: std::time::Duration,
+    /// How long a terminal stays fitted to a client, as a phone fits one,
+    /// unless the client asks for the fit again: see `Request::Fit`.
+    pub fit_lasts: std::time::Duration,
     /// For tests: a file a rename's thread waits for once it has written
     /// the new text of the files not open beside them, before they're put
     /// in place, so a test can act while it's under way. `None`, but in
@@ -157,6 +160,11 @@ pub const DEFAULT_SESSION_WAIT: std::time::Duration = std::time::Duration::from_
 /// session; opening it again takes about half a second, with the chat's
 /// next message.
 pub const DEFAULT_PARK_AFTER: std::time::Duration = std::time::Duration::from_mins(2);
+
+/// How long a terminal stays fitted to a client unless it's asked for
+/// again: the web app asks every half minute while it's shown, so a phone
+/// put away, whose connection may linger, lets its fit go within a minute.
+pub const DEFAULT_FIT_LASTS: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// How long the browser keeps running with no chat using it, unless
 /// told otherwise: about 150 MB, and a second to start again.
@@ -237,6 +245,7 @@ impl DaemonConfig {
             probe_wait: DEFAULT_PROBE_WAIT,
             session_wait: DEFAULT_SESSION_WAIT,
             park_after: DEFAULT_PARK_AFTER,
+            fit_lasts: DEFAULT_FIT_LASTS,
             rename_gate: None,
             trash: data_dir().map(|dir| dir.join("Trash")),
             boards: match non_empty("CLACKATOO_BOARDS") {

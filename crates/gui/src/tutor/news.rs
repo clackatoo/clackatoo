@@ -227,6 +227,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "indenting",
         what: "A line where you type else, end or the like first is indented again; ]a stops once at each argument",
     },
+    News {
+        id: "phoneterminals",
+        date: "2026-10-14",
+        lesson: "remote",
+        what: "Your terminals from your phone, at their own size: typed into, with a row of keys, and Fit",
+    },
 ];
 
 impl News {

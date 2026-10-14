@@ -1,7 +1,7 @@
 {
   "name": "clackatoo",
   "short_name": "clackatoo",
-  "description": "Your clackatoo chats, from your phone.",
+  "description": "Your clackatoo chats and terminals, from your phone.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

@@ -691,6 +691,8 @@ impl HostedChat {
             size: self.size,
             title: self.title.clone(),
             status: TerminalStatus::Running,
+            cwd: Some(self.cwd.clone()),
+            command: None,
         }
     }
 

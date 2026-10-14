@@ -11,11 +11,13 @@
 //! [`MOST_OUTPUT`] of answers wait for it to read; and a request's head
 //! must arrive whole within a while of its first byte.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use clackatoo_protocol::TerminalId;
 use clackatoo_protocol::frame::FrameDecoder;
 use mio::{Interest, Registry, Token};
 
@@ -54,6 +56,10 @@ pub(super) const PING_EVERY: Duration = Duration::from_secs(25);
 /// How long a WebSocket goes without a word, pings answered included,
 /// before it's taken for gone. Phones lose connections without a word.
 pub(super) const SILENT_LIMIT: Duration = Duration::from_secs(70);
+
+/// How long a device's WebSocket that's closing is kept, to write what
+/// says why, if the device doesn't read it.
+pub(super) const CLOSING_LIMIT: Duration = Duration::from_secs(5);
 
 /// Where a connection comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,7 +318,8 @@ impl HttpConn {
             wants_writable: self.wants_writable,
             heard: now,
             pinged: now,
-            closing: false,
+            closing: None,
+            typed: BTreeMap::new(),
         }
     }
 }
@@ -344,8 +351,12 @@ pub(crate) struct WebLink {
     heard: Instant,
     /// When it was last pinged.
     pinged: Instant,
-    /// It closes once what's waiting is written.
-    closing: bool,
+    /// When it began closing: it closes once what's waiting is written,
+    /// or after [`CLOSING_LIMIT`] if the device doesn't read it.
+    closing: Option<Instant>,
+    /// When the device last typed into each terminal, so the log says it
+    /// typed once for each spell of typing, not once a key.
+    pub(crate) typed: BTreeMap<TerminalId, Instant>,
 }
 
 impl WebLink {
@@ -381,12 +392,18 @@ impl WebLink {
         let mut drop = false;
         loop {
             match self.ws.next() {
-                Ok(Some(Frame::Data(bytes))) => decoder.push(&bytes),
+                // Nothing it sends once closing is acted on: a device
+                // unpaired is cut off at once, whatever it had in flight.
+                Ok(Some(Frame::Data(bytes))) => {
+                    if self.closing.is_none() {
+                        decoder.push(&bytes);
+                    }
+                }
                 Ok(Some(Frame::Ping(payload))) => {
                     // It doesn't read what's sent: nothing could tell it.
                     if self.raw.len() > MOST_OWN_FRAMES {
                         log::warn!("device {} pings without reading; dropping it", self.device);
-                        self.closing = true;
+                        self.closing.get_or_insert(now);
                         drop = true;
                         break;
                     }
@@ -394,8 +411,10 @@ impl WebLink {
                 }
                 Ok(Some(Frame::Pong)) => {}
                 Ok(Some(Frame::Close(status))) => {
-                    socket::close(status.unwrap_or(1000), "", &mut self.raw);
-                    self.closing = true;
+                    if self.closing.is_none() {
+                        socket::close(status.unwrap_or(1000), "", &mut self.raw);
+                    }
+                    self.closing.get_or_insert(now);
                     break;
                 }
                 Ok(None) => break,
@@ -406,14 +425,14 @@ impl WebLink {
                         broken.reason
                     );
                     socket::close(broken.status, broken.reason, &mut self.raw);
-                    self.closing = true;
+                    self.closing.get_or_insert(now);
                     break;
                 }
             }
         }
         Received {
-            finished: reading.finished || self.closing,
-            more: reading.more && !self.closing,
+            finished: reading.finished || self.closing.is_some(),
+            more: reading.more && self.closing.is_none(),
             drop,
         }
     }
@@ -434,7 +453,7 @@ impl WebLink {
     ) -> io::Result<usize> {
         let mut framed = 0;
         loop {
-            if self.raw.is_empty() && !outgoing.is_empty() && !self.closing {
+            if self.raw.is_empty() && !outgoing.is_empty() && self.closing.is_none() {
                 socket::binary(outgoing, &mut self.raw);
                 framed += outgoing.len();
                 outgoing.clear();
@@ -470,9 +489,9 @@ impl WebLink {
 
     /// Queues a close saying `reason`, after what's waiting.
     pub(crate) fn close(&mut self, status: u16, reason: &str) {
-        if !self.closing {
+        if self.closing.is_none() {
             socket::close(status, reason, &mut self.raw);
-            self.closing = true;
+            self.closing = Some(Instant::now());
         }
     }
 
@@ -480,6 +499,13 @@ impl WebLink {
     /// been quiet so long it's taken for gone.
     pub(crate) fn tick(&mut self, now: Instant) -> bool {
         if now.saturating_duration_since(self.heard) >= SILENT_LIMIT {
+            return true;
+        }
+        // Closing, it isn't kept waiting for a device that won't read.
+        if self
+            .closing
+            .is_some_and(|since| now.saturating_duration_since(since) >= CLOSING_LIMIT)
+        {
             return true;
         }
         if now.saturating_duration_since(self.heard.max(self.pinged)) >= PING_EVERY {
@@ -491,6 +517,8 @@ impl WebLink {
 
     /// When it next needs looking at: to be pinged, or given up on.
     pub(crate) fn due(&self) -> Instant {
-        (self.heard.max(self.pinged) + PING_EVERY).min(self.heard + SILENT_LIMIT)
+        let due = (self.heard.max(self.pinged) + PING_EVERY).min(self.heard + SILENT_LIMIT);
+        self.closing
+            .map_or(due, |since| due.min(since + CLOSING_LIMIT))
     }
 }

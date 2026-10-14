@@ -43,6 +43,10 @@ enum Stopped {
 /// How long `here` from a client lasts unless it's said again.
 pub(super) const PRESENT_FOR: Duration = Duration::from_mins(5);
 
+/// How long a device goes without typing into a terminal before its next
+/// key is noted in the log again, as a new spell of typing.
+const TYPING_SPELL: Duration = Duration::from_mins(5);
+
 /// How long after a chat finishes or asks something its notification
 /// waits, in case someone looks, or the question is answered, meanwhile.
 const NOTIFY_AFTER: Duration = Duration::from_secs(3);
@@ -479,6 +483,25 @@ impl Daemon {
             _ => return,
         };
         log::info!("device {} {what}", link.device);
+    }
+
+    /// Notes in the log that a device typed into terminal `terminal`:
+    /// once when it starts, and again after a pause of [`TYPING_SPELL`],
+    /// so the log says which phone typed without a line for every key.
+    /// What it typed is never written, as it may be a password.
+    pub(super) fn note_device_typing(&mut self, token: Token, terminal: TerminalId) {
+        let Some(Source::Client(Client {
+            link: Link::Web(link),
+            ..
+        })) = self.sources.get_mut(token.0)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        let last = link.typed.insert(terminal, now);
+        if last.is_none_or(|last| now.duration_since(last) >= TYPING_SPELL) {
+            log::info!("device {} typed into terminal {terminal}", link.device);
+        }
     }
 
     /// Answers the connections waiting for windows to answer their asks,

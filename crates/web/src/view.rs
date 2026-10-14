@@ -1,18 +1,21 @@
 //! What each screen shows, as [`ui`](crate::ui) trees, from the app's
-//! state: the chats, by workspace, with what needs the user first among
-//! them; and a chat, as the window shows one: each message, the agent's
-//! work folded under one line once it's done, its answer, the cards of
-//! the chats it started, and its question, with every choice.
+//! state: the chats and terminals, by workspace, with what needs the user
+//! first among them; a chat, as the window shows one: each message, the
+//! agent's work folded under one line once it's done, its answer, the
+//! cards of the chats it started, and its question, with every choice;
+//! and a terminal's header and the row of keys under it (its rows are
+//! [`grid`](crate::grid)'s).
 
 use clackatoo_protocol::{
     ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Item, Outcome, ProviderModels, Setting,
-    SettingKind, Subagent, SubagentStatus, Tool, ToolContent, ToolStatus, Turn, TurnFilesState,
-    WorkspaceId,
+    SettingKind, Subagent, SubagentStatus, TerminalInfo, TerminalStatus, Tool, ToolContent,
+    ToolStatus, Turn, TurnFilesState, WorkspaceId,
 };
 
-use crate::action::{Action, Pick};
+use crate::action::{Action, Pick, RowKey};
 use crate::markdown;
 use crate::state::{Online, OpenChat, State};
+use crate::term::{Fit, OpenTerminal};
 use crate::ui::{Element, Node, el};
 
 /// The most lines of a command's output, or of a change to a file, shown:
@@ -72,7 +75,8 @@ pub fn home(state: &State, notifications: Notifications, now: u64) -> Element {
         let mut chats: Vec<&ChatSummary> = (state.chats.iter())
             .filter(|chat| chat.workspace == id)
             .collect();
-        if chats.is_empty() {
+        let terminals = state.terminals_of(id);
+        if chats.is_empty() && terminals.is_empty() {
             continue;
         }
         any = true;
@@ -84,22 +88,154 @@ pub fn home(state: &State, notifications: Notifications, now: u64) -> Element {
                 u64::MAX - chat.active,
             )
         });
-        let rows = chats.into_iter().map(|chat| chat_row(chat, now));
-        page = page.child(
-            el("section")
-                .class("workspace")
-                .child(el("h2").text(name))
-                .child(el("ul").class("chats").children(rows)),
-        );
+        let mut section = el("section").class("workspace").child(el("h2").text(name));
+        if !chats.is_empty() {
+            let rows = chats.into_iter().map(|chat| chat_row(chat, now));
+            section = section.child(el("ul").class("chats").children(rows));
+        }
+        if !terminals.is_empty() {
+            let rows = terminals.into_iter().map(terminal_row);
+            section = section.child(el("ul").class("chats terminals").children(rows));
+        }
+        page = page.child(section);
     }
     if !any && state.online == Online::Open {
         page = page.child(
             el("p")
                 .class("empty")
-                .text("No chats yet: start one in a window with :Agent."),
+                .text("No chats or terminals yet: start a chat in a window with :Agent."),
         );
     }
     page
+}
+
+/// What a terminal is called: the title its program set, else what it's
+/// running, else its number.
+fn terminal_title(terminal: &TerminalInfo) -> String {
+    let title = terminal.title.trim();
+    if !title.is_empty() {
+        return title.to_owned();
+    }
+    match &terminal.command {
+        Some(command) => command.clone(),
+        None => format!("Terminal {}", terminal.id),
+    }
+}
+
+/// A terminal, as a row of the list: what it's called, and what it's
+/// running, where, and at what size.
+fn terminal_row(terminal: &TerminalInfo) -> Element {
+    let mut said = Vec::new();
+    match terminal.status {
+        TerminalStatus::Running => {
+            if let Some(command) = &terminal.command
+                && command.trim() != terminal.title.trim()
+            {
+                said.push(command.clone());
+            }
+        }
+        status => said.push(status.to_string()),
+    }
+    if let Some(cwd) = &terminal.cwd {
+        said.push(cwd.clone());
+    }
+    said.push(format!("{}×{}", terminal.size.cols(), terminal.size.rows()));
+    el("li")
+        .class("chat")
+        .class("terminal")
+        .action(&Action::OpenTerminal(terminal.id))
+        .child(
+            el("div")
+                .class("top")
+                .child(el("span").class("prompt-mark").text("❯"))
+                .child(el("span").class("title").text(terminal_title(terminal))),
+        )
+        .child(el("div").class("meta").text(said.join(" · ")))
+}
+
+/// The shown terminal's header: back, what it's called, where it is, its
+/// size, and whether it's fitted to the phone, to fit or put back.
+#[must_use]
+pub fn terminal_header(state: &State, term: &OpenTerminal) -> Element {
+    let info = state.terminals.iter().find(|info| info.id == term.id);
+    let view = term.view.as_ref();
+    let title = (view.map(|view| view.title.trim()))
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+        .or_else(|| info.map(terminal_title))
+        .unwrap_or_else(|| format!("Terminal {}", term.id));
+    let mut said = Vec::new();
+    if let Some(cwd) = (view.and_then(|view| view.cwd.clone())).or_else(|| info?.cwd.clone()) {
+        said.push(cwd);
+    }
+    if let Some(grid) = term.grid() {
+        said.push(format!("{}×{}", grid.size.cols(), grid.size.rows()));
+    }
+    match state.online {
+        Online::Lost(retry) => said.push(format!("offline, trying again in {retry}s")),
+        Online::Connecting => said.push("connecting…".to_owned()),
+        Online::Open => {}
+    }
+    let fit = match term.fit {
+        Fit::Off => el("button")
+            .class("quiet")
+            .class("fit")
+            .action(&Action::Fit)
+            .text("Fit"),
+        Fit::Asked(_) => el("button")
+            .class("quiet")
+            .class("fit")
+            .attr("disabled", "")
+            .text("Fitting…"),
+        Fit::On(_) => el("button")
+            .class("fit")
+            .class("fitted")
+            .action(&Action::Unfit)
+            .attr("aria-label", "Fitted to the phone: tap to put back")
+            .text("Fitted ✕"),
+    };
+    el("header")
+        .class("bar chat-bar")
+        .child(el("button").class("back").action(&Action::Home).text("‹"))
+        .child(
+            el("div")
+                .class("heading")
+                .child(el("h1").text(title))
+                .child(el("div").class("meta").text(said.join(" · "))),
+        )
+        .child(fit)
+}
+
+/// What's under a terminal: whether keys go, and if not, how many were
+/// turned down, then the row of keys the phone's keyboard hasn't.
+#[must_use]
+pub fn key_row(state: &State, term: &OpenTerminal) -> Element {
+    let mut part = el("div").class("keys-part");
+    let unreached = !state.keys_go();
+    if unreached || term.refused > 0 {
+        let mut said = if unreached {
+            "Not connected: keys aren't sent"
+        } else {
+            "Keys aren't sent until the terminal shows"
+        }
+        .to_owned();
+        if term.refused > 0 {
+            let plural = if term.refused == 1 { "" } else { "s" };
+            said = format!("{said} ({} key{plural} turned down)", term.refused);
+        }
+        part = part.child(el("p").class("refused").text(said));
+    }
+    if let Some(note) = &state.note {
+        part = part.child(el("p").class("note").text(note.clone()));
+    }
+    let keys = RowKey::ALL.into_iter().map(|key| {
+        el("button")
+            .class("key")
+            .class_if(key == RowKey::Ctrl && term.ctrl, "on")
+            .action(&Action::Key(key))
+            .text(key.label())
+    });
+    part.child(el("div").class("key-row").children(keys))
 }
 
 /// What the connection is, as a dot and a word.
@@ -920,6 +1056,90 @@ mod tests {
             .map(|option| option.get("value").unwrap().to_owned())
             .collect();
         assert_eq!(values, ["set:haiku", "set:sonnet", "switch:codex:"]);
+    }
+
+    #[test]
+    fn terminals_are_listed_beside_the_chats_saying_what_and_where() {
+        let mut state = State::default();
+        state.workspaces = Workspaces {
+            list: vec![Workspace {
+                id: WorkspaceId(1),
+                name: "clackatoo".into(),
+                tabs: vec![clackatoo_protocol::Tab {
+                    id: clackatoo_protocol::TabId(1),
+                    layout: clackatoo_protocol::Layout::Pane(clackatoo_protocol::Pane {
+                        id: clackatoo_protocol::PaneId(1),
+                        content: clackatoo_protocol::Content::Terminal(TerminalId(2)),
+                    }),
+                    focused: clackatoo_protocol::PaneId(1),
+                    name: None,
+                }],
+                active_tab: clackatoo_protocol::TabId(1),
+            }],
+            active: None,
+        };
+        state.terminals = vec![TerminalInfo {
+            id: TerminalId(2),
+            pid: Some(1),
+            size: clackatoo_protocol::Size::new(80, 24).unwrap(),
+            title: String::new(),
+            status: TerminalStatus::Running,
+            cwd: Some("/home/jack/clackatoo".into()),
+            command: Some("cargo test".into()),
+        }];
+        state.online = Online::Open;
+        let page = home(&state, Notifications::On, 0);
+        let opened: Vec<&str> = (page.find_all("data-action").into_iter())
+            .filter_map(|row| row.get("data-action"))
+            .collect();
+        assert_eq!(opened, ["term:2"]);
+        let text = page.all_text();
+        assert!(text.contains("cargo test"), "{text}");
+        assert!(text.contains("/home/jack/clackatoo · 80×24"), "{text}");
+    }
+
+    #[test]
+    fn a_terminals_header_offers_fitting_and_says_when_its_fitted() {
+        let mut state = State::default();
+        state.open_terminal(TerminalId(2));
+        let size = clackatoo_protocol::Size::new(40, 30).unwrap();
+        let term = state.term.as_mut().unwrap();
+        let header = terminal_header(&State::default(), term);
+        assert_eq!(
+            header.find_all("data-action")[1].get("data-action"),
+            Some("fit")
+        );
+        term.fit = Fit::On(size);
+        let header = terminal_header(&State::default(), term);
+        let fitted = header.find_all("data-action")[1];
+        assert_eq!(fitted.get("data-action"), Some("unfit"));
+        assert!(fitted.all_text().contains("Fitted"));
+    }
+
+    #[test]
+    fn the_key_row_says_when_keys_dont_go_and_shows_ctrl_held() {
+        let mut state = State::default();
+        state.open_terminal(TerminalId(2));
+        state.tap_ctrl();
+        let term = state.term.as_ref().unwrap();
+        let row = key_row(&state, term);
+        assert!(
+            row.all_text()
+                .starts_with("Not connected: keys aren't sent")
+        );
+        let ctrl = (row.find_all("data-action").into_iter())
+            .find(|key| key.get("data-action") == Some("key:ctrl"))
+            .unwrap();
+        assert_eq!(ctrl.get("class"), Some("key on"));
+        let labels: Vec<String> = (row.find_all("data-action").into_iter())
+            .map(Element::all_text)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Esc", "Tab", "Ctrl", "^C", "←", "↑", "↓", "→", "|", "~", "/", "-", "Paste"
+            ]
+        );
     }
 
     #[test]

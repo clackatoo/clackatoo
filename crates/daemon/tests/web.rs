@@ -16,8 +16,9 @@ use clackatoo_daemon::web::{WebConfig, WebMode};
 use clackatoo_daemon::{AgentConfig, Client, CustomAgent, Daemon, DaemonConfig, ShutdownHandle};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    AgentTools, ChatAction, ChatSummary, ClientMessage, Error, Event, Item, NewAgent,
-    PROTOCOL_VERSION, PaneTerminal, Request, Response, ServerMessage, Size, View, ViewUpdate,
+    AgentTools, ChatAction, ChatSummary, ClientMessage, Content, Error, Event, GridNode, Item,
+    NewAgent, NewTerminal, PROTOCOL_VERSION, PaneTerminal, Request, Response, ServerMessage, Size,
+    TerminalId, View, ViewUpdate,
 };
 use tungstenite::client::IntoClientRequest as _;
 use tungstenite::http::HeaderValue;
@@ -159,6 +160,7 @@ impl TestDaemon {
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
             session_wait: clackatoo_daemon::DEFAULT_SESSION_WAIT,
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
+            fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
             rename_gate: None,
             trash: None,
             boards: None,
@@ -509,6 +511,18 @@ impl Phone {
                 return found;
             }
             assert!(Instant::now() < deadline, "the chat never got there");
+            self.event();
+        }
+    }
+
+    /// Waits for the terminal it follows to show what `done` wants.
+    fn grid_until<T>(&mut self, done: impl Fn(&GridNode) -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(found) = (self.view.as_ref()).and_then(|view| done(view.grid()?)) {
+                return found;
+            }
+            assert!(Instant::now() < deadline, "the terminal never got there");
             self.event();
         }
     }
@@ -1366,4 +1380,410 @@ fn the_socket_is_kept_to_the_user_and_never_put_where_others_can_write() {
         "a socket in a directory anyone can write in"
     );
     drop(refused);
+}
+
+/// A workspace a window makes, with a shell in it 40 columns by 10 rows,
+/// and the shell's terminal.
+fn shell_in_a_workspace(window: &mut Client) -> TerminalId {
+    let shell = PaneTerminal::New(NewTerminal {
+        size: Size::new(40, 10).unwrap(),
+        command: Some(vec!["/bin/sh".to_owned()]),
+        cwd: None,
+        record_to: None,
+    });
+    let Response::PaneCreated(pane) = (window.request(&Request::NewWorkspace {
+        name: None,
+        terminal: shell,
+    }))
+    .unwrap() else {
+        panic!("a pane");
+    };
+    let Response::Workspaces(workspaces) = window.request(&Request::WatchWorkspaces).unwrap()
+    else {
+        panic!("the workspaces");
+    };
+    let (_, _, found) = workspaces.find_pane(pane).expect("the pane is there");
+    let Content::Terminal(terminal) = found.content else {
+        panic!("a terminal");
+    };
+    terminal
+}
+
+/// The text of `grid`'s lines, one after the other.
+fn grid_text(grid: &GridNode) -> String {
+    let lines: Vec<String> = (grid.lines.iter())
+        .map(clackatoo_protocol::Line::text)
+        .collect();
+    lines.join("\n")
+}
+
+/// The size of terminal `terminal`, as a window captures it.
+fn size_of(window: &mut Client, terminal: TerminalId) -> Size {
+    window
+        .capture(terminal)
+        .unwrap()
+        .grid()
+        .expect("a grid")
+        .size
+}
+
+#[test]
+fn a_device_follows_a_terminal_types_into_it_and_reads_its_history() {
+    let daemon = TestDaemon::start();
+    let mut window = daemon.window();
+    let terminal = shell_in_a_workspace(&mut window);
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+
+    assert_eq!(phone.request(Request::Attach { terminal }), Response::Done);
+    let size = phone.grid_until(|grid| Some(grid.size));
+    assert_eq!(size, Size::new(40, 10).unwrap(), "the terminal's own size");
+    // Typed as the app types, a key at a time, each its own request.
+    for key in "printf 'Z%sZ\\n' typed\r".bytes() {
+        assert_eq!(
+            phone.request(Request::SendInput {
+                terminal,
+                bytes: vec![key],
+            }),
+            Response::Done
+        );
+    }
+    phone.grid_until(|grid| grid_text(grid).contains("ZtypedZ").then_some(()));
+
+    // Enough to scroll lines into history, read back as the app reads it.
+    let typed = b"i=0; while [ $i -lt 30 ]; do echo line$i; i=$((i+1)); done\r";
+    assert_eq!(
+        phone.request(Request::SendInput {
+            terminal,
+            bytes: typed.to_vec(),
+        }),
+        Response::Done
+    );
+    let end = phone.grid_until(|grid| {
+        let done = grid_text(grid).contains("line29") && grid.state.history_end > 10;
+        done.then_some(grid.state.history_end)
+    });
+    let Response::History(history) = phone.request(Request::History {
+        terminal,
+        end,
+        count: 200,
+    }) else {
+        panic!("history");
+    };
+    assert_eq!(history.first + history.lines.len() as u64, end);
+    let text: Vec<String> = (history.lines.iter())
+        .map(|line| line.line.text())
+        .collect();
+    assert!(text.iter().any(|line| line == "line0"), "{text:?}");
+    assert!(history.lines.iter().all(|line| line.width == 40));
+}
+
+#[test]
+fn the_list_says_where_each_terminal_is_and_what_it_runs() {
+    let daemon = TestDaemon::start();
+    let mut window = daemon.window();
+    let terminal = shell_in_a_workspace(&mut window);
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    // As a shell with clackatoo's integration says where it is, and what
+    // it starts.
+    let typed = "printf '\\033]7;file://desk/tmp/place\\007\\033]133;C;cmdline_url=sleep%%2030\\007'; \
+                 sleep 30\r";
+    window.send_input(terminal, typed.as_bytes()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let info = loop {
+        let Response::Terminals(terminals) = phone.request(Request::ListTerminals) else {
+            panic!("terminals");
+        };
+        let info = (terminals.into_iter())
+            .find(|info| info.id == terminal)
+            .unwrap();
+        if info.command.is_some() {
+            break info;
+        }
+        assert!(Instant::now() < deadline, "the command never showed");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(info.cwd.as_deref(), Some("/tmp/place"));
+    assert_eq!(info.command.as_deref(), Some("sleep 30"));
+}
+
+#[test]
+fn a_phones_fit_holds_until_a_window_types_then_takes_the_latest_size_asked_for() {
+    let daemon = TestDaemon::start();
+    let mut window = daemon.window();
+    let terminal = shell_in_a_workspace(&mut window);
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    assert_eq!(phone.request(Request::Attach { terminal }), Response::Done);
+    phone.grid_until(|grid| Some(grid.size));
+
+    let phone_size = Size::new(30, 8).unwrap();
+    assert_eq!(
+        phone.request(Request::Fit {
+            terminal,
+            size: Some(phone_size),
+            renew: false,
+        }),
+        Response::Done
+    );
+    phone.grid_until(|grid| (grid.size == phone_size).then_some(()));
+    // Windows ask for their size again whenever anything changes: kept
+    // for later, not made.
+    window.resize(terminal, Size::new(40, 10).unwrap()).unwrap();
+    assert_eq!(size_of(&mut window, terminal), phone_size);
+    window.resize(terminal, Size::new(50, 12).unwrap()).unwrap();
+    assert_eq!(size_of(&mut window, terminal), phone_size);
+    // The phone's own typing leaves it.
+    assert_eq!(
+        phone.request(Request::SendInput {
+            terminal,
+            bytes: b"x".to_vec(),
+        }),
+        Response::Done
+    );
+    assert_eq!(size_of(&mut window, terminal), phone_size);
+    // A window's ends it, at the size last asked for.
+    window.send_input(terminal, b"y").unwrap();
+    let latest = Size::new(50, 12).unwrap();
+    assert_eq!(size_of(&mut window, terminal), latest);
+    phone.grid_until(|grid| (grid.size == latest).then_some(()));
+    // Resizes are made again.
+    window.resize(terminal, Size::new(44, 11).unwrap()).unwrap();
+    assert_eq!(size_of(&mut window, terminal), Size::new(44, 11).unwrap());
+}
+
+#[test]
+fn a_phones_fit_is_put_back_when_it_says_leaves_or_goes() {
+    let daemon = TestDaemon::start();
+    let mut window = daemon.window();
+    let terminal = shell_in_a_workspace(&mut window);
+    let own = Size::new(40, 10).unwrap();
+    let phone_size = Size::new(30, 8).unwrap();
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    let fit = |phone: &mut Phone, size| {
+        assert_eq!(
+            phone.request(Request::Fit {
+                terminal,
+                size,
+                renew: false,
+            }),
+            Response::Done
+        );
+    };
+
+    // Put back by the phone.
+    assert_eq!(phone.request(Request::Attach { terminal }), Response::Done);
+    fit(&mut phone, Some(phone_size));
+    assert_eq!(size_of(&mut window, terminal), phone_size);
+    fit(&mut phone, None);
+    assert_eq!(size_of(&mut window, terminal), own);
+
+    // The phone stops following the terminal.
+    fit(&mut phone, Some(phone_size));
+    assert_eq!(phone.request(Request::Detach { terminal }), Response::Done);
+    assert_eq!(size_of(&mut window, terminal), own);
+
+    // Another client can't put back the phone's fit.
+    assert_eq!(phone.request(Request::Attach { terminal }), Response::Done);
+    fit(&mut phone, Some(phone_size));
+    assert_eq!(
+        window
+            .request(&Request::Fit {
+                terminal,
+                size: None,
+                renew: false,
+            })
+            .unwrap(),
+        Response::Done
+    );
+    assert_eq!(size_of(&mut window, terminal), phone_size);
+
+    // The phone goes.
+    drop(phone);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while size_of(&mut window, terminal) != own {
+        assert!(Instant::now() < deadline, "the fit was never put back");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    assert_eq!(
+        phone.request(Request::Fit {
+            terminal: TerminalId(9999),
+            size: Some(phone_size),
+            renew: false,
+        }),
+        Response::Error(Error::NoSuchTerminal(TerminalId(9999)))
+    );
+}
+
+#[test]
+fn only_a_client_following_a_terminal_fits_it_and_another_phone_takes_a_fit_over() {
+    let daemon = TestDaemon::start();
+    let mut window = daemon.window();
+    let terminal = shell_in_a_workspace(&mut window);
+    let own = Size::new(40, 10).unwrap();
+    let cookie = daemon.pair();
+    let mut first = daemon.socket(&cookie, |_| {}).expect("let in");
+    let mut second = daemon.socket(&cookie, |_| {}).expect("let in");
+    let fit = |phone: &mut Phone, cols, rows| {
+        phone.request(Request::Fit {
+            terminal,
+            size: Some(Size::new(cols, rows).unwrap()),
+            renew: false,
+        })
+    };
+
+    // Not following it, a phone can't fit it.
+    assert_eq!(
+        fit(&mut first, 30, 8),
+        Response::Error(Error::NotFollowing(terminal))
+    );
+    assert_eq!(size_of(&mut window, terminal), own);
+
+    for phone in [&mut first, &mut second] {
+        assert_eq!(phone.request(Request::Attach { terminal }), Response::Done);
+    }
+    assert_eq!(fit(&mut first, 30, 8), Response::Done);
+    assert_eq!(fit(&mut second, 36, 9), Response::Done);
+    assert_eq!(size_of(&mut window, terminal), Size::new(36, 9).unwrap());
+    // The first has no fit to put back now.
+    assert_eq!(first.request(Request::Detach { terminal }), Response::Done);
+    assert_eq!(size_of(&mut window, terminal), Size::new(36, 9).unwrap());
+    // The second's goes back to the size before either.
+    assert_eq!(second.request(Request::Detach { terminal }), Response::Done);
+    assert_eq!(size_of(&mut window, terminal), own);
+}
+
+#[test]
+fn an_unpaired_device_holding_a_fit_has_nothing_more_done_and_the_fit_goes_back() {
+    let daemon = TestDaemon::start();
+    let mut window = daemon.window();
+    let terminal = shell_in_a_workspace(&mut window);
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    assert_eq!(phone.request(Request::Attach { terminal }), Response::Done);
+    let fitted = Size::new(30, 8).unwrap();
+    assert_eq!(
+        phone.request(Request::Fit {
+            terminal,
+            size: Some(fitted),
+            renew: false,
+        }),
+        Response::Done
+    );
+    let Response::Devices(devices) = phone.request(Request::Devices) else {
+        panic!("devices");
+    };
+    // Unpaired as it asks, with keys sent in the same breath: what came
+    // after the request that cut it off isn't acted on, though it was
+    // sent before the device heard.
+    let mut bytes = Vec::new();
+    for request in [
+        Request::RevokeDevice {
+            device: devices[0].id,
+        },
+        Request::SendInput {
+            terminal,
+            bytes: b"printf 'Z%sZ\\n' cut\r".to_vec(),
+        },
+    ] {
+        let message = ClientMessage::Request(request);
+        bytes.extend(frame::encode(PROTOCOL_VERSION, &message).unwrap());
+    }
+    phone.socket.send(Message::binary(bytes)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while size_of(&mut window, terminal) != Size::new(40, 10).unwrap() {
+        assert!(Instant::now() < deadline, "the fit never went back");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let screen = window.capture(terminal).unwrap();
+    let text = grid_text(screen.grid().unwrap());
+    assert!(
+        !text.contains("ZcutZ") && !text.contains("printf"),
+        "{text}"
+    );
+}
+
+#[test]
+fn asking_to_keep_a_fit_never_brings_one_back_once_its_put_back() {
+    let daemon = TestDaemon::start();
+    let mut window = daemon.window();
+    let terminal = shell_in_a_workspace(&mut window);
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    assert_eq!(phone.request(Request::Attach { terminal }), Response::Done);
+    let fitted = Size::new(30, 8).unwrap();
+    let ask = |phone: &mut Phone, renew| {
+        phone.request(Request::Fit {
+            terminal,
+            size: Some(fitted),
+            renew,
+        })
+    };
+    assert_eq!(ask(&mut phone, false), Response::Done);
+    assert_eq!(ask(&mut phone, true), Response::Done, "kept");
+    assert_eq!(size_of(&mut window, terminal), fitted);
+    // A window types: put back, and asking to keep it is told so.
+    window.send_input(terminal, b"x").unwrap();
+    assert_eq!(size_of(&mut window, terminal), Size::new(40, 10).unwrap());
+    assert_eq!(
+        ask(&mut phone, true),
+        Response::Error(Error::NotFitted(terminal))
+    );
+    assert_eq!(size_of(&mut window, terminal), Size::new(40, 10).unwrap());
+
+    // A window the fitted size: put back to the same size, which no
+    // snapshot shows, and asking to keep it is still told it's gone, so
+    // the phone stops asking rather than fit it again.
+    assert_eq!(ask(&mut phone, false), Response::Done);
+    window.resize(terminal, fitted).unwrap();
+    window.send_input(terminal, b"y").unwrap();
+    assert_eq!(
+        ask(&mut phone, true),
+        Response::Error(Error::NotFitted(terminal))
+    );
+    // Not fitted any more, a window's resize is made at once.
+    window.resize(terminal, Size::new(44, 11).unwrap()).unwrap();
+    assert_eq!(size_of(&mut window, terminal), Size::new(44, 11).unwrap());
+}
+
+#[test]
+fn a_fit_not_asked_for_again_lapses() {
+    let daemon = TestDaemon::start_daemon(
+        |_| {},
+        |config| config.fit_lasts = Duration::from_millis(300),
+    );
+    let mut window = daemon.window();
+    let terminal = shell_in_a_workspace(&mut window);
+    let cookie = daemon.pair();
+    let mut phone = daemon.socket(&cookie, |_| {}).expect("let in");
+    assert_eq!(phone.request(Request::Attach { terminal }), Response::Done);
+    let fitted = Size::new(30, 8).unwrap();
+    assert_eq!(
+        phone.request(Request::Fit {
+            terminal,
+            size: Some(fitted),
+            renew: false,
+        }),
+        Response::Done
+    );
+    assert_eq!(size_of(&mut window, terminal), fitted);
+    // The phone is put away; its connection lingers, saying nothing.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while size_of(&mut window, terminal) != Size::new(40, 10).unwrap() {
+        assert!(Instant::now() < deadline, "the fit never lapsed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        phone.request(Request::Fit {
+            terminal,
+            size: Some(fitted),
+            renew: true,
+        }),
+        Response::Error(Error::NotFitted(terminal))
+    );
 }

@@ -118,6 +118,9 @@ gates! {
     /// `Event::Exited`: a terminal's program ended, said before its pane
     /// closes, so a window can tell that from a pane closed elsewhere.
     EXITED = 74,
+    /// Terminals from a phone: `Request::Fit`, and `TerminalInfo`'s
+    /// `cwd` and `command`.
+    PHONE_TERMINALS = 75,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -390,6 +393,7 @@ impl Since for Error {
             | Self::Pairing(_)
             | Self::SessionOpen(_) => EARLIER,
             Self::Unsupported | Self::Other(_) => FALLBACKS,
+            Self::NotFollowing(_) | Self::NotFitted(_) => PHONE_TERMINALS,
         }
     }
 }
@@ -528,15 +532,20 @@ impl Downgrade for ServerMessage {
     /// chat item or tool content becomes its `Other`; a new chat patch
     /// becomes a fresh snapshot of the chat; something only informative,
     /// such as a new buffer update, is dropped; a new error becomes
-    /// `Error::Other(err.to_string())`. `Event::Exited` is dropped: a
-    /// window that never hears a program ended takes its pane closing as
-    /// someone else's doing, and goes on in normal mode, the safe side.
+    /// `Error::Other(err.to_string())`, as `Error::NotFollowing` and
+    /// `Error::NotFitted` do.
+    /// `Event::Exited` is dropped: a window that never hears a program
+    /// ended takes its pane closing as someone else's doing, and goes on
+    /// in normal mode, the safe side.
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
         }
         match self {
             Self::Event(Event::Exited { .. }) => Downgraded::Dropped,
+            Self::Response(Response::Error(err)) if wire >= FALLBACKS => Downgraded::To(
+                Self::Response(Response::Error(Error::Other(err.to_string()))),
+            ),
             Self::Response(_) => Downgraded::Refused,
             _ if wire < FALLBACKS => Downgraded::Dropped,
             // What's newer than the fallbacks has no arm yet, so nothing is.

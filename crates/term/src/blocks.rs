@@ -316,6 +316,18 @@ impl Terminal {
         Some((blocks.last(), last.progress()))
     }
 
+    /// The command the shell's latest block is running, if one is and
+    /// the shell said what it is: what a list of terminals says each is
+    /// doing.
+    #[must_use]
+    pub fn running_command(&self) -> Option<&str> {
+        let last = self.emulator_blocks().parts().1.back()?;
+        if last.phase != Phase::Running {
+            return None;
+        }
+        last.command.as_deref()
+    }
+
     /// How far block `block` has got, while it's still known: until no
     /// row is marked with it.
     #[must_use]
@@ -548,6 +560,20 @@ mod tests {
             "the command's block is still known"
         );
         assert_eq!(t.block_progress(first + 2), None);
+    }
+
+    #[test]
+    fn the_running_command_is_said_only_while_it_runs() {
+        let mut t = terminal(40, 10, 100);
+        assert_eq!(t.running_command(), None);
+        t.advance(PROMPT.as_bytes());
+        t.advance(b"cargo test\r\n\x1b]133;C;cmdline_url=cargo%20test\x07");
+        assert_eq!(t.running_command(), Some("cargo test"));
+        t.advance(b"\x1b]133;D;0\x07");
+        assert_eq!(t.running_command(), None, "finished");
+        t.advance(PROMPT.as_bytes());
+        t.advance(b"sleep 1\r\n\x1b]133;C\x07");
+        assert_eq!(t.running_command(), None, "running, but not said what");
     }
 
     #[test]

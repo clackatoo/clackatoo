@@ -699,17 +699,9 @@ impl Pane {
         let Some(screen) = &self.screen else {
             return;
         };
-        let mut bytes = Vec::new();
-        if screen.state.modes.bracketed_paste {
-            bytes.extend_from_slice(b"\x1b[200~");
-            // Pasted text can't end the paste early.
-            bytes.extend_from_slice(text.replace("\x1b[201~", "").as_bytes());
-            bytes.extend_from_slice(b"\x1b[201~");
-        } else {
-            // Without bracketing, newlines must look like Enter.
-            bytes.extend_from_slice(text.replace("\r\n", "\r").replace('\n', "\r").as_bytes());
-        }
-        self.send_keyed(bytes);
+        // Bracketed, it can't end itself early; otherwise its newlines
+        // are Enter.
+        self.send_keyed(clackatoo_term::paste(text, screen.state.modes));
         self.scroll = 0;
     }
 
@@ -1292,6 +1284,21 @@ mod tests {
         pane.take_outbox()
             .iter()
             .any(|message| matches!(message, ClientMessage::Request(Request::Resize { .. })))
+    }
+
+    #[test]
+    fn a_bracketed_paste_cant_end_itself_early() {
+        // The program asked for bracketed paste.
+        let mut pane = pane(&terminal("\x1b[?2004h"));
+        // Taking out the terminator once would leave another.
+        pane.paste("\x1b[20\x1b[201~1~; cmd\n");
+        let sent: Vec<Vec<u8>> = (pane.take_outbox().into_iter())
+            .filter_map(|message| match message {
+                ClientMessage::Request(Request::SendInput { bytes, .. }) => Some(bytes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [b"\x1b[200~[20[201~1~; cmd\n\x1b[201~".to_vec()]);
     }
 
     #[test]

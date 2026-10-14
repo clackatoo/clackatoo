@@ -441,6 +441,7 @@ impl Daemon {
                 viewers: Vec::new(),
                 typist: None,
                 clipboard: None,
+                fit: None,
             },
         );
     }

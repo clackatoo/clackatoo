@@ -552,6 +552,58 @@ fn upgrading_keeps_terminals_and_their_programs_running() {
 }
 
 #[test]
+fn upgrading_puts_a_fit_back_at_the_size_last_asked_for() {
+    use clackatoo_daemon::Client;
+    use clackatoo_protocol::{NewTerminal, Request, Response, Size};
+
+    let runtime = Runtime::new();
+    let daemon = daemon(runtime.path());
+    let socket = runtime.path().join("clackatoo/daemon.sock");
+    let mut phone = Client::connect(&socket).unwrap();
+    let terminal = phone
+        .new_terminal(NewTerminal {
+            size: Size::new(40, 10).unwrap(),
+            command: Some(vec!["cat".to_owned()]),
+            cwd: None,
+            record_to: None,
+        })
+        .unwrap();
+    phone.attach(terminal).unwrap();
+    let fitted = Size::new(30, 8).unwrap();
+    let fit = Request::Fit {
+        terminal,
+        size: Some(fitted),
+        renew: false,
+    };
+    assert_eq!(phone.request(&fit).unwrap(), Response::Done);
+    // A window's size, kept for when the fit ends.
+    let mut window = Client::connect(&socket).unwrap();
+    let wanted = Size::new(50, 12).unwrap();
+    window.resize(terminal, wanted).unwrap();
+    let size = |client: &mut Client| client.capture(terminal).unwrap().grid().unwrap().size;
+    assert_eq!(size(&mut window), fitted);
+    drop(window);
+
+    // The next build takes over the size the windows want: its clients
+    // connect again, and none has fitted anything.
+    let bin = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let next = bin.path().join("clackatoo-next");
+    std::fs::hard_link(BINARY, &next).unwrap();
+    let upgraded = Command::new(&next)
+        .env("CLACKATOO_BOARDS", "off")
+        .arg("upgrade")
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .output()
+        .unwrap();
+    assert!(upgraded.status.success(), "{upgraded:?}");
+    drop(phone);
+    let mut client = Client::connect(&socket).unwrap();
+    assert_eq!(size(&mut client), wanted);
+    drop(runtime);
+    wait(daemon);
+}
+
+#[test]
 fn upgrading_keeps_chats_and_reaps_their_agent() {
     use clackatoo_daemon::Client;
     use clackatoo_protocol::{ChatState, NewAgent, PaneTerminal};
