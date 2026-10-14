@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.21 (2026-10-14)
+
+### Fixes
+
+- **chat:** say what the agent is doing above the box, always in view, with pulsing dots, and mark its tab (88dcb6b)
+
 ## 2026.10.20 (2026-10-14)
 
 ### Features
