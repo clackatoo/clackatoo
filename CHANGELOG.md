@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.24 (2026-10-14)
+
+### Features
+
+- **explorer:** show a .. line at the top of the tree that goes up to the parent folder (52568ef)
+
 ## 2026.10.23 (2026-10-14)
 
 ### Features
