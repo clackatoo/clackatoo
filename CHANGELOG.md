@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.18 (2026-10-14)
+
+### Features
+
+- **editor:** list a file's symbols and find the project's in the finder, and check a rename first (68cf823)
+
 ## 2026.10.17 (2026-10-14)
 
 ### Fixes
