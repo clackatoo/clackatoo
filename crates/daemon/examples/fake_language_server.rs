@@ -30,7 +30,7 @@
 //! | `--crash-once FILE` | Exits, as if it crashed, the first time a file has `crash` in it, making FILE so the next one started doesn't |
 //! | `--elsewhere FILE` | Says what's wrong in FILE too, as warnings, whenever it says of a file open |
 //! | `--bare` | Doesn't say what things are, rename them or format |
-//! | `--modified-once` | Answers the first question of what something is by saying the text changed while it worked, as rust-analyzer does while it reads a project |
+//! | `--modified-once` | Answers the first question of what something is, or the first search for the project's symbols, by saying the text changed while it worked, as rust-analyzer does while it reads a project |
 //! | `--rename-changes` | Renames with a `WorkspaceEdit`'s `changes`, not its `documentChanges` |
 //! | `--rename-files` | Renames `defs.fk` too, which clackatoo refuses |
 //! | `--rename-wrong-version` | Says its renames are counted in a version of each open file it was never sent |
@@ -53,6 +53,10 @@
 //! | `--stay` | Takes no notice of `exit`, so it has to be killed |
 //! | `--last-words TEXT` | Writes TEXT to stderr as it exits |
 //! | `--grandchild FILE` | Starts a process that sleeps, holding its stdout and stderr, as `npx` starts node, and writes its pid to FILE, an absolute path |
+//! | `--flat-symbols` | Lists a file's symbols as a flat list of `SymbolInformation`s, not a tree |
+//! | `--hold-symbols FILE` | Answers what symbols are in a file or the project only once FILE exists, taking nothing else in meanwhile |
+//! | `--queue-symbols FILE` | Holds questions of what symbols are in a file or the project until FILE exists, taking everything else in meanwhile, then answers them in order |
+//! | `--prepare HOW` | Checks a rename first, answering as HOW says: `range` with the word's range, `placeholder` with its range and the word in capitals, `default` leaving it to its client, `error` with an error; and with `null` where there's no word |
 //!
 //! It writes `shutdown` to the `--log` file when it's asked to shut down,
 //! and exits with code 0 when told to exit after that, or else with 1, as
@@ -64,6 +68,15 @@
 //! word's documentation when the item is resolved. Asked about a call, it
 //! says the function the place is in the brackets of takes `a` and `b`,
 //! and which of them the place is at.
+//!
+//! Its symbols are the lines with `type NAME` in them, structs, each to
+//! the next line that's `}`, and those with `fn NAME`, functions, or
+//! methods inside a type. Asked for a file's, it lists them as a tree, a
+//! type's methods inside it. Asked for the project's, it lists those of
+//! every file open in it, and of `defs.fk` beside the first, read from
+//! disk if it isn't open, whose names hold what's asked, ignoring case. It
+//! writes `symbols QUERY` to the `--log` file for each such search, and
+//! `symbols of a file` for each question of a file's.
 //!
 //! Asked what could be done to some text, it offers, in this order: to
 //! put the word the range starts in in capitals, which it works out only
@@ -81,40 +94,40 @@ use serde_json::{Value, json};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let flag = |name: &str| args.iter().any(|arg| arg == name);
+    // What follows a flag, if it's given.
+    let value = |name: &str| {
+        (args.iter().position(|arg| arg == name)).and_then(|at| args.get(at + 1).cloned())
+    };
     let mut server = Fake {
         utf16: flag("--utf16"),
         full: flag("--full"),
-        log: (args.iter().position(|arg| arg == "--log")).and_then(|at| args.get(at + 1).cloned()),
-        defs: (args.iter().position(|arg| arg == "--defs"))
-            .and_then(|at| args.get(at + 1).cloned()),
-        crash_once: (args.iter().position(|arg| arg == "--crash-once"))
-            .and_then(|at| args.get(at + 1).cloned()),
+        log: value("--log"),
+        defs: value("--defs"),
+        crash_once: value("--crash-once"),
         bare: flag("--bare"),
         modified_once: flag("--modified-once"),
         rename_changes: flag("--rename-changes"),
         rename_files: flag("--rename-files"),
         rename_wrong_version: flag("--rename-wrong-version"),
         rename_alias: flag("--rename-alias"),
-        rename_also: (args.iter().position(|arg| arg == "--rename-also"))
-            .and_then(|at| args.get(at + 1).cloned()),
-        hold_rename: (args.iter().position(|arg| arg == "--hold-rename"))
-            .and_then(|at| args.get(at + 1).cloned()),
+        rename_also: value("--rename-also"),
+        hold_rename: value("--hold-rename"),
         incomplete: flag("--incomplete"),
-        elsewhere: (args.iter().position(|arg| arg == "--elsewhere"))
-            .and_then(|at| args.get(at + 1).cloned()),
+        elsewhere: value("--elsewhere"),
         no_resolve: flag("--no-resolve"),
         many: (args.iter().position(|arg| arg == "--many"))
             .and_then(|at| args.get(at + 1)?.parse().ok())
             .unwrap_or(0),
-        hold_completion: (args.iter().position(|arg| arg == "--hold-completion"))
-            .and_then(|at| args.get(at + 1).cloned()),
-        hold_resolve: (args.iter().position(|arg| arg == "--hold-resolve"))
-            .and_then(|at| args.get(at + 1).cloned()),
-        hold_hover: (args.iter().position(|arg| arg == "--hold-hover"))
-            .and_then(|at| args.get(at + 1).cloned()),
-        queue_hover: (args.iter().position(|arg| arg == "--queue-hover"))
-            .and_then(|at| args.get(at + 1).cloned()),
+        hold_completion: value("--hold-completion"),
+        hold_resolve: value("--hold-resolve"),
+        hold_hover: value("--hold-hover"),
+        queue_hover: value("--queue-hover"),
         queued: Vec::new(),
+        flat_symbols: flag("--flat-symbols"),
+        queue_symbols: value("--queue-symbols"),
+        queued_symbols: Vec::new(),
+        hold_symbols: value("--hold-symbols"),
+        prepare: value("--prepare"),
         action_files: flag("--action-files"),
         resolve_partly: flag("--resolve-partly"),
         resolve_null: flag("--resolve-null"),
@@ -123,8 +136,7 @@ fn main() {
             .and_then(|at| serde_json::from_str(args.get(at + 1)?).ok()),
         slow_shutdown: flag("--slow-shutdown"),
         stay: flag("--stay"),
-        last_words: (args.iter().position(|arg| arg == "--last-words"))
-            .and_then(|at| args.get(at + 1).cloned()),
+        last_words: value("--last-words"),
         may_watch: false,
         watching: false,
         shut_down: false,
@@ -226,6 +238,14 @@ struct Fake {
     /// The questions of what's at a place held, in order, until
     /// `queue_hover` exists.
     queued: Vec<Value>,
+    flat_symbols: bool,
+    queue_symbols: Option<String>,
+    /// The searches for symbols held, in order, until `queue_symbols`
+    /// exists.
+    queued_symbols: Vec<Value>,
+    hold_symbols: Option<String>,
+    /// How it answers a rename checked first, if it checks them.
+    prepare: Option<String>,
     action_files: bool,
     resolve_partly: bool,
     resolve_null: bool,
@@ -396,8 +416,14 @@ impl Fake {
                 let id = params["id"].to_string();
                 let cancelled = self.methods.get(&id).map_or("nothing", String::as_str);
                 self.note(&format!("cancelled {id} {cancelled}"));
-                if let Some(at) = (self.queued.iter()).position(|held| held["id"] == params["id"]) {
-                    self.queued.remove(at);
+                let held = |queue: &mut Vec<Value>| {
+                    let at = queue.iter().position(|held| held["id"] == params["id"])?;
+                    Some(queue.remove(at))
+                };
+                if held(&mut self.queued)
+                    .or_else(|| held(&mut self.queued_symbols))
+                    .is_some()
+                {
                     send(&json!({
                         "jsonrpc": "2.0",
                         "id": params["id"],
@@ -418,6 +444,29 @@ impl Fake {
                 send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
             }
             "textDocument/implementation" | "textDocument/references" => self.places(message),
+            "textDocument/documentSymbol" | "workspace/symbol" => {
+                self.note(&match params.get("query").and_then(Value::as_str) {
+                    Some(query) => format!("symbols {query}"),
+                    None => "symbols of a file".to_owned(),
+                });
+                if self.modified_once && method == "workspace/symbol" {
+                    self.modified_once = false;
+                    let error = json!({ "code": -32801, "message": "content modified" });
+                    send(&json!({ "jsonrpc": "2.0", "id": message["id"], "error": error }));
+                    return true;
+                }
+                if self.queue_symbols.is_some() {
+                    self.queued_symbols.push(message.clone());
+                    return true;
+                }
+                if let Some(gate) = &self.hold_symbols {
+                    while !std::path::Path::new(gate).exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+                self.symbols(message);
+            }
+            "textDocument/prepareRename" => self.prepare_rename(message),
             "textDocument/formatting" => self.format(message),
             "textDocument/codeAction" => self.code_actions(message),
             "codeAction/resolve" => {
@@ -449,6 +498,23 @@ impl Fake {
             for message in std::mem::take(&mut self.queued) {
                 self.hover(&message);
             }
+        }
+        let open =
+            (self.queue_symbols.as_ref()).is_some_and(|gate| std::path::Path::new(gate).exists());
+        if open && !self.queued_symbols.is_empty() {
+            for message in std::mem::take(&mut self.queued_symbols) {
+                self.symbols(&message);
+            }
+        }
+    }
+
+    /// Answers what symbols are in a file, or the project, as `message`
+    /// asks.
+    fn symbols(&self, message: &Value) {
+        if message["method"] == "workspace/symbol" {
+            self.workspace_symbols(message);
+        } else {
+            self.document_symbols(message);
         }
     }
 
@@ -745,6 +811,112 @@ impl Fake {
         send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
     }
 
+    /// Answers whether the word at the place `message` asks about can be
+    /// renamed, as `--prepare` says.
+    fn prepare_rename(&self, message: &Value) {
+        let params = &message["params"];
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let text = &self.files[uri];
+        let (start, word) = word_at(text, byte(text, &params["position"], self.utf16));
+        let range = json!({
+            "start": place(text, start, self.utf16),
+            "end": place(text, start + word.len(), self.utf16),
+        });
+        let result = match self.prepare.as_deref() {
+            Some("error") => {
+                let error = json!({ "code": -32602, "message": "that can't be renamed" });
+                send(&json!({ "jsonrpc": "2.0", "id": message["id"], "error": error }));
+                return;
+            }
+            _ if word.is_empty() => Value::Null,
+            Some("placeholder") => json!({ "range": range, "placeholder": word.to_uppercase() }),
+            Some("default") => json!({ "defaultBehavior": true }),
+            _ => range,
+        };
+        send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
+    }
+
+    /// Answers what symbols are in the file `message` asks about.
+    fn document_symbols(&self, message: &Value) {
+        let uri = message["params"]["textDocument"]["uri"].as_str().unwrap();
+        let symbols = symbols(&self.files[uri], self.utf16);
+        let result: Vec<Value> = if self.flat_symbols {
+            (symbols.iter())
+                .map(|symbol| {
+                    json!({
+                        "name": symbol.name,
+                        "kind": symbol.kind,
+                        "location": { "uri": uri, "range": symbol.range },
+                    })
+                })
+                .collect()
+        } else {
+            let tree = |symbol: &Symbol, children: Vec<Value>| {
+                json!({
+                    "name": symbol.name,
+                    "kind": symbol.kind,
+                    "range": symbol.range,
+                    "selectionRange": symbol.name_range,
+                    "children": children,
+                })
+            };
+            let mut list = Vec::new();
+            let mut methods = Vec::new();
+            let mut parent: Option<&Symbol> = None;
+            for symbol in &symbols {
+                if symbol.kind == 6 {
+                    methods.push(tree(symbol, Vec::new()));
+                    continue;
+                }
+                if let Some(parent) = parent.take() {
+                    list.push(tree(parent, std::mem::take(&mut methods)));
+                }
+                if symbol.kind == 23 {
+                    parent = Some(symbol);
+                } else {
+                    list.push(tree(symbol, Vec::new()));
+                }
+            }
+            if let Some(parent) = parent {
+                list.push(tree(parent, methods));
+            }
+            list
+        };
+        send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
+    }
+
+    /// Answers which symbols in its files, and `defs.fk` beside the
+    /// first, have names holding what `message` asks for.
+    fn workspace_symbols(&self, message: &Value) {
+        let query = message["params"]["query"].as_str().unwrap().to_lowercase();
+        let mut files: Vec<(String, String)> = (self.files.iter())
+            .map(|(uri, text)| (uri.clone(), text.clone()))
+            .collect();
+        if let Some((first, _)) = files.first() {
+            let defs = format!("{}/defs.fk", &first[..first.rfind('/').unwrap()]);
+            if !self.files.contains_key(&defs)
+                && let Ok(text) = std::fs::read_to_string(defs.strip_prefix("file://").unwrap())
+            {
+                files.push((defs, text));
+            }
+        }
+        let result: Vec<Value> = (files.iter())
+            .flat_map(|(uri, text)| {
+                (symbols(text, self.utf16).into_iter())
+                    .filter(|symbol| symbol.name.to_lowercase().contains(&query))
+                    .map(move |symbol| {
+                        json!({
+                            "name": symbol.name,
+                            "kind": symbol.kind,
+                            "containerName": symbol.container,
+                            "location": { "uri": uri, "range": symbol.name_range },
+                        })
+                    })
+            })
+            .collect();
+        send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
+    }
+
     /// Renames the word at the place `params` give to their `newName`, in
     /// every file open, and `defs.fk` beside the file asked about.
     fn rename(&self, params: &Value) -> Value {
@@ -833,7 +1005,9 @@ impl Fake {
         }
         if !self.bare {
             capabilities["hoverProvider"] = json!(true);
-            capabilities["renameProvider"] = json!({ "prepareProvider": false });
+            capabilities["renameProvider"] = json!({ "prepareProvider": self.prepare.is_some() });
+            capabilities["documentSymbolProvider"] = json!(true);
+            capabilities["workspaceSymbolProvider"] = json!({});
             capabilities["documentFormattingProvider"] = json!(true);
             capabilities["completionProvider"] = json!({
                 "triggerCharacters": ["."],
@@ -1046,6 +1220,69 @@ fn place(text: &str, at: usize, utf16: bool) -> Value {
         before.len()
     };
     json!({ "line": text[..at].matches('\n').count(), "character": character })
+}
+
+/// A symbol in a file, as the fake finds them.
+struct Symbol {
+    name: String,
+    /// 23, a struct; 12, a function; or 6, a method.
+    kind: u8,
+    /// The type it's inside, or empty.
+    container: String,
+    /// Its range, its line or a type's lines, and its name's.
+    range: Value,
+    name_range: Value,
+}
+
+/// The symbols in `text`, counting columns in UTF-16 if `utf16`: its lines
+/// with `type NAME`, each to the next line that's `}`, and with `fn NAME`,
+/// methods inside a type.
+fn symbols(text: &str, utf16: bool) -> Vec<Symbol> {
+    let mut symbols: Vec<Symbol> = Vec::new();
+    // The type the lines are inside, by its index, and its name.
+    let mut inside: Option<(usize, String)> = None;
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let start = at;
+        at += line.len();
+        let trimmed = line.trim();
+        let line_end = start + line.trim_end().len();
+        if trimmed == "}" {
+            if let Some((index, _)) = inside.take() {
+                symbols[index].range["end"] = place(text, line_end, utf16);
+            }
+            continue;
+        }
+        // From its keyword, wherever it is on the line.
+        let (kind, indent, keyword) = if let Some(at) = line.find("type ") {
+            (23, at, "type ")
+        } else if let Some(at) = line.find("fn ") {
+            (if inside.is_some() { 6 } else { 12 }, at, "fn ")
+        } else {
+            continue;
+        };
+        let name: String = (line[indent + keyword.len()..].chars())
+            .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+            .collect();
+        let name_at = start + indent + keyword.len();
+        symbols.push(Symbol {
+            name: name.clone(),
+            kind,
+            container: (inside.as_ref()).map_or_else(String::new, |(_, name)| name.clone()),
+            range: json!({
+                "start": place(text, start + indent, utf16),
+                "end": place(text, line_end, utf16),
+            }),
+            name_range: json!({
+                "start": place(text, name_at, utf16),
+                "end": place(text, name_at + name.len(), utf16),
+            }),
+        });
+        if kind == 23 {
+            inside = Some((symbols.len() - 1, name));
+        }
+    }
+    symbols
 }
 
 /// Where the word at byte `at` of `text` starts, and the word: letters,

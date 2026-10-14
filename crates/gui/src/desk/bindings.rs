@@ -22,14 +22,15 @@
 //!
 //! In normal and visual mode, Space starts the finder's keys, as a leader
 //! key does in Neovim: `<Space>pf` the project's files, `<Space>pgf` a grep
-//! of them, `<Space>?` the files open, and `<Space>ds` what's wrong in the
-//! file (see [`crate::finder`]). And in an editor, the keys for the hunk
-//! at the cursor, as gitsigns.nvim suggests them: `<Space>hp` shows it,
-//! `<Space>hr` puts its lines back as they are in git's index, and
-//! `<Space>hs` stages it. `<Space>e` opens the tab's file explorer down
-//! its left, goes to it, or closes it if it has the focus (see
-//! [`super::explorers`]). `<Space>gr` opens a review of what agents
-//! changed, `<Space>ga` keeps the agent's change at the cursor and
+//! of them, `<Space>?` the files open, `<Space>ds` what's wrong in the
+//! file, `<Space>bs` the symbols in the focused editor's file, and
+//! `<Space>ps` the project's (see [`crate::finder`]). And in an editor,
+//! the keys for the hunk at the cursor, as gitsigns.nvim suggests them:
+//! `<Space>hp` shows it, `<Space>hr` puts its lines back as they are in
+//! git's index, and `<Space>hs` stages it. `<Space>e` opens the tab's
+//! file explorer down its left, goes to it, or closes it if it has the
+//! focus (see [`super::explorers`]). `<Space>gr` opens a review of what
+//! agents changed, `<Space>ga` keeps the agent's change at the cursor and
 //! `<Space>gx` rejects it, and `<Space>c` comments on the cursor's line
 //! for the agent (see [`super::reviews`]).
 //!
@@ -206,17 +207,9 @@ fn defaults() -> Keymap<Binding> {
     bind("niv", "<C-b><C-b>", Action::SendCtrlB, None);
 
     bind("nv", ":", Action::CommandLine, None);
-    // As jack's Telescope keys are.
-    let find = Some("find");
-    bind("nv", "<Space>pf", Action::Find(finder::Kind::Files), find);
-    bind("nv", "<Space>pgf", Action::Find(finder::Kind::Grep), find);
-    bind("nv", "<Space>?", Action::Find(finder::Kind::Buffers), find);
-    bind(
-        "nv",
-        "<Space>ds",
-        Action::Find(finder::Kind::Diagnostics),
-        find,
-    );
+    for (keys, kind) in FINDER_KEYS {
+        bind("nv", keys, Action::Find(kind), Some("find"));
+    }
     // As gitsigns.nvim suggests them.
     let hunk = Some("hunk");
     bind("nv", "<Space>hp", Action::Hunk(HunkAction::Preview), hunk);
@@ -252,6 +245,18 @@ fn defaults() -> Keymap<Binding> {
     bind_review_keys(&mut map);
     map
 }
+
+/// The finder's keys, as jack's Telescope keys are: `p` for the project,
+/// as in `<Space>pf`, and `b` for the buffer, as in `<Space>bs`, its
+/// symbols.
+const FINDER_KEYS: [(&str, finder::Kind); 6] = [
+    ("<Space>pf", finder::Kind::Files),
+    ("<Space>pgf", finder::Kind::Grep),
+    ("<Space>?", finder::Kind::Buffers),
+    ("<Space>ds", finder::Kind::Diagnostics),
+    ("<Space>bs", finder::Kind::Symbols),
+    ("<Space>ps", finder::Kind::ProjectSymbols),
+];
 
 /// Binds the keys for reviewing what agents changed in `map`.
 fn bind_review_keys(map: &mut Keymap<Binding>) {

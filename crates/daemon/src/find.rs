@@ -1,6 +1,7 @@
 //! The finder's searches, each on a thread of its own: walking a project
-//! for its files, grepping them, listing the files open in buffers, and
-//! reading lines of a file to preview. The event loop starts each with what
+//! for its files, grepping them, listing the files open in buffers,
+//! placing the symbols a language server found, and reading lines of a
+//! file to preview. The event loop starts each with what
 //! it needs and takes what they find, so a walk of a big project never
 //! holds up a keystroke.
 //!
@@ -18,6 +19,7 @@
 //! regex crate, ripgrep's engine, skipping big files and those that aren't
 //! text.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read};
 use std::os::unix::fs::OpenOptionsExt;
@@ -28,14 +30,14 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::{Done, Found, FoundBuffer, FoundLine};
+use clackatoo_protocol::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Symbol};
 use clackatoo_syntax::Server;
 use clackatoo_text::{Diagnostic, Rope, Severity};
 
 use ignore::{DirEntry, ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
 use regex::bytes::{Regex, RegexBuilder};
 
-use crate::lsp::{self, Encoding, Reported};
+use crate::lsp::{self, Encoding, NamedSymbol, Reported};
 
 /// The most files one search lists: far more than a project has, but short
 /// of listing all of a home directory that has no project in it.
@@ -149,6 +151,17 @@ pub(crate) enum Job {
         project: Project,
         open: Vec<(PathBuf, Vec<Diagnostic>, Rope)>,
         elsewhere: Vec<(PathBuf, Encoding, Arc<[Reported]>)>,
+    },
+    /// The symbols a language server found, placed in their files, as
+    /// paths from the project's root: in their buffers' texts, for those
+    /// open, or else as read from disk, counting columns as the server
+    /// does. `more`, if the server found more than these.
+    Symbols {
+        project: Project,
+        symbols: Vec<NamedSymbol>,
+        encoding: Encoding,
+        open: Vec<(PathBuf, Rope)>,
+        more: bool,
     },
     /// Up to `lines` lines of the file at `path`, around line `line`, from
     /// its buffer's text if it's open.
@@ -371,6 +384,17 @@ fn run(job: Job, home: &Path, out: &Out) {
             open,
             elsewhere,
         } => diagnostics(out, home, &project, &open, elsewhere),
+        Job::Symbols {
+            project,
+            symbols,
+            encoding,
+            open,
+            more,
+        } => {
+            symbols_found(out, home, &project, &symbols, encoding, open);
+            out.cut_short.fetch_or(more, Ordering::Relaxed);
+            out.done();
+        }
         Job::Preview {
             path,
             line,
@@ -390,6 +414,72 @@ fn run(job: Job, home: &Path, out: &Out) {
                 Err(why) => out.send(Found::Done(Done::Failed(why))),
             }
         }
+    }
+}
+
+/// Sends `symbols`, as a language server counted their places, placed
+/// in their files, in their order: in the texts `open` has for those open,
+/// or else as read from disk, each file once. A symbol in a file that
+/// can't be read is at the start of the line the server says.
+fn symbols_found(
+    out: &Out,
+    home: &Path,
+    project: &Project,
+    symbols: &[NamedSymbol],
+    encoding: Encoding,
+    open: Vec<(PathBuf, Rope)>,
+) {
+    let root = project.root(home).unwrap_or_else(|_| home.to_owned());
+    out.send(root_found(&root, home));
+    // Each file's symbols, by their places in the list.
+    let mut files: HashMap<&Path, Vec<usize>> = HashMap::new();
+    for (index, symbol) in symbols.iter().enumerate() {
+        if let Some(path) = &symbol.path {
+            files.entry(path).or_default().push(index);
+        }
+    }
+    let mut open: HashMap<PathBuf, Rope> = open.into_iter().collect();
+    let mut placed = vec![None; symbols.len()];
+    let mut read = Vec::new();
+    for (path, indices) in files {
+        if out.stopped() {
+            return;
+        }
+        let text = (open.remove(path)).or_else(|| {
+            read_text(path, &mut read)?;
+            Some(Rope::from_str(&String::from_utf8_lossy(&read)))
+        });
+        for index in indices {
+            let start = symbols[index].start;
+            placed[index] = Some(match &text {
+                Some(text) => {
+                    let byte = lsp::place(text, start, encoding);
+                    let line = text.byte_to_line(byte);
+                    (line as u64, byte - text.line_to_byte(line))
+                }
+                None => (u64::from(start.line), 0),
+            });
+        }
+    }
+    let found: Vec<FoundSymbol> = (symbols.iter().zip(placed))
+        .filter_map(|(symbol, place)| {
+            let (line, col) = place?;
+            Some(FoundSymbol {
+                path: relative(symbol.path.as_deref()?, &root),
+                symbol: Symbol {
+                    name: symbol.name.clone(),
+                    kind: symbol.kind,
+                    depth: symbol.depth,
+                    container: symbol.container.clone(),
+                    line,
+                    col,
+                    offset: None,
+                },
+            })
+        })
+        .collect();
+    for batch in found.chunks(BATCH) {
+        out.send(Found::Symbols(batch.to_vec()));
     }
 }
 

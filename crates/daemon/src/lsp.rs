@@ -19,6 +19,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use clackatoo_protocol::{CodeAction, Query, ServerFeatures, Trigger};
 use clackatoo_text::{Edit, Rope, Severity};
@@ -50,7 +51,7 @@ enum Sync {
 
 /// A place in a text, as LSP gives it: a line, from 0, and a column in it,
 /// counted in the server's [`Encoding`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 pub(crate) struct Position {
     pub(crate) line: u32,
     pub(crate) character: u32,
@@ -297,6 +298,12 @@ struct Offers {
     hover: bool,
     /// Renames things.
     rename: bool,
+    /// Says whether a rename can be made, before it's asked to make it.
+    prepare_rename: bool,
+    /// Lists the symbols in a file.
+    symbols: bool,
+    /// Finds symbols in the whole project by name.
+    workspace_symbols: bool,
     /// Formats whole files.
     format: bool,
     /// Completes what's typed, and these characters ask it to.
@@ -380,6 +387,9 @@ impl LanguageServer {
             "dataSupport": true,
             "resolveSupport": { "properties": ["edit"] },
         });
+        // Every kind LSP has, so a server sends a symbol's own, not the
+        // nearest of the first 18 that LSP began with.
+        let symbol_kinds: Vec<u8> = (1..=MAX_SYMBOL_KIND).collect();
         let root_uri = uri(root);
         let name = root.file_name().map_or_else(
             || root.display().to_string(),
@@ -399,7 +409,17 @@ impl LanguageServer {
                         "synchronization": { "didSave": true },
                         "publishDiagnostics": { "versionSupport": true },
                         "hover": { "contentFormat": ["markdown", "plaintext"] },
-                        "rename": { "prepareSupport": false },
+                        // Asked first, as `grn` asks before it asks for the
+                        // new name; a server may leave the name to start
+                        // from to the window.
+                        "rename": {
+                            "prepareSupport": true,
+                            "prepareSupportDefaultBehavior": 1,
+                        },
+                        "documentSymbol": {
+                            "hierarchicalDocumentSymbolSupport": true,
+                            "symbolKind": { "valueSet": symbol_kinds },
+                        },
                         "completion": completion,
                         "signatureHelp": signature,
                         "codeAction": code_action,
@@ -415,6 +435,7 @@ impl LanguageServer {
                         "workspaceEdit": { "documentChanges": true },
                         "applyEdit": true,
                         "executeCommand": {},
+                        "symbol": { "symbolKind": { "valueSet": symbol_kinds } },
                     },
                     "window": { "workDoneProgress": true },
                 },
@@ -532,6 +553,8 @@ impl LanguageServer {
             Query::Completion(_) | Query::Resolve { .. } => self.offers.completion.is_some(),
             Query::SignatureHelp { .. } => self.offers.signature.is_some(),
             Query::CodeActions { .. } | Query::Act { .. } => self.offers.code_actions,
+            Query::Symbols => self.offers.symbols,
+            Query::PrepareRename => self.offers.prepare_rename,
             Query::Definition
             | Query::Declaration
             | Query::TypeDefinition
@@ -553,7 +576,20 @@ impl LanguageServer {
             completion: self.offers.completion.clone(),
             signature: self.offers.signature.clone(),
             signature_again: self.offers.signature_again.clone(),
+            prepare_rename: self.offers.rename && self.offers.prepare_rename,
         }
+    }
+
+    /// Whether it finds symbols in the whole project by name.
+    pub(crate) fn finds_symbols(&self) -> bool {
+        self.offers.workspace_symbols
+    }
+
+    /// Asks the server, which [`finds_symbols`](Self::finds_symbols), for
+    /// the symbols in its project whose names match `query`, as it likes.
+    /// Returns the request's number, as [`ask`](Self::ask) does.
+    pub(crate) fn find_symbols(&mut self, query: &str) -> u64 {
+        self.request("workspace/symbol", &json!({ "query": query }))
     }
 
     /// Whether it renames things.
@@ -576,6 +612,8 @@ impl LanguageServer {
             Query::Format { .. } => "textDocument/formatting",
             Query::Completion(_) => "textDocument/completion",
             Query::SignatureHelp { .. } => "textDocument/signatureHelp",
+            Query::Symbols => "textDocument/documentSymbol",
+            Query::PrepareRename => "textDocument/prepareRename",
             Query::Resolve { .. } => unreachable!("resolved with the item, by resolve"),
             Query::CodeActions { .. } => unreachable!("asked with what's wrong, by code_actions"),
             Query::Act { .. } => unreachable!("done by the daemon, with the action"),
@@ -593,6 +631,7 @@ impl LanguageServer {
         };
         match query {
             Query::References => params["context"] = json!({ "includeDeclaration": true }),
+            Query::Symbols => params = json!({ "textDocument": { "uri": uri(path) } }),
             Query::Format { tab_size, spaces } => {
                 params = json!({
                     "textDocument": { "uri": uri(path) },
@@ -935,6 +974,10 @@ impl LanguageServer {
             save: offered(&sync["save"]),
             hover: offered(&capabilities["hoverProvider"]),
             rename: offered(&capabilities["renameProvider"]),
+            prepare_rename: capabilities["renameProvider"]["prepareProvider"].as_bool()
+                == Some(true),
+            symbols: offered(&capabilities["documentSymbolProvider"]),
+            workspace_symbols: offered(&capabilities["workspaceSymbolProvider"]),
             format: offered(&capabilities["documentFormattingProvider"]),
             completion: (completion.is_object())
                 .then(|| characters(&completion["triggerCharacters"])),
@@ -1061,6 +1104,220 @@ pub(crate) fn hover_range(answer: &Value) -> Option<(Position, Position)> {
     let range = answer.get("range")?;
     let at = |key: &str| serde_json::from_value(range.get(key)?.clone()).ok();
     Some((at("start")?, at("end")?))
+}
+
+/// How many kinds of symbol LSP has (`SymbolKind`), numbered from 1.
+pub(crate) const MAX_SYMBOL_KIND: u8 = 26;
+
+/// How deep in a file's outline symbols are taken: far deeper than code is
+/// written, but short of an answer nested as deep as JSON allows.
+const MAX_SYMBOL_DEPTH: u8 = 32;
+
+/// The most bytes of a symbol's name, or of what it's inside, passed on:
+/// longer than any name, but short of a server's line of nonsense.
+pub(crate) const MAX_SYMBOL_NAME: usize = 200;
+
+/// A symbol as a server names it, before its place is counted in bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NamedSymbol {
+    /// Its name, on one line, cut short if it's long.
+    pub(crate) name: String,
+    /// Its `SymbolKind`, or 0 for one LSP doesn't have.
+    pub(crate) kind: u8,
+    /// How deep it is in its file's outline.
+    pub(crate) depth: u8,
+    /// What it's inside, the outermost first, or empty.
+    pub(crate) container: String,
+    /// Its file, if the server says: always for a project's symbols, and
+    /// for each of a file's that come as a flat list.
+    pub(crate) path: Option<PathBuf>,
+    /// Where its name starts, or else where it does.
+    pub(crate) start: Position,
+    /// Where it ends, for one of a flat list, by which what's inside what
+    /// is found.
+    end: Option<Position>,
+}
+
+/// How many of an answer's entries are looked at for each symbol taken, at
+/// most: entries that make no sense cost no more than that many symbols
+/// would, however many a server sends.
+const LOOKED_AT_EACH: usize = 4;
+
+/// The symbols in an answer to `textDocument/documentSymbol` or
+/// `workspace/symbol`, at most `max` of them, and whether there were more:
+/// a tree of `DocumentSymbol`s, each taken before what's inside it, or a
+/// flat list of `SymbolInformation`s or `WorkspaceSymbol`s, each with its
+/// file. One that makes no sense is left out, with what's inside it. At
+/// most [`LOOKED_AT_EACH`] entries are looked at for each of `max`, so the
+/// work is bounded by `max`, not by the answer.
+pub(crate) fn symbols(answer: &Value, max: usize) -> (Vec<NamedSymbol>, bool) {
+    let Some(list) = answer.as_array() else {
+        return (Vec::new(), false);
+    };
+    let position = |range: &Value, key: &str| -> Option<Position> {
+        serde_json::from_value(range.get(key)?.clone()).ok()
+    };
+    let mut found = Vec::new();
+    let mut budget = max.saturating_mul(LOOKED_AT_EACH);
+    // The lists being walked, the innermost last: how far each has got,
+    // how deep its entries are, and what they're inside, shared. A stack,
+    // not recursion, at most `MAX_SYMBOL_DEPTH + 1` deep, and an entry's
+    // children are taken one at a time as they're reached, never all at
+    // once.
+    let mut walking: Vec<(std::slice::Iter<'_, Value>, u8, Rc<str>)> =
+        vec![(list.iter(), 0, Rc::from(""))];
+    while let Some((entries, depth, container)) = walking.last_mut() {
+        let Some(item) = entries.next() else {
+            walking.pop();
+            continue;
+        };
+        let (depth, container) = (*depth, Rc::clone(container));
+        if budget == 0 {
+            return (found, true);
+        }
+        budget -= 1;
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let name = one_line(name, MAX_SYMBOL_NAME);
+        let kind = (item.get("kind").and_then(Value::as_u64))
+            .and_then(|kind| u8::try_from(kind).ok())
+            .filter(|kind| (1..=MAX_SYMBOL_KIND).contains(kind))
+            .unwrap_or(0);
+        let symbol = if let Some(location) = item.get("location") {
+            // A flat list's: its container as the server names it.
+            let Some(path) = (location.get("uri").and_then(Value::as_str)).and_then(path_of) else {
+                continue;
+            };
+            // A project's symbol may come without a range, to be resolved:
+            // its file's start, then, as clackatoo doesn't resolve them.
+            let range = location.get("range");
+            let start = range.and_then(|range| position(range, "start"));
+            NamedSymbol {
+                name,
+                kind,
+                depth: 0,
+                container: (item.get("containerName").and_then(Value::as_str))
+                    .map(|container| one_line(container, MAX_SYMBOL_NAME))
+                    .unwrap_or_default(),
+                path: Some(path),
+                start: start.unwrap_or(Position {
+                    line: 0,
+                    character: 0,
+                }),
+                end: range.and_then(|range| position(range, "end")),
+            }
+        } else {
+            let range = item.get("selectionRange").or_else(|| item.get("range"));
+            let Some(start) = range.and_then(|range| position(range, "start")) else {
+                continue;
+            };
+            NamedSymbol {
+                name,
+                kind,
+                depth,
+                container: container.to_string(),
+                path: None,
+                start,
+                end: None,
+            }
+        };
+        if found.len() == max {
+            return (found, true);
+        }
+        let children = item.get("children").and_then(Value::as_array);
+        if let Some(children) =
+            children.filter(|children| depth < MAX_SYMBOL_DEPTH && !children.is_empty())
+        {
+            let inside = inside(&symbol.container, &symbol.name);
+            walking.push((children.iter(), depth + 1, Rc::from(inside)));
+        }
+        found.push(symbol);
+    }
+    (found, false)
+}
+
+/// What's inside a symbol called `name`, inside `container`, is inside: the
+/// names, the outermost first, cut short if they're long.
+fn inside(container: &str, name: &str) -> String {
+    if container.is_empty() {
+        name.to_owned()
+    } else {
+        one_line(&format!("{container} › {name}"), MAX_SYMBOL_NAME)
+    }
+}
+
+/// Puts a file's symbols that came as a flat list, each with its range,
+/// in the order of the file's outline, each inside the last whose range
+/// holds where it starts, as a tree of them would have been: of two that
+/// start together, the longer outside the shorter. Symbols from a tree are
+/// left as they came.
+pub(crate) fn outline(symbols: &mut [NamedSymbol]) {
+    if symbols.iter().any(|symbol| symbol.end.is_none()) {
+        return;
+    }
+    symbols.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+    // Those the next may be inside: where each ends, and what's inside it
+    // is inside, worked out once, as it's taken.
+    let mut around: Vec<(Position, String)> = Vec::new();
+    for symbol in symbols {
+        while (around.last()).is_some_and(|(end, _)| *end <= symbol.start) {
+            around.pop();
+        }
+        let depth = around.len().min(usize::from(MAX_SYMBOL_DEPTH));
+        symbol.depth = u8::try_from(depth).unwrap_or(MAX_SYMBOL_DEPTH);
+        symbol.container = (around.last()).map_or_else(String::new, |(_, path)| path.clone());
+        if let Some(end) = symbol.end {
+            around.push((end, inside(&symbol.container, &symbol.name)));
+        }
+    }
+}
+
+/// `text` on one line, its line breaks and other control characters made
+/// spaces, cut to at most `max` bytes, at a character's start.
+pub(crate) fn one_line(text: &str, max: usize) -> String {
+    let mut line = String::with_capacity(text.len().min(max));
+    for ch in text.trim().chars() {
+        if line.len() + ch.len_utf8() > max {
+            break;
+        }
+        line.push(if ch.is_control() { ' ' } else { ch });
+    }
+    line
+}
+
+/// What a server answered `textDocument/prepareRename` with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Prepared {
+    /// There's nothing at the place to rename.
+    Nothing,
+    /// It can be renamed, and the window says what the new name starts
+    /// as, as it would have without asking.
+    Window,
+    /// It can be renamed, and the new name starts as this.
+    Placeholder(String),
+    /// It can be renamed, and the new name starts as the text from the
+    /// first place to the second.
+    Range(Position, Position),
+}
+
+/// What an answer to `textDocument/prepareRename` says: `null` for
+/// nothing there, a range, a range with a placeholder, or
+/// `{ defaultBehavior: true }`. Anything else is taken as leaving it to the
+/// window, so a rename goes as it would have without asking.
+pub(crate) fn prepared(answer: &Value) -> Prepared {
+    if answer.is_null() || answer.get("defaultBehavior") == Some(&Value::Bool(false)) {
+        return Prepared::Nothing;
+    }
+    if let Some(placeholder) = answer.get("placeholder").and_then(Value::as_str) {
+        return Prepared::Placeholder(placeholder.to_owned());
+    }
+    let range = answer.get("range").unwrap_or(answer);
+    let at = |key: &str| serde_json::from_value(range.get(key)?.clone()).ok();
+    match (at("start"), at("end")) {
+        (Some(start), Some(end)) => Prepared::Range(start, end),
+        _ => Prepared::Window,
+    }
 }
 
 /// One edit to a file's text that a server asks for: what's from `start`
@@ -1629,6 +1886,11 @@ mod tests {
         Position { line, character }
     }
 
+    /// A place, as LSP writes one.
+    fn spot(line: u32, character: u32) -> Value {
+        json!({ "line": line, "character": character })
+    }
+
     #[test]
     fn places_go_to_lines_and_columns_and_back() {
         // "é" is two bytes and one UTF-16 unit; "𝄞" four bytes and two.
@@ -1849,6 +2111,178 @@ mod tests {
             signature(&json!({ "signatures": [] }), Encoding::Utf8),
             None
         );
+    }
+
+    #[test]
+    fn symbols_from_a_server_are_taken_as_far_as_they_make_sense() {
+        let range = json!({ "start": spot(1, 0), "end": spot(1, 4) });
+        let named = |name: &str, children: Value| {
+            json!({
+                "name": name,
+                "kind": 12,
+                "range": range,
+                "selectionRange": range,
+                "children": children,
+            })
+        };
+        // Its name on one line, cut short; a kind LSP hasn't, unknown;
+        // one with no place, or no name, left out with what's inside it.
+        let long = "x".repeat(MAX_SYMBOL_NAME + 10);
+        let answer = json!([
+            { "name": "two\nlines", "kind": 99, "range": range, "selectionRange": range },
+            { "name": long, "kind": 5, "range": range },
+            { "name": "nowhere", "kind": 5, "children": [named("lost", json!([]))] },
+            { "kind": 5, "range": range },
+        ]);
+        let (taken, more) = symbols(&answer, 10);
+        assert!(!more);
+        let kept: Vec<(&str, u8)> = (taken.iter())
+            .map(|symbol| (symbol.name.as_str(), symbol.kind))
+            .collect();
+        assert_eq!(kept, [("two lines", 0), (&long[..MAX_SYMBOL_NAME], 5)]);
+
+        // So many, and no more; nested however deep, only so deep.
+        let mut deep = named("leaf", json!([]));
+        for _ in 0..100 {
+            deep = named("inner", json!([deep]));
+        }
+        let (taken, more) = symbols(&json!([deep]), 1000);
+        assert!(!more);
+        assert_eq!(taken.len(), usize::from(MAX_SYMBOL_DEPTH) + 1);
+        assert_eq!(taken.last().unwrap().depth, MAX_SYMBOL_DEPTH);
+        let many: Vec<Value> = (0..20).map(|_| named("f", json!([]))).collect();
+        let (taken, more) = symbols(&json!(many), 5);
+        assert_eq!(taken.len(), 5);
+        assert!(more);
+        // Not a list at all.
+        assert_eq!(symbols(&json!({ "name": "f" }), 5), (Vec::new(), false));
+    }
+
+    #[test]
+    fn a_flood_of_symbols_that_make_no_sense_is_looked_at_only_so_far() {
+        // A million nameless children of one symbol, and then, after them,
+        // one that makes sense: it's never reached, as no more than so many
+        // are looked at for each symbol that may be taken.
+        let range = json!({ "start": spot(0, 0), "end": spot(0, 1) });
+        let mut children = vec![json!({}); 1_000_000];
+        children.push(json!({ "name": "last", "kind": 12, "range": range }));
+        let answer = json!([{ "name": "parent", "kind": 5, "range": range, "children": children }]);
+        let started = std::time::Instant::now();
+        let (taken, more) = symbols(&answer, 100);
+        let took = started.elapsed();
+        assert_eq!(taken.len(), 1, "only the parent");
+        assert!(more, "cut short");
+        // Walked one child at a time, never the million at once: far
+        // quicker than looking at them all would be.
+        assert!(took < std::time::Duration::from_millis(50), "{took:?}");
+        // The same as a flat list.
+        let mut flat = vec![json!({}); 1_000_000];
+        flat.push(json!({ "name": "last", "kind": 12, "location": {
+            "uri": "file:///a.fk", "range": range,
+        }}));
+        let (taken, more) = symbols(&json!(flat), 100);
+        assert!(taken.is_empty() && more);
+    }
+
+    #[test]
+    fn a_deep_flat_outline_is_nested_in_time_with_the_symbols() {
+        // 5000 symbols, each inside the one before, with long names: each
+        // one's container is worked out from the last's, cut short, never
+        // from every name above it.
+        let count = 5000_u32;
+        let flat: Vec<Value> = (0..count)
+            .map(|at| {
+                json!({ "name": format!("{at:0>200}"), "kind": 12, "location": {
+                    "uri": "file:///a.fk",
+                    "range": { "start": spot(at, 0), "end": spot(2 * count - at, 0) },
+                }})
+            })
+            .collect();
+        let (mut taken, more) = symbols(&json!(flat), 5000);
+        assert!(!more);
+        let started = std::time::Instant::now();
+        outline(&mut taken);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+        let last = taken.last().unwrap();
+        assert_eq!(last.depth, MAX_SYMBOL_DEPTH);
+        assert!(last.container.len() <= MAX_SYMBOL_NAME);
+        assert_eq!(taken[1].container, taken[0].name);
+    }
+
+    #[test]
+    fn of_two_flat_symbols_starting_together_the_longer_holds_the_shorter() {
+        let info = |name: &str, end: u32| {
+            json!({ "name": name, "kind": 12, "location": {
+                "uri": "file:///a.fk",
+                "range": { "start": spot(1, 0), "end": spot(end, 0) },
+            }})
+        };
+        // The inner one first, as a server may send them.
+        let (mut taken, _) = symbols(&json!([info("inner", 2), info("outer", 9)]), 10);
+        outline(&mut taken);
+        let shown: Vec<(&str, u8)> = (taken.iter())
+            .map(|symbol| (symbol.name.as_str(), symbol.depth))
+            .collect();
+        assert_eq!(shown, [("outer", 0), ("inner", 1)]);
+    }
+
+    #[test]
+    fn a_flat_list_of_a_files_symbols_is_nested_by_their_ranges() {
+        let info = |name: &str, (start, end): (u32, u32)| {
+            json!({ "name": name, "kind": 12, "location": {
+                "uri": "file:///a.fk",
+                "range": { "start": spot(start, 0), "end": spot(end, 1) },
+            }})
+        };
+        // Out of order, as a server may send them.
+        let answer = json!([
+            info("method", (2, 2)),
+            info("Type", (1, 5)),
+            info("inner", (3, 4)),
+            info("after", (7, 7)),
+        ]);
+        let (mut taken, _) = symbols(&answer, 10);
+        outline(&mut taken);
+        let shown: Vec<(&str, u8, &str)> = (taken.iter())
+            .map(|symbol| {
+                (
+                    symbol.name.as_str(),
+                    symbol.depth,
+                    symbol.container.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Type", 0, ""),
+                ("method", 1, "Type"),
+                ("inner", 1, "Type"),
+                ("after", 0, ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rename_checked_first_is_answered_in_every_shape_lsp_has() {
+        let range = json!({ "start": spot(0, 1), "end": spot(0, 3) });
+        assert_eq!(prepared(&Value::Null), Prepared::Nothing);
+        assert_eq!(prepared(&range), Prepared::Range(at(0, 1), at(0, 3)));
+        assert_eq!(
+            prepared(&json!({ "range": range, "placeholder": "name" })),
+            Prepared::Placeholder("name".into())
+        );
+        assert_eq!(
+            prepared(&json!({ "defaultBehavior": true })),
+            Prepared::Window
+        );
+        assert_eq!(
+            prepared(&json!({ "defaultBehavior": false })),
+            Prepared::Nothing
+        );
+        // What makes no sense leaves it to the window, as without asking.
+        assert_eq!(prepared(&json!(7)), Prepared::Window);
     }
 
     #[test]

@@ -1225,6 +1225,8 @@ impl Facts for DeskFacts<'_> {
             finder::Kind::Boards => "boards",
             finder::Kind::Lessons => "lessons",
             finder::Kind::News => "news",
+            finder::Kind::Symbols => "symbols",
+            finder::Kind::ProjectSymbols => "projectsymbols",
         })
     }
 

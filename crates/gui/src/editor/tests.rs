@@ -1216,6 +1216,69 @@ fn grn_asks_in_the_bar_for_a_new_name_and_renames() {
     assert_eq!(setup.text(), "let value = 1;\nvalue + 1\n");
 }
 
+#[test]
+fn grn_asks_a_server_that_can_tell_first_and_starts_the_name_as_it_says() {
+    let mut setup = Setup::new("let value = 1;\nvalue + 1\n");
+    setup.copy.update(BufferUpdate::Features(ServerFeatures {
+        prepare_rename: true,
+        ..ServerFeatures::default()
+    }));
+    let label = |setup: &Setup| setup.editor.label(&setup.copy);
+    // Asked first, at the cursor, before anything's asked in the bar.
+    setup.keys("jgrn");
+    let (asked, at, query) = setup.queries[0];
+    assert_eq!(
+        (at, query),
+        ("let value = 1;\n".len(), Query::PrepareRename)
+    );
+    assert!(!label(&setup).starts_with("rename to"), "not yet");
+    // Started as the server says...
+    let renamable = |name: Option<&str>| Answer::Renamable {
+        name: name.map(str::to_owned),
+    };
+    setup.answer(asked, renamable(Some("the_value")));
+    assert_eq!(label(&setup), "rename to: the_value▏");
+    setup.keys("<CR>");
+    assert_eq!(setup.editor.status.as_deref(), Some("not renamed"));
+    // ...or, if it leaves that to the window, as the word there.
+    setup.keys("grn");
+    setup.answer(setup.queries[1].0, renamable(None));
+    assert_eq!(label(&setup), "rename to: value▏");
+    setup.keys("<Esc>");
+
+    // Nothing there, or what's wrong, is said at once, asking nothing.
+    setup.keys("grn");
+    setup.answer(setup.queries[2].0, Answer::Nothing);
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("there's nothing here to rename")
+    );
+    setup.keys("grn");
+    let why = "that can't be renamed";
+    setup.answer(setup.queries[3].0, Answer::Failed(why.into()));
+    assert_eq!(setup.editor.status.as_deref(), Some(why));
+    assert!(!label(&setup).starts_with("rename to"));
+    // An answer for where the cursor was asks nothing either.
+    setup.keys("grnl");
+    setup.answer(setup.queries[4].0, renamable(Some("x")));
+    assert!(!label(&setup).starts_with("rename to"));
+    // Nor one about a text changed meanwhile, the cursor where it was.
+    setup.keys("hgrn");
+    let end = setup.copy.text().len_bytes();
+    let update = setup.daemon.agent(end, "// more\n");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(update);
+    setup.editor.heard(&mut heard, true, &mut setup.copy);
+    setup.answer(setup.queries[5].0, renamable(Some("x")));
+    assert!(!label(&setup).starts_with("rename to"));
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some("the text changed meanwhile: not renamed")
+    );
+    assert!(setup.renames.is_empty());
+    assert_eq!(setup.text(), "let value = 1;\nvalue + 1\n// more\n");
+}
+
 fn code_action(title: &str, kind: &str, disabled: Option<&str>) -> CodeAction {
     CodeAction {
         title: title.into(),
@@ -1752,6 +1815,7 @@ impl Setup {
             completion: Some(vec!['.']),
             signature: Some(vec!['(', ',']),
             signature_again: vec![')'],
+            prepare_rename: false,
         }));
     }
 

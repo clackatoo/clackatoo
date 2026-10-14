@@ -74,6 +74,7 @@ mod rename;
 mod review;
 mod signs;
 mod stopping;
+mod symbols;
 mod tools;
 mod turn_undo;
 mod watched;

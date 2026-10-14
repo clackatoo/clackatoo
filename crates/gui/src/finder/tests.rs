@@ -353,3 +353,57 @@ fn the_preview_follows_what_is_picked() {
     let preview = finder.view((10, 60), Some((9, 40))).preview.unwrap();
     assert_eq!(preview.lines[0].text, "it isn't text");
 }
+
+#[test]
+fn a_symbols_name_is_plain_and_what_it_is_quieter_indented_as_deep_as_it_is() {
+    let symbol = |name: &str, kind, depth, container: &str| Symbol {
+        name: name.into(),
+        kind,
+        depth,
+        container: container.into(),
+        line: 2,
+        col: 4,
+        offset: Some(20),
+    };
+    let mut finder = Finder::new(Kind::Symbols, String::new(), Case::default());
+    finder.ask(3);
+    assert_eq!(finder.view((10, 60), None).count, "0 / 0…");
+    let symbols = vec![
+        symbol("Engine", 23, 0, ""),
+        symbol("start", 99, 1, "Engine"),
+    ];
+    // More than the daemon passed on: the count says so.
+    finder.answered(
+        "/p/a.rs",
+        Answer::Symbols {
+            symbols,
+            more: true,
+        },
+    );
+    assert_eq!(finder.asking(), None);
+    assert_eq!(finder.view((10, 60), None).count, "2 / 2+");
+    assert_eq!(
+        shown(&mut finder),
+        ["Engine  struct", "  start  symbol · Engine"]
+    );
+    let view = finder.view((10, 60), None);
+    let start = &view.rows[1];
+    assert_eq!(
+        start.runs,
+        [
+            ("  start".len(), Ink::Plain),
+            (start.text.len(), Ink::Muted)
+        ]
+    );
+    // What's typed is picked out, and the place is the file's, absolute.
+    type_text(&mut finder, "st");
+    assert_eq!(picked_out(&mut finder), "st");
+    assert_eq!(
+        named(&mut finder, NamedKey::Enter),
+        Outcome::Open(Opening {
+            path: "/p/a.rs".into(),
+            at: Some((2, 4)),
+            place: Place::Here,
+        })
+    );
+}

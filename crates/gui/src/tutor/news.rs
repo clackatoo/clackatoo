@@ -239,6 +239,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "finder",
         what: "K colours the code in what the language server says, in its language, and underlines what it's about",
     },
+    News {
+        id: "symbols",
+        date: "2026-10-14",
+        lesson: "finder",
+        what: "<Space>bs lists the file's symbols, <Space>ps finds the project's, and grn asks the language server first",
+    },
 ];
 
 impl News {

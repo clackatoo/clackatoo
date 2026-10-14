@@ -17,12 +17,12 @@ use clackatoo_protocol::{
     AgentTools, Answer, Author, Axis, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction,
     ChatNode, ChatState, ClientMessage, CompletionItem, Construct, Content, Diff, Done, Edit,
     Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
-    Found, FoundBuffer, FoundLine, GitMark, Item, Kind, Layout, Location, NewAgent, NewTerminal,
-    OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece,
-    ProviderModels, Query, Request, Response, Resume, Search, Selection, ServerFeatures,
-    ServerMessage, Side, Size, Span, SubagentStatus, TerminalId, TerminalStatus, TextChange, Tool,
-    ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles, TurnFilesState, View, ViewUpdate,
-    Workspaces,
+    Found, FoundBuffer, FoundLine, FoundSymbol, GitMark, Item, Kind, Layout, Location, NewAgent,
+    NewTerminal, OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch,
+    Piece, ProviderModels, Query, Request, Response, Resume, Search, Selection, ServerFeatures,
+    ServerMessage, Side, Size, Span, SubagentStatus, Symbol, TerminalId, TerminalStatus,
+    TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles, TurnFilesState, View,
+    ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -4802,8 +4802,63 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
     };
     assert!(markdown && said.contains("pub fn f() -> u32"), "{said}");
     rust_analyzer_completes_and_helps(&mut client, buffer, text);
+    rust_analyzer_lists_symbols_and_checks_a_rename(&mut client, buffer, text);
     let (version, text) = rust_analyzer_finds_renames_and_formats(&mut client, buffer, text);
     rust_analyzer_acts(&mut client, buffer, (version, &text));
+}
+
+/// The symbols rust-analyzer lists in `text`, buffer `buffer`, and what
+/// it says of renaming f where it's called.
+fn rust_analyzer_lists_symbols_and_checks_a_rename(
+    client: &mut Client,
+    buffer: BufferId,
+    text: &str,
+) {
+    client.query(buffer, 11, (0, 0), Query::Symbols).unwrap();
+    let (_, answer) = next_answer(client);
+    let Answer::Symbols {
+        symbols,
+        more: false,
+    } = answer
+    else {
+        panic!("{answer:?}");
+    };
+    let names: Vec<(&str, u8)> = (symbols.iter())
+        .filter(|symbol| symbol.depth == 0)
+        .map(|symbol| (symbol.name.as_str(), symbol.kind))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("f", 12),
+            ("g", 12),
+            ("h", 12),
+            ("k", 12),
+            ("m", 12),
+            ("n", 12)
+        ]
+    );
+    assert_eq!((symbols[0].line, symbols[0].col), (0, "pub fn ".len()));
+    let call = text.rfind("f()").unwrap();
+    client
+        .query(buffer, 12, (0, call), Query::PrepareRename)
+        .unwrap();
+    let (_, answer) = next_answer(client);
+    assert_eq!(
+        answer,
+        Answer::Renamable {
+            name: Some("f".into())
+        }
+    );
+    // Not a name: a keyword.
+    client
+        .query(buffer, 13, (0, 1), Query::PrepareRename)
+        .unwrap();
+    let (_, answer) = next_answer(client);
+    assert!(
+        matches!(answer, Answer::Failed(_) | Answer::Nothing),
+        "{answer:?}"
+    );
 }
 
 /// What rust-analyzer could do to m's `two`, in `text`, buffer `buffer` at
@@ -5504,6 +5559,7 @@ fn windows_are_told_what_a_server_does_as_you_type() {
         completion: Some(vec!['.']),
         signature: Some(vec!['(', ',']),
         signature_again: vec![')'],
+        prepare_rename: false,
     };
     // A window attaching once it's ready is told after the snapshot.
     let mut other = daemon.client();
@@ -5530,6 +5586,307 @@ fn windows_are_told_what_a_server_does_as_you_type() {
         if let BufferUpdate::Features(told) = next_buffer_update(&mut client) {
             assert_eq!(told, ServerFeatures::default());
             break;
+        }
+    }
+}
+
+/// A file with symbols for the fake language server: a type, `Engine`,
+/// with a method, `start`, and a function, `main`, after a character that
+/// takes two bytes but one column in UTF-16.
+const SYMBOLS: &str = "bad\ntype Engine {\n    fn start() {}\n}\né fn main() {}\n";
+
+/// A symbol, as the daemon passes them on.
+fn symbol(name: &str, kind: u8, container: &str, (line, col): (u64, usize)) -> Symbol {
+    Symbol {
+        name: name.into(),
+        kind,
+        depth: u8::from(!container.is_empty()),
+        container: container.into(),
+        line,
+        col,
+        offset: None,
+    }
+}
+
+#[test]
+fn a_files_symbols_are_listed_as_its_outline_from_a_tree_or_a_flat_list() {
+    // Counting columns in bytes and in UTF-16, which "é" tells apart; and
+    // as a flat list, nested by where each starts and ends.
+    for flags in [&[][..], &["--utf16"], &["--flat-symbols", "--utf16"]] {
+        let daemon = with_fake_language_server(|_| flags.iter().map(|&flag| flag.into()).collect());
+        let (mut client, buffer) = fake_project(&daemon, &[("a.fk", SYMBOLS)]);
+        client.query(buffer, 1, (0, 0), Query::Symbols).unwrap();
+        let (
+            id,
+            Answer::Symbols {
+                symbols,
+                more: false,
+            },
+        ) = next_answer(&mut client)
+        else {
+            panic!("not symbols");
+        };
+        assert_eq!(id, 1);
+        let flat = flags.contains(&"--flat-symbols");
+        // A tree says where each name is; a flat list, where each starts.
+        let name_at = |line: &str, keyword: &str| {
+            if flat {
+                line.find(keyword).unwrap()
+            } else {
+                line.find(keyword).unwrap() + keyword.len()
+            }
+        };
+        let place = |line: u64, col: usize| {
+            let offset: usize = SYMBOLS
+                .split_inclusive('\n')
+                .take(usize::try_from(line).unwrap())
+                .map(str::len)
+                .sum();
+            ((line, col), offset + col)
+        };
+        let expected: Vec<Symbol> = [
+            (
+                "Engine",
+                23,
+                "",
+                place(1, name_at("type Engine {", "type ")),
+            ),
+            (
+                "start",
+                6,
+                "Engine",
+                place(2, name_at("    fn start() {}", "fn ")),
+            ),
+            ("main", 12, "", place(4, name_at("é fn main() {}", "fn "))),
+        ]
+        .into_iter()
+        .map(|(name, kind, container, (at, offset))| Symbol {
+            offset: Some(offset),
+            ..symbol(name, kind, container, at)
+        })
+        .collect();
+        assert_eq!(symbols, expected, "{flags:?}");
+    }
+
+    // A server that lists none says why.
+    let daemon = with_fake_language_server(|_| vec!["--bare".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", SYMBOLS)]);
+    client.query(buffer, 1, (0, 0), Query::Symbols).unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (
+            1,
+            Answer::Failed("its language server doesn't list symbols".into())
+        )
+    );
+}
+
+#[test]
+fn a_files_symbols_move_with_edits_made_while_the_server_worked() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        let log = dir.join("log").display().to_string();
+        vec!["--hold-symbols".to_owned(), gate, "--log".to_owned(), log]
+    });
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", SYMBOLS)]);
+    let dir = daemon.dir.path();
+    client.query(buffer, 1, (0, 0), Query::Symbols).unwrap();
+    wait_for_server_log(&dir.join("log"), |line| line == "symbols of a file");
+    // While the server works, another window puts a line in at the top.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    send_change(
+        &mut other,
+        buffer,
+        0,
+        insert(SYMBOLS.len(), 0, "// one\n", 0),
+    );
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    std::fs::write(dir.join("gate"), "").unwrap();
+    let (_, (_, answer)) = updates_to_answer(&mut client);
+    let Answer::Symbols {
+        symbols,
+        more: false,
+    } = answer
+    else {
+        panic!("{answer:?}");
+    };
+    // Counted in the text with the line put in.
+    let engine = &symbols[0];
+    assert_eq!((engine.line, engine.col), (2, "type ".len()));
+    assert_eq!(engine.offset, Some("// one\nbad\ntype ".len()));
+}
+
+#[test]
+fn a_rename_is_checked_first_with_a_server_that_can() {
+    let checked = |how: &str, at: usize| {
+        let daemon = with_fake_language_server(|_| {
+            vec!["--prepare".to_owned(), how.to_owned(), "--utf16".to_owned()]
+        });
+        let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\né name = 1\n")]);
+        client
+            .query(buffer, 1, (0, at), Query::PrepareRename)
+            .unwrap();
+        next_answer(&mut client).1
+    };
+    let on_name = "bad\né na".len();
+    let renamable = |name: Option<&str>| Answer::Renamable {
+        name: name.map(str::to_owned),
+    };
+    // The text of the range it gives, counted in UTF-16 after "é".
+    assert_eq!(checked("range", on_name), renamable(Some("name")));
+    // Its placeholder, before the range's text.
+    assert_eq!(checked("placeholder", on_name), renamable(Some("NAME")));
+    // Left to the window.
+    assert_eq!(checked("default", on_name), renamable(None));
+    // Nothing there to rename.
+    assert_eq!(checked("range", "bad\né name ".len()), Answer::Nothing);
+    // An error, said as the server says it.
+    assert_eq!(
+        checked("error", on_name),
+        Answer::Failed("that can't be renamed".into())
+    );
+
+    // Windows are told it checks them, only if it does.
+    let told = |args: Vec<String>| {
+        let daemon = with_fake_language_server(|_| args);
+        let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+        attach_buffer(&mut client, buffer);
+        loop {
+            if let BufferUpdate::Features(told) = next_buffer_update(&mut client) {
+                return told.prepare_rename;
+            }
+        }
+    };
+    assert!(told(vec!["--prepare".into(), "range".into()]));
+    assert!(!told(Vec::new()));
+}
+
+/// A project for the fake language server, run with the arguments `args`
+/// makes, as [`fake_project`] makes, with `defs.fk` beside `a.fk`, not
+/// open: the daemon, a client, and the pane showing `a.fk`.
+fn symbols_project(args: impl FnOnce(&Path) -> Vec<String>) -> (TestDaemon, Client, PaneId) {
+    let daemon = with_fake_language_server(args);
+    let dir = daemon.dir.path();
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    std::fs::write(dir.join("app/a.fk"), SYMBOLS).unwrap();
+    std::fs::write(dir.join("app/defs.fk"), "// defs\né fn start_all() {}\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    next_diagnostics(&mut client);
+    (daemon, client, pane)
+}
+
+/// The symbols a search found, and where it looked.
+fn symbols_found(found: &[Found]) -> (Option<String>, Vec<FoundSymbol>) {
+    let mut root = None;
+    let mut symbols = Vec::new();
+    for found in found {
+        match found {
+            Found::Root { path, .. } => root = Some(path.clone()),
+            Found::Symbols(batch) => symbols.extend(batch.iter().cloned()),
+            other => panic!("not a symbol: {other:?}"),
+        }
+    }
+    (root, symbols)
+}
+
+#[test]
+fn a_projects_symbols_are_found_in_files_open_and_read_from_disk() {
+    let (daemon, mut client, pane) = symbols_project(|_| vec!["--utf16".to_owned()]);
+    let search = |query: &str| Search::Symbols {
+        query: query.into(),
+    };
+    client.find(1, Some(pane), search("START")).unwrap();
+    let (shown, done) = found(&mut client, 1);
+    assert_eq!(done, Done::All);
+    let (root, symbols) = symbols_found(&shown);
+    let app = daemon.dir.path().join("app").display().to_string();
+    assert_eq!(root, Some(app));
+    // A project's are flat: their containers as the server names them.
+    let found_symbol = |path: &str, symbol| FoundSymbol {
+        path: path.into(),
+        symbol: Symbol { depth: 0, ..symbol },
+    };
+    assert_eq!(
+        symbols,
+        [
+            found_symbol("a.fk", symbol("start", 6, "Engine", (2, "    fn ".len()))),
+            // From disk, its column counted in UTF-16 after "é".
+            found_symbol("defs.fk", symbol("start_all", 12, "", (1, "é fn ".len()))),
+        ]
+    );
+
+    // From a pane with no file, there's no server to ask.
+    client
+        .split_pane(pane, Side::Right, new_pane(&["sleep", "100"]))
+        .unwrap();
+    let terminal = PaneId(pane.0 + 1);
+    client.find(2, Some(terminal), search("start")).unwrap();
+    let (_, done) = found(&mut client, 2);
+    assert!(matches!(done, Done::Failed(why) if why.contains("no file")));
+
+    // A server that finds none says so.
+    let (_daemon, mut client, pane) = symbols_project(|_| vec!["--bare".to_owned()]);
+    client.find(3, Some(pane), search("start")).unwrap();
+    assert_eq!(
+        found(&mut client, 3).1,
+        Done::Failed("its language server doesn't find symbols in the project".into())
+    );
+}
+
+#[test]
+fn a_search_for_symbols_the_server_was_busy_with_is_asked_once_more() {
+    // Saying, the first time, that the text changed while it worked.
+    let (_daemon, mut client, pane) = symbols_project(|_| vec!["--modified-once".to_owned()]);
+    let asked = Instant::now();
+    let search = Search::Symbols {
+        query: "start".into(),
+    };
+    client.find(1, Some(pane), search).unwrap();
+    let (found, done) = found(&mut client, 1);
+    assert_eq!(done, Done::All);
+    assert!(asked.elapsed() >= Duration::from_millis(80), "not at once");
+    assert_eq!(symbols_found(&found).1.len(), 2);
+}
+
+#[test]
+fn a_search_for_symbols_stopped_is_cancelled_at_the_server() {
+    let (daemon, mut client, pane) = symbols_project(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        let log = dir.join("log").display().to_string();
+        vec!["--queue-symbols".to_owned(), gate, "--log".to_owned(), log]
+    });
+    let dir = daemon.dir.path();
+    let search = |query: &str| Search::Symbols {
+        query: query.into(),
+    };
+    client.find(1, Some(pane), search("s")).unwrap();
+    wait_for_server_log(&dir.join("log"), |line| line == "symbols s");
+    // As a window asks again as more is typed.
+    client.stop_finding(1).unwrap();
+    client.find(2, Some(pane), search("st")).unwrap();
+    let said = wait_for_server_log(&dir.join("log"), |line| line == "symbols st");
+    assert!(
+        said.lines()
+            .any(|line| line.starts_with("cancelled") && line.ends_with("workspace/symbol")),
+        "{said}"
+    );
+    std::fs::write(dir.join("gate"), "").unwrap();
+    // Only the second is answered, though the server answered both.
+    let (found, done) = found(&mut client, 2);
+    assert_eq!(done, Done::All);
+    assert_eq!(symbols_found(&found).1.len(), 2);
+    client.find(3, Some(pane), Search::Buffers).unwrap();
+    loop {
+        match client.next_event().unwrap() {
+            Event::Found { id: 1, found } => panic!("the first search went on: {found:?}"),
+            Event::Found { id: 3, .. } => break,
+            _ => {}
         }
     }
 }

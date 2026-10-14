@@ -26,7 +26,7 @@ use clackatoo_text::{
 };
 
 use crate::frame::{self, FrameDecoder, FrameError};
-use crate::wire::{EXITED, FALLBACKS, HOVER, PHONE_TERMINALS};
+use crate::wire::{EXITED, FALLBACKS, HOVER, PHONE_TERMINALS, SYMBOLS};
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
     Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
@@ -43,10 +43,10 @@ use crate::{
     Answer, BoardAction, BoardAuthor, BoardEntry, BoardLink, BoardScope, BoardSummary, BoardUpdate,
     BrowserFrame, BrowserStatus, BrowserUpdate, ChatChoices, ChatSummary, CodeAction, CommentPlace,
     CompletionItem, Device, Done, Entry, EntryKind, Expect, FileLocation, FileOp, FileOpError,
-    FileStamp, FilesAction, FilesUpdate, Found, FoundLine, GitMark, Hunks, Made, OpenBoard,
-    OpenFile, OpenFiles, PairingAsk, PairingState, PostKind, Query, ReviewAction, ReviewChat,
-    ReviewComment, ReviewFile, ReviewHunk, ReviewList, ReviewScope, Search, ServerFeatures,
-    TextChange, Trigger, Udp,
+    FileStamp, FilesAction, FilesUpdate, Found, FoundLine, FoundSymbol, GitMark, Hunks, Made,
+    OpenBoard, OpenFile, OpenFiles, PairingAsk, PairingState, PostKind, Query, ReviewAction,
+    ReviewChat, ReviewComment, ReviewFile, ReviewHunk, ReviewList, ReviewScope, Search,
+    ServerFeatures, Symbol, TextChange, Trigger, Udp,
 };
 
 /// One sample: a message either side sends.
@@ -680,7 +680,85 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })),
         ),
     ]);
+    samples.extend(symbols(buffer).into_iter().map(|sample| (SYMBOLS, sample)));
     samples
+}
+
+/// Samples of protocol 77: a file's symbols, and a project's, found; and a
+/// rename checked before the name's asked for.
+fn symbols(buffer: BufferId) -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let query = |id, query| {
+        Client(ClientMessage::Query {
+            buffer,
+            id,
+            version: 6,
+            at: 2,
+            query,
+        })
+    };
+    let answer = |id, answer| {
+        Server(ServerMessage::Event(Event::Buffer {
+            buffer,
+            update: BufferUpdate::Answer {
+                id,
+                version: 6,
+                answer,
+            },
+        }))
+    };
+    let symbol = Symbol {
+        name: "start".into(),
+        kind: 6,
+        depth: 1,
+        container: "Engine".into(),
+        line: 3,
+        col: 7,
+        offset: Some(40),
+    };
+    vec![
+        Server(ServerMessage::Event(Event::Buffer {
+            buffer,
+            update: BufferUpdate::Features(ServerFeatures {
+                completion: Some(vec!['.']),
+                signature: Some(vec!['(']),
+                signature_again: vec![','],
+                prepare_rename: true,
+            }),
+        })),
+        query(8, Query::Symbols),
+        answer(
+            8,
+            Answer::Symbols {
+                symbols: vec![symbol.clone()],
+                more: true,
+            },
+        ),
+        query(9, Query::PrepareRename),
+        answer(
+            9,
+            Answer::Renamable {
+                name: Some("start".into()),
+            },
+        ),
+        Client(ClientMessage::Find {
+            id: 10,
+            pane: Some(PaneId(2)),
+            search: Search::Symbols {
+                query: "sta".into(),
+            },
+        }),
+        Server(ServerMessage::Event(Event::Found {
+            id: 10,
+            found: Found::Symbols(vec![FoundSymbol {
+                path: "src/engine.rs".into(),
+                symbol: Symbol {
+                    offset: None,
+                    ..symbol
+                },
+            }]),
+        })),
+    ]
 }
 
 /// More samples of protocol 72: the rest of what a window and the daemon
@@ -894,6 +972,8 @@ fn more() -> Vec<Sample> {
             completion: Some(vec!['.']),
             signature: Some(vec!['(']),
             signature_again: vec![','],
+            // Not on the wire before protocol 77.
+            prepare_rename: false,
         })),
         buffer_update(BufferUpdate::Offer {
             language: "rust".into(),

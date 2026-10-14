@@ -435,7 +435,8 @@ impl Desk {
         if self.grep_at.is_some() {
             self.grep_now();
         }
-        (self.finder.as_ref()).is_some_and(|finder| finder.search().is_some())
+        (self.finder.as_ref())
+            .is_some_and(|finder| finder.search().is_some() || finder.asking().is_some())
     }
 
     /// Whether a macro being typed waits for something, so keys pressed

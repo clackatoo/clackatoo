@@ -1,14 +1,16 @@
 //! The finder: a picker over the panes, as Telescope's and fzf's are, for
 //! the files in a project, the lines in them a pattern matches, the files
-//! open, and the places a language server's answer gives; and for the
-//! tutor's lessons, and what's new, which the window lists itself.
+//! open, the places a language server's answer gives, and the symbols in a
+//! file or a project; and for the tutor's lessons, and what's new, which
+//! the window lists itself.
 //!
 //! The daemon owns the files, so it lists and greps them, and sends what it
 //! finds a batch at a time (see `clackatoo_protocol::Found`). The finder
 //! matches what's typed against what's come (see [`rank`]), except for a
-//! grep, whose pattern goes to the daemon instead, and keeps what's picked
-//! and the preview beside it. It does no I/O and draws nothing: the desk
-//! talks to the daemon for it, and [`view`] lays it out.
+//! grep, whose pattern goes to the daemon instead, and a search of the
+//! project's symbols, which its language server matches; and keeps what's
+//! picked and the preview beside it. It does no I/O and draws nothing: the
+//! desk talks to the daemon for it, and [`view`] lays it out.
 //!
 //! | Key | Does |
 //! |---|---|
@@ -24,7 +26,11 @@
 pub(crate) mod rank;
 pub(crate) mod view;
 
-use clackatoo_protocol::{Done, FileLocation, Found, FoundBuffer, FoundLine, Side};
+use std::fmt::Write as _;
+
+use clackatoo_protocol::{
+    Answer, Done, FileLocation, Found, FoundBuffer, FoundLine, FoundSymbol, Side, Symbol,
+};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::command::Place;
@@ -56,6 +62,12 @@ pub(crate) enum Kind {
     Lessons,
     /// What's new, each line going to the lesson that teaches it.
     News,
+    /// The symbols in the focused editor's file, as its language server
+    /// lists them, in the order of its outline.
+    Symbols,
+    /// The symbols in the project whose names match what's typed, as the
+    /// focused editor's language server finds them.
+    ProjectSymbols,
 }
 
 impl Kind {
@@ -70,7 +82,16 @@ impl Kind {
             Self::Boards => "Boards",
             Self::Lessons => "Lessons",
             Self::News => "What's new",
+            Self::Symbols => "Symbols",
+            Self::ProjectSymbols => "Project symbols",
         }
+    }
+
+    /// Whether what's typed goes to the daemon to look for, rather than
+    /// narrowing down what's come: a grep's pattern, or the name of a
+    /// project's symbol, which its language server matches as it likes.
+    fn searched(self) -> bool {
+        matches!(self, Self::Grep | Self::ProjectSymbols)
     }
 
     /// Whether the window lists it itself, previews and all, with no help
@@ -96,6 +117,10 @@ struct Entry {
     /// Byte ranges of its text to pick out, beside what's typed matches:
     /// where a grep's pattern matched.
     matched: Vec<(usize, usize)>,
+    /// For a symbol, how deep it is in its file's outline, which it's
+    /// indented by, and how much of its text is its name, which is drawn
+    /// plainly and the rest quieter.
+    symbol: Option<(u8, usize)>,
 }
 
 /// A file to open, and where.
@@ -150,6 +175,9 @@ pub(crate) struct Finder {
     query: String,
     /// The daemon's search filling the list, while it goes on.
     search: Option<u64>,
+    /// The query to a file's language server whose answer fills the list,
+    /// until it comes.
+    asking: Option<u64>,
     /// How the last search finished, once it has.
     done: Option<Done>,
     /// Where it looks, made absolute, and as people write it.
@@ -189,13 +217,14 @@ impl Finder {
         let mut ranking = Ranking::new(case, matches!(kind, Kind::Files | Kind::Buffers));
         let items = Items::default();
         // A grep's query is the daemon's to look for.
-        if kind != Kind::Grep {
+        if !kind.searched() {
             ranking.set_query(&query, &items);
         }
         Self {
             kind,
             query,
             search: None,
+            asking: None,
             done: None,
             root: None,
             items,
@@ -220,6 +249,7 @@ impl Finder {
                 at: None,
                 path_len: item.name_len,
                 matched: Vec::new(),
+                symbol: None,
             });
             finder.local_previews.push(item.preview);
         }
@@ -279,6 +309,37 @@ impl Finder {
         self.top = 0;
     }
 
+    /// The query to a file's language server whose answer fills the list,
+    /// until it comes.
+    pub(crate) fn asking(&self) -> Option<u64> {
+        self.asking
+    }
+
+    /// Waits for the answer to the query numbered `id`, to a file's
+    /// language server, to fill the list.
+    pub(crate) fn ask(&mut self, id: u64) {
+        self.asking = Some(id);
+        self.done = None;
+    }
+
+    /// Takes in the answer to the query it waited for, the symbols in the
+    /// file at `path`, made absolute: or why there are none. A list cut
+    /// short says so, as a search's does.
+    pub(crate) fn answered(&mut self, path: &str, answer: Answer) {
+        self.asking = None;
+        self.done = Some(match answer {
+            Answer::Symbols { symbols, more } => {
+                for symbol in &symbols {
+                    self.push_symbol(path, symbol, false);
+                }
+                self.ranking.add(&self.items);
+                if more { Done::CutShort } else { Done::All }
+            }
+            Answer::Failed(why) => Done::Failed(why),
+            _ => Done::All,
+        });
+    }
+
     /// Ends the list where it is, with no search filling it, as for a grep
     /// of nothing.
     pub(crate) fn not_searching(&mut self) {
@@ -299,6 +360,7 @@ impl Finder {
                         path,
                         at: None,
                         matched: Vec::new(),
+                        symbol: None,
                     });
                 }
             }
@@ -327,6 +389,7 @@ impl Finder {
                         path,
                         at: None,
                         matched: Vec::new(),
+                        symbol: None,
                     });
                 }
             }
@@ -347,7 +410,13 @@ impl Finder {
                         at: None,
                         path_len: 0,
                         matched: Vec::new(),
+                        symbol: None,
                     });
+                }
+            }
+            Found::Symbols(symbols) => {
+                for FoundSymbol { path, symbol } in &symbols {
+                    self.push_symbol(path, symbol, true);
                 }
             }
             Found::Preview { .. } => {}
@@ -386,6 +455,32 @@ impl Finder {
             at: Some((line, col)),
             path_len: prefix.len(),
             matched,
+            symbol: None,
+        });
+    }
+
+    /// Adds `symbol`, in the file at `path`: its name, then, quieter, what
+    /// it is and what it's inside, and if `with_path`, its file and line.
+    fn push_symbol(&mut self, path: &str, symbol: &Symbol, with_path: bool) {
+        let mut text = symbol.name.clone();
+        let name_len = text.len();
+        text.push_str("  ");
+        text.push_str(symbol_kind(symbol.kind));
+        if !symbol.container.is_empty() {
+            text.push_str(" · ");
+            text.push_str(&symbol.container);
+        }
+        if with_path {
+            let _ = write!(text, "  {path}:{}", symbol.line + 1);
+        }
+        self.items.push(&text);
+        self.entries.push(Entry {
+            path: path.to_owned(),
+            at: Some((symbol.line, symbol.col)),
+            path_len: 0,
+            matched: Vec::new(),
+            // A project's are in no outline.
+            symbol: Some((if with_path { 0 } else { symbol.depth }, name_len)),
         });
     }
 
@@ -465,7 +560,7 @@ impl Finder {
     fn typed(&mut self) -> Outcome {
         self.selected = 0;
         self.top = 0;
-        if self.kind == Kind::Grep {
+        if self.kind.searched() {
             return Outcome::Search;
         }
         self.ranking.set_query(&self.query, &self.items);
@@ -602,7 +697,7 @@ impl Finder {
 
     /// How many things match, of how many, or why there are none.
     fn count(&self) -> String {
-        let more = match (&self.done, self.search) {
+        let more = match (&self.done, self.search.or(self.asking)) {
             (Some(Done::Failed(why)), _) => return why.clone(),
             (Some(Done::CutShort), _) => "+",
             (_, Some(_)) => "…",
@@ -617,6 +712,9 @@ impl Finder {
         let entry = &self.entries[index];
         let text = self.items.get(index);
         let accents = self.ranking.matched_chars(text);
+        if let Some((depth, name_len)) = entry.symbol {
+            return Some(symbol_row(text, &accents, (depth, name_len), cols));
+        }
         // A file's directory quieter than its name; a line's file and
         // number quieter than its text.
         let quiet_to = if entry.at.is_some() {
@@ -669,6 +767,63 @@ impl Finder {
             Err(why) => PreviewView::note(why.clone()),
             Ok((first, lines)) => PreviewView::new(*first, lines, line, (rows, cols)),
         })
+    }
+}
+
+/// The row for a symbol whose text is `text`, `cols` cells wide, its
+/// characters numbered in `accents` picked out: indented two cells for
+/// each of `depth`, its first `name_len` bytes, its name, drawn plainly,
+/// and the rest quieter.
+fn symbol_row(text: &str, accents: &[u32], (depth, name_len): (u8, usize), cols: usize) -> Row {
+    let indent = "  ".repeat(usize::from(depth).min(cols / 4));
+    let shown = format!("{indent}{text}");
+    let inks: Vec<Ink> = (indent.chars().map(|_| Ink::Plain))
+        .chain(
+            (text.char_indices().zip(0_u32..)).map(|((at, _), char_index)| {
+                if accents.binary_search(&char_index).is_ok() {
+                    Ink::Accent
+                } else if at < name_len {
+                    Ink::Plain
+                } else {
+                    Ink::Muted
+                }
+            }),
+        )
+        .collect();
+    view::fit(&shown, &inks, cols, false)
+}
+
+/// What a symbol is, by its kind as LSP numbers them (`SymbolKind`), as
+/// the finder says it.
+fn symbol_kind(kind: u8) -> &'static str {
+    match kind {
+        1 => "file",
+        2 => "module",
+        3 => "namespace",
+        4 => "package",
+        5 => "class",
+        6 => "method",
+        7 => "property",
+        8 => "field",
+        9 => "constructor",
+        10 => "enum",
+        11 => "interface",
+        12 => "function",
+        13 => "variable",
+        14 => "constant",
+        15 => "string",
+        16 => "number",
+        17 => "boolean",
+        18 => "array",
+        19 => "object",
+        20 => "key",
+        21 => "null",
+        22 => "enum member",
+        23 => "struct",
+        24 => "event",
+        25 => "operator",
+        26 => "type parameter",
+        _ => "symbol",
     }
 }
 

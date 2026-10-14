@@ -5836,6 +5836,228 @@ mod tests {
         );
     }
 
+    /// A symbol for the finder, at the start of `line`, `col` bytes in.
+    fn symbol(
+        name: &str,
+        kind: u8,
+        container: &str,
+        (line, col): (u64, usize),
+    ) -> clackatoo_protocol::Symbol {
+        clackatoo_protocol::Symbol {
+            name: name.into(),
+            kind,
+            depth: u8::from(!container.is_empty()),
+            container: container.into(),
+            line,
+            col,
+            offset: None,
+        }
+    }
+
+    #[test]
+    fn space_b_s_lists_the_files_symbols_and_goes_to_the_one_picked() {
+        use clackatoo_protocol::{Answer, BufferUpdate, Query};
+        let text = "use a;\ntype Engine {\n    fn start() {}\n}\nfn main() {}\n";
+        let mut desk = editing("/p/a.rs", text);
+        type_keys(&mut desk, " bs");
+        let id = (desk.take_outbox().into_iter())
+            .find_map(|message| match message {
+                ClientMessage::Query {
+                    id,
+                    query: Query::Symbols,
+                    ..
+                } => Some(id),
+                _ => None,
+            })
+            .expect("the symbols asked for");
+        // Open at once, waiting for them.
+        let view = desk.finder_view((10, 60), None).expect("the finder");
+        assert_eq!((view.title, view.count.as_str()), ("Symbols", "0 / 0…"));
+        let symbols = vec![
+            symbol("Engine", 23, "", (1, 5)),
+            symbol("start", 6, "Engine", (2, 7)),
+            symbol("main", 12, "", (4, 3)),
+        ];
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Answer {
+                id,
+                version: 0,
+                answer: Answer::Symbols {
+                    symbols,
+                    more: false,
+                },
+            },
+        );
+        // In the file's outline, indented as deep as each is.
+        assert_eq!(
+            finder_rows(&mut desk),
+            [
+                "Engine  struct",
+                "  start  method · Engine",
+                "main  function"
+            ]
+        );
+        // Matched as other lists are, by what each says.
+        type_keys(&mut desk, "eng");
+        assert_eq!(
+            finder_rows(&mut desk),
+            ["Engine  struct", "  start  method · Engine"]
+        );
+        ctrl(&mut desk, "n");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert!(desk.finder_view((10, 60), None).is_none(), "closed");
+        let note = |desk: &mut Desk| {
+            let Status::Tabs { note, .. } = desk.status() else {
+                panic!("the tabs");
+            };
+            note.unwrap_or_default()
+        };
+        assert!(
+            note(&mut desk).starts_with("a.rs  3:8"),
+            "{}",
+            note(&mut desk)
+        );
+        // A jump, so Ctrl+O comes back.
+        ctrl(&mut desk, "o");
+        assert!(
+            note(&mut desk).starts_with("a.rs  1:1"),
+            "{}",
+            note(&mut desk)
+        );
+    }
+
+    #[test]
+    fn space_b_s_says_why_a_file_has_no_symbols_listed() {
+        use clackatoo_protocol::{Answer, BufferUpdate};
+        let mut desk = editing("/p/a.rs", "use a;\n");
+        // What went wrong is said where the count goes.
+        type_keys(&mut desk, " bs");
+        let id = (desk.take_outbox().into_iter())
+            .find_map(|message| match message {
+                ClientMessage::Query { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("the symbols asked for");
+        let why = "its language server doesn't list symbols";
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Answer {
+                id,
+                version: 0,
+                answer: Answer::Failed(why.into()),
+            },
+        );
+        assert_eq!(desk.finder_view((10, 60), None).unwrap().count, why);
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Escape),
+            None,
+            Modifiers::default(),
+        );
+
+        // A daemon too old to list them says so, and how to update it.
+        desk.daemon_is(clackatoo_protocol::wire::SYMBOLS - 1, None);
+        type_keys(&mut desk, " bs");
+        assert!(desk.finder_view((10, 60), None).is_none());
+        assert!(
+            (desk.message.as_deref()).is_some_and(|message| message
+                .starts_with("listing a file's symbols needs a newer clackatoo daemon")),
+            "{:?}",
+            desk.message
+        );
+        assert!(desk.take_outbox().is_empty(), "nothing asked");
+
+        // And a pane with no file has none.
+        let mut desk = three_tabs();
+        snapshot(&mut desk, 1);
+        normal_mode(&mut desk);
+        type_keys(&mut desk, " bs");
+        assert_eq!(
+            desk.message.as_deref(),
+            Some("this pane has no file to list the symbols of")
+        );
+    }
+
+    #[test]
+    fn space_p_s_finds_the_projects_symbols_as_typed_and_opens_the_one_picked() {
+        use clackatoo_protocol::{Done, Found, FoundSymbol, OpenFile, Search};
+        let mut desk = editing("/p/src/main.rs", "fn main() {}\n");
+        type_keys(&mut desk, " ps");
+        let (first, search) = search_in(&finds(&mut desk));
+        // Asked at once, for what a server lists for nothing typed.
+        assert_eq!(
+            search,
+            Search::Symbols {
+                query: String::new()
+            }
+        );
+        // Typing asks again, once it pauses, stopping the search before.
+        type_keys(&mut desk, "eng");
+        assert!(finds(&mut desk).is_empty(), "not yet");
+        desk.grep_if_due(std::time::Instant::now() + finding::GREP_WAIT);
+        let asked = finds(&mut desk);
+        assert!(asked.contains(&ClientMessage::StopFinding { id: first }));
+        let (id, search) = search_in(&asked);
+        assert_eq!(
+            search,
+            Search::Symbols {
+                query: "eng".into()
+            }
+        );
+        let found_symbol = |path: &str, symbol| FoundSymbol {
+            path: path.into(),
+            symbol,
+        };
+        for found in [
+            Found::Root {
+                path: "/p".into(),
+                name: "~/p".into(),
+            },
+            Found::Symbols(vec![
+                found_symbol("src/engine.rs", symbol("Engine", 23, "", (3, 11))),
+                found_symbol("src/engine.rs", symbol("start", 6, "Engine", (9, 7))),
+            ]),
+            Found::Done(Done::All),
+        ] {
+            desk.found(id, found);
+        }
+        // As the server ranks them, which matched them as it likes: not
+        // narrowed down again.
+        assert_eq!(
+            finder_rows(&mut desk),
+            [
+                "Engine  struct  src/engine.rs:4",
+                "start  method · Engine  src/engine.rs:10"
+            ]
+        );
+        assert_eq!(
+            desk.finder_view((10, 60), None).unwrap().title,
+            "Project symbols"
+        );
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::OpenHere {
+                pane: PaneId(1),
+                file: OpenFile {
+                    path: "/p/src/engine.rs".into(),
+                    cwd: None
+                },
+            }]
+        );
+    }
+
     #[test]
     fn keys_a_binding_types_reach_the_windows_keys_and_a_key_ending_a_prefix_is_looked_up() {
         // `:w<CR>` typed by a binding opens the command line and writes.

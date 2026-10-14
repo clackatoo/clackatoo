@@ -305,6 +305,15 @@ pub struct ServerFeatures {
     pub signature: Option<Vec<char>>,
     /// While it's helping, these ask again too, as `)` does.
     pub signature_again: Vec<char>,
+    /// It says whether what's at a place can be renamed, and what to
+    /// start the new name from, before it's asked to rename it (see
+    /// [`Query::PrepareRename`]), so `grn` asks it first. `false` from a
+    /// daemon older than protocol 77.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::SYMBOLS }, _>",
+        deserialize_with = "wire::since::<{ wire::SYMBOLS }, _, _>"
+    )]
+    pub prepare_rename: bool,
 }
 
 /// What a client asks about a place in a buffer: most questions are for
@@ -407,6 +416,18 @@ pub enum Query {
         /// The columns tabs stop at multiples of (`tabstop`).
         tabstop: u32,
     },
+    /// The symbols in the file, such as its functions, its types and
+    /// their fields, as `<Space>bs` lists them. Answered with
+    /// [`Answer::Symbols`]. The place isn't looked at. Only for a daemon
+    /// of protocol 77 or later.
+    Symbols,
+    /// Whether what's at the place can be renamed, and what the new name
+    /// should start as, as `grn` asks before it asks for the name, of a
+    /// server that says (see [`ServerFeatures::prepare_rename`]).
+    /// Answered with [`Answer::Renamable`]; with [`Answer::Nothing`] if
+    /// there's nothing there to rename; or with [`Answer::Failed`],
+    /// saying why not. Only for a daemon of protocol 77 or later.
+    PrepareRename,
 }
 
 impl Query {
@@ -541,6 +562,26 @@ pub enum Answer {
     /// the hunk's lines are in git's index, and the buffer's hunks, sent
     /// before this, no longer have it.
     Staged,
+    /// The symbols in the file, as [`Query::Symbols`] asks, in the order
+    /// of its outline: each before those inside it, as many as the daemon
+    /// passes on. Only from a daemon of protocol 77 or later.
+    Symbols {
+        /// The symbols.
+        symbols: Vec<Symbol>,
+        /// Whether the server said more than these, which the daemon left
+        /// out.
+        more: bool,
+    },
+    /// What's at the place can be renamed, as [`Query::PrepareRename`]
+    /// asks, and the new name is to start as `name`: what the server
+    /// suggests, or the text it would rename. Only from a daemon of
+    /// protocol 77 or later.
+    Renamable {
+        /// What the new name starts as, on one line; or `None` if the
+        /// server leaves that to the window, which starts it as the word
+        /// there.
+        name: Option<String>,
+    },
 }
 
 /// Something a language server could do to some text, such as fix what's
@@ -619,4 +660,31 @@ pub struct FileLocation {
     /// The line's text, without its end, cut short if it's long, for a
     /// list of places to pick from.
     pub text: String,
+}
+
+/// Something a language server names in a file, such as a function, a
+/// type or one of its fields, as [`Query::Symbols`] and
+/// [`Search::Symbols`](crate::Search::Symbols) find them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Symbol {
+    /// Its name, on one line, cut short if it's long.
+    pub name: String,
+    /// What it is, as LSP numbers kinds (`SymbolKind`): 5 is a class, 6 a
+    /// method, 12 a function, 23 a struct. 0 if the server says nothing
+    /// the daemon knows.
+    pub kind: u8,
+    /// How deep it is in the file's outline: 0 for one at the top, 1 for
+    /// one inside one of those, and so on.
+    pub depth: u8,
+    /// What it's inside, such as a method's type, as the server names it,
+    /// the outermost first. Empty if the server doesn't say.
+    pub container: String,
+    /// Its line, from 0: where its name is, if the server says.
+    pub line: u64,
+    /// Its column, in bytes from the line's start.
+    pub col: usize,
+    /// For one in the buffer asked about, its byte in the text at the
+    /// answer's version, which a client moves past its own changes that
+    /// haven't been made yet, as it moves diagnostics.
+    pub offset: Option<usize>,
 }

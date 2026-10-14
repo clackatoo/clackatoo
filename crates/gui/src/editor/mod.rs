@@ -370,6 +370,11 @@ enum Asking {
     /// What could be done to the text at this place, or selected from it,
     /// as `gra` asks: the menu's shown only if the cursor's still there.
     Actions(Point),
+    /// Whether what's at this place can be renamed, and what the new name
+    /// starts as, as `grn` asks first of a server that says, asked with
+    /// the copy's text at this revision: the name's asked for only if the
+    /// cursor's still there, and the text as it was.
+    Renaming(Point, u64),
 }
 
 /// A pane editing a buffer.
@@ -847,7 +852,7 @@ impl Editor {
         self.close_completion();
         self.close_signature();
         self.asked
-            .take_if(|(_, asking)| matches!(asking, Asking::Hover(_)));
+            .take_if(|(_, asking)| matches!(asking, Asking::Hover(_) | Asking::Renaming(..)));
     }
 
     /// What the bar says: a search or a name being typed, a message, or
@@ -3094,7 +3099,7 @@ impl Editor {
             Action::Ask(query) => self.ask(query, copy),
             Action::Hover => self.hover(copy),
             Action::ShowDiagnostics => self.show_diagnostics(copy),
-            Action::Rename => self.ask_for_name(copy),
+            Action::Rename => self.rename_here(copy),
             Action::CodeActions => self.ask_actions(copy),
             _ => {}
         }
@@ -3134,12 +3139,26 @@ impl Editor {
         self.asked = Some((id, Asking::Hover(self.cursor.at)));
     }
 
-    /// `grn`: asks in the bar for a new name for what's under the cursor,
-    /// starting with the word there.
-    fn ask_for_name(&mut self, copy: &BufferCopy) {
-        let text = self.text(copy);
-        let (start, end) = word_at(&text, text.byte_at(self.cursor.at));
-        let was = text.slice(start, end);
+    /// `grn`: asks the language server first whether what's under the
+    /// cursor can be renamed, if it says it can tell; or else asks for the
+    /// new name at once.
+    fn rename_here(&mut self, copy: &mut BufferCopy) {
+        if !copy.features().prepare_rename {
+            return self.ask_for_name(None, copy);
+        }
+        let at = self.text(copy).byte_at(self.cursor.at);
+        let id = copy.ask(Query::PrepareRename, at);
+        self.asked = Some((id, Asking::Renaming(self.cursor.at, copy.revision())));
+    }
+
+    /// Asks in the bar for a new name for what's under the cursor,
+    /// starting as `name`, or else the word there.
+    fn ask_for_name(&mut self, name: Option<String>, copy: &BufferCopy) {
+        let was = name.unwrap_or_else(|| {
+            let text = self.text(copy);
+            let (start, end) = word_at(&text, text.byte_at(self.cursor.at));
+            text.slice(start, end)
+        });
         self.prompt = Some(Prompt::Rename {
             name: was.clone(),
             was,
@@ -3702,8 +3721,30 @@ impl Editor {
             {
                 self.show_actions(asked, answer);
             }
+            // Asked for only in normal mode, whose keys the bar would take,
+            // as for the menu.
+            Asking::Renaming(at, revision)
+                if at == self.cursor.at && self.mode == Mode::Normal && self.prompt.is_none() =>
+            {
+                match answer {
+                    // What the server said of a name that may have changed.
+                    _ if copy.revision() != revision => {
+                        self.status = Some("the text changed meanwhile: not renamed".into());
+                        self.fail();
+                    }
+                    Answer::Renamable { name } => self.ask_for_name(name.clone(), copy),
+                    Answer::Failed(why) => {
+                        self.status = Some(why.clone());
+                        self.fail();
+                    }
+                    _ => {
+                        self.status = Some("there's nothing here to rename".into());
+                        self.fail();
+                    }
+                }
+            }
             // The cursor has moved since, or the keys are another mode's.
-            Asking::Hover(_) | Asking::Actions(_) => {}
+            Asking::Hover(_) | Asking::Actions(_) | Asking::Renaming(..) => {}
         }
     }
 
@@ -3776,6 +3817,8 @@ impl Editor {
             }
             Answer::Failed(why) => self.status = Some(why.clone()),
             Answer::Hover { .. }
+            | Answer::Symbols { .. }
+            | Answer::Renamable { .. }
             | Answer::Renamed { .. }
             | Answer::Formatted { .. }
             | Answer::Staged

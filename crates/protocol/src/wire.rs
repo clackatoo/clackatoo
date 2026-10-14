@@ -67,9 +67,9 @@ use std::cell::Cell;
 use serde::{Deserialize, Deserializer};
 
 use crate::{
-    BufferUpdate, ChatPatch, ClientMessage, Content, Error, Event, FilesUpdate, Item, Node,
-    PROTOCOL_VERSION, Patch, Response, ServerMessage, Setting, SettingKind, ToolContent, Turn,
-    ViewUpdate, Workspaces,
+    Answer, BufferUpdate, ChatPatch, ClientMessage, Content, Done, Error, Event, FilesUpdate,
+    Found, Item, Node, PROTOCOL_VERSION, Patch, Response, ServerMessage, Setting, SettingKind,
+    ToolContent, Turn, ViewUpdate, Workspaces,
 };
 
 /// The oldest client a daemon of this build talks to.
@@ -125,6 +125,11 @@ gates! {
     /// `BufferUpdate::Coloured`, how the code in its fenced blocks is
     /// coloured, sent after it.
     HOVER = 76,
+    /// Symbols, and checking a rename first: `Query::Symbols` and
+    /// `Answer::Symbols`, a file's; `Search::Symbols` and
+    /// `Found::Symbols`, a project's; `Query::PrepareRename`,
+    /// `Answer::Renamable` and `ServerFeatures`' `prepare_rename`.
+    SYMBOLS = 77,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -317,6 +322,43 @@ impl Since for BufferUpdate {
     }
 }
 
+impl Since for Answer {
+    fn since(&self) -> u32 {
+        match self {
+            Self::Locations(_)
+            | Self::Hover { .. }
+            | Self::Completions { .. }
+            | Self::Resolved { .. }
+            | Self::Signature { .. }
+            | Self::CodeActions(_)
+            | Self::Acted { .. }
+            | Self::Renamed { .. }
+            | Self::Nothing
+            | Self::Formatted { .. }
+            | Self::Failed(_)
+            | Self::Pieces(_)
+            | Self::Indents(_)
+            | Self::Staged => EARLIER,
+            Self::Symbols { .. } | Self::Renamable { .. } => SYMBOLS,
+        }
+    }
+}
+
+impl Since for Found {
+    fn since(&self) -> u32 {
+        match self {
+            Self::Root { .. }
+            | Self::Files(_)
+            | Self::Lines(_)
+            | Self::Buffers(_)
+            | Self::Boards(_)
+            | Self::Preview { .. }
+            | Self::Done(_) => EARLIER,
+            Self::Symbols(_) => SYMBOLS,
+        }
+    }
+}
+
 impl Since for FilesUpdate {
     fn since(&self) -> u32 {
         match self {
@@ -429,8 +471,12 @@ pub fn newest(message: &ServerMessage) -> u32 {
                         .unwrap_or(EARLIER),
                 },
                 Event::Workspaces(workspaces) => newest_in_workspaces(workspaces),
-                Event::Buffer { update, .. } => update.since(),
+                Event::Buffer { update, .. } => match update {
+                    BufferUpdate::Answer { answer, .. } => update.since().max(answer.since()),
+                    update => update.since(),
+                },
                 Event::Files { update, .. } => update.since(),
+                Event::Found { found, .. } => found.since(),
                 _ => EARLIER,
             };
             event.since().max(inside)
@@ -493,6 +539,9 @@ fn newest_in_patch(patch: &ChatPatch) -> u32 {
     patch.since().max(inside)
 }
 
+/// What an older peer is told in place of an answer too new for it.
+const TOO_NEW: &str = "the daemon answered with what this window is too old to read";
+
 /// What a message becomes for a peer older than this build.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Downgraded<T> {
@@ -543,6 +592,9 @@ impl Downgrade for ServerMessage {
     /// ended takes its pane closing as someone else's doing, and goes on
     /// in normal mode, the safe side. So is `BufferUpdate::Coloured`: a
     /// hover's code stays plain.
+    /// A new answer, or a new kind of thing found, only ever answers what
+    /// a newer window asked; should one reach an older peer all the same,
+    /// it's told its question failed, rather than wait for ever.
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
@@ -555,6 +607,23 @@ impl Downgrade for ServerMessage {
                     ..
                 },
             ) => Downgraded::Dropped,
+            Self::Event(Event::Buffer {
+                buffer,
+                update: BufferUpdate::Answer { id, version, .. },
+            }) if wire >= FALLBACKS => Downgraded::To(Self::Event(Event::Buffer {
+                buffer: *buffer,
+                update: BufferUpdate::Answer {
+                    id: *id,
+                    version: *version,
+                    answer: Answer::Failed(TOO_NEW.into()),
+                },
+            })),
+            Self::Event(Event::Found { id, .. }) if wire >= FALLBACKS => {
+                Downgraded::To(Self::Event(Event::Found {
+                    id: *id,
+                    found: Found::Done(Done::Failed(TOO_NEW.into())),
+                }))
+            }
             Self::Response(Response::Error(err)) if wire >= FALLBACKS => Downgraded::To(
                 Self::Response(Response::Error(Error::Other(err.to_string()))),
             ),
@@ -850,6 +919,45 @@ mod tests {
             spans: Vec::new(),
         };
         assert_eq!(coloured.since(), HOVER);
+        assert_eq!(Answer::Staged.since(), EARLIER);
+        assert_eq!(Answer::Renamable { name: None }.since(), SYMBOLS);
+        assert_eq!(Found::Done(Done::All).since(), EARLIER);
+        assert_eq!(Found::Symbols(Vec::new()).since(), SYMBOLS);
+    }
+
+    #[test]
+    fn a_new_answer_reaching_an_older_peer_says_its_question_failed() {
+        let answer = ServerMessage::Event(Event::Buffer {
+            buffer: crate::BufferId(1),
+            update: BufferUpdate::Answer {
+                id: 4,
+                version: 2,
+                answer: Answer::Symbols {
+                    symbols: Vec::new(),
+                    more: false,
+                },
+            },
+        });
+        let Downgraded::To(ServerMessage::Event(Event::Buffer {
+            update: BufferUpdate::Answer { id: 4, answer, .. },
+            ..
+        })) = answer.downgrade(SYMBOLS - 1)
+        else {
+            panic!("not turned into a failure");
+        };
+        assert_eq!(answer, Answer::Failed(TOO_NEW.into()));
+        assert_eq!(found_symbols_for(SYMBOLS), Downgraded::AsIs);
+        // A peer from before the fallbacks has its event dropped.
+        assert_eq!(found_symbols_for(FALLBACKS - 1), Downgraded::Dropped);
+    }
+
+    /// What a found symbol becomes for a peer speaking `wire`.
+    fn found_symbols_for(wire: u32) -> Downgraded<ServerMessage> {
+        ServerMessage::Event(Event::Found {
+            id: 1,
+            found: Found::Symbols(Vec::new()),
+        })
+        .downgrade(wire)
     }
 
     #[test]

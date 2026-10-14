@@ -1,6 +1,6 @@
 # The finder and diagnostics
 
-Picking a file from the project, grepping its lines, the files open, and what the language servers say is wrong, all in the finder.
+Picking a file from the project, grepping its lines, the files open, what the language servers say is wrong, and the symbols they know of, all in the finder.
 
 The finder looks from the project's root: the one its language server was started for, or its git repository, or else its folder. Here, that's the lesson's scratch directory.
 
@@ -76,4 +76,14 @@ These text files have no language server, so here the list is empty. Press `<Spa
 
 ```check
 finder diagnostics
+```
+
+## Symbols
+
+`<Space>bs` lists the symbols in the file, as its language server knows them: its functions, its types and their fields, each with what it is, indented inside what it's in. What you type narrows them down, and Enter goes to the one picked, as a jump, so Ctrl+O comes back. `<Space>ps` finds symbols in the whole project, asking the server again as you type, and opens the file of the one picked. A server that can tell is asked first by `grn` whether what's under the cursor can be renamed: if it can't, the bar says so at once, and if it can, the new name starts as the server suggests.
+
+These text files have no language server, so here the list says so. Press `<Space>bs` to see it, and Esc to close it.
+
+```check
+finder symbols
 ```

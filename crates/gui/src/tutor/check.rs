@@ -90,7 +90,7 @@ pub(crate) enum Focus {
 
 /// The finder's kinds, as checks name them, and the start page `:Agent`
 /// opens, which is drawn as the finder is.
-const FINDERS: [&str; 8] = [
+const FINDERS: [&str; 10] = [
     "files",
     "grep",
     "buffers",
@@ -98,6 +98,8 @@ const FINDERS: [&str; 8] = [
     "marks",
     "places",
     "boards",
+    "symbols",
+    "projectsymbols",
     "agent",
 ];
 

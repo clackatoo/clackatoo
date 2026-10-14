@@ -1047,25 +1047,36 @@ impl BufferCopy {
                 range,
             };
         }
-        let Answer::Locations(mut found) = answer else {
-            return answer;
-        };
         let waiting: Vec<&Edit> = waiting.collect();
-        for place in &mut found {
-            let Some(offset) = place.offset else { continue };
+        let moved = |offset: &mut Option<usize>, line: &mut u64, col: &mut usize| {
+            let Some(at) = offset else { return };
             if version != self.version {
                 log::debug!("buffer {}: an answer for version {version}", self.id);
-                continue;
+                return;
             }
-            let offset = (waiting.iter())
-                .fold(offset, |offset, edit| edit.map(offset, Bias::Before))
+            let at = (waiting.iter())
+                .fold(*at, |at, edit| edit.map(at, Bias::Before))
                 .min(self.text.len_bytes());
-            let line = self.text.byte_to_line(offset);
-            place.line = line as u64;
-            place.col = offset - self.text.line_to_byte(line);
-            place.offset = Some(offset);
+            let moved_line = self.text.byte_to_line(at);
+            *line = moved_line as u64;
+            *col = at - self.text.line_to_byte(moved_line);
+            *offset = Some(at);
+        };
+        match answer {
+            Answer::Locations(mut found) => {
+                for place in &mut found {
+                    moved(&mut place.offset, &mut place.line, &mut place.col);
+                }
+                Answer::Locations(found)
+            }
+            Answer::Symbols { mut symbols, more } => {
+                for symbol in &mut symbols {
+                    moved(&mut symbol.offset, &mut symbol.line, &mut symbol.col);
+                }
+                Answer::Symbols { symbols, more }
+            }
+            answer => answer,
         }
-        Answer::Locations(found)
     }
 
     /// Takes the diagnostics for the daemon's text at `version`, moving
@@ -1407,7 +1418,7 @@ pub(crate) fn queries_asked() -> u64 {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use clackatoo_protocol::{Author, BufferSnapshot, FileLocation, LineIndent, Piece};
+    use clackatoo_protocol::{Author, BufferSnapshot, FileLocation, LineIndent, Piece, Symbol};
     use clackatoo_text::History;
 
     use super::*;
@@ -2098,6 +2109,35 @@ pub(super) mod tests {
             Heard::Answer {
                 id,
                 answer: Answer::Locations(vec![place(at + 1)])
+            }
+        );
+
+        // So do a file's symbols.
+        let symbol = |offset| Symbol {
+            name: "a".into(),
+            kind: 12,
+            depth: 0,
+            container: String::new(),
+            line: 0,
+            col: offset,
+            offset: Some(offset),
+        };
+        let heard = copy.update(BufferUpdate::Answer {
+            id,
+            version: 2,
+            answer: Answer::Symbols {
+                symbols: vec![symbol(at)],
+                more: false,
+            },
+        });
+        assert_eq!(
+            heard,
+            Heard::Answer {
+                id,
+                answer: Answer::Symbols {
+                    symbols: vec![symbol(at + 1)],
+                    more: false,
+                }
             }
         );
 

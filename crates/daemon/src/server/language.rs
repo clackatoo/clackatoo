@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
     Answer, BufferId, BufferUpdate, ClientMessage, CompletionItem, Edit, FileLocation, Query,
-    ServerFeatures, TextChange,
+    ServerFeatures, Symbol, TextChange,
 };
 use clackatoo_text::{Bias, Diagnostic, Diagnostics, Rope};
 use mio::unix::SourceFd;
@@ -30,7 +30,7 @@ use super::rename::{Made, Purpose};
 use super::stopping::{EXIT_WAIT, Stopping};
 use super::watched::{Walking, Wanted};
 use super::{Daemon, OUTPUT_BUDGET, Orphan, Source};
-use crate::lsp::{self, Incoming, LanguageServer, Reported};
+use crate::lsp::{self, Incoming, LanguageServer, Prepared, Reported};
 use crate::pty::Process;
 
 /// Identifies a language server within one daemon.
@@ -93,6 +93,12 @@ pub(super) struct Servers {
     started: Vec<(Vec<String>, PathBuf, u8)>,
     /// Clients' queries waiting for their servers' answers.
     asked: Vec<Asked>,
+    /// Clients' searches for symbols in a project, waiting for their
+    /// servers' answers (see [`super::symbols`]).
+    pub(super) symbol_searches: Vec<super::symbols::Searching>,
+    /// Searches for symbols to ask again, and when: their servers said the
+    /// text changed while they worked.
+    pub(super) symbol_retries: Vec<(Instant, super::symbols::Searching)>,
     /// Files answers have gone to, and the server that answered, which
     /// they're opened in rather than one of their own: a library's file
     /// gone to from a project is the project's server's to know.
@@ -311,6 +317,14 @@ const MAX_DOCUMENTATION: usize = 16 * 1024;
 /// The most code actions of one answer passed on: more than a menu by the
 /// cursor shows, scrolled.
 const MAX_ACTIONS: usize = 200;
+
+/// The most symbols of one answer passed on, a file's or a project's:
+/// more than anyone looks through, but short of a server's flood.
+pub(super) const MAX_SYMBOLS: usize = 5000;
+
+/// The most bytes of a new name a rename is started with: longer than any
+/// name, but short of a whole file a server says is one.
+const MAX_NEW_NAME: usize = 256;
 
 /// A buffer as its language server knows it.
 #[derive(Debug)]
@@ -640,11 +654,13 @@ impl Daemon {
 
     /// When the next query to ask again is due.
     pub(super) fn next_retry(&self) -> Option<Instant> {
-        self.servers.again.iter().map(|(due, _)| *due).min()
+        let query = self.servers.again.iter().map(|(due, _)| *due).min();
+        query.into_iter().chain(self.next_symbols_retry()).min()
     }
 
     /// Asks again the queries that are due.
     pub(super) fn ask_again(&mut self) {
+        self.ask_symbols_again();
         let now = Instant::now();
         if self.servers.again.iter().all(|(due, _)| *due > now) {
             return;
@@ -762,7 +778,13 @@ impl Daemon {
                 version,
                 diagnostics,
             } => self.diagnosed(server, &path, version, diagnostics),
+            Incoming::Answer { id, result } if self.searching_symbols(server, id) => {
+                self.found_symbols(server, id, result);
+            }
             Incoming::Answer { id, result } => self.answered(server, id, result),
+            Incoming::Outdated { id } if self.searching_symbols(server, id) => {
+                self.symbols_outdated(server, id);
+            }
             Incoming::Outdated { id } => self.outdated(server, id),
             Incoming::Ready => self.server_ready(server),
             Incoming::ApplyEdit { id, edit } => self.apply_edit(server, id, &edit),
@@ -954,6 +976,8 @@ impl Daemon {
                 (Query::Hover, Query::Hover)
                     | (Query::Completion(_), Query::Completion(_))
                     | (Query::SignatureHelp { .. }, Query::SignatureHelp { .. })
+                    | (Query::Symbols, Query::Symbols)
+                    | (Query::PrepareRename, Query::PrepareRename)
             )
         };
         let mut cancelled = Vec::new();
@@ -1102,6 +1126,10 @@ impl Daemon {
                 self.completions(server, &asked, value)
             }
             (Ok(value), Asking::Query(Query::Resolve { .. })) => resolved(&value),
+            (Ok(value), Asking::Query(Query::Symbols)) => self.symbols_in(server, &asked, &value),
+            (Ok(value), Asking::Query(Query::PrepareRename)) => {
+                self.renamable(server, &asked, &value)
+            }
             (Ok(value), Asking::Query(Query::SignatureHelp { .. })) => {
                 let encoding = self.server_encoding(server).unwrap_or(lsp::Encoding::Utf16);
                 lsp::signature(&value, encoding).map_or(Answer::Nothing, |signature| {
@@ -1194,6 +1222,71 @@ impl Daemon {
             text: cut(text, MAX_HOVER),
             markdown,
             range: (lsp::hover_range(value)).and_then(|range| self.range_now(server, asked, range)),
+        }
+    }
+
+    /// The symbols server `server` says, in `value`, are in the file
+    /// `asked` asked about, in the order of its outline, as many as are
+    /// passed on: their places counted in the text it was asked about, and
+    /// moved along with edits made since.
+    fn symbols_in(&self, server: ServerId, asked: &Asked, value: &Value) -> Answer {
+        let (Some(encoding), Some(slot)) = (
+            self.server_encoding(server),
+            self.buffers.get(&asked.buffer),
+        ) else {
+            return Answer::Failed("its language server has stopped".into());
+        };
+        let Some(edits) = slot.buffer.edits_since(asked.version) else {
+            return Answer::Failed("the file has changed since".into());
+        };
+        let edits: Vec<&Edit> = edits.collect();
+        let text = slot.buffer.text();
+        let (mut named, more) = lsp::symbols(value, MAX_SYMBOLS);
+        lsp::outline(&mut named);
+        let symbols = (named.into_iter())
+            .map(|symbol| {
+                // A flat list names the file, which is this one.
+                let byte = lsp::place(&asked.text, symbol.start, encoding);
+                let byte = (edits.iter())
+                    .fold(byte, |byte, edit| edit.map(byte, Bias::Before))
+                    .min(text.len_bytes());
+                let line = text.byte_to_line(byte);
+                Symbol {
+                    name: symbol.name,
+                    kind: symbol.kind,
+                    depth: symbol.depth,
+                    container: symbol.container,
+                    line: line as u64,
+                    col: byte - text.line_to_byte(line),
+                    offset: Some(byte),
+                }
+            })
+            .collect();
+        Answer::Symbols { symbols, more }
+    }
+
+    /// What server `server` says, in `value`, of renaming what's at the
+    /// place `asked` asked about: nothing's there; or it can be, with the
+    /// name to start from, if it says one that's on one line and not too
+    /// long, its placeholder or the text it would rename, as it was asked
+    /// about.
+    fn renamable(&self, server: ServerId, asked: &Asked, value: &Value) -> Answer {
+        let name = match lsp::prepared(value) {
+            Prepared::Nothing => return Answer::Nothing,
+            Prepared::Window => None,
+            Prepared::Placeholder(name) => Some(name),
+            Prepared::Range(start, end) => self.server_encoding(server).and_then(|encoding| {
+                let start = lsp::place(&asked.text, start, encoding);
+                let end = lsp::place(&asked.text, end, encoding);
+                (start < end && end - start <= MAX_NEW_NAME)
+                    .then(|| asked.text.byte_slice(start..end).to_string())
+            }),
+        };
+        let fits = |name: &String| {
+            !name.is_empty() && name.len() <= MAX_NEW_NAME && !name.contains(char::is_control)
+        };
+        Answer::Renamable {
+            name: name.filter(fits),
         }
     }
 
@@ -1708,6 +1801,7 @@ impl Daemon {
     pub(super) fn forget_server(&mut self, id: ServerId) -> Option<ServerSlot> {
         let slot = self.servers.slots.remove(&id)?;
         self.servers.asked.retain(|asked| asked.server != id);
+        self.end_symbol_searches(id, "its language server stopped");
         self.servers.reached.retain(|_, server| *server != id);
         // The edits it asked for itself are its no more.
         self.forget_asked_edits(id);
@@ -1895,6 +1989,8 @@ fn cannot(query: Query) -> &'static str {
         }
         Query::SignatureHelp { .. } => "its language server doesn't help with calls",
         Query::CodeActions { .. } | Query::Act { .. } => "its language server has no code actions",
+        Query::Symbols => "its language server doesn't list symbols",
+        Query::PrepareRename => "its language server can't check a rename first",
         _ => "its language server doesn't say what things are",
     }
 }

@@ -24,6 +24,7 @@ use super::{Asked, Desk, Purpose};
 use crate::command::Place;
 use crate::editor::{BufferCopy, Done, Editor, GiveUp, Heard, HunkAction, Marks, Shared, Stroke};
 use crate::explorer::Explorer;
+use crate::finder::Finder;
 use crate::input::{KeptPress, KeyPress};
 use crate::options::Options;
 use crate::pane::Copy;
@@ -535,6 +536,7 @@ impl Desk {
         }
         let was = copy.path().to_owned();
         let mut heard = copy.update(update);
+        let filled = fill_finder(self.finder.as_mut(), &mut heard, copy.path());
         // Completions, which may be thousands, are no format's answer.
         let answered = match &heard {
             Heard::Answer { id, answer } if !matches!(answer, Answer::Completions { .. }) => {
@@ -623,6 +625,7 @@ impl Desk {
         // seen to, and then the keys held, which were typed after it.
         let typed = self.type_macros();
         typed
+            || filled
             || formatted
             || self.shown_tab().is_some_and(|tab| {
                 (tab.layout.panes().iter()).any(|pane| pane.content == Content::Buffer(buffer))
@@ -1594,6 +1597,21 @@ impl Desk {
     pub(super) fn editors_reconnected(&mut self) {
         self.editors.reconnected();
     }
+}
+
+/// Gives `finder` the answer `heard` is, if it's the one the finder waits
+/// for, the symbols in the file at `path`, leaving nothing in its place:
+/// they may be thousands, and are the finder's alone. Returns whether it
+/// was.
+fn fill_finder(finder: Option<&mut Finder>, heard: &mut Heard, path: &str) -> bool {
+    let Heard::Answer { id, answer } = heard else {
+        return false;
+    };
+    let Some(finder) = finder.filter(|finder| finder.asking() == Some(*id)) else {
+        return false;
+    };
+    finder.answered(path, std::mem::replace(answer, Answer::Nothing));
+    true
 }
 
 /// What the bar says of the window's unsaved changes to the file at

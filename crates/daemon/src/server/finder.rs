@@ -1,7 +1,8 @@
 //! The finder in the event loop: starting each search a client asks for,
 //! with where it's to look, and passing what it finds on to the client,
 //! until it's done, the client stops it, or the client goes. The searches
-//! themselves run on threads of their own (see [`crate::find`]).
+//! themselves run on threads of their own (see [`crate::find`]); a search
+//! for symbols first asks a language server (see [`super::symbols`]).
 //!
 //! What's found waits in its search's queue until the client has written
 //! nearly everything it was sent, and goes a little at a time: a grep that
@@ -94,6 +95,8 @@ impl Daemon {
             return;
         }
         let job = match search {
+            // The language server finds them, then a thread places them.
+            Search::Symbols { query } => return self.find_symbols(token, id, pane, &query),
             Search::Files => Job::Files(self.project(pane)),
             Search::Grep { pattern, exact } => Job::Grep {
                 project: self.project(pane),
@@ -135,6 +138,12 @@ impl Daemon {
                 }
             }
         };
+        self.start_finding(token, id, job);
+    }
+
+    /// Starts `job` on a thread of its own, for the search the client at
+    /// `token` numbered `id`.
+    pub(super) fn start_finding(&mut self, token: Token, id: u64, job: Job) {
         let running = self.finds.searches.start(job);
         self.finds.running.push(Finding {
             token,
@@ -146,14 +155,16 @@ impl Daemon {
     }
 
     /// Stops the search the client at `token` numbered `id`, if it's going
-    /// on.
+    /// on, or waiting for a language server.
     pub(super) fn stop_finding(&mut self, token: Token, id: u64) {
         (self.finds.running).retain(|finding| (finding.token, finding.id) != (token, id));
+        self.stop_symbol_searches(|asker, search| (asker, search) == (token, id));
     }
 
     /// Stops the searches of the client at `token`, which has gone.
     pub(super) fn forget_finds(&mut self, token: Token) {
         (self.finds.running).retain(|finding| finding.token != token);
+        self.stop_symbol_searches(|asker, _| asker == token);
     }
 
     /// Queues what searches have found since last asked, and sends what

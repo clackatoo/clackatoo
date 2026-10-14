@@ -1,6 +1,6 @@
 //! Finding things for a client's picker: the files in a project, the lines
-//! in them a pattern matches, the files open in buffers, and lines of a
-//! file to preview.
+//! in them a pattern matches, the files open in buffers, the symbols a
+//! language server finds, and lines of a file to preview.
 //!
 //! The daemon owns the files, which may be on another machine, so it walks
 //! and reads them, off its event loop. A client asks with
@@ -49,6 +49,16 @@ pub enum Search {
         /// How many lines, at most.
         lines: u16,
     },
+    /// The symbols in the project whose names match `query`, as the
+    /// language server of the file the pane shows matches them, best
+    /// first: functions, types and the like, as `<Space>ps` finds them.
+    /// Fails if the pane shows no file with a language server that finds
+    /// them. Only for a daemon of protocol 77 or later.
+    Symbols {
+        /// What's typed, which the server matches names against as it
+        /// likes, most often letters in order.
+        query: String,
+    },
 }
 
 /// Some of what the daemon found for a search.
@@ -81,6 +91,9 @@ pub enum Found {
     },
     /// The search has finished: nothing more comes of it.
     Done(Done),
+    /// Symbols, for [`Search::Symbols`], in the order the server ranks
+    /// them. Only from a daemon of protocol 77 or later.
+    Symbols(Vec<FoundSymbol>),
 }
 
 /// How a search finished.
@@ -108,6 +121,15 @@ pub struct FoundLine {
     pub text: String,
     /// Where in `text` each match is, as byte ranges, in order.
     pub matches: Vec<(usize, usize)>,
+}
+
+/// A symbol a search found, and the file it's in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FoundSymbol {
+    /// Its file's path, from the root if it's under it, or else absolute.
+    pub path: String,
+    /// The symbol, at a place in that file, never with an offset.
+    pub symbol: crate::Symbol,
 }
 
 /// A file open in a buffer.

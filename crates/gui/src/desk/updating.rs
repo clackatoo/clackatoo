@@ -65,7 +65,6 @@ impl Desk {
     /// Whether the daemon has what `what`, such as `:Browser`, needs, which
     /// arrived in protocol version `gate`. If it hasn't, the bar says so,
     /// and how to update it.
-    #[allow(dead_code, reason = "nothing newer than the daemons it talks to yet")]
     pub(crate) fn needs_daemon(&mut self, what: &str, gate: u32) -> bool {
         if self.daemon_has(gate) {
             return true;

@@ -126,7 +126,8 @@ pub(crate) enum Command {
     Reload,
     /// `:set`: change options, or say what they are, as these words say.
     Set(String),
-    /// `:Files`, `:Grep` or `:Buffers`: the finder, with this typed.
+    /// `:Files`, `:Grep`, `:Buffers`, `:Symbols` and the like: the finder,
+    /// with this typed.
     Find { kind: finder::Kind, query: String },
     /// `:Gitsigns`: this, to the hunk at the focused editor's cursor.
     Hunk(HunkAction),
@@ -216,12 +217,14 @@ const KINDS: [(&str, Kind); 2] = [("Terminal", Kind::Terminal), ("Agent", Kind::
 const EDITOR: &str = "Editor";
 
 /// What the finder lists, by name.
-const FINDERS: [(&str, finder::Kind); 5] = [
+const FINDERS: [(&str, finder::Kind); 7] = [
     ("Files", finder::Kind::Files),
     ("Grep", finder::Kind::Grep),
     ("Buffers", finder::Kind::Buffers),
     ("Diagnostics", finder::Kind::Diagnostics),
     ("Boards", finder::Kind::Boards),
+    ("Symbols", finder::Kind::Symbols),
+    ("ProjectSymbols", finder::Kind::ProjectSymbols),
 ];
 
 /// The kind of pane that shows a board, which takes the board's name.

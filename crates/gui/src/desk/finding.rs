@@ -4,9 +4,14 @@
 //! as `:e` does, beside it, or in a new tab, with the cursor on the line
 //! picked once the file's text has come.
 //!
-//! A grep waits for typing to pause a moment before it searches, so a
-//! word typed quickly is one search, not one a letter. The window wakes
-//! for it, to draw again, and it's started as it's drawn.
+//! A grep, and a search of the project's symbols, waits for typing to
+//! pause a moment before it searches, so a word typed quickly is one
+//! search, not one a letter. The window wakes for it, to draw again, and
+//! it's started as it's drawn.
+//!
+//! The symbols in the focused editor's file are asked of its language
+//! server as other questions about it are, and the answer, in order with
+//! the file's edits, fills the list once it comes.
 //!
 //! The preview is asked for as the finder is drawn, for what it shows
 //! picked then, so a flood of files streaming in costs one sort a frame,
@@ -19,8 +24,9 @@
 
 use std::time::{Duration, Instant};
 
+use clackatoo_protocol::wire::SYMBOLS;
 use clackatoo_protocol::{
-    ClientMessage, FileLocation, Found, OpenFile, PaneTerminal, Request, Search,
+    ClientMessage, FileLocation, Found, OpenFile, PaneTerminal, Query, Request, Search,
 };
 
 use super::{Asked, Desk};
@@ -30,7 +36,8 @@ use crate::finder::{Finder, Kind, Opening, Outcome, PREVIEW_LINES};
 use crate::input::KeyPress;
 use crate::options::Case;
 
-/// How long a grep waits for the next key before it searches.
+/// How long a grep, or a search of the project's symbols, waits for the
+/// next key before it searches.
 pub(super) const GREP_WAIT: Duration = Duration::from_millis(80);
 
 impl Desk {
@@ -48,17 +55,33 @@ impl Desk {
             Kind::Marks => return self.pick_mark(),
             Kind::Lessons => return self.tutor(None),
             Kind::News => return self.tutor(Some("new")),
+            Kind::Symbols if !self.needs_daemon("listing a file's symbols", SYMBOLS) => return,
+            Kind::ProjectSymbols if !self.needs_daemon("finding symbols", SYMBOLS) => return,
             _ => {}
         }
-        self.finder = Some(Finder::new(kind, query, case));
+        // Asked of the file's language server, about its text as it is.
+        let asked = if kind == Kind::Symbols {
+            let Some((_, id)) = self.ask_about_focused_file(Query::Symbols) else {
+                self.refuse("this pane has no file to list the symbols of".into());
+                return;
+            };
+            Some(id)
+        } else {
+            None
+        };
+        let mut finder = Finder::new(kind, query, case);
+        if let Some(id) = asked {
+            finder.ask(id);
+        }
+        self.finder = Some(finder);
         match kind {
             Kind::Files => self.search(Search::Files),
             Kind::Buffers => self.search(Search::Buffers),
-            Kind::Grep => self.grep(),
+            Kind::Grep | Kind::ProjectSymbols => self.grep(),
             Kind::Diagnostics => self.search(Search::Diagnostics),
             Kind::Boards => self.search(Search::Boards),
-            // Their places are given them.
-            Kind::Places | Kind::Marks | Kind::Lessons | Kind::News => {}
+            // Their places are given them, or asked for above.
+            Kind::Places | Kind::Marks | Kind::Lessons | Kind::News | Kind::Symbols => {}
         }
     }
 
@@ -175,20 +198,25 @@ impl Desk {
     }
 
     /// Greps for what's typed in the finder, instead of what was, unless
-    /// nothing is.
+    /// nothing is; or for the project's symbols, searches for those whose
+    /// names match it, whatever it is, as a language server lists some
+    /// for nothing typed.
     fn grep(&mut self) {
         let Some(finder) = &mut self.finder else {
             return;
         };
         let before = finder.search();
         let pattern = finder.query().to_owned();
-        if pattern.is_empty() {
+        let symbols = finder.kind() == Kind::ProjectSymbols;
+        if pattern.is_empty() && !symbols {
             finder.not_searching();
         }
         if let Some(id) = before {
             self.stop_search(id);
         }
-        if !pattern.is_empty() {
+        if symbols {
+            self.search(Search::Symbols { query: pattern });
+        } else if !pattern.is_empty() {
             let exact = Case::of(&self.options).exact(&pattern);
             self.search(Search::Grep { pattern, exact });
         }
