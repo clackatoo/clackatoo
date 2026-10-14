@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.22 (2026-10-14)
+
+### Features
+
+- **editor:** draw language servers' inlay hints between the code, never as part of it (d06a81b)
+
 ## 2026.10.21 (2026-10-14)
 
 ### Fixes
