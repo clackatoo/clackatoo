@@ -221,6 +221,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "One mode for the whole window: every pane, tab and workspace you go to is in insert or normal mode as you were",
     },
+    News {
+        id: "branchindent",
+        date: "2026-10-14",
+        lesson: "indenting",
+        what: "A line where you type else, end or the like first is indented again; ]a stops once at each argument",
+    },
 ];
 
 impl News {

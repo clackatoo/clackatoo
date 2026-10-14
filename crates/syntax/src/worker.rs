@@ -906,6 +906,111 @@ mod tests {
         assert!(starts(a, true, 1).is_empty());
     }
 
+    fn curly() -> Arc<Pack> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/languages/curly");
+        Arc::new(Pack::read(&dir).unwrap())
+    }
+
+    /// Lists ending with a comma, which curly's query for parameters
+    /// matches twice at the last: with the comma after it, and the one
+    /// before.
+    const CURLY: &str = "fn f(a, bb,) {
+    g(1,
+      22,
+    );
+}
+fn h(c,dd,) {
+}
+";
+
+    #[test]
+    fn a_piece_matched_twice_with_one_inside_is_found_once() {
+        let at = |text: &str| CURLY.find(text).unwrap();
+        let ask = |at, ask| {
+            let pieces = WORKER.with_borrow_mut(|worker| ask_by(worker, curly(), CURLY, at, ask));
+            texts(CURLY, &pieces)
+        };
+        let argument = Ask::Around(Construct::Argument);
+        // The smaller, with the comma after it rather than the comma and
+        // the blank before it.
+        assert_eq!(ask(at("bb"), argument), [piece("bb,", Some("bb"))]);
+        // As small either way: the comma after it, as nvim-treesitter's
+        // queries mostly take.
+        assert_eq!(ask(at("dd"), argument), [piece("dd,", Some("dd"))]);
+        // On the comma between, only the one before it has it now.
+        assert_eq!(ask(at(", bb"), argument), [piece("a,", Some("a"))]);
+        // After it, the next.
+        assert_eq!(ask(at(" bb"), argument), [piece("bb,", Some("bb"))]);
+        // Arguments as Rust's are found have no doubles to begin with.
+        assert_eq!(ask(at("22"), argument), [piece(",\n      22", Some("22"))]);
+        // `]a` and `[a` stop once at each.
+        let starts = |at, backward| {
+            let ask = Ask::Starts {
+                construct: Construct::Argument,
+                backward,
+                count: 99,
+            };
+            let pieces = WORKER.with_borrow_mut(|worker| ask_by(worker, curly(), CURLY, at, ask));
+            texts(CURLY, &pieces)
+                .into_iter()
+                .map(|(whole, _)| whole)
+                .collect::<Vec<_>>()
+        };
+        let all = ["a,", "bb,", "1,", ",\n      22", "c,", "dd,"];
+        assert_eq!(starts(0, false), all);
+        let mut backward = all.to_vec();
+        backward.reverse();
+        assert_eq!(starts(CURLY.len(), true), backward);
+    }
+
+    #[test]
+    fn an_else_starting_a_line_goes_back_to_its_if() {
+        // What the editor asks once an `else` is typed first on a line, as
+        // GCSL's rules and Rust-like ones answer it: wherever it was typed,
+        // it goes back to its `if`'s indent, inside a `let` or a call too.
+        let text = "fn f(a,) {
+    if a {
+        g(1);
+        }
+            else if b {
+    let x = if c {
+y;
+}
+        else {
+    h(if d {
+    1
+    }
+    else {
+    2
+    });
+    };
+    }
+}
+";
+        let indented = "fn f(a,) {
+    if a {
+        g(1);
+    }
+    else if b {
+        let x = if c {
+            y;
+        }
+        else {
+            h(if d {
+                1
+            }
+            else {
+                2
+            });
+        };
+    }
+}
+";
+        WORKER.with_borrow_mut(|worker| {
+            assert_eq!(reindented(worker, &curly(), text), indented);
+        });
+    }
+
     #[test]
     fn a_pack_without_textobjects_finds_pieces_by_kinds() {
         // JSON's kinds aren't code's: none.
@@ -991,6 +1096,38 @@ impl Point {
         ))
         .len();
         assert_eq!(starts, if query { 1 } else { 2 });
+    }
+
+    /// Checks that the installed Rust and Python packs in `dir` find a last
+    /// argument followed by a comma once, as each of `]a`'s stops: Rust's
+    /// query matches it with the comma before it too.
+    fn trailing_commas(worker: &mut Worker, dir: &Path) {
+        let cases: [(&str, &str, &[&str]); 2] = [
+            (
+                "rust",
+                "fn f(a: u8, bb: u8,) {\n    g(1, 22,);\n    h(\n        x,\n        yy,\n    );\n}\n",
+                &["a: u8,", "bb: u8,", "1,", "22,", "x,", "yy,"],
+            ),
+            (
+                "python",
+                "def f(a, bb,):\n    g(1, 22,)\n    h(\n        x,\n        yy,\n    )\n",
+                &["a,", ", bb", "1,", ", 22", "x,", ",\n        yy"],
+            ),
+        ];
+        for (language, text, stops) in cases {
+            let pack = Arc::new(Pack::read(&dir.join(language)).unwrap());
+            let ask = Ask::Starts {
+                construct: Construct::Argument,
+                backward: false,
+                count: 99,
+            };
+            let found = texts(text, &ask_by(worker, pack.clone(), text, 0, ask));
+            let found: Vec<_> = found.into_iter().map(|(whole, _)| whole).collect();
+            assert_eq!(found, stops, "{language}");
+            let at = text.find("yy").unwrap();
+            let around = ask_by(worker, pack, text, at, Ask::Around(Construct::Argument));
+            assert_eq!(around.len(), 1, "{language}");
+        }
     }
 
     /// A case for indenting, and what Neovim makes of it.
@@ -1225,6 +1362,7 @@ impl Point {
         }
         let old = Arc::new(Pack::read(&old).unwrap());
         rust_pieces(&mut worker, &old, false);
+        trailing_commas(&mut worker, dir.path());
 
         // How long questions take about a big file: this crate's
         // biggest neighbour.

@@ -1,5 +1,5 @@
 //! Indenting as the file's language says: a new line's indent put right,
-//! a line where `}` is typed first taken back, and `=`.
+//! a line where `}` or `else` is typed first taken back, and `=`.
 //!
 //! Only the daemon has the syntax tree the rules are read from, so the
 //! editor asks it, with a [`Query::Indent`]. A new line never waits for
@@ -8,9 +8,11 @@
 //! within a millisecond or two, its indent is put right. Typing after the
 //! indent meanwhile leaves that so, but a line whose indent isn't what it
 //! was given, as when a Tab or Backspace has been typed in it, keeps what
-//! the user made it. So does a line where `}`, `]` or `)` is typed first,
-//! which the rules usually take back a step, or `:` after `else` and the
-//! like, which Python's do.
+//! the user made it. A line is asked about again, and put right so, where
+//! `}`, `]` or `)` is typed first, which the rules usually take back a
+//! step; where a word such as `else` or `end` is typed first, once the key
+//! after it, or Esc, ends it; and where `:` follows such a word, as
+//! Python's rules take `else:` back.
 //!
 //! The editor keeps track of where each line asked about starts, through
 //! every edit, and forgets one that's taken out or joined to the line
@@ -42,10 +44,23 @@ use crate::pane::Mode;
 /// for for ever.
 const MOST_CORRECTIONS: usize = 32;
 
-/// The words a line starts with whose `:` has its indent worked out
-/// again, as Python's `else:` goes back a step: Vim's `indentkeys` for
-/// Python, and C's labels.
-const BRANCHES: &[&str] = &["else", "elif", "except", "finally", "case", "default"];
+/// The words whose line has its indent worked out again once one's typed
+/// first on it, as the next key, or Esc, ends it: `else` and the like,
+/// which the rules often put back a step from the lines before, and words
+/// that end a block, as Lua's `end` and the shell's `fi` do. So is a line
+/// starting with one when `:` is typed at its end, as Python's `else:`.
+///
+/// The window can't see which words a language's `indents.scm` takes
+/// back, so these stand in for them, as Vim's `indentkeys` do. Asking
+/// about one that isn't, in some language, is harmless: the rules give its
+/// line the indent `=` would.
+const BRANCHES: &[&str] = &[
+    "case", "catch", "default", "done", "elif", "else", "elseif", "elsif", "end", "ensure", "esac",
+    "except", "fi", "finally", "rescue",
+];
+
+/// The longest of [`BRANCHES`], in bytes.
+const LONGEST_BRANCH: usize = 7;
 
 /// A line given an indent at once, waiting for the grammar to say what it
 /// should be.
@@ -107,21 +122,46 @@ impl Editor {
     }
 
     /// Asks how the cursor's line should be indented if `ch`, just typed
-    /// before the cursor, changes it: `}`, `]` or `)` first on the line,
-    /// or `:` ending a line that starts with a word such as `else`.
-    pub(super) fn typed_indent_key(&mut self, ch: char, copy: &mut BufferCopy) {
-        if !self.indent.smart || !matches!(ch, '}' | ']' | ')' | ':') {
+    /// before the cursor, at byte `end`, and not part of a word, changes
+    /// it: `}`, `]` or `)` first on the line, `:` ending a line that starts
+    /// with a word such as `else`, or anything ending such a word typed
+    /// first on the line, as the space in `else {` does. `typed` is how
+    /// many of a word's characters were typed in a row before it.
+    ///
+    /// Not as the word's last letter is typed, as Vim's `=else` does: the
+    /// line would go back a step at `else` in `elsewhere`, and come back a
+    /// letter later. A word's letters cost nothing more than a look at
+    /// what they are.
+    pub(super) fn typed_indent_key(
+        &mut self,
+        ch: char,
+        end: usize,
+        typed: usize,
+        copy: &mut BufferCopy,
+    ) {
+        if !self.indent.smart {
             return;
         }
-        let text = self.text(copy);
         let line = self.cursor.at.line;
-        let line_text = text.line_text(line);
-        let cursor = text.byte_at(self.cursor.at) - text.line_start(line);
-        let (before, after) = line_text.split_at(cursor.min(line_text.len()));
-        drop(text);
-        if reindents(before, after, ch) {
+        let closes = matches!(ch, '}' | ']' | ')' | ':') && {
+            let text = self.text(copy);
+            let line_text = text.line_text(line);
+            let cursor = end - text.line_start(line);
+            let (before, after) = line_text.split_at(cursor.min(line_text.len()));
+            reindents(before, after, ch)
+        };
+        if closes || self.ends_branch(end - ch.len_utf8(), typed, copy) {
             self.ask_indent(line, copy);
         }
+    }
+
+    /// Whether byte `end` of the text ends a word in [`BRANCHES`] that's
+    /// first on its line, and was typed, `typed` being how many of a word's
+    /// characters were typed in a row before it, if `smartindent` is on:
+    /// so Enter, Tab or Esc there, or another key, has the line's indent
+    /// worked out again.
+    pub(super) fn ends_branch(&self, end: usize, typed: usize, copy: &BufferCopy) -> bool {
+        self.indent.smart && ends_branch(copy.text(), end, typed)
     }
 
     /// Moves the starts of the lines waiting for their indents along with
@@ -377,6 +417,53 @@ fn reindents(before: &str, after: &str, ch: char) -> bool {
     }
 }
 
+/// Whether `ch` is part of a word, as Vim's `iskeyword` has it.
+pub(super) fn is_word(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+/// Whether byte `end` of `text` ends a word in [`BRANCHES`] with nothing
+/// but blanks before it on its line, and no more of the word after it,
+/// whose characters were all typed: no more than the last `typed` before
+/// it. It looks only at the bytes around it, back to the line's start,
+/// and only as far as a word in [`BRANCHES`] could reach before the
+/// blanks, so a key costs a few looks, and none after one that wasn't
+/// typed.
+fn ends_branch(text: &Rope, end: usize, typed: usize) -> bool {
+    if typed == 0 || end > text.len_bytes() {
+        return false;
+    }
+    let byte = |at: usize| text.byte(at);
+    // A byte of a word goes on after it, as Esc in the middle of a word
+    // leaves it: an ASCII letter or digit, or any byte of another
+    // character, which may be a letter.
+    let word_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || !b.is_ascii();
+    if end < text.len_bytes() && word_byte(byte(end)) {
+        return false;
+    }
+    // A word of ASCII letters and digits: a byte of any other character
+    // ends it, and then isn't a blank.
+    let mut start = end;
+    while start > 0 && (byte(start - 1).is_ascii_alphanumeric() || byte(start - 1) == b'_') {
+        start -= 1;
+        if end - start > LONGEST_BRANCH {
+            return false;
+        }
+    }
+    if start == end || end - start > typed {
+        return false;
+    }
+    let mut line = start;
+    while line > 0 && matches!(byte(line - 1), b' ' | b'\t') {
+        line -= 1;
+    }
+    let first = line == 0 || byte(line - 1) == b'\n';
+    let word = |word: &&str| {
+        word.len() == end - start && (word.bytes().enumerate()).all(|(i, b)| byte(start + i) == b)
+    };
+    first && BRANCHES.iter().any(word)
+}
+
 /// The line starting at byte `byte` of `text`, if one does: not if it's
 /// in the middle of one, as when the line was joined to the one before.
 fn line_starting(text: &Rope, byte: usize) -> Option<u64> {
@@ -421,6 +508,46 @@ mod tests {
         assert!(!reindents("    else:", "x", ':'));
         assert!(!reindents("    x = a:", "", ':'));
         assert!(!reindents("    {", "", '{'));
+    }
+
+    #[test]
+    fn a_branch_is_a_whole_word_first_on_its_line() {
+        let ends = |text: &str| ends_branch(&Rope::from_str(text), text.len(), 99);
+        assert!(ends("else"));
+        assert!(ends("x\n    elif"));
+        assert!(ends("a\n\t end"));
+        assert!(ends("default"));
+        // Not part of a longer word, nor after anything but blanks.
+        assert!(!ends("elsewhere"));
+        assert!(!ends("defaults"));
+        assert!(!ends("_else"));
+        assert!(!ends("xelse"));
+        assert!(!ends("éelse"));
+        assert!(!ends("x else"));
+        assert!(!ends("} else"));
+        assert!(!ends("els"));
+        assert!(!ends("  "));
+        assert!(!ends(""));
+        // Where it ends, in the middle of the text.
+        let text = Rope::from_str("  fi\nx\n");
+        assert!(ends_branch(&text, 4, 2));
+        assert!(!ends_branch(&text, 3, 2));
+        assert!(!ends_branch(&text, 99, 2));
+        // Only if all of it was typed.
+        assert!(!ends_branch(&text, 4, 1));
+        assert!(!ends_branch(&text, 4, 0));
+        // Not with more of a word after it, as `else|where` has.
+        let text = Rope::from_str("    elsewhere\n    elseé\n    else(\n");
+        assert!(!ends_branch(&text, 8, 4));
+        assert!(!ends_branch(&text, 22, 4));
+        assert!(ends_branch(&text, 33, 4));
+    }
+
+    #[test]
+    fn the_longest_branch_is_as_long_as_it_says() {
+        let longest = BRANCHES.iter().map(|word| word.len()).max();
+        assert_eq!(longest, Some(LONGEST_BRANCH));
+        assert!(BRANCHES.iter().all(|word| word.is_ascii()));
     }
 
     #[test]

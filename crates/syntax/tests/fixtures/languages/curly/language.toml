@@ -1,0 +1,2 @@
+grammar = "curly"
+extensions = ["curly"]

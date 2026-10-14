@@ -21,6 +21,8 @@ Licensed under the Apache License 2.0
 - The patterns for an array's items in
   crates/syntax/tests/fixtures/languages/json/textobjects.scm are adapted from
   queries/c/textobjects.scm at 851e865342e5a4cb1ae23d31caf6e991e1c99f1e.
+- So are the patterns for a call's arguments in
+  crates/syntax/tests/fixtures/languages/curly/textobjects.scm.
 
 tree-sitter-json
 https://github.com/tree-sitter/tree-sitter-json

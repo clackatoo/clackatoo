@@ -438,6 +438,11 @@ pub(crate) struct Editor {
     /// Whether the next edit starts an undo step: it's the first of a
     /// command, or of a go of insert mode.
     new_step: bool,
+    /// How many of a word's characters have been typed in a row in insert
+    /// mode, just before the cursor: so only a word typed there, such as
+    /// `else`, has its line's indent worked out again, not one that was
+    /// there already, or pasted.
+    word_run: usize,
     /// The change being made, while insert mode goes on after it.
     changing: Option<Change>,
     /// The last change, for `.`.
@@ -617,6 +622,7 @@ impl Editor {
             cursor_cell: None,
             typed: Vec::new(),
             new_step: true,
+            word_run: 0,
             changing: None,
             last_change: None,
             insert_times: 1,
@@ -1013,6 +1019,7 @@ impl Editor {
         }
         let at = self.insert_byte(copy);
         self.new_step |= self.mode != Mode::Insert;
+        self.word_run = 0;
         self.insert_text(at, text, copy);
         if self.mode != Mode::Insert {
             self.new_step = true;
@@ -2265,6 +2272,7 @@ impl Editor {
         self.mode = Mode::Insert;
         self.anchor = None;
         self.insert_times = times.max(1);
+        self.word_run = 0;
     }
 
     /// Leaves insert mode, typing what was typed again if a count asked
@@ -2283,6 +2291,13 @@ impl Editor {
             }
         }
         self.insert_times = 1;
+        // A line just typed as `end` is indented as one. Only a word typed
+        // just now: so the indent joins the change that typed it.
+        let at = self.insert_byte(copy);
+        let run = std::mem::take(&mut self.word_run);
+        if self.ends_branch(at, run, copy) {
+            self.ask_indent(self.cursor.at.line, copy);
+        }
         self.mode = Mode::Normal;
         if let Some(change) = self.changing.take() {
             self.last_change = Some(change);
@@ -2297,35 +2312,24 @@ impl Editor {
 
     fn insert_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy) {
         let at = self.insert_byte(copy);
+        // The word characters typed in a row before this key, which any
+        // key but another of them ends.
+        let run = std::mem::take(&mut self.word_run);
         match stroke {
-            Stroke::Escape => self.leave_insert(copy),
+            Stroke::Escape => {
+                self.word_run = run;
+                self.leave_insert(copy);
+            }
             Stroke::Char { ch, ctrl: false } => {
                 self.insert_text(at, ch.encode_utf8(&mut [0; 4]), copy);
-                self.typed_indent_key(ch, copy);
-            }
-            Stroke::Enter => {
-                let text = self.text(copy);
-                let line = text.point_of(at).line;
-                let line_text = text.line_text(line);
-                let before_cursor = at - text.line_start(line);
-                let indent = indent_of(&line_text[..before_cursor.min(line_text.len())]).to_owned();
-                drop(text);
-                self.insert_text(at, &format!("\n{indent}"), copy);
-                self.ask_indent(line + 1, copy);
-            }
-            Stroke::Tab | Stroke::BackTab => {
-                let text = self.text(copy);
-                let point = text.point_of(at);
-                let tabs = self.indent.tabs_near(&text, point.line, point.line);
-                drop(text);
-                let step = self.indent.step;
-                let indent = if tabs {
-                    "\t".to_owned()
+                if indent::is_word(ch) {
+                    self.word_run = run.saturating_add(1);
                 } else {
-                    " ".repeat(step - point.col % step)
-                };
-                self.insert_text(at, &indent, copy);
+                    self.typed_indent_key(ch, at + ch.len_utf8(), run, copy);
+                }
             }
+            Stroke::Enter => self.insert_line_break(at, run, copy),
+            Stroke::Tab | Stroke::BackTab => self.insert_tab(at, run, copy),
             Stroke::Backspace
             | Stroke::Char {
                 ch: 'h',
@@ -2393,6 +2397,46 @@ impl Editor {
         }
     }
 
+    /// Enter in insert mode, before byte `at`, after `run` of a word's
+    /// characters typed in a row: a new line, indented as the line before
+    /// at once, and as the grammar says once it answers.
+    fn insert_line_break(&mut self, at: usize, run: usize, copy: &mut BufferCopy) {
+        let text = self.text(copy);
+        let line = text.point_of(at).line;
+        let line_text = text.line_text(line);
+        let before_cursor = at - text.line_start(line);
+        let indent = indent_of(&line_text[..before_cursor.min(line_text.len())]).to_owned();
+        drop(text);
+        self.insert_text(at, &format!("\n{indent}"), copy);
+        // The line it ends is asked about too, if it ends a word such as
+        // `end` just typed first on it: looked at once it's ended, so
+        // `else` split from `elsewhere` is too.
+        if self.ends_branch(at, run, copy) {
+            self.ask_indent(line, copy);
+        }
+        self.ask_indent(line + 1, copy);
+    }
+
+    /// Tab in insert mode, before byte `at`, after `run` of a word's
+    /// characters typed in a row: a tab, or spaces to the next stop.
+    fn insert_tab(&mut self, at: usize, run: usize, copy: &mut BufferCopy) {
+        let text = self.text(copy);
+        let point = text.point_of(at);
+        let tabs = self.indent.tabs_near(&text, point.line, point.line);
+        drop(text);
+        let step = self.indent.step;
+        let indent = if tabs {
+            "\t".to_owned()
+        } else {
+            " ".repeat(step - point.col % step)
+        };
+        self.insert_text(at, &indent, copy);
+        // It ends a word as a space does.
+        if self.ends_branch(at, run, copy) {
+            self.ask_indent(point.line, copy);
+        }
+    }
+
     /// Types `typed` again, as `.` and a count do.
     fn retype(&mut self, typed: &Typed, copy: &mut BufferCopy) {
         match typed {
@@ -2420,6 +2464,7 @@ impl Editor {
                 let edit = Edit::replace(copy.text().len_bytes(), start, &removed, &text);
                 self.make(edit, copy);
                 self.cursor = Cursor::new(self.text(copy).point_of(start + offset));
+                self.word_run = 0;
             }
         }
     }
@@ -2430,6 +2475,7 @@ impl Editor {
     fn moved_while_inserting(&mut self, copy: &BufferCopy) {
         self.snippet_moved(copy);
         self.new_step = true;
+        self.word_run = 0;
         if let Some(change) = self.changing.take() {
             self.last_change = Some(change);
         }
@@ -2836,6 +2882,7 @@ impl Editor {
         }
         self.make(accepted.edit, copy);
         self.cursor = Cursor::new(self.text(copy).point_of(accepted.cursor));
+        self.word_run = 0;
         // For a macro being recorded, the keys that type the same.
         let mut keys = vec![Stroke::Backspace; accepted.replaced];
         keys.extend(snippet::typing_keys(&accepted.text));
@@ -4019,6 +4066,10 @@ impl Editor {
         if self.cursor.at != at {
             self.close_completion();
             self.actions = None;
+            // In insert mode, it moved, as the arrow keys move it.
+            if self.mode == Mode::Insert {
+                self.moved_while_inserting(copy);
+            }
         }
     }
 
@@ -4095,6 +4146,8 @@ impl Editor {
         if self.mode == Mode::Insert {
             let byte = self.insert_byte(copy);
             self.cursor = Cursor::new(self.text(copy).point_of(byte));
+            // It moved, as the arrow keys move it.
+            self.moved_while_inserting(copy);
         } else {
             self.normal_cursor(copy);
         }

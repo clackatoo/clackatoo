@@ -7,7 +7,9 @@
 //! function and `@function.inner` its body, and so `@class.*` and
 //! `@parameter.*`. Captures of one name in one match make one piece, from
 //! the first node to the last, so `"," @parameter.outer . (parameter)
-//! @parameter.outer` is an argument with the comma before it.
+//! @parameter.outer` is an argument with the comma before it. A piece two
+//! patterns find two ways, with one inside, is kept once, as
+//! [`Found::one_per_inside`] says.
 //!
 //! A pack without one, such as one installed before clackatoo read them,
 //! is read by the kinds of its nodes instead: a node whose kind says
@@ -114,13 +116,80 @@ pub(crate) struct Finder<'a> {
     pub(crate) cursor: &'a mut QueryCursor,
 }
 
-/// The two sides of a piece found, by the query or by kinds.
+/// The two sides of a piece found, by the query or by kinds, each in
+/// order, as [`one_per_inside`](Self::one_per_inside) leaves them.
 #[derive(Default)]
 struct Found {
     /// Whole pieces.
     outer: Vec<(usize, usize)>,
     /// Their insides.
     inner: Vec<(usize, usize)>,
+}
+
+impl Found {
+    /// Takes in `more`, found in another look, leaving one piece for each
+    /// inside of them all.
+    fn take_in(&mut self, more: Found) {
+        if self.outer.is_empty() && self.inner.is_empty() {
+            *self = more;
+            return;
+        }
+        self.outer.extend(more.outer);
+        self.inner.extend(more.inner);
+        self.one_per_inside();
+    }
+
+    /// Leaves one piece for each inside, as two patterns can find one
+    /// piece two ways: `"," . (x) . ")"` matches a last argument followed
+    /// by a comma, as `.` passes over the comma, so it's found with the
+    /// comma before it as well as with the one after it, and `]a` would
+    /// stop at it twice. The smaller is kept, or of two as small, the one
+    /// with what follows its inside, as nvim-treesitter's queries mostly
+    /// take the comma after an argument.
+    ///
+    /// A piece is never given the inside of a smaller piece in it, so two
+    /// with one inside overlap without either holding the other: only
+    /// those are looked at, so no more than a few pieces' insides are
+    /// worked out, however many there are.
+    fn one_per_inside(&mut self) {
+        self.outer.sort_unstable();
+        self.outer.dedup();
+        self.inner.sort_unstable();
+        self.inner.dedup();
+        let outer = &self.outer;
+        // Each piece's inside, once worked out.
+        let mut known: Vec<Option<Option<(usize, usize)>>> = vec![None; outer.len()];
+        let mut inside_of =
+            |piece: usize| *known[piece].get_or_insert_with(|| insides(outer[piece], self));
+        let mut gone = vec![false; outer.len()];
+        for (one, &(start, end)) in outer.iter().enumerate() {
+            // The pieces starting inside it, which are those after it, in
+            // order, until one starts at its end or past it.
+            for other in one + 1..outer.len() {
+                let (other_start, other_end) = outer[other];
+                if other_start >= end {
+                    break;
+                }
+                // One holds the other.
+                if other_start == start || other_end <= end {
+                    continue;
+                }
+                let inside = inside_of(one);
+                if inside.is_none() || inside != inside_of(other) {
+                    continue;
+                }
+                // The smaller wins, or the later of two as small.
+                let rank = |piece: usize| {
+                    let (start, end) = outer[piece];
+                    (end - start, std::cmp::Reverse(start))
+                };
+                let worse = if rank(one) <= rank(other) { other } else { one };
+                gone[worse] = true;
+            }
+        }
+        let mut gone = gone.into_iter();
+        self.outer.retain(|_| !gone.next().unwrap_or(false));
+    }
 }
 
 impl Finder<'_> {
@@ -215,48 +284,49 @@ impl Finder<'_> {
     /// one place come together.
     fn after(&mut self, construct: Construct, at: usize, count: usize) -> Vec<(usize, usize)> {
         let len = self.text.len_bytes();
-        let mut found = Vec::new();
+        let mut found = Found::default();
+        let mut pieces = Vec::new();
         let (mut from, mut look) = (at + 1, FIRST_LOOK);
         while from < len {
             let to = from.saturating_add(look).min(len);
             // A piece starting in the range has a node in it, so it's
-            // found; one found starting earlier was found before.
-            let mut new: Vec<_> = (self.find(construct, from..to).outer.into_iter())
-                .filter(|&(start, _)| (from..to).contains(&start))
+            // found. Those found before are kept with them, as a piece
+            // found two ways may be found one way in each look.
+            found.take_in(self.find(construct, from..to));
+            pieces = (found.outer.iter().copied())
+                .filter(|&(start, _)| start > at && start < to)
                 .collect();
-            new.sort_unstable();
-            found.extend(new);
-            if distinct_starts(&found) >= count {
+            if distinct_starts(&pieces) >= count {
                 break;
             }
             (from, look) = (to, look.saturating_mul(2));
         }
-        found
+        pieces
     }
 
     /// The pieces starting before byte `at`, nearest first, as
     /// [`after`](Self::after) finds those after.
     fn before(&mut self, construct: Construct, at: usize, count: usize) -> Vec<(usize, usize)> {
-        let mut found = Vec::new();
+        let mut found = Found::default();
+        let mut pieces = Vec::new();
         let (mut to, mut look) = (at, FIRST_LOOK);
         while to > 0 {
             let from = to.saturating_sub(look);
-            let mut new: Vec<_> = (self.find(construct, from..to).outer.into_iter())
-                .filter(|&(start, _)| (from..to).contains(&start))
+            found.take_in(self.find(construct, from..to));
+            pieces = (found.outer.iter().rev().copied())
+                .filter(|&(start, _)| start >= from && start < at)
                 .collect();
-            new.sort_unstable_by(|a, b| b.cmp(a));
-            found.extend(new);
-            if distinct_starts(&found) >= count {
+            if distinct_starts(&pieces) >= count {
                 break;
             }
             (to, look) = (from, look.saturating_mul(2));
         }
-        found
+        pieces
     }
 
-    /// The pieces with a node in bytes `range`.
+    /// The pieces with a node in bytes `range`, one for each inside.
     fn find(&mut self, construct: Construct, range: Range<usize>) -> Found {
-        match self.objects {
+        let mut found = match self.objects {
             Some(objects) => self.by_query(objects, construct, range),
             None if self.findable[index(construct)] => {
                 by_kinds(self.tree.root_node(), construct, &range)
@@ -264,7 +334,9 @@ impl Finder<'_> {
             // None of the grammar's kinds could be one: JSON has no
             // functions.
             None => Found::default(),
-        }
+        };
+        found.one_per_inside();
+        found
     }
 
     fn by_query(&mut self, objects: &Objects, construct: Construct, range: Range<usize>) -> Found {
@@ -305,15 +377,33 @@ fn distinct_starts(found: &[(usize, usize)]) -> usize {
 
 /// The insides of `outer`: the biggest of `within`'s insides in it that
 /// aren't in a smaller piece in it, such as a function's body but not the
-/// body of a closure in it.
+/// body of a closure in it. `within`'s pieces and insides are in order, so
+/// only those starting in it are looked at, each once or so: a list of
+/// thousands of arguments in one costs no more than going through them.
 fn insides(outer: (usize, usize), within: &Found) -> Option<(usize, usize)> {
     let inside = |a: (usize, usize), b: (usize, usize)| b.0 <= a.0 && a.1 <= b.1;
-    (within.inner.iter().copied())
-        .filter(|&inner| inside(inner, outer) && inner.0 < inner.1)
-        .filter(|&inner| {
-            !(within.outer.iter().copied())
-                .any(|smaller| smaller != outer && inside(smaller, outer) && inside(inner, smaller))
+    let starting_in = |pieces: &[(usize, usize)]| {
+        let first = pieces.partition_point(|piece| piece.0 < outer.0);
+        let after = pieces.partition_point(|piece| piece.0 < outer.1);
+        first..after
+    };
+    // The smaller pieces in it, by where they start, and the furthest any
+    // of them reaches by then: an inside is in one of them if one starting
+    // where it does or before reaches its end.
+    let (starts, reach): (Vec<usize>, Vec<usize>) = (within.outer[starting_in(&within.outer)])
+        .iter()
+        .filter(|&&smaller| smaller != outer && inside(smaller, outer))
+        .scan(0, |reach, &(start, end)| {
+            *reach = end.max(*reach);
+            Some((start, *reach))
         })
+        .unzip();
+    let in_smaller = |(start, end): (usize, usize)| {
+        let before = starts.partition_point(|&smaller| smaller <= start);
+        before > 0 && reach[before - 1] >= end
+    };
+    (within.inner[starting_in(&within.inner)].iter().copied())
+        .filter(|&inner| inside(inner, outer) && inner.0 < inner.1 && !in_smaller(inner))
         .max_by_key(|&(start, end)| (end - start, std::cmp::Reverse(start)))
 }
 
@@ -513,5 +603,58 @@ mod tests {
         assert_eq!(insides((0, 100), &within), Some((10, 90)));
         assert_eq!(insides((20, 50), &within), Some((30, 40)));
         assert_eq!(insides((60, 70), &within), None);
+    }
+
+    #[test]
+    fn one_piece_is_kept_for_each_inside() {
+        let mut found = Found {
+            outer: vec![
+                // `bb,` and `, bb`.
+                (10, 13),
+                (8, 12),
+                // `d,` and `,d`, as small.
+                (19, 21),
+                (20, 22),
+                // `e,` and `, ff`, which share only the comma.
+                (30, 32),
+                (31, 35),
+                // A function holding them, its inside theirs too.
+                (0, 100),
+            ],
+            inner: vec![(1, 99), (10, 12), (20, 21), (30, 31), (33, 35)],
+        };
+        found.one_per_inside();
+        assert_eq!(
+            found.outer,
+            [(0, 100), (10, 13), (20, 22), (30, 32), (31, 35)]
+        );
+        assert_eq!(insides((0, 100), &found), Some((1, 99)));
+    }
+
+    #[test]
+    fn a_piece_holding_thousands_finds_its_inside_without_going_through_them_for_each() {
+        // A list of 50,000 arguments, as `[1, 2, …],` is in a call, and
+        // the argument after it, which shares its comma: so both insides
+        // are worked out, and the list's has every argument in it.
+        const MANY: usize = 50_000;
+        let end = 10 * MANY + 2;
+        let mut found = Found::default();
+        for item in 0..MANY {
+            found.outer.push((10 * item + 1, 10 * item + 3));
+            found.inner.push((10 * item + 1, 10 * item + 2));
+        }
+        found.outer.extend([(0, end), (end - 1, end + 5)]);
+        found.inner.extend([(1, end - 2), (end, end + 4)]);
+        let took = std::time::Instant::now();
+        found.one_per_inside();
+        // Going through the smaller pieces for each would take minutes.
+        assert!(
+            took.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            took.elapsed()
+        );
+        assert_eq!(found.outer.len(), MANY + 2);
+        assert_eq!(insides((0, end), &found), Some((1, end - 2)));
+        assert_eq!(insides((11, 13), &found), Some((11, 12)));
     }
 }

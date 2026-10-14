@@ -96,6 +96,30 @@ On the `if` line, press `o`, type `let more = 2;`, and press Esc.
 has "\n        let more = 2;"
 ```
 
+## Words such as else
+
+A line starting with `else` is worked out again once the word's typed: as the key after it, a space, Tab, `{`, `:` or Enter, or Esc, ends it. Only a word you type counts: not one that was there, or was pasted. So are lines starting with the other words the rules usually take back a step, such as `elif`, `case`, `catch`, and `end`, `fi` and `done`, which end blocks. A longer word, such as `elsewhere`, isn't.
+
+```practice tidy.rs
+fn main() {
+    let total = 1;
+    if total > 0 {
+        println!("yes");
+    }
+
+}
+```
+
+```setup
+cursor 6
+```
+
+On the empty line, press `i`, type `else`, and press Esc.
+
+```check
+has "\n    else\n"
+```
+
 ## Tabs
 
-A tab is drawn to the next column that's a multiple of `tabstop`, 4 to begin with; `shiftwidth` is `tabstop`'s while it's 0. `:set ts=8 sw=4` draws tabs 8 wide and indents by 4, and `:set noet` indents new lines with tabs. `:set nosi` turns indenting as the language says off for new lines; `=` goes by the rules either way.
+A tab is drawn to the next column that's a multiple of `tabstop`, 4 to begin with; `shiftwidth` is `tabstop`'s while it's 0. `:set ts=8 sw=4` draws tabs 8 wide and indents by 4, and `:set noet` indents new lines with tabs. `:set nosi` turns indenting as the language says off for new lines and the words typed; `=` goes by the rules either way.

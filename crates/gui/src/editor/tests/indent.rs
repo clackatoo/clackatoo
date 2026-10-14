@@ -229,6 +229,149 @@ fn a_closing_bracket_or_else_typed_first_on_a_line_asks_again() {
     assert_eq!(asked(&mut setup, "o}<Esc>O<CR>"), 0);
 }
 
+#[test]
+fn a_word_such_as_else_or_end_first_on_a_line_asks_again_once_its_typed() {
+    let mut setup = Setup::new("x\n");
+    let asked = |setup: &mut Setup, keys: &str| {
+        let before = setup.indents.len();
+        setup.keys(keys);
+        setup.indents.len() - before
+    };
+    // An `else` on the line after a `}`, as in GCSL or Rust: the space or
+    // bracket after it asks, and its letters don't.
+    assert_eq!(
+        asked(&mut setup, "o}<CR>else"),
+        3,
+        "the o's, }}'s and Enter's"
+    );
+    assert_eq!(asked(&mut setup, " "), 1);
+    assert_eq!(asked(&mut setup, "<CR>else{"), 2);
+    // Esc, or Enter, after a word that ends a block.
+    assert_eq!(asked(&mut setup, "<CR>end<Esc>"), 2);
+    assert_eq!(
+        asked(&mut setup, "o  fi<CR>"),
+        3,
+        "o's, fi's and the new line's"
+    );
+    // Python's `else:`, once.
+    assert_eq!(asked(&mut setup, "else:"), 1);
+    // Not a longer word, nor one after something else on the line.
+    assert_eq!(asked(&mut setup, "<CR>elsewhere "), 1);
+    assert_eq!(asked(&mut setup, "<CR>else_x "), 1);
+    assert_eq!(asked(&mut setup, "<CR>} else "), 2, "the }}'s");
+    assert_eq!(asked(&mut setup, "<CR>x = end<Esc>"), 1);
+    // Nor Esc where nothing's been typed.
+    setup.keys("oend<Esc>");
+    assert_eq!(asked(&mut setup, "A<Esc>"), 0);
+    // Nor with smartindent off.
+    setup.set(|options| options.smartindent = false);
+    assert_eq!(asked(&mut setup, "oelse {<CR>end<Esc>"), 0);
+}
+
+#[test]
+fn only_a_word_typed_and_ended_asks_again() {
+    let asked = |text: &str, keys: &str| {
+        let mut setup = Setup::new(text);
+        let before = setup.indents.len();
+        setup.keys(keys);
+        setup.indents.len() - before
+    };
+    // `else` typed before `where` makes `elsewhere`; Esc in the middle of
+    // a word doesn't end it.
+    assert_eq!(asked("x\n    where\n", "jIelse<Esc>"), 0);
+    // A word that was there already: Enter asks only about the new line,
+    // and a space after it nothing.
+    assert_eq!(asked("x\n      end\n", "jA<CR>"), 1);
+    assert_eq!(asked("x\n      end\n", "jA -- c"), 0);
+    // Nor after the cursor moves past one.
+    assert_eq!(asked("x\n", "oend<Left><Right> "), 1, "the o's");
+    // Nor after a click past one, or the wheel moving the cursor.
+    let mut setup = Setup::new("x\n      end\n");
+    setup.editor.settle(&setup.copy);
+    setup.keys("Aelse");
+    let before = setup.indents.len();
+    setup.editor.click(1, 4 + 30, &setup.copy);
+    assert_eq!(setup.cursor(), (1, 9), "after the end");
+    setup.keys("<Esc>");
+    assert_eq!(setup.indents.len() - before, 0);
+    let mut setup = Setup::new(&format!("\n{}", "end ;\n".repeat(60)));
+    setup.editor.settle(&setup.copy);
+    setup.keys("ixyz");
+    let before = setup.indents.len();
+    setup.editor.wheel(-20, &setup.copy);
+    assert_eq!(setup.cursor().1, 3, "after an end");
+    setup.keys(" ");
+    assert_eq!(setup.indents.len() - before, 0);
+    // Pasted, it wasn't typed.
+    let mut setup = Setup::new("x\n");
+    setup.keys("o");
+    let before = setup.indents.len();
+    setup.editor.paste("y\n      end", &mut setup.copy);
+    setup.keys("<Esc>");
+    assert_eq!(setup.indents.len() - before, 0);
+    // Enter splitting `elsewhere` after `else` typed asks about the
+    // `else` it leaves, and the new line.
+    assert_eq!(asked("x\n    where\n", "jIelse<CR>"), 2);
+    // Tab ends a word as a space does.
+    assert_eq!(asked("x\n", "oelse<Tab>"), 2);
+    // `.` and a count type it again, and ask again.
+    let mut setup = Setup::new("x\n");
+    setup.keys("oend<Esc>");
+    let before = setup.indents.len();
+    setup.keys(".");
+    assert_eq!(setup.indents.len() - before, 2, "the o's and end's");
+    assert_eq!(
+        asked("x\n", "A<CR><Esc>3ifi <Esc>"),
+        2,
+        "the Enter's and the first fi's"
+    );
+}
+
+#[test]
+fn an_else_put_back_is_part_of_the_change_that_typed_it() {
+    // A blank line further in than the `}`, as one left by a `}` typed
+    // with no grammar to answer, or by hand.
+    let text = "    if a {\n        b;\n    }\n        \n";
+    let mut setup = Setup::new(text);
+    setup.keys("GAelse {");
+    assert_eq!(
+        setup.text(),
+        "    if a {\n        b;\n    }\n        else {\n"
+    );
+    let (asked, at, lines) = last_indent(&setup);
+    assert_eq!((at, lines), (28, 1));
+    setup.answer(asked, indents(&[(at, Some(4))]));
+    assert_eq!(setup.text(), "    if a {\n        b;\n    }\n    else {\n");
+    assert_eq!(setup.cursor(), (3, 10), "still after what was typed");
+    setup.keys("<Esc>u");
+    assert_eq!(setup.text(), text, "one undo step");
+    // So with Esc, as Lua's `end`.
+    let text = "if a then\n    b\n";
+    let mut setup = Setup::new(text);
+    setup.keys("jo");
+    let (asked, at, _) = last_indent(&setup);
+    setup.answer(asked, indents(&[(at, Some(4))]));
+    setup.keys("end<Esc>");
+    let (asked, at, _) = last_indent(&setup);
+    setup.answer(asked, indents(&[(at, Some(0))]));
+    assert_eq!(setup.text(), "if a then\n    b\nend\n");
+    assert_eq!(setup.cursor(), (2, 2));
+    setup.keys("u");
+    assert_eq!(setup.text(), text);
+}
+
+#[test]
+fn an_else_in_a_language_without_rules_is_left_as_it_is() {
+    let text = "    if a {\n    }\n        \n";
+    let mut setup = Setup::new(text);
+    setup.keys("GAelse ");
+    let why = "no rules for indenting mine: its pack has no indents.scm";
+    setup.answer(last_indent(&setup).0, Answer::Failed(why.into()));
+    assert_eq!(setup.text(), "    if a {\n    }\n        else \n");
+    // Nor does it say why, as `=` would: nobody asked.
+    assert_eq!(setup.editor.status, None);
+}
+
 const BLOCK: &str = "a {\nb\n\n  c\n}\n";
 
 #[test]

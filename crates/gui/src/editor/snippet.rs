@@ -511,6 +511,7 @@ impl Editor {
         if matches!(stroke, Stroke::Tab | Stroke::BackTab) {
             // With no place to go to, the text stays selected.
             self.menu_keys = Some(Vec::new());
+            self.word_run = 0;
             self.go_to_place(stroke == Stroke::Tab, copy);
             return Some(Done::REDRAW);
         }
@@ -519,6 +520,7 @@ impl Editor {
         match stroke {
             Stroke::Char { ctrl: false, .. } | Stroke::Enter => {
                 if let Some((start, end)) = selected {
+                    self.word_run = 0;
                     self.delete_text(start, end, copy);
                 }
                 None
