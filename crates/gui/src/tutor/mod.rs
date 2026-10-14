@@ -354,6 +354,9 @@ mod tests {
         fn listed(&self, _: &str) -> bool {
             false
         }
+        fn rooted(&self, _: &str) -> bool {
+            false
+        }
         fn file(&self) -> Option<String> {
             None
         }

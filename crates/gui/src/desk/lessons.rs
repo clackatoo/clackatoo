@@ -1236,6 +1236,20 @@ impl Facts for DeskFacts<'_> {
             .any(|explorer| explorer.lists(path))
     }
 
+    fn rooted(&self, path: &str) -> bool {
+        let Some(open) = self.open() else {
+            return false;
+        };
+        let wanted = match path {
+            "." => open.dir.clone(),
+            path => open.dir.join(path),
+        };
+        (self.desk.lesson_tab_panes().iter())
+            .filter_map(|pane| self.desk.explorer(pane.id))
+            .filter_map(|explorer| explorer.root())
+            .any(|root| Path::new(root) == wanted)
+    }
+
     fn file(&self) -> Option<String> {
         let (_, copy) = self.desk.focused_editor()?;
         // A folder's listing is no file.

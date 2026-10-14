@@ -81,6 +81,26 @@ listed "drafts"
 not listed "todo.txt"
 ```
 
+## Root it at a folder
+
+`:Explore DIR` roots the tab's explorer at DIR, from its root, so the tree shows only what's in it.
+
+Back in the tree, type `:Explore drafts` to root it at the folder you just made.
+
+```check
+rooted "drafts"
+```
+
+## Go up with ..
+
+The first line under the root's name is `..`, the way up. Enter on it, or a double click, does what `-` does: the folder above becomes the root, and the cursor lands on the folder you came from. `gg` goes to it, as to any first line. It names no file, so `r`, `d`, `x` and `y` leave it alone. There's none at `/`, nor at the lesson's folder, which its explorer stays in.
+
+Press `gg`, then Enter, to go back up to the lesson's folder.
+
+```check
+rooted "."
+```
+
 ## Browse a folder in an editor
 
 An editor shows a folder too, as oil.nvim does: `:e .` or `:e DIR` shows a folder's listing in the editor's pane, and `:Editor` with no file opens a new one on the folder you're in. It's the listing `e` shows, edited the same way, with `:w` and `y` making the changes. From a file, `-` shows the folder it's in, with the cursor on the file.

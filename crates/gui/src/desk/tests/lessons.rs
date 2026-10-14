@@ -1107,6 +1107,63 @@ fn a_lessons_explorer_stays_in_the_lessons_folder() {
 }
 
 #[test]
+fn the_explorer_lesson_roots_its_explorer_at_a_folder_and_goes_back_up_with_dot_dot() {
+    use clackatoo_protocol::{FilesAction, FilesId, FilesUpdate};
+    let mut desk = one_terminal(Some(seen_everything()));
+    open(&mut desk, "explorer", file_pane(2, 7));
+    let dir = format!("{SCRATCH}/explorer");
+    let drafts = format!("{dir}/drafts");
+    load(&mut desk, 7, &format!("{dir}/done.txt"), "Things to do.\n");
+    let layout = side_by_side(vec![files_pane(4, 1), file_pane(3, 8), file_pane(2, 7)]);
+    desk.workspaces_changed(workspaces(vec![with_lesson(layout, vec![], 2)]));
+    answer_all(&mut desk);
+    let rooted = |desk: &mut Desk, path: &str| {
+        let root = FilesUpdate::Root {
+            path: path.to_owned(),
+            name: path.rsplit('/').next().unwrap().to_owned(),
+        };
+        desk.files_changed(FilesId(1), root);
+        let listed = FilesUpdate::Listed {
+            dir: path.to_owned(),
+            entries: Vec::new(),
+            cut_short: false,
+        };
+        desk.files_changed(FilesId(1), listed);
+    };
+    rooted(&mut desk, &dir);
+    let lesson = tutor::lesson("explorer").unwrap();
+    let root_it = (lesson.steps.iter())
+        .position(|step| step.title == "Root it at a folder")
+        .expect("the step");
+    desk.tutor.open.as_mut().unwrap().step = root_it;
+    desk.show_pane(PaneId(4));
+    desk.settle_lesson();
+    let root_asked = |desk: &mut Desk, path: &str| {
+        (desk.take_outbox().iter()).any(|message| {
+            matches!(message, ClientMessage::Files { action: FilesAction::Root(root), .. } if root == path)
+        })
+    };
+    // At the lesson's folder, which its explorer stays in, there's no `..`.
+    assert_eq!(
+        desk.explorer(PaneId(4)).unwrap().label(),
+        "explorer",
+        "no line at the cursor: the folder's empty, and has no .."
+    );
+    type_keys(&mut desk, ":Explore drafts");
+    enter(&mut desk);
+    assert!(root_asked(&mut desk, &drafts));
+    rooted(&mut desk, &drafts);
+    assert_eq!(step(&desk), root_it + 1);
+    // In drafts, `..` goes back up to the lesson's folder.
+    type_keys(&mut desk, "gg");
+    assert_eq!(desk.explorer(PaneId(4)).unwrap().label(), "drafts  ..");
+    enter(&mut desk);
+    assert!(root_asked(&mut desk, &dir));
+    rooted(&mut desk, &dir);
+    assert_eq!(step(&desk), root_it + 2);
+}
+
+#[test]
 fn the_explorer_lessons_editor_goes_to_its_folder_with_minus_and_opens_a_file_from_it() {
     use clackatoo_protocol::{FilesId, FilesUpdate};
     let mut desk = one_terminal(Some(seen_everything()));

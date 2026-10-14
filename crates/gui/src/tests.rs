@@ -2197,7 +2197,7 @@ fn renders_an_explorer_pane() {
         eprintln!("no GPU available; skipping");
         return;
     };
-    let (cols, rows) = (24u16, 6u16);
+    let (cols, rows) = (24u16, 7u16);
     let mut explorer = Explorer::new(FilesId(1), &crate::options::Options::default());
     explorer.resize(Size::new(cols, rows).unwrap());
     let entry = |name: &str, kind, ignored| Entry {
@@ -2269,6 +2269,7 @@ fn renders_an_explorer_pane() {
         text,
         [
             "~/p",
+            "    ..",
             "M ▾ src",
             "M │   main.rs",
             "  ▸ target",
@@ -2278,16 +2279,26 @@ fn renders_an_explorer_pane() {
     );
     let fg = |row: &clackatoo_term::Row, col: usize| row.style(row.cells()[col]).fg;
     assert_eq!(
-        fg(lines[2], 0),
+        fg(lines[3], 0),
         crate::colors::git_mark(GitMark::Modified).1.fg
     );
+    let up = lines[1].style(lines[1].cells()[4]);
     assert_eq!(
-        fg(lines[1], 4),
+        up.fg,
+        clackatoo_protocol::Color::Indexed(4),
+        "as a directory"
+    );
+    assert!(
+        up.attributes.contains(clackatoo_protocol::Attributes::DIM),
+        "but muted"
+    );
+    assert_eq!(
+        fg(lines[2], 4),
         clackatoo_protocol::Color::Indexed(4),
         "a directory"
     );
     assert_eq!(
-        fg(lines[4], 4),
+        fg(lines[5], 4),
         clackatoo_protocol::Color::Indexed(2),
         "a program"
     );
@@ -2300,9 +2311,9 @@ fn renders_an_explorer_pane() {
         &pixels[start..start + 4]
     };
     // The cursor's line is lit across the pane, and nothing past it.
-    assert_ne!(at(2, 20), background, "the cursor's line");
-    assert_eq!(at(5, 20), background);
-    assert_ne!(at(2, 0), background, "the mark");
+    assert_ne!(at(3, 20), background, "the cursor's line");
+    assert_eq!(at(6, 20), background);
+    assert_ne!(at(3, 0), background, "the mark");
 }
 
 #[test]

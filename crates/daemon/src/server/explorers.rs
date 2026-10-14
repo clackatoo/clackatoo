@@ -89,6 +89,10 @@ pub(super) struct Explorers {
     workers: Option<Workers>,
     /// Every directory a client has expanded, by its path.
     dirs: HashMap<PathBuf, Dir>,
+    /// When directories that couldn't be listed were last tried, for the
+    /// last [`LIST_GAP`]: one expanded again so soon waits out its gap, so
+    /// a client asking again at once can't have it listed back to back.
+    failed: HashMap<PathBuf, Instant>,
     /// Every repository an explorer's root is in, by its work tree's top.
     repos: HashMap<PathBuf, Repo>,
     /// The inotify instance directories are watched with, once one is, and
@@ -146,6 +150,7 @@ impl Default for Explorers {
             next: 1,
             workers: None,
             dirs: HashMap::new(),
+            failed: HashMap::new(),
             repos: HashMap::new(),
             inotify: None,
             watches: HashMap::new(),
@@ -422,7 +427,12 @@ impl Daemon {
             return;
         }
         let known = self.explorers.dirs.contains_key(dir);
+        let failed = self.explorers.failed.remove(dir);
         let entry = self.explorers.dirs.entry(dir.to_owned()).or_default();
+        // Tried and failed a moment ago: listed again a gap after.
+        if !known {
+            entry.last = failed;
+        }
         if !entry.viewers.contains(&(token, files)) {
             entry.viewers.push((token, files));
         }
@@ -1043,8 +1053,16 @@ impl Daemon {
                 listed_update(dir, &listing)
             }
             Err(reason) => {
-                // Gone, or unreadable: collapsed for everyone.
+                // Gone, or unreadable: collapsed for everyone, though when
+                // it was tried is kept for a gap.
+                let last = entry.last;
                 self.explorers.dirs.remove(dir);
+                let now = Instant::now();
+                let failed = &mut self.explorers.failed;
+                failed.retain(|_, tried| *tried + LIST_GAP > now);
+                if let Some(last) = last {
+                    failed.insert(dir.to_owned(), last);
+                }
                 self.unwatch(|watched| watched.dirs.retain(|watched| watched != dir));
                 FilesUpdate::Unlisted {
                     dir: dir.display().to_string(),
@@ -1640,6 +1658,30 @@ mod tests {
         assert_eq!(daemon.explorers.running, 0);
         assert!(made.exists(), "the thread carried on");
         drop(upgrade);
+    }
+
+    #[test]
+    fn a_folder_that_cant_be_listed_isnt_listed_again_within_its_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let gone = dir.path().join("gone");
+        let (token, files) = (Token(1000), FilesId(1));
+        daemon.expand(token, files, &gone);
+        let tried = Instant::now();
+        daemon.listed(&gone, Err("No such file or directory".into()));
+        assert!(!daemon.explorers.dirs.contains_key(&gone), "collapsed");
+        // Asked for again at once, as a window might: it waits its gap,
+        // from when it was tried.
+        daemon.expand(token, files, &gone);
+        let entry = &daemon.explorers.dirs[&gone];
+        let last = entry.last.expect("when it was tried");
+        assert!(last >= tried);
+        assert_eq!(due(entry.due, entry.last, LIST_GAP), Some(last + LIST_GAP));
+        assert!(daemon.explorers.failed.is_empty(), "forgotten once used");
+        // A folder never tried is listed at once.
+        let other = dir.path().join("other");
+        daemon.expand(token, files, &other);
+        assert_eq!(daemon.explorers.dirs[&other].last, None);
     }
 
     #[test]

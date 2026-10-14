@@ -147,9 +147,10 @@ impl Explorer {
     }
 
     /// `e`: shows the listing of the folder at the cursor, if it's open,
-    /// or else the folder its line is in, as text, to edit.
+    /// or else the folder its line is in, or the root, as on `..`, as
+    /// text, to edit.
     pub(super) fn edit_here(&mut self) {
-        let dir = match self.lines.get(self.cursor) {
+        let dir = match self.line() {
             Some(line) if line.entry().kind.expands() && self.asked.contains(&line.path()) => {
                 line.path()
             }
@@ -159,7 +160,7 @@ impl Explorer {
                 None => return,
             },
         };
-        let at = self.lines.get(self.cursor).map(super::Line::path);
+        let at = self.line().map(super::Line::path);
         self.edit_folder(dir, at.as_deref());
     }
 

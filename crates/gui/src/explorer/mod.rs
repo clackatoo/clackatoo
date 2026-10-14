@@ -12,12 +12,18 @@
 //! expanded or listed changes, and only the lines in view are drawn, so a
 //! directory of ten thousand files costs a frame what any other does.
 //!
+//! Above the tree's lines, under the root's heading, is `..`, the way up,
+//! unless the root is `/`. The cursor moves onto it as onto any line, and
+//! Enter on it does what `-` does. It names no file: nothing that acts on
+//! a file acts on it, and nothing about the folder above is listed until
+//! it's gone up to.
+//!
 //! The keys are Vim's, as netrw's and nvim-tree's are:
 //!
 //! | Key | Does |
 //! |---|---|
 //! | `j` `k`, `gg` `G`, Ctrl+D Ctrl+U, Ctrl+F Ctrl+B | Moves, with a count |
-//! | `l`, Enter | Opens a file; expands a directory (Enter collapses one too) |
+//! | `l`, Enter | Opens a file; expands a directory (Enter collapses one too); goes up on `..` |
 //! | `h` | Collapses a directory, or goes to the one it's in |
 //! | `-` | Goes up, making the directory above the root the root |
 //! | `zo` `zc` `za` | Expands, collapses, toggles the directory at the cursor |
@@ -115,6 +121,8 @@ pub(crate) struct View {
     expanded: HashSet<String>,
     /// The path the cursor's on.
     cursor: Option<String>,
+    /// The cursor's on `..`.
+    up: bool,
     /// Hidden files show.
     hidden: bool,
 }
@@ -172,6 +180,12 @@ enum Prompt {
 
 /// A pane showing a file explorer.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "unrelated flags, none a state of another: whether the tree needs \
+              flattening, the option, an editor's folder, the cursor on `..`, the \
+              root unlistable"
+)]
 pub(crate) struct Explorer {
     files: FilesId,
     /// The directory at its root, once the daemon has said, and as people
@@ -189,8 +203,12 @@ pub(crate) struct Explorer {
     /// The tree, as shown, and whether it needs flattening again.
     lines: Vec<Line>,
     stale: bool,
-    /// The line the cursor's on, and the first line in view.
+    /// The line the cursor's on, unless it's on `..`, as `up` says. A
+    /// line's number never counts `..`, so it names the same line whether
+    /// `..` shows or not.
     cursor: usize,
+    up: bool,
+    /// The first row in view: `..`'s, if it shows, counts as the first.
     top: usize,
     width: usize,
     height: usize,
@@ -230,10 +248,19 @@ pub(crate) struct Explorer {
     /// folder at: its answer comes later, so this, not the root, says
     /// whether to ask again.
     asked_root: Option<String>,
+    /// The daemon couldn't list the root: it isn't asked to again, which
+    /// would have it try again and again, until `R`, a new root, or a new
+    /// connection. A folder in it that couldn't be listed is collapsed, so
+    /// it isn't asked for again until it's expanded.
+    unlisted: bool,
 }
 
 /// What an explorer says when it's asked to leave its fence.
 pub(crate) const FENCED: &str = "a lesson's explorer stays in the lesson's folder";
+
+/// What an explorer says when a key that acts on a file is pressed on
+/// `..`, which names none.
+pub(crate) const ONLY_UP: &str = ".. is only the way up: Enter or - goes up";
 
 impl Explorer {
     pub(crate) fn new(files: FilesId, options: &Options) -> Self {
@@ -251,6 +278,7 @@ impl Explorer {
             lines: Vec::new(),
             stale: true,
             cursor: 0,
+            up: false,
             top: 0,
             width: 0,
             height: 0,
@@ -272,6 +300,7 @@ impl Explorer {
             pending_edit: None,
             folder: false,
             asked_root: None,
+            unlisted: false,
         }
     }
 
@@ -339,7 +368,9 @@ impl Explorer {
     /// What it keeps of how it's shown, for another explorer on its root.
     pub(crate) fn view(&self) -> View {
         let mut view = self.view.clone();
-        view.cursor = self.lines.get(self.cursor).map(Line::path);
+        view.cursor = self.line().map(Line::path);
+        // Only where it was put: not as it is when nothing's listed yet.
+        view.up = self.up && self.shows_up();
         view
     }
 
@@ -431,8 +462,9 @@ impl Explorer {
         if let Some(message) = &self.message {
             return message.clone();
         }
-        match self.lines.get(self.cursor) {
+        match self.line() {
             Some(line) => format!("{}  {}", self.name, self.relative(&line.path())),
+            None if self.on_up() => format!("{}  ..", self.name),
             None => self.name.clone(),
         }
     }
@@ -474,6 +506,7 @@ impl Explorer {
         match update {
             FilesUpdate::Root { path, name } => {
                 self.root = Some(path);
+                self.unlisted = false;
                 self.name = name;
                 self.stale = true;
                 self.sync();
@@ -498,6 +531,7 @@ impl Explorer {
                 self.view.expanded.remove(&dir);
                 if self.root.as_ref() == Some(&dir) {
                     self.message = Some(format!("{}: {reason}", self.name));
+                    self.unlisted = !self.folder;
                 }
                 // What was expanded in it no longer is.
                 self.sync();
@@ -511,6 +545,7 @@ impl Explorer {
     /// stays until it is again.
     pub(crate) fn reconnected(&mut self) {
         self.asked.clear();
+        self.unlisted = false;
         self.plan_cut_off();
     }
 
@@ -605,11 +640,15 @@ impl Explorer {
     /// The directories the daemon should list: the root, and each one
     /// expanded inside one it lists, unless it's hidden and hidden files
     /// don't show; or for an editor's folder, the root and the folders
-    /// whose listings are made, or waited for.
+    /// whose listings are made, or waited for. None in a root that
+    /// couldn't be listed.
     fn wanted(&self) -> HashSet<String> {
         let Some(root) = &self.root else {
             return HashSet::new();
         };
+        if self.unlisted {
+            return HashSet::new();
+        }
         if self.folder {
             return self.folders_wanted();
         }
@@ -661,7 +700,11 @@ impl Explorer {
     /// path it was on, and putting it on the path to reveal if that
     /// shows now.
     fn flatten(&mut self) {
-        let at = self.lines.get(self.cursor).map(Line::path);
+        let at = self.line().map(Line::path);
+        // Gone up from `..`, as `-` goes, too.
+        let from_up = self.up;
+        // Gone with `..`, the cursor stays on the line it was on.
+        self.up &= self.shows_up();
         self.lines.clear();
         let Some(root) = &self.root else { return };
         // Each directory's listing, where it's got to, how deep it is, and
@@ -698,10 +741,14 @@ impl Explorer {
         }
         self.stale = false;
         // The path to reveal, if it shows now, or else where a view kept
-        // put it, or else the path the cursor was on. A path gone leaves
-        // the cursor on the line it was on.
+        // put it, `..` or a path, or else the path the cursor was on. A
+        // path gone leaves the cursor on the line it was on.
         let wanted = [self.reveal.clone(), self.view.cursor.clone(), at];
         for (which, wanted) in wanted.into_iter().enumerate() {
+            if which == 1 && std::mem::take(&mut self.view.up) {
+                self.up = self.shows_up();
+                break;
+            }
             let Some(wanted) = wanted else { continue };
             let Some(index) = self.lines.iter().position(|line| line.is(&wanted)) else {
                 // Not there, though what it's in is listed and shown:
@@ -712,6 +759,11 @@ impl Explorer {
                 if which < 2 && shown && self.listings.contains_key(dir) {
                     if which == 0 {
                         self.reveal = None;
+                        // Gone up from a hidden folder: not left on `..`.
+                        if from_up {
+                            self.up = false;
+                            self.cursor = 0;
+                        }
                     } else {
                         self.view.cursor = None;
                     }
@@ -719,10 +771,12 @@ impl Explorer {
                 continue;
             };
             self.cursor = index;
+            self.up = false;
             match which {
                 0 => {
                     self.reveal = None;
-                    self.top = self.cursor.saturating_sub(self.list_height() / 2);
+                    self.view.up = false;
+                    self.top = self.row().saturating_sub(self.list_height() / 2);
                 }
                 1 => self.view.cursor = None,
                 _ => {}
@@ -768,6 +822,76 @@ impl Explorer {
         self.height.saturating_sub(1).max(1)
     }
 
+    // --- `..` ---------------------------------------------------------------
+
+    /// Whether `..` shows above the tree's lines: once the root is known,
+    /// unless it's `/`, or the folder above is outside the fence, or it's
+    /// an editor's folder, which shows no tree.
+    fn shows_up(&self) -> bool {
+        (self.root.as_deref())
+            .is_some_and(|root| !self.folder && root != "/" && !self.fenced_out(parent_of(root)))
+    }
+
+    /// How many rows come before the tree's lines: one, `..`'s, if it
+    /// shows.
+    fn lead(&self) -> usize {
+        usize::from(self.shows_up())
+    }
+
+    /// Whether the cursor's on `..`: put there, or there as the only line,
+    /// as before the root's listed, or when nothing in it shows.
+    fn on_up(&self) -> bool {
+        self.shows_up() && (self.up || self.lines.is_empty())
+    }
+
+    /// The line the cursor's on: none on `..`, which names no file.
+    fn line(&self) -> Option<&Line> {
+        if self.on_up() {
+            return None;
+        }
+        self.lines.get(self.cursor)
+    }
+
+    /// The line on row `row`, counting `..`'s as the first if it shows:
+    /// none for `..`.
+    fn line_at(&self, row: usize) -> Option<&Line> {
+        self.lines.get(row.checked_sub(self.lead())?)
+    }
+
+    /// How many rows the tree has: `..`'s, if it shows, and its lines'.
+    fn rows_len(&self) -> usize {
+        self.lines.len() + self.lead()
+    }
+
+    /// The row the cursor's on, counting `..`'s as the first if it shows.
+    fn row(&self) -> usize {
+        if self.on_up() {
+            0
+        } else {
+            self.cursor + self.lead()
+        }
+    }
+
+    /// Puts the cursor on row `row`, counting `..`'s as the first if it
+    /// shows.
+    fn go_to_row(&mut self, row: usize) {
+        let lead = self.lead();
+        self.up = row < lead;
+        if !self.up {
+            self.cursor = row - lead;
+        }
+    }
+
+    /// Says that `..` names no file, if the cursor's on it, for a key that
+    /// acts on one. Returns whether it is.
+    fn refused_on_up(&mut self) -> bool {
+        let up = self.on_up();
+        if up {
+            self.say(ONLY_UP.to_owned());
+        }
+        up
+    }
+
     // --- Keys ---------------------------------------------------------------
 
     /// Does what `stroke` does. Returns whether it should be drawn again.
@@ -783,6 +907,7 @@ impl Explorer {
         self.message = None;
         // Where a view kept put the cursor is forgotten once it's moved.
         self.view.cursor = None;
+        self.view.up = false;
         // What listings' edits come to, shown in place of the tree.
         if self.editing.as_ref().is_some_and(editing::Editing::planned) {
             self.plan_stroke(stroke);
@@ -829,7 +954,7 @@ impl Explorer {
             (None, 'G') => self.go_to(count.map_or(usize::MAX, |count| count - 1)),
             (None, 'l') => self.open_or_enter(),
             (None, 'h') => self.close_or_leave(),
-            (None, '-') => self.up(),
+            (None, '-') => self.go_up(),
             (None, '/' | '?') => {
                 self.prompt = Some(Prompt::Search {
                     query: String::new(),
@@ -837,21 +962,13 @@ impl Explorer {
                 });
             }
             (None, 'n' | 'N') => self.search_again(ch == 'N', count.unwrap_or(1)),
-            (None, 'R') => self.outbox.push(FilesAction::Refresh),
+            (None, 'R') => self.refresh(),
             (None, 'q') => self.asks.push(Ask::Close),
             (None, 'a') => self.ask_add(),
             (None, 'r') => self.ask_rename(),
             (None, 'd') => self.ask_delete(),
             (None, 'e') => self.edit_here(),
-            (None, 'x' | 'y') => {
-                if let Some(line) = self.lines.get(self.cursor) {
-                    let path = line.path();
-                    let cut = ch == 'x';
-                    let what = if cut { "cut" } else { "copied" };
-                    self.message = Some(format!("{what} {}: p puts it", self.shown(&path)));
-                    self.asks.push(Ask::Keep { path, cut });
-                }
-            }
+            (None, 'x' | 'y') => self.keep(ch == 'x'),
             (None, 'p') => {
                 if let Some(dir) = self.dir_here() {
                     self.asks.push(Ask::Paste { dir });
@@ -867,9 +984,10 @@ impl Explorer {
         match stroke {
             Stroke::Down => self.move_by(count.unwrap_or(1), true),
             Stroke::Up => self.move_by(count.unwrap_or(1), false),
-            Stroke::Enter => match self.lines.get(self.cursor) {
+            Stroke::Enter => match self.line() {
                 Some(line) if line.entry().kind.expands() => self.toggle_at_cursor(),
                 Some(_) => self.open(Opening::Here),
+                None if self.on_up() => self.go_up(),
                 None => {}
             },
             Stroke::Right => self.open_or_enter(),
@@ -993,19 +1111,21 @@ impl Explorer {
         }
     }
 
-    /// Moves the cursor `by` lines down, or up.
+    /// Moves the cursor `by` lines down, or up, `..` being one.
     fn move_by(&mut self, by: usize, down: bool) {
-        let last = self.lines.len().saturating_sub(1);
-        self.cursor = if down {
-            self.cursor.saturating_add(by).min(last)
+        let last = self.rows_len().saturating_sub(1);
+        let row = if down {
+            self.row().saturating_add(by).min(last)
         } else {
-            self.cursor.saturating_sub(by)
+            self.row().saturating_sub(by)
         };
+        self.go_to_row(row);
     }
 
-    /// Puts the cursor on line `line`, from 0, or the last.
+    /// Puts the cursor on line `line`, from 0, or the last, `..` being the
+    /// first if it shows.
     fn go_to(&mut self, line: usize) {
-        self.cursor = line.min(self.lines.len().saturating_sub(1));
+        self.go_to_row(line.min(self.rows_len().saturating_sub(1)));
     }
 
     /// Scrolls `count` pages down, or up, or half pages if `half`, the
@@ -1017,7 +1137,7 @@ impl Explorer {
             self.list_height().saturating_sub(2).max(1)
         };
         let by = page.saturating_mul(count);
-        let last = self.lines.len().saturating_sub(1);
+        let last = self.rows_len().saturating_sub(1);
         if down {
             self.top = self.top.saturating_add(by).min(last);
         } else {
@@ -1028,14 +1148,15 @@ impl Explorer {
 
     /// The directory at the cursor, if it's on one.
     fn dir_at_cursor(&self) -> Option<String> {
-        let line = self.lines.get(self.cursor)?;
+        let line = self.line()?;
         line.entry().kind.expands().then(|| line.path())
     }
 
     /// The directory things go in from the cursor: the one it's on, or
-    /// else the one its line is in, or the root.
+    /// else the one its line is in, or the root, as on `..`: never the
+    /// folder above.
     fn dir_here(&self) -> Option<String> {
-        match self.lines.get(self.cursor) {
+        match self.line() {
             Some(line) if line.entry().kind.expands() => Some(line.path()),
             Some(line) => Some(line.listing.dir.clone()),
             None => self.root.clone(),
@@ -1043,9 +1164,12 @@ impl Explorer {
     }
 
     /// `l`: opens the file at the cursor, or expands the directory, or
-    /// goes into it if it's expanded.
+    /// goes into it if it's expanded, or goes up on `..`.
     fn open_or_enter(&mut self) {
-        let Some(line) = self.lines.get(self.cursor) else {
+        if self.on_up() {
+            return self.go_up();
+        }
+        let Some(line) = self.line() else {
             return;
         };
         if !line.entry().kind.expands() {
@@ -1064,7 +1188,7 @@ impl Explorer {
     /// `h`: collapses the directory at the cursor, or goes to the one its
     /// line is in.
     fn close_or_leave(&mut self) {
-        let Some(line) = self.lines.get(self.cursor) else {
+        let Some(line) = self.line() else {
             return;
         };
         let path = line.path();
@@ -1077,7 +1201,7 @@ impl Explorer {
     /// Puts the cursor on the line of the directory its line is in, if
     /// that isn't the root.
     fn go_to_parent(&mut self) {
-        let Some(line) = self.lines.get(self.cursor) else {
+        let Some(line) = self.line() else {
             return;
         };
         let depth = line.depth;
@@ -1129,15 +1253,20 @@ impl Explorer {
     /// `zM`: collapses every directory, the cursor going to the one at the
     /// root its line is in.
     fn collapse_all(&mut self) {
-        while self
-            .lines
-            .get(self.cursor)
-            .is_some_and(|line| line.depth > 0)
-        {
+        while self.line().is_some_and(|line| line.depth > 0) {
             self.go_to_parent();
         }
         self.view.expanded.clear();
         self.sync();
+    }
+
+    /// `R`: lists everything shown again, and the root, if it couldn't be
+    /// listed, tried again.
+    fn refresh(&mut self) {
+        if std::mem::take(&mut self.unlisted) {
+            self.sync();
+        }
+        self.outbox.push(FilesAction::Refresh);
     }
 
     /// `.`: shows hidden files, or hides them.
@@ -1151,9 +1280,9 @@ impl Explorer {
         self.sync();
     }
 
-    /// `-`: makes the directory above the root the root, keeping the old
-    /// root expanded and the cursor on it.
-    fn up(&mut self) {
+    /// `-`, or Enter on `..`: makes the directory above the root the root,
+    /// keeping the old root expanded and the cursor on it.
+    fn go_up(&mut self) {
         let Some(root) = self.root.clone() else {
             return;
         };
@@ -1166,12 +1295,17 @@ impl Explorer {
         }
         self.view.expanded.insert(root.clone());
         self.reveal = Some(root);
+        // Gone from `..`, as far as where the cursor lands is concerned.
+        self.up = true;
         self.outbox.push(FilesAction::Root(parent));
     }
 
     /// Opens the file at the cursor, as `how` says.
     fn open(&mut self, how: Opening) {
-        let Some(line) = self.lines.get(self.cursor) else {
+        if self.refused_on_up() {
+            return;
+        }
+        let Some(line) = self.line() else {
             return;
         };
         if line.entry().kind.expands() {
@@ -1193,7 +1327,10 @@ impl Explorer {
 
     /// `r`: asks for the new name of what's at the cursor.
     fn ask_rename(&mut self) {
-        if let Some(line) = self.lines.get(self.cursor) {
+        if self.refused_on_up() {
+            return;
+        }
+        if let Some(line) = self.line() {
             let name = line.entry().name.clone();
             self.prompt = Some(Prompt::Rename {
                 from: line.path(),
@@ -1204,7 +1341,10 @@ impl Explorer {
 
     /// `d`: asks whether to delete what's at the cursor, to the trash.
     fn ask_delete(&mut self) {
-        if let Some(line) = self.lines.get(self.cursor) {
+        if self.refused_on_up() {
+            return;
+        }
+        if let Some(line) = self.line() {
             let path = line.path();
             let what = self.what_else(&path);
             let question = format!("delete {}{what}, to the trash? (y/n)", self.shown(&path));
@@ -1214,6 +1354,20 @@ impl Explorer {
                 expect: None,
             };
             self.prompt = Some(Prompt::Confirm { question, op });
+        }
+    }
+
+    /// `x` or `y`: keeps what's at the cursor to paste, to move if `cut`,
+    /// or copy.
+    fn keep(&mut self, cut: bool) {
+        if self.refused_on_up() {
+            return;
+        }
+        if let Some(line) = self.line() {
+            let path = line.path();
+            let what = if cut { "cut" } else { "copied" };
+            self.message = Some(format!("{what} {}: p puts it", self.shown(&path)));
+            self.asks.push(Ask::Keep { path, cut });
         }
     }
 
@@ -1252,12 +1406,17 @@ impl Explorer {
             return;
         };
         let backward = self.search.as_ref().is_some_and(|(_, backward)| *backward) != reverse;
-        let len = self.lines.len();
+        // Rows, of which `..`, having no name, is passed over.
+        let lead = self.lead();
+        let len = self.lines.len() + lead;
         if len == 0 {
             return;
         }
-        let matches = |line: &Line| pattern.find_at(&line.entry().name, 0).is_some();
-        let mut at = self.cursor;
+        let matches = |row: usize| {
+            (row.checked_sub(lead).and_then(|line| self.lines.get(line)))
+                .is_some_and(|line| pattern.find_at(&line.entry().name, 0).is_some())
+        };
+        let mut at = self.row();
         for _ in 0..count {
             let found = (1..=len)
                 .map(|step| {
@@ -1267,7 +1426,7 @@ impl Explorer {
                         (at + step) % len
                     }
                 })
-                .find(|&index| matches(&self.lines[index]));
+                .find(|&row| matches(row));
             let Some(index) = found else {
                 let query = self.search.as_ref().map_or("", |(query, _)| query.as_str());
                 self.message = Some(format!("no name shown matches {query}"));
@@ -1275,25 +1434,26 @@ impl Explorer {
             };
             at = index;
         }
-        self.cursor = at;
+        self.go_to_row(at);
     }
 
     // --- The mouse ----------------------------------------------------------
 
     /// A click on row `row` of the pane, a double one if `double`: the
     /// cursor goes to the line there, which a double click opens, or
-    /// expands or collapses, as Enter does. Returns whether it should be
-    /// drawn again.
+    /// expands or collapses, or goes up from if it's `..`, as Enter does.
+    /// Returns whether it should be drawn again.
     pub(crate) fn click(&mut self, row: usize, double: bool) -> bool {
         self.flatten_if_stale();
-        let Some(line) = (row.checked_sub(1)).map(|row| self.top + row) else {
+        let Some(row) = (row.checked_sub(1)).map(|row| self.top + row) else {
             return false;
         };
-        if line >= self.lines.len() || self.prompt.is_some() || self.editing.is_some() {
+        if row >= self.rows_len() || self.prompt.is_some() || self.editing.is_some() {
             return false;
         }
-        self.cursor = line;
+        self.go_to_row(row);
         self.view.cursor = None;
+        self.view.up = false;
         if double {
             self.named(Stroke::Enter, None);
             self.flatten_if_stale();
@@ -1309,7 +1469,7 @@ impl Explorer {
         }
         self.flatten_if_stale();
         let by = usize::try_from(lines.unsigned_abs()).unwrap_or(usize::MAX);
-        let last = self.lines.len().saturating_sub(1);
+        let last = self.rows_len().saturating_sub(1);
         let top = if lines < 0 {
             self.top.saturating_sub(by)
         } else {
@@ -1320,7 +1480,7 @@ impl Explorer {
         }
         self.top = top;
         let bottom = top + self.list_height() - 1;
-        self.cursor = self.cursor.clamp(top, bottom.max(top)).min(last);
+        self.go_to_row(self.row().clamp(top, bottom.max(top)).min(last));
         true
     }
 
@@ -1333,12 +1493,13 @@ impl Explorer {
             return;
         }
         let height = self.list_height();
-        if self.cursor < self.top {
-            self.top = self.cursor;
-        } else if self.cursor >= self.top + height {
-            self.top = self.cursor + 1 - height;
+        let cursor = self.row();
+        if cursor < self.top {
+            self.top = cursor;
+        } else if cursor >= self.top + height {
+            self.top = cursor + 1 - height;
         }
-        self.top = self.top.min(self.lines.len().saturating_sub(1));
+        self.top = self.top.min(self.rows_len().saturating_sub(1));
         let mut rows = Vec::with_capacity(self.height);
         let mut header = RowBuilder::new(self.width);
         let heading = Style {
@@ -1349,11 +1510,14 @@ impl Explorer {
         rows.push(header.finish(false));
         self.name_cols.clear();
         self.cursor_cell = None;
-        let end = (self.top + height).min(self.lines.len());
-        for (index, line) in self.lines[self.top..end].iter().enumerate() {
-            let (row, name_col) = self.draw_line(line);
-            if self.top + index == self.cursor {
-                self.cursor_cell = Some((index + 1, name_col));
+        let end = (self.top + height).min(self.rows_len());
+        for at in self.top..end {
+            let (row, name_col) = match self.line_at(at) {
+                Some(line) => self.draw_line(line),
+                None => self.draw_up(),
+            };
+            if at == cursor {
+                self.cursor_cell = Some((at - self.top + 1, name_col));
             }
             self.name_cols.push(name_col);
             rows.push(row);
@@ -1396,6 +1560,19 @@ impl Explorer {
             style.attributes |= Attributes::DIM;
         }
         builder.push(&entry.name, &style, true);
+        (builder.finish(false), name_col)
+    }
+
+    /// Draws `..`: as a directory's name, but muted, as an ignored one's
+    /// is, with no chevron, as it doesn't expand. Returns the row and where
+    /// the name starts.
+    fn draw_up(&self) -> (Row, usize) {
+        let mut builder = RowBuilder::new(self.width);
+        builder.push("    ", &Style::DEFAULT, true);
+        let name_col = builder.filled();
+        let mut style = name_style(EntryKind::Dir);
+        style.attributes |= Attributes::DIM;
+        builder.push("..", &style, true);
         (builder.finish(false), name_col)
     }
 
@@ -1459,8 +1636,10 @@ impl Explorer {
             Pattern::new(query, Matching::Typed(self.case), "", Words::NONE).ok()
         });
         if let Some(pattern) = pattern {
-            let shown = self.lines.iter().skip(self.top).zip(&self.name_cols);
-            for (index, (line, &col)) in shown.enumerate() {
+            for (index, &col) in self.name_cols.iter().enumerate() {
+                let Some(line) = self.line_at(self.top + index) else {
+                    continue;
+                };
                 let name = &line.entry().name;
                 let Some(found) = pattern
                     .find_at(name, 0)

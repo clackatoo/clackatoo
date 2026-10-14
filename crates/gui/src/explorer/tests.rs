@@ -69,7 +69,7 @@ fn shown(explorer: &mut Explorer) -> Vec<String> {
 /// The path at the cursor.
 fn at(explorer: &mut Explorer) -> String {
     explorer.settle();
-    explorer.lines[explorer.cursor].path()
+    explorer.line().expect("a line at the cursor").path()
 }
 
 fn project() -> Vec<Entry> {
@@ -88,7 +88,7 @@ fn directories_are_listed_as_theyre_expanded_and_forgotten_as_theyre_collapsed()
     rooted(&mut explorer, project());
     assert_eq!(
         shown(&mut explorer),
-        ["~/p", "  ▸ src", "  ▸ target", "    Cargo.toml"],
+        ["~/p", "    ..", "  ▸ src", "  ▸ target", "    Cargo.toml"],
         "hidden files hidden"
     );
     keys(&mut explorer, "l");
@@ -97,7 +97,7 @@ fn directories_are_listed_as_theyre_expanded_and_forgotten_as_theyre_collapsed()
         [FilesAction::Expand("/p/src".into())]
     );
     assert_eq!(
-        shown(&mut explorer)[1],
+        shown(&mut explorer)[2],
         "  ▾ src",
         "expanded before it's listed"
     );
@@ -106,6 +106,7 @@ fn directories_are_listed_as_theyre_expanded_and_forgotten_as_theyre_collapsed()
         shown(&mut explorer),
         [
             "~/p",
+            "    ..",
             "  ▾ src",
             "  │ ▸ bin",
             "  │   main.rs",
@@ -134,7 +135,7 @@ fn directories_are_listed_as_theyre_expanded_and_forgotten_as_theyre_collapsed()
         explorer.take_outbox(),
         [FilesAction::Collapse("/p/src".into())]
     );
-    assert_eq!(shown(&mut explorer).len(), 4);
+    assert_eq!(shown(&mut explorer).len(), 5);
     // Expanded again, it's listed again; what was expanded in it isn't.
     keys(&mut explorer, "zo");
     assert_eq!(
@@ -146,7 +147,7 @@ fn directories_are_listed_as_theyre_expanded_and_forgotten_as_theyre_collapsed()
     keys(&mut explorer, "zc");
     explorer.take_outbox();
     listed(&mut explorer, "/p/src", vec![file("late.rs")]);
-    assert_eq!(shown(&mut explorer).len(), 4);
+    assert_eq!(shown(&mut explorer).len(), 5);
 }
 
 #[test]
@@ -197,18 +198,27 @@ fn keys_move_with_counts_and_pages_and_the_view_follows_the_cursor() {
     keys(&mut explorer, "G");
     assert_eq!(at(&mut explorer), "/p/f099");
     assert_eq!(shown(&mut explorer).last().unwrap(), "    f099");
+    // `..` is a line as any other: the first.
     keys(&mut explorer, "gg");
+    assert_eq!(explorer.label(), "~/p  ..");
+    keys(&mut explorer, "j");
     assert_eq!(at(&mut explorer), "/p/f000");
     keys(&mut explorer, "12G");
-    assert_eq!(at(&mut explorer), "/p/f011");
-    keys(&mut explorer, "3gg2k");
-    assert_eq!(at(&mut explorer), "/p/f000");
+    assert_eq!(at(&mut explorer), "/p/f010");
+    keys(&mut explorer, "3gg");
+    assert_eq!(at(&mut explorer), "/p/f001");
+    keys(&mut explorer, "2k");
+    assert!(explorer.on_up());
     keys(&mut explorer, "<C-d>");
-    assert_eq!(at(&mut explorer), "/p/f005", "half of the ten lines shown");
+    assert_eq!(at(&mut explorer), "/p/f004", "half of the ten lines shown");
     keys(&mut explorer, "<C-u>");
-    assert_eq!(at(&mut explorer), "/p/f000");
+    assert!(explorer.on_up());
     keys(&mut explorer, "<C-f>");
-    assert_eq!(at(&mut explorer), "/p/f008");
+    assert_eq!(at(&mut explorer), "/p/f007");
+    keys(&mut explorer, "<C-b>k");
+    assert!(explorer.on_up(), "k stops at ..");
+    keys(&mut explorer, "<Home>j<Up>");
+    assert!(explorer.on_up());
 }
 
 #[test]
@@ -235,7 +245,7 @@ fn slash_searches_the_names_shown_and_n_goes_on() {
         .filter(|highlight| highlight.kind == HighlightKind::Match)
         .map(|highlight| highlight.line)
         .collect();
-    assert_eq!(matches, [1, 3, 4]);
+    assert_eq!(matches, [2, 4, 5], "below the root's row and ..'s");
     keys(&mut explorer, "/zzz<CR>");
     assert_eq!(explorer.label(), "no name shown matches zzz");
     assert_eq!(at(&mut explorer), "/p/Delta.RS");
@@ -264,6 +274,7 @@ fn git_marks_show_beside_files_and_roll_up_into_their_directories() {
         shown(&mut explorer),
         [
             "~/p",
+            "    ..",
             "? ▸ new",
             "M ▸ src",
             "M   a.txt",
@@ -274,18 +285,18 @@ fn git_marks_show_beside_files_and_roll_up_into_their_directories() {
     let (rows, _) = explorer.scene();
     let style = |row: &Row, col: usize| *row.style(row.cells()[col]);
     assert_eq!(
-        style(rows[2], 0).fg,
+        style(rows[3], 0).fg,
         colors::git_mark(GitMark::Modified).1.fg
     );
     assert!(
-        style(rows[5], 4).attributes.contains(Attributes::DIM),
+        style(rows[6], 4).attributes.contains(Attributes::DIM),
         "ignored"
     );
-    assert!(!style(rows[4], 4).attributes.contains(Attributes::DIM));
+    assert!(!style(rows[5], 4).attributes.contains(Attributes::DIM));
     // In a directory git says is untracked whole.
     keys(&mut explorer, "l");
     listed(&mut explorer, "/p/new", vec![file("n.rs")]);
-    assert_eq!(shown(&mut explorer)[2], "? │   n.rs");
+    assert_eq!(shown(&mut explorer)[3], "? │   n.rs");
 }
 
 #[test]
@@ -419,12 +430,12 @@ fn dot_shows_hidden_files_and_minus_goes_up_a_directory() {
     rooted(&mut explorer, project());
     keys(&mut explorer, ".");
     assert_eq!(
-        shown(&mut explorer)[1],
+        shown(&mut explorer)[2],
         "  ▸ .git",
         "dimmed, as git ignores it"
     );
     keys(&mut explorer, "g.");
-    assert_eq!(shown(&mut explorer)[1], "  ▸ src");
+    assert_eq!(shown(&mut explorer)[2], "  ▸ src");
 
     keys(&mut explorer, "-");
     assert_eq!(explorer.take_outbox(), [FilesAction::Root("/".into())]);
@@ -440,7 +451,11 @@ fn dot_shows_hidden_files_and_minus_goes_up_a_directory() {
     listed(&mut explorer, "/", vec![dir("etc"), dir("p")]);
     listed(&mut explorer, "/p", project());
     assert_eq!(at(&mut explorer), "/p", "on the old root");
-    assert_eq!(&shown(&mut explorer)[..3], ["/", "  ▸ etc", "  ▾ p"]);
+    assert_eq!(
+        &shown(&mut explorer)[..3],
+        ["/", "  ▸ etc", "  ▾ p"],
+        "no .. above /"
+    );
 }
 
 #[test]
@@ -493,7 +508,7 @@ fn a_directory_gone_is_collapsed_and_the_root_gone_says_so() {
         dir: "/p/src".into(),
         reason: "gone".into(),
     });
-    assert_eq!(shown(&mut explorer)[1], "  ▸ src");
+    assert_eq!(shown(&mut explorer)[2], "  ▸ src");
     keys(&mut explorer, "l");
     assert_eq!(
         explorer.take_outbox(),
@@ -551,21 +566,21 @@ fn a_click_puts_the_cursor_on_a_line_a_double_click_opens_it_and_the_wheel_scrol
     let entries = (0..20).map(|n| file(&format!("f{n:02}"))).collect();
     rooted(&mut explorer, entries);
     explorer.settle();
-    assert!(explorer.click(3, false));
+    assert!(explorer.click(4, false));
     assert_eq!(at(&mut explorer), "/p/f02");
     assert!(!explorer.click(0, false), "the root's line");
-    explorer.click(2, true);
+    explorer.click(3, true);
     let open = Ask::Open {
         path: "/p/f01".into(),
         how: Opening::Here,
     };
     assert_eq!(explorer.take_asks(), [open]);
     assert!(explorer.scroll(10));
-    assert_eq!(at(&mut explorer), "/p/f10", "brought into view");
-    assert_eq!(shown(&mut explorer)[1], "    f10");
+    assert_eq!(at(&mut explorer), "/p/f09", "brought into view");
+    assert_eq!(shown(&mut explorer)[1], "    f09");
     explorer.scroll(-100);
-    assert_eq!(shown(&mut explorer)[1], "    f00");
-    assert_eq!(at(&mut explorer), "/p/f04");
+    assert_eq!(shown(&mut explorer)[1], "    ..");
+    assert_eq!(at(&mut explorer), "/p/f03");
 }
 
 /// Opening an explorer on this repository: the time from the daemon's
@@ -682,4 +697,390 @@ fn what_the_daemon_has_listed_is_looked_up_by_its_path_from_the_root() {
     listed(&mut explorer, "/p/src", vec![file("main.rs")]);
     assert!(explorer.lists("src/main.rs"));
     assert!(!explorer.lists("main.rs"));
+}
+
+/// Roots `explorer` at `/home/me/p`, listing what's in it as `entries`.
+fn rooted_deeper(explorer: &mut Explorer, entries: Vec<Entry>) {
+    explorer.update(FilesUpdate::Root {
+        path: "/home/me/p".into(),
+        name: "~/p".into(),
+    });
+    explorer.take_outbox();
+    listed(explorer, "/home/me/p", entries);
+}
+
+/// Goes up from `/home/me/p`, as `typed` does, and has the daemon
+/// answer: `/home/me` is the root, listing `p` and `q`, with `p` as it
+/// was.
+fn gone_up(explorer: &mut Explorer, typed: &str) {
+    keys(explorer, typed);
+    assert_eq!(
+        explorer.take_outbox(),
+        [FilesAction::Root("/home/me".into())]
+    );
+    explorer.update(FilesUpdate::Root {
+        path: "/home/me".into(),
+        name: "~".into(),
+    });
+    listed(explorer, "/home/me", vec![dir("p"), dir("q")]);
+    listed(explorer, "/home/me/p", project());
+    explorer.take_outbox();
+}
+
+#[test]
+fn dot_dot_tops_the_tree_and_enter_on_it_goes_up_to_the_folder_come_from() {
+    let mut explorer = explorer(10);
+    rooted_deeper(&mut explorer, project());
+    // It opens on the first entry, not on `..`.
+    assert_eq!(at(&mut explorer), "/home/me/p/src");
+    assert_eq!(
+        shown(&mut explorer),
+        ["~/p", "    ..", "  ▸ src", "  ▸ target", "    Cargo.toml"]
+    );
+    // Moved onto as any line is: k from the first, and gg.
+    keys(&mut explorer, "k");
+    assert!(explorer.on_up());
+    assert_eq!(explorer.label(), "~/p  ..");
+    keys(&mut explorer, "jgg");
+    assert!(explorer.on_up());
+    // A listing come again doesn't move it off.
+    listed(&mut explorer, "/home/me/p", project());
+    assert!(explorer.on_up());
+    // Enter goes up, as `-` does, landing on the folder come from, open.
+    gone_up(&mut explorer, "<CR>");
+    assert_eq!(at(&mut explorer), "/home/me/p");
+    assert_eq!(
+        &shown(&mut explorer)[..4],
+        ["~", "    ..", "  ▾ p", "  │ ▸ src"]
+    );
+    // And `l` does too.
+    keys(&mut explorer, "ggl");
+    assert_eq!(explorer.take_outbox(), [FilesAction::Root("/home".into())]);
+}
+
+#[test]
+fn a_double_click_on_dot_dot_goes_up_and_a_single_one_only_moves_there() {
+    let mut explorer = explorer(10);
+    rooted_deeper(&mut explorer, project());
+    explorer.settle();
+    assert!(explorer.click(1, false));
+    assert!(explorer.on_up());
+    assert_eq!(explorer.take_outbox(), [], "a single click goes nowhere");
+    explorer.click(2, false);
+    assert_eq!(at(&mut explorer), "/home/me/p/src");
+    explorer.click(1, true);
+    assert_eq!(
+        explorer.take_outbox(),
+        [FilesAction::Root("/home/me".into())]
+    );
+    explorer.update(FilesUpdate::Root {
+        path: "/home/me".into(),
+        name: "~".into(),
+    });
+    listed(&mut explorer, "/home/me", vec![dir("p"), dir("q")]);
+    assert_eq!(at(&mut explorer), "/home/me/p");
+}
+
+#[test]
+fn there_is_no_dot_dot_at_slash_nor_above_a_fence() {
+    let mut explorer = explorer(10);
+    explorer.update(FilesUpdate::Root {
+        path: "/".into(),
+        name: "/".into(),
+    });
+    listed(&mut explorer, "/", vec![dir("etc"), dir("home")]);
+    assert_eq!(shown(&mut explorer), ["/", "  ▸ etc", "  ▸ home"]);
+    keys(&mut explorer, "jgg");
+    assert_eq!(at(&mut explorer), "/etc", "gg is the first entry");
+    // Gone up to `/` from `..`, the cursor goes to the folder come from.
+    let mut explorer = super::tests::explorer(10);
+    rooted(&mut explorer, project());
+    keys(&mut explorer, "gg<CR>");
+    assert_eq!(explorer.take_outbox(), [FilesAction::Root("/".into())]);
+    explorer.update(FilesUpdate::Root {
+        path: "/".into(),
+        name: "/".into(),
+    });
+    listed(&mut explorer, "/", vec![dir("etc"), dir("p")]);
+    assert_eq!(at(&mut explorer), "/p");
+    // Another window rooting it at `/` while the cursor's on `..`: it
+    // goes to a line, as it does when the line it was on goes.
+    let mut explorer = super::tests::explorer(10);
+    rooted(&mut explorer, project());
+    keys(&mut explorer, "gg");
+    explorer.update(FilesUpdate::Root {
+        path: "/".into(),
+        name: "/".into(),
+    });
+    listed(&mut explorer, "/", vec![dir("etc"), dir("p")]);
+    assert!(!explorer.on_up());
+    assert_eq!(at(&mut explorer), "/etc");
+    // A lesson's explorer, kept in its folder, has none at the fence…
+    let mut explorer = super::tests::explorer(10);
+    rooted(&mut explorer, project());
+    explorer.fence("/p".into());
+    assert_eq!(shown(&mut explorer)[1], "  ▸ src");
+    // …but has one below it, which goes up to it.
+    let mut explorer = super::tests::explorer(10);
+    rooted_deeper(&mut explorer, project());
+    explorer.fence("/home/me".into());
+    assert_eq!(shown(&mut explorer)[1], "    ..");
+    keys(&mut explorer, "gg<CR>");
+    assert_eq!(
+        explorer.take_outbox(),
+        [FilesAction::Root("/home/me".into())]
+    );
+}
+
+#[test]
+fn dot_dot_shows_before_the_root_is_listed_and_nothing_above_is_listed() {
+    let mut explorer = explorer(10);
+    explorer.update(FilesUpdate::Root {
+        path: "/home/me/p".into(),
+        name: "~/p".into(),
+    });
+    assert_eq!(
+        explorer.take_outbox(),
+        [FilesAction::Expand("/home/me/p".into())],
+        "nothing of /home/me"
+    );
+    assert_eq!(shown(&mut explorer), ["~/p", "    .."]);
+    // The only line, the cursor's on it, though a view kept of it now
+    // doesn't say so.
+    assert!(explorer.on_up());
+    assert!(!explorer.view().up);
+    // Listed once it comes, the cursor goes to the first entry.
+    listed(&mut explorer, "/home/me/p", project());
+    assert_eq!(at(&mut explorer), "/home/me/p/src");
+}
+
+#[test]
+fn a_root_that_cant_be_listed_isnt_asked_for_again_and_dot_dot_leads_out() {
+    let mut explorer = explorer(10);
+    rooted_deeper(&mut explorer, project());
+    let unlisted = || FilesUpdate::Unlisted {
+        dir: "/home/me/p".into(),
+        reason: "Permission denied".into(),
+    };
+    explorer.update(unlisted());
+    assert_eq!(explorer.label(), "~/p: Permission denied");
+    assert_eq!(explorer.take_outbox(), [], "not asked for again and again");
+    assert_eq!(shown(&mut explorer), ["~/p", "    .."]);
+    // R tries again, once.
+    keys(&mut explorer, "R");
+    assert_eq!(
+        explorer.take_outbox(),
+        [
+            FilesAction::Expand("/home/me/p".into()),
+            FilesAction::Refresh
+        ]
+    );
+    explorer.update(unlisted());
+    assert_eq!(explorer.take_outbox(), []);
+    // Enter, with the cursor on `..`, the only line, goes up, and the new
+    // root is asked for.
+    keys(&mut explorer, "<CR>");
+    assert_eq!(
+        explorer.take_outbox(),
+        [FilesAction::Root("/home/me".into())]
+    );
+    explorer.update(FilesUpdate::Root {
+        path: "/home/me".into(),
+        name: "~".into(),
+    });
+    // The old root, open in it, is tried once more, as a folder: one that
+    // can't be listed is collapsed, and so not asked for again.
+    assert_eq!(
+        explorer.take_outbox(),
+        [
+            FilesAction::Expand("/home/me".into()),
+            FilesAction::Expand("/home/me/p".into())
+        ]
+    );
+}
+
+#[test]
+fn in_an_empty_folder_the_cursor_is_on_dot_dot_and_a_makes_a_file_in_the_folder() {
+    let mut explorer = explorer(10);
+    rooted_deeper(&mut explorer, vec![file(".hidden")]);
+    assert!(explorer.on_up(), "the only line shown");
+    explorer.settle();
+    assert_eq!(explorer.scene().1.map(|cursor| cursor.line), Some(1));
+    keys(&mut explorer, "a");
+    assert_eq!(
+        explorer.label(),
+        "new file in ~/p/ (end with / for a directory): ▏"
+    );
+    keys(&mut explorer, "<Esc>");
+    // A file made there shows, and the cursor, not put on `..`, goes to
+    // it.
+    let made = vec![file(".hidden"), file("n.txt")];
+    listed(&mut explorer, "/home/me/p", made.clone());
+    assert_eq!(at(&mut explorer), "/home/me/p/n.txt");
+    // Put on `..`, it stays there.
+    keys(&mut explorer, "k");
+    listed(&mut explorer, "/home/me/p", made);
+    assert!(explorer.on_up());
+    keys(&mut explorer, "<CR>");
+    assert_eq!(
+        explorer.take_outbox(),
+        [FilesAction::Root("/home/me".into())]
+    );
+}
+
+#[test]
+fn gone_up_from_a_hidden_folder_the_cursor_goes_to_the_first_entry() {
+    for typed in ["gg<CR>", "-"] {
+        let mut explorer = explorer(10);
+        explorer.update(FilesUpdate::Root {
+            path: "/home/me/.config".into(),
+            name: "~/.config".into(),
+        });
+        explorer.take_outbox();
+        listed(&mut explorer, "/home/me/.config", vec![dir("nvim")]);
+        keys(&mut explorer, typed);
+        assert_eq!(
+            explorer.take_outbox(),
+            [FilesAction::Root("/home/me".into())],
+            "{typed}"
+        );
+        explorer.update(FilesUpdate::Root {
+            path: "/home/me".into(),
+            name: "~".into(),
+        });
+        listed(&mut explorer, "/home/me", vec![dir(".config"), dir("p")]);
+        assert!(!explorer.on_up(), "{typed}");
+        assert_eq!(at(&mut explorer), "/home/me/p", "{typed}");
+    }
+}
+
+#[test]
+fn nothing_that_acts_on_a_file_acts_on_dot_dot() {
+    let mut explorer = explorer(10);
+    rooted_deeper(&mut explorer, project());
+    keys(&mut explorer, "gg");
+    // Refused, saying why: rename, delete, cut, copy, and opening in a
+    // split or a tab.
+    for refused in ["r", "d", "x", "y", "<C-v>", "<C-s>", "<C-t>"] {
+        keys(&mut explorer, refused);
+        assert!(!explorer.prompting(), "{refused}");
+        assert_eq!(explorer.label(), ONLY_UP, "{refused}");
+        assert_eq!(explorer.take_asks(), [], "{refused}");
+        assert_eq!(explorer.take_outbox(), [], "{refused}");
+        assert!(explorer.on_up(), "{refused}");
+    }
+    // Passed over, as a file's line is: folding, h, and zR, which opens
+    // only the folders shown below it.
+    keys(&mut explorer, "zozczahzM");
+    assert_eq!(explorer.take_outbox(), []);
+    assert!(explorer.on_up());
+    keys(&mut explorer, "zR");
+    assert_eq!(
+        explorer.take_outbox(),
+        [
+            FilesAction::Expand("/home/me/p/src".into()),
+            FilesAction::Expand("/home/me/p/target".into())
+        ]
+    );
+    keys(&mut explorer, "zM");
+    explorer.take_outbox();
+    // What goes into a folder goes into the root, as with no line at the
+    // cursor, never into the folder above: a, p and e.
+    keys(&mut explorer, "a");
+    assert_eq!(
+        explorer.label(),
+        "new file in ~/p/ (end with / for a directory): ▏"
+    );
+    keys(&mut explorer, "n.txt<CR>");
+    assert_eq!(
+        explorer.take_asks(),
+        [Ask::Op(FileOp::Create {
+            path: "/home/me/p/n.txt".into(),
+            dir: false
+        })]
+    );
+    keys(&mut explorer, "p");
+    assert_eq!(
+        explorer.take_asks(),
+        [Ask::Paste {
+            dir: "/home/me/p".into()
+        }]
+    );
+    keys(&mut explorer, "e");
+    let asks = explorer.take_asks();
+    let [
+        Ask::Edit {
+            text: Some(text),
+            at: None,
+            ..
+        },
+    ] = &asks[..]
+    else {
+        panic!("not the root's listing: {asks:?}");
+    };
+    assert_eq!(explorer.folder_shown(), Some("/home/me/p"));
+    // The listing has no `..`, and a line typed so is refused, so it
+    // can't make, move or delete the folder above.
+    let names: Vec<&str> = (text.lines())
+        .map(|line| &line[listing::mark_len(line)..])
+        .collect();
+    assert_eq!(names, ["src/", "target/", "Cargo.toml"]);
+    for typed in ["..", "../"] {
+        let planned = explorer.plan(&[&format!("{typed}\n{text}")]);
+        assert!(
+            matches!(&planned, Planned::Refused { at: Some((0, 0)), why } if why.contains("holds it")),
+            "{typed}: {planned:?}"
+        );
+    }
+}
+
+#[test]
+fn a_search_passes_over_dot_dot() {
+    let mut explorer = explorer(10);
+    rooted_deeper(&mut explorer, vec![file("a.rs"), file("b.rs")]);
+    keys(&mut explorer, "gg/.<CR>");
+    assert_eq!(at(&mut explorer), "/home/me/p/a.rs");
+    keys(&mut explorer, "N");
+    assert_eq!(
+        at(&mut explorer),
+        "/home/me/p/b.rs",
+        "round the end, past .."
+    );
+    keys(&mut explorer, "n");
+    assert_eq!(at(&mut explorer), "/home/me/p/a.rs");
+}
+
+#[test]
+fn an_explorer_kept_shows_its_cursor_where_it_was_on_a_file_or_on_dot_dot() {
+    let opened = |view: View, reveal: Option<&str>| {
+        let mut again = Explorer::new(FilesId(2), &Options::default());
+        again.resize(Size::new(40, 10).unwrap());
+        if let Some(path) = reveal {
+            again.reveal(path.into());
+        }
+        again.update(FilesUpdate::Root {
+            path: "/home/me/p".into(),
+            name: "~/p".into(),
+        });
+        again.restore(view);
+        listed(&mut again, "/home/me/p", project());
+        again
+    };
+    let mut explorer = explorer(10);
+    rooted_deeper(&mut explorer, project());
+    // On a file: the same file, never the line before or after it.
+    keys(&mut explorer, "G");
+    let mut kept = opened(explorer.view(), None);
+    assert_eq!(at(&mut kept), "/home/me/p/Cargo.toml");
+    // On `..`: `..`.
+    keys(&mut explorer, "gg");
+    let mut kept = opened(explorer.view(), None);
+    assert!(kept.on_up());
+    keys(&mut kept, "j");
+    assert_eq!(at(&mut kept), "/home/me/p/src");
+    // Opened at a file to reveal, it goes there, not `..`, and stays.
+    let mut revealing = opened(explorer.view(), Some("/home/me/p/Cargo.toml"));
+    assert_eq!(at(&mut revealing), "/home/me/p/Cargo.toml");
+    listed(&mut revealing, "/home/me/p", project());
+    assert_eq!(at(&mut revealing), "/home/me/p/Cargo.toml");
 }

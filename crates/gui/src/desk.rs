@@ -8958,6 +8958,51 @@ mod tests {
     }
 
     #[test]
+    fn dot_dot_in_an_explorer_goes_up_on_a_double_click_and_is_kept_as_it_was_left() {
+        use clackatoo_protocol::{FilesAction, FilesId, FilesUpdate};
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        desk.take_outbox();
+        // A double click on `..`, the first line under the root's.
+        assert!(desk.explorer_click(PaneId(2), [1, 6], 2));
+        assert!(
+            desk.take_outbox().contains(&ClientMessage::Files {
+                files: FilesId(1),
+                action: FilesAction::Root("/".into()),
+            }),
+            "gone up"
+        );
+        // Closed on `..`, or on a file, and opened again on its root in
+        // this window, it's as it was left: never a line off.
+        let reopened = |desk: &mut Desk, files: u32| {
+            desk.workspaces_changed(one_tab(pane(3)));
+            let id = 10 + files;
+            let layout = side_by_side(vec![files_pane(id, files), pane(3)]);
+            desk.workspaces_changed(one_tab(layout));
+            let root = FilesUpdate::Root {
+                path: "/p".into(),
+                name: "~/p".into(),
+            };
+            desk.files_changed(FilesId(files), root);
+            let listed = FilesUpdate::Listed {
+                dir: "/p".into(),
+                entries: vec![entry("src", true), entry("a.txt", false)],
+                cut_short: false,
+            };
+            desk.files_changed(FilesId(files), listed);
+            desk.explorer(PaneId(id)).unwrap().label()
+        };
+        type_keys(&mut desk, "gg");
+        assert_eq!(note(&desk), "~/p  ..");
+        assert_eq!(reopened(&mut desk, 2), "~/p  ..");
+        let mut desk = super::tests::desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        type_keys(&mut desk, "G");
+        assert_eq!(note(&desk), "~/p  a.txt");
+        assert_eq!(reopened(&mut desk, 2), "~/p  a.txt");
+    }
+
+    #[test]
     fn colon_explore_opens_an_explorer_at_a_directory_or_goes_to_the_one_there() {
         use clackatoo_protocol::OpenFiles;
         let mut desk = desk(one_tab(pane(3)));

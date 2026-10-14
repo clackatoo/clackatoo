@@ -18,6 +18,7 @@
 //! | `option SETTING` | An option is as `:set` writes it: `option nowrap`, `option tabstop=8`. |
 //! | `finder`, `finder KIND` | The finder is open: any, or `files`, `grep`, `buffers`, `diagnostics`, `marks`, `places` or `boards`; or `agent`, the start page `:Agent` opens. |
 //! | `listed "PATH"` | A file explorer in the lesson's tab lists PATH, from its root. |
+//! | `rooted "PATH"` | A file explorer in the lesson's tab is rooted at PATH, from the lesson's folder: `.` for the folder itself. |
 //! | `file "NAME"` | The focused editor's file is called NAME. |
 //! | `recording R` | A macro is being recorded into register R. |
 //! | `saved` | The practice file has no changes that aren't written. |
@@ -48,6 +49,7 @@ pub(crate) enum Check {
     Option(&'static str, String),
     Finder(Option<String>),
     Listed(String),
+    Rooted(String),
     File(String),
     Recording(char),
     Saved,
@@ -134,6 +136,9 @@ pub(crate) trait Facts {
     /// Whether an explorer in the lesson's tab lists `path`, from its
     /// root.
     fn listed(&self, path: &str) -> bool;
+    /// Whether an explorer in the lesson's tab is rooted at `path`, from
+    /// the lesson's folder, `.` being the folder itself.
+    fn rooted(&self, path: &str) -> bool;
     /// The focused editor's file's name.
     fn file(&self) -> Option<String>;
     /// The register a macro is being recorded into.
@@ -196,6 +201,7 @@ impl Check {
             ["finder"] => Self::Finder(None),
             ["finder", kind] if FINDERS.contains(kind) => Self::Finder(Some((*kind).to_owned())),
             ["listed", path] => Self::Listed((*path).to_owned()),
+            ["rooted", path] => Self::Rooted((*path).to_owned()),
             ["file", name] => Self::File((*name).to_owned()),
             ["recording", name] => Self::Recording(register(name)?),
             ["saved"] => Self::Saved,
@@ -236,6 +242,7 @@ impl Check {
                 (None, _) => false,
             },
             Self::Listed(path) => facts.listed(path),
+            Self::Rooted(path) => facts.rooted(path),
             Self::File(name) => facts.file().is_some_and(|file| file == *name),
             Self::Recording(name) => facts.recording() == Some(*name),
             Self::Saved => facts.practice_saved() == Some(true),
@@ -338,6 +345,7 @@ mod tests {
         exit: Option<i32>,
         finder: Option<&'static str>,
         listed: Vec<String>,
+        rooted: Option<String>,
         file: Option<String>,
         recording: Option<char>,
     }
@@ -385,6 +393,9 @@ mod tests {
         }
         fn listed(&self, path: &str) -> bool {
             self.listed.iter().any(|listed| listed == path)
+        }
+        fn rooted(&self, path: &str) -> bool {
+            self.rooted.as_deref() == Some(path)
         }
         fn file(&self) -> Option<String> {
             self.file.clone()
@@ -485,6 +496,7 @@ mod tests {
             exit: Some(0),
             finder: Some("grep"),
             listed: vec!["notes/todo.txt".into()],
+            rooted: Some("notes".into()),
             ..Made::default()
         };
         assert!(holds("exited 0", &facts));
@@ -498,6 +510,8 @@ mod tests {
         assert!(!holds("finder files", &facts));
         assert!(holds(r#"listed "notes/todo.txt""#, &facts));
         assert!(!holds(r#"listed "notes""#, &facts));
+        assert!(holds(r#"rooted "notes""#, &facts));
+        assert!(!holds(r#"rooted ".""#, &facts));
         assert!(Check::parse("option nothing").is_err());
         assert!(Check::parse("finder windows").is_err());
     }

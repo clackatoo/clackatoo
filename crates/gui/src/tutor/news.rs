@@ -275,6 +275,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Chats show how full their context is, and Claude's limits; tabs and workspaces mark ⋯ working, ? asking, • unseen",
     },
+    News {
+        id: "explorer-up",
+        date: "2026-10-14",
+        lesson: "explorer",
+        what: "A .. line tops the explorer's tree: Enter or a double click on it goes up a folder",
+    },
 ];
 
 impl News {
