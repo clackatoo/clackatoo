@@ -16,6 +16,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,6 +26,7 @@ use rustix::process::WaitIdStatus;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::group::Group;
 use crate::pty::Process;
 
 /// The most one message may hold before it's dropped as broken: far more
@@ -107,6 +109,10 @@ impl Peer {
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
+        // In a process group of its own, so stopping it reaches whatever
+        // it starts too, as `npx` starts node (see [`crate::group`]). The
+        // daemon has no terminal whose signals it would miss.
+        command.process_group(0);
         let mut child = command.spawn()?;
         let pid = rustix::process::Pid::from_child(&child);
         // Taken first, so failing below drops the pipes, which ends it.
@@ -340,9 +346,15 @@ impl Peer {
         self.process.try_wait()
     }
 
-    /// Kills the program, if it's still there.
+    /// Kills the program, if it's still there, and whatever it started
+    /// that's still in its process group.
     pub(crate) fn kill(&self) {
-        self.process.kill();
+        self.process.kill_group();
+    }
+
+    /// Its process group, to signal by later (see [`crate::group`]).
+    pub(crate) fn group(&self) -> io::Result<Group> {
+        self.process.group()
     }
 
     /// Stops the program: closing its pipes ends it. Returns its process,

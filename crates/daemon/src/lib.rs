@@ -23,6 +23,7 @@ pub mod client;
 mod explorer;
 mod find;
 mod git;
+mod group;
 mod handoff;
 mod handover;
 mod hosted;

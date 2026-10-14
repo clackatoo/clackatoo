@@ -65,6 +65,7 @@ mod edit_log;
 mod explorers;
 mod finder;
 mod fits;
+mod groups;
 mod language;
 mod offers;
 mod pieces;
@@ -683,6 +684,9 @@ pub struct Daemon {
     /// The agents chats talk to, while any chat needs them, and those
     /// being installed.
     agents: chats::Agents,
+    /// The process groups of agents and language servers stopped, until
+    /// nothing they started is left.
+    groups: groups::Groups,
     /// Files as agents read them, and what agents changed in them.
     agent_files: agent_files::AgentFiles,
     /// Buffers' files changed on disk, waiting to be looked at.
@@ -801,6 +805,7 @@ impl Daemon {
             clipboard_due: Vec::new(),
             clipboard_unsent: false,
             agents: chats::Agents::default(),
+            groups: groups::Groups::default(),
             agent_files: agent_files::AgentFiles::default(),
             disk: disk::Disk::default(),
             reviews: review::Reviews::default(),
@@ -952,11 +957,12 @@ impl Daemon {
         // beside the old.
         self.abandon_renames();
         // The agents and language servers stop, and the next build reaps
-        // them. The boards' last changes are written, for it to read.
+        // them; nothing they started is left to it. The boards' last
+        // changes are written, for it to read.
         self.stop_agents();
         self.stop_servers();
         self.begin_stopping_browser();
-        self.wait_for_servers(servers_until);
+        self.wait_for_stopping(servers_until);
         self.stop_browser();
         self.stop_boards();
         let orphan_tokens: Vec<usize> = (self.sources.iter())
@@ -1058,6 +1064,7 @@ impl Daemon {
                     .chain(rewatch)
                     .chain(reviews)
                     .chain(self.next_stopping_due())
+                    .chain(self.groups.next_due())
                     .chain(self.next_file_changes_due())
                     .chain(self.next_agent_due())
                     .chain(self.next_web_due())
@@ -1108,6 +1115,7 @@ impl Daemon {
             self.check_disk();
             self.stop_idle_servers();
             self.push_stopping_servers();
+            self.groups.push();
             self.tell_file_changes();
             self.compact_scrollbacks();
             self.time_out_clipboard_asks();
@@ -1123,16 +1131,18 @@ impl Daemon {
             self.transmit_quic();
         }
         log::info!("shutting down");
-        // Asked first, to shut down while remote windows are told.
+        // Asked first, to shut down while remote windows are told. Agents
+        // are stopped too, and what they started with them.
         let servers_until = Instant::now() + stopping::STOP_WAIT;
         self.stop_servers();
+        self.stop_agents();
         self.close_web("the daemon stopped");
         self.close_remotes("the daemon stopped");
         self.abandon_renames();
         // The browser's moment to stop goes by as the servers are waited
         // for: together, well inside the time `clackatoo stop` gives.
         self.begin_stopping_browser();
-        self.wait_for_servers(servers_until);
+        self.wait_for_stopping(servers_until);
         self.stop_boards();
         self.stop_browser();
         Ok(None)
@@ -1180,9 +1190,10 @@ impl Daemon {
             return Ok(None);
         }
         // There's no way back now. Language servers are asked to shut down
-        // first, to do so while remote windows are told.
+        // first, and agents stopped, to do so while remote windows are told.
         let servers_until = Instant::now() + stopping::STOP_WAIT;
         self.stop_servers();
+        self.stop_agents();
         // The client that asked hears how it went: its connection closes
         // as the new build starts, or says why it didn't.
         self.close_remotes("the daemon is upgrading to a new build");
@@ -2866,12 +2877,13 @@ impl Daemon {
                         self.serve_carrier(token, event);
                     }
                     // Language servers stopping meanwhile, as the daemon
-                    // stops, go on their way: their events come only once.
-                    token => {
-                        if let Some(&Source::Server(id, pipe)) = self.sources.get(token.0) {
-                            self.server_event(id, pipe);
-                        }
-                    }
+                    // stops, go on their way, and agents' processes are
+                    // reaped: their events come only once.
+                    token => match self.sources.get(token.0) {
+                        Some(&Source::Server(id, pipe)) => self.server_event(id, pipe),
+                        Some(Source::Orphan(_)) => self.reap_orphan(token),
+                        _ => {}
+                    },
                 }
             }
             if let Some(quic) = self.quic.as_mut() {

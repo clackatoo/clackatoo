@@ -33,6 +33,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -507,7 +508,10 @@ pub(crate) fn git(dir: &Path) -> Result<Command, &'static str> {
         .env_remove("GIT_OBJECT_DIRECTORY")
         .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .env_remove("GIT_CONFIG")
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        // In a process group of its own, so one killed for taking too
+        // long takes what it started with it (see [`crate::group`]).
+        .process_group(0);
     Ok(command)
 }
 
@@ -533,6 +537,16 @@ pub(crate) fn git_filtering(top: &Path) -> Result<Command, &'static str> {
         filters::set(&mut command, &filters::turned_off(&config, allowed));
     }
     Ok(command)
+}
+
+/// Kills `child`, a git not yet reaped, with what it started, and reaps
+/// it. Not yet reaped, its process ID is its group's, and no other's.
+fn kill(child: &mut std::process::Child) {
+    let group = rustix::process::Pid::from_child(child);
+    if rustix::process::kill_process_group(group, rustix::process::Signal::KILL).is_err() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 /// What git printed, if it ran and succeeded.
@@ -571,8 +585,7 @@ pub(crate) fn output_within(command: &mut Command, patience: Duration) -> Option
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
             Ok(None) => {
                 log::warn!("git took longer than {patience:?}: stopped");
-                let _ = child.kill();
-                let _ = child.wait();
+                kill(&mut child);
                 break None;
             }
             Err(err) => {
@@ -616,8 +629,7 @@ pub(crate) fn output_fed(
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
             Ok(None) => {
                 log::warn!("git took longer than {patience:?}: stopped");
-                let _ = child.kill();
-                let _ = child.wait();
+                kill(&mut child);
                 break None;
             }
             Err(err) => {

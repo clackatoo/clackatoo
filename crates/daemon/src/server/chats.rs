@@ -19,7 +19,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io;
-use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -31,13 +30,15 @@ use clackatoo_protocol::{
 };
 use mio::unix::SourceFd;
 use mio::{Interest, Token};
-use rustix::process::Signal;
 
+use super::groups::End;
 use super::language::Pipe;
+use super::stopping::AGENT_STOP_WAIT;
 use super::{Daemon, Hosted, OUTPUT_BUDGET, Orphan, Slot, Source};
 use crate::agent::{Agent, Incoming, Listed, Opened, Opening, Refused};
 use crate::agents::{self, AgentSpec, Launch, Start};
 use crate::chat::{Action, HostedChat, settings_of};
+use crate::pty::Process;
 
 /// Identifies a running agent within one daemon. Never reused, so a
 /// token left over from a stopped agent can't reach another.
@@ -55,6 +56,8 @@ pub(super) struct AgentSlot {
     tokens: [Token; 4],
     /// Its read budget ran out with more of its output waiting.
     unread: bool,
+    /// Its read budget ran out with more of its stderr waiting.
+    unread_errors: bool,
 }
 
 /// The agents chats talk to, and the ones being installed.
@@ -90,9 +93,6 @@ pub(super) struct Agents {
     /// until it answers, or they've been told it's slow to (see
     /// [`Daemon::time_out_sessions`]).
     opening: BTreeMap<TerminalId, Asked>,
-    /// The processes of agents stopped firmly, by their pidfds, and when
-    /// each is killed if it hasn't gone (see [`Daemon::kill_agent`]).
-    killing: Vec<(Instant, OwnedFd)>,
     /// The lists of sessions agents were asked for, by the daemon's number
     /// for each: the client that asked, its number for it, and the agent.
     listings: HashMap<u64, Listing>,
@@ -129,8 +129,9 @@ struct Asked {
     fetching: bool,
 }
 
-/// How long an agent stopped firmly has to go once sent SIGTERM, before
-/// it's sent SIGKILL.
+/// How long an agent stopped has to end what it started, and how long
+/// what's left of its process group then has once sent SIGTERM, before
+/// it's sent SIGKILL (see [`super::groups`]).
 const KILL_AFTER: Duration = Duration::from_secs(2);
 
 /// How many times longer a chat waits for a session from an agent run
@@ -146,9 +147,10 @@ const ASK_AGAIN: Duration = Duration::from_mins(1);
 type Ended = (String, Result<(), String>);
 
 impl Agents {
-    /// Whether any agent's read budget ran out with more waiting.
+    /// Whether any agent's read budget ran out with more of its output
+    /// or stderr waiting.
     pub(super) fn unread(&self) -> bool {
-        self.running.values().any(|slot| slot.unread)
+        (self.running.values()).any(|slot| slot.unread || slot.unread_errors)
     }
 
     /// The agent called `name`, if it's running.
@@ -578,7 +580,11 @@ impl Daemon {
     }
 
     /// Starts `spec`'s agent with `command`.
-    fn start_agent(&mut self, spec: AgentSpec, command: Vec<OsString>) -> io::Result<AgentId> {
+    pub(super) fn start_agent(
+        &mut self,
+        spec: AgentSpec,
+        command: Vec<OsString>,
+    ) -> io::Result<AgentId> {
         let agent = Agent::start(&spec.name, &command)?;
         let id = AgentId(self.agents.next);
         self.agents.next += 1;
@@ -601,7 +607,7 @@ impl Daemon {
                     self.sources.remove(token.0);
                 }
                 // Its pipes close as it's dropped, which ends it.
-                self.watch_orphan(Orphan::new(agent.stop()));
+                self.let_agent_go(agent.stop(), &spec.name, End::Gently(KILL_AFTER));
                 return Err(err);
             }
             entry.insert(Source::Agent(id, pipe));
@@ -615,6 +621,7 @@ impl Daemon {
                 agent,
                 tokens: tokens.try_into().expect("four sources"),
                 unread: false,
+                unread_errors: false,
             },
         );
         Ok(id)
@@ -624,11 +631,7 @@ impl Daemon {
     pub(super) fn agent_event(&mut self, id: AgentId, pipe: Pipe) {
         match pipe {
             Pipe::Output => self.read_agent(id),
-            Pipe::Errors => {
-                if let Some(slot) = self.agents.running.get_mut(&id) {
-                    slot.agent.read_errors(&mut self.buffer);
-                }
-            }
+            Pipe::Errors => self.read_agent_errors(id),
             Pipe::Input => self.flush_agent(id),
             Pipe::Exit => {
                 // What it said last comes first.
@@ -711,14 +714,28 @@ impl Daemon {
         }
     }
 
-    /// Reads what every agent whose read budget ran out has sent since.
+    /// Reads what every agent whose read budget ran out has sent since,
+    /// or written to stderr.
     pub(super) fn read_agents_unread(&mut self) {
-        let unread: Vec<AgentId> = (self.agents.running.iter())
-            .filter(|(_, slot)| slot.unread)
-            .map(|(&id, _)| id)
+        let unread: Vec<(AgentId, bool, bool)> = (self.agents.running.iter())
+            .filter(|(_, slot)| slot.unread || slot.unread_errors)
+            .map(|(&id, slot)| (id, slot.unread, slot.unread_errors))
             .collect();
-        for id in unread {
-            self.read_agent(id);
+        for (id, output, errors) in unread {
+            if output {
+                self.read_agent(id);
+            }
+            if errors {
+                self.read_agent_errors(id);
+            }
+        }
+    }
+
+    /// Reads what agent `id` wrote to stderr, as much as one read budget
+    /// allows, so one that writes on and on can't hold up the loop.
+    fn read_agent_errors(&mut self, id: AgentId) {
+        if let Some(slot) = self.agents.running.get_mut(&id) {
+            slot.unread_errors = slot.agent.read_errors(&mut self.buffer, OUTPUT_BUDGET);
         }
     }
 
@@ -1019,8 +1036,10 @@ impl Daemon {
         let Some(slot) = self.agents.running.get_mut(&id) else {
             return;
         };
-        // What it said last, which its stdout closing may come before.
-        slot.agent.read_errors(&mut self.buffer);
+        // What it said last, which its stdout closing may come before: to
+        // the end, or as much as a read budget allows, if something it
+        // started holds its stderr open and writes on.
+        slot.agent.read_errors(&mut self.buffer, OUTPUT_BUDGET);
         let name = slot.spec.name.clone();
         let why = (!slot.agent.started()).then(|| slot.agent.last_errors());
         let why = why.map(|why| why.unwrap_or_else(|| "it said nothing".to_owned()));
@@ -1301,15 +1320,13 @@ impl Daemon {
 
     /// Starts the agents whose installs have ended, gives up on those
     /// asked for their models that haven't said in time, tells chats whose
-    /// sessions are slow to open, lets idle sessions go, and kills agents
-    /// that didn't stop when asked.
+    /// sessions are slow to open, and lets idle sessions go.
     pub(super) fn agent_chores(&mut self) {
         self.take_agent_installs();
         self.time_out_probes();
         self.time_out_sessions();
         self.time_out_listings();
         self.park_idle();
-        self.kill_late();
     }
 
     /// When the next chat waiting for its session is to be told its agent
@@ -1502,14 +1519,12 @@ impl Daemon {
 
     /// When the agents next need the loop's attention: an agent asked for
     /// its models is to have said, a chat in the background lets its
-    /// session go, a chat's session is slow to open, or a process sent
-    /// SIGTERM is to be killed.
+    /// session go, or a chat's session is slow to open.
     pub(super) fn next_agent_due(&self) -> Option<Instant> {
         (self.next_probe_due().into_iter())
             .chain(self.next_park_due())
             .chain(self.next_session_due())
             .chain(self.next_listing_due())
-            .chain(self.agents.killing.iter().map(|(due, _)| *due).min())
             .min()
     }
 
@@ -1595,22 +1610,25 @@ impl Daemon {
     }
 
     /// Stops agent `id`, if it's running, and watches its process until it
-    /// exits, to reap it.
+    /// exits, to reap it. Closing its pipes ends it, and it's left
+    /// [`KILL_AFTER`] to end what it started. Whatever of its process
+    /// group is still there then is sent SIGTERM, and SIGKILL if it's still
+    /// there after [`KILL_AFTER`] more (see [`super::groups`]).
     fn stop_agent(&mut self, id: AgentId) {
-        self.end_agent(id, false);
+        self.end_agent(id, End::Gently(KILL_AFTER));
     }
 
-    /// Stops agent `id` as [`stop_agent`](Self::stop_agent) does, and
-    /// makes sure its process ends: one stuck, as on a prompt to unlock
-    /// the keyring, may never read that its pipes have closed. It's sent
-    /// SIGTERM, and SIGKILL if it's still there after [`KILL_AFTER`]. Only
-    /// its own process: what it started hears its pipes close.
+    /// Stops agent `id` as [`stop_agent`](Self::stop_agent) does, but
+    /// firmly: one stuck, as on a prompt to unlock the keyring, may never
+    /// read that its pipes have closed. Its process group, it and what it
+    /// started, is sent SIGTERM at once, and SIGKILL if anything in it is
+    /// still there after [`KILL_AFTER`].
     fn kill_agent(&mut self, id: AgentId) {
-        self.end_agent(id, true);
+        self.end_agent(id, End::Firmly(KILL_AFTER));
     }
 
-    /// Stops agent `id`, firmly if `kill`: see [`kill_agent`](Self::kill_agent).
-    fn end_agent(&mut self, id: AgentId, kill: bool) {
+    /// Stops agent `id`, ending its process group as `end` says.
+    fn end_agent(&mut self, id: AgentId, end: End) {
         let Some(slot) = self.agents.running.remove(&id) else {
             return;
         };
@@ -1627,40 +1645,29 @@ impl Daemon {
         if let Err(err) = self.poll.registry().deregister(&mut SourceFd(&fd)) {
             log::warn!("agent: unwatching its process failed: {err}");
         }
-        if kill {
-            match process.pidfd() {
-                Ok(pidfd) => {
-                    // It may have gone already, which is as well.
-                    let _ = rustix::process::pidfd_send_signal(&pidfd, Signal::TERM);
-                    (self.agents.killing).push((Instant::now() + KILL_AFTER, pidfd));
-                }
-                Err(err) => log::warn!("agent: its process can't be stopped firmly: {err}"),
-            }
+        self.let_agent_go(process, &name, end);
+    }
+
+    /// Watches `process`, agent `name`'s, until it exits, to reap it, and
+    /// ends its process group as `end` says.
+    fn let_agent_go(&mut self, process: Process, name: &str, end: End) {
+        match process.group() {
+            Ok(group) => self.groups.end(group, &format!("agent {name}"), end),
+            Err(err) => log::warn!("agent {name}: what it started can't be stopped: {err}"),
         }
         self.watch_orphan(Orphan::new(process));
     }
 
-    /// Sends SIGKILL to the agents' processes sent SIGTERM a while ago,
-    /// which may have gone, and been reaped, since: their pidfds say so,
-    /// and the signal goes nowhere. Cheap when none is due.
-    fn kill_late(&mut self) {
-        let now = Instant::now();
-        (self.agents.killing).retain(|(due, pidfd)| {
-            if *due > now {
-                return true;
-            }
-            if rustix::process::pidfd_send_signal(pidfd, Signal::KILL).is_ok() {
-                log::info!("agent: its process didn't stop when asked: killing it");
-            }
-            false
-        });
-    }
-
-    /// Stops every agent, for the next build to reap.
+    /// Stops every agent, as the daemon stops or upgrades: none survives
+    /// either. Each is left [`AGENT_STOP_WAIT`] to end by itself once its
+    /// pipes close, as an adapter may be writing its session down for the
+    /// next build to go on with, and then its process group is sent
+    /// SIGTERM. They're waited for with the language servers (see
+    /// [`super::stopping`]). The next build, if there's one, reaps them.
     pub(super) fn stop_agents(&mut self) {
         let running: Vec<AgentId> = self.agents.running.keys().copied().collect();
         for id in running {
-            self.stop_agent(id);
+            self.end_agent(id, End::Gently(AGENT_STOP_WAIT));
         }
     }
 
@@ -1777,4 +1784,60 @@ fn model_choices(settings: &[Setting]) -> Option<&[clackatoo_protocol::SettingCh
         .find(|setting| setting.kind == SettingKind::Model)
         .map(|setting| setting.choices.as_slice())
         .filter(|choices| !choices.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::BorrowedFd;
+
+    use super::*;
+    use crate::server::agent_files::tests::daemon_with_chat;
+    use crate::server::stopping::tests::example;
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn an_agents_stderr_beyond_its_read_budget_is_read_again_until_its_all_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (mut daemon, _) = daemon_with_chat(&root);
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let written = root.join("written");
+        let command = vec![
+            example("fake_agent").into_os_string(),
+            "--errors-first".into(),
+            written.clone().into_os_string(),
+        ];
+        let id = daemon.start_agent(agent, command).unwrap();
+        // SAFETY: the agent's stderr is open as long as it's running,
+        // which it is throughout.
+        let errors =
+            unsafe { BorrowedFd::borrow_raw(daemon.agents.running[&id].agent.stderr_fd()) };
+        // Room in the pipe for a whole read budget, filled before it's
+        // read, so a read stops at its budget with more still waiting, and
+        // the agent held up writing it.
+        rustix::pipe::fcntl_setpipe_size(errors, OUTPUT_BUDGET).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rustix::io::ioctl_fionread(errors).unwrap() < OUTPUT_BUDGET as u64 {
+            assert!(Instant::now() < deadline, "it never filled the pipe");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        daemon.agent_event(id, Pipe::Errors);
+        assert!(daemon.agents.unread(), "it knows there's more");
+        // The loop reads again by itself while there's more, as nothing
+        // new may say so, and as poll would when something new does.
+        let mut again = 0;
+        while !written.exists() {
+            if daemon.agents.unread() {
+                daemon.read_agents_unread();
+                again += 1;
+            } else {
+                daemon.agent_event(id, Pipe::Errors);
+            }
+            assert!(Instant::now() < deadline, "it never wrote it all");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(again > 0);
+        daemon.stop_agents();
+    }
 }

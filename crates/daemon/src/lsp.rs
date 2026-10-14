@@ -787,9 +787,15 @@ impl LanguageServer {
         self.peer.try_wait()
     }
 
-    /// Kills it, if it's still there.
+    /// Kills it, if it's still there, and whatever it started that's
+    /// still in its process group.
     pub(crate) fn kill(&self) {
         self.peer.kill();
+    }
+
+    /// Its process group, to signal by later (see [`crate::group`]).
+    pub(crate) fn group(&self) -> io::Result<crate::group::Group> {
+        self.peer.group()
     }
 
     fn receive(&mut self, message: Message, incoming: &mut Vec<Incoming>) {

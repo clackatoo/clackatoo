@@ -18,6 +18,8 @@ use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions, WaitIdStatus};
 use rustix::pty::OpenptFlags;
 use rustix::termios::Winsize;
 
+use crate::group::Group;
+
 /// Environment variables that describe the terminal the *daemon* was started
 /// in. Programs in our terminals would otherwise think they are running
 /// inside tmux, kitty and so on, and behave accordingly.
@@ -79,16 +81,17 @@ impl Process {
         self.pid
     }
 
-    /// A copy of its pidfd, to signal it by later: through the pidfd, a
-    /// signal can never reach another process that took its pid.
-    pub(crate) fn pidfd(&self) -> io::Result<OwnedFd> {
-        self.pidfd.try_clone()
+    /// The process group it leads, if it was started in one of its own,
+    /// to signal by later, even once it has been reaped (see
+    /// [`crate::group`]).
+    pub(crate) fn group(&self) -> io::Result<Group> {
+        Ok(Group::new(self.pidfd.try_clone()?))
     }
 
-    /// Sends the process SIGKILL, through its pidfd, so it never reaches
-    /// another that took its pid. One gone already isn't sent anything.
-    pub(crate) fn kill(&self) {
-        let _ = rustix::process::pidfd_send_signal(&self.pidfd, rustix::process::Signal::KILL);
+    /// Sends SIGKILL to the process group it leads: it, and whatever it
+    /// started that stayed in its group (see [`crate::group`]).
+    pub(crate) fn kill_group(&self) {
+        crate::group::signal_group(self.pidfd.as_fd(), rustix::process::Signal::KILL);
     }
 
     /// Collects the process's exit status, if it has exited. After that the

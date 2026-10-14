@@ -56,6 +56,15 @@
 //! answers, and ends. With `--slow-new MS`, it answers a request for a
 //! new session only after MS milliseconds.
 //!
+//! With `--grandchild FILE`, an absolute path, it starts a process that
+//! sleeps, holding its stdout and stderr, as `npx` starts node, and writes
+//! that process's pid to FILE. With `--flood-errors`, it writes to stderr
+//! without end, as fast as it's read. With `--linger FILE`, an absolute
+//! path, once its stdin closes it takes 200 ms more, as an adapter writing
+//! its session down, then makes FILE, and ends. With `--errors-first
+//! FILE`, an absolute path, as it starts it writes 3 MiB to stderr, all
+//! of it before it goes on, then makes FILE.
+//!
 //! It keeps sessions from before it started, in whatever directory it's
 //! asked about, as an agent keeps the sessions of a terminal: `past-1`,
 //! "Fix the parser", whose conversation edits `a.txt` in that directory,
@@ -140,11 +149,30 @@ fn main() {
         asked: None,
         editing: None,
     };
+    if let Some(file) = value("--grandchild") {
+        grandchild(&file);
+    }
+    if let Some(file) = value("--errors-first") {
+        let errors = format!("{}\n", "e".repeat(3 * 1024 * 1024 - 1));
+        std::io::stderr().write_all(errors.as_bytes()).unwrap();
+        std::fs::write(file, "").unwrap();
+    }
+    if flag("--flood-errors") {
+        std::thread::spawn(|| {
+            let line = format!("{}\n", "x".repeat(1023));
+            let mut errors = std::io::stderr().lock();
+            while errors.write_all(line.as_bytes()).is_ok() {}
+        });
+    }
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         if !agent.receive(&serde_json::from_str(&line).unwrap()) {
             break;
         }
+    }
+    if let Some(file) = value("--linger") {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::write(file, "").unwrap();
     }
     // Stuck, as on a prompt to unlock the keyring: its stdin closing
     // doesn't end it.
@@ -202,6 +230,24 @@ struct Fake {
     /// A message waiting on permission to write a file itself: its
     /// request's ID, its session, the file's path and its new text.
     editing: Option<(Value, String, String, String)>,
+}
+
+/// Starts a process that sleeps, holding this one's stdout and stderr, as
+/// `npx` starts node, and writes its pid to `file`, renamed into place, so
+/// it's never read half written.
+#[allow(
+    clippy::zombie_processes,
+    reason = "it's meant to outlive this one, and be stopped with it"
+)]
+fn grandchild(file: &str) {
+    let sleeping = Command::new("sleep")
+        .arg("1000")
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let new = format!("{file}.new");
+    std::fs::write(&new, sleeping.id().to_string()).unwrap();
+    std::fs::rename(&new, file).unwrap();
 }
 
 fn send(message: &Value) {

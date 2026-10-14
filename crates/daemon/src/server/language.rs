@@ -25,11 +25,13 @@ use mio::{Interest, Token};
 use serde_json::{Value, json};
 
 use super::buffers::BufferSlot;
+use super::groups::End;
 use super::rename::{Made, Purpose};
-use super::stopping::Stopping;
+use super::stopping::{EXIT_WAIT, Stopping};
 use super::watched::{Walking, Wanted};
 use super::{Daemon, OUTPUT_BUDGET, Orphan, Source};
 use crate::lsp::{self, Incoming, LanguageServer, Reported};
+use crate::pty::Process;
 
 /// Identifies a language server within one daemon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -501,7 +503,8 @@ impl Daemon {
                 for token in tokens {
                     self.sources.remove(token.0);
                 }
-                self.watch_orphan(Orphan::new(server.stop()));
+                let name = format!("{}, for {}", command.join(" "), root.display());
+                self.let_go(server.stop(), &name);
                 return None;
             }
             entry.insert(Source::Server(id, pipe));
@@ -1647,6 +1650,19 @@ impl Daemon {
         let fd = std::os::fd::AsRawFd::as_raw_fd(&process);
         if let Err(err) = self.poll.registry().deregister(&mut SourceFd(&fd)) {
             log::warn!("language server: unwatching its process failed: {err}");
+        }
+        let name = format!("{}, for {}", slot.command.join(" "), slot.root.display());
+        self.let_go(process, &name);
+    }
+
+    /// Watches `process`, server `name`'s, which has gone or is going by
+    /// itself, until it exits, to reap it. What it started is left
+    /// [`EXIT_WAIT`] to go too, and then its process group is ended (see
+    /// [`super::groups`]).
+    fn let_go(&mut self, process: Process, name: &str) {
+        match process.group() {
+            Ok(group) => self.groups.end(group, name, End::Gently(EXIT_WAIT)),
+            Err(err) => log::warn!("{name}: what it started can't be stopped: {err}"),
         }
         self.watch_orphan(Orphan::new(process));
     }

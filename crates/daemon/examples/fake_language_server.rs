@@ -44,6 +44,7 @@
 //! | `--slow-shutdown` | Never answers `shutdown` |
 //! | `--stay` | Takes no notice of `exit`, so it has to be killed |
 //! | `--last-words TEXT` | Writes TEXT to stderr as it exits |
+//! | `--grandchild FILE` | Starts a process that sleeps, holding its stdout and stderr, as `npx` starts node, and writes its pid to FILE, an absolute path |
 //!
 //! It writes `shutdown` to the `--log` file when it's asked to shut down,
 //! and exits with code 0 when told to exit after that, or else with 1, as
@@ -119,6 +120,11 @@ fn main() {
         files: BTreeMap::new(),
         versions: BTreeMap::new(),
     };
+    if let Some(file) =
+        (args.iter().position(|arg| arg == "--grandchild")).and_then(|at| args.get(at + 1))
+    {
+        grandchild(file);
+    }
     let mut input = std::io::stdin().lock();
     while let Some(message) = read(&mut input) {
         if !server.receive(&message) {
@@ -142,6 +148,24 @@ fn main() {
         eprintln!("{why}");
         std::process::exit(1);
     }
+}
+
+/// Starts a process that sleeps, holding this one's stdout and stderr, as
+/// `npx` starts node, and writes its pid to `file`, renamed into place, so
+/// it's never read half written.
+#[allow(
+    clippy::zombie_processes,
+    reason = "it's meant to outlive this one, and be stopped with it"
+)]
+fn grandchild(file: &str) {
+    let sleeping = std::process::Command::new("sleep")
+        .arg("1000")
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let new = format!("{file}.new");
+    std::fs::write(&new, sleeping.id().to_string()).unwrap();
+    std::fs::rename(&new, file).unwrap();
 }
 
 #[allow(clippy::struct_excessive_bools, reason = "each flag is on or off")]

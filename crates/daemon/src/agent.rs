@@ -479,10 +479,10 @@ impl Agent {
         read
     }
 
-    /// Reads what the agent wrote to stderr, all of it, and logs it at
-    /// debug level.
-    pub(crate) fn read_errors(&mut self, buffer: &mut [u8]) {
-        self.peer.read_errors(buffer, usize::MAX);
+    /// Reads what the agent wrote to stderr, up to `budget` bytes, and
+    /// logs it at debug level. Returns whether more may be waiting.
+    pub(crate) fn read_errors(&mut self, buffer: &mut [u8], budget: usize) -> bool {
+        self.peer.read_errors(buffer, budget)
     }
 
     fn receive(&mut self, message: Message, incoming: &mut Vec<Incoming>) {
@@ -749,8 +749,9 @@ impl Agent {
         self.peer.exit_fd()
     }
 
-    /// Stops the agent: closing its pipes ends it. Returns its process,
-    /// to be reaped once it has exited.
+    /// Stops the agent: closing its pipes ends it, if it isn't stuck.
+    /// Returns its process, to be reaped once it has exited, and whose
+    /// group is to be ended (see [`crate::group`]).
     pub(crate) fn stop(self) -> Process {
         self.peer.stop()
     }

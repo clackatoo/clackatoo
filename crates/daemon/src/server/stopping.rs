@@ -4,21 +4,25 @@
 //! A server stopped is asked to `shutdown`, and once it answers, or after
 //! [`SHUTDOWN_WAIT`] if it doesn't, told to `exit`, so it can exit cleanly,
 //! with code 0: a server told to exit unasked must exit with code 1. One
-//! still running [`EXIT_WAIT`] after that is killed. All the while what it
+//! still running [`EXIT_WAIT`] after that is killed, with whatever it
+//! started that's still in its process group. All the while what it
 //! writes to stderr is read, and once it has exited, read to the end, so
 //! its last words reach the log, and how it exited is logged as it's
-//! reaped.
+//! reaped. Then whatever it started that's still running is stopped (see
+//! [`super::groups`]).
 //!
 //! When the daemon stops or upgrades, there's no loop to go on with, so it
-//! waits for its servers there and then, for at most [`STOP_WAIT`], since
-//! `clackatoo stop` gives the daemon only a few seconds before killing it.
-//! Those still running then are killed, and reaped by whoever comes next.
+//! waits for its servers, and for what they and its agents started, there
+//! and then, for at most [`STOP_WAIT`], since `clackatoo stop` gives the
+//! daemon only a few seconds before killing it. Those still running then
+//! are killed, and reaped by whoever comes next.
 
 use std::time::{Duration, Instant};
 
 use mio::unix::SourceFd;
 use mio::{Events, Token};
 
+use super::groups::End;
 use super::language::{Pipe, ServerId, ServerSlot};
 use super::{Daemon, OUTPUT_BUDGET, Orphan, Source};
 use crate::lsp::{Incoming, LanguageServer};
@@ -28,12 +32,22 @@ use crate::lsp::{Incoming, LanguageServer};
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
 
 /// How long a server told to exit has to do so before it's killed.
-const EXIT_WAIT: Duration = Duration::from_secs(1);
+pub(super) const EXIT_WAIT: Duration = Duration::from_secs(1);
 
 /// The longest the daemon waits for its servers as it stops or upgrades:
 /// with the half second it gives remote windows, well inside the few
 /// seconds `clackatoo stop` waits before killing it.
 pub(super) const STOP_WAIT: Duration = Duration::from_millis(1500);
+
+/// How long an agent has to end by itself once its pipes close, as the
+/// daemon stops or upgrades, before its process group is sent SIGTERM: an
+/// adapter may be writing its session down, which the next build resumes.
+/// Well inside [`STOP_WAIT`], to leave SIGTERM time to work.
+pub(super) const AGENT_STOP_WAIT: Duration = Duration::from_millis(500);
+
+/// How often the daemon looks whether what's in the process groups it's
+/// waiting for has gone, as it stops or upgrades.
+const GROUP_LOOK: Duration = Duration::from_millis(10);
 
 /// A server on its way out.
 #[derive(Debug)]
@@ -184,6 +198,12 @@ impl Daemon {
         let Some(mut stopping) = self.servers.stopping.remove(&id) else {
             return;
         };
+        // What it started has had its chance to go with it: what's left
+        // of its group is asked to go now.
+        match stopping.server.group() {
+            Ok(group) => (self.groups).end(group, &stopping.name, End::Firmly(EXIT_WAIT)),
+            Err(err) => log::warn!("{}: what it started can't be stopped: {err}", stopping.name),
+        }
         // What's in its stderr now is all it wrote: read to the end, or as
         // much as a read budget allows, if something it started holds it
         // open and writes on.
@@ -253,15 +273,22 @@ impl Daemon {
         }
     }
 
-    /// Waits for the servers stopping, as the daemon stops or upgrades,
-    /// until `until`, doing nothing else meanwhile, as there's nothing
-    /// else to do. Any still there then is killed, and watched as an
-    /// orphan, for an upgrade to hand over.
-    pub(super) fn wait_for_servers(&mut self, until: Instant) {
+    /// Waits for the servers stopping, and the process groups of servers
+    /// and agents ending, as the daemon stops or upgrades, until `until`,
+    /// doing nothing else meanwhile, as there's nothing else to do. A
+    /// group is left alone for at most [`AGENT_STOP_WAIT`] from now, then
+    /// sent SIGTERM (see [`super::groups`]). Any server
+    /// still there at the end is killed, and watched as an orphan, for an
+    /// upgrade to hand over, and what's left of every group is killed: the
+    /// next build reaps only the programs it's handed, and never signals
+    /// a group, so nothing they started outlives this one.
+    pub(super) fn wait_for_stopping(&mut self, until: Instant) {
         let mut events = Events::with_capacity(64);
+        self.groups.hurry(Instant::now() + AGENT_STOP_WAIT);
         loop {
             self.push_stopping_servers();
-            if self.servers.stopping.is_empty() {
+            self.groups.push_stopping();
+            if self.servers.stopping.is_empty() && self.groups.is_empty() {
                 return;
             }
             let now = Instant::now();
@@ -272,7 +299,13 @@ impl Daemon {
                 Duration::ZERO
             } else {
                 let next = self.next_stopping_due().map_or(until, |due| due.min(until));
-                next.saturating_duration_since(now)
+                let mut timeout = next.saturating_duration_since(now);
+                // What's in a group isn't the daemon's child: nothing says
+                // when it has gone, so it's looked for again soon.
+                if !self.groups.is_empty() {
+                    timeout = timeout.min(GROUP_LOOK);
+                }
+                timeout
             };
             match self.poll.poll(&mut events, Some(timeout)) {
                 Ok(()) => {}
@@ -283,8 +316,12 @@ impl Daemon {
                 }
             }
             for event in &events {
-                if let Some(&Source::Server(id, pipe)) = self.sources.get(event.token().0) {
-                    self.server_event(id, pipe);
+                match self.sources.get(event.token().0) {
+                    Some(&Source::Server(id, pipe)) => self.server_event(id, pipe),
+                    // A leader not yet reaped keeps its group, as far as
+                    // looking says.
+                    Some(Source::Orphan(_)) => self.reap_orphan(event.token()),
+                    _ => {}
                 }
             }
             self.read_stopping_unread();
@@ -295,6 +332,7 @@ impl Daemon {
             self.unregister_stopping(&stopping);
             self.watch_orphan(Orphan::new(stopping.server.stop()));
         }
+        self.groups.kill();
     }
 }
 
@@ -315,10 +353,10 @@ pub(super) mod tests {
     use super::*;
     use crate::server::agent_files::tests::daemon_with_chat;
 
-    /// The fake language server, which `cargo test` builds beside the
-    /// tests as an example: the newest one built, as a test build names
-    /// it with a hash.
-    fn fake_language_server() -> PathBuf {
+    /// The example called `name`, such as the fake language server, which
+    /// `cargo test` builds beside the tests: the newest one built, as a
+    /// test build names it with a hash.
+    pub(in crate::server) fn example(name: &str) -> PathBuf {
         let test = std::env::current_exe().unwrap();
         let examples = (test.parent().and_then(Path::parent))
             .expect("tests are in the profile's deps")
@@ -327,16 +365,11 @@ pub(super) mod tests {
             .filter(|entry| {
                 let file = entry.file_name();
                 let file = file.to_string_lossy();
-                file.starts_with("fake_language_server") && !file.ends_with(".d")
+                file.starts_with(name) && !file.ends_with(".d")
             })
             .max_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok())
             .map_or_else(
-                || {
-                    panic!(
-                        "no fake_language_server in {}: run cargo test",
-                        examples.display()
-                    )
-                },
+                || panic!("no {name} in {}: run cargo test", examples.display()),
                 |entry| entry.path(),
             )
     }
@@ -347,10 +380,11 @@ pub(super) mod tests {
     pub(in crate::server) fn daemon_with_fake(root: &Path, args: &[&str]) -> (Daemon, ServerId) {
         let pack = root.join("languages/fake");
         std::fs::create_dir_all(&pack).unwrap();
-        let server: Vec<String> = std::iter::once(fake_language_server().display().to_string())
-            .chain(args.iter().map(|arg| (*arg).to_owned()))
-            .map(|arg| format!("{arg:?}"))
-            .collect();
+        let server: Vec<String> =
+            std::iter::once(example("fake_language_server").display().to_string())
+                .chain(args.iter().map(|arg| (*arg).to_owned()))
+                .map(|arg| format!("{arg:?}"))
+                .collect();
         let language = format!(
             "grammar = \"fake\"\nextensions = [\"fk\"]\nserver = [{}]\nroots = [\"project\"]\n",
             server.join(", ")
@@ -404,5 +438,127 @@ pub(super) mod tests {
         let heard = std::fs::read_to_string(root.join("server.log")).unwrap();
         let heard: Vec<&str> = heard.lines().collect();
         assert_eq!(heard[heard.len() - 2..], ["shutdown", "exit"], "{heard:?}");
+    }
+
+    /// The pid of the process a fake agent or language server run with
+    /// `--grandchild FILE` started, read from `file` once it's there.
+    fn grandchild_in(file: &Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pid) = (std::fs::read_to_string(file).ok()).and_then(|pid| pid.parse().ok())
+            {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "{} never came", file.display());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether the process `pid` is still sleeping: there, not a zombie,
+    /// and running `sleep`.
+    fn sleeping(pid: u32) -> bool {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let command = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        (stat.rsplit_once(") ")).is_some_and(|(_, rest)| !rest.starts_with('Z'))
+            && command.starts_with(b"sleep\0")
+    }
+
+    #[test]
+    fn an_upgrade_leaves_nothing_agents_and_language_servers_started_but_keeps_terminals() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server_child = root.join("server child").display().to_string();
+        // A server that has to be killed, and an agent that its stdin
+        // closing doesn't end: both started something that sleeps.
+        let (mut daemon, _) = daemon_with_fake(&root, &["--stay", "--grandchild", &server_child]);
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        let command = vec![
+            example("fake_agent").into_os_string(),
+            "--stubborn".into(),
+            "--grandchild".into(),
+            root.join("agent child").into_os_string(),
+        ];
+        daemon.start_agent(agent, command).unwrap();
+        let terminal = clackatoo_protocol::NewTerminal {
+            size: clackatoo_term::Size::new(40, 10).unwrap(),
+            command: Some(vec!["sleep".into(), "1000".into()]),
+            cwd: None,
+            record_to: None,
+        };
+        daemon.new_terminal(&terminal).unwrap();
+        let server_child = grandchild_in(Path::new(&server_child));
+        let agent_child = grandchild_in(&root.join("agent child"));
+        assert!(sleeping(server_child) && sleeping(agent_child));
+
+        // Given long enough that none is killed for running late: SIGTERM
+        // ends them, well before then.
+        let started = Instant::now();
+        let handover = daemon.hand_over(started + Duration::from_secs(5)).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        // Gone before the next build starts, which reaps only what it's
+        // handed, and never signals a group.
+        assert!(!sleeping(server_child), "the server's");
+        assert!(!sleeping(agent_child), "the agent's");
+        // The terminal's program, which the next build adopts, is left
+        // alone.
+        let [terminal] = handover.state.terminals.as_slice() else {
+            panic!("one terminal");
+        };
+        assert!(sleeping(terminal.pid));
+    }
+
+    /// A daemon in `root`, not running, with no language server, running
+    /// the fake agent with `args`.
+    fn daemon_with_agent(root: &Path, command: Vec<std::ffi::OsString>) -> Daemon {
+        let (mut daemon, _) = daemon_with_chat(root);
+        let agent = crate::AgentConfig::default().find("claude").unwrap();
+        daemon.start_agent(agent, command).unwrap();
+        daemon
+    }
+
+    #[test]
+    fn an_upgrade_leaves_agents_a_moment_to_end_by_themselves_before_stopping_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let command = vec![
+            example("fake_agent").into_os_string(),
+            "--linger".into(),
+            root.join("written").into_os_string(),
+        ];
+        let mut daemon = daemon_with_agent(&root, command);
+        drop(daemon.hand_over(Instant::now() + STOP_WAIT).unwrap());
+        assert!(root.join("written").exists(), "it wrote its session down");
+    }
+
+    #[test]
+    fn an_upgrade_kills_what_an_agent_started_that_doesnt_stop_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // It ends neither when its stdin closes nor on SIGTERM, which the
+        // shell has it ignore, and nor does what it starts.
+        let command = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "trap '' TERM; exec \"$0\" \"$@\"".into(),
+            example("fake_agent").into_os_string(),
+            "--stubborn".into(),
+            "--grandchild".into(),
+            root.join("agent child").into_os_string(),
+        ];
+        let mut daemon = daemon_with_agent(&root, command);
+        let child = grandchild_in(&root.join("agent child"));
+        let started = Instant::now();
+        drop(daemon.hand_over(started + STOP_WAIT).unwrap());
+        assert!(started.elapsed() >= STOP_WAIT, "waited for it till the end");
+        // Killed then: gone a moment after.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while sleeping(child) {
+            assert!(Instant::now() < deadline, "it's still running");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

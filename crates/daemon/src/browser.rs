@@ -23,7 +23,7 @@ mod cdp;
 mod snapshot;
 
 use std::collections::{BTreeMap, VecDeque};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
@@ -211,12 +211,13 @@ impl Running {
     }
 
     /// Stops the browser with `signal`, if one is running, and any that's
-    /// starting once it has.
+    /// starting once it has: it, and what it started (see
+    /// [`crate::group`]).
     fn stop(&self, signal: rustix::process::Signal) {
         self.stopping.store(true, Ordering::Release);
         let process = self.process.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(process) = process.as_ref() {
-            let _ = rustix::process::pidfd_send_signal(process, signal);
+            crate::group::signal_group(process.as_fd(), signal);
         }
     }
 }

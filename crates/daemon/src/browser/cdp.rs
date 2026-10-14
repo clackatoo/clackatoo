@@ -30,6 +30,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::{Input, Running};
+use crate::group::Group;
 
 /// How long a command waits for its answer, unless it says otherwise.
 pub(super) const ANSWER_WAIT: Duration = Duration::from_secs(30);
@@ -68,6 +69,11 @@ pub(super) type Answer = Result<Value, String>;
 #[derive(Debug)]
 pub(super) struct Cdp {
     child: Child,
+    /// Its process group: it, and those of the processes it starts that
+    /// stay in its group, which are killed with it (see [`crate::group`]).
+    /// One that makes a session of its own, as Chromium's zygote may,
+    /// leaves the group, and goes when the browser does, as before.
+    group: Option<Group>,
     writer: Arc<Mutex<PipeWriter>>,
     /// The number the next command gets, shared with the reader, which
     /// answers dialogs itself.
@@ -98,9 +104,11 @@ impl Cdp {
         let child = spawn(program, profile, browser_reads, browser_writes).map_err(failed)?;
         // From now on, the daemon can stop it, even as it starts.
         let pid = rustix::process::Pid::from_child(&child);
-        running.set(rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok());
+        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok();
+        running.set(pidfd.as_ref().and_then(|pidfd| pidfd.try_clone().ok()));
         let mut cdp = Self {
             child,
+            group: pidfd.map(Group::new),
             writer: Arc::new(Mutex::new(commands)),
             next_id: Arc::new(AtomicU64::new(1)),
             waiting: Arc::new(Mutex::new(HashMap::new())),
@@ -194,10 +202,24 @@ impl Cdp {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Kills the browser, without a word to it, and waits for it to go.
+    /// Kills the browser, without a word to it, with whatever it started,
+    /// and waits for it to go.
     pub(super) fn kill(&mut self) {
-        let _ = self.child.kill();
+        self.kill_group();
         let _ = self.child.wait();
+    }
+
+    /// Sends SIGKILL to the browser's process group: it, if it's still
+    /// there, and whatever it started that is.
+    fn kill_group(&mut self) {
+        match &self.group {
+            Some(group) => {
+                group.signal(rustix::process::Signal::KILL);
+            }
+            None => {
+                let _ = self.child.kill();
+            }
+        }
     }
 
     /// Waits up to `grace` for the browser, told to stop already, to go,
@@ -209,16 +231,20 @@ impl Cdp {
         self.kill();
     }
 
-    /// Closes the browser, asking first, and waits for it to go.
+    /// Closes the browser, asking first, and waits for it to go. Whatever
+    /// it started that outlived it is killed.
     pub(super) fn stop(&mut self) {
         if self.running() {
             let closed = self.call(None, "Browser.close", json!({}), Duration::from_secs(2));
             if closed.is_err() || !wait_for_exit(&mut self.child, Duration::from_secs(3)) {
                 // It stops when its pipe closes too, but a hung one may not.
-                let _ = self.child.kill();
+                self.kill_group();
             }
         }
         let _ = self.child.wait();
+        if let Some(group) = &self.group {
+            group.signal(rustix::process::Signal::KILL);
+        }
     }
 }
 
@@ -278,7 +304,10 @@ fn spawn(
         .args(ARGS)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        // In a process group of its own, so stopping it stops what it
+        // starts that stays in that group too (see [`crate::group`]).
+        .process_group(0);
     // SAFETY: the closure runs in the child between fork and exec, where
     // only async-signal-safe operations are allowed. It makes two dup2
     // system calls through rustix, with no allocation, locking or shared

@@ -24,6 +24,7 @@ clackatoo-text.workspace = true
 globset.workspace = true
 httparse.workspace = true
 ignore.workspace = true
+libc.workspace = true
 log.workspace = true
 memchr.workspace = true
 mio.workspace = true

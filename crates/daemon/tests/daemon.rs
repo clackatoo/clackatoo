@@ -4247,7 +4247,14 @@ fn a_language_server_that_doesnt_answer_shutdown_is_told_to_exit_and_one_that_st
     ] {
         let daemon = with_fake_language_server(|dir| {
             let log = dir.join("server.log").display().to_string();
-            vec!["--log".into(), log, flag.into()]
+            let grandchild = dir.join("grandchild").display().to_string();
+            vec![
+                "--log".into(),
+                log,
+                flag.into(),
+                "--grandchild".into(),
+                grandchild,
+            ]
         });
         let dir = daemon.dir.path();
         std::fs::create_dir(dir.join("app")).unwrap();
@@ -4259,6 +4266,7 @@ fn a_language_server_that_doesnt_answer_shutdown_is_told_to_exit_and_one_that_st
         let buffer = buffer_in(&mut client, pane);
         attach_buffer(&mut client, buffer);
         next_diagnostics(&mut client);
+        let grandchild = grandchild_in(&dir.join("grandchild"));
         // Closed, it's stopped at once, as tests have it.
         client.close_pane(pane).unwrap();
         let log = dir.join("server.log");
@@ -4267,7 +4275,68 @@ fn a_language_server_that_doesnt_answer_shutdown_is_told_to_exit_and_one_that_st
         assert_eq!(heard[heard.len() - 2..], ["shutdown", "exit"], "{flag}");
         let root = dir.join("app").canonicalize().unwrap();
         wait_for_fake_server_logged(&format!("for {}: {said}", root.display()));
+        // What it started went with it, by the signal that ended it or
+        // asked once it had gone.
+        gone_within(grandchild, Duration::from_secs(3));
     }
+}
+
+#[test]
+fn a_language_server_stopped_when_idle_leaves_nothing_it_started_running() {
+    fake_server_logged();
+    let daemon = with_fake_language_server(|dir| {
+        let grandchild = dir.join("grandchild").display().to_string();
+        vec!["--grandchild".into(), grandchild]
+    });
+    let dir = daemon.dir.path();
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    std::fs::write(dir.join("app/a.fk"), "bad\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    next_diagnostics(&mut client);
+    let grandchild = grandchild_in(&dir.join("grandchild"));
+    // Closed, it's stopped at once, as tests have it: it shuts down and
+    // exits cleanly, and what it started, still running, is asked to go.
+    client.close_pane(pane).unwrap();
+    let root = dir.join("app").canonicalize().unwrap();
+    wait_for_fake_server_logged(&format!("for {}: exited", root.display()));
+    gone_within(grandchild, Duration::from_secs(3));
+}
+
+#[test]
+fn the_daemon_stopping_leaves_nothing_agents_or_language_servers_started_running() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let grandchild = dir.join("server child").display().to_string();
+        config.languages = Some(fake_language_server_pack(
+            dir,
+            vec!["--grandchild".into(), grandchild],
+        ));
+        let command = vec![
+            fake_agent().into(),
+            "--grandchild".into(),
+            dir.join("agent child").into(),
+        ];
+        config.agents.custom = vec![custom_agent("claude", command)];
+    });
+    let dir = daemon.dir.path().to_owned();
+    let (mut client, _) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[1].terminals()[0];
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    let server_child = grandchild_in(&dir.join("server child"));
+    let agent_child = grandchild_in(&dir.join("agent child"));
+
+    // The daemon waits for them as it stops, and kills any still there
+    // when it can wait no longer.
+    let mut daemon = daemon;
+    daemon.shutdown.shutdown();
+    daemon.thread.take().unwrap().join().unwrap();
+    gone_within(server_child, Duration::from_secs(2));
+    gone_within(agent_child, Duration::from_secs(2));
 }
 
 /// Whether the fake language server's log, `log`, has the line `line`
@@ -11156,6 +11225,8 @@ fn retry_starts_an_agent_slow_to_open_a_session_again_and_asks_again() {
             "--mute".into(),
             "--once".into(),
             dir.join("started").into(),
+            "--grandchild".into(),
+            dir.join("grandchild").into(),
         ];
         config.agents.custom = vec![custom_agent("claude", command.into())];
         config.session_wait = Duration::from_millis(300);
@@ -11171,6 +11242,8 @@ fn retry_starts_an_agent_slow_to_open_a_session_again_and_asks_again() {
     wait_for_chat(&mut client, other, says_slow);
     let first = child_processes_in(daemon.dir.path());
     assert_eq!(first.len(), 1);
+    // What it started ignores SIGTERM as it does.
+    let grandchild = grandchild_in(&daemon.dir.path().join("grandchild"));
     answer(&mut client, chat, Some("retry".to_owned()));
     let node = wait_for_chat(&mut client, chat, |node| last_outcome(node).is_some());
     assert_eq!(last_outcome(&node), Some(&Outcome::Done));
@@ -11189,6 +11262,82 @@ fn retry_starts_an_agent_slow_to_open_a_session_again_and_asks_again() {
         assert!(Instant::now() < deadline, "{running:?}, first {first:?}");
         std::thread::sleep(Duration::from_millis(10));
     }
+    // And so has what it started, killed with it.
+    gone_within(grandchild, Duration::from_secs(5));
+}
+
+/// The pid of the process a fake agent or language server run with
+/// `--grandchild FILE` started, read from `file` once it's there.
+fn grandchild_in(file: &Path) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(pid) = (std::fs::read_to_string(file).ok()).and_then(|pid| pid.parse().ok()) {
+            assert!(sleeping(pid), "it started sleeping");
+            return pid;
+        }
+        assert!(Instant::now() < deadline, "{} never came", file.display());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Whether the process `pid` is a grandchild still sleeping: there, not
+/// a zombie, and running `sleep`.
+fn sleeping(pid: u32) -> bool {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    let command = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    (stat.rsplit_once(") ")).is_some_and(|(_, rest)| !rest.starts_with('Z'))
+        && command.starts_with(b"sleep\0")
+}
+
+/// Fails unless the grandchild `pid` has gone within `limit`.
+fn gone_within(pid: u32, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    while sleeping(pid) {
+        assert!(Instant::now() < deadline, "{pid} is still running");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn an_agent_stopped_as_unneeded_leaves_nothing_it_started_running() {
+    let daemon = TestDaemon::start_with_agent(|dir| {
+        vec![
+            fake_agent().into(),
+            "--grandchild".into(),
+            dir.join("grandchild").into(),
+        ]
+    });
+    let mut client = daemon.client();
+    let pane = client.new_workspace(None, new_chat()).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    let grandchild = grandchild_in(&daemon.dir.path().join("grandchild"));
+    // With no chat left, the agent is stopped: its pipes close, which
+    // ends it, but not what it started, which is stopped after a while.
+    client.close_pane(pane).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !child_processes_in(daemon.dir.path()).is_empty() {
+        assert!(Instant::now() < deadline, "the agent never stopped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    gone_within(grandchild, Duration::from_secs(5));
+}
+
+#[test]
+fn an_agent_flooding_stderr_holds_up_nothing() {
+    let daemon =
+        TestDaemon::start_with_agent(|_| vec![fake_agent().into(), "--flood-errors".into()]);
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    // Read a budget at a time, its stderr leaves room for its answers,
+    // and for other clients.
+    assert_eq!(last_words(&ask(&mut client, chat, "hi")), "echo: hi\n");
+    let mut other = daemon.client();
+    assert_eq!(other.list_terminals().unwrap().len(), 1);
+    assert_eq!(
+        last_words(&ask(&mut client, chat, "again")),
+        "echo: again\n"
+    );
 }
 
 #[test]
