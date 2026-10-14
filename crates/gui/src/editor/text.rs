@@ -77,6 +77,15 @@ fn plain(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| (b' '..=b'~').contains(byte))
 }
 
+/// What has a line under it as a line is drawn: a wavy one under what
+/// diagnostics are about, and a straight one under what a hover is
+/// about, as bytes of the text.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Underlines<'a> {
+    pub(crate) diagnostics: &'a [&'a Diagnostic],
+    pub(crate) hovered: Option<(usize, usize)>,
+}
+
 /// One line, laid out in cells.
 #[derive(Clone, Debug)]
 pub(crate) struct Laid {
@@ -425,18 +434,21 @@ impl Laid {
     }
 
     /// Appends the line to `builder` as drawn in `width` cells from cell
-    /// `left`, coloured as `spans` say, with a wavy line under what
-    /// `diagnostics` are about. The line starts at byte `start` of the
-    /// text they're for.
+    /// `left`, coloured as `spans` say, with the lines under it
+    /// `underlines` says. The line starts at byte `start` of the text
+    /// they're for.
     pub(crate) fn show(
         &self,
         builder: &mut RowBuilder,
-        left: usize,
-        width: usize,
+        (left, width): (usize, usize),
         spans: &[Span],
-        diagnostics: &[&Diagnostic],
+        underlines: &Underlines<'_>,
         start: usize,
     ) {
+        let Underlines {
+            diagnostics,
+            hovered,
+        } = *underlines;
         // From the character at cell `left`, and the spans from its byte
         // on, found by halving: a row far into a long line doesn't step
         // through all that's before it.
@@ -459,7 +471,7 @@ impl Laid {
                 .map(|diagnostic| diagnostic.severity)
                 .min()
         };
-        let underlined = |style: Style, from: usize, to: usize| match marked(from, to) {
+        let wavy = |style: Style, from: usize, to: usize| match marked(from, to) {
             Some(severity) => Style {
                 underline: Underline::Curly,
                 underline_color: colors::diagnostic(severity),
@@ -492,7 +504,21 @@ impl Laid {
             let style = if diagnostics.is_empty() {
                 style
             } else {
-                underlined(style, byte, next_byte)
+                wavy(style, byte, next_byte)
+            };
+            // What a hover is about, under no wavy line.
+            let style = match hovered {
+                Some((first, last))
+                    if start + byte < last
+                        && start + next_byte > first
+                        && style.underline == Underline::None =>
+                {
+                    Style {
+                        underline: Underline::Single,
+                        ..style
+                    }
+                }
+                _ => style,
             };
             match piece.chars().next() {
                 // As much of it as fits: a tab can go on over the next row
@@ -934,10 +960,16 @@ mod tests {
         }
     }
 
+    /// Nothing underlined.
+    const NO_UNDERLINES: Underlines<'static> = Underlines {
+        diagnostics: &[],
+        hovered: None,
+    };
+
     /// `laid` as drawn in a row of `width` cells of its own.
     fn shown(laid: &Laid, left: usize, width: usize, spans: &[Span], start: usize) -> Row {
         let mut builder = RowBuilder::new(width);
-        laid.show(&mut builder, left, width, spans, &[], start);
+        laid.show(&mut builder, (left, width), spans, &NO_UNDERLINES, start);
         builder.finish(false)
     }
 
@@ -1024,7 +1056,7 @@ mod tests {
         );
         // Drawn from far along, as a row it wraps onto is.
         let mut builder = RowBuilder::new(5);
-        laid.show(&mut builder, 69_998, 5, &[], &[], 0);
+        laid.show(&mut builder, (69_998, 5), &[], &NO_UNDERLINES, 0);
         assert_eq!(builder.finish(false).text(), "aa字");
     }
 

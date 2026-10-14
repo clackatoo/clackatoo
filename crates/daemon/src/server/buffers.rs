@@ -595,12 +595,26 @@ impl Daemon {
     /// Has buffer `id` parsed, if its language has a pack, starting the
     /// thread that parses if it's the first.
     pub(super) fn parse_buffer(&mut self, id: BufferId) {
-        let (Some(languages), Some(slot)) = (&mut self.languages, self.buffers.get_mut(&id)) else {
+        let (Some(languages), Some(slot)) = (&mut self.languages, self.buffers.get(&id)) else {
             return;
         };
         let Some(pack) = languages.find(slot.buffer.path()) else {
             return;
         };
+        let (text, version) = (slot.buffer.text().clone(), slot.buffer.version());
+        let Some(syntax) = self.start_syntax() else {
+            return;
+        };
+        log::info!("buffer {id}: parsed as {}", pack.name);
+        syntax.open(key(id), pack, text, version);
+        if let Some(slot) = self.buffers.get_mut(&id) {
+            slot.parsed = true;
+        }
+    }
+
+    /// The thread that parses buffers, started if it's the first need of
+    /// it, or `None` if it can't be, and so nothing is parsed.
+    pub(super) fn start_syntax(&mut self) -> Option<&Syntax> {
         if self.syntax.is_none() {
             let waker = Arc::clone(&self.waker);
             let wake = move || {
@@ -613,17 +627,11 @@ impl Daemon {
                 Err(err) => {
                     log::error!("buffers won't be parsed: {err}");
                     self.languages = None;
-                    return;
+                    return None;
                 }
             }
         }
-        let Some(syntax) = &self.syntax else {
-            return;
-        };
-        log::info!("buffer {id}: parsed as {}", pack.name);
-        let (text, version) = (slot.buffer.text().clone(), slot.buffer.version());
-        syntax.open(key(id), pack, text, version);
-        slot.parsed = true;
+        self.syntax.as_ref()
     }
 
     /// Tells buffer `id`'s server about `edit`, which made `version`, and
@@ -651,7 +659,8 @@ impl Daemon {
 
     /// Sends the highlights parses have found since last asked to every
     /// client following their buffers, and the answers to questions about
-    /// their pieces of code to the clients that asked.
+    /// their pieces of code, and the colours of hovers' code, to the
+    /// clients that asked.
     pub(super) fn take_highlights(&mut self) {
         let Some(syntax) = &self.syntax else {
             return;
@@ -662,10 +671,12 @@ impl Daemon {
             match found {
                 Found::Highlighted(found) => self.highlighted(found),
                 Found::Answered(answered) => self.answered_pieces(answered),
+                Found::Coloured(coloured) => self.coloured(&coloured),
             }
         }
         if stopped {
             self.fail_piece_questions();
+            self.forget_all_colourings();
         }
     }
 

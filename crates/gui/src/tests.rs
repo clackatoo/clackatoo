@@ -1968,6 +1968,7 @@ fn an_editors_panel_is_drawn_over_its_text() {
         answer: Answer::Hover {
             text: "```rust\nfn bad()\n```\n\nIt's **bad**: see `good`.".into(),
             markdown: true,
+            range: None,
         },
     });
     editor.heard(&mut heard, true, &mut copy);

@@ -66,6 +66,7 @@ mod explorers;
 mod finder;
 mod fits;
 mod groups;
+mod hover;
 mod language;
 mod offers;
 mod pieces;
@@ -672,6 +673,8 @@ pub struct Daemon {
     /// Questions about buffers' pieces of code, on their way to the
     /// thread parsing buffers.
     piece_questions: pieces::PieceQuestions,
+    /// The hovers whose code is being coloured.
+    colourings: hover::Colourings,
     /// How many questions about the clipboard programs have asked, which
     /// numbers them.
     clipboard_asks: u64,
@@ -801,6 +804,7 @@ impl Daemon {
             boards,
             signs: Signs::default(),
             piece_questions: pieces::PieceQuestions::default(),
+            colourings: hover::Colourings::default(),
             clipboard_asks: 0,
             clipboard_due: Vec::new(),
             clipboard_unsent: false,

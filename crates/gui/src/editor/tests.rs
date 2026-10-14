@@ -940,6 +940,7 @@ fn k_shows_what_the_language_server_says_in_a_panel_by_the_cursor() {
     let hover = |text: &str| Answer::Hover {
         text: text.to_owned(),
         markdown: true,
+        range: None,
     };
     setup.answer(asked, hover("```rust\nfn y()\n```\n\nDoes **y**."));
     assert_eq!(panel_text(&mut setup).unwrap(), ["fn y()", "", "Does y."]);
@@ -1003,6 +1004,119 @@ fn k_shows_what_the_language_server_says_in_a_panel_by_the_cursor() {
 }
 
 #[test]
+fn k_underlines_what_its_about_and_colours_its_code_once_told() {
+    use clackatoo_term::Underline;
+    use clackatoo_text::{Kind, Span};
+
+    let mut setup = Setup::new("let x = y;\nfn y() {}\n");
+    setup.keys("fyK");
+    let asked = setup.queries[0].0;
+    let text = "```rust\nfn y()\n```\n\nDoes **y**.";
+    setup.answer(
+        asked,
+        Answer::Hover {
+            text: text.into(),
+            markdown: true,
+            range: Some((8, 9)),
+        },
+    );
+    // After the four cells of line numbers.
+    let underline = |setup: &mut Setup, col: usize| {
+        setup.editor.settle(&setup.copy);
+        let (rows, _) = setup.editor.scene();
+        let row = rows[0];
+        row.style(row.cells()[4 + col]).underline
+    };
+    assert_eq!(underline(&mut setup, 8), Underline::Single);
+    assert_eq!(underline(&mut setup, 7), Underline::None);
+    assert_eq!(underline(&mut setup, 9), Underline::None);
+    // Its code is plain until its colours come, then coloured, for this
+    // query only.
+    let code_runs = |setup: &mut Setup| {
+        setup.editor.settle(&setup.copy);
+        let view = setup.editor.panel().unwrap();
+        (view.lines[0].runs.iter())
+            .map(|run| (run.text.clone(), run.ink))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(code_runs(&mut setup), [("fn y()".to_owned(), Ink::Plain)]);
+    let colour = |setup: &mut Setup, id| {
+        let at = text.find("fn y").unwrap();
+        let spans = vec![Span {
+            start: at,
+            end: at + 2,
+            kind: Kind::Keyword,
+        }];
+        let mut heard = setup.copy.update(BufferUpdate::Coloured { id, spans });
+        setup.editor.heard(&mut heard, true, &mut setup.copy);
+    };
+    colour(&mut setup, asked + 1);
+    assert_eq!(code_runs(&mut setup), [("fn y()".to_owned(), Ink::Plain)]);
+    colour(&mut setup, asked);
+    let keyword = Ink::Color(crate::colors::syntax(Kind::Keyword).fg);
+    assert_eq!(
+        code_runs(&mut setup),
+        [("fn".to_owned(), keyword), (" y()".to_owned(), Ink::Plain)]
+    );
+
+    // An edit from elsewhere before it moves it along...
+    let agents = setup.daemon.agent(0, "  ");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(agents);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    assert!(setup.editor.panel().is_some());
+    assert_eq!(underline(&mut setup, 10), Underline::Single);
+    assert_eq!(underline(&mut setup, 8), Underline::None);
+    // ...and one beside it changes it: it's no longer underlined, though
+    // the panel stays.
+    let agents = setup.daemon.agent(11, "z");
+    setup.editor.hold(&setup.copy);
+    let mut heard = setup.copy.update(agents);
+    setup.editor.heard(&mut heard, false, &mut setup.copy);
+    assert!(setup.editor.panel().is_some());
+    assert_eq!(underline(&mut setup, 10), Underline::None);
+
+    // Closing the panel, as moving the cursor does, takes it away.
+    setup.keys("<Esc>K");
+    setup.answer(
+        setup.queries[1].0,
+        Answer::Hover {
+            text: "y".into(),
+            markdown: false,
+            range: Some((10, 11)),
+        },
+    );
+    assert_eq!(underline(&mut setup, 10), Underline::Single);
+    setup.keys("l");
+    assert_eq!(panel_text(&mut setup), None);
+    assert_eq!(underline(&mut setup, 10), Underline::None);
+}
+
+#[test]
+fn leaving_an_editor_stops_waiting_for_what_k_asked() {
+    let mut setup = Setup::new("let x = y;\n");
+    setup.keys("fyK");
+    let asked = setup.queries[0].0;
+    assert!(setup.editor.waiting_for_answer(&setup.copy, asked));
+    // Another pane's K may have it cancelled: it's no longer waited for,
+    // nor shown if it comes.
+    setup.editor.leave();
+    assert!(!setup.editor.waiting_for_answer(&setup.copy, asked));
+    let hover = Answer::Hover {
+        text: "y".into(),
+        markdown: false,
+        range: None,
+    };
+    setup.answer(asked, hover);
+    assert_eq!(panel_text(&mut setup), None);
+    // A jump asked for is still waited for.
+    setup.keys("gd");
+    let asked = setup.queries[1].0;
+    setup.editor.leave();
+    assert!(setup.editor.waiting_for_answer(&setup.copy, asked));
+}
+
+#[test]
 fn whats_wrong_is_shown_in_full_in_the_panel() {
     use clackatoo_protocol::{Diagnostic, Severity};
 
@@ -1048,6 +1162,7 @@ fn whats_wrong_is_shown_in_full_in_the_panel() {
     let hover = Answer::Hover {
         text: "y: u32".into(),
         markdown: false,
+        range: None,
     };
     setup.answer(setup.queries[1].0, hover);
     let text = panel_text(&mut setup).unwrap();

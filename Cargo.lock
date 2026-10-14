@@ -613,6 +613,7 @@ dependencies = [
  "memchr",
  "mio",
  "postcard",
+ "pulldown-cmark",
  "quinn-proto",
  "rcgen",
  "regex",

@@ -81,14 +81,14 @@ use keys::{Action, Command, Entry, Operator, Parsed, Target, ViewAt};
 pub(crate) use marks::{FilePlace, Marks};
 #[cfg(test)]
 pub(crate) use panel::Line as PanelLine;
-use panel::Panel;
 pub(crate) use panel::PanelView;
+use panel::{Hover, Panel};
 pub(crate) use pattern::{Matching, Pattern};
 pub(crate) use pieces::{GiveUp, PATIENCE};
 use preview::Preview;
 use registers::Wrote;
 pub(crate) use registers::{Register, Registers};
-use text::{Text, tab_end};
+use text::{Text, Underlines, tab_end};
 use wrap::{Shown, Top, Wrapping};
 
 use crate::colors;
@@ -834,9 +834,11 @@ impl Editor {
 
     /// Ends what was half done here as the focus leaves: a visual
     /// selection, a command half typed, a search or a name being typed,
-    /// and the menus of code actions and completions and the signature
-    /// shown. The cursor stays where it is, and insert mode stays insert
-    /// mode.
+    /// the menus of code actions and completions and the signature shown,
+    /// and waiting for what's at the cursor, which the daemon cancels if
+    /// another pane of the same file asks with `K`, so a macro isn't left
+    /// waiting for it. The cursor stays where it is, and insert mode stays
+    /// insert mode.
     pub(crate) fn leave(&mut self) {
         self.leave_visual();
         self.typed.clear();
@@ -844,6 +846,8 @@ impl Editor {
         self.actions = None;
         self.close_completion();
         self.close_signature();
+        self.asked
+            .take_if(|(_, asking)| matches!(asking, Asking::Hover(_)));
     }
 
     /// What the bar says: a search or a name being typed, a message, or
@@ -2533,6 +2537,11 @@ impl Editor {
         if let Some(completion) = &mut self.completion {
             completion.edited(edit);
         }
+        // What the panel's hover is about moves with the text, and is
+        // forgotten once anything changes it.
+        if let Some(hovered) = (self.panel.as_mut()).and_then(|panel| panel.hovered.as_mut()) {
+            hovered.range = (hovered.range).and_then(|(start, end)| edit.map_untouched(start, end));
+        }
     }
 
     // --- Completion and help with calls -------------------------------------
@@ -3580,6 +3589,12 @@ impl Editor {
                     self.signed(answer);
                 }
             }
+            // Shown in its colours, if it's still shown.
+            Heard::Coloured { id, spans } => {
+                if let Some(panel) = &mut self.panel {
+                    panel.colour(*id, spans);
+                }
+            }
             Heard::Nothing | Heard::Moved { .. } | Heard::Kept { .. } | Heard::Rejoined => {}
         }
         // A new text, or the window's own undo, closes the panel, as an
@@ -3659,7 +3674,16 @@ impl Editor {
             Asking::Jump => self.jump(answer, copy),
             Asking::Hover(at) if at == self.cursor.at => {
                 let hover = match answer {
-                    Answer::Hover { text, markdown } => Some((text.as_str(), *markdown)),
+                    Answer::Hover {
+                        text,
+                        markdown,
+                        range,
+                    } => Some(Hover {
+                        text,
+                        markdown: *markdown,
+                        query: asked,
+                        range: *range,
+                    }),
                     _ => None,
                 };
                 let tabstop = self.indent.tabstop;
@@ -4274,6 +4298,11 @@ impl Editor {
             _ => None,
         };
         let all_diagnostics = moved.as_ref().unwrap_or(copy.diagnostics());
+        // What the panel's hover is about, underlined while it's shown,
+        // but not over a preview's text.
+        let hovered = (self.panel.as_ref())
+            .and_then(|panel| panel.hovered.as_ref()?.range)
+            .filter(|_| preview.is_none());
         let mut rows = Vec::with_capacity(self.height);
         // What's wrong with the line being drawn, and the worst said of it
         // where it starts, which its number and the text after it tell of:
@@ -4316,7 +4345,17 @@ impl Editor {
                 }
                 None => copy.highlights().within(start, end),
             };
-            laid.show(&mut builder, shown.start, cells, spans, diagnostics, start);
+            let underlines = Underlines {
+                diagnostics,
+                hovered,
+            };
+            laid.show(
+                &mut builder,
+                (shown.start, cells),
+                spans,
+                &underlines,
+                start,
+            );
             if shown.next.is_none() {
                 let end = self.gutter + shown.indent + laid.cells().saturating_sub(shown.start);
                 self.write_after_line(&mut builder, end, (line, *worst), copy);

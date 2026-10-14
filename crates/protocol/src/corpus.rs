@@ -26,7 +26,7 @@ use clackatoo_text::{
 };
 
 use crate::frame::{self, FrameDecoder, FrameError};
-use crate::wire::{EXITED, FALLBACKS, PHONE_TERMINALS};
+use crate::wire::{EXITED, FALLBACKS, HOVER, PHONE_TERMINALS};
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
     Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
@@ -646,6 +646,38 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             Server(ServerMessage::Response(Response::Error(Error::NotFitted(
                 terminal,
             )))),
+        ),
+    ]);
+    // What's at a place, with the text it's about, then its code coloured.
+    samples.extend([
+        (
+            HOVER,
+            Server(ServerMessage::Event(Event::Buffer {
+                buffer,
+                update: BufferUpdate::Answer {
+                    id: 4,
+                    version: 6,
+                    answer: Answer::Hover {
+                        text: "```rust\nfn a()\n```".into(),
+                        markdown: true,
+                        range: Some((3, 4)),
+                    },
+                },
+            })),
+        ),
+        (
+            HOVER,
+            Server(ServerMessage::Event(Event::Buffer {
+                buffer,
+                update: BufferUpdate::Coloured {
+                    id: 4,
+                    spans: vec![Span {
+                        start: 8,
+                        end: 10,
+                        kind: Kind::Keyword,
+                    }],
+                },
+            })),
         ),
     ]);
     samples

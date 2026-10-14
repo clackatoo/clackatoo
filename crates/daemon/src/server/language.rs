@@ -635,6 +635,7 @@ impl Daemon {
         (self.servers.listed).retain(|listed| !forgotten(listed.token, listed.buffer));
         (self.servers.offered).retain(|offered| !forgotten(offered.token, offered.buffer));
         self.forget_renames(token, buffer);
+        self.forget_colourings(token, buffer);
     }
 
     /// When the next query to ask again is due.
@@ -859,7 +860,8 @@ impl Daemon {
             Ask::Action(action) => {
                 return self.take_action(server, (token, buffer, id), action, &[]);
             }
-            _ => {}
+            Ask::Query(query) => self.supersede(token, buffer, query),
+            Ask::Rename(_) => {}
         }
         let (Some(slot), Some(running)) = (
             self.buffers.get(&buffer),
@@ -935,6 +937,50 @@ impl Daemon {
             tries,
         });
         self.flush_server(server);
+    }
+
+    /// Forgets the question of `query`'s kind the client at `token` asked
+    /// about `buffer` before, if it's still waiting for its server or to
+    /// be asked again, as `query` takes its place: a window asks what's at
+    /// a place, what could be typed, and about a call afresh as the cursor
+    /// moves or more is typed, and only wants the last answer. The server
+    /// is told it needn't answer, and an answer that comes anyway is let
+    /// go. No other client was waiting for it: each question is one
+    /// client's, asked of the server on its own.
+    fn supersede(&mut self, token: Token, buffer: BufferId, query: Query) {
+        let same_kind = |asked: Query| {
+            matches!(
+                (query, asked),
+                (Query::Hover, Query::Hover)
+                    | (Query::Completion(_), Query::Completion(_))
+                    | (Query::SignatureHelp { .. }, Query::SignatureHelp { .. })
+            )
+        };
+        let mut cancelled = Vec::new();
+        self.servers.asked.retain(|asked| {
+            let replaced = asked.token == token
+                && asked.buffer == buffer
+                && matches!(asked.what, Asking::Query(asked) if same_kind(asked));
+            if replaced {
+                cancelled.push((asked.server, asked.request));
+            }
+            !replaced
+        });
+        self.servers.again.retain(|(_, again)| {
+            !(again.token == token
+                && again.buffer == buffer
+                && matches!(again.ask, Ask::Query(asked) if same_kind(asked)))
+        });
+        for (server, request) in cancelled {
+            if let Some(running) = self.servers.slots.get_mut(&server) {
+                running.server.cancel(request);
+                self.flush_server(server);
+            }
+        }
+        // Colours still to come for a hover before are for one gone.
+        if query == Query::Hover {
+            self.forget_colourings(token, Some(buffer));
+        }
     }
 
     /// The server to ask what `ask` asks about buffer `buffer`, which is
@@ -1048,12 +1094,7 @@ impl Daemon {
         }
         let answer = match (result, &asked.what) {
             (Err(err), _) => Answer::Failed(err),
-            (Ok(value), Asking::Query(Query::Hover)) => {
-                lsp::hover(&value).map_or(Answer::Nothing, |(text, markdown)| Answer::Hover {
-                    text: cut(text, MAX_HOVER),
-                    markdown,
-                })
-            }
+            (Ok(value), Asking::Query(Query::Hover)) => self.hover(server, &asked, &value),
             (Ok(value), Asking::Query(Query::Format { .. })) => {
                 self.formatted(server, (asked.buffer, asked.version, &asked.text), &value)
             }
@@ -1126,6 +1167,8 @@ impl Daemon {
                 }
             }
         };
+        // The code in what's at a place, to colour once it's been shown.
+        let code = self.hover_code(asked.token, asked.buffer, &answer);
         // A rename's edits have been sent: the answer comes after them.
         let Some(slot) = self.buffers.get(&asked.buffer) else {
             return;
@@ -1136,6 +1179,48 @@ impl Daemon {
             answer,
         };
         self.tell(asked.token, asked.buffer, update);
+        if !code.is_empty() {
+            self.colour_hover((asked.token, asked.buffer, asked.id), code);
+        }
+    }
+
+    /// What server `server` answered `asked`'s question of what's at a
+    /// place with, `value`, with the text it's about as it is now.
+    fn hover(&self, server: ServerId, asked: &Asked, value: &Value) -> Answer {
+        let Some((text, markdown)) = lsp::hover(value) else {
+            return Answer::Nothing;
+        };
+        Answer::Hover {
+            text: cut(text, MAX_HOVER),
+            markdown,
+            range: (lsp::hover_range(value)).and_then(|range| self.range_now(server, asked, range)),
+        }
+    }
+
+    /// Bytes `start` to `end` of the buffer `asked` asked about, as server
+    /// `server` counted them in the text it was asked about, as they are
+    /// now, moved along with edits made since: or `None` if an edit since
+    /// changed them, or put text in beside them, or they make no sense.
+    fn range_now(
+        &self,
+        server: ServerId,
+        asked: &Asked,
+        (start, end): (lsp::Position, lsp::Position),
+    ) -> Option<(usize, usize)> {
+        let encoding = self.server_encoding(server)?;
+        let start = lsp::place(&asked.text, start, encoding);
+        let end = lsp::place(&asked.text, end, encoding);
+        if start > end {
+            return None;
+        }
+        let edits = self
+            .buffers
+            .get(&asked.buffer)?
+            .buffer
+            .edits_since(asked.version)?;
+        (edits.into_iter()).try_fold((start, end), |(start, end), edit| {
+            edit.map_untouched(start, end)
+        })
     }
 
     /// The code actions server `server` answered with, `value`, to what

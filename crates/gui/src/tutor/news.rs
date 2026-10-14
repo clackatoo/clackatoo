@@ -233,6 +233,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "remote",
         what: "Your terminals from your phone, at their own size: typed into, with a row of keys, and Fit",
     },
+    News {
+        id: "hoverhighlight",
+        date: "2026-10-14",
+        lesson: "finder",
+        what: "K colours the code in what the language server says, in its language, and underlines what it's about",
+    },
 ];
 
 impl News {

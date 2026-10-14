@@ -327,6 +327,7 @@ fn the_panel_by_the_cursor_is_by_its_row() {
         Answer::Hover {
             text: "a".into(),
             markdown: false,
+            range: None,
         },
     );
     setup.editor.settle(&setup.copy);

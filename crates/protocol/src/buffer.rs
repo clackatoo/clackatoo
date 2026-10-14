@@ -48,7 +48,7 @@ use std::fmt;
 use clackatoo_text::{AgentHunk, Construct, Diagnostic, Edit, Hunk, LineIndent, Piece, Span};
 use serde::{Deserialize, Serialize};
 
-use crate::{ChatName, TerminalId};
+use crate::{ChatName, TerminalId, wire};
 
 /// Identifies a buffer within one daemon. Never reused while it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -278,6 +278,19 @@ pub enum BufferUpdate {
         /// The names of the chats that made them.
         chats: Vec<ChatName>,
     },
+    /// How the code in the fenced blocks of the [`Answer::Hover`] to the
+    /// client's query numbered `id` is coloured, as each block's language
+    /// reads it: the language its block is tagged with, or the buffer's
+    /// own for one with no tag. Sent after the answer, once the daemon has
+    /// read them, and only if some of them are coloured: code in a
+    /// language that isn't installed is left plain. Only to a client of
+    /// protocol 76 or later.
+    Coloured {
+        /// The query's number.
+        id: u64,
+        /// The spans, as bytes of the answer's text, in order.
+        spans: Vec<Span>,
+    },
 }
 
 /// What a buffer's language server does as you type, as it said when it
@@ -427,12 +440,23 @@ pub enum Answer {
     /// Places, best first.
     Locations(Vec<FileLocation>),
     /// What's there, to read, as markdown if `markdown`, or else plain
-    /// text.
+    /// text. The code in its fenced blocks may be coloured after, by a
+    /// [`BufferUpdate::Coloured`] answering the same query.
     Hover {
         /// What the server said.
         text: String,
         /// Whether it's markdown.
         markdown: bool,
+        /// The bytes of the buffer's text it's about, such as the name
+        /// under the cursor, if the server says, as bytes of the text at
+        /// the answer's version, which a client moves past its own changes
+        /// as it moves pieces. `None` from an older daemon, or once the
+        /// text there has changed.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::HOVER }, _>",
+            deserialize_with = "wire::since::<{ wire::HOVER }, _, _>"
+        )]
+        range: Option<(usize, usize)>,
     },
     /// What could be typed, best first as the server sorts them (see
     /// [`CompletionItem::sort`]).

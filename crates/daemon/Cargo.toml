@@ -29,6 +29,7 @@ log.workspace = true
 memchr.workspace = true
 mio.workspace = true
 postcard.workspace = true
+pulldown-cmark.workspace = true
 quinn-proto.workspace = true
 rcgen.workspace = true
 regex.workspace = true

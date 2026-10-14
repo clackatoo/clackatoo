@@ -126,6 +126,15 @@ pub(crate) fn is_for<S: AsRef<str>>(extensions: &[S], filenames: &[S], path: &Pa
     named(filenames, path.file_name()) || named(extensions, path.extension())
 }
 
+/// Tags of fenced blocks that name a language neither by a pack's name
+/// nor by its files' ending, and the pack each means.
+const ALIASES: &[(&str, &str)] = &[
+    ("shell", "bash"),
+    ("zsh", "bash"),
+    ("golang", "go"),
+    ("jsonc", "json"),
+];
+
 /// The packs in one directory, read again when it changes.
 #[derive(Debug)]
 pub struct Languages {
@@ -157,6 +166,30 @@ impl Languages {
     pub fn find(&mut self, path: &Path) -> Option<Arc<Pack>> {
         self.refresh();
         self.packs.iter().find(|pack| pack.is_for(path)).cloned()
+    }
+
+    /// The pack for code tagged `tag`, as a fenced block in markdown is,
+    /// such as `rust`, `rs`, `python` or `py`: the pack of that name, or
+    /// else one for files ending in it, or else the pack a few common tags
+    /// that are neither mean, such as `shell` for bash. Case doesn't
+    /// matter. The directory is read again if a pack has been added or
+    /// taken away since.
+    pub fn named(&mut self, tag: &str) -> Option<Arc<Pack>> {
+        let tag = tag.to_ascii_lowercase();
+        let tag = (ALIASES.iter())
+            .find_map(|&(alias, name)| (alias == tag).then_some(name))
+            .unwrap_or(&tag);
+        self.refresh();
+        let packs = self.packs.iter();
+        (packs
+            .clone()
+            .find(|pack| pack.name.eq_ignore_ascii_case(tag)))
+        .or_else(|| {
+            packs.clone().find(|pack| {
+                (pack.extensions.iter()).any(|extension| extension.eq_ignore_ascii_case(tag))
+            })
+        })
+        .cloned()
     }
 
     fn refresh(&mut self) {
@@ -228,6 +261,29 @@ mod tests {
         );
         assert_eq!(languages.find(Path::new("main.rsx")), None);
         assert_eq!(languages.find(Path::new("rs")), None);
+    }
+
+    #[test]
+    fn packs_are_found_by_a_fenced_blocks_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, extensions) in [("rust", "\"rs\""), ("bash", "\"sh\", \"bash\"")] {
+            let pack = dir.path().join(name);
+            fs::create_dir(&pack).unwrap();
+            let toml = format!("grammar = \"{name}\"\nextensions = [{extensions}]\n");
+            fs::write(pack.join("language.toml"), toml).unwrap();
+        }
+        let mut languages = Languages::new(dir.path().to_owned());
+        let named =
+            |languages: &mut Languages, tag| languages.named(tag).map(|pack| pack.name.clone());
+        // By name, by ending, whatever the case, and by a common alias.
+        assert_eq!(named(&mut languages, "rust").as_deref(), Some("rust"));
+        assert_eq!(named(&mut languages, "rs").as_deref(), Some("rust"));
+        assert_eq!(named(&mut languages, "Rust").as_deref(), Some("rust"));
+        assert_eq!(named(&mut languages, "sh").as_deref(), Some("bash"));
+        assert_eq!(named(&mut languages, "shell").as_deref(), Some("bash"));
+        // A language with no pack is none.
+        assert_eq!(named(&mut languages, "python"), None);
+        assert_eq!(named(&mut languages, ""), None);
     }
 
     #[test]

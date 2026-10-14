@@ -226,6 +226,20 @@ impl Edit {
         new.saturating_add(place.saturating_sub(old))
     }
 
+    /// Where bytes `start` to `end` of the text before the edit are in the
+    /// text after it, if it changes none of them and puts nothing in at
+    /// either end: a name with anything typed beside it isn't that name
+    /// any more. `None` if it does.
+    #[must_use]
+    pub fn map_untouched(&self, start: usize, end: usize) -> Option<(usize, usize)> {
+        let touched =
+            |(at, removed, _): (usize, &str, &str)| at <= end && at + removed.len() >= start;
+        if self.changes().any(touched) {
+            return None;
+        }
+        Some((self.map(start, Bias::After), self.map(end, Bias::Before)))
+    }
+
     /// Each change it makes, as where it is in the text before the edit,
     /// the text taken away there and the text put in its place.
     pub fn changes(&self) -> impl Iterator<Item = (usize, &str, &str)> {
@@ -623,6 +637,22 @@ mod tests {
         }
         let longest = Edit::try_from(vec![Op::Retain(usize::MAX)]).unwrap();
         assert_eq!(longest.base_len(), usize::MAX);
+    }
+
+    #[test]
+    fn text_is_moved_only_if_nothing_touches_it() {
+        // "let name = 1;": `name` is bytes 4 to 8.
+        let moved = |edit: Edit| edit.map_untouched(4, 8);
+        assert_eq!(moved(Edit::replace(13, 0, "", "  ")), Some((6, 10)));
+        assert_eq!(moved(Edit::replace(13, 12, ";", "")), Some((4, 8)));
+        // In it, or beside it at either end, it's no longer the same.
+        assert_eq!(moved(Edit::replace(13, 5, "a", "o")), None);
+        assert_eq!(moved(Edit::replace(13, 8, "", "s")), None);
+        assert_eq!(moved(Edit::replace(13, 3, " ", "")), None);
+        assert_eq!(moved(Edit::keep(13)), Some((4, 8)));
+        // Taken away with what's around it.
+        assert_eq!(moved(Edit::replace(13, 2, "t name =", "")), None);
+        assert_eq!(moved(Edit::replace(13, 4, "name", "")), None);
     }
 
     #[test]

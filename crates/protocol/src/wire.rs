@@ -121,6 +121,10 @@ gates! {
     /// Terminals from a phone: `Request::Fit`, and `TerminalInfo`'s
     /// `cwd` and `command`.
     PHONE_TERMINALS = 75,
+    /// `Answer::Hover`'s `range`, the text the server says it's about, and
+    /// `BufferUpdate::Coloured`, how the code in its fenced blocks is
+    /// coloured, sent after it.
+    HOVER = 76,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -308,6 +312,7 @@ impl Since for BufferUpdate {
             | Self::Notice(_)
             | Self::ChangedOnDisk
             | Self::Agents { .. } => EARLIER,
+            Self::Coloured { .. } => HOVER,
         }
     }
 }
@@ -536,13 +541,20 @@ impl Downgrade for ServerMessage {
     /// `Error::NotFitted` do.
     /// `Event::Exited` is dropped: a window that never hears a program
     /// ended takes its pane closing as someone else's doing, and goes on
-    /// in normal mode, the safe side.
+    /// in normal mode, the safe side. So is `BufferUpdate::Coloured`: a
+    /// hover's code stays plain.
     fn downgrade(&self, wire: u32) -> Downgraded<Self> {
         if newest(self) <= wire {
             return Downgraded::AsIs;
         }
         match self {
-            Self::Event(Event::Exited { .. }) => Downgraded::Dropped,
+            Self::Event(
+                Event::Exited { .. }
+                | Event::Buffer {
+                    update: BufferUpdate::Coloured { .. },
+                    ..
+                },
+            ) => Downgraded::Dropped,
             Self::Response(Response::Error(err)) if wire >= FALLBACKS => Downgraded::To(
                 Self::Response(Response::Error(Error::Other(err.to_string()))),
             ),
@@ -719,7 +731,17 @@ mod tests {
     fn droppable(message: &ServerMessage) -> bool {
         // Only ever a reason to keep the mode as a pane closes: without
         // it, a window goes on in normal mode, which sends nothing typed.
-        matches!(message, ServerMessage::Event(Event::Exited { .. }))
+        // And a hover's colours: without them, its code is plain.
+        matches!(
+            message,
+            ServerMessage::Event(
+                Event::Exited { .. }
+                    | Event::Buffer {
+                        update: BufferUpdate::Coloured { .. },
+                        ..
+                    }
+            )
+        )
     }
 
     #[test]
@@ -823,6 +845,11 @@ mod tests {
             terminal: crate::TerminalId(1),
         };
         assert_eq!(exited.since(), EXITED);
+        let coloured = BufferUpdate::Coloured {
+            id: 1,
+            spans: Vec::new(),
+        };
+        assert_eq!(coloured.since(), HOVER);
     }
 
     #[test]

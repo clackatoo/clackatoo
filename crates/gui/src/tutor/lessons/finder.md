@@ -70,7 +70,7 @@ finder buffers
 
 ## What's wrong
 
-`<Space>ds` lists what the language servers say is wrong in the project's files, the worst first: those open, and those a server has checked, as rust-analyzer checks a whole crate. In an editor, mistakes are underlined, the worst on each line is written dimly after it, and `]d` and `[d` go to the next and the one before. `K` shows what's under the cursor, with what's wrong there, and Ctrl+W `d` just what's wrong.
+`<Space>ds` lists what the language servers say is wrong in the project's files, the worst first: those open, and those a server has checked, as rust-analyzer checks a whole crate. In an editor, mistakes are underlined, the worst on each line is written dimly after it, and `]d` and `[d` go to the next and the one before. `K` shows what's under the cursor, with what's wrong there, and Ctrl+W `d` just what's wrong. The code in what `K` shows is coloured in its language once the daemon has read it, and what it's about is underlined while it's shown.
 
 These text files have no language server, so here the list is empty. Press `<Space>ds` to see it, and Esc to close it.
 

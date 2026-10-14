@@ -9,11 +9,17 @@
 //! read from disk. Asked what implements something, it says every `bad` in
 //! the file, so an answer can give several places.
 //!
-//! Asked what's at a place, it describes a `bad` there in markdown, and
-//! knows nothing of anything else. Asked to rename a word, it renames it
-//! everywhere in every file open in it, and in `defs.fk` beside the file
-//! asked about, from disk if it isn't open, with the version of each open
-//! file it counted in.
+//! Asked what's at a place, it describes a `bad` there in markdown, with
+//! a block of JSON, one with no tag, and one tagged with a language that
+//! doesn't exist, saying the `bad` is what it's about; and knows nothing
+//! of anything else. It writes `hover ID` to the `--log` file for each
+//! such question, by its number. Told a request is no longer wanted, it
+//! writes `cancelled ID METHOD` there, and answers a question it still
+//! holds (see `--queue-hover`) with LSP's `RequestCancelled` error.
+//!
+//! Asked to rename a word, it renames it everywhere in every file open in
+//! it, and in `defs.fk` beside the file asked about, from disk if it isn't
+//! open, with the version of each open file it counted in.
 //!
 //! | Flag | Does |
 //! |---|---|
@@ -35,6 +41,8 @@
 //! | `--no-resolve` | Sends completion items' documentation with them, not when they're resolved |
 //! | `--many N` | Completes with N made-up words as well |
 //! | `--hold-completion FILE` | Answers a completion only once FILE exists, taking nothing else in meanwhile |
+//! | `--hold-hover FILE` | Answers what's at a place only once FILE exists, taking nothing else in meanwhile |
+//! | `--queue-hover FILE` | Holds questions of what's at a place until FILE exists, taking everything else in meanwhile, then answers them in order |
 //! | `--hold-resolve FILE` | Resolves a code action only once FILE exists, taking nothing else in meanwhile |
 //! | `--action-files` | Makes a file in each code action's edits, and its command's, which clackatoo refuses |
 //! | `--resolve-partly` | Offers to put the word in capitals with the command to mark the file too, and resolves it with only its edit |
@@ -102,6 +110,11 @@ fn main() {
             .and_then(|at| args.get(at + 1).cloned()),
         hold_resolve: (args.iter().position(|arg| arg == "--hold-resolve"))
             .and_then(|at| args.get(at + 1).cloned()),
+        hold_hover: (args.iter().position(|arg| arg == "--hold-hover"))
+            .and_then(|at| args.get(at + 1).cloned()),
+        queue_hover: (args.iter().position(|arg| arg == "--queue-hover"))
+            .and_then(|at| args.get(at + 1).cloned()),
+        queued: Vec::new(),
         action_files: flag("--action-files"),
         resolve_partly: flag("--resolve-partly"),
         resolve_null: flag("--resolve-null"),
@@ -119,17 +132,35 @@ fn main() {
         running: None,
         files: BTreeMap::new(),
         versions: BTreeMap::new(),
+        methods: BTreeMap::new(),
     };
     if let Some(file) =
         (args.iter().position(|arg| arg == "--grandchild")).and_then(|at| args.get(at + 1))
     {
         grandchild(file);
     }
-    let mut input = std::io::stdin().lock();
-    while let Some(message) = read(&mut input) {
-        if !server.receive(&message) {
-            break;
+    // Read on a thread of its own, so questions held can be answered
+    // while nothing more comes.
+    let (sent, messages) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut input = std::io::stdin().lock();
+        while let Some(message) = read(&mut input) {
+            if sent.send(message).is_err() {
+                return;
+            }
         }
+    });
+    loop {
+        match messages.recv_timeout(std::time::Duration::from_millis(5)) {
+            Ok(message) => {
+                if !server.receive(&message) {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        server.answer_queued();
     }
     if server.stay {
         loop {
@@ -190,6 +221,11 @@ struct Fake {
     many: usize,
     hold_completion: Option<String>,
     hold_resolve: Option<String>,
+    hold_hover: Option<String>,
+    queue_hover: Option<String>,
+    /// The questions of what's at a place held, in order, until
+    /// `queue_hover` exists.
+    queued: Vec<Value>,
     action_files: bool,
     resolve_partly: bool,
     resolve_null: bool,
@@ -214,6 +250,8 @@ struct Fake {
     files: BTreeMap<String, String>,
     /// The version of each file's text, by URI.
     versions: BTreeMap<String, Value>,
+    /// The method of each request its client has sent, by its number.
+    methods: BTreeMap<String, String>,
 }
 
 fn read(input: &mut impl BufRead) -> Option<Value> {
@@ -258,6 +296,11 @@ impl Fake {
                 .open(log)
                 .unwrap();
             writeln!(file, "{method}").unwrap();
+        }
+        if let Some(id) = message.get("id")
+            && !method.is_empty()
+        {
+            self.methods.insert(id.to_string(), method.to_owned());
         }
         match method {
             "initialize" => {
@@ -336,7 +379,32 @@ impl Fake {
                 self.files.remove(uri);
                 self.versions.remove(uri);
             }
-            "textDocument/hover" => self.hover(message),
+            "textDocument/hover" => {
+                self.note(&format!("hover {}", message["id"]));
+                if self.queue_hover.is_some() {
+                    self.queued.push(message.clone());
+                    return true;
+                }
+                if let Some(gate) = &self.hold_hover {
+                    while !std::path::Path::new(gate).exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+                self.hover(message);
+            }
+            "$/cancelRequest" => {
+                let id = params["id"].to_string();
+                let cancelled = self.methods.get(&id).map_or("nothing", String::as_str);
+                self.note(&format!("cancelled {id} {cancelled}"));
+                if let Some(at) = (self.queued.iter()).position(|held| held["id"] == params["id"]) {
+                    self.queued.remove(at);
+                    send(&json!({
+                        "jsonrpc": "2.0",
+                        "id": params["id"],
+                        "error": { "code": -32800, "message": "cancelled" },
+                    }));
+                }
+            }
             "textDocument/completion" | "completionItem/resolve" | "textDocument/signatureHelp" => {
                 self.as_you_type(message);
             }
@@ -370,6 +438,18 @@ impl Fake {
             _ => {}
         }
         true
+    }
+
+    /// Answers the questions of what's at a place held, once the file
+    /// `--queue-hover` names exists.
+    fn answer_queued(&mut self) {
+        let open =
+            (self.queue_hover.as_ref()).is_some_and(|gate| std::path::Path::new(gate).exists());
+        if open && !self.queued.is_empty() {
+            for message in std::mem::take(&mut self.queued) {
+                self.hover(&message);
+            }
+        }
     }
 
     /// Writes `line` to the log, if it has one.
@@ -648,11 +728,17 @@ impl Fake {
         let uri = params["textDocument"]["uri"].as_str().unwrap();
         let text = &self.files[uri];
         let at = byte(text, &params["position"], self.utf16);
-        let result = if word_at(text, at).1 == "bad" {
+        let (start, word) = word_at(text, at);
+        let result = if word == "bad" {
+            let range = json!({
+                "start": place(text, start, self.utf16),
+                "end": place(text, start + word.len(), self.utf16),
+            });
             json!({ "contents": {
                 "kind": "markdown",
-                "value": "# bad\n\nIt's **bad**: see `good`.\n\n```fake\nfn bad()\n```",
-            }})
+                "value": "# bad\n\nIt's **bad**: see `good`.\n\n```json\n[1, true]\n```\n\n\
+                          ```\nfn bad() {}\n```\n\n```nothing\n[2]\n```",
+            }, "range": range })
         } else {
             Value::Null
         };

@@ -67,6 +67,26 @@ pub enum Reply {
     Failed(String),
 }
 
+/// Code that isn't a buffer's, to colour as `pack`'s language reads it,
+/// such as a fenced block in what a language server says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snippet {
+    /// Its language.
+    pub pack: Arc<Pack>,
+    /// The code.
+    pub text: String,
+}
+
+/// How the snippets given to [`Syntax::colour`] are coloured.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Coloured {
+    /// The number they were given with.
+    pub ticket: u64,
+    /// Each snippet's spans, as bytes of its text, in the order given:
+    /// none for one whose grammar couldn't be loaded.
+    pub spans: Vec<Vec<Span>>,
+}
+
 /// What the thread has found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Found {
@@ -74,6 +94,8 @@ pub enum Found {
     Highlighted(Highlighted),
     /// An answer.
     Answered(Answered),
+    /// Snippets coloured.
+    Coloured(Coloured),
 }
 
 enum Job {
@@ -95,6 +117,10 @@ enum Job {
         ticket: u64,
         at: usize,
         ask: Ask,
+    },
+    Colour {
+        ticket: u64,
+        snippets: Vec<Snippet>,
     },
 }
 
@@ -175,6 +201,13 @@ impl Syntax {
             at,
             ask,
         });
+    }
+
+    /// Colours `snippets`, each in its own language, answered with a
+    /// [`Coloured`] numbered `ticket`. A language's grammar is loaded the
+    /// first time it's needed, as for a buffer, and kept.
+    pub fn colour(&self, ticket: u64, snippets: Vec<Snippet>) {
+        self.send(Job::Colour { ticket, snippets });
     }
 
     /// The highlights and answers found since last asked.
@@ -266,6 +299,8 @@ impl Worker {
                         found.extend(self.parse(buffer).map(Found::Highlighted));
                     }
                     found.push(Found::Answered(self.answer(buffer, ticket, at, ask)));
+                } else if let Job::Colour { ticket, snippets } = job {
+                    found.push(Found::Coloured(self.colour(ticket, &snippets)));
                 } else if let Some(buffer) = self.take(job)
                     && !changed.contains(&buffer)
                 {
@@ -387,8 +422,32 @@ impl Worker {
                 self.open.remove(&buffer);
                 None
             }
-            Job::Ask { .. } => None,
+            Job::Ask { .. } | Job::Colour { .. } => None,
         }
+    }
+
+    /// `snippets`, each parsed afresh and highlighted whole, numbered
+    /// `ticket`.
+    fn colour(&mut self, ticket: u64, snippets: &[Snippet]) -> Coloured {
+        let spans = (snippets.iter())
+            .map(|snippet| {
+                let Some(grammar) = self.grammar(&snippet.pack) else {
+                    return Vec::new();
+                };
+                if let Err(err) = self.parser.set_language(&grammar.language) {
+                    log::warn!("syntax: {err}");
+                    return Vec::new();
+                }
+                let mut document = Document::new(Rope::from_str(&snippet.text));
+                let (Some(_), Some(tree)) = (document.parse(&mut self.parser), document.tree())
+                else {
+                    return Vec::new();
+                };
+                let range = 0..snippet.text.len();
+                grammar.highlight(&mut self.cursor, tree, document.text(), range)
+            })
+            .collect();
+        Coloured { ticket, spans }
     }
 
     /// Parses `buffer` again, and highlights what changed.
@@ -692,6 +751,52 @@ mod tests {
         // Asked about, it says it isn't parsed.
         let ask = Ask::Around(Construct::Function);
         assert_eq!(worker.answer(1, 5, 0, ask).reply, None);
+    }
+
+    #[test]
+    fn snippets_are_coloured_each_in_its_own_language() {
+        let mut worker = worker();
+        // A buffer open in another language isn't disturbed by them.
+        worker.take(Job::Open {
+            buffer: 1,
+            pack: json(),
+            text: Rope::from_str("[1]"),
+            version: 0,
+        });
+        worker.parse(1);
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("language.toml"), "grammar = \"none\"").unwrap();
+        let broken = Arc::new(Pack::read(dir.path()).unwrap());
+        let snippet = |pack: &Arc<Pack>, text: &str| Snippet {
+            pack: pack.clone(),
+            text: text.to_owned(),
+        };
+        let snippets = [
+            snippet(&json(), "[true, 2]"),
+            snippet(&broken, "[3]"),
+            snippet(&json(), ""),
+        ];
+        let span = |start, end, kind| Span { start, end, kind };
+        assert_eq!(
+            worker.colour(7, &snippets),
+            Coloured {
+                ticket: 7,
+                // A grammar that can't be loaded colours nothing.
+                spans: vec![
+                    vec![span(1, 5, Kind::Constant), span(7, 8, Kind::Number)],
+                    Vec::new(),
+                    Vec::new(),
+                ],
+            }
+        );
+        worker.take(Job::Edit {
+            buffer: 1,
+            version: 1,
+            edit: Edit::replace(3, 1, "", "4, "),
+            text: Rope::from_str("[4, 1]"),
+        });
+        let highlighted = worker.parse(1).unwrap();
+        assert!(highlighted.spans.contains(&span(1, 2, Kind::Number)));
     }
 
     #[test]
@@ -1455,7 +1560,7 @@ impl Point {
         worker.run(&taken);
         let answer = found.try_iter().find_map(|found| match found {
             Found::Answered(answer) => Some(answer),
-            Found::Highlighted(_) => None,
+            Found::Highlighted(_) | Found::Coloured(_) => None,
         });
         // "[1, 2]": the 2, with its comma, as the text was at version 1.
         let piece = Piece {

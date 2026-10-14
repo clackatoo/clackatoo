@@ -6090,6 +6090,7 @@ mod tests {
                 answer: Answer::Hover {
                     text: "fn a()".into(),
                     markdown: false,
+                    range: None,
                 },
             },
         );

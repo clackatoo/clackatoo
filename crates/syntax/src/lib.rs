@@ -13,7 +13,9 @@
 //! changed. It finds the [`Piece`](clackatoo_text::Piece)s of code that
 //! text objects and motions use too: as a pack's `textobjects.scm` says,
 //! or else by the kinds of the tree's nodes; and how lines should be
-//! indented, as its `indents.scm` says.
+//! indented, as its `indents.scm` says. And it colours
+//! [`Snippet`]s of code that are no buffer's, such as the fenced blocks
+//! in what a language server says is at a place.
 //!
 //! [tree-sitter]: https://tree-sitter.github.io
 
@@ -35,4 +37,4 @@ pub use known::KNOWN;
 pub use pack::{Languages, Pack};
 pub use pieces::Ask;
 pub use server::{Server, git_root};
-pub use worker::{Answered, Found, Highlighted, Key, Reply, Syntax};
+pub use worker::{Answered, Coloured, Found, Highlighted, Key, Reply, Snippet, Syntax};

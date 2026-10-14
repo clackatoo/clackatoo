@@ -86,6 +86,9 @@ pub(crate) enum Heard {
     NothingToReverse { undo: bool },
     /// The language server answered the query numbered `id`.
     Answer { id: u64, answer: Answer },
+    /// The code in the hover answered to the query numbered `id` is
+    /// coloured so, as bytes of its text.
+    Coloured { id: u64, spans: Vec<Span> },
     /// Its file has moved, from the path it had.
     Moved { from: String },
     /// The window's changes couldn't be brought up to date after a lost
@@ -960,6 +963,7 @@ impl BufferCopy {
                 Heard::Nothing
             }
             update @ BufferUpdate::Agents { .. } => self.take_agents(update),
+            BufferUpdate::Coloured { id, spans } => Heard::Coloured { id, spans },
             BufferUpdate::Moved(path) => Heard::Moved {
                 from: std::mem::replace(&mut self.path, path),
             },
@@ -1024,6 +1028,24 @@ impl BufferCopy {
                 indents.retain_mut(|indent| indent.map(edit));
             }
             return Answer::Indents(indents);
+        }
+        if let Answer::Hover {
+            text,
+            markdown,
+            range,
+        } = answer
+        {
+            // What it's about is gone once the window's changed it, but
+            // what it says is still worth reading.
+            let range = range.filter(|_| version == self.version).and_then(|range| {
+                (waiting.into_iter())
+                    .try_fold(range, |(start, end), edit| edit.map_untouched(start, end))
+            });
+            return Answer::Hover {
+                text,
+                markdown,
+                range,
+            };
         }
         let Answer::Locations(mut found) = answer else {
             return answer;

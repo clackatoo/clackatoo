@@ -4795,6 +4795,7 @@ fn rust_analyzer_says_whats_wrong_with_a_rust_file() {
     let Answer::Hover {
         text: said,
         markdown,
+        ..
     } = answer
     else {
         panic!("{answer:?}");
@@ -4965,8 +4966,8 @@ fn fake_project(daemon: &TestDaemon, files: &[(&str, &str)]) -> (Client, BufferI
 }
 
 /// The updates about a buffer up to the next answer, but diagnostics,
-/// highlights and what its server does, which come whenever they come,
-/// and the answer.
+/// highlights, what its server does and hovers' colours, which come
+/// whenever they come, and the answer.
 fn updates_to_answer(client: &mut Client) -> (Vec<BufferUpdate>, (u64, Answer)) {
     let mut updates = Vec::new();
     loop {
@@ -4974,7 +4975,8 @@ fn updates_to_answer(client: &mut Client) -> (Vec<BufferUpdate>, (u64, Answer)) 
             BufferUpdate::Answer { id, answer, .. } => return (updates, (id, answer)),
             BufferUpdate::Diagnostics { .. }
             | BufferUpdate::Highlights { .. }
-            | BufferUpdate::Features(_) => {}
+            | BufferUpdate::Features(_)
+            | BufferUpdate::Coloured { .. } => {}
             update => updates.push(update),
         }
     }
@@ -5008,16 +5010,222 @@ fn a_language_server_says_what_things_are() {
     let Answer::Hover {
         text,
         markdown: true,
+        range,
     } = answer
     else {
         panic!("{answer:?}");
     };
     assert!(text.starts_with("# bad\n\nIt's **bad**"), "{text}");
+    // And the `bad` it's about, counted in UTF-16 by the server.
+    assert_eq!(range, Some(("é ".len(), "é bad".len())));
     // Nothing to say of what's not a `bad`.
     client
         .query(buffer, 2, (0, "é bad\nu".len()), Query::Hover)
         .unwrap();
     assert_eq!(next_answer(&mut client), (2, Answer::Nothing));
+}
+
+/// A daemon with the fake language server, as [`with_fake_language_server`]
+/// says, reading its files with the curly test grammar, and with the JSON
+/// test pack beside it, which its hovers' code blocks are coloured with.
+fn with_fake_language_server_and_grammars(args: impl FnOnce(&Path) -> Vec<String>) -> TestDaemon {
+    TestDaemon::start_with(|dir, config| {
+        let languages = fake_language_server_pack(dir, args(dir));
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages");
+        // Copied, not linked: a pack is a directory, not a link to one.
+        let copy = |from: &str, to: &str, files: &[&str]| {
+            std::fs::create_dir_all(languages.join(to)).unwrap();
+            for file in files {
+                std::fs::copy(
+                    fixtures.join(from).join(file),
+                    languages.join(to).join(file),
+                )
+                .unwrap();
+            }
+        };
+        copy(
+            "json",
+            "json",
+            &["language.toml", "grammar.wasm", "highlights.scm"],
+        );
+        copy("curly", "fake", &["grammar.wasm", "highlights.scm"]);
+        let fake = languages.join("fake/language.toml");
+        let toml = std::fs::read_to_string(&fake).unwrap();
+        std::fs::write(
+            &fake,
+            toml.replace("grammar = \"fake\"", "grammar = \"curly\""),
+        )
+        .unwrap();
+        config.languages = Some(languages);
+    })
+}
+
+/// The colours of the code of the hover answered to a query, and the
+/// query's number, skipping other updates.
+fn next_coloured(client: &mut Client) -> (u64, Vec<Span>) {
+    loop {
+        if let BufferUpdate::Coloured { id, spans } = next_buffer_update(client) {
+            return (id, spans);
+        }
+    }
+}
+
+#[test]
+fn a_hovers_code_is_coloured_after_in_each_blocks_language() {
+    let daemon = with_fake_language_server_and_grammars(|_| vec!["--utf16".into()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "é bad\n")]);
+    // A window from before colours were sent, asking first, is sent none,
+    // nor what it's about.
+    let old = wire::HOVER - 1;
+    let mut raw = Raw::open(&daemon, old);
+    raw.hello(old);
+    raw.request(Request::AttachBuffer {
+        buffer,
+        window: 9,
+        resume: None,
+    });
+    let query = |id, query| ClientMessage::Query {
+        buffer,
+        id,
+        version: 0,
+        at: "é b".len(),
+        query,
+    };
+    raw.send(&frame::encode(old, &query(1, Query::Hover)).unwrap());
+    let raw_answer = |raw: &mut Raw| loop {
+        match raw.next().expect("an answer") {
+            ServerMessage::Event(Event::Buffer {
+                update: BufferUpdate::Answer { id, answer, .. },
+                ..
+            }) => break (id, answer),
+            ServerMessage::Event(Event::Buffer {
+                update: update @ BufferUpdate::Coloured { .. },
+                ..
+            }) => panic!("protocol {old} has no {update:?}"),
+            _ => {}
+        }
+    };
+    let (_, answer) = raw_answer(&mut raw);
+    assert!(
+        matches!(answer, Answer::Hover { range: None, .. }),
+        "{answer:?}"
+    );
+
+    client
+        .query(buffer, 1, (0, "é b".len()), Query::Hover)
+        .unwrap();
+    let (id, answer) = next_answer(&mut client);
+    let Answer::Hover { text, .. } = answer else {
+        panic!("{answer:?}");
+    };
+    // Then the colours of its code: the JSON block's as JSON, the one with
+    // no tag as the file's own language, and the one in a language that
+    // doesn't exist, none.
+    let (coloured, spans) = next_coloured(&mut client);
+    assert_eq!(coloured, id);
+    let json = text.find("[1, true]").unwrap();
+    let curly = text.find("fn bad() {}").unwrap();
+    let span = |start, end, kind| Span { start, end, kind };
+    assert_eq!(
+        spans,
+        [
+            span(json + 1, json + 2, Kind::Number),
+            span(json + 4, json + 8, Kind::Constant),
+            span(curly, curly + 2, Kind::Keyword),
+        ]
+    );
+    // The older window, asking again, is still sent none: any would have
+    // come before the newer window's.
+    raw.send(&frame::encode(old, &query(2, Query::Definition)).unwrap());
+    assert_eq!(raw_answer(&mut raw).0, 2);
+}
+
+#[test]
+fn what_a_hover_is_about_moves_with_edits_made_while_the_server_worked() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        vec!["--hold-hover".to_owned(), gate]
+    });
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "a bad\n")]);
+    client.query(buffer, 1, (0, 2), Query::Hover).unwrap();
+    // While the server works, another window types at the file's start.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    send_change(&mut other, buffer, 0, insert("a bad\n".len(), 0, "zz ", 0));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    std::fs::write(daemon.dir.path().join("gate"), "").unwrap();
+    let (id, answer) = next_answer(&mut client);
+    assert_eq!(id, 1);
+    assert!(
+        matches!(
+            answer,
+            Answer::Hover {
+                range: Some((5, 8)),
+                ..
+            }
+        ),
+        "{answer:?}"
+    );
+}
+
+#[test]
+fn a_question_asked_again_cancels_the_last_at_the_server_but_not_another_windows() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        let log = dir.join("log").display().to_string();
+        vec!["--queue-hover".to_owned(), gate, "--log".to_owned(), log]
+    });
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    let log = daemon.dir.path().join("log");
+    // The server holds each, as it comes, in order.
+    client.query(buffer, 1, (0, 0), Query::Hover).unwrap();
+    let first = hovers_asked(&log, 1)[0].clone();
+    other.query(buffer, 1, (0, 0), Query::Hover).unwrap();
+    hovers_asked(&log, 2);
+    client.query(buffer, 2, (0, 0), Query::Hover).unwrap();
+    hovers_asked(&log, 3);
+    // The first window's first, and only it, was cancelled, before the
+    // question that took its place was asked.
+    let said = std::fs::read_to_string(&log).unwrap();
+    let cancelled: Vec<&str> = (said.lines())
+        .filter(|line| line.starts_with("cancelled"))
+        .collect();
+    assert_eq!(
+        cancelled,
+        [format!("cancelled {first} textDocument/hover")],
+        "{said}"
+    );
+    std::fs::write(daemon.dir.path().join("gate"), "").unwrap();
+    // The first window hears only its last, though the server answered
+    // the first with an error; the other window hears its own.
+    let (id, _) = next_answer(&mut client);
+    assert_eq!(id, 2, "the question asked again is answered, not the first");
+    assert_eq!(next_answer(&mut other).0, 1);
+    // What's asked after isn't answered with anything of the first's.
+    client.query(buffer, 3, (0, 0), Query::Definition).unwrap();
+    assert_eq!(next_answer(&mut client).0, 3);
+}
+
+/// The numbers of the questions of what's at a place the fake language
+/// server writes to its log, `log`, it was asked, once it's been asked
+/// `count`.
+fn hovers_asked(log: &Path, count: usize) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let said = std::fs::read_to_string(log).unwrap_or_default();
+        let asked: Vec<String> = (said.lines())
+            .filter_map(|line| line.strip_prefix("hover "))
+            .map(str::to_owned)
+            .collect();
+        if asked.len() >= count {
+            return asked;
+        }
+        assert!(Instant::now() < deadline, "asked {asked:?}, not {count}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]

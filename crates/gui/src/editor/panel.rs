@@ -6,8 +6,13 @@
 //! panel's width when it's placed, and again only if the pane's width
 //! changes. Everything is in the terminal's font, a cell per character,
 //! or two for a wide one, so the panel lines up with the text beside it.
+//!
+//! The code in what the language server says is drawn plain at first,
+//! and made again in its colours once the daemon has read it (see
+//! [`Panel::colour`]).
 
-use clackatoo_text::{Diagnostic, Severity};
+use clackatoo_protocol::Color;
+use clackatoo_text::{Diagnostic, Kind, Severity, Span};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::colors;
@@ -54,8 +59,9 @@ impl Line {
 enum Block {
     /// Prose, wrapped between words. A `\n` in a run breaks the line.
     Prose(Vec<Run>),
-    /// A line of code, in an ink, wrapped wherever it reaches the edge.
-    Code(String, Ink),
+    /// A line of code, in runs of inks, wrapped wherever it reaches the
+    /// edge.
+    Code(Vec<Run>),
     /// A line across, between what the server says and what's wrong.
     Rule,
     /// An empty line, between paragraphs.
@@ -77,6 +83,39 @@ pub(crate) struct Panel {
     placed: Option<Placed>,
     /// Where it was asked for: moving the cursor from there closes it.
     pub(crate) anchor: crate::motion::Point,
+    /// What the language server said in it, if it says anything.
+    pub(crate) hovered: Option<Hovered>,
+}
+
+/// What the language server said is at a place, to show.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Hover<'a> {
+    /// What it said...
+    pub(crate) text: &'a str,
+    /// ...as markdown, or else plain text.
+    pub(crate) markdown: bool,
+    /// The query it answered, whose colours may come after.
+    pub(crate) query: u64,
+    /// The bytes of the buffer's text it's about, if it said.
+    pub(crate) range: Option<(usize, usize)>,
+}
+
+/// What the language server said a panel shows: kept so its code can be
+/// coloured once the colours come, with the text it's about, which is
+/// underlined while the panel's shown.
+#[derive(Debug)]
+pub(crate) struct Hovered {
+    /// The query it answered.
+    pub(crate) query: u64,
+    /// The bytes of the buffer's text it's about, if the server said,
+    /// moved with edits from elsewhere, and forgotten once one changes
+    /// them.
+    pub(crate) range: Option<(usize, usize)>,
+    /// What it said, if it's markdown, whose code may be coloured.
+    markdown: Option<String>,
+    /// Where its blocks start among the panel's.
+    first: usize,
+    tabstop: usize,
 }
 
 /// Where the panel goes in its pane, in cells: its box, which is a cell
@@ -111,7 +150,7 @@ impl Panel {
     /// `tabstop` columns. `None` if there's nothing to show.
     pub(crate) fn new(
         diagnostics: &[&Diagnostic],
-        hover: Option<(&str, bool)>,
+        hover: Option<Hover<'_>>,
         anchor: crate::motion::Point,
         tabstop: usize,
     ) -> Option<Self> {
@@ -122,26 +161,33 @@ impl Panel {
             }
             blocks.extend(described(diagnostic));
         }
-        if let Some((text, markdown)) = hover {
+        let hovered = hover.map(|hover| {
             if !blocks.is_empty() {
                 blocks.push(Block::Rule);
             }
-            if markdown {
-                blocks.extend(from_markdown(text, tabstop));
+            let first = blocks.len();
+            if hover.markdown {
+                blocks.extend(from_markdown(hover.text, tabstop, &[]));
             } else {
-                let lines = text.lines().map(|line| expand_tabs(line, tabstop));
+                let lines = hover.text.lines().map(|line| expand_tabs(line, tabstop));
                 blocks.extend(lines.map(|line| Block::Prose(vec![plain(&line)])));
             }
-        }
-        Self::of(blocks, anchor)
+            Hovered {
+                query: hover.query,
+                range: hover.range,
+                markdown: hover.markdown.then(|| hover.text.to_owned()),
+                first,
+                tabstop,
+            }
+        });
+        let mut panel = Self::of(blocks, anchor)?;
+        panel.hovered = hovered;
+        Some(panel)
     }
 
     /// A panel showing `blocks`, `None` if they show nothing.
     fn of(mut blocks: Vec<Block>, anchor: crate::motion::Point) -> Option<Self> {
-        // Gaps at either end, as after a last paragraph, show nothing.
-        while blocks.last() == Some(&Block::Gap) {
-            blocks.pop();
-        }
+        trim(&mut blocks);
         (!blocks.is_empty()).then(|| Self {
             widest: (blocks.iter()).map(Block::natural_width).max().unwrap_or(0),
             blocks,
@@ -150,7 +196,36 @@ impl Panel {
             scroll: 0,
             placed: None,
             anchor,
+            hovered: None,
         })
+    }
+
+    /// Colours the code in what the language server said, if it's its
+    /// answer to query `query`, as `spans`, bytes of its text, say: it's
+    /// made again, and wrapped again before it's next drawn, scrolled as
+    /// it was. Returns whether it was.
+    pub(crate) fn colour(&mut self, query: u64, spans: &[Span]) -> bool {
+        let Some(Hovered {
+            markdown: Some(text),
+            first,
+            tabstop,
+            ..
+        }) = self
+            .hovered
+            .as_ref()
+            .filter(|hovered| hovered.query == query)
+        else {
+            return false;
+        };
+        self.blocks.truncate(*first);
+        self.blocks.extend(from_markdown(text, *tabstop, spans));
+        trim(&mut self.blocks);
+        self.widest = (self.blocks.iter())
+            .map(Block::natural_width)
+            .max()
+            .unwrap_or(0);
+        self.wrapped_to = 0;
+        true
     }
 
     /// A panel showing a hunk as a diff: its lines as they were, `base`,
@@ -165,7 +240,7 @@ impl Panel {
     ) -> Option<Self> {
         let lines = |text: &str, mark: char, ink: Ink| -> Vec<Block> {
             (text.lines())
-                .map(|line| Block::Code(format!("{mark}{}", expand_tabs(line, tabstop)), ink))
+                .map(|line| code(format!("{mark}{}", expand_tabs(line, tabstop)), ink))
                 .collect()
         };
         let mut blocks = lines(base, '-', Ink::Removed);
@@ -178,6 +253,7 @@ impl Panel {
             scroll: 0,
             placed: None,
             anchor,
+            hovered: None,
         })
     }
 
@@ -191,8 +267,8 @@ impl Panel {
         if rows.is_empty() {
             return None;
         }
-        let mut blocks = vec![Block::Code(heading.to_owned(), Ink::Muted)];
-        blocks.extend(rows.into_iter().map(|row| Block::Code(row, Ink::Plain)));
+        let mut blocks = vec![code(heading.to_owned(), Ink::Muted)];
+        blocks.extend(rows.into_iter().map(|row| code(row, Ink::Plain)));
         Self::of(blocks, anchor)
     }
 
@@ -206,14 +282,14 @@ impl Panel {
     ) -> Option<Self> {
         let mut blocks: Vec<Block> = (detail.into_iter())
             .flat_map(str::lines)
-            .map(|line| Block::Code(expand_tabs(line, tabstop), Ink::Plain))
+            .map(|line| code(expand_tabs(line, tabstop), Ink::Plain))
             .collect();
         if let Some((text, markdown)) = documentation {
             if !blocks.is_empty() {
                 blocks.push(Block::Gap);
             }
             if markdown {
-                blocks.extend(from_markdown(text, tabstop));
+                blocks.extend(from_markdown(text, tabstop, &[]));
             } else {
                 let lines = text.lines().map(|line| expand_tabs(line, tabstop));
                 blocks.extend(lines.map(|line| Block::Prose(vec![plain(&line)])));
@@ -415,7 +491,7 @@ impl Block {
                 let text: String = runs.iter().map(|run| run.text.as_str()).collect();
                 text.split('\n').map(mono_width).max().unwrap_or(0)
             }
-            Self::Code(line, _) => mono_width(line),
+            Self::Code(runs) => runs.iter().map(|run| mono_width(&run.text)).sum(),
             Self::Rule | Self::Gap => 0,
         }
     }
@@ -424,8 +500,10 @@ impl Block {
     fn wrap(&self, width: usize) -> Vec<Line> {
         match self {
             Self::Prose(runs) => wrap_prose(runs, width),
-            Self::Code(line, ink) => {
-                let chars: Vec<(char, usize)> = line.chars().map(|ch| (ch, 0)).collect();
+            Self::Code(runs) => {
+                let chars: Vec<(char, usize)> = (runs.iter().enumerate())
+                    .flat_map(|(index, run)| run.text.chars().map(move |ch| (ch, index)))
+                    .collect();
                 if chars.is_empty() {
                     return vec![Line {
                         runs: Vec::new(),
@@ -433,16 +511,11 @@ impl Block {
                         picked: false,
                     }];
                 }
-                let run = [Run {
-                    text: String::new(),
-                    ink: *ink,
-                    code: false,
-                }];
                 let mut lines = Vec::new();
                 let mut rest = &chars[..];
                 while !rest.is_empty() {
                     let (fits, _) = fit(rest, width);
-                    let mut line = line_of(&rest[..fits], &run);
+                    let mut line = line_of(&rest[..fits], runs);
                     line.block = true;
                     lines.push(line);
                     rest = &rest[fits..];
@@ -497,6 +570,135 @@ pub(crate) fn place(
         width: boxed - 2,
         height: height - 1,
     })
+}
+
+/// Gaps at the end, as after a last paragraph, show nothing.
+fn trim(blocks: &mut Vec<Block>) {
+    while blocks.last() == Some(&Block::Gap) {
+        blocks.pop();
+    }
+}
+
+/// A line of code all in one ink.
+fn code(text: String, ink: Ink) -> Block {
+    Block::Code(vec![Run {
+        text,
+        ink,
+        code: false,
+    }])
+}
+
+/// The ink code of `kind` is drawn in, as in an editor.
+fn ink_of(kind: Kind) -> Ink {
+    match colors::syntax(kind).fg {
+        Color::Default => Ink::Plain,
+        color => Ink::Color(color),
+    }
+}
+
+/// `text`, which starts at byte `from` of the markdown it's from, if it's
+/// the markdown's own text there, as runs coloured as `spans`, bytes of
+/// the markdown in order, say. Text whose place isn't known is plain.
+fn coloured(text: &str, from: Option<usize>, spans: &[Span]) -> Vec<Run> {
+    let run = |text: &str, ink| Run {
+        text: text.to_owned(),
+        ink,
+        code: false,
+    };
+    let Some(from) = from.filter(|_| !spans.is_empty()) else {
+        return vec![run(text, Ink::Plain)];
+    };
+    let end = from + text.len();
+    let mut runs = Vec::new();
+    let mut done = from;
+    for span in &spans[spans.partition_point(|span| span.end <= from)..] {
+        if span.start >= end {
+            break;
+        }
+        // One overlapping a span before, which a daemon never sends, is
+        // coloured only past it.
+        if span.end <= done {
+            continue;
+        }
+        let (start, stop) = (span.start.max(done), span.end.min(end));
+        // A span that doesn't fall on a character's edge is passed over.
+        let (Some(before), Some(inside)) = (
+            text.get(done - from..start - from),
+            text.get(start - from..stop - from),
+        ) else {
+            continue;
+        };
+        if !before.is_empty() {
+            runs.push(run(before, Ink::Plain));
+        }
+        runs.push(run(inside, ink_of(span.kind)));
+        done = stop;
+    }
+    if done < end {
+        runs.push(run(&text[done - from..], Ink::Plain));
+    }
+    runs
+}
+
+/// `runs`, the runs of a line of code, as [`expand_tabs`] makes a line.
+fn expand_tabs_in(mut runs: Vec<Run>, tabstop: usize) -> Vec<Run> {
+    if !runs.iter().any(|run| run.text.contains('\t')) {
+        return runs;
+    }
+    let tabstop = tabstop.max(1);
+    let mut col = 0;
+    for run in &mut runs {
+        let mut expanded = String::with_capacity(run.text.len());
+        for ch in run.text.chars() {
+            if ch == '\t' {
+                let blanks = tabstop - col % tabstop;
+                expanded.extend(std::iter::repeat_n(' ', blanks));
+                col += blanks;
+            } else {
+                expanded.push(ch);
+                col += mono_cells(ch);
+            }
+        }
+        run.text = expanded;
+    }
+    runs
+}
+
+/// `runs` of a block of code, split into its lines, without the line
+/// breaks after the last: as the panel shows them, each line in runs of
+/// one ink.
+fn code_lines(runs: Vec<Run>) -> Vec<Vec<Run>> {
+    let mut lines = vec![Vec::new()];
+    for run in runs {
+        let mut pieces = run.text.split('\n');
+        if let Some(first) = pieces.next() {
+            push_run(lines.last_mut().expect("never empty"), first, run.ink);
+        }
+        for piece in pieces {
+            lines.push(Vec::new());
+            push_run(lines.last_mut().expect("just pushed"), piece, run.ink);
+        }
+    }
+    while lines.len() > 1 && lines.last().is_some_and(Vec::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+/// Adds `text`, in `ink`, to the end of `runs`, joining the last run if
+/// it's in the same ink.
+fn push_run(runs: &mut Vec<Run>, text: &str, ink: Ink) {
+    if text.is_empty() {
+        return;
+    }
+    match runs.last_mut() {
+        Some(last) if last.ink == ink => last.text.push_str(text),
+        _ => runs.push(Run {
+            text: text.to_owned(),
+            ink,
+            code: false,
+        }),
+    }
 }
 
 /// `line` with each tab made blanks to the next multiple of `tabstop`
@@ -580,23 +782,40 @@ fn described(diagnostic: &Diagnostic) -> Vec<Block> {
 }
 
 /// Markdown, simply: headings and strong text bold, code in its box or
-/// band, lists with their marks, links' text in the accent colour, and
-/// everything else as plain text.
-fn from_markdown(text: &str, tabstop: usize) -> Vec<Block> {
+/// band, coloured as `spans`, bytes of `text` in order, say, lists with
+/// their marks, links' text in the accent colour, and everything else as
+/// plain text.
+///
+/// The daemon finds the code it colours with the same parser and options,
+/// so its places are where this looks for them.
+fn from_markdown(text: &str, tabstop: usize, spans: &[Span]) -> Vec<Block> {
     let mut reading = Markdown {
         tabstop,
-        ..Markdown::default()
+        spans,
+        blocks: Vec::new(),
+        runs: Vec::new(),
+        strong: 0,
+        links: 0,
+        lists: Vec::new(),
+        code: None,
     };
-    for event in Parser::new_ext(text, Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES) {
-        reading.take(event);
+    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
+    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        // Where a piece of code is in the text, if it's the text's own.
+        let from = match &event {
+            Event::Text(piece) => {
+                (text.get(range.clone()) == Some(&**piece)).then_some(range.start)
+            }
+            _ => None,
+        };
+        reading.take(event, from);
     }
     reading.end_paragraph();
     reading.blocks
 }
 
 /// Markdown being read into blocks.
-#[derive(Default)]
-struct Markdown {
+struct Markdown<'a> {
     blocks: Vec<Block>,
     /// The paragraph or line being read.
     runs: Vec<Run>,
@@ -606,14 +825,18 @@ struct Markdown {
     /// The lists it's in, innermost last: each one's next number, or
     /// `None` for one with bullets.
     lists: Vec<Option<u64>>,
-    /// The text of a block of code being read.
-    code: Option<String>,
+    /// The text of a block of code being read, in runs of its colours.
+    code: Option<Vec<Run>>,
     /// The columns tabs in code stop at multiples of.
     tabstop: usize,
+    /// How its code is coloured, as bytes of the markdown.
+    spans: &'a [Span],
 }
 
-impl Markdown {
-    fn take(&mut self, event: Event<'_>) {
+impl Markdown<'_> {
+    /// Takes in `event`, whose text, if it has any, starts at byte `from`
+    /// of the markdown, if it's the markdown's own.
+    fn take(&mut self, event: Event<'_>, from: Option<usize>) {
         match event {
             Event::Start(Tag::Heading { .. }) => {
                 self.end_paragraph();
@@ -654,18 +877,18 @@ impl Markdown {
             Event::End(TagEnd::Paragraph) if self.lists.is_empty() => self.end_paragraph(),
             Event::Start(Tag::CodeBlock(_)) => {
                 self.end_paragraph();
-                self.code = Some(String::new());
+                self.code = Some(Vec::new());
             }
             Event::End(TagEnd::CodeBlock) => {
-                let text = self.code.take().unwrap_or_default();
-                let lines = text.trim_end_matches('\n').split('\n');
+                let runs = self.code.take().unwrap_or_default();
                 let tabstop = self.tabstop;
+                let lines = code_lines(runs).into_iter();
                 self.blocks
-                    .extend(lines.map(|line| Block::Code(expand_tabs(line, tabstop), Ink::Plain)));
+                    .extend(lines.map(|line| Block::Code(expand_tabs_in(line, tabstop))));
                 self.blocks.push(Block::Gap);
             }
             Event::Text(text) => match &mut self.code {
-                Some(code) => code.push_str(&text),
+                Some(code) => code.extend(coloured(&text, from, self.spans)),
                 None => self.push(text.into_string(), false),
             },
             Event::Code(text) => self.push(text.into_string(), true),
@@ -799,6 +1022,17 @@ mod tests {
 
     const HERE: Point = Point { line: 0, col: 0 };
 
+    /// What the language server said, `text`, as markdown if `markdown`,
+    /// answering query 1, about nothing it says.
+    fn said(text: &str, markdown: bool) -> Hover<'_> {
+        Hover {
+            text,
+            markdown,
+            query: 1,
+            range: None,
+        }
+    }
+
     /// `panel` as shown at the top of a pane 40 rows by 100 columns.
     fn shown(panel: &mut Panel) -> PanelView<'_> {
         panel.settle((40, 100), Some((0, 0)));
@@ -831,10 +1065,10 @@ mod tests {
         );
         // A hard break breaks.
         assert_eq!(texts(&wrap_prose(&[plain("a\nb")], 9)), ["a", "b"]);
-        let code = Block::Code("fn main() {}".into(), Ink::Plain).wrap(5);
+        let code = super::code("fn main() {}".into(), Ink::Plain).wrap(5);
         assert_eq!(texts(&code), ["fn ma", "in() ", "{}"]);
         assert_eq!(
-            texts(&Block::Code("日本語".into(), Ink::Plain).wrap(5)),
+            texts(&super::code("日本語".into(), Ink::Plain).wrap(5)),
             ["日本", "語"]
         );
         assert!(code.iter().all(|line| line.block));
@@ -844,7 +1078,7 @@ mod tests {
     fn markdown_is_shown_simply() {
         let markdown =
             "# bad\n\nIt's **bad**: see `good`.\n\n```fake\nfn bad()\n```\n\n- one\n- two";
-        let mut panel = Panel::new(&[], Some((markdown, true)), HERE, 4).unwrap();
+        let mut panel = Panel::new(&[], Some(said(markdown, true)), HERE, 4).unwrap();
         let view = shown(&mut panel);
         assert_eq!(
             texts(view.lines),
@@ -861,20 +1095,112 @@ mod tests {
         );
         let heading = &view.lines[0].runs[0];
         assert_eq!(heading.ink, Ink::Bold);
-        let said = &view.lines[2].runs;
+        let prose = &view.lines[2].runs;
         assert!(
-            said.iter()
+            prose
+                .iter()
                 .any(|run| run.text == "bad" && run.ink == Ink::Bold)
         );
-        assert!(said.iter().any(|run| run.text == "good" && run.code));
+        assert!(prose.iter().any(|run| run.text == "good" && run.code));
         assert!(view.lines[4].block);
         // Tabs in code go to the next stop, as gopls indents with them.
         let code = "```go\nfunc f() {\n\tx\ta\n}\n```";
-        let mut panel = Panel::new(&[], Some((code, true)), HERE, 4).unwrap();
+        let mut panel = Panel::new(&[], Some(said(code, true)), HERE, 4).unwrap();
         assert_eq!(shown(&mut panel).lines[1].text(), "    x   a");
         // Plain text keeps its lines, and isn't read as markdown.
-        let mut panel = Panel::new(&[], Some(("# not\n**this**", false)), HERE, 4).unwrap();
+        let mut panel = Panel::new(&[], Some(said("# not\n**this**", false)), HERE, 4).unwrap();
         assert_eq!(texts(shown(&mut panel).lines), ["# not", "**this**"]);
+    }
+
+    #[test]
+    fn code_is_coloured_once_its_colours_come_keeping_its_place() {
+        // Lines enough to scroll, then a block with a tab, and one in a
+        // list, indented, whose lines are apart in the markdown.
+        let lines = (0..30)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+            + "\n\n";
+        let markdown = format!("{lines}```go\nif\tx\n```\n\n- a\n\n  ```\n  y if\n  ```\n");
+        let diagnostic = Diagnostic {
+            start: 0,
+            end: 1,
+            severity: Severity::Warning,
+            message: "unused".into(),
+            source: None,
+            code: None,
+        };
+        let hover = Hover {
+            text: &markdown,
+            markdown: true,
+            query: 7,
+            range: None,
+        };
+        let mut panel = Panel::new(&[&diagnostic], Some(hover), HERE, 4).unwrap();
+        let plain = texts(shown(&mut panel).lines);
+        panel.scroll(5);
+        let keyword = |start: usize| Span {
+            start,
+            end: start + 2,
+            kind: Kind::Keyword,
+        };
+        let first = markdown.find("if\t").unwrap();
+        let second = markdown.find("y if").unwrap() + 2;
+        let spans = [keyword(first), keyword(second)];
+        // Colours for another query are someone else's.
+        assert!(!panel.colour(8, &spans));
+        assert!(panel.colour(7, &spans));
+        let view = shown(&mut panel);
+        assert_eq!(view.first, 5, "scrolled as it was");
+        panel.scroll(100);
+        let view = shown(&mut panel);
+        // The same text, the diagnostic still above it, the code coloured.
+        let lines = &view.lines[view.lines.len() - 5..];
+        assert_eq!(texts(lines), ["if  x", "", "• a", "", "y if"]);
+        let inks = |line: &Line| -> Vec<(String, Ink)> {
+            (line.runs.iter())
+                .map(|run| (run.text.clone(), run.ink))
+                .collect()
+        };
+        let keyword = Ink::Color(colors::syntax(Kind::Keyword).fg);
+        assert_eq!(
+            inks(&lines[0]),
+            [("if".to_owned(), keyword), ("  x".to_owned(), Ink::Plain)]
+        );
+        assert_eq!(
+            inks(&lines[4]),
+            [("y ".to_owned(), Ink::Plain), ("if".to_owned(), keyword)]
+        );
+        let mut all = plain;
+        all.truncate(1);
+        assert_eq!(all, ["warning: unused"]);
+    }
+
+    #[test]
+    fn spans_that_overlap_or_split_a_character_are_coloured_only_where_they_can_be() {
+        let span = |start, end, kind| Span { start, end, kind };
+        let runs = |spans: &[Span]| -> Vec<(String, Ink)> {
+            // "fn é", from byte 10 of the markdown: é is bytes 13 and 14.
+            (coloured("fn é", Some(10), spans).into_iter())
+                .map(|run| (run.text, run.ink))
+                .collect()
+        };
+        let keyword = ("fn".to_owned(), ink_of(Kind::Keyword));
+        // One within the one before is passed over, as is one ending
+        // inside a character.
+        assert_eq!(
+            runs(&[
+                span(10, 12, Kind::Keyword),
+                span(11, 12, Kind::String),
+                span(12, 14, Kind::String),
+            ]),
+            [keyword.clone(), (" é".to_owned(), Ink::Plain)]
+        );
+        // One overlapping the one before is coloured past it.
+        assert_eq!(
+            runs(&[span(10, 12, Kind::Keyword), span(10, 15, Kind::String)]),
+            [keyword, (" é".to_owned(), ink_of(Kind::String))]
+        );
     }
 
     #[test]
@@ -887,7 +1213,7 @@ mod tests {
             source: Some("rustc".into()),
             code: Some("E0308".into()),
         };
-        let mut panel = Panel::new(&[&diagnostic], Some(("u32", false)), HERE, 4).unwrap();
+        let mut panel = Panel::new(&[&diagnostic], Some(said("u32", false)), HERE, 4).unwrap();
         let view = shown(&mut panel);
         assert_eq!(
             texts(view.lines),
@@ -949,7 +1275,7 @@ mod tests {
     #[test]
     fn a_long_panel_scrolls_and_pages() {
         let text: Vec<String> = (0..50).map(|n| n.to_string()).collect();
-        let mut panel = Panel::new(&[], Some((&text.join("\n"), false)), HERE, 4).unwrap();
+        let mut panel = Panel::new(&[], Some(said(&text.join("\n"), false)), HERE, 4).unwrap();
         let view = shown(&mut panel);
         assert_eq!(
             (view.lines.len(), view.first, view.total),

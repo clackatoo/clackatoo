@@ -626,6 +626,13 @@ impl LanguageServer {
         self.request(method, &params)
     }
 
+    /// Tells the server the answer to its request numbered `request` is no
+    /// longer wanted, as a newer one of the same kind has taken its place:
+    /// it may stop working on it, and answer it with an error or not.
+    pub(crate) fn cancel(&mut self, request: u64) {
+        self.notify("$/cancelRequest", &json!({ "id": request }));
+    }
+
     /// Asks the server, which [`resolves`](Self::resolves), more about
     /// `item`, a completion item as it sent it. Returns the request's
     /// number, as [`ask`](Self::ask) does.
@@ -1045,6 +1052,15 @@ pub(crate) fn hover(answer: &Value) -> Option<(String, bool)> {
         one => (marked(one)?, true),
     };
     (!text.trim().is_empty()).then_some((text, markdown))
+}
+
+/// The text a `textDocument/hover` answer is about, from its start to its
+/// end, if it says: the name under the place asked about, as servers give
+/// it.
+pub(crate) fn hover_range(answer: &Value) -> Option<(Position, Position)> {
+    let range = answer.get("range")?;
+    let at = |key: &str| serde_json::from_value(range.get(key)?.clone()).ok();
+    Some((at("start")?, at("end")?))
 }
 
 /// One edit to a file's text that a server asks for: what's from `start`
@@ -1681,6 +1697,13 @@ mod tests {
         );
         assert_eq!(hover(&json!({ "contents": "" })), None);
         assert_eq!(hover(&Value::Null), None);
+        // The text it's about, if it says.
+        assert_eq!(hover_range(&markup), None);
+        let range = json!({
+            "contents": "x",
+            "range": { "start": { "line": 1, "character": 2 }, "end": { "line": 1, "character": 5 } },
+        });
+        assert_eq!(hover_range(&range), Some((at(1, 2), at(1, 5))));
     }
 
     #[test]
