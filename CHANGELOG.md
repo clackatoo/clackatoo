@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.12 (2026-10-14)
+
+### Features
+
+- **window:** one mode for the whole window, shared by every pane, tab and workspace (bc6ca9d)
+
 ## 2026.10.11 (2026-10-14)
 
 ### Features
