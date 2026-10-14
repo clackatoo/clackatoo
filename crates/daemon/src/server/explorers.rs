@@ -1286,6 +1286,48 @@ impl Daemon {
         }
     }
 
+    /// As the daemon stops: waits for file operations under way to finish,
+    /// until `until` at most, doing nothing else meanwhile, so each puts
+    /// its copy in place or takes it away (see
+    /// [`file_ops_hold_upgrade`](Self::file_ops_hold_upgrade)). One still
+    /// going then is cut off where it is as the daemon exits: it never
+    /// destroys what it wasn't told to, but may leave a copy half made.
+    pub(super) fn wait_for_file_ops(&mut self, until: Instant) {
+        let mut events = mio::Events::with_capacity(64);
+        loop {
+            if let Some(workers) = &self.explorers.workers {
+                // Nothing but how they went matters now.
+                for done in workers.take() {
+                    if matches!(done, Done::Op { .. }) {
+                        self.explorers.running = self.explorers.running.saturating_sub(1);
+                    }
+                }
+            }
+            let running = self.explorers.running;
+            if running == 0 {
+                return;
+            }
+            let now = Instant::now();
+            if now >= until {
+                log::warn!(
+                    "stopping with {running} file operation{} still running, which may leave \
+                     a copy half made",
+                    if running == 1 { "" } else { "s" }
+                );
+                return;
+            }
+            // Woken as one finishes.
+            match self.poll.poll(&mut events, Some(until - now)) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => {
+                    log::warn!("waiting for file operations failed: {err}");
+                    return;
+                }
+            }
+        }
+    }
+
     /// Takes how the file operation numbered `ticket` went: has buffers
     /// follow what it moved, even if it went wrong partway, and what it
     /// wrote over, and tells the client that asked.
@@ -1484,6 +1526,7 @@ mod tests {
         let asker = Token(1000);
         let upgrading = || Upgrading {
             executable: PathBuf::from("/next/clackatoo"),
+            takes_signals: true,
             token: Token(1001),
             until: Instant::now() + UPGRADE_OPS_WAIT,
         };
@@ -1530,6 +1573,44 @@ mod tests {
     }
 
     #[test]
+    fn stopping_waits_a_while_for_file_operations_then_goes_without_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = crate::server::agent_files::tests::daemon_with_chat(dir.path());
+        let files = dir.path().canonicalize().unwrap().join("files");
+        std::fs::create_dir_all(files.join("from")).unwrap();
+        std::fs::write(files.join("from/a.txt"), "a").unwrap();
+        let copy = |to: &str| FileOp::Copy {
+            from: files.join("from").display().to_string(),
+            to: files.join(to).display().to_string(),
+            overwrite: None,
+            expect: None,
+        };
+        // A copy held up a moment, as a long one would be: waited for, and
+        // finished.
+        let release = daemon.files_workers().unwrap().hold_ops();
+        daemon.serve_file_op(Token(1000), 1, copy("to"));
+        let let_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(release);
+        });
+        let started = Instant::now();
+        daemon.wait_for_file_ops(started + Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(daemon.explorers.running, 0);
+        assert_eq!(names(&files.join("to")), ["a.txt"]);
+        let_go.join().unwrap();
+
+        // One held up for longer than the daemon can wait isn't.
+        let release = daemon.files_workers().unwrap().hold_ops();
+        daemon.serve_file_op(Token(1000), 2, copy("late"));
+        let started = Instant::now();
+        daemon.wait_for_file_ops(started + Duration::from_millis(100));
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert_eq!(daemon.explorers.running, 1);
+        drop(release);
+    }
+
+    #[test]
     fn a_file_operation_that_panics_is_answered_and_upgrades_still_go_ahead() {
         use crate::server::{UPGRADE_OPS_WAIT, Upgrading};
 
@@ -1543,6 +1624,7 @@ mod tests {
         assert_eq!(daemon.explorers.running, 2);
         daemon.upgrade_to = Some(Upgrading {
             executable: PathBuf::from("/next/clackatoo"),
+            takes_signals: true,
             token: Token(1001),
             until: Instant::now() + UPGRADE_OPS_WAIT,
         });

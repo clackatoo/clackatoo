@@ -19,7 +19,9 @@
 //! The listening socket never closes, so clients that connect meanwhile
 //! wait in its queue. Every connection does close, and clients reconnect.
 //! If exec fails, the daemon still holds everything it sent, and carries
-//! on from its own handover.
+//! on from its own handover. A signal asking the daemon to stop, as it
+//! upgrades, is held back for the new build, which stops once it's running
+//! (see [`crate::signals`]).
 //!
 //! Once exec succeeds there's no way back, so first the daemon checks that
 //! the new program is a build that can take over: it runs it with the
@@ -59,9 +61,17 @@ const FDS_PER_MESSAGE: usize = 253;
 pub const RESUME_FLAG: &str = "--resume";
 
 /// The flag that asks a build which handovers it can take over from,
-/// instead of running the daemon. It prints [`readable_versions`],
-/// separated by spaces.
+/// instead of running the daemon. It prints [`versions_answer`]: the
+/// [`readable_versions`], then [`TAKES_SIGNALS`], separated by spaces.
 pub const VERSIONS_FLAG: &str = "--handover-versions";
+
+/// The word a build adds to its answer to [`VERSIONS_FLAG`] when it takes
+/// the signals the build before held back for it as it upgraded (see
+/// `crate::signals`). A build from before then would leave them blocked
+/// for good, and so would every program it started, so they're held back
+/// only for a build that says this. Builds reading the answer skip words
+/// that aren't numbers.
+pub const TAKES_SIGNALS: &str = "signals";
 
 /// How long a build may take to answer [`VERSIONS_FLAG`].
 const VERSIONS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -72,9 +82,21 @@ pub fn readable_versions() -> &'static [u32] {
     crate::handover::READABLE
 }
 
+/// What this build answers [`VERSIONS_FLAG`] with.
+#[must_use]
+pub fn versions_answer() -> String {
+    (readable_versions().iter())
+        .map(u32::to_string)
+        .chain([TAKES_SIGNALS.to_owned()])
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
 /// Checks that `executable`, run with `args`, is a build that can take
 /// over from this one, by asking it which handover versions it reads.
-pub(crate) fn check_takes_over(executable: &Path, args: &[OsString]) -> Result<(), String> {
+/// Returns whether it also takes the signals held back for it (see
+/// [`TAKES_SIGNALS`]).
+pub(crate) fn check_takes_over(executable: &Path, args: &[OsString]) -> Result<bool, String> {
     let run = |err: io::Error| format!("{} can't be run: {err}", executable.display());
     let mut child = Command::new(executable)
         .args(args)
@@ -101,7 +123,7 @@ pub(crate) fn check_takes_over(executable: &Path, args: &[OsString]) -> Result<(
         .split_whitespace()
         .any(|version| version.parse() == Ok(crate::handover::VERSION));
     if takes_over {
-        Ok(())
+        Ok(answer.split_whitespace().any(|word| word == TAKES_SIGNALS))
     } else {
         Err(format!(
             "{} can't take over from this build: it isn't a build of clackatoo that reads \
@@ -117,6 +139,9 @@ pub(crate) fn check_takes_over(executable: &Path, args: &[OsString]) -> Result<(
 #[derive(Debug)]
 pub struct Upgrade {
     pub(crate) executable: PathBuf,
+    /// Whether the build takes the signals held back for it (see
+    /// [`TAKES_SIGNALS`]).
+    pub(crate) takes_signals: bool,
     pub(crate) handover: Handover,
     /// The connection that asked, which is told if the upgrade fails. The
     /// exec closes it if it doesn't.
@@ -153,6 +178,38 @@ pub fn serve(
     resume: bool,
     args: &[OsString],
 ) -> Result<(), ServeError> {
+    // First of all, before any thread starts: a signal held back by the
+    // build before, as it upgraded, is taken now, and the daemon stops as
+    // soon as it's running.
+    crate::signals::install()?;
+    serve_signalled(runtime, config, resume, args)
+}
+
+/// For tests: runs the daemon as [`serve`] does, but as a build from
+/// before daemons caught signals did, catching none, to try upgrading to
+/// one.
+///
+/// # Errors
+///
+/// As [`serve`].
+#[doc(hidden)]
+pub fn serve_catching_no_signals(
+    runtime: &RuntimeDir,
+    config: &DaemonConfig,
+    resume: bool,
+    args: &[OsString],
+) -> Result<(), ServeError> {
+    serve_signalled(runtime, config, resume, args)
+}
+
+/// Runs the daemon as [`serve`] does, once the signals asking it to stop
+/// are caught, if they're to be.
+fn serve_signalled(
+    runtime: &RuntimeDir,
+    config: &DaemonConfig,
+    resume: bool,
+    args: &[OsString],
+) -> Result<(), ServeError> {
     let resumed = if resume {
         receive()
             .and_then(|handover| resume_from(handover, config))
@@ -173,6 +230,7 @@ pub fn serve(
 
     while let Some(Upgrade {
         executable,
+        takes_signals,
         mut handover,
         requester,
     }) = daemon.run()?
@@ -181,7 +239,7 @@ pub fn serve(
         // Closes every connection, including the one that asked.
         drop(daemon);
         log::info!("upgrading to {}", executable.display());
-        let err = exec(&executable, args, &handover);
+        let err = exec(&executable, args, &handover, takes_signals);
         log::error!("upgrading to {} failed: {err}", executable.display());
         if let Some(requester) = requester {
             tell_failure(requester, &err);
@@ -226,8 +284,14 @@ fn resume_from(
 }
 
 /// Execs `executable` with `args` and [`RESUME_FLAG`], handing it
-/// `handover`. Returns only if that fails.
-fn exec(executable: &Path, args: &[OsString], handover: &Handover) -> io::Error {
+/// `handover`, and holding back signals for it if it `takes_signals`.
+/// Returns only if that fails.
+fn exec(
+    executable: &Path,
+    args: &[OsString],
+    handover: &Handover,
+    takes_signals: bool,
+) -> io::Error {
     // Returns both ends of the socket pair. Ours must stay open until the
     // exec closes it, which ends the stream for the new build; if the exec
     // fails, closing it drops the fds in flight.
@@ -264,11 +328,27 @@ fn exec(executable: &Path, args: &[OsString], handover: &Handover) -> io::Error 
         Ok((ours, theirs))
     };
     match send() {
-        Ok((_ours, theirs)) => Command::new(executable)
-            .args(args)
-            .arg(RESUME_FLAG)
-            .stdin(Stdio::from(theirs))
-            .exec(),
+        Ok((_ours, theirs)) => {
+            // A build that wouldn't take a signal asking the daemon to stop,
+            // which came as it handed over, isn't started: the daemon
+            // carries on from its own handover, and stops.
+            if !takes_signals && crate::signals::asked_to_stop() {
+                return io::Error::other(
+                    "the daemon was asked to stop as it upgraded, and the new build can't be \
+                     told",
+                );
+            }
+            // A signal asking the daemon to stop, from now until the next
+            // build can take it, waits for it, if the next build takes it.
+            crate::signals::hold(takes_signals);
+            let err = Command::new(executable)
+                .args(args)
+                .arg(RESUME_FLAG)
+                .stdin(Stdio::from(theirs))
+                .exec();
+            crate::signals::release(takes_signals);
+            err
+        }
         Err(err) => err,
     }
 }

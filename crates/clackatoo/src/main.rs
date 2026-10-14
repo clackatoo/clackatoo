@@ -220,8 +220,9 @@ struct DaemonArgs {
     /// over its state on standard input.
     #[arg(long, hide = true)]
     resume: bool,
-    /// Print the handover versions this build can take over from, instead
-    /// of running the daemon: an older build asks before upgrading to it.
+    /// Print the handover versions this build can take over from, and
+    /// that it takes signals held back for it, instead of running the
+    /// daemon: an older build asks before upgrading to it.
     #[arg(long, hide = true)]
     handover_versions: bool,
     /// When scrollback is compacted to save memory: `lazy` once output
@@ -527,11 +528,7 @@ fn open_window(args: &WindowArgs) -> anyhow::Result<()> {
 
 fn run_daemon(args: &DaemonArgs) -> anyhow::Result<()> {
     if args.handover_versions {
-        let versions: Vec<String> = upgrade::readable_versions()
-            .iter()
-            .map(u32::to_string)
-            .collect();
-        println!("{}", versions.join(" "));
+        println!("{}", upgrade::versions_answer());
         return Ok(());
     }
     logs::daemon();

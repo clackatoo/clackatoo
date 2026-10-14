@@ -249,8 +249,10 @@ fn not_running(err: &std::io::Error) -> bool {
 }
 
 /// Stops the running daemon, whatever protocol it speaks, and waits for it
-/// to exit. Its terminals close, and their programs are hung up. Returns
-/// false if no daemon was running.
+/// to exit. Its terminals close, and their programs are hung up. It's sent
+/// SIGTERM, and stops as it always does, but is killed if it hasn't
+/// exited within [`STOP_WAIT`]; a daemon from before daemons caught
+/// SIGTERM simply exits. Returns false if no daemon was running.
 ///
 /// # Errors
 ///
@@ -266,19 +268,28 @@ pub fn stop(runtime: &RuntimeDir) -> Result<bool, LaunchError> {
     if peer.uid != rustix::process::getuid() {
         return Err(LaunchError::NotOurs);
     }
-    signal_and_wait(runtime, peer.pid, Signal::TERM)
-        .or_else(|_| signal_and_wait(runtime, peer.pid, Signal::KILL))?;
+    signal_and_wait(runtime, peer.pid, Signal::TERM, STOP_WAIT)
+        .or_else(|_| signal_and_wait(runtime, peer.pid, Signal::KILL, DEADLINE / 2))?;
     Ok(true)
 }
 
-/// Sends `signal` to `pid`, then waits until the daemon's lock is free,
-/// which happens when its process exits.
-fn signal_and_wait(runtime: &RuntimeDir, pid: Pid, signal: Signal) -> Result<(), LaunchError> {
+/// How long a daemon asked to stop has before it's killed: it stops what
+/// it started, and writes what it keeps, first, in about 3 s at most.
+const STOP_WAIT: Duration = Duration::from_secs(5);
+
+/// Sends `signal` to `pid`, then waits up to `wait` until the daemon's
+/// lock is free, which happens when its process exits.
+fn signal_and_wait(
+    runtime: &RuntimeDir,
+    pid: Pid,
+    signal: Signal,
+    wait: Duration,
+) -> Result<(), LaunchError> {
     match rustix::process::kill_process(pid, signal) {
         Ok(()) | Err(rustix::io::Errno::SRCH) => {}
         Err(err) => return Err(std::io::Error::from(err).into()),
     }
-    let deadline = Instant::now() + DEADLINE / 2;
+    let deadline = Instant::now() + wait;
     loop {
         match runtime.lock() {
             Ok(_released) => return Ok(()),

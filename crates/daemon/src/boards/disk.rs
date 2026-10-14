@@ -552,10 +552,17 @@ impl Disk {
         let _ = self.jobs.send(Job::Stall(time));
     }
 
-    /// Has the thread write what's waiting and stop, waiting up to
-    /// `wait` for it. Returns whether it stopped in time.
-    pub(crate) fn stop(self, wait: Duration) -> bool {
+    /// Has the thread write what's waiting and stop, without waiting for
+    /// it: [`stop`](Self::stop) does.
+    pub(crate) fn begin_stop(&self) {
         let _ = self.jobs.send(Job::Stop);
+    }
+
+    /// Has the thread write what's waiting and stop, if it hasn't been
+    /// told to already, waiting up to `wait` for it. Returns whether it
+    /// stopped in time.
+    pub(crate) fn stop(self, wait: Duration) -> bool {
+        self.begin_stop();
         !matches!(
             self.stopped.recv_timeout(wait),
             Err(RecvTimeoutError::Timeout)

@@ -40,13 +40,19 @@ fn daemon_with(runtime: &Path, args: &[&str]) -> Child {
     child
 }
 
-/// Waits for `child` to exit, failing after a few seconds.
+/// Waits for the daemon `child`, stopped, to exit, failing after a few
+/// seconds, or if it didn't exit cleanly: stopped, it stops by itself,
+/// and isn't killed.
 fn wait(mut child: Child) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while child.try_wait().expect("waitable").is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("waitable") {
+            break status;
+        }
         assert!(Instant::now() < deadline, "the daemon didn't exit");
         std::thread::sleep(Duration::from_millis(10));
-    }
+    };
+    assert!(status.success(), "{status:?}");
 }
 
 #[test]

@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
     BoardAction, BoardAuthor, BoardId, BoardScope, BoardSummary, BoardUpdate, Error, Event,
@@ -25,10 +25,11 @@ use super::Daemon;
 use crate::boards::disk::{Disk, Reading, Record};
 use crate::boards::{self, Board, Boards};
 
-/// The longest the daemon, stopping, waits for the boards' last changes to
-/// be written: past it, they may be lost, and the thread writing them
+/// The longest the daemon, handing over, waits for the boards' last changes
+/// to be written: past it, they may be lost, and the thread writing them
 /// still holds the boards' lock as the daemon goes. A disk busy with other
-/// work can take seconds to sync.
+/// work can take seconds to sync. (Stopping, the daemon waits only as long
+/// as it can: see `STOPPING_WAIT` in `server.rs`.)
 const STOP_WAIT: Duration = Duration::from_secs(10);
 
 /// The boards, and what's needed to keep and show them.
@@ -155,11 +156,31 @@ impl Daemon {
         true
     }
 
-    /// Writes what's waiting, and stops the thread, for an upgrade or as
-    /// the daemon stops, waiting a moment for it.
+    /// Writes what's waiting, and stops the thread, for an upgrade, waiting
+    /// a moment for it.
     pub(super) fn stop_boards(&mut self) {
         if let Some(disk) = self.boards.disk.take()
             && !disk.stop(STOP_WAIT)
+        {
+            log::error!("the boards' last changes may not have been written");
+        }
+    }
+
+    /// As the daemon stops: has the thread write what's waiting and stop,
+    /// while everything else stops.
+    /// [`finish_stopping_boards`](Self::finish_stopping_boards) waits for
+    /// it.
+    pub(super) fn begin_stopping_boards(&self) {
+        if let Some(disk) = &self.boards.disk {
+            disk.begin_stop();
+        }
+    }
+
+    /// As the daemon stops: waits for the thread, told to stop already, to
+    /// write what was waiting and stop, until `until` at most.
+    pub(super) fn finish_stopping_boards(&mut self, until: Instant) {
+        if let Some(disk) = self.boards.disk.take()
+            && !disk.stop(until.saturating_duration_since(Instant::now()))
         {
             log::error!("the boards' last changes may not have been written");
         }
@@ -400,6 +421,35 @@ mod tests {
         daemon
     }
 
+    /// The boards in `dir`, read as the next daemon would, with the thread
+    /// reading them, once their lock is let go of: the last daemon's thread
+    /// lets go of it a moment after it says it has stopped.
+    fn read_again(dir: &std::path::Path) -> (Disk, crate::boards::disk::Loaded) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let reading = Reading::default();
+            let next = Disk::start(dir.to_owned(), Arc::clone(&reading), || {}).unwrap();
+            let read = loop {
+                if let Some(read) = reading.lock().unwrap().take() {
+                    break read;
+                }
+                assert!(Instant::now() < deadline, "never read");
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            match read {
+                Ok(read) => return (next, read),
+                Err(why) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the lock was never let go of: {why}"
+                    );
+                    drop(next);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
     #[test]
     fn an_upgrade_waits_for_the_boards_to_be_written_and_let_go_of() {
         let dir = tempfile::tempdir().unwrap();
@@ -425,18 +475,33 @@ mod tests {
             .prepare_boards_for_upgrade(Duration::from_secs(5))
             .unwrap();
         assert!(daemon.boards.disk.is_none());
-        let reading = Reading::default();
-        let next = Disk::start(boards.path().to_owned(), Arc::clone(&reading), || {}).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let read = loop {
-            if let Some(read) = reading.lock().unwrap().take() {
-                break read;
-            }
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(5));
-        };
-        let read = read.expect("the lock was let go of");
+        let (next, read) = read_again(boards.path());
         assert_eq!(read.boards.get(id).unwrap().entries.len(), 1);
+        assert!(next.stop(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn stopping_waits_for_the_boards_last_changes_to_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let boards = tempfile::tempdir().unwrap();
+        let mut daemon = daemon_with_boards(dir.path(), boards.path());
+        let id = daemon
+            .create_board("plan", "", BoardScope::Global, &BoardAuthor::User)
+            .unwrap();
+        // A change still waiting as the daemon stops, behind a slow disk.
+        daemon
+            .boards
+            .disk
+            .as_ref()
+            .unwrap()
+            .stall(Duration::from_millis(300));
+        let user = BoardAuthor::User;
+        let post = |board: &Board| board.post(&user, 1, PostKind::Note, "last", Vec::new());
+        daemon.change_board(id, post).unwrap();
+        daemon.stop();
+        assert!(daemon.boards.disk.is_none());
+        let (next, read) = read_again(boards.path());
+        assert_eq!(read.boards.get(id).unwrap().entries[0].text, "last");
         assert!(next.stop(Duration::from_secs(5)));
     }
 }

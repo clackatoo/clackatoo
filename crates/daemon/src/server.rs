@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, VecDeque, btree_map};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::RangeInclusive;
-use std::os::fd::{AsFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -92,6 +92,7 @@ const LISTENER: Token = Token(usize::MAX);
 const WAKER: Token = Token(usize::MAX - 1);
 const UDP: Token = Token(usize::MAX - 2);
 const WEB: Token = Token(usize::MAX - 3);
+const SIGNALS: Token = Token(usize::MAX - 4);
 
 /// Bytes read per `read` call, from PTYs and clients alike.
 const READ_BUFFER_LEN: usize = 64 * 1024;
@@ -120,6 +121,12 @@ const UPGRADE_BOARDS_WAIT: Duration = Duration::from_secs(10);
 /// of a new path at once.
 const CLOSING_WAIT: Duration = Duration::from_millis(500);
 
+/// The longest the daemon takes to stop, well short of the 5 s `clackatoo
+/// stop` waits before killing it: language servers, and what agents
+/// started, are waited for [`stopping::STOP_WAIT`] of it, and file
+/// operations under way and the boards' last changes all of it.
+const STOPPING_WAIT: Duration = Duration::from_secs(3);
+
 /// The longest an upgrade waits for file operations under way to finish,
 /// before it's refused: short of how long `clackatoo upgrade` waits to
 /// hear back, so it hears why.
@@ -137,6 +144,9 @@ const UNREADABLE_FORGOTTEN: u32 = 8;
 struct Upgrading {
     /// The program the daemon is to become.
     executable: PathBuf,
+    /// Whether it takes the signals held back for it (see
+    /// [`crate::upgrade::TAKES_SIGNALS`]).
+    takes_signals: bool,
     /// The client that asked.
     token: Token,
     /// The longest it waits for file operations under way to finish.
@@ -772,6 +782,12 @@ impl Daemon {
         poll.registry()
             .register(&mut listener, LISTENER, Interest::READABLE)?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKER)?);
+        // Signals asking it to stop, in a daemon that catches them (see
+        // `crate::signals`).
+        if let Some(pipe) = crate::signals::pipe() {
+            let pipe = pipe.as_raw_fd();
+            (poll.registry()).register(&mut SourceFd(&pipe), SIGNALS, Interest::READABLE)?;
+        }
         let finds = {
             let waker = Arc::clone(&waker);
             Finds::new(&config.home, move || {
@@ -1134,22 +1150,49 @@ impl Daemon {
             self.send_view_updates();
             self.transmit_quic();
         }
+        self.stop();
+        Ok(None)
+    }
+
+    /// Takes the signals that came asking the daemon to stop: it stops
+    /// once the loop next goes round. Any that come once it's stopping
+    /// change nothing.
+    fn take_signals(&mut self) {
+        for signal in crate::signals::take() {
+            log::info!("{}", signal.meaning());
+            self.shutdown.store(true, Ordering::Release);
+        }
+    }
+
+    /// Stops everything, as the daemon stops, within [`STOPPING_WAIT`],
+    /// waiting for it all at once. Language servers are asked to shut
+    /// down, agents are stopped, and what they started with them, the
+    /// boards' last changes are written, the browser is stopped, and
+    /// remote windows are told why. Terminals are left to the daemon being
+    /// dropped, which hangs up their programs.
+    fn stop(&mut self) {
         log::info!("shutting down");
-        // Asked first, to shut down while remote windows are told. Agents
-        // are stopped too, and what they started with them.
-        let servers_until = Instant::now() + stopping::STOP_WAIT;
+        let started = Instant::now();
+        let servers_until = started + stopping::STOP_WAIT;
+        let until = started + STOPPING_WAIT;
+        // A client waiting for an upgrade hears why there won't be one.
+        if let Some(upgrading) = self.upgrade_to.take() {
+            self.refuse_upgrade(upgrading.token, "the daemon is stopping".to_owned());
+        }
+        // Asked first, to shut down while the rest stops. The boards'
+        // last changes and the browser's moment to stop go by meanwhile.
         self.stop_servers();
         self.stop_agents();
+        self.begin_stopping_boards();
+        self.begin_stopping_browser();
+        self.abandon_renames();
         self.close_web("the daemon stopped");
         self.close_remotes("the daemon stopped");
-        self.abandon_renames();
-        // The browser's moment to stop goes by as the servers are waited
-        // for: together, well inside the time `clackatoo stop` gives.
-        self.begin_stopping_browser();
         self.wait_for_stopping(servers_until);
-        self.stop_boards();
+        self.wait_for_file_ops(until);
+        self.finish_stopping_boards(until);
         self.stop_browser();
-        Ok(None)
+        log::info!("stopped in {} ms", started.elapsed().as_millis());
     }
 
     /// The upgrade a client asked for, if it's to go ahead now: once file
@@ -1178,7 +1221,10 @@ impl Daemon {
             }
         }
         let Upgrading {
-            executable, token, ..
+            executable,
+            takes_signals,
+            token,
+            ..
         } = upgrading;
         // Every change to the boards is on disk, and their lock let go of,
         // before there's no way back.
@@ -1213,6 +1259,7 @@ impl Daemon {
         };
         Ok(Some(Upgrade {
             executable,
+            takes_signals,
             handover: self.hand_over(servers_until)?,
             requester,
         }))
@@ -1235,6 +1282,7 @@ impl Daemon {
         match event.token() {
             LISTENER => self.accept_clients(),
             WAKER => {}
+            SIGNALS => self.take_signals(),
             UDP => self.receive_udp(),
             WEB => self.accept_web(),
             token => match self.sources.get(token.0) {
@@ -1876,10 +1924,11 @@ impl Daemon {
                     let local = matches!(client.link, Link::Unix(_));
                     let executable = PathBuf::from(std::ffi::OsString::from_vec(executable));
                     match self.check_upgrade(local, protocol_version, &executable) {
-                        Ok(()) => {
+                        Ok(takes_signals) => {
                             // The connection closes as the daemon upgrades.
                             self.upgrade_to = Some(Upgrading {
                                 executable,
+                                takes_signals,
                                 token,
                                 until: Instant::now() + UPGRADE_OPS_WAIT,
                             });
@@ -2003,13 +2052,15 @@ impl Daemon {
     }
 
     /// Why the daemon won't become `executable`, if it won't, as a client
-    /// speaking `protocol_version` asked, on this machine if `local`.
+    /// speaking `protocol_version` asked, on this machine if `local`. If it
+    /// will, whether `executable` takes the signals held back for it (see
+    /// [`crate::upgrade::TAKES_SIGNALS`]).
     fn check_upgrade(
         &self,
         local: bool,
         protocol_version: u32,
         executable: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if !local {
             return Err("only a client on the daemon's machine can upgrade it".to_owned());
         }

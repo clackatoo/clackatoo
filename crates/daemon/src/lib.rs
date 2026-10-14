@@ -7,8 +7,9 @@
 //! Terminals outlive any client, so closing a window closes nothing.
 
 // The only unsafe code is the pre-exec hooks in `pty::spawn` and
-// `browser::cdp::spawn`, and the declaration of glibc's `malloc_trim` in
-// `memory`, which opt out of this explicitly.
+// `browser::cdp::spawn`, the declaration of glibc's `malloc_trim` in
+// `memory`, and the signal handling in `signals`, which opt out of this
+// explicitly.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -39,6 +40,7 @@ mod rpc;
 mod runtime;
 mod server;
 mod shell;
+mod signals;
 pub mod upgrade;
 pub mod web;
 mod workspaces;
