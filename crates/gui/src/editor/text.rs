@@ -23,7 +23,7 @@ use clackatoo_text::{Diagnostic, Rope, Span};
 use super::kept::{Kept, LineLog};
 use super::wrap::Wrap;
 use crate::colors;
-use crate::motion::{Cells, Lines, Point, ScreenRow, Spot};
+use crate::motion::{Cells, Lines, Point, ScreenRow, Spot, Words};
 
 /// The column after a tab that starts at column `col`, with tabs stopping
 /// at multiples of `tabstop`.
@@ -694,6 +694,8 @@ pub(crate) struct Text<'a> {
     typing: Option<Point>,
     /// How much of the start of each line is hidden, if any is.
     hide: Option<fn(&str) -> usize>,
+    /// What words are made of besides letters, digits and `_`.
+    words: Words,
     kept: Kept,
 }
 
@@ -706,8 +708,15 @@ impl<'a> Text<'a> {
             wrap: None,
             typing: None,
             hide: None,
+            words: Words::NONE,
             kept: Kept::default(),
         }
+    }
+
+    /// The text with `words` part of words, as its language says, for
+    /// moving by words and finding them.
+    pub(crate) fn with_words(self, words: Words) -> Self {
+        Self { words, ..self }
     }
 
     /// The text with as much of the start of each line hidden as `hide`
@@ -906,6 +915,10 @@ impl Lines for Text<'_> {
 
     fn row_width(&self) -> Option<usize> {
         self.wrap.map(|wrap| wrap.width)
+    }
+
+    fn words(&self) -> Words {
+        self.words
     }
 }
 

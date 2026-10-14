@@ -17,7 +17,7 @@
 use clackatoo_text::Construct;
 
 use crate::motion::{
-    Cells, Class, Lines, Point, Walk, class_at, next_cell, previous_cell, text_end,
+    Cells, Class, Lines, Point, Walk, Words, class_at, next_cell, previous_cell, text_end,
 };
 
 /// How far a bracket object looks for each of its brackets, in cells.
@@ -26,7 +26,8 @@ const BRACKET_SEARCH: usize = 100_000;
 /// A kind of text object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Object {
-    /// `w`: letters, digits and `_`, or a run of other punctuation.
+    /// `w`: letters, digits and `_`, with what the file's language adds
+    /// to them, or a run of other punctuation.
     Word,
     /// `W`: anything but blanks.
     BigWord,
@@ -67,18 +68,11 @@ impl Object {
     /// module docs).
     pub(crate) fn find(self, lines: &impl Lines, at: Point, inner: bool) -> Option<(Point, Point)> {
         match self {
-            Self::Word => Some(word(lines.row(at.line).as_deref(), at, inner, |class| {
-                class
-            })),
-            Self::BigWord => Some(word(
-                lines.row(at.line).as_deref(),
-                at,
-                inner,
-                |class| match class {
-                    Class::Blank => Class::Blank,
-                    Class::Word | Class::Punctuation => Class::Word,
-                },
-            )),
+            Self::Word | Self::BigWord => {
+                let row = lines.row(at.line);
+                let big = self == Self::BigWord;
+                Some(word(row.as_deref(), at, inner, big, lines.words()))
+            }
             Self::Quote(quote) => quoted(lines.row(at.line).as_deref(), at, quote, inner),
             Self::Bracket { open, close } => bracketed(lines, at, open, close, inner),
             Self::Block | Self::Code(_) => None,
@@ -86,15 +80,19 @@ impl Object {
     }
 }
 
-/// `iw` and `aw`, or `iW` and `aW` with `classify` lumping punctuation in
-/// with letters.
+/// `iw` and `aw`, with `words` part of words; or if `big`, `iW` and
+/// `aW`, lumping punctuation in with letters.
 fn word(
     row: Option<&impl Cells>,
     at: Point,
     inner: bool,
-    classify: impl Fn(Class) -> Class,
+    big: bool,
+    words: Words,
 ) -> (Point, Point) {
-    let class = |col| classify(class_at(row, col));
+    let class = |col| match class_at(row, col, words) {
+        Class::Punctuation if big => Class::Word,
+        class => class,
+    };
     let end = text_end(row).max(at.col + 1);
     let run = |col: usize| {
         let wanted = class(col);
@@ -126,7 +124,7 @@ fn word(
 /// `start` to `last`, with the blanks after it, or if there are none, the
 /// blanks before it, as `aw` and `a"` take.
 fn with_blanks(row: Option<&impl Cells>, start: usize, last: usize, end: usize) -> (usize, usize) {
-    let blank = |col| class_at(row, col) == Class::Blank;
+    let blank = |col| class_at(row, col, Words::NONE) == Class::Blank;
     let mut after = last;
     while let Some(next) = next_cell(row, after).filter(|&n| n < end && blank(n)) {
         after = next;

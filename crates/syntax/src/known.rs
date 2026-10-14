@@ -11,6 +11,10 @@
 //! 851e865, and those for indenting from nvim-treesitter at cf12346, the
 //! last of its `master` branch before its rewrite on `main`, with the
 //! queries they inherit put first, as Neovim reads them.
+//!
+//! The characters each adds to its words are those Neovim's own ftplugin
+//! adds to `iskeyword` for it: only CSS's `-`. Bash's `-` and `:` are
+//! only its syntax file's, for highlighting, and Go's `.` only for `K`.
 
 use crate::install::{Download, Known};
 
@@ -22,6 +26,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-bash v0.25.1",
         extensions: &["sh", "bash"],
         filenames: &[".bashrc", ".bash_profile", ".profile"],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-bash/releases/download/v0.25.1/tree-sitter-bash.wasm",
             sha256: "8292919c88a0f7d3fb31d0cd0253ca5a9531bc1ede82b0537f2c63dd8abe6a7a",
@@ -42,6 +47,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-c v0.24.2",
         extensions: &["c", "h"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-c/releases/download/v0.24.2/tree-sitter-c.wasm",
             sha256: "83e8d7902b9d7f8c7c5cd4bd9acb5c7eb5faf42c09f85546b183964d3b5f48f9",
@@ -65,6 +71,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-css v0.25.0",
         extensions: &["css"],
         filenames: &[],
+        word: "-",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-css/releases/download/v0.25.0/tree-sitter-css.wasm",
             sha256: "8a23977fe271357cce6f254ef88c9bebf3854602d8046605aef6a45c02135c59",
@@ -85,6 +92,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-go v0.25.0",
         extensions: &["go"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-go/releases/download/v0.25.0/tree-sitter-go.wasm",
             sha256: "9504573f352b20be7f2f1911754d710622aedc15afff16d5ed8fb5645681aee7",
@@ -108,6 +116,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-html v0.23.2",
         extensions: &["html", "htm"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-html/releases/download/v0.23.2/tree-sitter-html.wasm",
             sha256: "c48fcd82c7ea8bf943180088ba7f28c48b2bb5287874179168bf9d31e394cf85",
@@ -131,6 +140,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-javascript v0.25.0",
         extensions: &["js", "mjs", "cjs", "jsx"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-javascript/releases/download/v0.25.0/tree-sitter-javascript.wasm",
             sha256: "5fb488d0cabb4775a594bab85682de5ad6ce83c0d6ac997a9f82dd084d571240",
@@ -176,6 +186,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-json v0.24.8",
         extensions: &["json"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-json/releases/download/v0.24.8/tree-sitter-json.wasm",
             sha256: "d2119fb98d5912719b13f9458574f8608d2d29dfbe45f6be1f860ea1fe2a2405",
@@ -196,6 +207,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter-grammars/tree-sitter-lua v0.5.0",
         extensions: &["lua", "luau"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter-grammars/tree-sitter-lua/releases/download/v0.5.0/tree-sitter-lua.wasm",
             sha256: "df08a1704e504c70b8dba4a3e6f8e0c99a4fb94e1b1693d2969f53141d09f0d4",
@@ -219,6 +231,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-python v0.25.0",
         extensions: &["py", "pyi"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-python/releases/download/v0.25.0/tree-sitter-python.wasm",
             sha256: "16108b50df4ee9a30168794252ab55e7c93bfc5765d7fa0aa3e335752c515f47",
@@ -242,6 +255,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-rust v0.24.2",
         extensions: &["rs"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-rust/releases/download/v0.24.2/tree-sitter-rust.wasm",
             sha256: "24c89bd9252255e4aebbcbd7d2d308bd92c86dd95a130fdc80efa49577b8d738",
@@ -265,6 +279,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter-grammars/tree-sitter-toml v0.7.0",
         extensions: &["toml"],
         filenames: &["Cargo.lock"],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter-grammars/tree-sitter-toml/releases/download/v0.7.0/tree-sitter-toml.wasm",
             sha256: "1ac6a83826c35a68857f8325e00c78f6bcbef4eb6db3931a6cf3041f76e5e09f",
@@ -288,6 +303,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-typescript v0.23.2",
         extensions: &["ts", "mts", "cts"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-typescript/releases/download/v0.23.2/tree-sitter-typescript.wasm",
             sha256: "778025db5a8be0e70f8ccc3671e486dfeddd048c25d9e8a70c26de2e1bf6f97d",
@@ -329,6 +345,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter/tree-sitter-typescript v0.23.2",
         extensions: &["tsx"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter/tree-sitter-typescript/releases/download/v0.23.2/tree-sitter-tsx.wasm",
             sha256: "79e5da75ea62855a0cd67177685f0164eac87d5f630b3cbe1e0a099751ad30f8",
@@ -382,6 +399,7 @@ pub const KNOWN: &[Known] = &[
         source: "tree-sitter-grammars/tree-sitter-yaml v0.7.2",
         extensions: &["yml", "yaml"],
         filenames: &[],
+        word: "",
         wasm: Download {
             url: "https://github.com/tree-sitter-grammars/tree-sitter-yaml/releases/download/v0.7.2/tree-sitter-yaml.wasm",
             sha256: "0a0e5ebcfeb0b2bf272d071396eeed107b2c4b2617b69d5959b13f78b357a4d6",

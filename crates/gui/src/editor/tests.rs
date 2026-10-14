@@ -19,6 +19,7 @@ use crate::render::{HighlightKind, Ink};
 mod indent;
 mod snippets;
 mod substitute;
+mod words;
 mod wrapped;
 
 struct Setup {

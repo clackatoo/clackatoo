@@ -10,7 +10,7 @@ use clackatoo_protocol::{
     Author, BufferId, BufferSnapshot, BufferUpdate, Change, Content, Edit, Error, Event, OpenFile,
     OpenFiles, PaneId, Response, Resume, ServerMessage, frame,
 };
-use clackatoo_syntax::{Found, Highlighted, Syntax};
+use clackatoo_syntax::{Found, Highlighted, Syntax, pack};
 use clackatoo_text::{AgentHunks, Highlights, Hunks, Maker};
 use mio::Token;
 
@@ -28,6 +28,10 @@ pub(super) struct BufferSlot {
     highlights: Highlights,
     /// Whether it's being parsed: its language has a pack.
     pub(super) parsed: bool,
+    /// The characters its words are made of besides letters, digits and
+    /// `_`, as its language says, as of when its pack was last looked for:
+    /// what [`BufferUpdate::Language`] tells windows.
+    word: String,
     /// How its language server knows it, while it's open in one.
     pub(super) server: Option<Opened>,
     /// Whether it's being compared with its file's text in the index.
@@ -84,6 +88,7 @@ impl BufferSlot {
             viewers: Vec::new(),
             highlights: Highlights::new(),
             parsed: false,
+            word: String::new(),
             server: None,
             compared: false,
             git_dir: None,
@@ -193,13 +198,18 @@ impl Daemon {
         id: BufferId,
         resume: Option<Resume>,
     ) -> Result<(), Error> {
+        let parsed = self.buffers.get(&id).ok_or(Error::NoSuchBuffer(id))?.parsed;
+        // Its language may have been installed since it was opened, or its
+        // pack changed: looked at before the client follows it, so what
+        // its words are made of comes to it after its text, not before.
+        if parsed {
+            self.find_words(id);
+        } else {
+            self.parse_buffer(id);
+        }
         let slot = self.buffers.get_mut(&id).ok_or(Error::NoSuchBuffer(id))?;
         if !slot.viewers.contains(&token) {
             slot.viewers.push(token);
-        }
-        if !slot.parsed {
-            // Its language may have been installed since it was opened.
-            self.parse_buffer(id);
         }
         // Its server may have stopped, or it came through an upgrade,
         // which servers don't.
@@ -259,6 +269,10 @@ impl Daemon {
                 diagnostics: opened.diagnostics.all().to_vec(),
             });
         let features = self.server_features(id).map(BufferUpdate::Features);
+        // A window reads a buffer as plain text until told otherwise.
+        let language = (!slot.word.is_empty()).then(|| BufferUpdate::Language {
+            word: slot.word.clone(),
+        });
         // A window catching up may still have hunks gone meanwhile.
         let resumed = matches!(snapshot, BufferUpdate::Resumed { .. });
         self.tell(token, id, snapshot);
@@ -270,7 +284,8 @@ impl Daemon {
                 chats: Vec::new(),
             })
         });
-        let after = (highlights.into_iter())
+        let after = (language.into_iter())
+            .chain(highlights)
             .chain(diagnostics)
             .chain(hunks)
             .chain(agents);
@@ -593,8 +608,10 @@ impl Daemon {
     }
 
     /// Has buffer `id` parsed, if its language has a pack, starting the
-    /// thread that parses if it's the first.
+    /// thread that parses if it's the first; and works out what its words
+    /// are made of, as [`find_words`](Self::find_words) does.
     pub(super) fn parse_buffer(&mut self, id: BufferId) {
+        self.find_words(id);
         let (Some(languages), Some(slot)) = (&mut self.languages, self.buffers.get(&id)) else {
             return;
         };
@@ -610,6 +627,28 @@ impl Daemon {
         if let Some(slot) = self.buffers.get_mut(&id) {
             slot.parsed = true;
         }
+    }
+
+    /// Works out what buffer `id`'s words are made of besides letters,
+    /// digits and `_`: as its pack says, if packs are looked for and it has
+    /// one, or else as clackatoo's own pack of its language says, which
+    /// needs no grammar. Tells the windows following it if that's changed,
+    /// as it may have with its file's name, or a pack installed.
+    pub(super) fn find_words(&mut self, id: BufferId) {
+        let Some(slot) = self.buffers.get_mut(&id) else {
+            return;
+        };
+        let path = slot.buffer.path();
+        let pack = (self.languages.as_mut()).and_then(|languages| languages.find(path));
+        let word = pack::word_of(pack.as_deref(), path);
+        if word == slot.word {
+            return;
+        }
+        word.clone_into(&mut slot.word);
+        let update = BufferUpdate::Language {
+            word: slot.word.clone(),
+        };
+        self.tell_viewers(id, None, &update);
     }
 
     /// The thread that parses buffers, started if it's the first need of

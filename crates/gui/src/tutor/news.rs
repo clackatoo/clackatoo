@@ -245,6 +245,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "finder",
         what: "<Space>bs lists the file's symbols, <Space>ps finds the project's, and grn asks the language server first",
     },
+    News {
+        id: "wordchars",
+        date: "2026-10-14",
+        lesson: "words",
+        what: "Names such as margin-top are one word to w, e, b, iw, * and completion, in languages whose packs say so",
+    },
 ];
 
 impl News {

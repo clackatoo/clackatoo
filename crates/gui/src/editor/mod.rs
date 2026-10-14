@@ -69,7 +69,7 @@ use winit::keyboard::{Key, NamedKey};
 use actions::{ActionMenu, MenuKey, MenuStroke};
 use case::Recase;
 pub use complete::Ranking;
-use complete::{Completion, Resolved, is_word};
+use complete::{Completion, Resolved};
 /// The daemon's side of a buffer, for the desk's tests.
 #[cfg(test)]
 pub(crate) use copy::tests::Daemon;
@@ -95,7 +95,7 @@ use crate::colors;
 use crate::input::KeyPress;
 use crate::keymap::Chord;
 use crate::motion::{
-    Class, Cursor, Lines, Motion, Point, Reach, RowAt, before, class_at, last_row, row_at,
+    Class, Cursor, Lines, Motion, Point, Reach, RowAt, Words, before, class_at, last_row, row_at,
     rows_down, rows_up,
 };
 use crate::objects::Object;
@@ -802,6 +802,7 @@ impl Editor {
         let typing = (self.mode == Mode::Insert).then_some(self.cursor.at);
         Text::new(copy.text(), self.indent.tabstop)
             .hiding(self.hide)
+            .with_words(copy.words())
             .wrapping(self.wrapping.at(self.text_width().max(1)), typing)
             .keeping(&self.kept, self.buffer, copy.revision(), copy.line_log())
     }
@@ -1909,7 +1910,7 @@ impl Editor {
                 let big = motion == Motion::BigWordStart;
                 let row = text.row(at.line);
                 let class = |col| {
-                    let class = class_at(row.as_deref(), col);
+                    let class = class_at(row.as_deref(), col, text.words());
                     if big && class == Class::Punctuation {
                         Class::Word
                     } else {
@@ -2651,6 +2652,8 @@ impl Editor {
             _ => None,
         };
         let features = copy.features();
+        let words = copy.words();
+        let is_word = |ch| words.is_word(ch);
         let asks = |list: Option<&Vec<char>>, ch| list.is_some_and(|list| list.contains(&ch));
         let completes = typed.filter(|&ch| asks(features.completion.as_ref(), ch));
         let signs = typed.filter(|&ch| asks(features.signature.as_ref(), ch));
@@ -2740,7 +2743,8 @@ impl Editor {
         let text = self.text(copy);
         let at = text.byte_at(self.cursor.at);
         let typed = text.rope().get_byte_slice(start..at)?.to_string();
-        typed.chars().all(is_word).then_some(typed)
+        let words = text.words();
+        typed.chars().all(|ch| words.is_word(ch)).then_some(typed)
     }
 
     /// Narrows the menu down to the word typed, or closes it, and forgets
@@ -3222,7 +3226,7 @@ impl Editor {
         } else {
             Matching::Typed(self.case)
         };
-        let compiled = match self.pattern(&pattern, matching, shared) {
+        let compiled = match self.pattern(&pattern, matching, copy, shared) {
             Ok(compiled) => compiled,
             Err(why) => {
                 self.status = Some(why);
@@ -3243,7 +3247,7 @@ impl Editor {
             self.cursor = Cursor::new(text.point_of(found.start));
         } else {
             self.found = None;
-            self.status = Some(format!("{pattern} isn't in the file"));
+            self.status = Some(compiled.not_found(format!("{pattern} isn't in the file")));
             self.fail();
         }
     }
@@ -3256,9 +3260,9 @@ impl Editor {
         // The word under the cursor, or the next on its line, as Vim's.
         let here = text.byte_at(self.cursor.at);
         let line_end = text.line_end(self.cursor.at.line);
-        let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+        let words = text.words();
         let next = (text.slice(here, line_end).char_indices())
-            .find(|&(_, ch)| is_word(ch))
+            .find(|&(_, ch)| words.is_word(ch))
             .map(|(at, _)| here + at);
         let Some((start, end)) = next.map(|at| word_at(&text, at)) else {
             self.status = Some("no word under the cursor".into());
@@ -4318,6 +4322,7 @@ impl Editor {
         let text = match &previewed {
             Some(rope) => Text::new(rope, self.indent.tabstop)
                 .hiding(self.hide)
+                .with_words(copy.words())
                 .wrapping(self.wrapping.at(self.text_width().max(1)), None),
             None => self.text(copy),
         };
@@ -4838,7 +4843,9 @@ fn can_fail(motion: Motion) -> bool {
 }
 
 /// Where the word before `byte` starts, on its line, taking the blanks
-/// after it too, as Ctrl+W deletes back to in insert mode.
+/// after it too, as Ctrl+W deletes back to in insert mode: a word as `w`
+/// reads it, with what the file's language adds to letters, digits and
+/// `_`.
 fn word_before(text: &Text<'_>, byte: usize) -> usize {
     let line = text.point_of(byte).line;
     let line_start = text.shown_start(line);
@@ -4849,7 +4856,8 @@ fn word_before(text: &Text<'_>, byte: usize) -> usize {
     }
     let before = |at: usize| text.slice(previous_char(text, at), at);
     let blank = |at: usize| before(at).chars().all(char::is_whitespace);
-    let word = |at: usize| (before(at).chars()).all(|ch| ch.is_alphanumeric() || ch == '_');
+    let words = text.words();
+    let word = |at: usize| (before(at).chars()).all(|ch| words.is_word(ch));
     let mut start = byte;
     while start > line_start && blank(start) {
         start = previous_char(text, start);
@@ -4927,6 +4935,7 @@ struct Compiled {
     source: String,
     matching: Matching,
     tilde: String,
+    words: Words,
     pattern: Pattern,
 }
 
@@ -4943,10 +4952,12 @@ struct Searched {
 }
 
 /// Where the word at byte `at` of `text` starts and ends: letters, digits
-/// and `_`, as `w` reads them. Both are `at` if there's none there.
+/// and `_`, and what its language adds to them, as `w` reads them. Both
+/// are `at` if there's none there.
 fn word_at(text: &Text<'_>, at: usize) -> (usize, usize) {
     let rope = text.rope();
-    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let words = text.words();
+    let is_word = |ch| words.is_word(ch);
     let char_at = rope.byte_to_char(at.min(rope.len_bytes()));
     let mut start = char_at;
     while start > 0 && is_word(rope.char(start - 1)) {
@@ -4963,11 +4974,13 @@ fn word_at(text: &Text<'_>, at: usize) -> (usize, usize) {
 }
 
 /// Where the word ending at byte `at` of `text` starts: letters, digits
-/// and `_`, as `w` reads them. `at` if there's none there.
+/// and `_`, and what its language adds to them, as `w` reads them. `at` if
+/// there's none there.
 fn word_start(text: &Text<'_>, at: usize) -> usize {
     let rope = text.rope();
+    let words = text.words();
     let mut start = rope.byte_to_char(at.min(rope.len_bytes()));
-    while start > 0 && is_word(rope.char(start - 1)) {
+    while start > 0 && words.is_word(rope.char(start - 1)) {
         start -= 1;
     }
     rope.char_to_byte(start)
@@ -5013,10 +5026,12 @@ fn find(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<pa
                 .chars()
                 .next()
                 .map_or(1, char::len_utf8);
+        // A search past the cursor that gave up may have missed the next,
+        // so doesn't go round to one before it.
         return (after <= text.len())
             .then(|| pattern.find_at(text, after))
             .flatten()
-            .or_else(|| pattern.find_at(text, 0));
+            .or_else(|| (!pattern.gave_up()).then(|| pattern.find_at(text, 0))?);
     }
     let (mut before, mut last) = (None, None);
     let mut at = 0;
@@ -5032,6 +5047,10 @@ fn find(text: &str, pattern: &Pattern, from: usize, backward: bool) -> Option<pa
         } else {
             found.end + text[found.end..].chars().next().map_or(1, char::len_utf8)
         };
+    }
+    // Nor does one that gave up say which is nearest before it.
+    if pattern.gave_up() {
+        return None;
     }
     before.or(last)
 }

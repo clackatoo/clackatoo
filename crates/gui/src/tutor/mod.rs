@@ -34,6 +34,7 @@ pub(crate) use state::State;
 const SOURCES: &[(&str, &str)] = &[
     ("basics", include_str!("lessons/basics.md")),
     ("text-objects", include_str!("lessons/text-objects.md")),
+    ("words", include_str!("lessons/words.md")),
     ("registers", include_str!("lessons/registers.md")),
     ("substitute", include_str!("lessons/substitute.md")),
     ("wrap", include_str!("lessons/wrap.md")),

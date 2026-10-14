@@ -21,11 +21,10 @@
 //! does.
 
 use clackatoo_text::Edit;
-use regex::CaptureLocations;
 
 use super::case::Recase;
 use super::marked::Marked;
-use super::pattern::{Found, Matching, Pattern};
+use super::pattern::{Found, Locations, Matching, Pattern, TOO_COMPLEX};
 use super::substitute::{self, Bytes, Flags, Replacement};
 use super::{BufferCopy, Done, Editor, Prompt, Register, Searched, Shared, Text, Wrote, keys};
 use crate::keymap::read_macro;
@@ -503,7 +502,7 @@ impl Editor {
         copy: &BufferCopy,
         shared: &Shared,
     ) -> Result<i64, String> {
-        let pattern = self.compile(source, None, shared)?;
+        let pattern = self.compile(source, None, copy, shared)?;
         self.remember_search(source);
         let (whole, len) = self.haystack(copy);
         let hay = &whole[..len];
@@ -532,7 +531,8 @@ impl Editor {
                 .or_else(|| pattern.find_at(hay, 0))
                 .map(|found| found.start)
         };
-        let found = found.ok_or_else(|| format!("{source} isn't in the file"))?;
+        let found =
+            found.ok_or_else(|| pattern.not_found(format!("{source} isn't in the file")))?;
         Ok(starts_line(found).cast_signed())
     }
 
@@ -580,6 +580,7 @@ impl Editor {
         &self,
         source: &str,
         exact: Option<bool>,
+        copy: &BufferCopy,
         shared: &Shared,
     ) -> Result<Pattern, String> {
         let matching = match exact {
@@ -587,19 +588,21 @@ impl Editor {
             Some(false) => Matching::Ignore,
             None => Matching::Typed(self.case),
         };
-        self.pattern(source, matching, shared)
+        self.pattern(source, matching, copy, shared)
     }
 
     /// `source` compiled, matching case as `matching` says, with `~` the
-    /// last replacement. The last compiled is kept, so a `:g` compiles its
-    /// command's pattern once, not on every line, and a preview once, not
-    /// at every key.
+    /// last replacement, and words as `copy`'s language reads them. The
+    /// last compiled is kept, so a `:g` compiles its command's pattern
+    /// once, not on every line, and a preview once, not at every key.
     pub(super) fn pattern(
         &self,
         source: &str,
         matching: Matching,
+        copy: &BufferCopy,
         shared: &Shared,
     ) -> Result<Pattern, String> {
+        let words = copy.words();
         let tilde = shared
             .substituted
             .as_ref()
@@ -609,14 +612,16 @@ impl Editor {
             && kept.source == source
             && kept.matching == matching
             && kept.tilde == tilde
+            && kept.words == words
         {
             return Ok(kept.pattern.clone());
         }
-        let pattern = Pattern::new(source, matching, tilde)?;
+        let pattern = Pattern::new(source, matching, tilde, words)?;
         *kept = Some(super::Compiled {
             source: source.to_owned(),
             matching,
             tilde: tilde.to_owned(),
+            words,
             pattern: pattern.clone(),
         });
         Ok(pattern)
@@ -678,7 +683,7 @@ impl Editor {
         )?;
         let searched = searched || flags.last_search;
         let (pattern, replacement) = self.substitution(typed, searched, last.as_ref())?;
-        let compiled = self.compile(&pattern, flags.exact, shared)?;
+        let compiled = self.compile(&pattern, flags.exact, copy, shared)?;
         let with = Replacement::new(&replacement)?;
         shared.substituted = Some(Substituted {
             pattern: pattern.clone(),
@@ -704,15 +709,21 @@ impl Editor {
             start: start - base,
             end: (end - base).min(hay.len()),
         };
-        let not_found = || format!("{pattern} isn't in the lines given");
+        let not_found = || compiled.not_found(format!("{pattern} isn't in the lines given"));
+        // Nothing found, or only some of what's there, as when a search
+        // gave up, which nothing is done to: said, unless `quiet` and it
+        // found nothing.
+        let none = |quiet: bool| {
+            if quiet && !compiled.gave_up() {
+                Ok(())
+            } else {
+                Err(not_found())
+            }
+        };
         if flags.count_only {
             let (count, on) = count_matches(hay, &compiled, bytes, flags.all);
-            if count == 0 {
-                return if flags.quiet || self.in_global {
-                    Ok(())
-                } else {
-                    Err(not_found())
-                };
+            if count == 0 || compiled.gave_up() {
+                return none(flags.quiet || self.in_global);
             }
             self.counted_matches.0 += count;
             self.counted_matches.1 += on;
@@ -735,13 +746,7 @@ impl Editor {
                     &replacement,
                 )
                 .map_or_else(
-                    || {
-                        if flags.quiet {
-                            Ok(())
-                        } else {
-                            Err(not_found())
-                        }
-                    },
+                    || none(flags.quiet),
                     |()| {
                         self.show_asked(copy);
                         Ok(())
@@ -750,12 +755,8 @@ impl Editor {
         }
         let at = (base, total);
         let replaced = substitute::replace(hay, at, &compiled, &with, bytes, flags.all);
-        if replaced.count == 0 {
-            return if flags.quiet || self.in_global {
-                Ok(())
-            } else {
-                Err(not_found())
-            };
+        if replaced.count == 0 || compiled.gave_up() {
+            return none(flags.quiet || self.in_global);
         }
         self.make(replaced.edit, copy);
         if let Some(end) = replaced.last_end {
@@ -819,7 +820,7 @@ impl Editor {
             pattern,
             bytes,
             (all, with.uses_groups()),
-            &mut |found, locations: &CaptureLocations| {
+            &mut |found, locations: &Locations| {
                 let mut replacement = String::new();
                 with.expand(hay, pattern, (found, locations), &mut replacement);
                 asked.push_back(Asked {
@@ -830,7 +831,9 @@ impl Editor {
                 true
             },
         );
-        if asked.is_empty() {
+        // Nothing's asked about where a search gave up, as only some of
+        // the matches were found.
+        if asked.is_empty() || pattern.gave_up() {
             return None;
         }
         self.prompt = Some(Prompt::Confirm(Confirming {
@@ -1020,12 +1023,16 @@ impl Editor {
         if command.trim().is_empty() {
             return Err(":g needs a command to do on each line, as :g/pattern/d".into());
         }
-        let compiled = self.compile(&pattern, None, shared)?;
+        let compiled = self.compile(&pattern, None, copy, shared)?;
         self.remember_search(&pattern);
         let starts = {
             let (whole, len) = self.haystack(copy);
             matching_lines(&whole[..len], &compiled, &self.text(copy), lines, invert)
         };
+        // Nor are only some of the lines that match acted on.
+        if compiled.gave_up() {
+            return Err(TOO_COMPLEX.into());
+        }
         if starts.is_empty() {
             return Err(if invert {
                 format!("every line has {pattern}")

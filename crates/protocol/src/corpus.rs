@@ -26,7 +26,7 @@ use clackatoo_text::{
 };
 
 use crate::frame::{self, FrameDecoder, FrameError};
-use crate::wire::{EXITED, FALLBACKS, HOVER, PHONE_TERMINALS, SYMBOLS};
+use crate::wire::{EXITED, FALLBACKS, HOVER, PHONE_TERMINALS, SYMBOLS, WORDS};
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
     Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
@@ -681,6 +681,15 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ),
     ]);
     samples.extend(symbols(buffer).into_iter().map(|sample| (SYMBOLS, sample)));
+    // What a buffer's words are made of, in a language with names such as
+    // `margin-top`.
+    samples.push((
+        WORDS,
+        Server(ServerMessage::Event(Event::Buffer {
+            buffer,
+            update: BufferUpdate::Language { word: "-?".into() },
+        })),
+    ));
     samples
 }
 

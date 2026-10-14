@@ -5196,6 +5196,153 @@ fn a_hovers_code_is_coloured_after_in_each_blocks_language() {
     assert_eq!(raw_answer(&mut raw).0, 2);
 }
 
+/// The next update saying what a buffer's words are made of, skipping
+/// others.
+fn next_words(client: &mut Client) -> String {
+    loop {
+        if let BufferUpdate::Language { word } = next_buffer_update(client) {
+            return word;
+        }
+    }
+}
+
+#[test]
+fn a_buffers_language_says_what_its_words_are_made_of() {
+    // A pack that says, with no grammar; and none for CSS, which is as
+    // clackatoo's own CSS pack says.
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let pack = dir.join("languages/dash");
+        std::fs::create_dir_all(&pack).unwrap();
+        let toml = "grammar = \"dash\"\nextensions = [\"dash\"]\nword = [\"-\", \"?\"]\n";
+        std::fs::write(pack.join("language.toml"), toml).unwrap();
+        config.languages = Some(dir.join("languages"));
+    });
+    let dir = daemon.dir.path();
+    let root = project(dir);
+    std::fs::write(root.join("a.dash"), "odd.libcap-tools\n").unwrap();
+    std::fs::write(root.join("b.css"), "a { margin-top: 0; }\n").unwrap();
+    let mut client = daemon.client();
+    // Said just after the text.
+    let dash = open_attached(&mut client, dir, "p/a.dash");
+    assert_eq!(
+        next_buffer_update(&mut client),
+        BufferUpdate::Language { word: "-?".into() }
+    );
+    let pane = (client.new_workspace(None, open_file(dir, "p/b.css"))).unwrap();
+    let css = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, css);
+    assert_eq!(next_words(&mut client), "-");
+
+    // Renamed into plain text, its words are plain text's, said after it's
+    // moved; and back, they're the language's again.
+    let path = |name: &str| root.join(name).display().to_string();
+    let moving = |from: &str, to: &str| FileOp::Move {
+        from: path(from),
+        to: path(to),
+        overwrite: None,
+        expect: None,
+    };
+    // What the buffer's told, in order, as the file moves: before the
+    // answer comes.
+    let mut said = |id, op| {
+        client.file_op(id, op).unwrap();
+        let mut said = Vec::new();
+        loop {
+            match client.next_event().expect("an event") {
+                Event::Buffer {
+                    update: BufferUpdate::Moved(_),
+                    ..
+                } => said.push(None),
+                Event::Buffer {
+                    update: BufferUpdate::Language { word },
+                    ..
+                } => said.push(Some(word)),
+                Event::FileOp { id: of, outcome } if of == id => {
+                    assert_eq!(outcome, Ok(()));
+                    return said;
+                }
+                _ => {}
+            }
+        }
+    };
+    assert_eq!(
+        said(1, moving("a.dash", "plain.txt")),
+        [None, Some(String::new())]
+    );
+    assert_eq!(
+        said(2, moving("plain.txt", "a.dash")),
+        [None, Some("-?".into())]
+    );
+
+    // A window of this version reads it after a snapshot; one from before
+    // it, asking first, is never sent it.
+    assert_eq!(words_heard(&daemon, dash, wire::WORDS), ["-?"]);
+    assert_eq!(words_heard(&daemon, dash, wire::HOVER), [""; 0]);
+
+    // A pack installed after a file's opened: a window attaching then is
+    // told after the text, and the window following it already is told.
+    std::fs::write(root.join("c.late"), "late-comer\n").unwrap();
+    let late = open_attached(&mut client, dir, "p/c.late");
+    let pack = dir.join("languages/late");
+    std::fs::create_dir_all(&pack).unwrap();
+    let toml = "grammar = \"late\"\nextensions = [\"late\"]\nword = \"-\"\n";
+    std::fs::write(pack.join("language.toml"), toml).unwrap();
+    assert_eq!(words_heard(&daemon, late, wire::WORDS), ["-"]);
+    assert_eq!(next_words(&mut client), "-");
+}
+
+#[test]
+fn css_words_need_no_grammar_nor_packs() {
+    // No packs are looked for here, as when the grammars can't be run.
+    let daemon = TestDaemon::start();
+    let dir = daemon.dir.path();
+    std::fs::write(dir.join("b.css"), "a { margin-top: 0; }\n").unwrap();
+    std::fs::write(dir.join("c.txt"), "margin-top\n").unwrap();
+    let mut client = daemon.client();
+    let css = open_attached(&mut client, dir, "b.css");
+    assert_eq!(next_words(&mut client), "-");
+    let txt = open_attached(&mut client, dir, "c.txt");
+    assert_eq!(words_heard(&daemon, txt, wire::WORDS), [""; 0]);
+    assert_eq!(words_heard(&daemon, css, wire::WORDS), ["-"]);
+}
+
+/// What a window of protocol `wire` attaching to `buffer` is told its words
+/// are made of, up to the answer to a question asked after.
+fn words_heard(daemon: &TestDaemon, buffer: BufferId, wire: u32) -> Vec<String> {
+    let mut raw = Raw::open(daemon, wire);
+    raw.hello(wire);
+    raw.request(Request::AttachBuffer {
+        buffer,
+        window: 9,
+        resume: None,
+    });
+    let query = ClientMessage::Query {
+        buffer,
+        id: 1,
+        version: 0,
+        at: 0,
+        query: Query::Definition,
+    };
+    raw.send(&frame::encode(wire, &query).unwrap());
+    let mut snapshot = false;
+    let mut words = Vec::new();
+    loop {
+        let ServerMessage::Event(Event::Buffer { update, .. }) = raw.next().expect("an answer")
+        else {
+            continue;
+        };
+        match update {
+            BufferUpdate::Answer { .. } => return words,
+            BufferUpdate::Snapshot(_) => snapshot = true,
+            BufferUpdate::Language { word } => {
+                assert!(snapshot, "{wire}: {word:?} before the snapshot");
+                words.push(word);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[test]
 fn what_a_hover_is_about_moves_with_edits_made_while_the_server_worked() {
     let daemon = with_fake_language_server(|dir| {

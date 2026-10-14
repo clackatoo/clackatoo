@@ -298,8 +298,11 @@ impl Daemon {
             .map(|(&id, _)| id)
             .collect();
         for id in shown {
+            // A pack installed may say other of the words of one parsed.
             if self.buffers.get(&id).is_some_and(|slot| !slot.parsed) {
                 self.parse_buffer(id);
+            } else {
+                self.find_words(id);
             }
             self.open_in_server(id);
         }

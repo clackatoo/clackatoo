@@ -13,10 +13,9 @@
 //! joins the lines but leaves the file ending with one.
 
 use clackatoo_text::Edit;
-use regex::CaptureLocations;
 
 use super::case::Recase;
-use super::pattern::{Found, Pattern};
+use super::pattern::{Found, Locations, Pattern};
 
 /// What `:s` is typed with after its name: `/pattern/replacement/flags`
 /// and a count, any of it left out.
@@ -277,7 +276,7 @@ impl Replacement {
         &self,
         text: &str,
         pattern: &Pattern,
-        (found, locations): (Found, &CaptureLocations),
+        (found, locations): (Found, &Locations),
         out: &mut String,
     ) {
         let group = |number: usize| {
@@ -338,7 +337,7 @@ pub(crate) fn each_match(
     pattern: &Pattern,
     lines: Bytes,
     (all, groups): (bool, bool),
-    visit: &mut dyn FnMut(Found, &CaptureLocations) -> bool,
+    visit: &mut dyn FnMut(Found, &Locations) -> bool,
 ) {
     let mut locations = pattern.locations();
     let line_end = |from: usize| text[from..].find('\n').map_or(text.len(), |at| from + at);
@@ -496,11 +495,12 @@ pub(crate) fn report(count: usize, lines: usize, matched: bool) -> String {
 mod tests {
     use super::*;
     use crate::editor::pattern::Matching;
+    use crate::motion::Words;
 
     /// `:s/pattern/replacement/`, with `g` if `all`, on every line of
     /// `text`, as Vim does it.
     fn substitute(text: &str, pattern: &str, replacement: &str, all: bool) -> String {
-        let pattern = Pattern::new(pattern, Matching::Exact, "").unwrap();
+        let pattern = Pattern::new(pattern, Matching::Exact, "", Words::NONE).unwrap();
         let replacement = Replacement::new(replacement).unwrap();
         let hay = text.strip_suffix('\n').unwrap_or(text);
         let lines = Bytes {

@@ -20,6 +20,11 @@ pub struct Known {
     pub extensions: &'static [&'static str],
     /// The names of files it's for.
     pub filenames: &'static [&'static str],
+    /// The characters its words are made of besides letters, digits and
+    /// `_`, as its pack's `word` says (see [`Pack::word`]): empty for most.
+    ///
+    /// [`Pack::word`]: crate::pack::Pack::word
+    pub word: &'static str,
     /// The grammar, compiled to WebAssembly.
     pub wasm: Download,
     /// The highlight queries, in the order they go in `highlights.scm`.
@@ -133,7 +138,7 @@ fn manifest(known: &Known) -> String {
         let quoted: Vec<String> = names.iter().map(|name| format!("{name:?}")).collect();
         format!("[{}]", quoted.join(", "))
     };
-    format!(
+    let mut manifest = format!(
         "# Installed by `clackatoo language install`, from {}.\n\
          grammar = {:?}\n\
          extensions = {}\n\
@@ -142,7 +147,11 @@ fn manifest(known: &Known) -> String {
         known.grammar,
         list(known.extensions),
         list(known.filenames),
-    )
+    );
+    if !known.word.is_empty() {
+        let _ = writeln!(manifest, "word = {:?}", known.word);
+    }
+    manifest
 }
 
 /// Writes `name` in `dir`, replacing it whole.
@@ -245,6 +254,12 @@ mod tests {
         assert_eq!(read.grammar, "bash");
         assert_eq!(read.extensions, ["sh", "bash"]);
         assert!(read.filenames.contains(&".bashrc".to_owned()));
+        assert_eq!(read.word, None, "bash's words are as Vim's are");
+        // And CSS's names, with their `-`, are words.
+        let pack = dir.path().join("css");
+        fs::create_dir(&pack).unwrap();
+        fs::write(pack.join("language.toml"), manifest(known("css").unwrap())).unwrap();
+        assert_eq!(Pack::read(&pack).unwrap().word.as_deref(), Some("-"));
     }
 
     #[test]

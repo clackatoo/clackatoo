@@ -291,6 +291,20 @@ pub enum BufferUpdate {
         /// The spans, as bytes of the answer's text, in order.
         spans: Vec<Span>,
     },
+    /// How the buffer's language reads its text, as its language pack
+    /// says. Sent after a snapshot, or the edits since a window last knew
+    /// the buffer, if it reads it other than as plain text does, and again
+    /// whenever that changes, as when its file is renamed into another
+    /// language: until then, and after each snapshot or catching up, a
+    /// window reads the buffer as plain text. Only to a client of protocol
+    /// 78 or later.
+    Language {
+        /// The characters its words are made of besides letters, digits
+        /// and `_`, as Vim's `iskeyword` adds them: `-` in CSS, so `w`, `*`
+        /// and completion take `margin-top` as one word. ASCII
+        /// punctuation, each once, or empty.
+        word: String,
+    },
 }
 
 /// What a buffer's language server does as you type, as it said when it

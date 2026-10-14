@@ -40,11 +40,9 @@ const LEAST_DOCS: usize = 24;
 /// The widest the documentation beside the menu goes, in cells.
 const DOCS_WIDTH: usize = 60;
 
-/// Whether `ch` is part of a word being completed: letters, digits and `_`,
-/// as `w` reads them.
-pub(crate) fn is_word(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
-}
+/// The most bytes before the word an item is put in place of are looked
+/// back over, for the start of what it names (see [`already_there`]).
+const MOST_BEFORE: usize = 256;
 
 /// Completion items ranked against what's typed: those that match it,
 /// best first, by how well they match, then as the language server sorts
@@ -420,13 +418,10 @@ impl Completion {
         expand: impl FnOnce(&Snippet) -> Expanded,
     ) -> Option<Result<Accepted, String>> {
         let item = self.item(self.picked()?)?;
-        // Where the server said, if it's not past the cursor or on a line
-        // before, or else where the word starts.
         let line_start = text.line_to_byte(text.byte_to_line(cursor.min(text.len_bytes())));
-        let start = (item.start.map(|start| self.now(start)))
-            .filter(|&start| start <= cursor && start >= line_start)
-            .unwrap_or(self.start.min(cursor));
-        let (put, offset, stops) = if item.snippet {
+        let said = (item.start.map(|start| self.now(start)))
+            .filter(|&start| start <= cursor && start >= line_start);
+        let (mut put, mut offset, mut stops) = if item.snippet {
             let Expanded { text, stops } = expand(&Snippet::parse(&item.text));
             // The cursor goes to the end of the first place to type, or
             // else to the last, `$0`.
@@ -440,6 +435,23 @@ impl Completion {
         } else {
             (item.text.clone(), item.text.len(), Vec::new())
         };
+        // Where the server said, if it's not past the cursor or on a line
+        // before, or else where the word starts. What's before the word
+        // that the text starts with is already there: only the rest goes
+        // in, so what's replaced is what was typed, as `.` types it again.
+        let start = said.unwrap_or_else(|| {
+            let start = self.start.min(cursor);
+            let there = already_there(text, start, cursor, line_start, &put);
+            if there > 0 && offset >= there && stops.iter().all(|stop| stop.start >= there) {
+                put.drain(..there);
+                offset -= there;
+                for stop in &mut stops {
+                    stop.start -= there;
+                    stop.end -= there;
+                }
+            }
+            start
+        });
         let mut changes = vec![Splice {
             start,
             end: cursor,
@@ -668,6 +680,41 @@ fn kind_name(kind: u8) -> &'static str {
     }
 }
 
+/// How many bytes of `put`, the text going in place of the word from
+/// `start` to `cursor` in `text`, whose line starts at `line_start`, are
+/// there already, just before the word: the most of what's before it that
+/// `put` starts with, followed by the word. So accepting `libcap-tools`
+/// after `libcap-t`, where words have no `-` in them and the server didn't
+/// say where the name starts, puts in only `tools` in place of the `t`,
+/// not all of it. It's never past a blank, the line's start, or
+/// [`MOST_BEFORE`] bytes.
+fn already_there(text: &Rope, start: usize, cursor: usize, line_start: usize, put: &str) -> usize {
+    // A line broken between the word's start and the cursor, by another
+    // window or an agent as the menu was open, has no word to look before.
+    if start < line_start {
+        return 0;
+    }
+    let typed = text.byte_slice(start..cursor).to_string();
+    let reach = put.len().min(MOST_BEFORE);
+    let line = text.byte_slice(line_start..start);
+    let mut back = Vec::new();
+    let mut len = typed.len();
+    for ch in line.chars_at(line.len_chars()).reversed() {
+        len += ch.len_utf8();
+        if ch.is_whitespace() || len > reach {
+            break;
+        }
+        back.push(ch);
+    }
+    let before: String = back.into_iter().rev().collect();
+    // The longest that fits: `a-b-c` after `a-b-` with `c` typed takes all
+    // of `a-b-`, though `b-` alone would fit.
+    (before.char_indices())
+        .map(|(at, _)| &before[at..])
+        .find(|there| put.starts_with(there) && put[there.len()..].starts_with(&typed))
+        .map_or(0, str::len)
+}
+
 /// A change accepting an item makes: bytes `start` to `end` replaced with
 /// `text`, the item's own text if `main`.
 #[derive(Debug)]
@@ -870,6 +917,15 @@ mod tests {
             main: false,
         };
         assert_eq!(splice(&text, vec![cut(1, 3), cut(2, 4)]), None);
+    }
+
+    #[test]
+    fn a_word_whose_line_was_broken_since_is_not_widened() {
+        let mut unplaced = item("bc");
+        unplaced.start = None;
+        let completion = Completion::new(1, 0, vec![unplaced], false);
+        let accepted = completion.accept(&Rope::from_str("a\nb"), 3, plain);
+        assert!(matches!(accepted, Some(Ok(_))));
     }
 
     /// The text after accepting `item` in `text`, with the cursor shown as

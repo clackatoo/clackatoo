@@ -13,17 +13,40 @@
 //! `\c` and `\C`. What the engine can't do is refused, with why: `\1` in
 //! a pattern, `\@` lookaround, `\&` and `\%V`.
 //!
+//! The engine's own word boundaries know only letters, digits and `_`. In
+//! a language whose words have more in them (see [`Words`]), such as CSS's
+//! `-`, `\k` takes those characters too, as `iskeyword` does in Vim; and a
+//! pattern with `\<` or `\>` is matched by fancy-regex instead, which can
+//! look behind and ahead: `\<` is a place with no word's character before
+//! it and one after, and `\>` the other way round. fancy-regex backtracks,
+//! so it gives up past [`MOST_BACKTRACKS`] steps of one search, rather
+//! than hang, and the pattern says so ([`gave_up`](Pattern::gave_up)).
+//! Every other pattern, in every buffer, is the regex crate's alone.
+//!
 //! A line break in the text is `\n`, as in Vim, so `^` and `$` are each
 //! line's start and end, `.` doesn't take a line break, and nor does a
 //! class such as `[^a]` or `\S`.
 
+use std::cell::Cell;
+
 use regex::{CaptureLocations, Regex, RegexBuilder};
 
+use crate::motion::Words;
 use crate::options::Case;
 
 /// The most memory a compiled pattern takes, so a huge one is refused at
 /// once, rather than compiled again at every key of a preview.
 const MOST_COMPILED: usize = 1 << 20;
+
+/// The most steps back one search with fancy-regex takes before giving
+/// up. It takes about one for each place in the text it tries, from the
+/// first the regex crate finds could match, so this is some megabytes of
+/// places that nearly match; a pattern that backtracks badly reaches it in
+/// a fraction of a second, or in tests, built unoptimised, a smaller one.
+pub(crate) const MOST_BACKTRACKS: usize = if cfg!(test) { 500_000 } else { 8_000_000 };
+
+/// What the bar says of a search that gave up.
+pub(crate) const TOO_COMPLEX: &str = "too complex a pattern to search this file with";
 
 /// How a pattern's case is matched, unless `\c` or `\C` in it says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +64,7 @@ pub(crate) enum Matching {
 /// A pattern, ready to match.
 #[derive(Clone, Debug)]
 pub(crate) struct Pattern {
-    regex: Regex,
+    engine: Engine,
     /// The regex's group for each of Vim's `\1` to `\9`, by number from 1.
     groups: Vec<usize>,
     /// The group between `\zs` and `\ze`, which is what matches, if the
@@ -50,6 +73,41 @@ pub(crate) struct Pattern {
     /// Whether it can match a line break, so a match can go on past its
     /// line's end.
     multiline: bool,
+    /// Whether a search with it has given up since it was made.
+    gave_up: Cell<bool>,
+}
+
+/// What matches a pattern.
+#[derive(Clone, Debug)]
+enum Engine {
+    /// The regex crate, for every pattern but those below.
+    Plain(Regex),
+    /// fancy-regex, for a pattern with `\<` or `\>` where words have more
+    /// in them than the regex crate's word boundaries know; with the
+    /// regex crate's for the same pattern without them, which matches
+    /// wherever it does and more, so a search starts no sooner than where
+    /// that finds a match, and none is made where it finds none.
+    Looking {
+        regex: fancy_regex::Regex,
+        loose: Regex,
+    },
+}
+
+/// Where a match's groups are, as [`Pattern::captures_at`] keeps them.
+#[derive(Clone, Debug)]
+pub(crate) enum Locations {
+    Plain(CaptureLocations),
+    Looking(Vec<Option<(usize, usize)>>),
+}
+
+impl Locations {
+    /// Where group `index` of the regex matched, if it did.
+    fn get(&self, index: usize) -> Option<(usize, usize)> {
+        match self {
+            Self::Plain(locations) => locations.get(index),
+            Self::Looking(locations) => locations.get(index).copied().flatten(),
+        }
+    }
 }
 
 /// Where a match is, in bytes of the text: what Vim calls the match, which
@@ -61,11 +119,16 @@ pub(crate) struct Found {
 }
 
 impl Pattern {
-    /// `source`, Vim's pattern, with case matched as `matching` says, and
-    /// `~` standing for `tilde`, the last replacement. `Err` says why it
-    /// can't be.
-    pub(crate) fn new(source: &str, matching: Matching, tilde: &str) -> Result<Self, String> {
-        let translated = translate(source, tilde)?;
+    /// `source`, Vim's pattern, with case matched as `matching` says, `~`
+    /// standing for `tilde`, the last replacement, and `words` part of
+    /// words. `Err` says why it can't be.
+    pub(crate) fn new(
+        source: &str,
+        matching: Matching,
+        tilde: &str,
+        words: Words,
+    ) -> Result<Self, String> {
+        let translated = translate(source, tilde, words)?;
         let ignore = match translated.case {
             Some(exact) => !exact,
             None => match matching {
@@ -75,20 +138,45 @@ impl Pattern {
                 Matching::Ignore => true,
             },
         };
-        let regex = RegexBuilder::new(&translated.regex)
-            .multi_line(true)
-            .case_insensitive(ignore)
-            .size_limit(MOST_COMPILED)
-            .build()
-            .map_err(|err| match err {
-                regex::Error::CompiledTooBig(_) => format!("{source} is too big a pattern"),
-                _ => format!("{source} isn't a pattern this editor can match"),
-            })?;
+        let cant = || format!("{source} isn't a pattern this editor can match");
+        let plain = |regex: &str| {
+            RegexBuilder::new(regex)
+                .multi_line(true)
+                .case_insensitive(ignore)
+                .size_limit(MOST_COMPILED)
+                .build()
+                .map_err(|err| match err {
+                    regex::Error::CompiledTooBig(_) => format!("{source} is too big a pattern"),
+                    _ => cant(),
+                })
+        };
+        let engine = if translated.looks {
+            let loose = (translated.regex)
+                .replace(&edge(words, true), "")
+                .replace(&edge(words, false), "");
+            let regex = fancy_regex::RegexBuilder::new(&translated.regex)
+                .multi_line(true)
+                .case_insensitive(ignore)
+                .delegate_size_limit(MOST_COMPILED)
+                .backtrack_limit(MOST_BACKTRACKS)
+                .build()
+                .map_err(|err| match err {
+                    fancy_regex::Error::CompileError(_) => format!("{source} is too big a pattern"),
+                    _ => cant(),
+                })?;
+            Engine::Looking {
+                regex,
+                loose: plain(&loose)?,
+            }
+        } else {
+            Engine::Plain(plain(&translated.regex)?)
+        };
         Ok(Self {
-            regex,
+            engine,
             groups: translated.groups,
             focus: translated.focus,
             multiline: translated.multiline,
+            gave_up: Cell::new(false),
         })
     }
 
@@ -97,10 +185,30 @@ impl Pattern {
         self.multiline
     }
 
+    /// Whether a search with it gave up, as one that backtracks too much
+    /// does, and found nothing for that, since it was made: so the bar
+    /// says it's [`TOO_COMPLEX`], not that it isn't in the file.
+    pub(crate) fn gave_up(&self) -> bool {
+        self.gave_up.get()
+    }
+
+    /// What the bar says of a search with it that found nothing: that it
+    /// gave up, or else `why`.
+    pub(crate) fn not_found(&self, why: String) -> String {
+        if self.gave_up() {
+            TOO_COMPLEX.to_owned()
+        } else {
+            why
+        }
+    }
+
     /// Room for where a match's groups are, for
     /// [`captures_at`](Self::captures_at).
-    pub(crate) fn locations(&self) -> CaptureLocations {
-        self.regex.capture_locations()
+    pub(crate) fn locations(&self) -> Locations {
+        match &self.engine {
+            Engine::Plain(regex) => Locations::Plain(regex.capture_locations()),
+            Engine::Looking { .. } => Locations::Looking(Vec::new()),
+        }
     }
 
     /// The first match in `text` tried from byte `at`, keeping where its
@@ -109,28 +217,88 @@ impl Pattern {
         &self,
         text: &str,
         at: usize,
-        locations: &mut CaptureLocations,
+        locations: &mut Locations,
     ) -> Option<Found> {
-        self.regex.captures_read_at(locations, text, at)?;
+        match (&self.engine, &mut *locations) {
+            (Engine::Plain(regex), Locations::Plain(kept)) => {
+                regex.captures_read_at(kept, text, at)?;
+            }
+            (Engine::Looking { regex, loose }, kept) => {
+                *kept = Locations::Looking(self.looking(loose, text, at, |hay, at| {
+                    let captures = regex.captures_from_pos(hay, at).map_err(Box::new)?;
+                    Ok(captures.map(|captures| {
+                        (0..captures.len())
+                            .map(|index| captures.get(index).map(|got| (got.start(), got.end())))
+                            .collect()
+                    }))
+                })?);
+            }
+            (Engine::Plain(_), kept) => {
+                *kept = self.locations();
+                return self.captures_at(text, at, kept);
+            }
+        }
         let (start, end) = locations.get(self.focus.unwrap_or(0))?;
         Some(Found { start, end })
     }
 
+    /// The first match `search` finds in `text` from byte `at`, as
+    /// fancy-regex does, starting from where `loose`, the regex crate's
+    /// pattern without the look-arounds, finds one could be. For a pattern
+    /// that can't cross a line break, `search` is given the text only to
+    /// the end of that line, and if it finds nothing there, the next is
+    /// looked for after it: so how many steps back a search takes before
+    /// giving up is counted a line at a time, not through the whole text.
+    /// A search that gives up finds nothing, and is noted.
+    fn looking<T>(
+        &self,
+        loose: &Regex,
+        text: &str,
+        at: usize,
+        mut search: impl FnMut(&str, usize) -> Result<Option<T>, Box<fancy_regex::Error>>,
+    ) -> Option<T> {
+        let mut at = at;
+        loop {
+            let start = loose.find_at(text, at)?.start();
+            let end = if self.multiline {
+                text.len()
+            } else {
+                (text[start..].find('\n')).map_or(text.len(), |line| start + line)
+            };
+            match search(&text[..end], start) {
+                Ok(Some(found)) => return Some(found),
+                Ok(None) if end < text.len() => at = end + 1,
+                Ok(None) => return None,
+                Err(err) => {
+                    log::debug!("a search gave up: {err}");
+                    self.gave_up.set(true);
+                    return None;
+                }
+            }
+        }
+    }
+
     /// The first match in `text` tried from byte `at`.
     pub(crate) fn find_at(&self, text: &str, at: usize) -> Option<Found> {
-        if self.focus.is_none() {
-            let found = self.regex.find_at(text, at)?;
-            return Some(Found {
-                start: found.start(),
-                end: found.end(),
-            });
+        if self.focus.is_some() {
+            return self.captures_at(text, at, &mut self.locations());
         }
-        self.captures_at(text, at, &mut self.locations())
+        let (start, end) = match &self.engine {
+            Engine::Plain(regex) => {
+                let found = regex.find_at(text, at)?;
+                (found.start(), found.end())
+            }
+            Engine::Looking { regex, loose } => self.looking(loose, text, at, |hay, at| {
+                let found = regex.find_from_pos(hay, at).map_err(Box::new)?;
+                Ok(found.map(|found| (found.start(), found.end())))
+            })?,
+        };
+        Some(Found { start, end })
     }
 
     /// Where Vim's group `number` matched, as last kept in `locations`:
     /// 0 is the whole match.
-    pub(crate) fn group(&self, locations: &CaptureLocations, number: usize) -> Option<Found> {
+    pub(crate) fn group(&self, locations: &Locations, number: usize) -> Option<Found> {
         let index = match number {
             0 => self.focus.unwrap_or(0),
             _ => *self.groups.get(number - 1)?,
@@ -176,6 +344,10 @@ struct Translated {
     regex: String,
     groups: Vec<usize>,
     focus: Option<usize>,
+    /// Whether it looks behind or ahead, as `\<` and `\>` do where words
+    /// have more in them than the regex crate knows: see the module's
+    /// docs.
+    looks: bool,
     /// Whether `\C` (`true`) or `\c` said how to match case.
     case: Option<bool>,
     multiline: bool,
@@ -306,6 +478,10 @@ struct Reader<'a> {
     groups: Vec<(usize, usize)>,
     /// How many groups the regex has opened.
     opened: usize,
+    /// What words are made of besides letters, digits and `_`.
+    words: Words,
+    /// Whether it has written a look behind or ahead.
+    looks: bool,
     /// How deep in groups the reader is.
     depth: usize,
     /// Where in `out` `\zs` and `\ze` were, at the top level.
@@ -323,8 +499,9 @@ struct Reader<'a> {
     no_repeat: bool,
 }
 
-/// Translates `source`, with `~` standing for `tilde`.
-fn translate(source: &str, tilde: &str) -> Result<Translated, String> {
+/// Translates `source`, with `~` standing for `tilde`, and `words` part
+/// of words.
+fn translate(source: &str, tilde: &str, words: Words) -> Result<Translated, String> {
     let mut reader = Reader {
         source,
         rest: source.chars(),
@@ -332,6 +509,8 @@ fn translate(source: &str, tilde: &str) -> Result<Translated, String> {
         out: String::with_capacity(source.len() * 2),
         groups: Vec::new(),
         opened: 0,
+        words,
+        looks: false,
         depth: 0,
         zs: None,
         ze: None,
@@ -481,6 +660,12 @@ impl Reader<'_> {
                 self.at_start = true;
                 self.no_repeat = true;
             }
+            '<' | '>' if !self.words.is_none() => {
+                // See the module's docs.
+                self.out.push_str(&edge(self.words, ch == '<'));
+                self.looks = true;
+                self.no_repeat = true;
+            }
             '<' => {
                 self.out.push_str(r"\b{start}");
                 self.no_repeat = true;
@@ -549,7 +734,7 @@ impl Reader<'_> {
                     self.source
                 ));
             }
-            _ => match class_atom(ch, false) {
+            _ => match self.class_atom(ch, false) {
                 Some(regex) => self.push_atom(&regex),
                 None => {
                     return Err(format!("{}: \\{ch} isn't supported", self.source));
@@ -557,6 +742,20 @@ impl Reader<'_> {
             },
         }
         Ok(())
+    }
+
+    /// The class `\ch` names, as [`class_atom`] says, but for `\k` and
+    /// `\K`, which take what words have in them besides letters, digits
+    /// and `_`.
+    fn class_atom(&self, ch: char, breaks: bool) -> Option<String> {
+        if !matches!(ch, 'k' | 'K') || self.words.is_none() {
+            return class_atom(ch, breaks);
+        }
+        let mut inside = keyword_inside(self.words);
+        if ch == 'K' {
+            inside.push_str("&&[^0-9]");
+        }
+        Some(class_regex(&inside, false, breaks))
     }
 
     fn push_atom(&mut self, regex: &str) {
@@ -597,7 +796,7 @@ impl Reader<'_> {
             }
             '$' => self.push_atom("$"),
             '[' => self.bracket(true),
-            _ => match class_atom(ch, true) {
+            _ => match self.class_atom(ch, true) {
                 Some(regex) => self.push_atom(&regex),
                 None => return Err(format!("{}: \\_{ch} isn't supported", self.source)),
             },
@@ -762,6 +961,7 @@ impl Reader<'_> {
         let Self {
             mut out,
             groups,
+            looks,
             zs,
             ze,
             alternatives,
@@ -792,6 +992,7 @@ impl Reader<'_> {
             regex: out,
             groups,
             focus,
+            looks,
             case,
             multiline,
         })
@@ -823,6 +1024,27 @@ fn numbered(base: char, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) ->
     u32::from_str_radix(&digits, radix)
         .ok()
         .and_then(char::from_u32)
+}
+
+/// The inside of a class of the characters of words: `\w`, and `words`.
+fn keyword_inside(words: Words) -> String {
+    let mut inside = String::from(r"\w");
+    for word in words.chars() {
+        push_class_char(&mut inside, word);
+    }
+    inside
+}
+
+/// `\<`, if `start`, or else `\>`, as fancy-regex looks for them with
+/// `words` part of words: no word's character before and one after, or
+/// the other way round.
+fn edge(words: Words, start: bool) -> String {
+    let word = format!("[{}]", keyword_inside(words));
+    if start {
+        format!("(?<!{word})(?={word})")
+    } else {
+        format!("(?<={word})(?!{word})")
+    }
 }
 
 /// Adds `ch` to a class being written, escaped as the engine needs.
@@ -862,12 +1084,50 @@ mod tests {
     use super::*;
 
     fn regex(source: &str) -> String {
-        translate(source, "TILDE").unwrap().regex
+        translate(source, "TILDE", Words::NONE).unwrap().regex
     }
 
     /// Every match of `source` in `text`, as Vim would find them.
     fn matches(source: &str, text: &str) -> Vec<String> {
-        let pattern = Pattern::new(source, Matching::Exact, "TILDE").unwrap();
+        matches_in(source, text, Words::NONE)
+    }
+
+    /// How long finding every match takes, in texts that once took
+    /// seconds, and in plain ones; and how long a search takes to give up.
+    #[test]
+    #[ignore = "a benchmark: run with --ignored --nocapture --release"]
+    fn word_edge_timings() {
+        let dashes = "-x".repeat(50_000);
+        // A minified line with an `o` in many words, but starting only the
+        // last.
+        let css = "a{color:red;border-top:0;font:bold}".repeat(2_300) + "o";
+        let big = "a{color:red;border-top:0;font:bold}\n".repeat(110_000);
+        let dash = Words::new("-");
+        for (source, text, words) in [
+            ("\\<x\\k*", dashes.as_str(), dash),
+            ("\\<o.*", css.as_str(), dash),
+            ("\\<color\\>", css.as_str(), dash),
+            ("\\<color\\>", css.as_str(), Words::NONE),
+            ("border-top", css.as_str(), dash),
+            ("\\<zzz\\>", big.as_str(), dash),
+            ("\\<zzz\\>", big.as_str(), Words::NONE),
+            ("\\(a*\\)*b\\>", &("a".repeat(40) + "b-"), dash),
+        ] {
+            let start = std::time::Instant::now();
+            let found = matches_in(source, text, words).len();
+            let words = if words.is_none() { "plain" } else { "-" };
+            eprintln!(
+                "{source:12} {words:5} {} KB: {found} matches in {:?}",
+                text.len() / 1000,
+                start.elapsed()
+            );
+        }
+    }
+
+    /// Every match of `source` in `text`, as Vim would find them with
+    /// `words` part of words.
+    fn matches_in(source: &str, text: &str, words: Words) -> Vec<String> {
+        let pattern = Pattern::new(source, Matching::Exact, "TILDE", words).unwrap();
         let mut found = Vec::new();
         let mut at = 0;
         while at <= text.len()
@@ -953,7 +1213,7 @@ mod tests {
         assert_eq!(matches("\\~", "a~"), ["~"]);
         assert_eq!(matches("foo\\zsbar", "foobar bar"), ["bar"]);
         assert_eq!(matches("foo\\zebar", "foobar foo"), ["foo"]);
-        let pattern = Pattern::new("\\(a\\)\\zs\\(b\\)", Matching::Exact, "").unwrap();
+        let pattern = Pattern::new("\\(a\\)\\zs\\(b\\)", Matching::Exact, "", Words::NONE).unwrap();
         let mut locations = pattern.locations();
         pattern.captures_at("ab", 0, &mut locations).unwrap();
         assert_eq!(
@@ -974,7 +1234,7 @@ mod tests {
     fn case_is_matched_as_the_options_and_the_pattern_say() {
         let case = Case::default();
         let found = |source: &str, matching| {
-            let pattern = Pattern::new(source, matching, "").unwrap();
+            let pattern = Pattern::new(source, matching, "", Words::NONE).unwrap();
             pattern.find_at("Foo foo", 0).map(|found| found.start)
         };
         // Smart: a capital matches case, but not one after a backslash.
@@ -993,7 +1253,7 @@ mod tests {
     #[test]
     fn capitals_and_small_letters_match_case_whatever_ignorecase_says() {
         let found = |source: &str, text: &str| {
-            let pattern = Pattern::new(source, Matching::Ignore, "").unwrap();
+            let pattern = Pattern::new(source, Matching::Ignore, "", Words::NONE).unwrap();
             let mut found = Vec::new();
             let mut at = 0;
             while let Some(one) = pattern.find_at(text, at) {
@@ -1013,7 +1273,7 @@ mod tests {
     #[test]
     fn ze_alone_and_the_rest_of_the_classes_and_escapes() {
         // `\ze` without `\zs`: the match is up to it, and `\1` its group.
-        let pattern = Pattern::new("\\(a\\)b\\zec", Matching::Exact, "").unwrap();
+        let pattern = Pattern::new("\\(a\\)b\\zec", Matching::Exact, "", Words::NONE).unwrap();
         let mut locations = pattern.locations();
         let found = pattern.captures_at("abc", 0, &mut locations).unwrap();
         assert_eq!(found, Found { start: 0, end: 2 });
@@ -1031,13 +1291,139 @@ mod tests {
         assert_eq!(matches("[\\x]", "x\\"), ["x", "\\"]);
         // The file's start and end can't be found a line at a time.
         assert!(
-            Pattern::new("\\%$", Matching::Exact, "")
+            Pattern::new("\\%$", Matching::Exact, "", Words::NONE)
                 .unwrap()
                 .multiline()
         );
         // A huge pattern is refused, rather than compiled.
         let huge = "a\\{1000}".repeat(100);
-        assert!(Pattern::new(&huge, Matching::Exact, "").is_err());
+        assert!(Pattern::new(&huge, Matching::Exact, "", Words::NONE).is_err());
+    }
+
+    #[test]
+    fn word_edges_and_keywords_are_as_the_languages_words_say() {
+        let words = Words::new("-");
+        // `\<` and `\>` are at the edges of words with `-` in them, which
+        // can start and end with it.
+        assert_eq!(
+            matches_in("\\<a-b\\>", "a-b x-a-b a-b-c (a-b)", words),
+            ["a-b", "a-b"]
+        );
+        assert_eq!(matches_in("\\<--x\\>", "--x a--x --x-", words), ["--x"]);
+        assert_eq!(matches_in("\\v<a>", "a a-b", words), ["a"]);
+        // `\k` takes them, and `\K` too, but not digits.
+        assert_eq!(
+            matches_in("\\<\\k\\+\\>", "margin-top: 0", words),
+            ["margin-top", "0"]
+        );
+        assert_eq!(matches_in("\\K\\+", "a1-b", words), ["a", "-b"]);
+        // The groups, and what `\zs` narrows it to, are as they'd be
+        // without them.
+        assert_eq!(matches_in("\\<\\(a\\)-\\zsb\\>", "a-b c-b", words), ["b"]);
+        let pattern = Pattern::new("\\<\\(a\\)-\\(b\\)", Matching::Exact, "", words).unwrap();
+        let mut locations = pattern.locations();
+        let found = pattern.captures_at("a-b", 0, &mut locations).unwrap();
+        assert_eq!((found.start, found.end), (0, 3));
+        let second = pattern.group(&locations, 2).unwrap();
+        assert_eq!((second.start, second.end), (2, 3));
+        // An alternative that doesn't match says nothing of the edges.
+        assert_eq!(matches_in("x\\|\\<a\\>", "x-a a", words), ["x", "a"]);
+        // The engine backtracks to find where the edges hold, as Vim does,
+        // rather than taking the first match it would without them.
+        assert_eq!(matches_in("\\<.*\\>", "color: red;", words), ["color: red"]);
+        assert_eq!(
+            matches_in("\\<.\\{-}\\>", "color: red;", words),
+            ["color", "red"]
+        );
+        assert_eq!(matches_in("\\<\\k\\{-1,}\\>", "ab-cd", words), ["ab-cd"]);
+        assert_eq!(
+            matches_in("\\(foo\\|foo-bar\\)\\>", "foo-bar", words),
+            ["foo-bar"]
+        );
+        assert_eq!(
+            matches_in("\\<margin\\>\\|\\<margin-top\\>", "margin-top", words),
+            ["margin-top"]
+        );
+        // In plain text, the engine's own edges.
+        assert_eq!(matches("\\<a\\>", "a-b"), ["a"]);
+        assert_eq!(regex("\\<a\\>"), "\\b{start}a\\b{end}");
+    }
+
+    #[test]
+    fn looking_around_matches_as_the_engines_own_edges_do() {
+        // With words that have something in them the texts haven't, the
+        // patterns are fancy-regex's, and find what the regex crate does.
+        let words = Words::new("~");
+        let text = "fn a_b(x: u8) -> u8 {\n  x * 2 // é and ÿ\n}\n\nlet αβ = a_b(1);\n";
+        for source in [
+            "\\<a_b\\>",
+            "\\<\\w\\+\\>",
+            "\\<\\k\\+\\>",
+            "\\v<\\w+>",
+            "\\<x\\>.*$",
+            "^\\s*\\<\\a",
+            "\\<\\(fn\\|let\\)\\>\\s\\+\\zs\\k\\+",
+            "\\<\\u\\|\\<\\l\\+\\>",
+            "\\c\\<FN\\>",
+            "\\<[^ ]\\+\\>",
+            "\\<.\\{-1,}\\>",
+            "\\>\\_s\\+\\<",
+            "\\<é\\>\\|\\<αβ\\>",
+        ] {
+            let pattern = Pattern::new(source, Matching::Exact, "", words).unwrap();
+            assert!(matches!(pattern.engine, Engine::Looking { .. }), "{source}");
+            assert_eq!(
+                matches_in(source, text, words),
+                matches(source, text),
+                "{source}"
+            );
+        }
+        // Without `\<` or `\>`, it's the regex crate's, words or none.
+        let pattern = Pattern::new("\\k\\+", Matching::Exact, "", words).unwrap();
+        assert!(matches!(pattern.engine, Engine::Plain(_)));
+    }
+
+    #[test]
+    fn a_long_file_is_searched_a_line_at_a_time_without_giving_up() {
+        // 10 MB of lines, each with a `color` in a word, and an `o` in
+        // many, but no match: the steps back are counted a line at a time.
+        let text = "a{background-color:red}\n".repeat(420_000);
+        let words = Words::new("-");
+        for source in ["\\<color\\>", "o.*z\\>"] {
+            let pattern = Pattern::new(source, Matching::Exact, "", words).unwrap();
+            assert_eq!(pattern.find_at(&text, 0), None, "{source}");
+            assert!(!pattern.gave_up(), "{source}");
+        }
+        // And a match on the last line is found, and where it is.
+        let text = text + "color\n";
+        let pattern = Pattern::new("\\<color\\>", Matching::Exact, "", words).unwrap();
+        let at = text.len() - "color\n".len();
+        assert_eq!(
+            pattern.find_at(&text, 0),
+            Some(Found {
+                start: at,
+                end: at + 5
+            })
+        );
+    }
+
+    #[test]
+    fn a_search_that_backtracks_too_much_gives_up_and_says_so() {
+        let words = Words::new("-");
+        // A `b` for the regex crate to find, so fancy-regex looks, but
+        // never at a word's end.
+        let text = "a".repeat(40) + "b-";
+        let pattern = Pattern::new("\\(a*\\)*b\\>", Matching::Exact, "", words).unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(pattern.find_at(&text, 0), None);
+        assert!(pattern.gave_up());
+        assert_eq!(pattern.not_found("x".into()), TOO_COMPLEX);
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        // One that found nothing having looked everywhere didn't give up.
+        let pattern = Pattern::new("\\<b\\>", Matching::Exact, "", words).unwrap();
+        assert_eq!(pattern.find_at(&text, 0), None);
+        assert!(!pattern.gave_up());
+        assert_eq!(pattern.not_found("none".into()), "none");
     }
 
     #[test]
@@ -1052,7 +1438,7 @@ mod tests {
             "\\(a",
         ] {
             assert!(
-                Pattern::new(source, Matching::Exact, "").is_err(),
+                Pattern::new(source, Matching::Exact, "", Words::NONE).is_err(),
                 "{source}"
             );
         }

@@ -130,6 +130,9 @@ gates! {
     /// `Found::Symbols`, a project's; `Query::PrepareRename`,
     /// `Answer::Renamable` and `ServerFeatures`' `prepare_rename`.
     SYMBOLS = 77,
+    /// `BufferUpdate::Language`: the characters a buffer's words are made
+    /// of besides letters, digits and `_`, as its language says.
+    WORDS = 78,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -318,6 +321,7 @@ impl Since for BufferUpdate {
             | Self::ChangedOnDisk
             | Self::Agents { .. } => EARLIER,
             Self::Coloured { .. } => HOVER,
+            Self::Language { .. } => WORDS,
         }
     }
 }
@@ -591,7 +595,8 @@ impl Downgrade for ServerMessage {
     /// `Event::Exited` is dropped: a window that never hears a program
     /// ended takes its pane closing as someone else's doing, and goes on
     /// in normal mode, the safe side. So is `BufferUpdate::Coloured`: a
-    /// hover's code stays plain.
+    /// hover's code stays plain. And `BufferUpdate::Language`: words are
+    /// read as in plain text, as they were before.
     /// A new answer, or a new kind of thing found, only ever answers what
     /// a newer window asked; should one reach an older peer all the same,
     /// it's told its question failed, rather than wait for ever.
@@ -603,7 +608,7 @@ impl Downgrade for ServerMessage {
             Self::Event(
                 Event::Exited { .. }
                 | Event::Buffer {
-                    update: BufferUpdate::Coloured { .. },
+                    update: BufferUpdate::Coloured { .. } | BufferUpdate::Language { .. },
                     ..
                 },
             ) => Downgraded::Dropped,
@@ -800,13 +805,15 @@ mod tests {
     fn droppable(message: &ServerMessage) -> bool {
         // Only ever a reason to keep the mode as a pane closes: without
         // it, a window goes on in normal mode, which sends nothing typed.
-        // And a hover's colours: without them, its code is plain.
+        // And a hover's colours: without them, its code is plain. And
+        // what a buffer's words are made of: without it, they're plain
+        // text's.
         matches!(
             message,
             ServerMessage::Event(
                 Event::Exited { .. }
                     | Event::Buffer {
-                        update: BufferUpdate::Coloured { .. },
+                        update: BufferUpdate::Coloured { .. } | BufferUpdate::Language { .. },
                         ..
                     }
             )
@@ -923,6 +930,8 @@ mod tests {
         assert_eq!(Answer::Renamable { name: None }.since(), SYMBOLS);
         assert_eq!(Found::Done(Done::All).since(), EARLIER);
         assert_eq!(Found::Symbols(Vec::new()).since(), SYMBOLS);
+        let language = BufferUpdate::Language { word: "-".into() };
+        assert_eq!(language.since(), WORDS);
     }
 
     #[test]

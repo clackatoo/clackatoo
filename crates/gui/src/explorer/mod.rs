@@ -50,6 +50,7 @@ use clackatoo_term::{Row, RowBuilder};
 
 use crate::colors;
 use crate::editor::{Matching, Pattern, Stroke};
+use crate::motion::Words;
 use crate::options::{Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 
@@ -1234,7 +1235,7 @@ impl Explorer {
     /// can match, saying why not if it isn't.
     fn pattern(&mut self) -> Option<Pattern> {
         let (query, _) = self.search.as_ref()?;
-        match Pattern::new(query, Matching::Typed(self.case), "") {
+        match Pattern::new(query, Matching::Typed(self.case), "", Words::NONE) {
             Ok(pattern) => Some(pattern),
             Err(why) => {
                 self.message = Some(why);
@@ -1454,8 +1455,9 @@ impl Explorer {
                 kind: HighlightKind::CursorLine,
             });
         }
-        let pattern = (self.search.as_ref())
-            .and_then(|(query, _)| Pattern::new(query, Matching::Typed(self.case), "").ok());
+        let pattern = (self.search.as_ref()).and_then(|(query, _)| {
+            Pattern::new(query, Matching::Typed(self.case), "", Words::NONE).ok()
+        });
         if let Some(pattern) = pattern {
             let shown = self.lines.iter().skip(self.top).zip(&self.name_cols);
             for (index, (line, &col)) in shown.enumerate() {

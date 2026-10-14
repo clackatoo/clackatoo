@@ -312,6 +312,7 @@ mod tests {
                 extensions: Vec::new(),
                 filenames: Vec::new(),
                 server: None,
+                word: None,
             })
         };
         // Empty blocks, and one in a language with no pack, are passed

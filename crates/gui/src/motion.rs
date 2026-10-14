@@ -139,6 +139,59 @@ pub(crate) trait Lines {
     fn row_width(&self) -> Option<usize> {
         None
     }
+
+    /// The characters words are made of besides letters, digits and `_`:
+    /// an editor's, as its file's language says; a terminal's, none.
+    fn words(&self) -> Words {
+        Words::NONE
+    }
+}
+
+/// The characters words are made of besides letters, digits and `_`, as a
+/// file's language says, as Vim's `iskeyword` adds them: `-` in CSS, so
+/// `w` goes over `margin-top` whole. ASCII punctuation only, kept as one
+/// bit each, so asking about a character costs no more than asking whether
+/// it's `_`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Words(u128);
+
+impl Words {
+    /// None: words are letters, digits and `_`, as in plain text and in
+    /// terminals.
+    pub(crate) const NONE: Self = Self(0);
+
+    /// The ASCII punctuation in `chars`, as a language pack gives it. Any
+    /// other character is passed over: letters and digits are in words
+    /// already.
+    pub(crate) fn new(chars: &str) -> Self {
+        Self(
+            (chars.chars())
+                .filter(char::is_ascii_punctuation)
+                .fold(0, |bits, ch| bits | 1 << u32::from(ch)),
+        )
+    }
+
+    /// Whether there are none.
+    pub(crate) fn is_none(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether `ch` is one of them.
+    pub(crate) fn has(self, ch: char) -> bool {
+        let ch = u32::from(ch);
+        ch < 128 && self.0 >> ch & 1 == 1
+    }
+
+    /// Whether `ch` is part of a word: a letter, a digit, `_` or one of
+    /// them.
+    pub(crate) fn is_word(self, ch: char) -> bool {
+        ch.is_alphanumeric() || ch == '_' || self.has(ch)
+    }
+
+    /// Them, in the order of their codes.
+    pub(crate) fn chars(self) -> impl Iterator<Item = char> {
+        (0..128_u8).map(char::from).filter(move |&ch| self.has(ch))
+    }
 }
 
 /// One of the screen rows a line is drawn on, when it wraps.
@@ -360,7 +413,8 @@ pub(crate) struct Cursor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Class {
     Blank,
-    /// Letters, digits and `_`.
+    /// Letters, digits and `_`, and the characters the file's language
+    /// adds to them (see [`Words`]).
     Word,
     /// Any other printing character.
     Punctuation,
@@ -414,7 +468,7 @@ impl Cursor {
                 let row = row.as_deref();
                 let end = text_end(row);
                 let mut col = 0;
-                while col < end && class_at(row, col) == Class::Blank {
+                while col < end && class_at(row, col, Words::NONE) == Class::Blank {
                     col = next_cell(row, col).unwrap_or(end);
                 }
                 self.at.col = start_of_cell(row, col.min(end.saturating_sub(1)));
@@ -594,6 +648,8 @@ pub(crate) struct Walk<'a, L> {
     lines: &'a L,
     at: Point,
     kind: fn(Class) -> Class,
+    /// What words are made of in `lines`, asked once.
+    words: Words,
     /// The last line whose text's end was asked for, and where that is:
     /// finding it reads back over the blanks after it, which a step along
     /// a line of many shouldn't do each time.
@@ -606,6 +662,7 @@ impl<'a, L: Lines> Walk<'a, L> {
             lines,
             at,
             kind: Class::of,
+            words: lines.words(),
             end: std::cell::Cell::new(None),
         }
     }
@@ -624,7 +681,11 @@ impl<'a, L: Lines> Walk<'a, L> {
     }
 
     fn class_of(&self, at: Point) -> Class {
-        (self.kind)(class_at(self.lines.row(at.line).as_deref(), at.col))
+        (self.kind)(class_at(
+            self.lines.row(at.line).as_deref(),
+            at.col,
+            self.words,
+        ))
     }
 
     /// Steps to the next cell, or the next line's start. Returns false at
@@ -797,14 +858,15 @@ fn paragraph_end(line: u64, forward: bool, lines: &impl Lines) -> u64 {
     line
 }
 
-/// The class of the cell at `col`, with past a line's text blank.
-pub(crate) fn class_at(row: Option<&impl Cells>, col: usize) -> Class {
+/// The class of the cell at `col`, with past a line's text blank, and
+/// `words` part of words.
+pub(crate) fn class_at(row: Option<&impl Cells>, col: usize, words: Words) -> Class {
     let Some(spot) = row.and_then(|row| row.cell(col)) else {
         return Class::Blank;
     };
     if spot.blank() {
         Class::Blank
-    } else if spot.ch.is_alphanumeric() || spot.ch == '_' || spot.wide {
+    } else if words.is_word(spot.ch) || spot.wide {
         Class::Word
     } else {
         Class::Punctuation
@@ -1001,6 +1063,18 @@ pub(crate) mod tests {
         // ");" is one run of punctuation, so one word.
         assert_eq!(moved(&text, at(1, 2), &[Motion::WordBack]), at(0, 15));
         assert_eq!(moved(&text, at(0, 10), &[Motion::WordBack]), at(0, 8));
+    }
+
+    #[test]
+    fn words_are_ascii_punctuation_each_a_bit() {
+        let words = Words::new("-?é a-_");
+        assert_eq!(words.chars().collect::<String>(), "-?_");
+        assert!(words.has('-') && words.has('?') && !words.has('é') && !words.has('a'));
+        assert!(words.is_word('-') && words.is_word('é') && words.is_word('7'));
+        assert!(!words.is_word(':') && !words.is_word(' '));
+        assert!(Words::NONE.is_none() && !words.is_none());
+        assert!(!Words::NONE.is_word('-') && Words::NONE.is_word('_'));
+        assert_eq!(Words::new("~").chars().collect::<String>(), "~");
     }
 
     #[test]

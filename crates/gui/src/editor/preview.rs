@@ -190,7 +190,7 @@ impl Editor {
     ) -> Option<Preview> {
         let (lines, pattern, flags, replacement) = self.typed_command(line, copy, shared)?;
         let last_line = self.text(copy).last_line();
-        let compiled = self.compile(&pattern, flags.exact, shared).ok()?;
+        let compiled = self.compile(&pattern, flags.exact, copy, shared).ok()?;
         let with = match &replacement {
             Some(replacement) => Some(Replacement::new(replacement).ok()?),
             None => None,

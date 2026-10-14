@@ -93,6 +93,9 @@ rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 # The finder's grep, over a whole file at a time, as ripgrep's engine, and
 # editors' patterns, for `/`, `:s` and `:g`, translated from Vim's.
 regex = { version = "1.13", default-features = false, features = ["std", "perf", "unicode"] }
+# Editors' patterns with `\<` and `\>` where a language's words have more
+# in them than letters, digits and `_`, which need look-around.
+fancy-regex = "0.16"
 # Reads the agent's words in a chat as Markdown.
 pulldown-cmark = { version = "0.13", default-features = false }
 mlua = { version = "0.12.2", features = ["luau"] }

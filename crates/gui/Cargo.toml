@@ -16,6 +16,7 @@ bench = false
 parley.workspace = true
 pulldown-cmark.workspace = true
 regex.workspace = true
+fancy-regex.workspace = true
 similar.workspace = true
 mlua.workspace = true
 anyhow.workspace = true

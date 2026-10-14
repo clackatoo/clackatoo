@@ -24,7 +24,17 @@
 //! extensions = ["rs"]
 //! # ...or with one of these names.
 //! filenames = []
+//! # The characters its words are made of besides letters, digits and `_`,
+//! # as Vim's `iskeyword` adds them: optional.
+//! word = "-"
 //! ```
+//!
+//! `word` can be a string of characters or a list of them (`["-", "?"]`),
+//! all ASCII punctuation. With it, `w`, `e`, `b`, `iw`, `*` and completion
+//! take a name such as `margin-top` as one word. A pack that doesn't say
+//! takes what clackatoo's own pack of its name says (see
+//! [`KNOWN`](crate::KNOWN)), so a pack installed before `word` was written
+//! still has it.
 //!
 //! It can also name the language's server, as [`Server`] says.
 
@@ -51,6 +61,9 @@ pub struct Pack {
     pub filenames: Vec<String>,
     /// Its language server, if it has one: see [`Server`].
     pub server: Option<Server>,
+    /// The characters its words are made of besides letters, digits and
+    /// `_`, each once, if it says: see [`word_of`].
+    pub word: Option<String>,
 }
 
 /// Why a pack can't be read.
@@ -106,6 +119,7 @@ impl Pack {
             grammar,
             extensions: strings("extensions")?.unwrap_or_default(),
             filenames: strings("filenames")?.unwrap_or_default(),
+            word: document.get("word").map(word).transpose()?,
         })
     }
 
@@ -113,6 +127,47 @@ impl Pack {
     #[must_use]
     pub fn is_for(&self, path: &Path) -> bool {
         is_for(&self.extensions, &self.filenames, path)
+    }
+}
+
+/// A pack's `word`: a string of characters, or a list of them, each ASCII
+/// punctuation, as each once, in order.
+fn word(item: &toml_edit::Item) -> Result<String, PackError> {
+    const WRONG: &str = "word is a string of ASCII punctuation, or a list of it";
+    let chars: Vec<char> = if let Some(chars) = item.as_str() {
+        chars.chars().collect()
+    } else {
+        let list = item.as_array().ok_or(PackError::Invalid(WRONG))?;
+        let mut chars = Vec::new();
+        for value in list {
+            chars.extend(value.as_str().ok_or(PackError::Invalid(WRONG))?.chars());
+        }
+        chars
+    };
+    let mut word = String::new();
+    for ch in chars {
+        if !ch.is_ascii_punctuation() {
+            return Err(PackError::Invalid(WRONG));
+        }
+        if !word.contains(ch) {
+            word.push(ch);
+        }
+    }
+    Ok(word)
+}
+
+/// The characters the words of the file at `path`, whose pack is `pack`,
+/// are made of besides letters, digits and `_`: as its pack says, or else
+/// as clackatoo's own pack of the language says, the pack's name or else
+/// the file's naming it. Empty for most languages.
+#[must_use]
+pub fn word_of<'a>(pack: Option<&'a Pack>, path: &Path) -> &'a str {
+    match pack {
+        Some(Pack {
+            word: Some(word), ..
+        }) => word.as_str(),
+        Some(pack) => crate::install::known(&pack.name).map_or("", |known| known.word),
+        None => crate::install::known_for(path).map_or("", |known| known.word),
     }
 }
 
@@ -284,6 +339,53 @@ mod tests {
         // A language with no pack is none.
         assert_eq!(named(&mut languages, "python"), None);
         assert_eq!(named(&mut languages, ""), None);
+    }
+
+    #[test]
+    fn a_pack_says_what_its_words_are_made_of() {
+        let dir = tempfile::tempdir().unwrap();
+        let read = |name: &str, word: &str| {
+            let pack = dir.path().join(name);
+            fs::create_dir_all(&pack).unwrap();
+            let toml = format!("grammar = \"{name}\"\nextensions = [\"{name}\"]\n{word}");
+            fs::write(pack.join("language.toml"), toml).unwrap();
+            Pack::read(&pack)
+        };
+        // A string, or a list, each character once.
+        let gcsl = read("gcsl", "word = \"-\"\n").unwrap();
+        assert_eq!(gcsl.word.as_deref(), Some("-"));
+        let lisp = read("lisp", "word = [\"-\", \"?\", \"-\", \"*!\"]\n").unwrap();
+        assert_eq!(lisp.word.as_deref(), Some("-?*!"));
+        assert_eq!(
+            read("none", "word = \"\"\n").unwrap().word.as_deref(),
+            Some("")
+        );
+        // Letters, blanks and characters beyond ASCII aren't punctuation.
+        for wrong in [
+            "\"a\"",
+            "\" \"",
+            "\"é\"",
+            "\"\\t\"",
+            "1",
+            "[1]",
+            "{ a = 1 }",
+        ] {
+            let error = read("wrong", &format!("word = {wrong}\n")).unwrap_err();
+            assert!(matches!(error, PackError::Invalid(_)), "{wrong}: {error}");
+        }
+
+        let path = |name: &str| PathBuf::from(format!("/a/b.{name}"));
+        // As the pack says; or, if it doesn't, as clackatoo's pack of its
+        // name, or for the file, does.
+        assert_eq!(word_of(Some(&gcsl), &path("gcsl")), "-");
+        let css = read("css", "").unwrap();
+        assert_eq!(css.word, None);
+        assert_eq!(word_of(Some(&css), &path("css")), "-");
+        let plain = read("css2", "word = \"\"\n").unwrap();
+        assert_eq!(word_of(Some(&plain), &path("css")), "");
+        assert_eq!(word_of(None, &path("css")), "-");
+        assert_eq!(word_of(None, &path("rs")), "");
+        assert_eq!(word_of(None, &path("unknown")), "");
     }
 
     #[test]

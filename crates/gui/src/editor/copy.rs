@@ -33,6 +33,7 @@ use clackatoo_text::{
 
 use super::kept::{LineChange, LineLog};
 use super::scratch::Scratch;
+use crate::motion::Words;
 
 /// The most pieces an edit waiting to be sent grows to by joining the
 /// edits after it in its undo step; those after go on their own, in the
@@ -169,6 +170,9 @@ pub(crate) struct BufferCopy {
     chats: Vec<ChatName>,
     /// What its language server does as you type.
     features: ServerFeatures,
+    /// What its words are made of besides letters, digits and `_`, as its
+    /// language says.
+    words: Words,
     /// Whether the macro being typed has edited the buffer yet, so its
     /// first edit starts an undo step and the rest join it.
     macro_edited: bool,
@@ -218,6 +222,7 @@ impl BufferCopy {
             agents: AgentHunks::new(),
             chats: Vec::new(),
             features: ServerFeatures::default(),
+            words: Words::NONE,
             macro_edited: false,
             steps: 0,
             batch: None,
@@ -255,6 +260,12 @@ impl BufferCopy {
     /// daemon has said.
     pub(crate) fn features(&self) -> &ServerFeatures {
         &self.features
+    }
+
+    /// What the buffer's words are made of besides letters, digits and
+    /// `_`, as its language says, as far as the daemon has said.
+    pub(crate) fn words(&self) -> Words {
+        self.words
     }
 
     pub(crate) fn buffer(&self) -> BufferId {
@@ -860,6 +871,17 @@ impl BufferCopy {
         if self.passes_over(&update) {
             return Heard::Nothing;
         }
+        // Words are plain text's until the daemon says otherwise, as it
+        // does after a snapshot or catching up, whether the text is kept or
+        // not.
+        match &update {
+            BufferUpdate::Snapshot(_) | BufferUpdate::Resumed { .. } => self.words = Words::NONE,
+            BufferUpdate::Language { word } => {
+                self.words = Words::new(word);
+                return Heard::Nothing;
+            }
+            _ => {}
+        }
         if self.kept.is_some() {
             return self.update_kept(update);
         }
@@ -942,10 +964,12 @@ impl BufferCopy {
                 self.diagnose(version, diagnostics);
                 Heard::Nothing
             }
-            // The window asks and says these, not the editor.
-            BufferUpdate::Offer { .. } | BufferUpdate::Notice(_) | BufferUpdate::ChangedOnDisk => {
-                Heard::Nothing
-            }
+            // The window asks and says these, not the editor; and
+            // `update` has taken what words are made of.
+            BufferUpdate::Offer { .. }
+            | BufferUpdate::Notice(_)
+            | BufferUpdate::ChangedOnDisk
+            | BufferUpdate::Language { .. } => Heard::Nothing,
             BufferUpdate::Features(features) => {
                 self.features = features;
                 Heard::Nothing
