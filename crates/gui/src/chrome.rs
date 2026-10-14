@@ -175,6 +175,70 @@ impl ModeName {
     }
 }
 
+/// What a tab or a workspace says of its chats, after its name. When
+/// several chats would say different things, the one that needs the user
+/// most is said: asking, then at work, then finished unseen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Mark {
+    /// A chat finished while this window wasn't showing it.
+    Unseen,
+    /// A chat's agent is at work.
+    Working,
+    /// A chat's agent asks the user something, and waits.
+    Asking,
+}
+
+impl Mark {
+    /// Every mark.
+    pub(crate) const ALL: [Self; 3] = [Self::Unseen, Self::Working, Self::Asking];
+    /// What goes after a name: a space and the mark.
+    pub(crate) fn suffix(self) -> &'static str {
+        match self {
+            Self::Unseen => " •",
+            Self::Working => " ⋯",
+            Self::Asking => " ?",
+        }
+    }
+}
+
+/// A workspace, as the top bar names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceName {
+    pub(crate) id: WorkspaceId,
+    pub(crate) name: String,
+    /// How many tabs it has.
+    pub(crate) tabs: usize,
+    /// Whether it's the one shown.
+    pub(crate) shown: bool,
+    /// What it says of its chats, after its name.
+    pub(crate) mark: Option<Mark>,
+}
+
+impl WorkspaceName {
+    /// What it is as an item in the top bar: its ID, its name, how many
+    /// tabs it has, unless it's named with a number, and whether it's
+    /// shown.
+    fn item(&self) -> (WorkspaceId, String, Option<String>, bool) {
+        let name = &self.name;
+        let numbered = !name.is_empty() && name.chars().all(|ch| ch.is_ascii_digit());
+        let tabs = (!numbered).then(|| self.tabs.to_string());
+        (self.id, name.clone(), tabs, self.shown)
+    }
+
+    #[cfg(test)]
+    /// Workspace `id`, called `name`, with `tabs` tabs, shown if `shown`,
+    /// with nothing to say of its chats.
+    pub(crate) fn plain(id: u32, name: &str, tabs: usize, shown: bool) -> Self {
+        Self {
+            id: WorkspaceId(id),
+            name: name.to_owned(),
+            tabs,
+            shown,
+            mark: None,
+        }
+    }
+}
+
 /// A name in a bar, and where it is.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Item<T> {
@@ -186,6 +250,9 @@ pub(crate) struct Item<T> {
     /// The one shown, drawn picked out.
     pub(crate) active: bool,
     pub(crate) rect: Rect,
+    /// What a workspace says of its chats, after its name, and where it
+    /// starts.
+    pub(crate) mark: Option<(Mark, f32)>,
 }
 
 /// What the bottom bar and the palette show.
@@ -260,8 +327,9 @@ pub(crate) struct Chrome {
 /// What goes in the frame, besides where.
 #[derive(Debug)]
 pub(crate) struct Contents<'a> {
-    /// Each workspace's name, how many tabs it has, and whether it's shown.
-    pub(crate) workspaces: Vec<(WorkspaceId, String, usize, bool)>,
+    /// Each workspace's name, how many tabs it has, whether it's shown,
+    /// and what it says of its chats.
+    pub(crate) workspaces: Vec<WorkspaceName>,
     pub(crate) tabs: Vec<(TabId, String, bool)>,
     pub(crate) status: Status,
     pub(crate) buttons: &'a ButtonLayout,
@@ -308,25 +376,11 @@ impl Chrome {
             (text, rect)
         });
 
-        // A workspace: its dot, its name, and quieter, how many tabs it has,
-        // unless it's named with a number, as workspaces are by default:
-        // "1 3" would read as nonsense.
-        let dot = metrics.dot();
-        let workspaces = lay_out(
-            contents
-                .workspaces
-                .into_iter()
-                .map(|(id, text, tabs, active)| {
-                    let numbered = !text.is_empty() && text.chars().all(|ch| ch.is_ascii_digit());
-                    (id, text, (!numbered).then(|| tabs.to_string()), active)
-                }),
+        let workspaces = lay_out_workspaces(
+            &contents.workspaces,
             workspaces_start..workspaces_end - pill_height - padding,
-            padding,
-            |text, detail, active| {
-                let detail = detail.map_or(0.0, |detail| 1.5 * padding + measure(detail, false));
-                (measure(text, active) + detail + dot + 8.0 * padding).round()
-            },
-            (pill_y, pill_height),
+            (metrics, pill_y, pill_height),
+            measure,
         );
         let plus = |after: f32, y: f32, side: f32| Rect {
             x: after + padding,
@@ -334,14 +388,6 @@ impl Chrome {
             width: side,
             height: side,
         };
-        // Each tab count ends its pill, three paddings in.
-        let mut workspaces = workspaces;
-        for item in &mut workspaces {
-            if let Some((detail, x)) = &mut item.detail {
-                *x = (item.rect.x + item.rect.width - 3.0 * padding - measure(detail, false))
-                    .round();
-            }
-        }
         let new_workspace = contents.bottom_shown.then(|| {
             let after = workspaces
                 .last()
@@ -1083,6 +1129,60 @@ fn paint_workspace<'a>(
             font: TextFont::Ui,
         });
     }
+    // A chat asking stands out, in clackatoo's colour.
+    if let Some((mark, x)) = item.mark {
+        painted.texts.push(Text {
+            origin: [x, text_y],
+            content: mark.suffix(),
+            ink: match mark {
+                Mark::Asking => Ink::Accent,
+                Mark::Working | Mark::Unseen => Ink::Muted,
+            },
+            font: TextFont::Ui,
+        });
+    }
+}
+
+/// Lays out `workspaces` in the top bar, in `span`, as pills `height`
+/// tall at `y`: each its dot, its name and what it says of its chats,
+/// and quieter, how many tabs it has, unless it's named with a number, as
+/// workspaces are by default: "1 3" would read as nonsense. Room is kept
+/// for the widest mark whether one shows or not, so no pill moves, nor is
+/// left out, as a chat starts or stops working.
+fn lay_out_workspaces(
+    workspaces: &[WorkspaceName],
+    span: std::ops::Range<f32>,
+    (metrics, y, height): (Metrics, f32, f32),
+    measure: &mut dyn FnMut(&str, bool) -> f32,
+) -> Vec<Item<WorkspaceId>> {
+    let padding = metrics.padding;
+    let dot = metrics.dot();
+    let room = (Mark::ALL.iter())
+        .map(|mark| measure(mark.suffix(), true))
+        .fold(0.0, f32::max);
+    let mut placed = lay_out(
+        workspaces.iter().map(WorkspaceName::item),
+        span,
+        padding,
+        |text, detail, active| {
+            let detail = detail.map_or(0.0, |detail| 1.5 * padding + measure(detail, false));
+            (measure(text, active) + room + detail + dot + 8.0 * padding).round()
+        },
+        (y, height),
+    );
+    // Those that fit are the first.
+    for (item, workspace) in placed.iter_mut().zip(workspaces) {
+        // Each tab count ends its pill, three paddings in.
+        if let Some((detail, x)) = &mut item.detail {
+            *x = (item.rect.x + item.rect.width - 3.0 * padding - measure(detail, false)).round();
+        }
+        // A mark goes straight after the name, as `paint_workspace` places
+        // the name.
+        let text_x = (item.rect.x + 3.0 * padding).round() + dot + 2.0 * padding;
+        let after = text_x + measure(&item.text, item.active);
+        item.mark = workspace.mark.map(|mark| (mark, after.round()));
+    }
+    placed
 }
 
 /// The window behind everything, in the bars' colour: rounded where it can
@@ -1315,6 +1415,7 @@ fn lay_out<T>(
             text,
             detail: detail.map(|detail| (detail, 0.0)),
             active,
+            mark: None,
             rect: Rect {
                 x,
                 y,
@@ -1379,8 +1480,8 @@ mod tests {
             Geometry::new([800, 600], METRICS),
             Contents {
                 workspaces: vec![
-                    (WorkspaceId(1), "clackatoo".into(), 2, true),
-                    (WorkspaceId(2), "peios".into(), 1, false),
+                    WorkspaceName::plain(1, "clackatoo", 2, true),
+                    WorkspaceName::plain(2, "peios", 1, false),
                 ],
                 tabs: vec![
                     (TabId(1), "1 zsh".into(), true),
@@ -1402,7 +1503,7 @@ mod tests {
     fn an_alert_goes_before_the_buttons_and_the_workspaces_make_room() {
         let buttons = ButtonLayout::default();
         let workspaces: Vec<_> = (1..=12)
-            .map(|id| (WorkspaceId(id), format!("workspace {id}"), 1, id == 1))
+            .map(|id| WorkspaceName::plain(id, &format!("workspace {id}"), 1, id == 1))
             .collect();
         let chrome = Chrome::new(
             Geometry::new([800, 600], METRICS),
@@ -1468,18 +1569,18 @@ mod tests {
             &ButtonLayout::default(),
         );
         // clackatoo's pill starts two paddings in, 8, and holds a dot of 6,
-        // 9 characters, its 1 character of tabs 6 after them, and 32 of
-        // padding: 124 wide.
+        // 9 characters, room of 16 for a mark, its 1 character of tabs 6
+        // after them, and 32 of padding: 140 wide.
         assert_eq!(chrome.workspaces[0].rect.x, 8.0);
-        assert_eq!(chrome.workspaces[0].rect.width, 124.0);
+        assert_eq!(chrome.workspaces[0].rect.width, 140.0);
         let (count, count_x) = chrome.workspaces[0].detail.clone().unwrap();
-        assert_eq!((count.as_str(), count_x), ("2", 8.0 + 124.0 - 12.0 - 8.0));
+        assert_eq!((count.as_str(), count_x), ("2", 8.0 + 140.0 - 12.0 - 8.0));
         assert_eq!(
             chrome.hit([20.0, 18.0], false),
             Hit::Workspace(WorkspaceId(1))
         );
         assert_eq!(
-            chrome.hit([150.0, 18.0], false),
+            chrome.hit([160.0, 18.0], false),
             Hit::Workspace(WorkspaceId(2))
         );
         assert_eq!(chrome.hit([400.0, 18.0], false), Hit::TopBar);
@@ -1515,8 +1616,17 @@ mod tests {
             Geometry::new([800, 600], METRICS),
             Contents {
                 workspaces: vec![
-                    (WorkspaceId(1), "1".into(), 3, true),
-                    (WorkspaceId(2), "work 2".into(), 3, false),
+                    WorkspaceName::plain(1, "1", 3, true),
+                    WorkspaceName::plain(2, "work 2", 3, false),
+                    // Marked, and numbered still.
+                    WorkspaceName {
+                        mark: Some(Mark::Asking),
+                        ..WorkspaceName::plain(3, "3", 2, false)
+                    },
+                    WorkspaceName {
+                        mark: Some(Mark::Unseen),
+                        ..WorkspaceName::plain(4, "peios", 2, false)
+                    },
                 ],
                 tabs: Vec::new(),
                 status: Status::tabs(),
@@ -1537,6 +1647,59 @@ mod tests {
                 .map(|(count, _)| count.as_str()),
             Some("3")
         );
+        // What a workspace says of its chats goes after its name.
+        let [.., three, peios] = &chrome.workspaces[..] else {
+            panic!("four workspaces");
+        };
+        assert_eq!((three.text.as_str(), three.detail.as_ref()), ("3", None));
+        let mark = three.mark.expect("its mark");
+        assert_eq!(mark.0, Mark::Asking);
+        // After the dot and the name, "3", 8 wide.
+        let padding = METRICS.padding;
+        let name = three.rect.x + 3.0 * padding + METRICS.dot() + 2.0 * padding;
+        assert!(
+            (mark.1 - (name + 8.0)).abs() <= 1.0,
+            "{mark:?} {:?}",
+            three.rect
+        );
+        assert_eq!(peios.mark.map(|(mark, _)| mark), Some(Mark::Unseen));
+        assert!(peios.detail.is_some());
+    }
+
+    #[test]
+    fn a_workspaces_pill_keeps_its_place_and_width_as_its_mark_comes_and_goes() {
+        let buttons = ButtonLayout::default();
+        let lay = |mark: Option<Mark>, width: u32| {
+            let workspaces = (1..=6)
+                .map(|id| WorkspaceName {
+                    mark: (id == 2).then_some(mark).flatten(),
+                    ..WorkspaceName::plain(id, &format!("workspace {id}"), 2, id == 1)
+                })
+                .collect();
+            let contents = Contents {
+                workspaces,
+                tabs: Vec::new(),
+                status: Status::tabs(),
+                buttons: &buttons,
+                bottom_shown: true,
+                menu: None,
+                alert: None,
+                rounded: false,
+                finder: None,
+            };
+            let chrome = Chrome::new(Geometry::new([width, 600], METRICS), contents, &mut measure);
+            (chrome.workspaces.iter())
+                .map(|item| item.rect)
+                .collect::<Vec<_>>()
+        };
+        for width in [1600, 900] {
+            let plain = lay(None, width);
+            for mark in Mark::ALL {
+                assert_eq!(lay(Some(mark), width), plain, "{mark:?} at {width}");
+            }
+        }
+        // Narrow, some are left out, the same ones with a mark or not.
+        assert!(lay(None, 900).len() < 6);
     }
 
     #[test]

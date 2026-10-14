@@ -41,6 +41,9 @@ pub(crate) struct Theme {
     pub(crate) palette_edge: Rgba,
     /// For what's gone wrong, such as the daemon being out of contact.
     pub(crate) warning: Rgba,
+    /// Amber, for what's getting close to going wrong, such as a chat's
+    /// context filling up.
+    pub(crate) caution: Rgba,
     /// For lines added to a file...
     pub(crate) added: Rgba,
     /// ...and removed.
@@ -99,6 +102,8 @@ impl Default for Theme {
             palette_background: hex_rgba(0x16_18_1c),
             palette_edge: hex_rgba(0x2e_2f_36),
             warning: hex_rgba(0xe0_6c_75),
+            // Further from the accent's gold than the palette's yellow.
+            caution: hex_rgba(0xe8_9a_3c),
             // The bright green and red.
             added: hex_rgba(NAMED[10]),
             removed: hex_rgba(NAMED[9]),
@@ -329,7 +334,7 @@ impl Theme {
             Paint::Workspace(index) => self.workspaces[usize::from(index) % self.workspaces.len()],
             Paint::Mode(mode) => self.modes[mode.colour()],
             Paint::Hover => self.hover,
-            Paint::Icon => self.muted,
+            Paint::Icon | Paint::Gauge => self.muted,
             Paint::Ink => self.foreground,
             Paint::Palette => self.palette_background,
             Paint::PaletteEdge => self.palette_edge,
@@ -340,6 +345,8 @@ impl Theme {
             Paint::Code => white(0.05),
             Paint::Added => faint(self.added, 0.13),
             Paint::Removed => faint(self.removed, 0.13),
+            Paint::Caution => self.caution,
+            Paint::Full => self.warning,
         }
     }
 

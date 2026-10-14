@@ -7,9 +7,9 @@
 //! [`grid`](crate::grid)'s).
 
 use clackatoo_protocol::{
-    ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Item, Outcome, ProviderModels, Setting,
-    SettingKind, Subagent, SubagentStatus, TerminalInfo, TerminalStatus, Tool, ToolContent,
-    ToolStatus, Turn, TurnFilesState, WorkspaceId,
+    ChatNode, ChatState, ChatSummary, ChoiceKind, Diff, Fullness, Item, Outcome, ProviderModels,
+    Setting, SettingKind, Subagent, SubagentStatus, TerminalInfo, TerminalStatus, Tool,
+    ToolContent, ToolStatus, Turn, TurnFilesState, WorkspaceId,
 };
 
 use crate::action::{Action, Pick, RowKey};
@@ -331,6 +331,7 @@ fn duration(ms: u64) -> String {
 }
 
 /// The shown chat's header: back, its title, what it's doing, and stop.
+/// How much context it fills is by its menus ([`meter`]).
 #[must_use]
 pub fn chat_header(state: &State, open: &OpenChat) -> Element {
     let node = open.view.as_ref().and_then(|view| view.chat());
@@ -342,9 +343,6 @@ pub fn chat_header(state: &State, open: &OpenChat) -> Element {
     if let Some(node) = node {
         said.push(node.agent.clone());
         said.push(state_word(&node.state).to_owned());
-        if let Some(usage) = node.usage.filter(|usage| usage.size > 0) {
-            said.push(format!("{}% of context", usage.used * 100 / usage.size));
-        }
     }
     if let Online::Lost(retry) = state.online {
         said.push(format!("offline, trying again in {retry}s"));
@@ -741,6 +739,174 @@ pub fn menus(node: &ChatNode) -> Element {
     menus
 }
 
+/// How many minutes ahead of UTC the phone's clock is, or was, or will
+/// be, at a time in milliseconds since the Unix epoch.
+pub type Offset<'a> = &'a dyn Fn(u64) -> i64;
+
+/// What goes along the top of the box a message is typed in: the menus,
+/// with the meter at their end, and its detail above them once tapped, as
+/// [`usage_detail`] says.
+#[must_use]
+pub fn box_bar(node: &ChatNode, open: &OpenChat, now: u64, offset: Offset<'_>) -> Element {
+    let detail = usage_detail(node, open, now, offset);
+    el("div")
+        .children(detail)
+        .child(menus(node).children(meter(node, now)))
+}
+
+/// The fold that opens the meter's detail, in [`OpenChat::folds`].
+pub const USAGE_FOLD: &str = "usage";
+
+/// How full something `fullness` full is, as a class: none while there's
+/// room.
+fn fullness_class(fullness: Fullness) -> Option<&'static str> {
+    match fullness {
+        Fullness::Room => None,
+        Fullness::Filling => Some("filling"),
+        Fullness::Full => Some("full"),
+    }
+}
+
+/// The meter of how much of its context the chat fills, at the end of its
+/// menus, as the window has it by the model menu: "42% context" over a
+/// thin bar, amber past 80% and red past 95%, and before it, the
+/// account's limit over five hours or a week, once that's as full, and
+/// not yet past when it resets, at `now`. Tapping it shows the detail
+/// ([`usage_detail`]), or hides it.
+#[must_use]
+pub fn meter(node: &ChatNode, now: u64) -> Option<Element> {
+    let usage = node.usage?;
+    let percent = usage.percent();
+    let mut meter = el("button").class("meter").action(&Action::Usage);
+    if let Some(class) = percent.map(Fullness::of).and_then(fullness_class) {
+        meter = meter.class(class);
+    }
+    if let Some((said, fullness)) = usage.pressing(now) {
+        let limit = el("span").class("limit").text(said);
+        meter = meter.child(match fullness_class(fullness) {
+            Some(class) => limit.class(class),
+            None => limit,
+        });
+    }
+    let mut context = el("span")
+        .class("context")
+        .child(el("span").text(usage.label()));
+    if let Some(percent) = percent {
+        let filled = el("i").style("width", format!("{percent}%"));
+        context = context.child(el("span").class("bar").child(filled));
+    }
+    Some(meter.child(context))
+}
+
+/// The meter's detail, above the chat's menus, once the meter's tapped:
+/// the tokens, and each limit of the account's the agent has said, how
+/// much of it is used and when it resets, as said at `now`, in
+/// milliseconds since the Unix epoch, in the phone's time as `offset`
+/// says it.
+#[must_use]
+pub fn usage_detail(
+    node: &ChatNode,
+    open: &OpenChat,
+    now: u64,
+    offset: Offset<'_>,
+) -> Option<Element> {
+    let usage = node.usage?;
+    if !open.folds.get(USAGE_FOLD).copied().unwrap_or(false) {
+        return None;
+    }
+    let rows = (usage.detail(now, |at| resets(at, now, offset)).into_iter()).map(|line| {
+        let said = el("dd").text(line.said);
+        let said = match line.fullness.and_then(fullness_class) {
+            Some(class) => said.class(class),
+            None => said,
+        };
+        [el("dt").text(line.name), said]
+    });
+    Some(
+        el("dl")
+            .class("usage")
+            .children(rows.flatten())
+            .action(&Action::Usage),
+    )
+}
+
+/// The days of the week, from Sunday.
+const WEEKDAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+/// The months, short.
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// When a limit resets, `at`, as said at `now`, both in milliseconds since
+/// the Unix epoch, in the phone's time as `offset` says it then, so a
+/// change of the clocks between comes out right, as the window says it:
+/// "at" and the time today, "tomorrow" and the time, the day of the week
+/// and the time within the week, and the date and the time further off,
+/// with the year if it's another.
+#[must_use]
+pub fn resets(at: u64, now: u64, offset: Offset<'_>) -> String {
+    const DAY: i64 = 86_400_000;
+    let local = |ms: u64| {
+        i64::try_from(ms)
+            .ok()?
+            .checked_add(offset(ms).checked_mul(60_000)?)
+    };
+    let (Some(at), Some(now)) = (local(at), local(now)) else {
+        return String::new();
+    };
+    let (day, today) = (at.div_euclid(DAY), now.div_euclid(DAY));
+    let minutes = at.rem_euclid(DAY) / 60_000;
+    let time = format!("{:02}:{:02}", minutes / 60, minutes % 60);
+    match day - today {
+        0 => format!("at {time}"),
+        1 => format!("tomorrow {time}"),
+        // The epoch's first day was a Thursday.
+        2..=6 => {
+            let weekday = usize::try_from((day + 4).rem_euclid(7)).unwrap_or(0);
+            format!("{} {time}", WEEKDAYS[weekday])
+        }
+        _ => {
+            let ((year, month, date), (this_year, ..)) = (civil(day), civil(today));
+            let month = MONTHS[usize::try_from(month - 1).unwrap_or(0) % 12];
+            if year == this_year {
+                format!("{date} {month} {time}")
+            } else {
+                format!("{date} {month} {year} {time}")
+            }
+        }
+    }
+}
+
+/// The year, month (from 1) and day of the month `days` days after the
+/// Unix epoch, in the proleptic Gregorian calendar (Howard Hinnant's
+/// `civil_from_days`).
+fn civil(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * day_of_year + 2) / 153;
+    let date = day_of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 {
+        shifted + 3
+    } else {
+        shifted - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, date)
+}
+
 /// A menu of `setting`'s choices, with its value picked.
 fn setting_menu(setting: &Setting) -> Element {
     let options = setting.choices.iter().map(|choice| {
@@ -1098,6 +1264,97 @@ mod tests {
             .map(|option| option.get("value").unwrap().to_owned())
             .collect();
         assert_eq!(values, ["set:haiku", "set:sonnet", "switch:codex:"]);
+    }
+
+    /// A chat whose agent has said it fills `used` of 200k tokens, and
+    /// `five_hour` of its account's limit over five hours.
+    fn using(used: u64, five_hour: Option<u8>) -> ChatNode {
+        ChatNode {
+            usage: Some(clackatoo_protocol::Usage {
+                used,
+                size: 200_000,
+                five_hour: five_hour.map(|used| clackatoo_protocol::Limit {
+                    used,
+                    resets: Some(1_760_543_400_000),
+                }),
+                weekly: None,
+            }),
+            ..ChatNode::default()
+        }
+    }
+
+    #[test]
+    fn the_meter_says_the_context_used_quietly_then_amber_then_red() {
+        let now = 1_760_529_600_000;
+        assert_eq!(meter(&ChatNode::default(), now), None, "nothing said yet");
+        let quiet = meter(&using(84_000, Some(42)), now).unwrap();
+        assert_eq!(quiet.get("class"), Some("meter"));
+        assert_eq!(quiet.get("data-action"), Some("usage"));
+        assert_eq!(quiet.all_text(), "42% context");
+        let bar = &quiet.find_all("class").last().unwrap().children[0];
+        assert!(
+            matches!(bar, Node::Element(filled) if filled.styles == [("width", "42%".to_owned())]),
+            "{bar:?}"
+        );
+        let filling = meter(&using(170_000, None), now).unwrap();
+        assert_eq!(filling.get("class"), Some("meter filling"));
+        // Said to fill more than it holds: all of it.
+        let full = meter(&using(u64::MAX, None), now).unwrap();
+        assert_eq!(full.get("class"), Some("meter full"));
+        assert_eq!(full.all_text(), "100% context");
+        // A limit all but reached goes before it, in red.
+        let limit = meter(&using(84_000, Some(97)), now).unwrap();
+        assert_eq!(limit.get("class"), Some("meter"));
+        assert_eq!(limit.all_text(), "5-hour 97%42% context");
+    }
+
+    #[test]
+    fn the_meters_detail_shows_once_tapped_saying_when_each_limit_resets() {
+        let node = using(84_000, Some(42));
+        let mut open = open();
+        // Wednesday 15 October 2025, 12:00 UTC.
+        let now = 1_760_529_600_000;
+        assert_eq!(usage_detail(&node, &open, now, &|_| 60), None, "folded");
+        open.folds.insert(USAGE_FOLD.into(), true);
+        let detail = usage_detail(&node, &open, now, &|_| 60).unwrap();
+        // An hour ahead of UTC, as in London in October.
+        assert_eq!(
+            detail.all_text(),
+            "Context84k of 200k tokens, 42%5-hour limit42% used, resets at 16:50"
+        );
+        assert_eq!(usage_detail(&ChatNode::default(), &open, now, &|_| 0), None);
+        // Past when it resets: how much is used now isn't known.
+        let later = 1_760_543_400_000;
+        let detail = usage_detail(&node, &open, later, &|_| 60).unwrap();
+        assert_eq!(detail.all_text(), "Context84k of 200k tokens, 42%");
+        let limit = meter(&using(84_000, Some(97)), now).unwrap();
+        assert_eq!(limit.all_text(), "5-hour 97%42% context");
+        let reset = meter(&using(84_000, Some(97)), later).unwrap();
+        assert_eq!(reset.all_text(), "42% context");
+    }
+
+    #[test]
+    fn a_reset_is_said_as_the_window_says_it_in_the_phones_time() {
+        let now = 1_760_529_600_000;
+        let (hour, day) = (3_600_000, 86_400_000);
+        let utc = &|_| 0;
+        assert_eq!(resets(now + 3 * hour + 2_400_000, now, utc), "at 15:40");
+        assert_eq!(resets(now + 13 * hour, now, utc), "tomorrow 01:00");
+        // Behind UTC, that's still today.
+        assert_eq!(resets(now + 13 * hour, now, &|_| -300), "at 20:00");
+        assert_eq!(resets(now + 6 * day - 3 * hour, now, utc), "Tuesday 09:00");
+        assert_eq!(resets(now + 20 * day, now, utc), "4 Nov 12:00");
+        assert_eq!(resets(now + 120 * day, now, utc), "12 Feb 2026 12:00");
+        assert_eq!(resets(u64::MAX, now, utc), "");
+        // In London: summer time now, and the clocks gone back by the
+        // reset, a fortnight on at 09:00 GMT, which is 09:00 there.
+        let summer_till = 1_761_440_400_000;
+        let london = &|ms| if ms < summer_till { 60 } else { 0 };
+        let reset = now + 14 * day - 3 * hour;
+        assert_eq!(resets(reset, now, london), "29 Oct 09:00");
+        assert_eq!(civil(0), (1970, 1, 1));
+        assert_eq!(civil(-1), (1969, 12, 31));
+        assert_eq!(civil(11_016), (2000, 2, 29));
     }
 
     #[test]

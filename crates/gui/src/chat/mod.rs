@@ -51,6 +51,8 @@ pub(crate) enum Tone {
     Muted,
     Accent,
     Warning,
+    /// Amber: getting close to what [`Tone::Warning`] says.
+    Caution,
     /// On something in the accent colour.
     OnAccent,
     /// Added to a file.
@@ -149,6 +151,9 @@ enum Hit {
     CopyCode(TextKey),
     /// The button under a turn that copies its answer, by the turn.
     CopyAnswer(usize),
+    /// The meter of how much context the chat fills, which shows its
+    /// detail.
+    Usage,
 }
 
 /// What the mouse pointer looks like over a chat.
@@ -294,6 +299,11 @@ pub(crate) struct ChatView {
     edge_step: Option<u64>,
     /// The column's right edge, from the pane's left, when last drawn.
     column_right: f32,
+    /// The meter's detail, while it's shown, and how it came to be.
+    detail: Option<paint::Detail>,
+    /// Where the meter was drawn, for its detail to open from, while
+    /// drawing: its right, and the box's top.
+    detail_anchor: Option<[f32; 2]>,
 }
 
 impl std::fmt::Debug for ChatView {
@@ -353,6 +363,8 @@ impl ChatView {
             drag_to: None,
             edge_step: None,
             column_right: 0.0,
+            detail: None,
+            detail_anchor: None,
         }
     }
 
@@ -409,6 +421,11 @@ impl ChatView {
                     }
                 }
             }
+        }
+        // A chat that moved to another agent has nothing to say in detail
+        // until the new one says how much it uses.
+        if self.node.usage.is_none() {
+            self.detail = None;
         }
         // The agent has set what a slider was slid to.
         if let Some(menu) = &mut self.menu
@@ -545,7 +562,40 @@ impl ChatView {
             redraw = true;
         }
         redraw |= self.hover_menu(at);
+        redraw |= self.hover_meter(at);
         redraw
+    }
+
+    /// The mouse moved to `at` with no button held: over the meter, its
+    /// detail shows, until the mouse leaves it. Returns whether the chat
+    /// must be redrawn.
+    fn hover_meter(&mut self, at: [f32; 2]) -> bool {
+        let over = (self.hits.iter()).any(|(hit, rect)| *hit == Hit::Usage && contains(*rect, at));
+        match (over, self.detail) {
+            (true, None) => self.detail = Some(paint::Detail::Hovered),
+            (false, Some(paint::Detail::Hovered)) => self.detail = None,
+            _ => return false,
+        }
+        true
+    }
+
+    /// Shows the meter's detail, as `K` does, or hides it again. Returns
+    /// whether there's a meter to show it of.
+    pub(crate) fn toggle_detail(&mut self) -> bool {
+        self.detail = match self.detail {
+            Some(paint::Detail::Asked) => None,
+            _ if self.node.usage.is_none() => return false,
+            _ => Some(paint::Detail::Asked),
+        };
+        true
+    }
+
+    /// Hides the meter's detail if a key or a click showed it, as the
+    /// next does. Returns whether it was shown.
+    fn hide_detail(&mut self) -> bool {
+        self.detail
+            .take_if(|detail| *detail == paint::Detail::Asked)
+            .is_some()
     }
 
     /// The mouse left the pane: the button that copies a block of code
@@ -554,7 +604,10 @@ impl ChatView {
     pub(crate) fn unhover(&mut self) -> bool {
         self.copied_code = None;
         let copied = self.copied_answer.take().is_some();
-        self.hovered_code.take().is_some() || copied
+        let detail = (self.detail)
+            .take_if(|detail| *detail == paint::Detail::Hovered)
+            .is_some();
+        self.hovered_code.take().is_some() || copied || detail
     }
 
     /// The mouse moved to `at` with no button held, over the menu, if
@@ -1059,6 +1112,13 @@ impl ChatView {
         let hit = (self.hits.iter().rev())
             .find(|(_, rect)| contains(*rect, at))
             .map(|(hit, _)| hit.clone());
+        // A click closes the meter's detail, if a click showed it, unless
+        // it's on the meter, which shows it as long as the mouse is there.
+        if self.hide_detail() && hit == Some(Hit::Usage) {
+            self.detail = Some(paint::Detail::Hovered);
+        } else if hit == Some(Hit::Usage) {
+            self.detail = Some(paint::Detail::Asked);
+        }
         // A click anywhere else closes the menu.
         if !matches!(
             hit,
@@ -1130,6 +1190,8 @@ impl ChatView {
             }
             Some(Hit::Send) => self.send(settled),
             Some(Hit::Stop) => settled.actions.push(ChatAction::Stop),
+            // Its detail, shown or hidden above.
+            Some(Hit::Usage) => {}
             Some(Hit::Choice(id)) => {
                 // The question the button was drawn for, which may have
                 // been answered since.
@@ -1994,5 +2056,172 @@ mod tests {
                 value: "sonnet".into()
             })
         );
+    }
+
+    /// A chat with its agent's mode and model, and the daemon's own Tools
+    /// and Browser settings, as every chat has them, that fills 84k of
+    /// 200k tokens of context, with its account's limit over five hours
+    /// 91% used.
+    pub(crate) fn with_every_chip() -> ChatView {
+        use clackatoo_protocol::SettingChoice;
+        let mut view = with_settings();
+        let own = |id: &str, name: &str, kind, value: &str, values: &[&str]| Setting {
+            id: id.into(),
+            name: name.into(),
+            kind,
+            value: value.into(),
+            choices: (values.iter())
+                .map(|value| SettingChoice {
+                    value: value.to_lowercase(),
+                    name: (*value).into(),
+                    description: None,
+                })
+                .collect(),
+        };
+        view.node.settings.extend([
+            own(
+                "clackatoo.tools",
+                "Tools",
+                SettingKind::Tools,
+                "ask",
+                &["Ask", "Allow", "Off"],
+            ),
+            own(
+                "clackatoo.browser",
+                "Browser",
+                SettingKind::Browser,
+                "off",
+                &["Off", "On"],
+            ),
+        ]);
+        view.node.usage = Some(clackatoo_protocol::Usage {
+            used: 84_000,
+            size: 200_000,
+            five_hour: Some(clackatoo_protocol::Limit {
+                used: 91,
+                resets: None,
+            }),
+            weekly: None,
+        });
+        view
+    }
+
+    #[test]
+    fn the_meter_gives_way_to_the_chips_and_never_runs_under_one() {
+        let mut fonts = fonts();
+        let mut view = with_every_chip();
+        let overlaps = |a: [f32; 4], b: [f32; 4]| {
+            a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+        };
+        let mut widths = Vec::new();
+        for width in [
+            900.0, 720.0, 680.0, 640.0, 600.0, 560.0, 480.0, 420.0, 340.0, 260.0,
+        ] {
+            view.paint(&mut fonts, [0.0; 2], [width, 800.0], false);
+            let meter = (view.hits.iter())
+                .find(|(hit, _)| *hit == Hit::Usage)
+                .map(|(_, rect)| *rect)
+                .expect("the meter, its bar at least");
+            for (hit, rect) in &view.hits {
+                if matches!(hit, Hit::Chip(_) | Hit::Send | Hit::Stop) {
+                    assert!(
+                        !overlaps(meter, *rect),
+                        "{width}: {hit:?} {rect:?} {meter:?}"
+                    );
+                }
+            }
+            let chips = (view.hits.iter())
+                .filter(|(hit, _)| matches!(hit, Hit::Chip(_)))
+                .count();
+            widths.push((meter[2], chips));
+        }
+        // Wide, the limit beside the context, and every chip; narrower,
+        // the context alone, then its bar; at the narrowest, chips go
+        // rather than run under it.
+        let (whole, bar) = (widths[0].0, widths.last().unwrap().0);
+        assert_eq!(widths[0].1, 4, "{widths:?}");
+        assert!(
+            widths.windows(2).all(|pair| pair[1].0 <= pair[0].0),
+            "{widths:?}"
+        );
+        assert!(
+            (widths.iter()).any(|&(width, chips)| width < whole && width > bar && chips == 4),
+            "{widths:?}"
+        );
+        assert!(widths.last().unwrap().1 < 4, "{widths:?}");
+    }
+
+    #[test]
+    fn the_meters_detail_shows_while_hovered_and_once_clicked_or_asked_for_with_k() {
+        use paint::Detail::{Asked, Hovered};
+
+        let mut fonts = fonts();
+        let mut view = with_settings();
+        // No usage said yet: no meter, and `K` says why.
+        fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(drawn_at(&view, &Hit::Usage), None);
+        fixtures::read(&mut view, "K");
+        assert_eq!(view.detail, None);
+        assert!(view.said.is_some());
+        view.node.usage = Some(clackatoo_protocol::Usage {
+            used: 84_000,
+            size: 200_000,
+            five_hour: None,
+            weekly: None,
+        });
+        fixtures::paint(&mut view, &mut fonts);
+        let meter = drawn_at(&view, &Hit::Usage).expect("the meter");
+        // The mouse over it, and off it.
+        assert!(view.hover(meter));
+        assert_eq!(view.detail, Some(Hovered));
+        assert!(!view.hover([meter[0], meter[1] + 1.0]), "still over it");
+        assert!(view.hover([1.0, 1.0]));
+        assert_eq!(view.detail, None);
+        assert!(view.hover(meter));
+        assert!(view.unhover());
+        assert_eq!(view.detail, None);
+        // Clicked, it stays after the mouse leaves, until a click
+        // elsewhere.
+        view.press(meter, 1, false);
+        view.settle(&mut fonts);
+        assert_eq!(view.detail, Some(Asked));
+        assert!(!view.hover([1.0, 1.0]));
+        assert_eq!(view.detail, Some(Asked));
+        view.press([1.0, 1.0], 1, false);
+        view.settle(&mut fonts);
+        assert_eq!(view.detail, None);
+        // `K` shows it until `K` again, or any other key.
+        assert_eq!(fixtures::read(&mut view, "K"), (true, false));
+        assert_eq!(view.detail, Some(Asked));
+        fixtures::read(&mut view, "K");
+        assert_eq!(view.detail, None);
+        fixtures::read(&mut view, "K");
+        assert_eq!(fixtures::read(&mut view, "j"), (true, false));
+        assert_eq!(view.detail, None);
+        // `K` hiding what a click showed ends a two-key command half
+        // typed, as any key does.
+        fixtures::read(&mut view, "g");
+        assert!(view.pending());
+        view.detail = Some(Asked);
+        fixtures::read(&mut view, "K");
+        assert_eq!(view.detail, None);
+        assert!(!view.pending());
+    }
+
+    #[test]
+    fn k_shows_the_meters_detail_in_normal_mode_only() {
+        let mut fonts = fonts();
+        let mut view = ChatView::new(String::new(), fixtures::talk(&[("one", "first answer")]));
+        view.node.usage = with_every_chip().node.usage;
+        view.reading = true;
+        fixtures::paint(&mut view, &mut fonts);
+        fixtures::read(&mut view, "v");
+        assert!(view.visual().is_some());
+        fixtures::read(&mut view, "K");
+        assert_eq!(view.detail, None);
+        assert!(view.visual().is_some(), "still selecting");
+        fixtures::read_named(&mut view, NamedKey::Escape);
+        fixtures::read(&mut view, "K");
+        assert_eq!(view.detail, Some(paint::Detail::Asked));
     }
 }

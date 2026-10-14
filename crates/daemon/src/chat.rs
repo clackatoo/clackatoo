@@ -32,12 +32,14 @@ use crate::agents::AgentSpec;
 use crate::handoff::{self, Changed, Digest, Step, StepState};
 use crate::handover;
 
+mod limits;
 mod relations;
 mod resume;
 
 use resume::Held;
 mod subagent;
 
+pub(crate) use limits::Limits;
 pub(crate) use relations::{Cause, MAX_INBOX, Message, Relations};
 pub(crate) use subagent::{Wanted, role_for};
 
@@ -374,6 +376,11 @@ pub(crate) struct HostedChat {
     /// whatever it's titled, and the agent can't make a command's input
     /// say so.
     own_tools: VecDeque<String>,
+    /// Its agent's account's limits, as the daemon last heard them from
+    /// any of that agent's chats, shown with the context it fills. Not
+    /// handed over: after an upgrade they come again with the next that
+    /// changes.
+    limits: Limits,
 }
 
 /// A session a chat had with another agent, which it can go back to.
@@ -533,6 +540,7 @@ impl HostedChat {
             wanted: None,
             told_parent: std::cell::Cell::new(0),
             own_tools: VecDeque::new(),
+            limits: Limits::default(),
         }
     }
 
@@ -1338,7 +1346,7 @@ impl HostedChat {
             Some(choice.name.clone())
         });
         self.set_settings(shown);
-        self.set_usage(None);
+        self.forget_usage();
         self.clear_slow();
         self.set_notice(None);
         self.withdraw_install();
@@ -2100,9 +2108,14 @@ impl HostedChat {
                     self.set_value(&id, &mode);
                 }
             }
+            // What it says of its account's limits the daemon has taken
+            // in already, for every chat of the agent: see
+            // `Daemon::limits_heard`.
             SessionUpdate::UsageUpdate(usage) => self.set_usage(Some(Usage {
-                used: usage.used,
-                size: usage.size,
+                used: usage.used.min(limits::MOST_TOKENS),
+                size: usage.size.min(limits::MOST_TOKENS),
+                five_hour: self.limits.five_hour,
+                weekly: self.limits.weekly,
             })),
             // Not shown yet, but kept for the next agent to hear of.
             SessionUpdate::Plan(plan) => {
@@ -2467,6 +2480,28 @@ impl HostedChat {
         if self.node.usage != usage {
             self.node.usage = usage;
             self.journal.push(ChatPatch::Usage(usage));
+        }
+    }
+
+    /// Forgets what the agent said of the context the chat fills, and of
+    /// its account's limits, as the chat moves to another agent, whose
+    /// account may be another.
+    fn forget_usage(&mut self) {
+        self.limits = Limits::default();
+        self.set_usage(None);
+    }
+
+    /// Its agent's account's limits are now `limits`, as heard from any of
+    /// that agent's chats: shown with the context it fills, once it's
+    /// said how much that is.
+    pub(crate) fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
+        if let Some(usage) = self.node.usage {
+            self.set_usage(Some(Usage {
+                five_hour: limits.five_hour,
+                weekly: limits.weekly,
+                ..usage
+            }));
         }
     }
 
@@ -3969,6 +4004,8 @@ mod tests {
         chat.set_usage(Some(Usage {
             used: 0,
             size: 40_000,
+            five_hour: None,
+            weekly: None,
         }));
         let quarter = chat.digest(0, to, &[]).unwrap();
         assert!(
@@ -4299,11 +4336,43 @@ mod tests {
             &mut chat,
             r#"{"sessionUpdate":"usage_update","used":22118,"size":1000000}"#,
         );
+        let usage = Usage {
+            used: 22118,
+            size: 1_000_000,
+            five_hour: None,
+            weekly: None,
+        };
+        assert_eq!(chat.node.usage, Some(usage));
+        // Its account's limits, as the daemon heard them, go with it, and
+        // with the next it says.
+        let five_hour = Some(clackatoo_protocol::Limit {
+            used: 42,
+            resets: None,
+        });
+        chat.set_limits(Limits {
+            five_hour,
+            weekly: None,
+        });
+        assert_eq!(chat.node.usage, Some(Usage { five_hour, ..usage }));
+        assert!(matches!(
+            chat.journal.patches.back(),
+            Some(ChatPatch::Usage(Some(Usage {
+                five_hour: Some(_),
+                ..
+            })))
+        ));
+        // Nonsense counts are cut to sense.
+        update(
+            &mut chat,
+            r#"{"sessionUpdate":"usage_update","used":18446744073709551615,"size":0}"#,
+        );
         assert_eq!(
             chat.node.usage,
             Some(Usage {
-                used: 22118,
-                size: 1_000_000,
+                used: limits::MOST_TOKENS,
+                size: 0,
+                five_hour,
+                weekly: None,
             })
         );
         chat.settings_changed(Ok(claude_settings("sonnet")));

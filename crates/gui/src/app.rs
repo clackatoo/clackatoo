@@ -2740,6 +2740,7 @@ impl App {
                 self.sender = Some(sender);
                 let remote = self.session.host().is_some();
                 self.desk.daemon_is(wire, daemon_version.clone());
+                self.desk.daemon_at(self.session.host());
                 self.desk.connected(workspaces, remote);
                 let host = self.session.host();
                 let news = self.updates.daemon_is(daemon_version.as_deref(), host);
@@ -2868,11 +2869,13 @@ impl App {
                     self.request_redraw();
                 }
             }
-            // The window doesn't watch the chats as a list.
+            SessionEvent::Message(ServerMessage::Event(Event::Chats(chats))) => {
+                if self.desk.chats_changed(chats) {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Message(
-                ServerMessage::Hello { .. }
-                | ServerMessage::NotUpgrading { .. }
-                | ServerMessage::Event(Event::Chats(_)),
+                ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. },
             ) => {}
             SessionEvent::Clipboard(heard) => {
                 for (from, text) in heard {

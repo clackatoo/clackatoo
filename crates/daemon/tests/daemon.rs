@@ -18,11 +18,11 @@ use clackatoo_protocol::{
     ChatNode, ChatState, ClientMessage, CompletionItem, Construct, Content, Diff, Done, Edit,
     Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
     Found, FoundBuffer, FoundLine, FoundSymbol, GitMark, InlayHint, InlayHintKind, Item, Kind,
-    Layout, Location, NewAgent, NewTerminal, OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION,
+    Layout, Limit, Location, NewAgent, NewTerminal, OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION,
     PaneId, PaneTerminal, Patch, Piece, ProviderModels, Query, Request, Response, Resume, Search,
     Selection, ServerFeatures, ServerMessage, Side, Size, Span, SubagentStatus, Symbol, TerminalId,
     TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles,
-    TurnFilesState, Use, UseKind, View, ViewUpdate, Workspaces,
+    TurnFilesState, Usage, Use, UseKind, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -2093,6 +2093,67 @@ fn a_chat_starts_in_auto_mode_and_keeps_the_settings_chosen() {
         last_words(&ask(&mut client, chat, "settings")),
         "auto sonnet\n"
     );
+}
+
+#[test]
+fn an_accounts_limits_show_in_every_chat_of_its_agent_kept_to_sense() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let first = client.new_workspace(None, new_chat()).unwrap();
+    client.split_pane(first, Side::Right, new_chat()).unwrap();
+    let chats = client.watch_workspaces().unwrap().list[0].terminals();
+    for &chat in &chats {
+        wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    }
+    // The second has said how much context it fills, and no limits yet.
+    let node = ask(&mut client, chats[1], "hello");
+    let usage = node.usage.expect("its usage");
+    assert_eq!((usage.five_hour, usage.weekly), (None, None));
+
+    // The first's agent says its account's limits: a week's reached, at a
+    // time that's nonsense, which isn't said.
+    let node = ask(&mut client, chats[0], "limits");
+    let five_hour = Some(Limit {
+        used: 42,
+        resets: Some(1_760_018_400_000),
+    });
+    let weekly = Some(Limit {
+        used: 100,
+        resets: None,
+    });
+    assert_eq!(
+        node.usage,
+        Some(Usage {
+            used: 84_000,
+            size: 200_000,
+            five_hour,
+            weekly,
+        })
+    );
+    // They're the account's: the other chat shows them at once, with its
+    // own context.
+    let node = wait_for_chat(&mut client, chats[1], |node| {
+        node.usage.is_some_and(|usage| usage.weekly.is_some())
+    });
+    assert_eq!(
+        node.usage,
+        Some(Usage {
+            used: 1000,
+            size: 200_000,
+            five_hour,
+            weekly,
+        })
+    );
+    // A chat started after shows them once it says its context.
+    let pane = client.watch_workspaces().unwrap().list[0].tabs[0].focused;
+    client.split_pane(pane, Side::Below, new_chat()).unwrap();
+    let third = *(client.watch_workspaces().unwrap().list[0].terminals())
+        .iter()
+        .find(|chat| !chats.contains(chat))
+        .expect("the third chat");
+    wait_for_chat(&mut client, third, |node| node.state == ChatState::Ready);
+    let node = ask(&mut client, third, "hello");
+    assert_eq!(node.usage.and_then(|usage| usage.five_hour), five_hour);
 }
 
 /// A daemon whose chats talk to the fake agent as Claude Code, and as
@@ -13671,6 +13732,29 @@ fn open_resumed(client: &mut Client, chat: PaneTerminal) -> TerminalId {
     };
     wait_for_chat(client, chat, |node| node.state == ChatState::Ready);
     chat
+}
+
+#[test]
+fn limits_told_again_with_a_loaded_session_never_take_the_place_of_those_heard_live() {
+    let daemon = TestDaemon::start();
+    let home = daemon.dir.path().to_owned();
+    let mut client = daemon.client();
+    let live = start_chat(&mut client);
+    let five_hour = |node: &ChatNode| node.usage.and_then(|usage| usage.five_hour);
+    let now = ask(&mut client, live, "limits");
+    let heard = five_hour(&now);
+    assert_eq!(heard.map(|limit| limit.used), Some(42));
+    // A session loaded tells how its limits stood long ago, at 99%.
+    let resumed = open_resumed(&mut client, resumed_chat(&home, "past-1", None));
+    wait_for_log(&daemon, "agent.log", "told past-1");
+    let node = ask(&mut client, resumed, "hello");
+    assert_eq!(
+        five_hour(&node),
+        heard,
+        "the resumed chat has the live ones"
+    );
+    let node = client.capture(live).unwrap().chat().unwrap().clone();
+    assert_eq!(five_hour(&node), heard);
 }
 
 #[test]

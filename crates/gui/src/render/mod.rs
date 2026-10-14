@@ -198,6 +198,12 @@ pub(crate) enum Paint {
     Removed,
     /// Behind text selected, in a chat, as a terminal's selection is.
     Selected,
+    /// A gauge's filling while there's room to spare, quietly...
+    Gauge,
+    /// ...in amber once it's getting full...
+    Caution,
+    /// ...and in the warning colour once it's all but full.
+    Full,
 }
 
 /// A line of text of the window's own.
@@ -221,6 +227,8 @@ pub(crate) enum Ink {
     OnColor,
     /// In the warning colour, for what's gone wrong.
     Warning,
+    /// In amber, for what's getting close to going wrong.
+    Caution,
     /// In clackatoo's own colour, as links are.
     Accent,
     /// Green, for what's added to a file...
@@ -993,6 +1001,7 @@ impl Renderer {
             Ink::OnColor => self.theme.bar,
             Ink::Muted => self.theme.muted,
             Ink::Warning => self.theme.warning,
+            Ink::Caution => self.theme.caution,
             Ink::Accent => self.theme.accent,
             Ink::Added => self.theme.added,
             Ink::Removed => self.theme.removed,

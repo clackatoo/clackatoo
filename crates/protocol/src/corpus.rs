@@ -26,18 +26,20 @@ use clackatoo_text::{
 };
 
 use crate::frame::{self, FrameDecoder, FrameError};
-use crate::wire::{EXITED, FALLBACKS, HOVER, INLAY_HINTS, PHONE_TERMINALS, SYMBOLS, USES, WORDS};
+use crate::wire::{
+    EXITED, FALLBACKS, HOVER, INLAY_HINTS, LIMITS, PHONE_TERMINALS, SYMBOLS, USES, WORDS,
+};
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
     Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
     ClientMessage, Content, CursorState, Diff, Error, Event, FilesId, GridNode, GridState,
-    HistoryLine, HistoryLines, Item, Layout, Line, LinkTarget, Location, NewAgent, NewReview,
-    NewTerminal, Node, NodeId, Outcome, Pane, PaneId, PaneKind, PaneTerminal, Patch, Provider,
-    ProviderModels, Question, Request, Response, Resume, ResumeSession, ReviewId, Run, Sender,
-    ServerMessage, Setting, SettingChoice, SettingKind, Side, Subagent, SubagentStatus, Switch,
-    Tab, TabId, TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus,
-    Turn, TurnEnd, TurnFiles, TurnFilesState, Usage, View, ViewUpdate, Workspace, WorkspaceId,
-    Workspaces,
+    HistoryLine, HistoryLines, Item, Layout, Limit, Line, LinkTarget, Location, NewAgent,
+    NewReview, NewTerminal, Node, NodeId, Outcome, Pane, PaneId, PaneKind, PaneTerminal, Patch,
+    Provider, ProviderModels, Question, Request, Response, Resume, ResumeSession, ReviewId, Run,
+    Sender, ServerMessage, Setting, SettingChoice, SettingKind, Side, Subagent, SubagentStatus,
+    Switch, Tab, TabId, TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolKind,
+    ToolStatus, Turn, TurnEnd, TurnFiles, TurnFilesState, Usage, View, ViewUpdate, Workspace,
+    WorkspaceId, Workspaces,
 };
 use crate::{
     Answer, BoardAction, BoardAuthor, BoardEntry, BoardLink, BoardScope, BoardSummary, BoardUpdate,
@@ -696,6 +698,25 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             .into_iter()
             .map(|sample| (INLAY_HINTS, sample)),
     );
+    // An account's limits, beside the context: one reached.
+    samples.push((
+        LIMITS,
+        Server(ServerMessage::Event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Chat(ChatPatch::Usage(Some(Usage {
+                used: 84_000,
+                size: 200_000,
+                five_hour: Some(Limit {
+                    used: 42,
+                    resets: Some(1_760_018_400_000),
+                }),
+                weekly: Some(Limit {
+                    used: 100,
+                    resets: Some(1_760_400_000_000),
+                }),
+            })))]),
+        })),
+    ));
     samples
 }
 
@@ -1828,6 +1849,10 @@ fn usage() -> Usage {
     Usage {
         used: 1000,
         size: 200_000,
+        // What older versions' fixtures hold: limits came at 81, sampled
+        // there.
+        five_hour: None,
+        weekly: None,
     }
 }
 

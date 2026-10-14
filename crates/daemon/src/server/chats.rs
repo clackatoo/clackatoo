@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use agent_client_protocol_schema::v1::SessionUpdate;
+use agent_client_protocol_schema::v1::{Meta, SessionUpdate};
 use clackatoo_protocol::{
     AgentSession, ChatChoices, Error, Event, NewAgent, PaneId, Provider, ProviderModels, Setting,
     SettingKind, TerminalId,
@@ -37,7 +37,7 @@ use super::stopping::AGENT_STOP_WAIT;
 use super::{Daemon, Hosted, OUTPUT_BUDGET, Orphan, Slot, Source};
 use crate::agent::{Agent, Incoming, Listed, Opened, Opening, Refused};
 use crate::agents::{self, AgentSpec, Launch, Start};
-use crate::chat::{Action, HostedChat, settings_of};
+use crate::chat::{Action, HostedChat, Limits, settings_of};
 use crate::pty::Process;
 
 /// Identifies a running agent within one daemon. Never reused, so a
@@ -85,6 +85,9 @@ pub(super) struct Agents {
     /// How many tokens each agent's context holds, by its name, as its
     /// sessions last said, to keep a digest for it to a quarter of that.
     context: HashMap<String, u64>,
+    /// Each agent's account's limits, by its name, as any of its sessions
+    /// last said, for every chat of it to show.
+    limits: HashMap<String, Limits>,
     /// The chats in the background that have finished, and when each
     /// lets its session go if it's still idle (see
     /// [`Daemon::park_idle`]).
@@ -763,6 +766,33 @@ impl Daemon {
         }
     }
 
+    /// Takes in what agent `name` said of its account's limits in `meta`,
+    /// a `usage_update`'s about `session`: every chat of that agent shows
+    /// the latest, as they're the account's, and the chat with `session`
+    /// shows those heard from any other with what it says next.
+    fn limits_heard(&mut self, name: &str, session: &str, meta: Option<&Meta>) {
+        let limits = self.agents.limits.entry(name.to_owned()).or_default();
+        let changed = limits.heard(meta);
+        let limits = *limits;
+        if changed {
+            let others: Vec<TerminalId> = (self.terminals.iter_mut())
+                .filter_map(|(&id, slot)| {
+                    let chat = slot.terminal.chat()?;
+                    (chat.agent() == name && chat.session() != Some(session)).then(|| {
+                        chat.set_limits(limits);
+                        id
+                    })
+                })
+                .collect();
+            for id in others {
+                self.collect_damage(id);
+            }
+        }
+        if let Some((_, chat)) = self.chat_in(name, session) {
+            chat.set_limits(limits);
+        }
+    }
+
     /// Hands `update`, from agent `name` about `session`, to its chat.
     /// Returns the chat, if there is one.
     fn session_updated(
@@ -771,9 +801,6 @@ impl Daemon {
         session: &str,
         update: SessionUpdate,
     ) -> Option<TerminalId> {
-        if let SessionUpdate::UsageUpdate(usage) = &update {
-            self.agents.context.insert(name.to_owned(), usage.size);
-        }
         let (id, chat) = self.chat_in(name, session)?;
         // The conversation so far, written long ago. A load that goes on
         // telling isn't slow to open: it's waited for as long again.
@@ -797,6 +824,12 @@ impl Daemon {
         // Before anything is made of it: see `writing_ended`.
         if chat.finishes_writing(&update) {
             self.writing_ended(id);
+        }
+        // Heard live, never from a conversation told again, which says how
+        // things stood long ago.
+        if let SessionUpdate::UsageUpdate(usage) = &update {
+            self.agents.context.insert(name.to_owned(), usage.size);
+            self.limits_heard(name, session, usage.meta.as_ref());
         }
         let chat = self.chat(id)?;
         let settings = matches!(update, SessionUpdate::ConfigOptionUpdate(_));

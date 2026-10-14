@@ -48,7 +48,7 @@ static ZONE: Mutex<Option<(Instant, TimeZone)>> = Mutex::new(None);
 /// The local time zone, looked up at most every [`ZONE_KEPT`]: jiff keeps
 /// one it found, but not that it found none, so a system without one
 /// would read the disk every frame.
-fn local_zone() -> TimeZone {
+pub(super) fn local_zone() -> TimeZone {
     let mut kept = ZONE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

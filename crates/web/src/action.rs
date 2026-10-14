@@ -42,6 +42,8 @@ pub enum Action {
     Type,
     /// A key on the row above the keyboard.
     Key(RowKey),
+    /// Shows how much context the chat shown fills, in full, or hides it.
+    Usage,
 }
 
 /// The keys on the row above the phone's keyboard: those a phone's
@@ -174,6 +176,7 @@ impl Action {
             Self::Unfit => "unfit".to_owned(),
             Self::Type => "type".to_owned(),
             Self::Key(key) => format!("key:{}", key.name()),
+            Self::Usage => "usage".to_owned(),
         }
     }
 
@@ -204,6 +207,7 @@ impl Action {
             ("unfit", "") => Self::Unfit,
             ("type", "") => Self::Type,
             ("key", name) => Self::Key(RowKey::ALL.into_iter().find(|key| key.name() == name)?),
+            ("usage", "") => Self::Usage,
             _ => return None,
         })
     }
@@ -279,6 +283,7 @@ mod tests {
             Action::Fit,
             Action::Unfit,
             Action::Type,
+            Action::Usage,
         ]
         .into_iter()
         .chain(RowKey::ALL.map(Action::Key))

@@ -23,7 +23,7 @@ use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::browser::BrowserPane;
-use crate::chrome::{ModeName, Status};
+use crate::chrome::{ModeName, Status, WorkspaceName};
 use crate::command::{self, Command, Kind, Place};
 use crate::finder::Finder;
 use crate::input::{self, KeptPress, KeyPress, Modifiers};
@@ -109,6 +109,9 @@ enum Asked {
     Devices,
     /// What a new chat could be, for the start page.
     ChatChoices,
+    /// The chats, every one, to mark the tabs and workspaces with what
+    /// they're doing.
+    Chats,
     /// The workspaces, asked for again after a newer daemon sent them as
     /// this window couldn't read.
     Workspaces,
@@ -133,6 +136,7 @@ const MOST_MISSED: usize = 5;
 /// The time those are counted over.
 const MISSED_OVER: std::time::Duration = std::time::Duration::from_mins(1);
 
+mod badges;
 mod bindings;
 mod boards;
 mod browsers;
@@ -209,10 +213,6 @@ const REFUSED_FOR: std::time::Duration = std::time::Duration::from_millis(300);
 /// How long a pane an agent points out stays lit.
 const POINTED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
-/// After a tab's name while a chat in it is at work. Still: it never
-/// wakes the window.
-const WORKING_MARK: &str = " ⋯";
-
 /// The window's view of the daemon's workspaces.
 #[derive(Debug, Default)]
 #[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
@@ -221,6 +221,8 @@ pub(crate) struct Desk {
     workspaces: Workspaces,
     /// The pane an agent last pointed out, and until when it's lit.
     pointed: Option<(PaneId, std::time::Instant)>,
+    /// The chats, as a list, to mark the tabs and workspaces with.
+    watched: badges::Watched,
     /// What's shown, once connected.
     shown: Option<Shown>,
     /// Panes by the terminal each shows: those of the workspace shown, and
@@ -587,19 +589,19 @@ impl Desk {
         (!title.is_empty()).then_some(title)
     }
 
-    /// Every workspace, by name, and whether it's the one shown.
-    pub(crate) fn workspace_names(&self) -> Vec<(WorkspaceId, String, usize, bool)> {
+    /// Every workspace, by name, how many tabs it has, whether it's the
+    /// one shown, and what it says of its chats.
+    pub(crate) fn workspace_names(&self) -> Vec<WorkspaceName> {
         let shown = self.shown.map(|shown| shown.workspace);
         self.workspaces
             .list
             .iter()
-            .map(|workspace| {
-                (
-                    workspace.id,
-                    workspace.name.clone(),
-                    workspace.tabs.len(),
-                    Some(workspace.id) == shown,
-                )
+            .map(|workspace| WorkspaceName {
+                id: workspace.id,
+                name: workspace.name.clone(),
+                tabs: workspace.tabs.len(),
+                shown: Some(workspace.id) == shown,
+                mark: self.workspace_mark(workspace.id),
             })
             .collect()
     }
@@ -619,15 +621,15 @@ impl Desk {
             .enumerate()
             .map(|(index, tab)| {
                 let mut name = self.tab_name(index, tab);
-                // A chat whose agent is at work, anywhere in the tab: in
-                // another tab, or beside the pane with the keyboard, it
-                // says it's still going.
-                if self.tab_working(tab) {
+                // A chat at work, asking, or finished unseen, anywhere in
+                // the tab: in another tab, or beside the pane with the
+                // keyboard, it says so. Still: it never wakes the window.
+                if let Some(mark) = self.tab_mark(tab) {
                     // A name cut short ends with an ellipsis already.
                     if name.ends_with('…') {
                         name.pop();
                     }
-                    name.push_str(WORKING_MARK);
+                    name.push_str(mark.suffix());
                 }
                 // A pane an agent pointed out, in a tab not shown.
                 if tab.id != shown.tab
@@ -638,13 +640,6 @@ impl Desk {
                 (tab.id, name, tab.id == shown.tab)
             })
             .collect()
-    }
-
-    /// Whether any pane in `tab` shows a chat whose agent is at work.
-    fn tab_working(&self, tab: &Tab) -> bool {
-        (tab.layout.panes().iter())
-            .filter_map(|pane| pane.content.terminal())
-            .any(|terminal| self.panes.get(&terminal).is_some_and(Pane::chat_working))
     }
 
     /// What the status line shows: the command line or a search being
@@ -970,6 +965,7 @@ impl Desk {
         }
         self.shown = Some(shown);
         self.note_focus(pane);
+        self.see_shown();
         // Before the mode: a pane of another workspace may not exist yet.
         self.attach_shown();
         self.arrive();
@@ -1133,6 +1129,7 @@ impl Desk {
             pane.chat_offline(false);
         }
         self.workspaces_changed(workspaces);
+        self.watch_chats();
         self.tutor_connected();
         // A new daemon, or one that lost the last connection, doesn't know.
         self.pairing = clackatoo_protocol::PairingState::default();
@@ -1208,6 +1205,7 @@ impl Desk {
             self.macro_follows_focus();
         }
         self.attach_shown();
+        self.see_shown();
         self.arrive_if_moved(ended);
         self.fit_panes();
         self.forget_gone_handlers();
@@ -1278,13 +1276,13 @@ impl Desk {
         let Some(pane) = self.panes.get_mut(&terminal) else {
             return false;
         };
-        let working = pane.chat_working();
+        let doing = (pane.chat_working(), pane.asking());
         if !pane.view_changed(update) {
             return false;
         }
-        // A chat starting or stopping work changes its tab's name, shown
-        // or not.
-        let flipped = pane.chat_working() != working;
+        // A chat starting or stopping work, or asking, changes its tab's
+        // name, shown or not.
+        let flipped = (pane.chat_working(), pane.asking()) != doing;
         self.lesson_view_changed(terminal);
         self.settle_lesson();
         // Tabs not shown wait, undrawn, until they are.
@@ -1393,6 +1391,7 @@ impl Desk {
             }
             Some(Asker::Window(Asked::Devices)) => self.devices_answered(response),
             Some(Asker::Window(Asked::ChatChoices)) => self.chat_choices(response),
+            Some(Asker::Window(Asked::Chats)) => self.chats_answered(response),
             Some(Asker::Window(Asked::Reattached(terminal))) => {
                 if let Response::Error(err) = response {
                     log::warn!("the daemon wouldn't attach to terminal {terminal} again: {err}");
@@ -2015,6 +2014,8 @@ impl Desk {
     pub(crate) fn window_focus(&mut self, focused: bool) {
         self.unfocused = !focused;
         self.say_present(focused);
+        // What finished in the tab shown meanwhile is seen now.
+        self.see_shown();
         if !focused
             && let Some((terminal, _)) = self.dragging.take()
             && let Some(pane) = self.panes.get_mut(&terminal)
@@ -2385,12 +2386,13 @@ mod tests {
     mod lessons;
     mod mode;
 
-    use clackatoo_protocol::{Layout, Pane as LayoutPane, View, Workspace};
+    use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};
     use clackatoo_term::mouse::{MouseAction, MouseButton};
     use clackatoo_term::{Config, Terminal};
     use winit::keyboard::{KeyCode, KeyLocation};
 
     use super::*;
+    use crate::chrome::Mark;
     use crate::input::Modifiers;
 
     fn pane(id: u32) -> Layout {
@@ -2821,8 +2823,8 @@ mod tests {
 
         let (mut desk, turn) = working_chat_desk();
         let names = desk.tab_names();
-        assert!(names[1].1.ends_with(WORKING_MARK), "{names:?}");
-        assert!(!names[0].1.contains(WORKING_MARK), "{names:?}");
+        assert!(names[1].1.ends_with(Mark::Working.suffix()), "{names:?}");
+        assert!(!names[0].1.contains(Mark::Working.suffix()), "{names:?}");
         // Its long title, cut short, says so once.
         assert!(!names[1].1.contains('…'), "{names:?}");
         // Drawn, it wakes the window to count.
@@ -2848,7 +2850,7 @@ mod tests {
                 Patch::Chat(ChatPatch::State(ChatState::Ready)),
             ]),
         ));
-        assert!(!desk.tab_names()[1].1.contains(WORKING_MARK));
+        assert!(!desk.tab_names()[1].1.contains(Mark::Working.suffix()));
         paint_chat_two(&mut desk, &mut fonts);
         assert!(desk.chat_wakes().is_none(), "zero CPU when idle");
     }
@@ -2861,7 +2863,7 @@ mod tests {
         assert!(desk.chat_wakes().is_some());
         desk.lost();
         assert!(desk.chat_wakes().is_none(), "no wakes through hours away");
-        assert!(!desk.tab_names()[1].1.contains(WORKING_MARK));
+        assert!(!desk.tab_names()[1].1.contains(Mark::Working.suffix()));
         paint_chat_two(&mut desk, &mut fonts);
         assert!(desk.chat_wakes().is_none());
         let pane = desk.pane_mut(TerminalId(2)).expect("the chat's pane");
@@ -2917,6 +2919,289 @@ mod tests {
             }),
         ));
         (desk, turn)
+    }
+
+    /// Chat `chat`, in workspace `workspace`, as the list of chats sums it
+    /// up.
+    fn summary(chat: u32, workspace: u32, state: ChatState) -> ChatSummary {
+        ChatSummary {
+            chat: TerminalId(chat),
+            title: format!("chat {chat}"),
+            agent: "Claude Code".into(),
+            state,
+            asking: false,
+            unseen: false,
+            parent: None,
+            workspace: Some(WorkspaceId(workspace)),
+            active: 0,
+        }
+    }
+
+    /// A desk showing workspace 1's first tab, a terminal, with chats in
+    /// terminals 2 and 3 in its second tab, side by side, and workspace 2,
+    /// not shown, with a chat in terminal 5 in its first tab and one in
+    /// terminal 6 in its second.
+    fn chats_desk() -> Desk {
+        desk(workspaces(vec![
+            workspace(
+                1,
+                "work",
+                vec![
+                    tab(1, pane(1)),
+                    tab(2, side_by_side(vec![pane(2), pane(3)])),
+                ],
+            ),
+            workspace(2, "peios", vec![tab(3, pane(5)), tab(4, pane(6))]),
+        ]))
+    }
+
+    /// The marks the desk shows: each workspace's, and each tab's name.
+    fn marks(desk: &Desk) -> (Vec<Option<Mark>>, Vec<String>) {
+        let workspaces = (desk.workspace_names().into_iter())
+            .map(|workspace| workspace.mark)
+            .collect();
+        let tabs = (desk.tab_names().into_iter())
+            .map(|(_, name, _)| name)
+            .collect();
+        (workspaces, tabs)
+    }
+
+    #[test]
+    fn the_window_watches_the_chats_as_it_connects() {
+        let mut desk = Desk::default();
+        desk.connected(
+            workspaces(vec![workspace(1, "work", vec![tab(1, pane(1))])]),
+            false,
+        );
+        assert!(answer_all(&mut desk).contains(&Request::WatchChats));
+    }
+
+    #[test]
+    fn a_chat_that_finishes_in_a_tab_not_shown_is_unseen_until_its_tab_is() {
+        use ChatState::{Answering, Ready};
+        let mut desk = chats_desk();
+        assert!(!desk.chats_changed(vec![summary(2, 1, Ready), summary(3, 1, Ready)]));
+        assert_eq!(
+            marks(&desk),
+            (vec![None, None], vec!["1".into(), "2".into()])
+        );
+        // At work: the workspace says so from the list.
+        assert!(desk.chats_changed(vec![summary(2, 1, Answering), summary(3, 1, Ready)]));
+        assert_eq!(marks(&desk).0, [Some(Mark::Working), None]);
+        // Done, while its tab wasn't shown: unseen, the tab and the
+        // workspace say.
+        assert!(desk.chats_changed(vec![summary(2, 1, Ready), summary(3, 1, Ready)]));
+        assert_eq!(
+            marks(&desk),
+            (
+                vec![Some(Mark::Unseen), None],
+                vec!["1".into(), "2 •".into()]
+            )
+        );
+        // The list again, the same: nothing to draw.
+        assert!(!desk.chats_changed(vec![summary(2, 1, Ready), summary(3, 1, Ready)]));
+        // Its tab shown: seen, and it stays so.
+        desk.show_tab(TabId(2));
+        assert_eq!(
+            marks(&desk),
+            (vec![None, None], vec!["1".into(), "2".into()])
+        );
+        desk.show_tab(TabId(1));
+        assert_eq!(marks(&desk).1, ["1", "2"]);
+    }
+
+    #[test]
+    fn a_chat_that_finishes_in_view_is_seen_and_one_going_again_is_at_work() {
+        use ChatState::{Answering, Ready};
+        let mut desk = chats_desk();
+        desk.show_tab(TabId(2));
+        desk.chats_changed(vec![summary(2, 1, Answering)]);
+        desk.chats_changed(vec![summary(2, 1, Ready)]);
+        desk.show_tab(TabId(1));
+        assert_eq!(marks(&desk).1, ["1", "2"], "seen as it finished");
+        // Unseen, then going again: at work, not unseen, and once done
+        // in view, nothing.
+        desk.chats_changed(vec![summary(2, 1, Answering)]);
+        desk.chats_changed(vec![summary(2, 1, Ready)]);
+        desk.chats_changed(vec![summary(2, 1, Answering)]);
+        assert_eq!(marks(&desk).0, [Some(Mark::Working), None]);
+        desk.show_tab(TabId(2));
+        desk.chats_changed(vec![summary(2, 1, Ready)]);
+        assert_eq!(marks(&desk).0, [None, None]);
+    }
+
+    #[test]
+    fn another_workspaces_chats_mark_it_asking_first() {
+        use ChatState::{Answering, Ready};
+        let mut desk = chats_desk();
+        let asking = ChatSummary {
+            asking: true,
+            ..summary(5, 2, Answering)
+        };
+        desk.chats_changed(vec![asking.clone(), summary(6, 2, Answering)]);
+        assert_eq!(marks(&desk).0, [None, Some(Mark::Asking)]);
+        desk.chats_changed(vec![summary(5, 2, Answering), summary(6, 2, Answering)]);
+        assert_eq!(marks(&desk).0, [None, Some(Mark::Working)]);
+        // One done, one still at work: at work, the workspace says.
+        desk.chats_changed(vec![summary(5, 2, Ready), summary(6, 2, Answering)]);
+        assert_eq!(marks(&desk).0, [None, Some(Mark::Working)]);
+        desk.chats_changed(vec![summary(5, 2, Ready), summary(6, 2, Ready)]);
+        assert_eq!(marks(&desk).0, [None, Some(Mark::Unseen)]);
+        // Shown, at its first tab: chat 5 is seen, chat 6, in the tab
+        // not shown, isn't.
+        desk.show_workspace(WorkspaceId(2));
+        assert_eq!(
+            marks(&desk),
+            (
+                vec![None, Some(Mark::Unseen)],
+                vec!["1".into(), "2 •".into()]
+            )
+        );
+        desk.show_tab(TabId(4));
+        assert_eq!(marks(&desk).0, [None, None]);
+    }
+
+    #[test]
+    fn a_chat_no_one_saw_finish_is_unseen_to_a_window_new_to_it_and_a_subagent_never() {
+        use ChatState::{Answering, Ready};
+        let mut desk = chats_desk();
+        let unseen = ChatSummary {
+            unseen: true,
+            ..summary(5, 2, Ready)
+        };
+        let subagent = ChatSummary {
+            parent: Some(TerminalId(5)),
+            ..summary(9, 2, Answering)
+        };
+        desk.chats_changed(vec![unseen, subagent.clone()]);
+        assert_eq!(marks(&desk).0, [None, Some(Mark::Unseen)]);
+        desk.show_workspace(WorkspaceId(2));
+        desk.show_workspace(WorkspaceId(1));
+        assert_eq!(marks(&desk).0, [None, None]);
+        // A subagent finishing tells its chat, not the user.
+        desk.chats_changed(vec![
+            summary(5, 2, Ready),
+            ChatSummary {
+                state: Ready,
+                ..subagent
+            },
+        ]);
+        assert_eq!(marks(&desk).0, [None, None]);
+        // A chat closing takes its mark with it.
+        desk.chats_changed(vec![summary(5, 2, Answering)]);
+        desk.chats_changed(vec![summary(5, 2, Ready)]);
+        assert_eq!(marks(&desk).0, [None, Some(Mark::Unseen)]);
+        assert!(desk.chats_changed(Vec::new()));
+        assert_eq!(marks(&desk).0, [None, None]);
+    }
+
+    #[test]
+    fn a_chat_finishing_in_view_of_a_window_in_the_background_is_unseen_till_its_focused() {
+        use ChatState::{Answering, Ready};
+        let mut desk = chats_desk();
+        desk.show_tab(TabId(2));
+        desk.window_focus(false);
+        desk.chats_changed(vec![summary(2, 1, Answering)]);
+        desk.chats_changed(vec![summary(2, 1, Ready)]);
+        assert_eq!(
+            marks(&desk),
+            (
+                vec![Some(Mark::Unseen), None],
+                vec!["1".into(), "2 •".into()]
+            )
+        );
+        // Shown again, still in the background: still unseen.
+        desk.show_tab(TabId(1));
+        desk.show_tab(TabId(2));
+        assert_eq!(marks(&desk).0, [Some(Mark::Unseen), None]);
+        // Focused on another tab: still unseen; then on its own, seen.
+        desk.show_tab(TabId(1));
+        desk.window_focus(true);
+        assert_eq!(marks(&desk).0, [Some(Mark::Unseen), None]);
+        desk.window_focus(false);
+        desk.show_tab(TabId(2));
+        desk.window_focus(true);
+        assert_eq!(
+            marks(&desk),
+            (vec![None, None], vec!["1".into(), "2".into()])
+        );
+    }
+
+    #[test]
+    fn what_was_unseen_is_forgotten_on_another_machine_and_kept_on_the_same_again() {
+        use ChatState::{Answering, Ready};
+        let mut desk = chats_desk();
+        desk.daemon_at(None);
+        desk.chats_changed(vec![summary(5, 2, Answering)]);
+        desk.chats_changed(vec![summary(5, 2, Ready)]);
+        assert_eq!(marks(&desk).0, [None, Some(Mark::Unseen)]);
+        // Connected again to the same daemon: kept.
+        desk.lost();
+        desk.daemon_at(None);
+        desk.connected(desk.workspaces.clone(), false);
+        assert_eq!(marks(&desk).0, [None, Some(Mark::Unseen)]);
+        // To another machine's, whose chat 5 is another: forgotten, and
+        // its list then is the first heard.
+        desk.lost();
+        desk.daemon_at(Some("laptop"));
+        desk.connected(desk.workspaces.clone(), true);
+        assert_eq!(marks(&desk).0, [None, None]);
+        assert!(!desk.chats_changed(vec![summary(5, 2, Ready)]));
+        assert_eq!(marks(&desk).0, [None, None]);
+    }
+
+    #[test]
+    fn out_of_reach_no_chat_is_said_to_work_or_ask_but_whats_unseen_stays() {
+        use ChatState::{Answering, Ready};
+        let mut desk = chats_desk();
+        desk.chats_changed(vec![summary(5, 2, Answering), summary(6, 2, Answering)]);
+        desk.chats_changed(vec![summary(5, 2, Ready), summary(6, 2, Answering)]);
+        assert_eq!(marks(&desk).0, [None, Some(Mark::Working)]);
+        desk.lost();
+        assert_eq!(marks(&desk).0, [None, Some(Mark::Unseen)]);
+        // Back: chat 6 finished meanwhile, as the list says once it comes.
+        desk.connected(desk.workspaces.clone(), false);
+        assert!(answer_all(&mut desk).contains(&Request::WatchChats));
+        desk.chats_changed(vec![summary(5, 2, Ready), summary(6, 2, Ready)]);
+        desk.show_workspace(WorkspaceId(2));
+        assert_eq!(marks(&desk).1, ["1", "2 •"], "chat 6 finished unseen");
+    }
+
+    #[test]
+    fn a_tab_with_a_chat_asking_says_so_before_one_at_work() {
+        use clackatoo_protocol::{ChatNode, Node, Question};
+
+        let mut desk = chats_desk();
+        let chat = |question| ChatNode {
+            agent: "Claude Code".into(),
+            state: ChatState::Starting,
+            question,
+            ..ChatNode::default()
+        };
+        let question = Question {
+            id: 1,
+            title: "Run ls".into(),
+            choices: Vec::new(),
+            own: false,
+        };
+        for (terminal, node) in [(2, chat(None)), (3, chat(Some(question)))] {
+            // Asking in a tab not shown: drawn, for its name to say so.
+            assert!(desk.view_changed(
+                TerminalId(terminal),
+                &ViewUpdate::Snapshot(View {
+                    title: "chat".into(),
+                    cwd: None,
+                    root: Node::Chat(Box::new(node)),
+                }),
+            ));
+        }
+        assert_eq!(
+            marks(&desk),
+            (
+                vec![Some(Mark::Asking), None],
+                vec!["1".into(), "2 chat ?".into()]
+            )
+        );
     }
 
     #[test]

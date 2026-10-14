@@ -10,6 +10,8 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
+use crate::wire;
+
 /// A chat with an agent, as a view's node.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatNode {
@@ -164,13 +166,193 @@ pub struct SettingChoice {
     pub description: Option<String>,
 }
 
-/// How much of the agent's context a chat fills.
+/// How much of the agent's context a chat fills, and of its account's
+/// limits, where the agent says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Tokens in the context.
     pub used: u64,
-    /// The most it holds.
+    /// The most it holds: 0 if the agent doesn't say.
     pub size: u64,
+    /// The account's limit over five hours, once the agent has said how
+    /// much of it is used, as Claude Code's does for a subscription.
+    /// `None` from a daemon older than protocol 81.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::LIMITS }, _>",
+        deserialize_with = "wire::since::<{ wire::LIMITS }, _, _>"
+    )]
+    pub five_hour: Option<Limit>,
+    /// Its limit over a week, likewise.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::LIMITS }, _>",
+        deserialize_with = "wire::since::<{ wire::LIMITS }, _, _>"
+    )]
+    pub weekly: Option<Limit>,
+}
+
+impl Usage {
+    /// How much of the context is used, in percent, from 0 to 100, if the
+    /// agent says how much it holds. More used than it holds, as an agent
+    /// may say, is 100.
+    #[must_use]
+    pub fn percent(&self) -> Option<u8> {
+        (self.size > 0).then(|| {
+            let percent = u128::from(self.used) * 100 / u128::from(self.size);
+            u8::try_from(percent.min(100)).unwrap_or(100)
+        })
+    }
+}
+
+/// How much of one of an account's limits is used, as its agent says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Limit {
+    /// How much, in percent, from 0 to 100: 100 once it's reached.
+    pub used: u8,
+    /// When it starts again, in milliseconds since the Unix epoch, if the
+    /// agent says.
+    pub resets: Option<u64>,
+}
+
+/// Past this much of a chat's context, or of one of its account's limits,
+/// used, in percent, clients show it in amber...
+pub const AMBER: u8 = 80;
+
+/// ...and past this, in red.
+pub const RED: u8 = 95;
+
+/// How full a chat's context, or one of its account's limits, is, as
+/// clients show it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Fullness {
+    /// Room to spare.
+    Room,
+    /// Past [`AMBER`].
+    Filling,
+    /// Past [`RED`].
+    Full,
+}
+
+impl Fullness {
+    /// How full `percent` used is.
+    #[must_use]
+    pub fn of(percent: u8) -> Self {
+        if percent > RED {
+            Self::Full
+        } else if percent > AMBER {
+            Self::Filling
+        } else {
+            Self::Room
+        }
+    }
+}
+
+/// One line of what clients say of a chat's usage in full: what it's
+/// about, what's said of it, and how full that is, if it says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsageLine {
+    /// "Context", "5-hour limit"…
+    pub name: String,
+    /// "84k of 200k tokens, 42%", "reached, resets at 15:40"…
+    pub said: String,
+    /// How full it is: `None` for a context of a size not said.
+    pub fullness: Option<Fullness>,
+}
+
+impl Usage {
+    /// What a meter of it says: "42% context", or for an agent that
+    /// doesn't say how much its context holds, how much it's used, "84k
+    /// context".
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self.percent() {
+            Some(percent) => format!("{percent}% context"),
+            None => format!("{} context", tokens(self.used)),
+        }
+    }
+
+    /// The account's limits, by name, as known at `now`, in milliseconds
+    /// since the Unix epoch: one said to reset by then has, and how much
+    /// of it is used now isn't known until the agent says again, as it
+    /// says only when that changes.
+    #[must_use]
+    pub fn limits(&self, now: u64) -> [(&'static str, Option<Limit>); 2] {
+        let known = |limit: Option<Limit>| {
+            limit.filter(|limit| limit.resets.is_none_or(|resets| resets > now))
+        };
+        [
+            ("5-hour", known(self.five_hour)),
+            ("Weekly", known(self.weekly)),
+        ]
+    }
+
+    /// The fullest of the account's limits known at `now`, if it's full
+    /// enough to say so beside a meter, "5-hour 91%", and how full that
+    /// is.
+    #[must_use]
+    pub fn pressing(&self, now: u64) -> Option<(String, Fullness)> {
+        let (name, limit) = (self.limits(now).into_iter())
+            .filter_map(|(name, limit)| Some((name, limit?)))
+            .max_by_key(|(_, limit)| limit.used)?;
+        let fullness = Fullness::of(limit.used);
+        (fullness > Fullness::Room).then(|| (format!("{name} {}%", limit.used), fullness))
+    }
+
+    /// What's said of it in full, a line each: the context, and each
+    /// limit known at `now`, with when it resets as `resets` says a time,
+    /// both in milliseconds since the Unix epoch: "at 15:40".
+    #[must_use]
+    pub fn detail(&self, now: u64, resets: impl Fn(u64) -> String) -> Vec<UsageLine> {
+        let percent = self.percent();
+        let context = match percent {
+            Some(percent) => format!(
+                "{} of {} tokens, {percent}%",
+                tokens(self.used),
+                tokens(self.size)
+            ),
+            None => format!("{} tokens", tokens(self.used)),
+        };
+        let mut lines = vec![UsageLine {
+            name: "Context".to_owned(),
+            said: context,
+            fullness: percent.map(Fullness::of),
+        }];
+        for (name, limit) in self.limits(now) {
+            let Some(limit) = limit else {
+                continue;
+            };
+            let mut said = if limit.used >= 100 {
+                "reached".to_owned()
+            } else {
+                format!("{}% used", limit.used)
+            };
+            if let Some(at) = limit.resets {
+                let _ = write!(said, ", resets {}", resets(at));
+            }
+            lines.push(UsageLine {
+                name: format!("{name} limit"),
+                said,
+                fullness: Some(Fullness::of(limit.used)),
+            });
+        }
+        lines
+    }
+}
+
+/// A count of tokens, short: "830", "38k", "1M", "1.2M".
+#[must_use]
+pub fn tokens(count: u64) -> String {
+    match count {
+        0..1_000 => count.to_string(),
+        1_000..1_000_000 => format!("{}k", (count + 500) / 1_000),
+        _ => {
+            let tenths = count.saturating_add(50_000) / 100_000;
+            if tenths.is_multiple_of(10) {
+                format!("{}M", tenths / 10)
+            } else {
+                format!("{}.{}M", tenths / 10, tenths % 10)
+            }
+        }
+    }
 }
 
 impl Setting {
@@ -982,6 +1164,125 @@ impl Tool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_context_used_is_a_percentage_only_of_a_size_said_and_never_past_100() {
+        let usage = |used, size| Usage {
+            used,
+            size,
+            five_hour: None,
+            weekly: None,
+        };
+        assert_eq!(usage(84_000, 200_000).percent(), Some(42));
+        assert_eq!(usage(0, 200_000).percent(), Some(0));
+        assert_eq!(usage(1, 0).percent(), None);
+        assert_eq!(usage(944_000, 200_000).percent(), Some(100));
+        assert_eq!(usage(u64::MAX, 1).percent(), Some(100));
+        assert_eq!(usage(u64::MAX, u64::MAX).percent(), Some(100));
+    }
+
+    fn usage(used: u64, size: u64) -> Usage {
+        Usage {
+            used,
+            size,
+            five_hour: None,
+            weekly: None,
+        }
+    }
+
+    #[test]
+    fn a_meter_is_amber_past_80_and_red_past_95_and_says_tokens_without_a_size() {
+        assert_eq!(Fullness::of(0), Fullness::Room);
+        assert_eq!(Fullness::of(80), Fullness::Room);
+        assert_eq!(Fullness::of(81), Fullness::Filling);
+        assert_eq!(Fullness::of(95), Fullness::Filling);
+        assert_eq!(Fullness::of(96), Fullness::Full);
+        assert_eq!(usage(84_000, 200_000).label(), "42% context");
+        assert_eq!(usage(944_000, 200_000).label(), "100% context");
+        assert_eq!(usage(84_000, 0).label(), "84k context");
+        assert_eq!(tokens(u64::MAX), "18446744073709.5M");
+        assert_eq!(tokens(1_250_000), "1.3M");
+    }
+
+    #[test]
+    fn a_limit_shows_beside_a_meter_only_once_its_getting_full() {
+        let limit = |used| Some(Limit { used, resets: None });
+        let mut usage = usage(1000, 200_000);
+        assert_eq!(usage.pressing(0), None);
+        usage.five_hour = limit(42);
+        usage.weekly = limit(80);
+        assert_eq!(usage.pressing(0), None);
+        usage.weekly = limit(91);
+        assert_eq!(
+            usage.pressing(0),
+            Some(("Weekly 91%".into(), Fullness::Filling))
+        );
+        usage.five_hour = limit(100);
+        assert_eq!(
+            usage.pressing(0),
+            Some(("5-hour 100%".into(), Fullness::Full))
+        );
+    }
+
+    #[test]
+    fn the_detail_says_the_tokens_and_each_limit_with_when_it_resets() {
+        let mut usage = usage(84_000, 200_000);
+        usage.five_hour = Some(Limit {
+            used: 42,
+            resets: Some(1),
+        });
+        usage.weekly = Some(Limit {
+            used: 100,
+            resets: Some(2),
+        });
+        let said: Vec<String> = (usage.detail(0, |at| format!("at {at}")).into_iter())
+            .map(|line| format!("{}: {} ({:?})", line.name, line.said, line.fullness))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "Context: 84k of 200k tokens, 42% (Some(Room))",
+                "5-hour limit: 42% used, resets at 1 (Some(Room))",
+                "Weekly limit: reached, resets at 2 (Some(Full))",
+            ]
+        );
+        // No size said, a limit with no time said, and none.
+        usage.size = 0;
+        usage.five_hour = Some(Limit {
+            used: 96,
+            resets: None,
+        });
+        usage.weekly = None;
+        let lines = usage.detail(0, |_| unreachable!("no time to say"));
+        assert_eq!(
+            (lines[0].said.as_str(), lines[0].fullness),
+            ("84k tokens", None)
+        );
+        assert_eq!(lines[1].said, "96% used");
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn a_limit_past_its_reset_is_no_longer_known() {
+        let mut usage = usage(84_000, 200_000);
+        usage.five_hour = Some(Limit {
+            used: 99,
+            resets: Some(1_000),
+        });
+        usage.weekly = Some(Limit {
+            used: 91,
+            resets: None,
+        });
+        let pressing = |now| usage.pressing(now).map(|(said, _)| said);
+        assert_eq!(pressing(999).as_deref(), Some("5-hour 99%"));
+        // Reset since: how much is used again isn't known till the agent
+        // says, and a limit with no time said stays.
+        assert_eq!(pressing(1_000).as_deref(), Some("Weekly 91%"));
+        let names: Vec<String> = (usage.detail(1_000, |_| String::new()).into_iter())
+            .map(|line| line.name)
+            .collect();
+        assert_eq!(names, ["Context", "Weekly limit"]);
+    }
 
     fn turn(prompt: &str, items: Vec<Item>) -> Turn {
         Turn {

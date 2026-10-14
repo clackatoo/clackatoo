@@ -11,6 +11,7 @@
   --accent: #f8ce57;
   --on-accent: #1a1b1f;
   --danger: #ef7d6d;
+  --caution: #e89a3c;
   --ok: #8fd18f;
   --added: #20352a;
   --removed: #3a2326;
@@ -276,6 +277,40 @@ details > summary::-webkit-details-marker { display: none; }
 .menu { display: flex; flex-direction: column; flex: 0 0 auto; max-width: 60vw; }
 .menu span { font-size: 11px; color: var(--muted); margin: 0 0 2px 4px; }
 .menu select { padding: 6px 8px; font-size: 14px; max-width: 60vw; }
+/* How much context the chat fills, at the menus' end: "42% context" over
+   a thin bar, amber past 80% and red past 95%, as in the window; and the
+   detail above the menus once it's tapped. */
+.meter {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-end;
+  gap: 8px;
+  margin-left: auto;
+  padding: 6px 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: normal;
+}
+.meter .context { display: flex; flex-direction: column; gap: 3px; }
+.meter .bar { display: block; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.meter .bar i { display: block; height: 100%; background: var(--muted); }
+.meter.filling .context, .usage .filling, .meter .limit.filling { color: var(--caution); }
+.meter.filling .bar i { background: var(--caution); }
+.meter.full .context, .usage .full, .meter .limit.full { color: var(--danger); }
+.meter.full .bar i { background: var(--danger); }
+.usage {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 14px;
+  margin: 0 4px 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+.usage dt { color: var(--muted); }
+.usage dd { margin: 0; }
 .row { display: flex; gap: 8px; align-items: flex-end; }
 .row textarea { flex: 1; resize: none; max-height: 240px; min-height: 44px; line-height: 22px; scrollbar-width: none; }
 

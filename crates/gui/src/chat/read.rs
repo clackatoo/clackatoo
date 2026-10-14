@@ -23,6 +23,7 @@
 //! | `y` | Copy what's selected, or the block of code, message or card under the cursor |
 //! | `za` `zo` `zc`, Enter | Open or fold the turn's work; `zR` and `zM` all of them |
 //! | `u`, Ctrl+R | Undo what the turn changed in files, or redo it; with nothing there, the last turn's, or the first's undone |
+//! | `K` | Show how much context the chat fills, and its account's limits, or hide it again |
 //! | `i` `a` `I` `A` `o`, Enter | Type a message |
 
 use clackatoo_protocol::{ChatAction, ChatNode, Item};
@@ -80,10 +81,18 @@ impl ChatView {
     /// redrawn, and whether the key goes to insert mode, to type a
     /// message.
     pub(crate) fn read_key(&mut self, press: &KeyPress<'_>) -> (bool, bool) {
-        // What the window said of the chat lasts until the next key.
+        // What the window said of the chat lasts until the next key, as
+        // does the meter's detail `K` showed, which `K` hides.
         let unsaid = self.unsay();
+        let detail = self.hide_detail();
+        let k = matches!(press.key, Key::Character(text) if text == "K");
+        if detail && k && self.visual().is_none() {
+            // A two-key command half typed is over, as with any other key.
+            self.read_prefix = None;
+            return (true, false);
+        }
         let (redraw, insert) = self.read(press);
-        (redraw || unsaid, insert)
+        (redraw || unsaid || detail, insert)
     }
 
     /// A key in normal or visual mode, as [`read_key`](Self::read_key)
@@ -148,6 +157,15 @@ impl ChatView {
             (Some('v'), _) => self.visual_key(visual, Selection::Characters),
             (Some('V'), _) => self.visual_key(visual, Selection::Lines),
             (Some('y'), _) => self.yank(),
+            // As in an editor, where it shows what the language server
+            // says of what's under the cursor.
+            // In normal mode only: visual mode keeps its keys for the
+            // selection.
+            (Some('K'), _) if visual.is_none() => {
+                if !self.toggle_detail() {
+                    self.say("the agent hasn't said how much context the chat fills".to_owned());
+                }
+            }
             (Some('u'), _) => self.undo_key(false),
             (Some('z'), _) => self.read_prefix = Some(Prefix::Z),
             (Some('g'), _) if prefix == Some(Prefix::G) => self.go_to_end(Way::Back),

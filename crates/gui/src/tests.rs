@@ -5,7 +5,9 @@ use clackatoo_term::{Config, Terminal};
 
 use clackatoo_protocol::{Axis, Content, Layout, Pane, PaneId, TabId, TerminalId, WorkspaceId};
 
-use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, ModeName, Status};
+use crate::chrome::{
+    self, Chrome, Contents, Geometry, Hit, Metrics, ModeName, Status, WorkspaceName,
+};
 use crate::desktop::ButtonLayout;
 use crate::fonts::{FontOptions, Fonts, Variant};
 use crate::layout::Placement;
@@ -474,8 +476,8 @@ fn two_pane_window(
         geometry,
         Contents {
             workspaces: vec![
-                (WorkspaceId(1), "clackatoo".into(), 2, true),
-                (WorkspaceId(2), "peios".into(), 1, false),
+                WorkspaceName::plain(1, "clackatoo", 2, true),
+                WorkspaceName::plain(2, "peios", 1, false),
             ],
             // The second, a chat at work, is marked so.
             tabs: vec![
@@ -906,6 +908,14 @@ fn chat_node(question: bool) -> clackatoo_protocol::ChatNode {
         usage: Some(clackatoo_protocol::Usage {
             used: 38_400,
             size: 200_000,
+            five_hour: Some(clackatoo_protocol::Limit {
+                used: 37,
+                resets: Some(1_760_018_400_000),
+            }),
+            weekly: Some(clackatoo_protocol::Limit {
+                used: 12,
+                resets: Some(1_760_400_000_000),
+            }),
         }),
         ..ChatNode::default()
     }
@@ -1038,13 +1048,24 @@ fn render_chat_in(
     (scale, ui): (f64, Option<&str>),
     then: impl FnOnce(&mut crate::chat::ChatView, &mut crate::fonts::Fonts),
 ) -> Option<Vec<u8>> {
+    render_chat_wide(name, node, typed, (scale, ui, 720.0), then)
+}
+
+/// As [`render_chat_in`], `width` wide before scaling.
+fn render_chat_wide(
+    name: &str,
+    node: clackatoo_protocol::ChatNode,
+    typed: &str,
+    (scale, ui, width): (f64, Option<&str>, f64),
+    then: impl FnOnce(&mut crate::chat::ChatView, &mut crate::fonts::Fonts),
+) -> Option<Vec<u8>> {
     let gpu = gpu()?;
     let mut fonts = fonts(scale);
     if let Some(ui) = ui {
         fonts.load_ui(Some(ui), 11.0, scale);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let size = [(720.0 * scale) as u32, (640.0 * scale) as u32];
+    let size = [(width * scale) as u32, (640.0 * scale) as u32];
     let mut chat = crate::chat::ChatView::new("chat".into(), node);
     // The turn going has been going 12 seconds.
     chat.set_clock(12_002);
@@ -2061,7 +2082,7 @@ fn the_finder_is_drawn_over_the_panes_with_a_preview() {
     let chrome = Chrome::new(
         geometry,
         Contents {
-            workspaces: vec![(WorkspaceId(1), "clackatoo".into(), 2, true)],
+            workspaces: vec![WorkspaceName::plain(1, "clackatoo", 2, true)],
             tabs: vec![(TabId(1), "1 zsh".into(), true)],
             status: Status::tabs(),
             buttons: &buttons,
@@ -2411,4 +2432,135 @@ fn a_chat_at_work_says_so_above_its_box_however_long_the_turn() {
         })
     });
     assert!(gold, "the dots are drawn");
+}
+
+/// Whether any pixel of `pixels`, an image 720 wide, in rows `rows` and
+/// columns `columns`, is near `colour`.
+fn drawn_in(
+    pixels: &[u8],
+    (rows, columns): (std::ops::Range<usize>, std::ops::Range<usize>),
+    colour: u32,
+) -> bool {
+    drawn_in_wide(pixels, 720, (rows, columns), colour)
+}
+
+/// As [`drawn_in`], in an image `wide` pixels wide.
+fn drawn_in_wide(
+    pixels: &[u8],
+    wide: usize,
+    (rows, columns): (std::ops::Range<usize>, std::ops::Range<usize>),
+    colour: u32,
+) -> bool {
+    let [_, r, g, b] = colour.to_be_bytes();
+    let near = |a: u8, b: u8| a.abs_diff(b) < 24;
+    rows.into_iter().any(|y| {
+        columns.clone().any(|x| {
+            let at = (y * wide + x) * 4;
+            near(pixels[at], r) && near(pixels[at + 1], g) && near(pixels[at + 2], b)
+        })
+    })
+}
+
+#[test]
+fn the_context_meter_is_quiet_with_room_amber_as_it_fills_and_red_when_all_but_full() {
+    // The box's row of controls, from the middle to the model's menu.
+    let meter = (560..640, 200..600);
+    let amber = 0xe8_9a_3c;
+    let red = 0xe0_6c_75;
+    let with = |used, five_hour: u8| {
+        let mut node = chat_node(false);
+        let usage = node.usage.as_mut().expect("usage");
+        usage.used = used;
+        usage.five_hour = Some(clackatoo_protocol::Limit {
+            used: five_hour,
+            resets: None,
+        });
+        node
+    };
+    let Some(quiet) = render_chat("chat-meter", with(38_400, 37), "", 1.0) else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    assert!(!drawn_in(&quiet, meter.clone(), amber));
+    assert!(!drawn_in(&quiet, meter.clone(), red));
+    let filling = render_chat("chat-meter-amber", with(170_000, 37), "", 1.0).unwrap();
+    assert!(drawn_in(&filling, meter.clone(), amber));
+    assert!(!drawn_in(&filling, meter.clone(), red));
+    let full = render_chat("chat-meter-red", with(194_000, 37), "", 1.0).unwrap();
+    assert!(drawn_in(&full, meter.clone(), red));
+    // A limit all but reached says so beside a context with room.
+    let limit = render_chat("chat-meter-limit", with(38_400, 99), "", 1.0).unwrap();
+    assert!(drawn_in(&limit, meter, red));
+}
+
+/// The daemon's own settings every chat has beside its agent's, as it
+/// makes them: what the agent may do with clackatoo's tools, and whether
+/// it drives the browser.
+fn daemons_own_settings() -> Vec<clackatoo_protocol::Setting> {
+    use clackatoo_protocol::{Setting, SettingChoice, SettingKind};
+    let choices = |values: &[(&str, &str)]| {
+        (values.iter())
+            .map(|&(value, name)| SettingChoice {
+                value: value.into(),
+                name: name.into(),
+                description: None,
+            })
+            .collect()
+    };
+    vec![
+        Setting {
+            id: "clackatoo.tools".into(),
+            name: "Tools".into(),
+            kind: SettingKind::Tools,
+            value: "ask".into(),
+            choices: choices(&[("ask", "Ask"), ("allow", "Allow"), ("off", "Off")]),
+        },
+        Setting {
+            id: "clackatoo.browser".into(),
+            name: "Browser".into(),
+            kind: SettingKind::Browser,
+            value: "off".into(),
+            choices: choices(&[("off", "Off"), ("on", "On")]),
+        },
+    ]
+}
+
+#[test]
+fn the_meter_fits_beside_the_daemons_own_chips_however_narrow_the_chat() {
+    let amber = 0xe8_9a_3c;
+    let mut node = chat_node(false);
+    node.settings.extend(daemons_own_settings());
+    let usage = node.usage.as_mut().expect("usage");
+    usage.five_hour = Some(clackatoo_protocol::Limit {
+        used: 91,
+        resets: None,
+    });
+    for width in [720_usize, 560, 420] {
+        #[allow(clippy::cast_precision_loss)]
+        let wide = (1.0, None, width as f64);
+        let name = format!("chat-meter-chips-{width}");
+        let Some(pixels) = render_chat_wide(&name, node.clone(), "", wide, |_, _| {}) else {
+            eprintln!("no GPU available; skipping");
+            return;
+        };
+        // The limit, or the context or the bar carrying its colour, is
+        // drawn in the row of controls, right of the middle.
+        let row = (560..640, width / 2..width - 40);
+        assert!(drawn_in_wide(&pixels, width, row, amber), "{width}");
+    }
+}
+
+#[test]
+fn the_meters_detail_shows_above_the_box_when_asked() {
+    let Some(shut) = render_chat("chat-meter-shut", chat_node(false), "", 1.0) else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let open = render_chat_with("chat-meter-detail", chat_node(false), "", 1.0, |chat| {
+        assert!(chat.toggle_detail());
+    })
+    .unwrap();
+    // Above the box, where the conversation was: the detail's panel.
+    let above = 380 * 720 * 4..560 * 720 * 4;
+    assert_ne!(shut[above.clone()], open[above]);
 }

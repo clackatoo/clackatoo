@@ -12,6 +12,7 @@ mod divider;
 mod edge;
 mod fold;
 mod select;
+mod usage;
 mod working;
 
 use std::borrow::Cow;
@@ -35,6 +36,7 @@ use crate::render::{Fill, Ink, Paint, PlacedGlyph};
 pub(super) use select::{
     How, Picked, Position, Shown, TextKey, after, before, line_middle, line_of, within, x_of,
 };
+pub(super) use usage::Detail;
 
 /// The widest the column of turns gets, in ems.
 const COLUMN: f32 = 46.0;
@@ -307,6 +309,7 @@ impl Canvas<'_> {
                     Tone::Muted => Ink::Muted,
                     Tone::Accent => Ink::Accent,
                     Tone::Warning => Ink::Warning,
+                    Tone::Caution => Ink::Caution,
                     Tone::Added => Ink::Added,
                     Tone::Removed => Ink::Removed,
                     Tone::OnAccent => Ink::OnColor,
@@ -447,9 +450,12 @@ impl ChatView {
                 .notes
                 .insert((EMPTY.to_owned(), Tone::Muted), laid);
         }
-        // The menu goes over everything, the box included.
+        // The menu goes over everything, the box included, and the
+        // meter's detail too, unless the menu's open.
         if let Some(anchor) = self.menu_anchor.take() {
             self.draw_menu(&mut paint, fonts, m, place, anchor);
+        } else if let Some(anchor) = self.detail_anchor.take() {
+            self.draw_detail(&mut paint, fonts, m, place, anchor);
         }
         paint
     }
@@ -1335,20 +1341,11 @@ impl ChatView {
             self.draw_chip(canvas, m, frame, rect, &laid, ids);
             right = rect[0] - m.em(0.6);
         }
-        if let Some(usage) = self.node.usage {
-            let text = format!("{} / {}", tokens(usage.used), tokens(usage.size));
-            let laid = lay_out(
-                &mut self.layout_cx,
-                canvas.fonts,
-                m,
-                &text,
-                Look::Plain(Tone::Muted),
-                frame.inner,
-            );
-            let at = [right - laid.width, top + (size - laid.height) / 2.0];
-            draw_laid(canvas, m, &laid, at, laid.width);
-        }
-        let mut left = frame.left + frame.pad * 0.4;
+        // The chips on the left first, for the meter to have the room
+        // they leave: it gives way first, down to its bar, and then the
+        // chips that would run under it go.
+        let start = frame.left + frame.pad * 0.4;
+        let gap = m.em(0.6);
         let chips = [
             mode.map(|mode| (format!("{}  ▾", chosen_name(&mode)), mode.id)),
             tools.map(|tools| (format!("Tools: {}  ▾", chosen_name(&tools)), tools.id)),
@@ -1357,19 +1354,32 @@ impl ChatView {
                 (label, browser.id)
             }),
         ];
-        for (label, id) in chips.into_iter().flatten() {
-            let laid = lay_out(
-                &mut self.layout_cx,
-                canvas.fonts,
-                m,
-                &label,
-                Look::Plain(Tone::Muted),
-                frame.inner,
-            );
+        let chips: Vec<(Laid, String)> = (chips.into_iter().flatten())
+            .map(|(label, id)| {
+                let look = Look::Plain(Tone::Muted);
+                let laid = lay_out(
+                    &mut self.layout_cx,
+                    canvas.fonts,
+                    m,
+                    &label,
+                    look,
+                    frame.inner,
+                );
+                (laid, id)
+            })
+            .collect();
+        let chips_end =
+            (chips.iter()).fold(start, |left, (laid, _)| left + laid.width + m.em(1.2) + gap);
+        let meter = self.draw_meter(canvas, m, frame, (right, chips_end, top, size));
+        let mut left = start;
+        for (laid, id) in chips {
             let width = laid.width + m.em(1.2);
+            if left + width > meter - gap {
+                break;
+            }
             let rect = [left, top, width, size];
             self.draw_chip(canvas, m, frame, rect, &laid, vec![id]);
-            left += width + m.em(0.6);
+            left += width + gap;
         }
     }
 
@@ -1713,22 +1723,6 @@ fn chosen_name(setting: &Setting) -> String {
     setting
         .current()
         .map_or_else(|| setting.value.clone(), |choice| choice.name.clone())
-}
-
-/// A count of tokens, short: "830", "38k", "1M", "1.2M".
-fn tokens(count: u64) -> String {
-    match count {
-        0..1_000 => count.to_string(),
-        1_000..1_000_000 => format!("{}k", (count + 500) / 1_000),
-        _ => {
-            let tenths = (count + 50_000) / 100_000;
-            if tenths.is_multiple_of(10) {
-                format!("{}M", tenths / 10)
-            } else {
-                format!("{}.{}M", tenths / 10, tenths % 10)
-            }
-        }
-    }
 }
 
 /// One of a menu's choices, laid out.

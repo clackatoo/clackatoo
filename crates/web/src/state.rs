@@ -734,6 +734,14 @@ impl State {
         }
     }
 
+    /// Opens the part `fold` of the chat shown if it's folded, or folds it.
+    pub fn toggle_fold(&mut self, fold: &str) {
+        if let Some(chat) = &mut self.open {
+            let open = chat.folds.get(fold).copied().unwrap_or(false);
+            chat.folds.insert(fold.to_owned(), !open);
+        }
+    }
+
     /// The chat shown's summary, from the list.
     #[must_use]
     pub fn open_summary(&self) -> Option<&ChatSummary> {

@@ -83,11 +83,11 @@ pub use buffer::{
     TextChange, Trigger, Use, UseKind,
 };
 pub use chat::{
-    AgentSession, ChatAction, ChatChoices, ChatNode, ChatPatch, ChatState, ChatSummary, Choice,
-    ChoiceKind, Diff, Item, Location, Outcome, Provider, ProviderModels, Question, ResumeSession,
-    Sender, Setting, SettingChoice, SettingKind, Subagent, SubagentStatus, Switch, Tool,
-    ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles, TurnFilesState, Usage,
-    turn_number, turn_numbered,
+    AMBER, AgentSession, ChatAction, ChatChoices, ChatNode, ChatPatch, ChatState, ChatSummary,
+    Choice, ChoiceKind, Diff, Fullness, Item, Limit, Location, Outcome, Provider, ProviderModels,
+    Question, RED, ResumeSession, Sender, Setting, SettingChoice, SettingKind, Subagent,
+    SubagentStatus, Switch, Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd, TurnFiles,
+    TurnFilesState, Usage, UsageLine, tokens, turn_number, turn_numbered,
 };
 pub use clackatoo_text::{
     AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Op, Piece, Severity, Span,
@@ -114,7 +114,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 80;
+pub const PROTOCOL_VERSION: u32 = 81;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

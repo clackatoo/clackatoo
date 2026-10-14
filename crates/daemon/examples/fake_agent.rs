@@ -10,6 +10,7 @@
 //! | `busy` | Starts running a command, which goes on until the message is cancelled |
 //! | `exit` | Exits, as if it crashed |
 //! | `settings` | Its mode and model, as `mode model` |
+//! | `limits` | Says its account's limits as Claude Code's adapter does, in `usage_update`'s `_meta`: five hours' 42% used, the week's reached, with a nonsense time |
 //! | `read PATH` | Reads the file through the daemon, and says `read:` and its text |
 //! | `write PATH`, a line's end, then text | Writes the text to the file through the daemon, in a tool call, and says `wrote` |
 //! | `disk PATH`, a line's end, then text | Writes the text to the file itself, as Claude Code's tools do, then says so as its adapter does: the tool call finished, then what it changed, the file's old and new text, in an update of its own; and `done` |
@@ -273,6 +274,26 @@ fn say(session: &str, text: &str) {
     );
 }
 
+/// Says the account's limits as Claude Code's adapter says a
+/// subscription's, one at a time, in `usage_update`'s `_meta` with the
+/// context again, and says `limits`: five hours' 42% used, and the week's
+/// reached, at a time that's nonsense.
+fn say_limits(session: &str) {
+    for info in [
+        json!({ "status": "allowed", "rateLimitType": "five_hour",
+                "utilization": 0.42, "resetsAt": 1_760_018_400 }),
+        json!({ "status": "rejected", "rateLimitType": "seven_day", "resetsAt": 1e300 }),
+    ] {
+        update(
+            session,
+            &json!({ "sessionUpdate": "usage_update", "used": 84_000, "size": 200_000,
+                     "_meta": { "_claude/rateLimit": info,
+                                "_claude/model": "claude-haiku-4-5" } }),
+        );
+    }
+    say(session, "limits\n");
+}
+
 /// Writes `text` to the file at `path`, as tool call `td`, as Claude
 /// Code's tools do, then says so as its adapter does: the tool call
 /// finished, then what it changed, the file's old and new text, in an
@@ -296,7 +317,8 @@ fn write_itself(session: &str, path: &str, text: &str) {
 
 /// Tells `past-1`'s conversation again, as loading it does: two messages,
 /// the first in two pieces, and what the agent did with each, an edit to
-/// `a.txt` in `cwd` among it.
+/// `a.txt` in `cwd` among it, and how full its account's 5-hour limit was
+/// then, 99%.
 fn tell_again(session: &str, cwd: &str, gap: Option<std::time::Duration>) {
     let pause = || {
         if let Some(gap) = gap {
@@ -316,6 +338,14 @@ fn tell_again(session: &str, cwd: &str, gap: Option<std::time::Duration>) {
     user("in src/parse.rs");
     pause();
     say(session, "Looking.");
+    // How its account's limits stood long ago, as Claude Code's adapter
+    // tells a session again: never to be taken as how they stand now.
+    update(
+        session,
+        &json!({ "sessionUpdate": "usage_update", "used": 9_000, "size": 200_000,
+                 "_meta": { "_claude/rateLimit": { "status": "allowed_warning",
+                     "rateLimitType": "five_hour", "utilization": 0.99 } } }),
+    );
     // What it asked as it worked, long ago: the daemon turns both down.
     send(
         &json!({ "jsonrpc": "2.0", "id": "f-replay", "method": "fs/read_text_file",
@@ -737,6 +767,10 @@ impl Fake {
         match text {
             "cwd" => {
                 say(&session, &format!("in {}\n", self.sessions[&session]));
+                done(&id, "end_turn");
+            }
+            "limits" => {
+                say_limits(&session);
                 done(&id, "end_turn");
             }
             "tool" => {

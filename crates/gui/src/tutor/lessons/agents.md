@@ -32,9 +32,15 @@ finder agent
 
 Below each message, what the agent did with it, in order: its words, its thinking, each tool it uses with `○` while it runs and `✓` or `✗` after, and each command it runs and change it makes, on a card of its own. Click a card to open it.
 
-While it works, a line just above the box says so, wherever the chat is scrolled to: three dots pulsing in clackatoo's colour, what the agent is doing, such as `Thinking…`, `Running cargo test…` or `Writing…`, and how long the turn has been going. The dots move only while the chat has the keyboard; elsewhere they step once a second, and once the agent stops, nothing moves. A tab with a chat at work shows `⋯` after its name. Ctrl+C asks it to stop.
+While it works, a line just above the box says so, wherever the chat is scrolled to: three dots pulsing in clackatoo's colour, what the agent is doing, such as `Thinking…`, `Running cargo test…` or `Writing…`, and how long the turn has been going. The dots move only while the chat has the keyboard; elsewhere they step once a second, and once the agent stops, nothing moves. Ctrl+C asks it to stop.
 
 Along the box's bottom are its settings: its mode on the left, how much it does without asking; its model and effort on the right. Shift+Tab steps through the modes.
+
+Beside the model is how full the chat's context is, as `42% context` over a thin bar: quiet while there's room, amber past 80% and red past 95%. With a Claude subscription, the account's 5-hour or weekly limit shows before it once it's past 80%. Hover over it, click it, or press `K` in the chat's normal mode for the detail: the tokens, and each limit, how much is used and when it resets. Codex keeps its limits to its own `/status`.
+
+## Which chats need you
+
+A tab says what its chats are doing after its name: `⋯` while one is at work, `?` while one asks you something, and `•` when one finished while this window wasn't showing it with the focus, until you show it. The workspaces in the top bar say the same of theirs, so a chat in another workspace that wants you shows there. When chats in one tab or workspace would say different things, the one that needs you most is shown: `?`, then `⋯`, then `•`.
 
 ## Copying, and when it was said
 

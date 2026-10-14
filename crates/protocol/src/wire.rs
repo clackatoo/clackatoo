@@ -141,6 +141,9 @@ gates! {
     /// (`InlayHint`, `InlayHintKind`), and `ServerFeatures`'
     /// `inlay_hints`.
     INLAY_HINTS = 80,
+    /// An account's limits, as its agent says them: `Usage`'s `five_hour`
+    /// and `weekly` (`Limit`).
+    LIMITS = 81,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

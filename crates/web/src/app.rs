@@ -736,6 +736,16 @@ fn epoch_millis() -> u64 {
     js_sys::Date::now() as u64
 }
 
+/// How many minutes ahead of UTC the phone's clock is at `at`, in
+/// milliseconds since the Unix epoch: summer time, or not, as it is then.
+fn zone_offset(at: u64) -> i64 {
+    #[allow(clippy::cast_precision_loss, reason = "milliseconds since 1970 fit")]
+    let at = js_sys::Date::new(&JsValue::from_f64(at as f64));
+    #[allow(clippy::cast_possible_truncation, reason = "minutes, less than a day")]
+    let behind = at.get_timezone_offset() as i64;
+    -behind
+}
+
 /// `text` as a JSON string.
 fn json_string(text: &str) -> String {
     use std::fmt::Write as _;
@@ -1382,7 +1392,10 @@ impl App {
             );
             page.shown_footer = footer;
         }
-        let menus = node.map_or_else(|| el("div"), view::menus);
+        let menus = node.map_or_else(
+            || el("div"),
+            |node| view::box_bar(node, open, now, &zone_offset),
+        );
         if fresh || menus != page.shown_menus {
             dom::replace_children(&self.document, &page.menus, &el("div").child(menus.clone()));
             page.shown_menus = menus;
@@ -1545,6 +1558,10 @@ impl App {
                     };
                     self.state.chat(answer, "answering");
                 }
+            }
+            Action::Usage => {
+                self.state.toggle_fold(view::USAGE_FOLD);
+                self.draw_soon();
             }
             Action::Stop => self.state.chat(ChatAction::Stop, "stopping the agent"),
             Action::Send => {
