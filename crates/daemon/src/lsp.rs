@@ -2056,22 +2056,49 @@ mod tests {
     }
 
     #[test]
-    fn places_on_a_line_a_megabyte_long_are_found_in_time() {
+    fn places_on_a_line_a_megabyte_long_are_found_as_quickly_as_on_a_short_one() {
         // A minified bundle's one line: each place is found without
-        // walking the line, as a server's thousands of uses ask.
-        let line = "x".repeat(1 << 20);
-        let text = Rope::from_str(&format!("{line}\nend\n"));
-        let started = std::time::Instant::now();
-        for character in 0..8000 {
-            for encoding in [Encoding::Utf8, Encoding::Utf16] {
-                let at = place(&text, at(0, character * 100), encoding);
-                assert_eq!(at, (character as usize * 100).min(line.len()));
+        // walking the line, or the text, as a server's thousands of uses
+        // ask. So places across a line of a megabyte are found about as
+        // quickly as places across a text of a thousand characters, where
+        // walking would take a thousand times as long.
+        let short = "x".repeat(1000);
+        let long = "x".repeat(1 << 20);
+        let (short_text, long_text) = (
+            Rope::from_str(&format!("{short}\nend\n")),
+            Rope::from_str(&format!("{long}\nend\n")),
+        );
+        // How long a hundred places across a text's first line take to
+        // find.
+        let places = |text: &Rope, len: usize| {
+            let started = std::time::Instant::now();
+            for step in 0..100 {
+                let character = len * step / 100;
+                let column = u32::try_from(character).unwrap();
+                for encoding in [Encoding::Utf8, Encoding::Utf16] {
+                    assert_eq!(place(text, at(0, column), encoding), character);
+                }
+            }
+            started.elapsed()
+        };
+        // Time is weighed against time, never against a clock's limit,
+        // which a slow machine would miss. The quickest of up to five goes
+        // at each counts, so a busy machine pausing during one doesn't.
+        // A deeper rope and cache misses alone make the long line a few
+        // times slower.
+        let (mut on_short, mut on_long) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..5 {
+            on_short = on_short.min(places(&short_text, short.len()));
+            on_long = on_long.min(places(&long_text, long.len()));
+            if on_long < on_short * 20 {
+                break;
             }
         }
-        let took = started.elapsed();
-        assert!(took < std::time::Duration::from_millis(500), "{took:?}");
+        assert!(on_long < on_short * 20, "{on_long:?} against {on_short:?}");
         // Past the line's end, at its end, before its line break.
-        assert_eq!(place(&text, at(0, u32::MAX), Encoding::Utf8), line.len());
+        for encoding in [Encoding::Utf8, Encoding::Utf16] {
+            assert_eq!(place(&long_text, at(0, u32::MAX), encoding), long.len());
+        }
     }
 
     #[test]

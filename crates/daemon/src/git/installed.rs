@@ -172,11 +172,25 @@ mod tests {
         assert_eq!(find_program("tool", OsStr::new(".:tool")), None);
     }
 
-    /// A stand-in for git, in `dir`, that runs `script`.
+    /// A stand-in for git, in `dir`, that runs `script`. It's written
+    /// through `sh`, so this process never has it open for writing: if it
+    /// did, a child another test starts meanwhile would have it open until
+    /// it ran its own program, and running the stand-in then would fail
+    /// with "Text file busy" (ETXTBSY).
     fn stand_in(dir: &Path, script: &str) -> OsString {
-        let program = dir.join("git");
-        std::fs::write(&program, format!("#!/bin/sh\n{script}")).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        use std::io::Write as _;
+        let mut writer = std::process::Command::new("sh")
+            .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+            .arg(dir.join("git"))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = writer.stdin.take().unwrap();
+        stdin
+            .write_all(format!("#!/bin/sh\n{script}").as_bytes())
+            .unwrap();
+        drop(stdin);
+        assert!(writer.wait().unwrap().success());
         OsString::from(dir)
     }
 

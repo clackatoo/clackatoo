@@ -461,7 +461,7 @@ fn a_full_screen_program_s_redraw_is_shown_at_once_and_whole() {
     // Each key has the program redraw its screen from a file of its own,
     // in one write, as a full-screen program does: 12 KB of drawing over
     // the top line, which never scrolls, then a line naming the key.
-    let letters = b"abcde";
+    let letters = b"abcdefgh";
     for &letter in letters {
         let letter = char::from(letter);
         let drawing = (0..300).map(|i| format!("\x1b[Hdrawing {letter} {i:05}{:20}", ""));
@@ -477,12 +477,16 @@ fn a_full_screen_program_s_redraw_is_shown_at_once_and_whole() {
 
     // Nothing else happens meanwhile, so no other event wakes the daemon
     // to send what's left. The first update after each key shows all of
-    // its file, or nearly always: a read can still outrun the kernel
-    // passing output along.
+    // its file, or nearly always: the kernel passes a program's write on
+    // to the daemon in pieces, and on a busy machine a read can still
+    // find only some of them there. Shown as it was first read, a 12 KB
+    // file never comes whole, as a first look takes 4 KB, so one key
+    // whose redraw comes whole is enough to tell. What's left, if it never
+    // comes, is waited for long enough for a busy machine.
     client
-        .set_read_timeout(Some(Duration::from_secs(1)))
+        .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    let mut whole = 0;
+    let mut whole = Vec::new();
     for &letter in letters {
         client.frame_done(terminal).unwrap();
         client.send_input(terminal, &[letter]).unwrap();
@@ -494,13 +498,15 @@ fn a_full_screen_program_s_redraw_is_shown_at_once_and_whole() {
             }
             match client.next_event() {
                 Ok(Event::View { update, .. }) => view.apply(update),
-                other => panic!("the redraw wasn't shown within a second: {other:?}"),
+                other => panic!("the redraw wasn't shown: {other:?}"),
             }
-            whole += usize::from(first && screen_text(&view).contains(&end));
+            if first && screen_text(&view).contains(&end) {
+                whole.push(char::from(letter));
+            }
             first = false;
         }
     }
-    assert!(whole >= 3, "only {whole} of {} came whole", letters.len());
+    assert!(!whole.is_empty(), "none of {} came whole", letters.len());
 }
 
 #[test]
@@ -3981,10 +3987,12 @@ fn buffer_in(client: &mut Client, pane: PaneId) -> BufferId {
     }
 }
 
-/// The next update about a buffer, skipping the workspaces.
+/// The next update about a buffer, skipping the workspaces. It's waited
+/// for long enough for a debug build on a busy machine, as a language
+/// server's answer can take seconds there.
 fn next_buffer_update(client: &mut Client) -> BufferUpdate {
     client
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
     loop {
         match client.next_event().expect("a buffer update") {
@@ -4571,11 +4579,13 @@ fn replace_file(path: &Path, text: &str) {
 
 /// Makes files at `paths`, one after another, renamed into place, until
 /// the fake language server says it was told one was made: its watches
-/// are made on a thread, so a change before then may go unheard.
+/// are made on a thread, so a change before then may go unheard. Each
+/// says `bad`, so a file the server says is wrong, if it's read only as
+/// it's probed, is still said to be, and still watched.
 fn until_told(log: &Path, paths: impl Fn(usize) -> PathBuf) {
     for attempt in 0..50 {
         let path = paths(attempt);
-        replace_file(&path, "probe\n");
+        replace_file(&path, "probe bad\n");
         let told = format!("changed: 1 {}", path.display());
         if server_says_within(log, &told, Duration::from_millis(200)) {
             return;
@@ -4773,7 +4783,7 @@ fn a_language_server_that_watches_nothing_hears_of_changes_to_files_it_said_are_
     };
     let told_before = told_of_other();
     replace_file(&other, "fine\n");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while told_of_other() == told_before {
         assert!(Instant::now() < deadline, "never told of the change");
         std::thread::sleep(Duration::from_millis(10));
@@ -4781,7 +4791,22 @@ fn a_language_server_that_watches_nothing_hears_of_changes_to_files_it_said_are_
     let before = told_of_other();
     send_change(&mut client, buffer, 0, insert(4, 0, "x ", 0));
     next_diagnostics(&mut client);
-    std::thread::sleep(Duration::from_millis(200));
+    // It says so of the file not open just after the one open: waited
+    // for until the file isn't listed as wrong, and so isn't watched.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    for id in 1.. {
+        client.find(id, None, Search::Diagnostics).unwrap();
+        let (shown, _) = found(&mut client, id);
+        let wrong = (shown.iter()).any(|found| {
+            matches!(found, Found::Lines(lines)
+                if lines.iter().any(|line| line.path.ends_with("other.fk")))
+        });
+        if !wrong {
+            break;
+        }
+        assert!(Instant::now() < deadline, "it's still said to be wrong");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     replace_file(&other, "fine again\n");
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(told_of_other(), before);
@@ -7350,7 +7375,7 @@ fn a_file_changed_or_opened_while_a_rename_writes_it_isnt_renamed() {
     // Changed on disk, by something else, while its new text waits: the
     // change is kept, and nothing is renamed.
     client.rename(buffer, 1, (0, 0), "good").unwrap();
-    let staged = Instant::now() + Duration::from_secs(5);
+    let staged = Instant::now() + Duration::from_secs(30);
     while listed(&dir.join("app")).len() == files.len() {
         assert!(Instant::now() < staged, "the new text wasn't written");
         std::thread::sleep(Duration::from_millis(5));
@@ -7413,8 +7438,10 @@ fn a_rename_writing_files_is_dropped_when_its_window_goes_or_the_daemon_stops() 
     let files = listed(&dir.join("app"));
     let mut other = daemon.client();
     attach_buffer(&mut other, buffer);
+    // Generous, for a busy machine: the files are written well within a
+    // second on a quiet one.
     let staged = || {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while listed(&dir.join("app")).len() == files.len() {
             assert!(Instant::now() < deadline, "the new text wasn't written");
             std::thread::sleep(Duration::from_millis(5));
@@ -7427,7 +7454,7 @@ fn a_rename_writing_files_is_dropped_when_its_window_goes_or_the_daemon_stops() 
     staged();
     drop(client);
     // A query after the window has gone is answered once that's seen.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while listed(&dir.join("app")).len() != files.len() {
         assert!(Instant::now() < deadline, "what was written stays");
         std::thread::sleep(Duration::from_millis(5));

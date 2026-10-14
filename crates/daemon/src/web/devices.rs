@@ -591,7 +591,19 @@ mod tests {
         );
         assert_eq!(mode & 0o077, 0, "only the user reads it");
         drop(devices);
-        let devices = Devices::open(dir.path()).unwrap();
+        // The lock is let go of as the devices are dropped. A child another
+        // test is starting meanwhile can still hold it for a moment, from
+        // its fork until it runs its program, as it has the file open too.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let devices = loop {
+            match Devices::open(dir.path()) {
+                Err(why) if why.contains("another daemon") => {
+                    assert!(std::time::Instant::now() < deadline, "{why}");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                opened => break opened.unwrap(),
+            }
+        };
         assert_eq!(devices.list.len(), 1);
         assert_eq!(devices.list[0].name, "iPhone");
         assert!(devices.by_token(&[1; 32]).is_some());

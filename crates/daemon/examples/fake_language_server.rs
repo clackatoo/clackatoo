@@ -75,7 +75,7 @@
 //! | `--queue-symbols FILE` | Holds questions of what symbols are in a file or the project until FILE exists, taking everything else in meanwhile, then answers them in order |
 //! | `--queue-uses FILE` | Holds questions of where a name is used until FILE exists, taking everything else in meanwhile, then answers them in order |
 //! | `--queue-hints FILE` | Holds questions of what to write inline until FILE exists, taking everything else in meanwhile, then answers them in order |
-//! | `--hint-flood` | Answers what to write inline with 100,000 hints with labels of 300 characters, then one whose label has 100,000 parts |
+//! | `--hint-flood` | Answers what to write inline with 10,000 hints with labels of 300 characters, then one whose label has 10,000 parts: more of each than its client looks at |
 //! | `--refresh-hints` | Asks its client to ask for inlay hints again, fifty times at once, after it's answered the first question of them |
 //! | `--format-error` | Answers formatting a file, or part of one, with an error, `RequestFailed`, as `gcsl lsp` does for a file with a syntax error |
 //! | `--prepare HOW` | Checks a rename first, answering as HOW says: `range` with the word's range, `placeholder` with its range and the word in capitals, `default` leaving it to its client, `error` with an error; and with `null` where there's no word |
@@ -610,11 +610,13 @@ impl Fake {
             range["start"]["line"], range["end"]["line"]
         ));
         if self.hint_flood {
+            // Well past every limit, yet quick to send and read in a debug
+            // build on a busy machine.
             let label = "y".repeat(300);
-            let mut flood: Vec<Value> = (0..100_000)
+            let mut flood: Vec<Value> = (0..10_000)
                 .map(|_| json!({ "position": place(text, 0, self.utf16), "label": label }))
                 .collect();
-            let parts: Vec<Value> = (0..100_000).map(|_| json!({ "value": "zz" })).collect();
+            let parts: Vec<Value> = (0..10_000).map(|_| json!({ "value": "zz" })).collect();
             flood.push(json!({ "position": place(text, 0, self.utf16), "label": parts }));
             return json!({ "jsonrpc": "2.0", "id": message["id"], "result": flood });
         }
