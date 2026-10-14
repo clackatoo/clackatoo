@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.26 (2026-10-14)
+
+### Features
+
+- **editor:** drag the mouse to select, by words after a double click and lines after a triple (11261e9)
+
 ## 2026.10.25 (2026-10-14)
 
 ### Speed
