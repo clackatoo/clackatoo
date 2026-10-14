@@ -12,6 +12,7 @@ mod divider;
 mod edge;
 mod fold;
 mod select;
+mod working;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -140,9 +141,12 @@ pub(super) struct Cache {
     bounded: usize,
     /// The turns laid out, to drop again once far from the view.
     laid: Vec<usize>,
-    /// Text of the chat's own, such as "Starting Claude Code…", by what it
-    /// says.
+    /// Text of the chat's own, such as that the agent couldn't start, by
+    /// what it says.
     notes: HashMap<(String, Tone), Laid>,
+    /// The line above the box that says what the agent is doing, laid
+    /// out, while it works: what it says changes as it goes on.
+    working: Option<working::WorkingLaid>,
 }
 
 /// What's kept of one turn between frames.
@@ -393,25 +397,18 @@ impl ChatView {
             column,
         };
         let box_height = self.paint_box(fonts, &mut paint, m, place, caret && !self.reading);
+        // Just above the box, a row for what's gone wrong, and under it,
+        // nearest the box, a row for what the agent is doing while it
+        // works: always in view, wherever the conversation's scrolled to.
         let status = self.status();
-        let status_height = if status.is_some() { m.em(1.8) } else { 0.0 };
+        self.moving = caret;
+        let now = self.now();
+        let working = self.label_working(fonts, m, now);
+        let rows = u8::from(status.is_some()) + u8::from(working);
+        let status_height = m.em(1.8) * f32::from(rows);
         let view_height = (size[1] - box_height - status_height - m.em(1.0)).max(0.0);
-        if let Some((text, tone)) = status {
-            let laid = self.note(fonts, m, &text, tone, column);
-            let top = origin[1] + view_height + (status_height - laid.height) / 2.0;
-            let x = origin[0] + left + (column - laid.width) / 2.0;
-            let mut canvas = Canvas {
-                paint: &mut paint,
-                fonts,
-                clip: [origin[0], origin[1], size[0], size[1]],
-                em,
-                over: false,
-            };
-            for block in &laid.blocks {
-                canvas.text(&block.layout, [x, top + block.top]);
-            }
-            self.cache.notes.insert((text, tone), laid);
-        }
+        let row = [left, view_height, column, m.em(1.8)];
+        self.draw_above_box((&mut paint, fonts), m, (origin, size), row, (status, now));
 
         // The conversation: the turns in view are laid out, and drawn.
         self.view_height = view_height;
@@ -501,9 +498,56 @@ impl ChatView {
         }
     }
 
-    /// What's said just above the box, if anything: a notice, such as
-    /// that the agent is being installed, or the agent starting, or
-    /// failing to.
+    /// Draws what's said just above the box, in the pane at `origin` of
+    /// `size`: `status`, and under it, what the agent is doing at `now`,
+    /// if it's working. `row` is where the first goes, from the pane's top
+    /// left: the column's left, the top, the column's width and a row's
+    /// height.
+    fn draw_above_box(
+        &mut self,
+        (paint, fonts): (&mut ChatPaint, &mut Fonts),
+        m: Measures,
+        (origin, size): ([f32; 2], [f32; 2]),
+        row: [f32; 4],
+        (status, now): (Option<(String, Tone)>, u64),
+    ) {
+        let mut canvas = Canvas {
+            paint,
+            fonts,
+            clip: [origin[0], origin[1], size[0], size[1]],
+            em: m.em,
+            over: false,
+        };
+        let mut row = [origin[0] + row[0], origin[1] + row[1], row[2], row[3]];
+        if let Some(status) = status {
+            self.draw_status(&mut canvas, m, row, status);
+            row[1] += row[3];
+        }
+        self.draw_working(&mut canvas, m, row, now);
+    }
+
+    /// Draws `status`, what's said just above the box, in the middle of
+    /// `row`: the column's left, top, width and height.
+    fn draw_status(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        row: [f32; 4],
+        (text, tone): (String, Tone),
+    ) {
+        let [left, top, column, height] = row;
+        let laid = self.note(canvas.fonts, m, &text, tone, column);
+        let top = top + (height - laid.height) / 2.0;
+        let x = left + (column - laid.width) / 2.0;
+        for block in &laid.blocks {
+            canvas.text(&block.layout, [x, top + block.top]);
+        }
+        self.cache.notes.insert((text, tone), laid);
+    }
+
+    /// What's said just above the box, if anything, in place of what the
+    /// agent is doing: a notice, such as that the agent is being
+    /// installed, or the agent failing to start.
     fn status(&self) -> Option<(String, Tone)> {
         match (&self.node.state, &self.node.notice) {
             (ChatState::Failed(why), _) => Some((
@@ -511,9 +555,6 @@ impl ChatView {
                 Tone::Warning,
             )),
             (_, Some(notice)) => Some((notice.clone(), Tone::Muted)),
-            (ChatState::Starting, None) => {
-                Some((format!("Starting {}…", self.agent()), Tone::Muted))
-            }
             _ => None,
         }
     }

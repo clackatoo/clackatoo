@@ -243,9 +243,23 @@ pub(crate) struct ChatView {
     open_agents: std::collections::HashSet<usize>,
     /// The time, as turns count it, if it's not the clock's, as for tests.
     clock: Option<u64>,
-    /// When the next turn still going counts on to the next second, if one
-    /// was drawn.
+    /// When the chat must next be drawn by itself, if anything it drew
+    /// changes with time: the line saying what the agent is doing, a card
+    /// counting its subagents' seconds, or the view scrolling as a drag
+    /// passes its edge.
     live: Option<std::time::Instant>,
+    /// Whether it had the keyboard, in a window with the focus, when last
+    /// drawn: only then do the dots that show the agent working move as
+    /// often as they can. Otherwise they step once a second.
+    moving: bool,
+    /// When the chat last heard from the daemon, as turns count time, if
+    /// it has since it was made: the dots stop moving often once the
+    /// agent's been quiet a while.
+    heard: Option<u64>,
+    /// Whether the daemon is out of reach: what the chat shows of the
+    /// agent working is as it was, and may be long over, so it isn't
+    /// said, nor counted.
+    offline: bool,
     /// The text drawn last, top to bottom, and where.
     shown: Vec<Shown>,
     /// Text selected in the conversation.
@@ -321,6 +335,9 @@ impl ChatView {
             open_agents: std::collections::HashSet::new(),
             clock: None,
             live: None,
+            moving: false,
+            heard: None,
+            offline: false,
             shown: Vec::new(),
             picked: None,
             picking: false,
@@ -341,6 +358,7 @@ impl ChatView {
 
     /// Applies an update from the daemon.
     pub(crate) fn apply(&mut self, update: &ViewUpdate) {
+        self.heard = Some(self.now());
         match update {
             ViewUpdate::Snapshot(view) => {
                 if let Some(chat) = view.chat() {
@@ -410,10 +428,26 @@ impl ChatView {
         }
     }
 
-    /// When the chat must be drawn again for a turn still going to count
-    /// on a second, if it showed one when last drawn.
+    /// When the chat must be drawn again by itself, if what it showed
+    /// when last drawn changes with time: `None` once nothing does.
     pub(crate) fn live(&self) -> Option<std::time::Instant> {
         self.live
+    }
+
+    /// Whether its agent is at work, for its tab to say so, as far as the
+    /// chat knows: not while the daemon is out of reach.
+    pub(crate) fn working(&self) -> bool {
+        !self.offline && self.node.working()
+    }
+
+    /// The daemon has gone out of reach, if `offline`, or come back:
+    /// meanwhile, the chat says nothing of its agent working, and nothing
+    /// it shows wakes the window to count.
+    pub(crate) fn set_offline(&mut self, offline: bool) {
+        self.offline = offline;
+        if offline {
+            self.live = None;
+        }
     }
 
     /// Whether the agent is answering, or starting to.

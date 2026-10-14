@@ -30,7 +30,9 @@ finder agent
 
 ## What it shows
 
-Below each message, what the agent did with it, in order: its words, its thinking, each tool it uses with `○` while it runs and `✓` or `✗` after, and each command it runs and change it makes, on a card of its own. Click a card to open it. While it works the turn ends with `Working…`, and Ctrl+C asks it to stop.
+Below each message, what the agent did with it, in order: its words, its thinking, each tool it uses with `○` while it runs and `✓` or `✗` after, and each command it runs and change it makes, on a card of its own. Click a card to open it.
+
+While it works, a line just above the box says so, wherever the chat is scrolled to: three dots pulsing in clackatoo's colour, what the agent is doing, such as `Thinking…`, `Running cargo test…` or `Writing…`, and how long the turn has been going. The dots move only while the chat has the keyboard; elsewhere they step once a second, and once the agent stops, nothing moves. A tab with a chat at work shows `⋯` after its name. Ctrl+C asks it to stop.
 
 Along the box's bottom are its settings: its mode on the left, how much it does without asking; its model and effort on the right. Shift+Tab steps through the modes.
 

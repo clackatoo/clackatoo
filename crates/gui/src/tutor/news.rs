@@ -257,6 +257,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "finder",
         what: "Uses of the name under the cursor are lit, gq formats a selection, and a failed format says why",
     },
+    News {
+        id: "working",
+        date: "2026-10-14",
+        lesson: "agents",
+        what: "A chat at work says above its box what the agent is doing, with pulsing dots, and its tab shows ⋯",
+    },
 ];
 
 impl News {

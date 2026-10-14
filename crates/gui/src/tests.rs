@@ -477,9 +477,10 @@ fn two_pane_window(
                 (WorkspaceId(1), "clackatoo".into(), 2, true),
                 (WorkspaceId(2), "peios".into(), 1, false),
             ],
+            // The second, a chat at work, is marked so.
             tabs: vec![
                 (TabId(1), "1 zsh".into(), true),
-                (TabId(2), "2 htop".into(), false),
+                (TabId(2), "2 Claude Code ⋯".into(), false),
             ],
             status,
             buttons: &buttons,
@@ -2382,4 +2383,31 @@ fn a_picture_is_drawn_where_it_is_placed_and_uploaded_again_when_it_changes() {
     picture.images = &placed;
     let pixels = draw_with(&gpu, &mut renderer, size, &picture, &mut fonts);
     assert_eq!(pixel(&pixels, [2, 10])[3], 0, "nothing drawn");
+}
+
+#[test]
+fn a_chat_at_work_says_so_above_its_box_however_long_the_turn() {
+    // A long turn still going, between tools: its top, where the line its
+    // work folds under is, is far above the view.
+    let mut node = crate::chat::fixtures::long_chat(2);
+    let last = node.turns.len() - 1;
+    node.turns[last].items.pop();
+    let more = node.turns[last].items.clone();
+    node.turns[last].items.extend(more);
+    node.turns[last].sent = 2;
+    let Some(pixels) = render_chat("chat-working", node, "", 1.0) else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    // The dots, in the accent colour, just above the box, left of the
+    // middle, where "Working… 12s" goes after them.
+    let width = 720;
+    let gold = (480..540).any(|y| {
+        (200..360).any(|x| {
+            let at = (y * width + x) * 4;
+            let [r, g, b] = [pixels[at], pixels[at + 1], pixels[at + 2]];
+            r > 0xb0 && g > 0x90 && b < 0x80
+        })
+    });
+    assert!(gold, "the dots are drawn");
 }

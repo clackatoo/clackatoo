@@ -23,7 +23,7 @@ use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    AddEventListenerOptions, Document, Element as DomElement, Event, HtmlInputElement,
+    AddEventListenerOptions, Document, Element as DomElement, Event, HtmlElement, HtmlInputElement,
     HtmlSelectElement, HtmlTextAreaElement, InputEvent, KeyboardEvent, MessageEvent, Notification,
     NotificationPermission, PushSubscriptionOptionsInit, RequestInit, TouchEvent, VisibilityState,
     WebSocket, Window,
@@ -112,6 +112,14 @@ enum Pairing {
 struct ChatPage {
     header: DomElement,
     turns: DomElement,
+    /// The line saying what the agent is doing, while it works, and the
+    /// two parts of it that change: made once, so its dots, which the
+    /// style sheet moves, never start again as the seconds count.
+    working: HtmlElement,
+    doing: DomElement,
+    seconds: DomElement,
+    /// What it last said, if it showed.
+    shown_working: Option<(String, String)>,
     footer: DomElement,
     menus: DomElement,
     textarea: HtmlTextAreaElement,
@@ -137,6 +145,9 @@ struct App {
     term_page: Option<TermPage>,
     /// When the app looks again at whether keys go, if it's to.
     check_at: f64,
+    /// When the chat shown is next drawn for its seconds to count, while
+    /// its agent works, in milliseconds since the Unix epoch.
+    count_at: f64,
     /// The key on the row of keys a finger is on, and where it came down.
     pressed: Option<(RowKey, (f64, f64))>,
     /// Counts the phone's screen changes, so the terminal is fitted again
@@ -190,6 +201,7 @@ pub(crate) fn start() {
             page: None,
             term_page: None,
             check_at: 0.0,
+            count_at: 0.0,
             pressed: None,
             refits: 0,
             frame_asked: false,
@@ -1350,6 +1362,17 @@ impl App {
                 &el("p").class("muted").text("Opening…"),
             ));
         }
+        let online = self.state.online;
+        let working = node.and_then(|node| view::working(node, online, now));
+        let next_second = node.and_then(|node| view::next_second(node, online, now));
+        if working != page.shown_working {
+            page.working.set_hidden(working.is_none());
+            if let Some((doing, seconds)) = &working {
+                page.doing.set_text_content(Some(doing));
+                page.seconds.set_text_content(Some(seconds));
+            }
+            page.shown_working.clone_from(&working);
+        }
         let footer = view::footer(&self.state, node);
         if fresh || footer != page.shown_footer {
             dom::replace_children(
@@ -1369,6 +1392,35 @@ impl App {
         {
             scroller.set_scroll_top(scroller.scroll_height());
         }
+        if let Some(at) = next_second {
+            self.count_later(at);
+        }
+    }
+
+    /// Draws the chat shown again at `at`, in milliseconds since the Unix
+    /// epoch, for the seconds its agent has been working to count: once,
+    /// however many draws ask, and not while the page isn't seen, as the
+    /// page is drawn again when it is. Nothing asks once the agent stops,
+    /// so nothing runs.
+    fn count_later(&mut self, at: u64) {
+        #[allow(clippy::cast_precision_loss, reason = "a time in milliseconds")]
+        let at = at as f64;
+        if at <= self.count_at || self.document.visibility_state() != VisibilityState::Visible {
+            return;
+        }
+        self.count_at = at;
+        let count = Closure::once_into_js(|| {
+            with_app(App::draw_soon);
+        });
+        let wait = (at - js_sys::Date::now()).max(0.0);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "milliseconds, at most a second"
+        )]
+        let wait = wait as i32;
+        let _ = self
+            .window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(count.unchecked_ref(), wait);
     }
 
     /// The page showing a chat: its parts, empty, and the box a message is
@@ -1400,6 +1452,22 @@ impl App {
         );
         let _ = row.append_child(&textarea);
         let _ = row.append_child(&send);
+        // At the top of the box's bar, which stays at the screen's foot,
+        // so it's seen wherever the turns are scrolled to. Hidden until
+        // the agent works.
+        let working: HtmlElement = dom::element_of(
+            document,
+            &el("p")
+                .class("working")
+                .attr("hidden", "")
+                .child(view::dots(epoch_millis())),
+        )
+        .unchecked_into();
+        let doing = dom::element_of(document, &el("span").class("doing"));
+        let seconds = dom::element_of(document, &el("span").class("seconds"));
+        let _ = working.append_child(&doing);
+        let _ = working.append_child(&seconds);
+        let _ = composer.append_child(&working);
         let _ = composer.append_child(&menus);
         let _ = composer.append_child(&row);
         for part in [&header, &turns, &footer, &composer] {
@@ -1410,6 +1478,10 @@ impl App {
         ChatPage {
             header,
             turns,
+            working,
+            doing,
+            seconds,
+            shown_working: None,
             footer,
             menus,
             textarea,
@@ -1617,6 +1689,10 @@ impl App {
         if here && matches!(self.screen, Screen::App) && self.socket.is_none() {
             self.retry = 1;
             self.connect();
+        }
+        // Seen again: drawn, so an agent's seconds count on from now.
+        if here {
+            self.draw_soon();
         }
         self.send();
     }

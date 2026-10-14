@@ -3,13 +3,13 @@
 //!
 //! Done, the line says how long the work took, "Worked for 42s ›", and
 //! the turn shows just its message and its answer. While the agent works,
-//! the line counts the seconds and says what it's doing, "Working… 12s ·
-//! Read Cargo.toml", and the work shows as it comes. A click on the line,
-//! Enter on it, or `za`, opens or folds it.
+//! the line says "Working… ⌄", and the work shows as it comes; what it's
+//! doing, and for how long, is said above the box (see `working.rs`). A
+//! click on the line, Enter on it, or `za`, opens or folds it.
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use clackatoo_protocol::{ChatState, Item, ToolStatus, Turn};
+use clackatoo_protocol::{Item, Turn};
 
 use super::select::TextKey;
 use super::{Canvas, Drawn, FOLD, LINE, Look, Measures, draw_laid, intersection, lay_out};
@@ -97,49 +97,13 @@ impl ChatView {
         }
     }
 
-    /// What the line turn `index`, `turn`, folds its work under says:
-    /// how long it took, or while it goes, how long it's been going, and
-    /// what it's doing.
-    pub(in crate::chat) fn fold_label(&self, turn: &Turn, open: bool, now: u64) -> String {
-        let chevron = if open { "⌄" } else { "›" };
-        let Some(end) = &turn.end else {
-            let elapsed = if turn.sent == 0 {
-                String::new()
-            } else {
-                format!(" {}", duration(now.saturating_sub(turn.sent)))
-            };
-            let doing = match self.node.state {
-                ChatState::Starting => format!("Starting {}…{elapsed}", self.agent()),
-                _ => format!("Working…{elapsed}"),
-            };
-            return match doing_now(turn) {
-                Some(what) => format!("{doing} · {what}  {chevron}"),
-                None => format!("{doing}  {chevron}"),
-            };
-        };
-        // A turn from before turns said when they were sent can't say
-        // how long it took.
-        if turn.sent == 0 {
-            return format!("Worked  {chevron}");
-        }
-        let took = duration(end.at.saturating_sub(turn.sent));
-        format!("Worked for {took}  {chevron}")
-    }
-
-    /// Notes when the line a turn still going folds its work under next
-    /// counts on a second, if one was drawn, and counts.
+    /// Notes when the chat must next be drawn by itself: for the line
+    /// above the box that says what the agent is doing, or a card that
+    /// counts its subagents' seconds, if either was drawn.
     pub(super) fn note_live(&mut self) {
         let now = self.now();
-        let agents = self.agents_live();
-        self.live = (self.shown.iter())
-            .filter(|shown| shown.key.piece == FOLD && shown.at[1] < self.view_height)
-            .filter_map(|shown| self.node.turns.get(shown.key.turn))
-            .filter(|turn| turn.end.is_none() && turn.sent > 0)
-            .map(|turn| {
-                let into = now.saturating_sub(turn.sent) % 1000;
-                Instant::now() + Duration::from_millis(1000 - into)
-            })
-            .chain(agents)
+        self.live = (self.working_wake(now).into_iter())
+            .chain(self.agents_live())
             .min();
     }
 
@@ -151,7 +115,6 @@ impl ChatView {
         m: Measures,
         turns: std::ops::Range<usize>,
     ) {
-        let now = self.now();
         for index in turns {
             let Some(turn) = self.node.turns.get(index) else {
                 continue;
@@ -160,7 +123,7 @@ impl ChatView {
             if !shape.fold {
                 continue;
             }
-            let label = self.fold_label(turn, shape.open, now);
+            let label = fold_label(turn, shape.open);
             let fresh = (self.cache.turns.get(index))
                 .and_then(|slot| slot.header.as_ref())
                 .is_none_or(|laid| laid.source != label);
@@ -219,18 +182,22 @@ impl ChatView {
     }
 }
 
-/// What the agent is doing in `turn`, as the line its work folds under
-/// says: the tool it's using, or thinking.
-fn doing_now(turn: &Turn) -> Option<String> {
-    let tool = (turn.items.iter().rev()).find_map(|item| match item {
-        Item::Tool(tool) if tool.status == ToolStatus::Running => Some(tool),
-        _ => None,
-    });
-    if let Some(tool) = tool {
-        let title = tool.title.lines().next().unwrap_or_default().trim();
-        return (!title.is_empty()).then(|| title.to_owned());
+/// What the line `turn` folds its work under says, `open` or not: how
+/// long it took, or while it goes, that it's going. What it's doing, and
+/// for how long, is said on the line above the box (see `working.rs`),
+/// which is always in view.
+fn fold_label(turn: &Turn, open: bool) -> String {
+    let chevron = if open { "⌄" } else { "›" };
+    let Some(end) = &turn.end else {
+        return format!("Working…  {chevron}");
+    };
+    // A turn from before turns said when they were sent can't say how
+    // long it took.
+    if turn.sent == 0 {
+        return format!("Worked  {chevron}");
     }
-    matches!(turn.items.last(), Some(Item::Thought(_))).then(|| "Thinking".to_owned())
+    let took = duration(end.at.saturating_sub(turn.sent));
+    format!("Worked for {took}  {chevron}")
 }
 
 #[cfg(test)]
@@ -307,29 +274,25 @@ mod tests {
     }
 
     #[test]
-    fn a_done_turn_folds_its_work_and_one_going_counts_the_seconds() {
+    fn a_done_turn_folds_its_work_and_one_going_says_so() {
         let mut fonts = fonts();
         let mut chat = ChatView::new(String::new(), working());
         chat.set_clock(400_000 + 12_400);
         paint(&mut chat, &mut fonts);
         assert_eq!(label(&chat, 0).as_deref(), Some("Worked for 4m 58s  ›"));
-        // The tool's title, to its first line.
+        assert_eq!(label(&chat, 1).as_deref(), Some("Working…  ⌄"));
+        // What it's doing, the tool's title to its first line, and the
+        // seconds, are said above the box.
         assert_eq!(
-            label(&chat, 1).as_deref(),
-            Some("Working… 12s · Read build.rs  ⌄")
+            chat.working_said(chat.now()).as_deref(),
+            Some("Reading build.rs… 12s")
         );
         // Folded, a turn shows its message and its answer; going, all of
         // it.
         assert_eq!(pieces(&chat, 0), [PROMPT, FOLD, ITEMS + 2]);
         assert_eq!(pieces(&chat, 1), [PROMPT, FOLD, ITEMS]);
-        // The window wakes for the next second, and it's counted.
+        // The window wakes to count.
         assert!(chat.live().is_some());
-        chat.set_clock(400_000 + 13_000);
-        paint(&mut chat, &mut fonts);
-        assert_eq!(
-            label(&chat, 1).as_deref(),
-            Some("Working… 13s · Read build.rs  ⌄")
-        );
     }
 
     #[test]
@@ -411,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn the_window_wakes_to_count_only_while_the_line_is_in_view() {
+    fn the_window_wakes_to_count_wherever_the_view_is_scrolled() {
         let mut fonts = fonts();
         let mut node = working();
         // A long answer under the line, to scroll it out of view.
@@ -421,10 +384,13 @@ mod tests {
         let mut chat = ChatView::new(String::new(), node);
         chat.set_clock(400_000);
         paint(&mut chat, &mut fonts);
-        // At the end: the turn's in view, but not its line.
+        // At the end: the turn's in view, but not its line. What's said
+        // above the box counts all the same.
         assert!(chat.shown.iter().any(|shown| shown.key.turn == 1));
-        assert!(chat.live().is_none());
-        chat.scroll_lines(f32::INFINITY);
+        assert!(!chat.shown.iter().any(|shown| shown.key.piece == FOLD));
+        assert!(chat.live().is_some());
+        // Scrolled to the top, the same.
+        chat.scroll_lines(-f32::INFINITY);
         paint(&mut chat, &mut fonts);
         assert!(chat.live().is_some());
     }

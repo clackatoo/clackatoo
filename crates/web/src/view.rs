@@ -260,6 +260,8 @@ fn chat_row(chat: &ChatSummary, now: u64) -> Element {
         .child(el("span").class("title").text(chat.title.clone()));
     if chat.asking {
         top = top.child(el("span").class("badge").text("Asks you"));
+    } else if matches!(chat.state, ChatState::Starting | ChatState::Answering) {
+        top = top.child(dots(now));
     } else if chat.unseen {
         top = top.child(el("span").class("badge new").text("New"));
     }
@@ -269,6 +271,31 @@ fn chat_row(chat: &ChatSummary, now: u64) -> Element {
         said.push(ago(now.saturating_sub(chat.active)));
     }
     row.child(el("div").class("meta").text(said.join(" · ")))
+}
+
+/// How long the dots take to pulse one after another and start again, in
+/// milliseconds, as the style sheet's `pulse` says.
+const DOTS_CYCLE: u64 = 1200;
+
+/// How far behind the one before it each dot pulses, in milliseconds.
+const DOTS_LAG: u64 = 200;
+
+/// Three dots that pulse one after another, in the accent colour, while
+/// an agent works: the style sheet moves them, and stops them for those
+/// who ask for less motion. Each starts as far into its pulse as it would
+/// be at `now`, in milliseconds since the Unix epoch, had it been pulsing
+/// since the epoch, so dots drawn again, as the list is, carry on rather
+/// than start again.
+#[must_use]
+pub fn dots(now: u64) -> Element {
+    let dot = |index: u64| {
+        let into = (now + DOTS_CYCLE - DOTS_LAG * index) % DOTS_CYCLE;
+        el("i").style("animation-delay", format!("-{into}ms"))
+    };
+    el("span")
+        .class("dots")
+        .attr("aria-hidden", "true")
+        .children([dot(0), dot(1), dot(2)])
 }
 
 /// What a chat is doing, in a word or two.
@@ -378,7 +405,7 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
     if answer > 0 || running {
         let key = format!("t{index}");
         let opened = open.folds.get(&key).copied().unwrap_or(running);
-        let label = fold_label(node, turn, now);
+        let label = fold_label(turn);
         let mut work = el("details")
             .class("work")
             .attr("data-fold", key)
@@ -425,31 +452,46 @@ pub fn turn(node: &ChatNode, open: &OpenChat, index: usize, now: u64) -> Element
 }
 
 /// What the line a turn's work folds under says: how long it took, or
-/// while it goes, how long it's been going, and what it's doing.
-fn fold_label(node: &ChatNode, turn: &Turn, now: u64) -> String {
+/// while it goes, that it's going. What it's doing, and for how long, is
+/// said just above the box (see [`working`]), which is always in view and
+/// counts the seconds without the turn being drawn again.
+fn fold_label(turn: &Turn) -> String {
     let Some(end) = &turn.end else {
-        let elapsed = if turn.sent == 0 {
-            String::new()
-        } else {
-            format!(" {}", duration(now.saturating_sub(turn.sent)))
-        };
-        let doing = match node.state {
-            ChatState::Starting => format!("Starting {}…{elapsed}", node.agent),
-            _ => format!("Working…{elapsed}"),
-        };
-        let now_doing = (turn.items.iter().rev()).find_map(|item| match item {
-            Item::Tool(tool) if tool.status == ToolStatus::Running => Some(tool.title.as_str()),
-            _ => None,
-        });
-        return match now_doing {
-            Some(what) => format!("{doing} · {what}"),
-            None => doing,
-        };
+        return "Working…".to_owned();
     };
     if turn.sent == 0 {
         return "Worked".to_owned();
     }
     format!("Worked for {}", duration(end.at.saturating_sub(turn.sent)))
+}
+
+/// What the line just above the box says while the agent works, at
+/// `now`: what it's doing, "Running cargo test…", and how long the turn
+/// going has been going, "12s", or nothing if its seconds don't count,
+/// as while it starts with no message, or loads the session. `None`
+/// while it isn't working, as when it asks you something, or while the
+/// app isn't `online`, as what the chat shows may be long over.
+#[must_use]
+pub fn working(node: &ChatNode, online: Online, now: u64) -> Option<(String, String)> {
+    if online != Online::Open {
+        return None;
+    }
+    let doing = node.doing()?;
+    let seconds = (node.counted_from())
+        .map(|sent| duration(now.saturating_sub(sent)))
+        .unwrap_or_default();
+    Some((doing, seconds))
+}
+
+/// When the line above the box next counts on a second, after `now`, in
+/// milliseconds since the Unix epoch: on the turn's next second, while
+/// [`working`] says something with seconds. Otherwise nothing need
+/// draw it again.
+#[must_use]
+pub fn next_second(node: &ChatNode, online: Online, now: u64) -> Option<u64> {
+    working(node, online, now)?;
+    let sent = node.counted_from()?;
+    Some(sent + (now.saturating_sub(sent) / 1000 + 1) * 1000)
 }
 
 /// One thing the agent did.
@@ -1140,6 +1182,122 @@ mod tests {
                 "Esc", "Tab", "Ctrl", "^C", "←", "↑", "↓", "→", "|", "~", "/", "-", "Paste"
             ]
         );
+    }
+
+    #[test]
+    fn while_the_agent_works_the_line_above_the_box_says_what_and_how_long() {
+        let tool = Tool {
+            id: "t".into(),
+            title: "cargo test".into(),
+            status: ToolStatus::Running,
+            kind: clackatoo_protocol::ToolKind::Execute,
+            content: Vec::new(),
+            locations: Vec::new(),
+        };
+        let mut node = ChatNode {
+            agent: "Claude Code".into(),
+            state: ChatState::Answering,
+            ..ChatNode::default()
+        };
+        node.turns.push(Turn {
+            prompt: "test it".into(),
+            sent: 1_000,
+            items: vec![Item::Tool(tool)],
+            end: None,
+            files: None,
+            from: None,
+            switch: None,
+        });
+        let said = |node: &ChatNode, now| {
+            working(node, Online::Open, now).map(|(doing, seconds)| format!("{doing} {seconds}"))
+        };
+        assert_eq!(
+            said(&node, 13_400).as_deref(),
+            Some("Running cargo test… 12s")
+        );
+        // Drawn again on the turn's next second.
+        assert_eq!(next_second(&node, Online::Open, 13_400), Some(14_000));
+        // Out of reach of the daemon: nothing said, nothing counted.
+        for online in [Online::Connecting, Online::Lost(3)] {
+            assert_eq!(working(&node, online, 13_400), None);
+            assert_eq!(next_second(&node, online, 13_400), None);
+        }
+        // The turn's own line says only that it's going, so it needn't be
+        // drawn again as the seconds count.
+        let section = turn(&node, &open(), 0, 13_400);
+        let work = &section.find_all("data-fold")[0];
+        assert!(
+            work.all_text().starts_with("Working…"),
+            "{}",
+            work.all_text()
+        );
+        assert_eq!(turn(&node, &open(), 0, 99_000), section);
+        // Thinking, then writing.
+        node.turns[0].items = vec![Item::Thought("hmm".into())];
+        assert_eq!(said(&node, 13_400).as_deref(), Some("Thinking… 12s"));
+        node.turns[0].items.push(Item::Words("It's".into()));
+        assert_eq!(said(&node, 13_400).as_deref(), Some("Writing… 12s"));
+        // Asking you, it waits: nothing.
+        node.question = Some(Question {
+            id: 1,
+            title: "run ls".into(),
+            choices: Vec::new(),
+            own: false,
+        });
+        assert_eq!(said(&node, 13_400), None);
+        node.question = None;
+        // Starting, before any message: no seconds.
+        let starting = ChatNode {
+            agent: "Claude Code".into(),
+            ..ChatNode::default()
+        };
+        assert_eq!(
+            working(&starting, Online::Open, 0),
+            Some(("Starting Claude Code…".to_owned(), String::new()))
+        );
+        assert_eq!(next_second(&starting, Online::Open, 0), None);
+        // Done: nothing, and nothing to draw again for.
+        node.turns[0].end = Some(TurnEnd {
+            at: 20_000,
+            outcome: Outcome::Done,
+        });
+        node.state = ChatState::Ready;
+        assert_eq!(said(&node, 20_000), None);
+        assert_eq!(next_second(&node, Online::Open, 20_000), None);
+    }
+
+    #[test]
+    fn dots_drawn_again_carry_on_where_they_were() {
+        let delays = |now| -> Vec<String> {
+            (dots(now).children.iter())
+                .filter_map(|child| match child {
+                    Node::Element(dot) => Some(dot.styles[0].1.clone()),
+                    Node::Text(_) => None,
+                })
+                .collect()
+        };
+        // Each a little behind the one before.
+        assert_eq!(delays(1_000_300), ["-700ms", "-500ms", "-300ms"]);
+        // Made a whole number of pulses later, the same.
+        assert_eq!(delays(1_000_300 + 3 * 1200), delays(1_000_300));
+    }
+
+    #[test]
+    fn a_chat_at_work_has_dots_in_the_list() {
+        let mut working = summary(1, None, false, 0);
+        working.state = ChatState::Answering;
+        let asking = ChatSummary {
+            asking: true,
+            ..working.clone()
+        };
+        let ready = summary(3, None, false, 0);
+        let dots = |chat: &ChatSummary| {
+            (chat_row(chat, 0).find_all("class").into_iter())
+                .any(|element| element.get("class") == Some("dots"))
+        };
+        assert!(dots(&working));
+        assert!(!dots(&asking), "it waits for you, and says so");
+        assert!(!dots(&ready));
     }
 
     #[test]

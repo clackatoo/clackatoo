@@ -281,6 +281,19 @@ impl Pane {
         self.chat.is_some()
     }
 
+    /// Tells the chat the pane shows, if any, that the daemon has gone out
+    /// of reach, if `offline`, or come back.
+    pub(crate) fn chat_offline(&mut self, offline: bool) {
+        if let Some(chat) = &mut self.chat {
+            chat.set_offline(offline);
+        }
+    }
+
+    /// Whether the pane shows a chat whose agent is at work.
+    pub(crate) fn chat_working(&self) -> bool {
+        self.chat.as_ref().is_some_and(|chat| chat.working())
+    }
+
     /// Asks the daemon to undo what turn `turn` of the chat the pane shows
     /// changed in files, or with `redo` to make it again: or, with no
     /// turn, the last that can be undone, or the first that can be

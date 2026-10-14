@@ -241,6 +241,36 @@ details > summary::-webkit-details-marker { display: none; }
   backdrop-filter: blur(12px);
   border-top: 1px solid var(--line);
 }
+/* While the agent works: three dots pulsing one after another, what it's
+   doing, cut short to fit, and the seconds. Hidden, nothing moves. */
+.working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.working[hidden] { display: none; }
+.working .doing { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.working .seconds { flex: none; font-variant-numeric: tabular-nums; }
+.dots { display: inline-flex; flex: none; gap: 4px; align-items: center; }
+.dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  /* Each dot's delay is set as it's made: see `view::dots`. */
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 60%, 100% { transform: scale(0.5); opacity: 0.6; }
+  30% { transform: scale(1); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dots i { animation: none; transform: scale(0.75); }
+}
+.chat .top .dots { align-self: center; }
 .menus { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: none; }
 .menus::-webkit-scrollbar { display: none; }
 .menu { display: flex; flex-direction: column; flex: 0 0 auto; max-width: 60vw; }

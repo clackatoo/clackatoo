@@ -811,6 +811,174 @@ impl ChatNode {
     }
 }
 
+/// The longest a tool's title is said in full on the line that shows an
+/// agent working, in characters: longer, it's cut short, so the seconds
+/// after it still fit on a phone.
+const LONGEST_DOING: usize = 60;
+
+/// Verbs agents start tools' titles with, and how the line that shows an
+/// agent working says them: "Read Cargo.toml" is "Reading Cargo.toml…".
+const DOING_VERBS: [(&str, &str); 14] = [
+    ("Read", "Reading"),
+    ("Edit", "Editing"),
+    ("Write", "Writing"),
+    ("Delete", "Deleting"),
+    ("Move", "Moving"),
+    ("Search", "Searching"),
+    ("Find", "Finding"),
+    ("Fetch", "Fetching"),
+    ("List", "Listing"),
+    ("Run", "Running"),
+    ("Open", "Opening"),
+    ("Create", "Creating"),
+    ("Update", "Updating"),
+    ("Check", "Checking"),
+];
+
+impl ChatNode {
+    /// The turn going, if one is: the last, until it ends.
+    #[must_use]
+    pub fn going(&self) -> Option<&Turn> {
+        self.turns.last().filter(|turn| turn.end.is_none())
+    }
+
+    /// Whether the agent is at work: starting, or answering a message.
+    /// Not while it asks the user something, as then it waits for them,
+    /// nor once it couldn't start. The daemon's own question while it
+    /// answers, which only suggests installing the agent it runs another
+    /// way meanwhile, doesn't stop it.
+    #[must_use]
+    pub fn working(&self) -> bool {
+        let asking = (self.question.as_ref())
+            .is_some_and(|question| !(question.own && self.state == ChatState::Answering));
+        !asking
+            && match self.state {
+                ChatState::Starting => true,
+                ChatState::Answering => self.going().is_some(),
+                ChatState::Ready | ChatState::Failed(_) => false,
+            }
+    }
+
+    /// When the turn whose seconds clients count, while the agent works,
+    /// was sent, in milliseconds since the Unix epoch: the turn going's.
+    /// Not while it loads the session, as each turn it tells again comes
+    /// as a turn going of its own, nor for a turn from before turns said
+    /// when they were sent.
+    #[must_use]
+    pub fn counted_from(&self) -> Option<u64> {
+        if !self.working() || self.loading() {
+            return None;
+        }
+        self.going().map(|turn| turn.sent).filter(|&sent| sent > 0)
+    }
+
+    /// What the agent is doing, while it's [working](Self::working), as
+    /// clients say it: "Starting Claude Code…", "Loading the session…",
+    /// "Thinking…", "Running cargo test…", "Reading Cargo.toml…",
+    /// "Writing…" while its answer comes, or else "Working…".
+    #[must_use]
+    pub fn doing(&self) -> Option<String> {
+        if !self.working() {
+            return None;
+        }
+        if self.state == ChatState::Starting {
+            return Some(if self.loading() {
+                "Loading the session…".to_owned()
+            } else if self.agent.is_empty() {
+                "Starting the agent…".to_owned()
+            } else {
+                format!("Starting {}…", self.agent)
+            });
+        }
+        let turn = self.going()?;
+        let tool = (turn.items.iter().rev()).find_map(|item| match item {
+            Item::Tool(tool) if tool.status == ToolStatus::Running => Some(tool),
+            _ => None,
+        });
+        Some(match (tool, turn.items.last()) {
+            (Some(tool), _) => tool.doing(),
+            (None, Some(Item::Thought(_))) => "Thinking…".to_owned(),
+            (None, Some(Item::Words(_))) => "Writing…".to_owned(),
+            _ => "Working…".to_owned(),
+        })
+    }
+
+    /// Whether the agent starting is opening a session the chat had
+    /// before, or telling it again: the turn going already has the
+    /// agent's work, as one told again does, or a turn before it reached
+    /// the agent since the chat last moved to a new session with another.
+    fn loading(&self) -> bool {
+        if self.state != ChatState::Starting {
+            return false;
+        }
+        let (before, going) = match self.going() {
+            Some(turn) => (&self.turns[..self.turns.len() - 1], Some(turn)),
+            None => (&self.turns[..], None),
+        };
+        if going.is_some_and(|turn| !turn.items.is_empty()) {
+            return true;
+        }
+        for turn in before.iter().rev() {
+            if let Some(switch) = &turn.switch {
+                return switch.resumed;
+            }
+            // A turn that failed before the agent did anything never
+            // reached a session.
+            let failed = matches!(
+                turn.end,
+                Some(TurnEnd {
+                    outcome: Outcome::Failed(_),
+                    ..
+                })
+            );
+            if !turn.items.is_empty() || (turn.end.is_some() && !failed) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl Tool {
+    /// What the line that shows the agent working says while it uses
+    /// this tool: "Running cargo test…" for a command, "Reading
+    /// Cargo.toml…" for "Read Cargo.toml", or its title as it is, cut
+    /// short.
+    #[must_use]
+    pub fn doing(&self) -> String {
+        let first = self.title.lines().next().unwrap_or_default();
+        let title: String = first.trim().chars().filter(|&ch| ch != '`').collect();
+        // Cut short, the ellipsis every line ends with says so.
+        let title = match title.char_indices().nth(LONGEST_DOING) {
+            Some((at, _)) => title[..at].trim_end().to_owned(),
+            None => title,
+        };
+        if title.is_empty() {
+            return match self.kind {
+                ToolKind::Read => "Reading…",
+                ToolKind::Edit => "Editing…",
+                ToolKind::Delete => "Deleting…",
+                ToolKind::Move => "Moving…",
+                ToolKind::Search => "Searching…",
+                ToolKind::Execute => "Running a command…",
+                ToolKind::Think => "Thinking…",
+                ToolKind::Fetch => "Fetching…",
+                ToolKind::Other => "Working…",
+            }
+            .to_owned();
+        }
+        if self.kind == ToolKind::Execute {
+            return format!("Running {title}…");
+        }
+        let (verb, rest) = title.split_once(' ').unwrap_or((&title, ""));
+        match DOING_VERBS.iter().find(|(said, _)| *said == verb) {
+            Some((_, doing)) if rest.is_empty() => format!("{doing}…"),
+            Some((_, doing)) => format!("{doing} {rest}…"),
+            None => format!("{title}…"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,6 +993,190 @@ mod tests {
             from: None,
             switch: None,
         }
+    }
+
+    fn tool(title: &str, kind: ToolKind, status: ToolStatus) -> Item {
+        Item::Tool(Tool {
+            id: title.into(),
+            title: title.into(),
+            status,
+            kind,
+            content: Vec::new(),
+            locations: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn what_the_agent_is_doing_is_said_from_its_latest_work() {
+        let mut chat = ChatNode {
+            agent: "Claude Code".into(),
+            state: ChatState::Starting,
+            ..ChatNode::default()
+        };
+        // Starting, with or without a message waiting for it.
+        assert!(chat.working());
+        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code…"));
+        chat.turns.push(turn("hi", vec![]));
+        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code…"));
+        // Answering: what it's doing comes from its latest work.
+        chat.state = ChatState::Answering;
+        let said = |chat: &mut ChatNode, items: Vec<Item>| {
+            chat.turns.last_mut().unwrap().items = items;
+            chat.doing()
+        };
+        assert_eq!(said(&mut chat, vec![]).as_deref(), Some("Working…"));
+        let thought = Item::Thought("hmm".into());
+        assert_eq!(
+            said(&mut chat, vec![thought.clone()]).as_deref(),
+            Some("Thinking…")
+        );
+        let words = Item::Words("It's".into());
+        assert_eq!(
+            said(&mut chat, vec![thought.clone(), words]).as_deref(),
+            Some("Writing…")
+        );
+        let read = tool("Read Cargo.toml", ToolKind::Read, ToolStatus::Running);
+        assert_eq!(
+            said(&mut chat, vec![read.clone()]).as_deref(),
+            Some("Reading Cargo.toml…")
+        );
+        // A tool still running is what it's doing, whatever came after.
+        assert_eq!(
+            said(&mut chat, vec![read, thought.clone()]).as_deref(),
+            Some("Reading Cargo.toml…")
+        );
+        // Between tools.
+        let done = tool("Read Cargo.toml", ToolKind::Read, ToolStatus::Done);
+        assert_eq!(said(&mut chat, vec![done]).as_deref(), Some("Working…"));
+        // Asking: it waits for the user, so it isn't working.
+        chat.question = Some(Question {
+            id: 1,
+            title: "Run ls".into(),
+            choices: Vec::new(),
+            own: false,
+        });
+        assert!(!chat.working() && chat.doing().is_none());
+        chat.question = None;
+        // Done.
+        chat.turns.last_mut().unwrap().end = Some(TurnEnd {
+            at: 1,
+            outcome: Outcome::Done,
+        });
+        chat.state = ChatState::Ready;
+        assert!(!chat.working() && chat.doing().is_none());
+        // Starting again, with turns from before: it loads the session.
+        chat.state = ChatState::Starting;
+        assert_eq!(chat.doing().as_deref(), Some("Loading the session…"));
+        chat.turns.push(turn("more", vec![]));
+        assert_eq!(chat.doing().as_deref(), Some("Loading the session…"));
+        // Not after moving to a new session with another agent.
+        chat.turns.insert(1, turn("", vec![]));
+        chat.turns[1].end = chat.turns[0].end.clone();
+        chat.turns[1].switch = Some(Switch {
+            from: "Claude Code".into(),
+            to: "Codex".into(),
+            model: None,
+            resumed: false,
+            notes: Vec::new(),
+        });
+        chat.agent = "Codex".into();
+        assert_eq!(chat.doing().as_deref(), Some("Starting Codex…"));
+        chat.state = ChatState::Failed("no".into());
+        assert!(!chat.working() && chat.doing().is_none());
+    }
+
+    #[test]
+    fn the_daemons_own_suggestion_while_it_answers_doesnt_stop_it_working() {
+        let mut chat = ChatNode {
+            agent: "Claude Code".into(),
+            state: ChatState::Answering,
+            turns: vec![turn("hi", vec![])],
+            ..ChatNode::default()
+        };
+        chat.question = Some(Question {
+            id: 1,
+            title: "Install Claude Code's adapter?".into(),
+            choices: Vec::new(),
+            own: true,
+        });
+        assert!(chat.working());
+        assert_eq!(chat.doing().as_deref(), Some("Working…"));
+        // Its own question while starting, as whether to install, does.
+        chat.state = ChatState::Starting;
+        assert!(!chat.working());
+        // Ready, with a turn not yet ended: not working.
+        chat.question = None;
+        chat.state = ChatState::Ready;
+        assert!(!chat.working());
+    }
+
+    #[test]
+    fn only_turns_that_reached_the_agent_mean_a_session_to_load() {
+        let mut chat = ChatNode {
+            agent: "Claude Code".into(),
+            state: ChatState::Starting,
+            turns: vec![turn("hi", vec![]), turn("again", vec![])],
+            ..ChatNode::default()
+        };
+        chat.turns[0].sent = 500;
+        chat.turns[1].sent = 1_000;
+        // The first failed before the agent did anything: no session.
+        chat.turns[0].end = Some(TurnEnd {
+            at: 600,
+            outcome: Outcome::Failed("couldn't start".into()),
+        });
+        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code…"));
+        assert_eq!(chat.counted_from(), Some(1_000));
+        // One stopped, or done, did.
+        chat.turns[0].end = Some(TurnEnd {
+            at: 600,
+            outcome: Outcome::Stopped,
+        });
+        assert_eq!(chat.doing().as_deref(), Some("Loading the session…"));
+        assert_eq!(chat.counted_from(), None, "no seconds while it loads");
+        // A turn going that already has the agent's work is one told
+        // again, as it loads.
+        chat.turns.remove(0);
+        assert_eq!(chat.doing().as_deref(), Some("Starting Claude Code…"));
+        chat.turns[0].items.push(Item::Words("Hello".into()));
+        assert_eq!(chat.doing().as_deref(), Some("Loading the session…"));
+        assert_eq!(chat.counted_from(), None);
+        // Answering, the seconds count.
+        chat.state = ChatState::Answering;
+        assert_eq!(chat.counted_from(), Some(1_000));
+    }
+
+    #[test]
+    fn a_tool_is_said_as_what_its_doing() {
+        let doing = |title: &str, kind: ToolKind| {
+            let Item::Tool(tool) = tool(title, kind, ToolStatus::Running) else {
+                unreachable!()
+            };
+            tool.doing()
+        };
+        assert_eq!(
+            doing("cargo test", ToolKind::Execute),
+            "Running cargo test…"
+        );
+        assert_eq!(
+            doing("`cargo test`\nand more", ToolKind::Execute),
+            "Running cargo test…"
+        );
+        assert_eq!(
+            doing("Read Cargo.toml", ToolKind::Read),
+            "Reading Cargo.toml…"
+        );
+        assert_eq!(
+            doing("Edit `src/lib.rs`", ToolKind::Edit),
+            "Editing src/lib.rs…"
+        );
+        assert_eq!(doing("Fetch", ToolKind::Fetch), "Fetching…");
+        assert_eq!(doing("grep -r foo", ToolKind::Search), "grep -r foo…");
+        assert_eq!(doing("", ToolKind::Search), "Searching…");
+        assert_eq!(doing("  ", ToolKind::Execute), "Running a command…");
+        // A long one is cut short.
+        let long = doing(&"x".repeat(200), ToolKind::Execute);
+        assert_eq!(long.chars().count(), "Running ".len() + LONGEST_DOING + 1);
     }
 
     #[test]

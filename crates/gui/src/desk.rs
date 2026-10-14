@@ -209,6 +209,10 @@ const REFUSED_FOR: std::time::Duration = std::time::Duration::from_millis(300);
 /// How long a pane an agent points out stays lit.
 const POINTED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// After a tab's name while a chat in it is at work. Still: it never
+/// wakes the window.
+const WORKING_MARK: &str = " ⋯";
+
 /// The window's view of the daemon's workspaces.
 #[derive(Debug, Default)]
 #[allow(clippy::struct_excessive_bools, reason = "each is so or not")]
@@ -425,9 +429,13 @@ impl Desk {
         redraw
     }
 
-    /// When a chat must be drawn again, for a turn still going to count on
-    /// a second: the soonest.
+    /// When a chat must be drawn again by itself, as for its agent's
+    /// seconds to count: the soonest. Never while the daemon is out of
+    /// reach, however long that is.
     pub(crate) fn chat_wakes(&self) -> Option<std::time::Instant> {
+        if !self.connected {
+            return None;
+        }
         self.panes.values().filter_map(Pane::chat_live).min()
     }
 
@@ -611,6 +619,16 @@ impl Desk {
             .enumerate()
             .map(|(index, tab)| {
                 let mut name = self.tab_name(index, tab);
+                // A chat whose agent is at work, anywhere in the tab: in
+                // another tab, or beside the pane with the keyboard, it
+                // says it's still going.
+                if self.tab_working(tab) {
+                    // A name cut short ends with an ellipsis already.
+                    if name.ends_with('…') {
+                        name.pop();
+                    }
+                    name.push_str(WORKING_MARK);
+                }
                 // A pane an agent pointed out, in a tab not shown.
                 if tab.id != shown.tab
                     && self.pointed().is_some_and(|pane| tab.layout.contains(pane))
@@ -620,6 +638,13 @@ impl Desk {
                 (tab.id, name, tab.id == shown.tab)
             })
             .collect()
+    }
+
+    /// Whether any pane in `tab` shows a chat whose agent is at work.
+    fn tab_working(&self, tab: &Tab) -> bool {
+        (tab.layout.panes().iter())
+            .filter_map(|pane| pane.content.terminal())
+            .any(|terminal| self.panes.get(&terminal).is_some_and(Pane::chat_working))
     }
 
     /// What the status line shows: the command line or a search being
@@ -1105,6 +1130,7 @@ impl Desk {
         for pane in self.panes.values_mut() {
             pane.reconnected();
             pane.set_remote(remote);
+            pane.chat_offline(false);
         }
         self.workspaces_changed(workspaces);
         self.tutor_connected();
@@ -1120,6 +1146,11 @@ impl Desk {
     pub(crate) fn lost(&mut self) {
         self.connected = false;
         self.forget_asked();
+        // A chat's agent may have long finished by the time it's back:
+        // none says it's working, nor counts, meanwhile.
+        for pane in self.panes.values_mut() {
+            pane.chat_offline(true);
+        }
         // A macro can't go on without the daemon, nor wait for it.
         if self.macro_waiting() {
             self.stop_macro(Some(
@@ -1247,18 +1278,23 @@ impl Desk {
         let Some(pane) = self.panes.get_mut(&terminal) else {
             return false;
         };
+        let working = pane.chat_working();
         if !pane.view_changed(update) {
             return false;
         }
+        // A chat starting or stopping work changes its tab's name, shown
+        // or not.
+        let flipped = pane.chat_working() != working;
         self.lesson_view_changed(terminal);
         self.settle_lesson();
         // Tabs not shown wait, undrawn, until they are.
-        self.shown_tab().is_some_and(|tab| {
-            tab.layout
-                .panes()
-                .iter()
-                .any(|pane| pane.content == Content::Terminal(terminal))
-        })
+        flipped
+            || self.shown_tab().is_some_and(|tab| {
+                tab.layout
+                    .panes()
+                    .iter()
+                    .any(|pane| pane.content == Content::Terminal(terminal))
+            })
     }
 
     /// Hands the daemon's answer to whoever asked, and goes on with a
@@ -2777,6 +2813,110 @@ mod tests {
         desk.agent_shows(PaneId(9), None);
         assert_eq!(desk.pointed(), Some(PaneId(3)));
         assert_eq!(shown_pane(&desk), PaneId(1));
+    }
+
+    #[test]
+    fn a_tab_with_a_chat_at_work_says_so_and_nothing_wakes_once_its_done() {
+        use clackatoo_protocol::{ChatPatch, ChatState, Outcome, Patch, Turn, TurnEnd};
+
+        let (mut desk, turn) = working_chat_desk();
+        let names = desk.tab_names();
+        assert!(names[1].1.ends_with(WORKING_MARK), "{names:?}");
+        assert!(!names[0].1.contains(WORKING_MARK), "{names:?}");
+        // Its long title, cut short, says so once.
+        assert!(!names[1].1.contains('…'), "{names:?}");
+        // Drawn, it wakes the window to count.
+        let mut fonts = crate::chat::fixtures::fonts();
+        paint_chat_two(&mut desk, &mut fonts);
+        assert!(desk.chat_wakes().is_some());
+        // Its turn ends: the tab, though not shown, is drawn again, without
+        // the mark, and nothing wakes the window.
+        let done = Turn {
+            end: Some(TurnEnd {
+                at: 2_000,
+                outcome: Outcome::Done,
+            }),
+            ..turn
+        };
+        assert!(desk.view_changed(
+            TerminalId(2),
+            &ViewUpdate::Patch(vec![
+                Patch::Chat(ChatPatch::Turn {
+                    index: 0,
+                    turn: done,
+                }),
+                Patch::Chat(ChatPatch::State(ChatState::Ready)),
+            ]),
+        ));
+        assert!(!desk.tab_names()[1].1.contains(WORKING_MARK));
+        paint_chat_two(&mut desk, &mut fonts);
+        assert!(desk.chat_wakes().is_none(), "zero CPU when idle");
+    }
+
+    #[test]
+    fn a_chat_at_work_neither_says_so_nor_wakes_the_window_while_the_daemon_is_out_of_reach() {
+        let (mut desk, _) = working_chat_desk();
+        let mut fonts = crate::chat::fixtures::fonts();
+        paint_chat_two(&mut desk, &mut fonts);
+        assert!(desk.chat_wakes().is_some());
+        desk.lost();
+        assert!(desk.chat_wakes().is_none(), "no wakes through hours away");
+        assert!(!desk.tab_names()[1].1.contains(WORKING_MARK));
+        paint_chat_two(&mut desk, &mut fonts);
+        assert!(desk.chat_wakes().is_none());
+        let pane = desk.pane_mut(TerminalId(2)).expect("the chat's pane");
+        assert!(!pane.chat_working());
+    }
+
+    /// Draws the chat in terminal 2 of [`working_chat_desk`].
+    fn paint_chat_two(desk: &mut Desk, fonts: &mut crate::fonts::Fonts) {
+        let pane = desk.pane_mut(TerminalId(2)).expect("the chat's pane");
+        pane.paint_chat(fonts, [0.0; 2], [900.0, 1000.0], true);
+    }
+
+    /// A desk with a terminal in one tab, and in another, a chat in
+    /// terminal 2, with a long title, beside a terminal: its agent is
+    /// answering the turn returned.
+    fn working_chat_desk() -> (Desk, clackatoo_protocol::Turn) {
+        use clackatoo_protocol::{ChatNode, ChatState, Node, Turn};
+
+        let mut desk = desk(workspaces(vec![workspace(
+            1,
+            "work",
+            vec![
+                tab(1, pane(1)),
+                tab(2, side_by_side(vec![pane(2), pane(3)])),
+            ],
+        )]));
+        for terminal in [1, 3] {
+            snapshot(&mut desk, terminal);
+        }
+        let turn = Turn {
+            from: None,
+            prompt: "Why does CI fail?".into(),
+            sent: 1_000,
+            items: Vec::new(),
+            end: None,
+            files: None,
+            switch: None,
+        };
+        let node = ChatNode {
+            agent: "Claude Code".into(),
+            state: ChatState::Answering,
+            turns: vec![turn.clone()],
+            ..ChatNode::default()
+        };
+        // The chat, in a tab not shown, beside a terminal: its starting
+        // to work is drawn.
+        assert!(desk.view_changed(
+            TerminalId(2),
+            &ViewUpdate::Snapshot(View {
+                title: "a chat whose title is far too long for a tab".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(node)),
+            }),
+        ));
+        (desk, turn)
     }
 
     #[test]
