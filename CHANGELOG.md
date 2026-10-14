@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.15 (2026-10-14)
+
+### Features
+
+- **web:** terminals on the phone, at their own size, typed into, and fitted on request (2739121)
+
 ## 2026.10.14 (2026-10-14)
 
 ### Fixes
