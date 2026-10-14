@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.23 (2026-10-14)
+
+### Features
+
+- **chat:** show how full a chat's context is and its account's limits, and mark chats that are working, asking or unseen across workspaces (a015b33)
+
 ## 2026.10.22 (2026-10-14)
 
 ### Features
