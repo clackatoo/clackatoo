@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.28 (2026-10-14)
+
+### Features
+
+- **editor:** . repeats changes made in visual mode, and gv selects the last selection again (b08a32b)
+
 ## 2026.10.27 (2026-10-14)
 
 ### Features
