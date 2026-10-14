@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.17 (2026-10-14)
+
+### Fixes
+
+- **daemon:** stop gracefully on SIGTERM, SIGINT and SIGHUP, and hold a signal that comes during an upgrade for the next build (ef7d2e3)
+
 ## 2026.10.16 (2026-10-14)
 
 ### Features
