@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.13 (2026-10-14)
+
+### Features
+
+- **editor:** re-indent a line once else or end is typed first on it, and find a text-object piece once per inside (3d0dd33)
+
 ## 2026.10.12 (2026-10-14)
 
 ### Features
