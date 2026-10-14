@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.11 (2026-10-14)
+
+### Features
+
+- **protocol:** windows and daemons a release or so apart still talk (084e278)
+
 ## 2026.10.10 (2026-10-13)
 
 ### Features
