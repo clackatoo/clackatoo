@@ -21,7 +21,7 @@ use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use clackatoo_protocol::{CodeAction, Query, ServerFeatures, Trigger};
+use clackatoo_protocol::{CodeAction, Query, ServerFeatures, Trigger, UseKind};
 use clackatoo_text::{Edit, Rope, Severity};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -306,6 +306,10 @@ struct Offers {
     workspace_symbols: bool,
     /// Formats whole files.
     format: bool,
+    /// Formats part of a file.
+    format_range: bool,
+    /// Says where else in a file the name at a place is used.
+    uses: bool,
     /// Completes what's typed, and these characters ask it to.
     completion: Option<Vec<char>>,
     /// Says more about a completion item when asked.
@@ -423,6 +427,8 @@ impl LanguageServer {
                         "completion": completion,
                         "signatureHelp": signature,
                         "codeAction": code_action,
+                        "rangeFormatting": {},
+                        "documentHighlight": {},
                     },
                     "workspace": {
                         "workspaceFolders": true,
@@ -550,6 +556,8 @@ impl LanguageServer {
         match query {
             Query::Hover => self.offers.hover,
             Query::Format { .. } => self.offers.format,
+            Query::FormatRange { .. } => self.offers.format_range,
+            Query::Uses => self.offers.uses,
             Query::Completion(_) | Query::Resolve { .. } => self.offers.completion.is_some(),
             Query::SignatureHelp { .. } => self.offers.signature.is_some(),
             Query::CodeActions { .. } | Query::Act { .. } => self.offers.code_actions,
@@ -577,6 +585,7 @@ impl LanguageServer {
             signature: self.offers.signature.clone(),
             signature_again: self.offers.signature_again.clone(),
             prepare_rename: self.offers.rename && self.offers.prepare_rename,
+            uses: self.offers.uses,
         }
     }
 
@@ -614,6 +623,8 @@ impl LanguageServer {
             Query::SignatureHelp { .. } => "textDocument/signatureHelp",
             Query::Symbols => "textDocument/documentSymbol",
             Query::PrepareRename => "textDocument/prepareRename",
+            Query::Uses => "textDocument/documentHighlight",
+            Query::FormatRange { .. } => "textDocument/rangeFormatting",
             Query::Resolve { .. } => unreachable!("resolved with the item, by resolve"),
             Query::CodeActions { .. } => unreachable!("asked with what's wrong, by code_actions"),
             Query::Act { .. } => unreachable!("done by the daemon, with the action"),
@@ -635,6 +646,22 @@ impl LanguageServer {
             Query::Format { tab_size, spaces } => {
                 params = json!({
                     "textDocument": { "uri": uri(path) },
+                    "options": { "tabSize": tab_size, "insertSpaces": spaces },
+                });
+            }
+            // From the place to `end`, which the daemon has moved as it
+            // moved the place.
+            Query::FormatRange {
+                end,
+                tab_size,
+                spaces,
+            } => {
+                params = json!({
+                    "textDocument": { "uri": uri(path) },
+                    "range": {
+                        "start": position(text, at, self.encoding),
+                        "end": position(text, end.max(at), self.encoding),
+                    },
                     "options": { "tabSize": tab_size, "insertSpaces": spaces },
                 });
             }
@@ -979,6 +1006,8 @@ impl LanguageServer {
             symbols: offered(&capabilities["documentSymbolProvider"]),
             workspace_symbols: offered(&capabilities["workspaceSymbolProvider"]),
             format: offered(&capabilities["documentFormattingProvider"]),
+            format_range: offered(&capabilities["documentRangeFormattingProvider"]),
+            uses: offered(&capabilities["documentHighlightProvider"]),
             completion: (completion.is_object())
                 .then(|| characters(&completion["triggerCharacters"])),
             resolve: completion["resolveProvider"].as_bool() == Some(true),
@@ -1104,6 +1133,36 @@ pub(crate) fn hover_range(answer: &Value) -> Option<(Position, Position)> {
     let range = answer.get("range")?;
     let at = |key: &str| serde_json::from_value(range.get(key)?.clone()).ok();
     Some((at("start")?, at("end")?))
+}
+
+/// The places an answer to `textDocument/documentHighlight` says the name
+/// is used, each from its start to its end and how it's used there, at
+/// most `max` of them: `Text` where the server doesn't say, or says what
+/// LSP hasn't. One that makes no sense is left out, and at most
+/// [`LOOKED_AT_EACH`] entries are looked at for each of `max`, so the work
+/// is bounded by `max`, not by the answer. `null`, or anything but a
+/// list, is none.
+pub(crate) fn uses(answer: &Value, max: usize) -> Vec<(Position, Position, UseKind)> {
+    let Some(list) = answer.as_array() else {
+        return Vec::new();
+    };
+    let position = |range: &Value, key: &str| -> Option<Position> {
+        serde_json::from_value(range.get(key)?.clone()).ok()
+    };
+    (list.iter())
+        .take(max.saturating_mul(LOOKED_AT_EACH))
+        .filter_map(|item| {
+            let range = item.get("range")?;
+            let (start, end) = (position(range, "start")?, position(range, "end")?);
+            let kind = match item.get("kind").and_then(Value::as_u64) {
+                Some(2) => UseKind::Read,
+                Some(3) => UseKind::Write,
+                _ => UseKind::Text,
+            };
+            (start <= end).then_some((start, end, kind))
+        })
+        .take(max)
+        .collect()
 }
 
 /// How many kinds of symbol LSP has (`SymbolKind`), numbered from 1.
@@ -1816,8 +1875,10 @@ pub(crate) fn place(text: &Rope, position: Position, encoding: Encoding) -> usiz
     }
     let line_start = text.line_to_byte(line);
     let line_text = text.line(line);
-    // The line's end, before its line break.
-    let line_len = line_text.len_bytes() - usize::from(line_text.chars().last() == Some('\n'));
+    // The line's end, before its line break: found from its last byte,
+    // never by walking a line that may be a minified file's megabyte.
+    let len = line_text.len_bytes();
+    let line_len = len - usize::from(len > 0 && line_text.byte(len - 1) == b'\n');
     let line_end = line_start + line_len;
     let character = position.character as usize;
     match encoding {
@@ -1889,6 +1950,25 @@ mod tests {
     /// A place, as LSP writes one.
     fn spot(line: u32, character: u32) -> Value {
         json!({ "line": line, "character": character })
+    }
+
+    #[test]
+    fn places_on_a_line_a_megabyte_long_are_found_in_time() {
+        // A minified bundle's one line: each place is found without
+        // walking the line, as a server's thousands of uses ask.
+        let line = "x".repeat(1 << 20);
+        let text = Rope::from_str(&format!("{line}\nend\n"));
+        let started = std::time::Instant::now();
+        for character in 0..8000 {
+            for encoding in [Encoding::Utf8, Encoding::Utf16] {
+                let at = place(&text, at(0, character * 100), encoding);
+                assert_eq!(at, (character as usize * 100).min(line.len()));
+            }
+        }
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_millis(500), "{took:?}");
+        // Past the line's end, at its end, before its line break.
+        assert_eq!(place(&text, at(0, u32::MAX), Encoding::Utf8), line.len());
     }
 
     #[test]
@@ -2262,6 +2342,43 @@ mod tests {
                 ("after", 0, ""),
             ]
         );
+    }
+
+    #[test]
+    fn uses_are_taken_with_their_kinds_as_far_as_they_make_sense() {
+        let range =
+            |line, start, end| json!({ "start": spot(line, start), "end": spot(line, end) });
+        let answer = json!([
+            { "range": range(0, 0, 3), "kind": 3 },
+            { "range": range(1, 4, 7), "kind": 2 },
+            // No kind, or one LSP hasn't, is just the same text.
+            { "range": range(2, 0, 3) },
+            { "range": range(3, 0, 3), "kind": 9 },
+            // Backwards, or with no range, it's left out.
+            { "range": range(4, 5, 1), "kind": 2 },
+            { "kind": 2 },
+        ]);
+        assert_eq!(
+            uses(&answer, 10),
+            [
+                (at(0, 0), at(0, 3), UseKind::Write),
+                (at(1, 4), at(1, 7), UseKind::Read),
+                (at(2, 0), at(2, 3), UseKind::Text),
+                (at(3, 0), at(3, 3), UseKind::Text),
+            ]
+        );
+        assert_eq!(uses(&answer, 2).len(), 2, "no more than asked");
+        assert!(uses(&Value::Null, 10).is_empty());
+        assert!(uses(&json!({ "range": range(0, 0, 1) }), 10).is_empty());
+        // A flood that makes no sense is looked at only so far: a million
+        // entries, the one that makes sense after them never reached.
+        let mut flood = vec![json!({}); 1_000_000];
+        flood.push(json!({ "range": range(0, 0, 1) }));
+        let flood = Value::Array(flood);
+        let started = std::time::Instant::now();
+        assert!(uses(&flood, 100).is_empty());
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_millis(50), "{took:?}");
     }
 
     #[test]

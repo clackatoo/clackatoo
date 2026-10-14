@@ -343,6 +343,9 @@ impl Theme {
             HighlightKind::Link => self.accent,
             HighlightKind::LessonStep => white(0.04),
             HighlightKind::LessonDone => faint(self.added, 0.14),
+            // Quieter than a search's match: the cursor merely rests there.
+            HighlightKind::Used => white(0.09),
+            HighlightKind::Written => faint(self.accent, 0.22),
         }
     }
 

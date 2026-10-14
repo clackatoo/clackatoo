@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{
     Answer, BufferId, BufferUpdate, ClientMessage, CompletionItem, Edit, FileLocation, Query,
-    ServerFeatures, Symbol, TextChange,
+    ServerFeatures, Symbol, TextChange, Use,
 };
 use clackatoo_text::{Bias, Diagnostic, Diagnostics, Rope};
 use mio::unix::SourceFd;
@@ -195,9 +195,9 @@ impl Servers {
 
     /// Whether buffer `buffer` is being formatted.
     fn formatting(&self, buffer: BufferId) -> bool {
-        let format = |ask: &Ask| matches!(ask, Ask::Query(Query::Format { .. }));
+        let format = |ask: &Ask| matches!(ask, Ask::Query(query) if query.formats());
         (self.asked.iter()).any(|asked| {
-            asked.buffer == buffer && matches!(asked.what, Asking::Query(Query::Format { .. }))
+            asked.buffer == buffer && matches!(asked.what, Asking::Query(query) if query.formats())
         }) || (self.again.iter()).any(|(_, again)| again.buffer == buffer && format(&again.ask))
     }
 
@@ -325,6 +325,10 @@ pub(super) const MAX_SYMBOLS: usize = 5000;
 /// The most bytes of a new name a rename is started with: longer than any
 /// name, but short of a whole file a server says is one.
 const MAX_NEW_NAME: usize = 256;
+
+/// The most uses of a name passed on: far more than a screen shows, but
+/// short of a server's flood, which a window would draw a frame at a time.
+pub(super) const MAX_USES: usize = 4000;
 
 /// A buffer as its language server knows it.
 #[derive(Debug)]
@@ -933,10 +937,13 @@ impl Daemon {
                 let before = sent_last(&self.buffers, server);
                 (request, Asking::CodeActions { end, before })
             }
-            Ask::Query(query) => (
-                running.server.ask(query, path, &text, at),
-                Asking::Query(query),
-            ),
+            Ask::Query(query) => {
+                let query = end_moved(query, moved, at);
+                (
+                    running.server.ask(query, path, &text, at),
+                    Asking::Query(query),
+                )
+            }
             Ask::Rename(name) => {
                 let request = running.server.rename(path, &text, at, &name);
                 // The server makes the edits it answers with to the text
@@ -978,6 +985,7 @@ impl Daemon {
                     | (Query::SignatureHelp { .. }, Query::SignatureHelp { .. })
                     | (Query::Symbols, Query::Symbols)
                     | (Query::PrepareRename, Query::PrepareRename)
+                    | (Query::Uses, Query::Uses)
             )
         };
         let mut cancelled = Vec::new();
@@ -1015,7 +1023,7 @@ impl Daemon {
             .and_then(|slot| slot.server.as_ref())
             .ok_or("this file has no language server")?;
         // Two answers counted in one text would make the edits twice.
-        if matches!(ask, Ask::Query(Query::Format { .. })) && self.servers.formatting(buffer) {
+        if matches!(ask, Ask::Query(query) if query.formats()) && self.servers.formatting(buffer) {
             return Err("it's being formatted already");
         }
         let running =
@@ -1074,14 +1082,14 @@ impl Daemon {
     pub(super) fn forget_formats(&mut self, id: BufferId) {
         let mut told = Vec::new();
         self.servers.asked.retain(|asked| {
-            let format = matches!(asked.what, Asking::Query(Query::Format { .. }));
+            let format = matches!(asked.what, Asking::Query(query) if query.formats());
             if asked.buffer == id && format {
                 told.push((asked.token, asked.id));
             }
             !(asked.buffer == id && format)
         });
         self.servers.again.retain(|(_, again)| {
-            let format = matches!(again.ask, Ask::Query(Query::Format { .. }));
+            let format = matches!(again.ask, Ask::Query(query) if query.formats());
             if again.buffer == id && format {
                 told.push((again.token, again.place.0));
             }
@@ -1103,6 +1111,10 @@ impl Daemon {
 
     /// Passes on the answer to the request numbered `request` to server
     /// `server`, to the client that asked, if it still follows the buffer.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "an arm for each kind of question, most short"
+    )]
     fn answered(&mut self, server: ServerId, request: u64, result: Result<Value, String>) {
         let Some(index) = (self.servers.asked.iter())
             .position(|asked| asked.server == server && asked.request == request)
@@ -1119,7 +1131,7 @@ impl Daemon {
         let answer = match (result, &asked.what) {
             (Err(err), _) => Answer::Failed(err),
             (Ok(value), Asking::Query(Query::Hover)) => self.hover(server, &asked, &value),
-            (Ok(value), Asking::Query(Query::Format { .. })) => {
+            (Ok(value), Asking::Query(query)) if query.formats() => {
                 self.formatted(server, (asked.buffer, asked.version, &asked.text), &value)
             }
             (Ok(value), Asking::Query(Query::Completion(_))) => {
@@ -1130,6 +1142,7 @@ impl Daemon {
             (Ok(value), Asking::Query(Query::PrepareRename)) => {
                 self.renamable(server, &asked, &value)
             }
+            (Ok(value), Asking::Query(Query::Uses)) => self.uses_in(server, &asked, &value),
             (Ok(value), Asking::Query(Query::SignatureHelp { .. })) => {
                 let encoding = self.server_encoding(server).unwrap_or(lsp::Encoding::Utf16);
                 lsp::signature(&value, encoding).map_or(Answer::Nothing, |signature| {
@@ -1263,6 +1276,38 @@ impl Daemon {
             })
             .collect();
         Answer::Symbols { symbols, more }
+    }
+
+    /// Where server `server` says, in `value`, the name at the place
+    /// `asked` asked about is used, as many as are passed on, in the order
+    /// of the text: counted in the text it was asked about, and moved
+    /// along with edits made since. One an edit since has changed, or put
+    /// text in beside, is left out, as it may not be the name now.
+    fn uses_in(&self, server: ServerId, asked: &Asked, value: &Value) -> Answer {
+        let (Some(encoding), Some(slot)) = (
+            self.server_encoding(server),
+            self.buffers.get(&asked.buffer),
+        ) else {
+            return Answer::Failed("its language server has stopped".into());
+        };
+        let Some(edits) = slot.buffer.edits_since(asked.version) else {
+            return Answer::Failed("the file has changed since".into());
+        };
+        let edits: Vec<&Edit> = edits.collect();
+        let mut uses: Vec<Use> = (lsp::uses(value, MAX_USES).into_iter())
+            .filter_map(|(start, end, kind)| {
+                let start = lsp::place(&asked.text, start, encoding);
+                let end = lsp::place(&asked.text, end, encoding);
+                let (start, end) = (edits.iter())
+                    .try_fold((start, end), |(start, end), edit| {
+                        edit.map_untouched(start, end)
+                    })?;
+                (start < end).then_some(Use { start, end, kind })
+            })
+            .collect();
+        uses.sort_unstable_by_key(|used| (used.start, used.end));
+        uses.dedup_by_key(|used| used.start);
+        Answer::Uses(uses)
     }
 
     /// What server `server` says, in `value`, of renaming what's at the
@@ -1980,10 +2025,30 @@ fn resolve(
     }
 }
 
+/// `query`, asked about byte `at`, with the end of the range it formats,
+/// if it formats one, moved by `moved` as `at` was, and never before it:
+/// so text typed inside the range meanwhile is formatted too.
+fn end_moved(query: Query, moved: impl Fn(usize) -> usize, at: usize) -> Query {
+    match query {
+        Query::FormatRange {
+            end,
+            tab_size,
+            spaces,
+        } => Query::FormatRange {
+            end: moved(end).max(at),
+            tab_size,
+            spaces,
+        },
+        query => query,
+    }
+}
+
 /// Why a server that can't answer `query` doesn't.
 fn cannot(query: Query) -> &'static str {
     match query {
         Query::Format { .. } => "its language server doesn't format files",
+        Query::FormatRange { .. } => "its language server can't format a selection",
+        Query::Uses => "its language server doesn't say where names are used",
         Query::Completion(_) | Query::Resolve { .. } => {
             "its language server doesn't complete what's typed"
         }

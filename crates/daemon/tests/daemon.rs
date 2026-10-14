@@ -21,8 +21,8 @@ use clackatoo_protocol::{
     NewTerminal, OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION, PaneId, PaneTerminal, Patch,
     Piece, ProviderModels, Query, Request, Response, Resume, Search, Selection, ServerFeatures,
     ServerMessage, Side, Size, Span, SubagentStatus, Symbol, TerminalId, TerminalStatus,
-    TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles, TurnFilesState, View,
-    ViewUpdate, Workspaces,
+    TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles, TurnFilesState, Use,
+    UseKind, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -5472,6 +5472,24 @@ fn a_language_server_is_never_asked_what_it_cant_do() {
         next_answer(&mut client),
         (5, failed("its language server doesn't help with calls"))
     );
+    client.query(buffer, 6, (0, 0), Query::Uses).unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (
+            6,
+            failed("its language server doesn't say where names are used")
+        )
+    );
+    let format = Query::FormatRange {
+        end: 3,
+        tab_size: 4,
+        spaces: true,
+    };
+    client.query(buffer, 7, (0, 0), format).unwrap();
+    assert_eq!(
+        next_answer(&mut client),
+        (7, failed("its language server can't format a selection"))
+    );
 }
 
 /// The completion items in `answer`, or a panic.
@@ -5603,6 +5621,183 @@ fn formatting_edits_the_buffer_as_the_user_and_says_whether_it_changed() {
 }
 
 #[test]
+fn formatting_part_of_a_file_edits_only_that_part_as_one_edit_of_the_users() {
+    let daemon = with_fake_language_server(|_| Vec::new());
+    let text = "\tbad x\n\tbad y\n\tbad z\n";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    // The second line, from its start to its end, as `:2Format` asks.
+    let start = "\tbad x\n".len();
+    let format = Query::FormatRange {
+        end: start + "\tbad y".len(),
+        tab_size: 2,
+        spaces: true,
+    };
+    client.query(buffer, 1, (0, start), format).unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(answer, (1, Answer::Formatted { changed: true }));
+    assert_eq!(edited(text, &updates), "\tbad x\n  BAD y\n\tbad z\n");
+    let authors: Vec<_> = (updates.iter())
+        .filter_map(|update| match update {
+            BufferUpdate::Edited { author, .. } => Some(*author),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(authors, [Author::User], "one edit, which `u` undoes");
+
+    // Its end is moved along with an edit made before it's asked, as its
+    // start is: text another window put in the line is formatted too.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    let now = edited(text, &updates);
+    let line = now.find("\tbad z").unwrap();
+    send_change(
+        &mut other,
+        buffer,
+        0,
+        insert(now.len(), line + 1, "bad ", 1),
+    );
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    let format = Query::FormatRange {
+        end: line + "\tbad z".len(),
+        tab_size: 2,
+        spaces: false,
+    };
+    client.query(buffer, 2, (1, line), format).unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(answer, (2, Answer::Formatted { changed: true }));
+    // The other window's edit, then the formatting.
+    assert_eq!(edited(&now, &updates), "\tbad x\n  BAD y\n\tBAD BAD z\n");
+}
+
+#[test]
+fn a_server_that_cant_format_says_why_and_nothing_changes() {
+    let daemon = with_fake_language_server(|_| vec!["--format-error".to_owned()]);
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "\tbad\n")]);
+    let why = Answer::Failed("not formatted: it has a syntax error (1:1)".into());
+    let format = Query::Format {
+        tab_size: 4,
+        spaces: true,
+    };
+    client.query(buffer, 1, (0, 0), format).unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(answer, (1, why.clone()));
+    assert!(updates.is_empty(), "{updates:?}");
+    let format = Query::FormatRange {
+        end: 4,
+        tab_size: 4,
+        spaces: true,
+    };
+    client.query(buffer, 2, (0, 0), format).unwrap();
+    let (updates, answer) = updates_to_answer(&mut client);
+    assert_eq!(answer, (2, why));
+    assert!(updates.is_empty(), "{updates:?}");
+}
+
+#[test]
+fn the_uses_of_a_name_are_said_with_how_each_is_used() {
+    let daemon = with_fake_language_server(|_| vec!["--utf16".to_owned()]);
+    // "é" is two bytes and one UTF-16 column.
+    let text = "é x = bad\nbad + x\n// x\nxx\n";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    let at = |line: &str, word: &str| text.find(line).unwrap() + line.find(word).unwrap();
+    client
+        .query(buffer, 1, (0, at("é x", "x")), Query::Uses)
+        .unwrap();
+    let used = |start: usize, kind| Use {
+        start,
+        end: start + 1,
+        kind,
+    };
+    assert_eq!(
+        next_answer(&mut client),
+        (
+            1,
+            Answer::Uses(vec![
+                used(at("é x", "x"), UseKind::Write),
+                used(at("bad + x", "x"), UseKind::Read),
+                used(at("// x", "x"), UseKind::Text),
+            ])
+        )
+    );
+    // Nothing to say of a place with no name.
+    client
+        .query(buffer, 2, (0, at("é x = bad", "=")), Query::Uses)
+        .unwrap();
+    assert_eq!(next_answer(&mut client), (2, Answer::Uses(Vec::new())));
+}
+
+#[test]
+fn the_uses_of_a_name_land_past_edits_made_while_the_server_worked() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        vec!["--queue-uses".to_owned(), gate]
+    });
+    let text = "x = bad\nbad + x\n";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    client.query(buffer, 1, (0, 0), Query::Uses).unwrap();
+    // While the server works, another window types just before the first.
+    let mut other = daemon.client();
+    attach_buffer(&mut other, buffer);
+    send_change(&mut other, buffer, 0, insert(text.len(), 0, "zz ", 0));
+    while !matches!(next_buffer_update(&mut other), BufferUpdate::Acked { .. }) {}
+    std::fs::write(daemon.dir.path().join("gate"), "").unwrap();
+    let (updates, (id, answer)) = updates_to_answer(&mut client);
+    assert_eq!(id, 1);
+    assert!(
+        (updates.iter()).any(|update| matches!(update, BufferUpdate::Edited { version: 1, .. })),
+        "the edit comes first"
+    );
+    // The one text was put in beside is left out, as it may not be the
+    // name now; the other moved past what was typed.
+    let start = "zz x = bad\nbad + ".len();
+    assert_eq!(
+        answer,
+        Answer::Uses(vec![Use {
+            start,
+            end: start + 1,
+            kind: UseKind::Read,
+        }])
+    );
+}
+
+#[test]
+fn asking_for_the_uses_of_a_name_again_cancels_the_last_at_the_server() {
+    let daemon = with_fake_language_server(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        let log = dir.join("log").display().to_string();
+        vec!["--queue-uses".to_owned(), gate, "--log".to_owned(), log]
+    });
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad x\nx bad\n")]);
+    let log = daemon.dir.path().join("log");
+    client.query(buffer, 1, (0, 0), Query::Uses).unwrap();
+    let said = wait_for_server_log(&log, |line| line.starts_with("uses "));
+    let first = (said.lines())
+        .find_map(|line| line.strip_prefix("uses "))
+        .unwrap()
+        .to_owned();
+    // As the cursor rests on another name.
+    client.query(buffer, 2, (0, 4), Query::Uses).unwrap();
+    let said = wait_for_server_log(&log, |line| {
+        line.starts_with("uses ") && !line.ends_with(&format!(" {first}"))
+    });
+    assert!(
+        said.lines()
+            .any(|line| line == format!("cancelled {first} textDocument/documentHighlight")),
+        "{said}"
+    );
+    std::fs::write(daemon.dir.path().join("gate"), "").unwrap();
+    // Only the second is answered, though the server answered both.
+    let (id, answer) = next_answer(&mut client);
+    assert_eq!(id, 2);
+    let Answer::Uses(uses) = answer else {
+        panic!("{answer:?}");
+    };
+    assert_eq!(uses.len(), 2);
+    client.query(buffer, 3, (0, 0), Query::Definition).unwrap();
+    assert_eq!(next_answer(&mut client).0, 3);
+}
+
+#[test]
 fn completions_that_arent_all_say_so_and_too_many_are_cut() {
     let daemon = with_fake_language_server(|_| vec!["--incomplete".to_owned()]);
     let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "alpha bad\nal")]);
@@ -5707,6 +5902,7 @@ fn windows_are_told_what_a_server_does_as_you_type() {
         signature: Some(vec!['(', ',']),
         signature_again: vec![')'],
         prepare_rename: false,
+        uses: true,
     };
     // A window attaching once it's ready is told after the snapshot.
     let mut other = daemon.client();

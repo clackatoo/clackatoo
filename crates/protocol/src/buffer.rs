@@ -328,6 +328,14 @@ pub struct ServerFeatures {
         deserialize_with = "wire::since::<{ wire::SYMBOLS }, _, _>"
     )]
     pub prepare_rename: bool,
+    /// It says where else the name at a place is used in the file (see
+    /// [`Query::Uses`]), so an editor lights them up once the cursor rests
+    /// on one. `false` from a daemon older than protocol 79.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::USES }, _>",
+        deserialize_with = "wire::since::<{ wire::USES }, _, _>"
+    )]
+    pub uses: bool,
 }
 
 /// What a client asks about a place in a buffer: most questions are for
@@ -442,6 +450,28 @@ pub enum Query {
     /// there's nothing there to rename; or with [`Answer::Failed`],
     /// saying why not. Only for a daemon of protocol 77 or later.
     PrepareRename,
+    /// Where else in the file the name at the place is used, as an editor
+    /// lights them up once the cursor rests on it, of a server that says
+    /// (see [`ServerFeatures::uses`]). Answered with [`Answer::Uses`].
+    /// Asked again, it takes the place of the question before, which the
+    /// server is told it needn't answer. Only for a daemon of protocol 79
+    /// or later.
+    Uses,
+    /// The text from the place to byte `end` formatted, as `:'<,'>Format`
+    /// and `gq` on a selection do, with tabs `tab_size` columns wide, and
+    /// indenting with spaces if `spaces`. As for [`Format`](Self::Format),
+    /// the server's edits are made to the buffer, as the user's, one undo
+    /// step, before the answer comes. Only for a daemon of protocol 79 or
+    /// later.
+    FormatRange {
+        /// The byte after the last to format, in the same text as the
+        /// place, which the daemon moves along with it.
+        end: usize,
+        /// How many columns a tab is.
+        tab_size: u32,
+        /// Whether to indent with spaces rather than tabs.
+        spaces: bool,
+    },
 }
 
 impl Query {
@@ -452,6 +482,13 @@ impl Query {
             self,
             Self::Pieces(_) | Self::Starts { .. } | Self::Indent { .. }
         )
+    }
+
+    /// Whether it formats the file, or part of it: its answer edits the
+    /// buffer.
+    #[must_use]
+    pub fn formats(self) -> bool {
+        matches!(self, Self::Format { .. } | Self::FormatRange { .. })
     }
 }
 
@@ -596,6 +633,11 @@ pub enum Answer {
         /// there.
         name: Option<String>,
     },
+    /// Where the name at the place is used in the file, as [`Query::Uses`]
+    /// asks, in the order of the text, as many as the daemon passes on:
+    /// none if the server says nothing of it. Only from a daemon of
+    /// protocol 79 or later.
+    Uses(Vec<Use>),
 }
 
 /// Something a language server could do to some text, such as fix what's
@@ -701,4 +743,27 @@ pub struct Symbol {
     /// answer's version, which a client moves past its own changes that
     /// haven't been made yet, as it moves diagnostics.
     pub offset: Option<usize>,
+}
+
+/// A place a name is used in a file, as [`Query::Uses`] finds them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Use {
+    /// Its first byte, in the text at the answer's version, which a
+    /// client moves past its own changes that haven't been made yet.
+    pub start: usize,
+    /// The byte after its last.
+    pub end: usize,
+    /// How it's used there.
+    pub kind: UseKind,
+}
+
+/// How a name is used where it is, as LSP's `DocumentHighlightKind` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UseKind {
+    /// The server doesn't say how: it's the same name, at least.
+    Text,
+    /// It's read, as a variable is in an expression.
+    Read,
+    /// It's written, as a variable is when it's given a value.
+    Write,
 }

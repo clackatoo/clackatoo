@@ -26,7 +26,7 @@ use clackatoo_text::{
 };
 
 use crate::frame::{self, FrameDecoder, FrameError};
-use crate::wire::{EXITED, FALLBACKS, HOVER, PHONE_TERMINALS, SYMBOLS, WORDS};
+use crate::wire::{EXITED, FALLBACKS, HOVER, PHONE_TERMINALS, SYMBOLS, USES, WORDS};
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
     Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
@@ -46,7 +46,7 @@ use crate::{
     FileStamp, FilesAction, FilesUpdate, Found, FoundLine, FoundSymbol, GitMark, Hunks, Made,
     OpenBoard, OpenFile, OpenFiles, PairingAsk, PairingState, PostKind, Query, ReviewAction,
     ReviewChat, ReviewComment, ReviewFile, ReviewHunk, ReviewList, ReviewScope, Search,
-    ServerFeatures, Symbol, TextChange, Trigger, Udp,
+    ServerFeatures, Symbol, TextChange, Trigger, Udp, Use, UseKind,
 };
 
 /// One sample: a message either side sends.
@@ -690,7 +690,62 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             update: BufferUpdate::Language { word: "-?".into() },
         })),
     ));
+    samples.extend(uses(buffer).into_iter().map(|sample| (USES, sample)));
     samples
+}
+
+/// Samples of protocol 79: the other uses of a name, of every kind, and
+/// part of a file formatted.
+fn uses(buffer: BufferId) -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let query = |id, at, query| {
+        Client(ClientMessage::Query {
+            buffer,
+            id,
+            version: 7,
+            at,
+            query,
+        })
+    };
+    let used = |start, kind| Use {
+        start,
+        end: start + 5,
+        kind,
+    };
+    vec![
+        Server(ServerMessage::Event(Event::Buffer {
+            buffer,
+            update: BufferUpdate::Features(ServerFeatures {
+                completion: None,
+                signature: None,
+                signature_again: Vec::new(),
+                prepare_rename: false,
+                uses: true,
+            }),
+        })),
+        query(11, 4, Query::Uses),
+        Server(ServerMessage::Event(Event::Buffer {
+            buffer,
+            update: BufferUpdate::Answer {
+                id: 11,
+                version: 7,
+                answer: Answer::Uses(vec![
+                    used(2, UseKind::Text),
+                    used(30, UseKind::Read),
+                    used(61, UseKind::Write),
+                ]),
+            },
+        })),
+        query(
+            12,
+            10,
+            Query::FormatRange {
+                end: 48,
+                tab_size: 4,
+                spaces: true,
+            },
+        ),
+    ]
 }
 
 /// Samples of protocol 77: a file's symbols, and a project's, found; and a
@@ -733,6 +788,8 @@ fn symbols(buffer: BufferId) -> Vec<Sample> {
                 signature: Some(vec!['(']),
                 signature_again: vec![','],
                 prepare_rename: true,
+                // Not on the wire before protocol 79.
+                uses: false,
             }),
         })),
         query(8, Query::Symbols),
@@ -983,6 +1040,8 @@ fn more() -> Vec<Sample> {
             signature_again: vec![','],
             // Not on the wire before protocol 77.
             prepare_rename: false,
+            // Nor this before protocol 79.
+            uses: false,
         })),
         buffer_update(BufferUpdate::Offer {
             language: "rust".into(),

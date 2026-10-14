@@ -19,6 +19,7 @@ use crate::render::{HighlightKind, Ink};
 mod indent;
 mod snippets;
 mod substitute;
+mod uses;
 mod words;
 mod wrapped;
 
@@ -1817,6 +1818,7 @@ impl Setup {
             signature: Some(vec!['(', ',']),
             signature_again: vec![')'],
             prepare_rename: false,
+            uses: false,
         }));
     }
 

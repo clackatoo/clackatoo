@@ -1,6 +1,6 @@
 //! The editor's own commands on the command line, Vim's Ex commands for
 //! lines: `:s`, `:&`, `:&&` and `:~`; `:g` and `:v`; `:d`, `:y`, `:m`,
-//! `:t` (or `:co`) and `:normal`.
+//! `:t` (or `:co`), `:normal`, and `:Format` over a range.
 //!
 //! A range alone goes to its last line: `:12`, `:+3`, `:$`, `:'a`. That's a
 //! jump, as is any command that leaves the cursor on another line.
@@ -69,10 +69,13 @@ pub(super) enum Name {
     Move,
     Copy,
     Normal,
+    /// `:Format` over a range: its lines formatted, as its language server
+    /// does.
+    Format,
 }
 
 /// The commands, by name, with the fewest letters each can be cut to.
-const NAMES: [(&str, usize, Name); 9] = [
+const NAMES: [(&str, usize, Name); 10] = [
     ("substitute", 1, Name::Substitute),
     ("global", 1, Name::Global),
     ("vglobal", 1, Name::Vglobal),
@@ -82,6 +85,7 @@ const NAMES: [(&str, usize, Name); 9] = [
     ("copy", 2, Name::Copy),
     ("t", 1, Name::Copy),
     ("normal", 4, Name::Normal),
+    ("Format", 6, Name::Format),
 ];
 
 /// The command `word`, all letters, names, if it names one.
@@ -288,6 +292,7 @@ impl Editor {
                     Ok(())
                 }
             }
+            Name::Format => self.format_lines(lines, after, copy),
             Name::Normal => {
                 let keys = after.strip_prefix(' ').unwrap_or(after);
                 if keys.is_empty() {
@@ -302,6 +307,26 @@ impl Editor {
                 })
             }
         }
+    }
+
+    /// `:Format` over `lines`, with `after` typed after it: from the first
+    /// line's start to the last one's end, not into the line after, for
+    /// the desk to have the language server format.
+    fn format_lines(&mut self, lines: Lines, after: &str, copy: &BufferCopy) -> Result<(), String> {
+        if self.in_global {
+            return Err(":Format can't be done by a :g".into());
+        }
+        if !after.trim().is_empty() {
+            return Err(format!(
+                ":Format takes nothing after it, but has {:?}",
+                after.trim()
+            ));
+        }
+        let text = self.text(copy);
+        let range = (text.line_start(lines.first), text.line_end(lines.last));
+        drop(text);
+        self.format_asked = Some(range);
+        Ok(())
     }
 
     // --- Ranges -------------------------------------------------------------
@@ -1400,7 +1425,7 @@ fn command_name(rest: &str) -> Result<(Name, bool, &str), String> {
             "a range needs a command after it, such as s, g, d, m or t".into()
         } else {
             format!(
-                "{word} isn't a command editors know; they know s, &, ~, g, v, d, y, m, t and normal"
+                "{word} isn't a command editors know; they know s, &, ~, g, v, d, y, m, t, normal and Format"
             )
         });
     };

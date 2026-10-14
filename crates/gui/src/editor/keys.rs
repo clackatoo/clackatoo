@@ -331,6 +331,9 @@ pub(crate) enum Action {
     /// cursor, or selected, such as fix what's wrong there, and show it in
     /// a menu to pick from.
     CodeActions,
+    /// `gq` in visual mode: format what's selected, as the language server
+    /// does.
+    FormatSelection,
     /// `o` in visual mode: to the other end of the selection.
     OtherEnd,
     /// `i` or `a` and an object, in visual mode: select it.
@@ -459,6 +462,10 @@ pub(crate) fn parse_with(keys: &[Stroke], visual: bool, tildeop: bool) -> Parsed
         return Parsed::Incomplete;
     };
     if stroke == Stroke::char('g') {
+        // `gq` on a selection formats it, as its language server does.
+        if visual && reader.peek().and_then(Stroke::plain) == Some('q') {
+            return command(first, Action::FormatSelection);
+        }
         // `g~`, `gu`, `gU` and `g?`, which change case, and `g&`.
         let recase = match reader.peek().and_then(Stroke::plain) {
             Some('~') => Some(Recase::Toggle),

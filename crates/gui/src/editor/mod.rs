@@ -57,6 +57,7 @@ mod scratch;
 mod snippet;
 mod substitute;
 mod text;
+mod uses;
 mod wrap;
 
 use std::time::{Duration, Instant};
@@ -89,6 +90,8 @@ use preview::Preview;
 use registers::Wrote;
 pub(crate) use registers::{Register, Registers};
 use text::{Text, Underlines, tab_end};
+#[cfg(test)]
+pub(crate) use uses::USES_WAIT;
 use wrap::{Shown, Top, Wrapping};
 
 use crate::colors;
@@ -585,6 +588,14 @@ pub(crate) struct Editor {
     lesson: bool,
     /// Lines lit as the tutor says, while it shows a lesson.
     lit: Vec<Lit>,
+    /// The other uses of the name the cursor rests on are lit
+    /// (`highlightuses`).
+    highlight_uses: bool,
+    /// Those uses, and when to ask for them (see [`uses`]).
+    uses: uses::Uses,
+    /// The bytes a command asked to have formatted, for the desk to ask
+    /// the language server.
+    format_asked: Option<(usize, usize)>,
 }
 
 /// Lines of a lesson lit, as the tutor says: a step done, or being done.
@@ -682,6 +693,9 @@ impl Editor {
             indents_by_grammar: false,
             lesson: false,
             lit: Vec::new(),
+            highlight_uses: options.highlightuses,
+            uses: uses::Uses::default(),
+            format_asked: None,
         }
     }
 
@@ -759,6 +773,10 @@ impl Editor {
         };
         self.inccommand = options.inccommand == crate::options::InCommand::NoSplit;
         self.tildeop = options.tildeop;
+        self.highlight_uses = options.highlightuses;
+        if !self.highlight_uses {
+            self.forget_uses();
+        }
         let indent = Indent::of(options);
         if indent.tabstop != self.indent.tabstop {
             // A column is a cell, and tabs take more or fewer of them now:
@@ -773,6 +791,8 @@ impl Editor {
             let text = self.text(copy);
             self.found = found.map(|(start, last)| (text.point_of(start), text.point_of(last)));
             self.flash = None;
+            // The uses lit are placed in cells, which have moved.
+            self.forget_uses();
         }
         self.indent = indent;
         self.numbers = Numbers::of(options);
@@ -1352,7 +1372,8 @@ impl Editor {
             | Action::Hover
             | Action::ShowDiagnostics
             | Action::Rename
-            | Action::CodeActions => {
+            | Action::CodeActions
+            | Action::FormatSelection => {
                 self.language_server(command.action, copy);
             }
             Action::OtherEnd => {
@@ -3016,6 +3037,7 @@ impl Editor {
             .chain(self.signature_due)
             .chain(self.resolve_due)
             .chain(self.grammar_deadline())
+            .chain(self.uses_due())
             .min()
     }
 
@@ -3105,8 +3127,40 @@ impl Editor {
             Action::ShowDiagnostics => self.show_diagnostics(copy),
             Action::Rename => self.rename_here(copy),
             Action::CodeActions => self.ask_actions(copy),
+            Action::FormatSelection => self.format_selection(copy),
             _ => {}
         }
+    }
+
+    /// `gq` in visual mode: what's selected is for the desk to have its
+    /// language server format, leaving visual mode, the cursor at its
+    /// start, as Vim's `gq` leaves it. Whole lines are formatted to the
+    /// last one's end, not into the line after.
+    fn format_selection(&mut self, copy: &BufferCopy) {
+        let (Mode::Visual(selection), Some(anchor)) = (self.mode, self.anchor) else {
+            return;
+        };
+        let (first, last) = if anchor <= self.cursor.at {
+            (anchor, self.cursor.at)
+        } else {
+            (self.cursor.at, anchor)
+        };
+        let text = self.text(copy);
+        let range = match selection {
+            Selection::Lines => (text.line_start(first.line), text.line_end(last.line)),
+            Selection::Characters => (text.byte_at(first), text.char_end(last)),
+        };
+        drop(text);
+        self.leave_visual();
+        self.cursor = Cursor::new(first);
+        self.format_asked = Some(range);
+    }
+
+    /// The bytes of the copy's text a command asked to have formatted, as
+    /// `gq` and `:'<,'>Format` do, for the desk to ask its language server,
+    /// as it does for `:Format`.
+    pub(crate) fn take_format_asked(&mut self) -> Option<(usize, usize)> {
+        self.format_asked.take()
     }
 
     /// `gra`: asks the language server what it could do to the text under
@@ -3582,7 +3636,9 @@ impl Editor {
                 let resolving = (self.completion.as_ref())
                     .and_then(|completion| completion.resolving)
                     .filter(|(resolving, _)| resolving == id);
-                if self.heard_pieces(*id, answer) || self.heard_indent(*id, answer) {
+                if self.heard_uses(*id, answer, jump, copy) {
+                    // Lit, if still about where the cursor is.
+                } else if self.heard_pieces(*id, answer) || self.heard_indent(*id, answer) {
                     // Done by `resume` or `correct_indents`, which the desk
                     // calls.
                 } else if let Some((asked, asking)) = self.asked
@@ -3823,6 +3879,7 @@ impl Editor {
             Answer::Hover { .. }
             | Answer::Symbols { .. }
             | Answer::Renamable { .. }
+            | Answer::Uses(_)
             | Answer::Renamed { .. }
             | Answer::Formatted { .. }
             | Answer::Staged
@@ -4311,7 +4368,12 @@ impl Editor {
     }
 
     /// Lays out the rows shown, for [`scene`](Self::scene).
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the rows laid out in one pass, step by step"
+    )]
     pub(crate) fn settle(&mut self, copy: &BufferCopy) {
+        self.settle_uses(copy);
         // The rows may have wrapped afresh, putting the cursor out of view.
         if self.resized {
             self.follow(copy);
@@ -4422,6 +4484,7 @@ impl Editor {
             preview.light(&text);
         }
         self.place_panels(&text);
+        self.place_uses(copy);
     }
 
     /// Places the cursor, and the panels and menus by it, on the rows just
@@ -4636,6 +4699,7 @@ impl Editor {
                 }
             }
         }
+        self.use_highlights(&mut highlights);
         if let (Some(anchor), Mode::Visual(kind)) = (self.anchor, self.mode) {
             let (start, last) = if anchor <= self.cursor.at {
                 (anchor, self.cursor.at)

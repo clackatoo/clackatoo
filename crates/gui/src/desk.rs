@@ -5760,6 +5760,239 @@ mod tests {
     }
 
     #[test]
+    fn a_server_that_cant_format_says_why_once_and_a_write_still_writes() {
+        use clackatoo_protocol::{Answer, BufferUpdate, Query};
+        let mut desk = editing("/p/a.rs", "one\n");
+        let format_asked = |desk: &mut Desk| {
+            (desk.take_outbox().into_iter())
+                .find_map(|message| match message {
+                    ClientMessage::Query {
+                        id,
+                        query: Query::Format { .. },
+                        ..
+                    } => Some(id),
+                    _ => None,
+                })
+                .expect("formatting asked")
+        };
+        let answer = |desk: &mut Desk, id, answer| {
+            desk.buffer_changed(
+                BufferId(7),
+                BufferUpdate::Answer {
+                    id,
+                    version: 0,
+                    answer,
+                },
+            )
+        };
+        let note = |desk: &Desk| match desk.status() {
+            Status::Tabs { note, .. } => note.unwrap_or_default(),
+            Status::Typing { .. } => panic!("the tabs"),
+        };
+        // As gcsl says of a file with a syntax error: "not formatted" once,
+        // never "already formatted".
+        let why = "not formatted: it has a syntax error (2:8)";
+        command(&mut desk, "Format");
+        let id = format_asked(&mut desk);
+        answer(&mut desk, id, Answer::Failed(why.into()));
+        assert_eq!(note(&desk), why);
+        // Said plainly, as other servers say it, it's said after.
+        command(&mut desk, "Format");
+        let id = format_asked(&mut desk);
+        answer(&mut desk, id, Answer::Failed("it can't be parsed".into()));
+        assert_eq!(note(&desk), "not formatted: it can't be parsed");
+        // Whatever case the server writes it in, it's said once.
+        command(&mut desk, "Format");
+        let id = format_asked(&mut desk);
+        let shouted = "Not Formatted: it can't be parsed";
+        answer(&mut desk, id, Answer::Failed(shouted.into()));
+        assert_eq!(note(&desk), "not formatted: it can't be parsed");
+        // And a server that gives no reason is said to have given none.
+        command(&mut desk, "Format");
+        let id = format_asked(&mut desk);
+        answer(&mut desk, id, Answer::Failed(String::new()));
+        assert_eq!(
+            note(&desk),
+            "not formatted: its language server didn't say why"
+        );
+
+        // Formatting on save still writes the file, saying why it's not
+        // formatted.
+        command(&mut desk, "set fos");
+        command(&mut desk, "w");
+        let id = format_asked(&mut desk);
+        answer(&mut desk, id, Answer::Failed(why.into()));
+        assert!(matches!(
+            answer_all(&mut desk)[..],
+            [Request::Save { force: false, .. }]
+        ));
+        assert_eq!(
+            note(&desk),
+            "a.rs written, not formatted: it has a syntax error (2:8)"
+        );
+    }
+
+    #[test]
+    fn a_selection_is_formatted_by_its_language_server_with_gq_or_format() {
+        use clackatoo_protocol::{Answer, BufferUpdate, Query};
+        let mut desk = editing("/p/a.rs", "one\n  two\nthree\n");
+        // What's asked: part of the file, indented as `>>` does.
+        let format_asked = |desk: &mut Desk| {
+            let asked: Vec<(u64, usize, Query)> = (desk.take_outbox().into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::Query { id, at, query, .. } => Some((id, at, query)),
+                    _ => None,
+                })
+                .collect();
+            asked
+        };
+        let range = |end| Query::FormatRange {
+            end,
+            tab_size: 4,
+            spaces: true,
+        };
+        let note = |desk: &Desk| match desk.status() {
+            Status::Tabs { note, .. } => note.unwrap_or_default(),
+            Status::Typing { .. } => panic!("the tabs"),
+        };
+        // `:'<,'>Format`, typed from a selection of lines: from the first
+        // one's start to the last one's end, one question.
+        type_keys(&mut desk, "jVj");
+        command(&mut desk, "Format");
+        let asked = format_asked(&mut desk);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        let (id, at, query) = asked[0];
+        assert_eq!((at, query), (4, range(15)));
+        // Asked again before it's answered, it's being formatted already.
+        command(&mut desk, "2Format");
+        assert!(format_asked(&mut desk).is_empty(), "not asked twice");
+        assert_eq!(note(&desk), "it's being formatted already");
+        // The daemon makes its edits, as the user's, one undo step, then
+        // answers, as for `:Format`.
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Answer {
+                id,
+                version: 1,
+                answer: Answer::Formatted { changed: true },
+            },
+        );
+        assert_eq!(note(&desk), "formatted");
+
+        // `gq` on a selection of characters, exactly: "th" of the last line,
+        // where the cursor was left.
+        type_keys(&mut desk, "vlgq");
+        let asked = format_asked(&mut desk);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!((asked[0].1, asked[0].2), (10, range(12)));
+        let why = "its language server can't format a selection";
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Answer {
+                id: asked[0].0,
+                version: 1,
+                answer: Answer::Failed(why.into()),
+            },
+        );
+        assert_eq!(note(&desk), format!("not formatted: {why}"));
+
+        // A daemon too old to format part of a file says so, and how to
+        // update it, asking nothing.
+        desk.daemon_is(clackatoo_protocol::wire::USES - 1, None);
+        command(&mut desk, "%Format");
+        assert!(format_asked(&mut desk).is_empty());
+        assert!(
+            (desk.message.as_deref()).is_some_and(|message| message
+                .starts_with("formatting a selection needs a newer clackatoo daemon")),
+            "{:?}",
+            desk.message
+        );
+    }
+
+    #[test]
+    fn the_focused_editor_lights_the_uses_of_the_name_its_cursor_rests_on() {
+        use crate::render::HighlightKind;
+        use clackatoo_protocol::{Answer, BufferUpdate, Query, ServerFeatures, Use, UseKind};
+        let mut desk = editing("/p/a.rs", "let x = 1;\nx + x\n");
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Features(ServerFeatures {
+                uses: true,
+                ..ServerFeatures::default()
+            }),
+        );
+        let uses_asked = |desk: &mut Desk| -> Vec<(u64, usize)> {
+            (desk.take_outbox().into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::Query {
+                        id,
+                        at,
+                        query: Query::Uses,
+                        ..
+                    } => Some((id, at)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let lit = |desk: &mut Desk| -> Vec<(usize, HighlightKind)> {
+            desk.settle_editors();
+            let editor = desk.editor(PaneId(1)).expect("the editor");
+            (editor.highlights().into_iter())
+                .filter(|highlight| {
+                    matches!(highlight.kind, HighlightKind::Used | HighlightKind::Written)
+                })
+                .map(|highlight| (highlight.line, highlight.kind))
+                .collect()
+        };
+        let rest = |desk: &mut Desk| {
+            let now = std::time::Instant::now();
+            desk.tick_editors(now);
+            let due = desk.editor_wakes().expect("the window wakes to ask");
+            assert!(due >= now + crate::editor::USES_WAIT);
+            desk.tick_editors(due);
+        };
+        type_keys(&mut desk, "w");
+        rest(&mut desk);
+        let asked = uses_asked(&mut desk);
+        assert_eq!(asked.iter().map(|&(_, at)| at).collect::<Vec<_>>(), [4]);
+        let used = |start, kind| Use {
+            start,
+            end: start + 1,
+            kind,
+        };
+        desk.buffer_changed(
+            BufferId(7),
+            BufferUpdate::Answer {
+                id: asked[0].0,
+                version: 0,
+                answer: Answer::Uses(vec![
+                    used(4, UseKind::Write),
+                    used(11, UseKind::Read),
+                    used(15, UseKind::Read),
+                ]),
+            },
+        );
+        assert_eq!(
+            lit(&mut desk),
+            [
+                (0, HighlightKind::Written),
+                (1, HighlightKind::Used),
+                (1, HighlightKind::Used)
+            ]
+        );
+        // Off the name, they go.
+        type_keys(&mut desk, "e");
+        assert_eq!(lit(&mut desk), []);
+        // A daemon too old to say is never asked.
+        type_keys(&mut desk, "b");
+        desk.daemon_is(clackatoo_protocol::wire::USES - 1, None);
+        let now = std::time::Instant::now();
+        desk.tick_editors(now);
+        desk.tick_editors(now + crate::editor::USES_WAIT);
+        assert!(uses_asked(&mut desk).is_empty());
+    }
+
+    #[test]
     fn several_places_an_answer_gives_are_picked_from_in_the_finder() {
         use clackatoo_protocol::{Answer, BufferUpdate, FileLocation, OpenFile};
         let mut desk = editing("/p/a.rs", "one\ntwo\nthree\n");

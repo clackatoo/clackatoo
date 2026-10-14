@@ -523,6 +523,10 @@ options! {
     /// over the cursor, with the argument being typed in bold, as the
     /// language server says.
     signaturehelp("sig"): bool = true;
+    /// Once the cursor rests on a name in an editor in normal mode, the
+    /// other places it's used in the file are lit, as its language server
+    /// says: where it's written a little brighter than where it's read.
+    highlightuses("hlu"): bool = true;
     /// Which of the desktop's the unnamed register goes along with, as in
     /// Neovim: the clipboard, so what's yanked or deleted in an editor can
     /// be pasted anywhere, and `p` puts what was copied anywhere; the

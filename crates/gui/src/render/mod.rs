@@ -304,6 +304,12 @@ pub(crate) enum HighlightKind {
     Added,
     /// It's a line removed: on faint red.
     Removed,
+    /// It's a use of the name the cursor rests on, where it's read, or
+    /// the server doesn't say (`highlightuses`).
+    Used,
+    /// It's a use of the name the cursor rests on, where it's written: a
+    /// little brighter.
+    Written,
 }
 
 impl HighlightKind {
@@ -318,6 +324,8 @@ impl HighlightKind {
                 | Self::LessonDone
                 | Self::Added
                 | Self::Removed
+                | Self::Used
+                | Self::Written
         )
     }
 }

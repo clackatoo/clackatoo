@@ -82,6 +82,8 @@ finder diagnostics
 
 `<Space>bs` lists the symbols in the file, as its language server knows them: its functions, its types and their fields, each with what it is, indented inside what it's in. What you type narrows them down, and Enter goes to the one picked, as a jump, so Ctrl+O comes back. `<Space>ps` finds symbols in the whole project, asking the server again as you type, and opens the file of the one picked. A server that can tell is asked first by `grn` whether what's under the cursor can be renamed: if it can't, the bar says so at once, and if it can, the new name starts as the server suggests.
 
+Once the cursor rests on a name in normal mode, the other places it's used in the file are lit, as its language server says: where it's written a little brighter than where it's read. `:set nohlu` turns that off. `gq` on a selection, or `:'<,'>Format`, has the server format just those lines, one undo step, as `:Format` does the whole file; a server that can't says why.
+
 These text files have no language server, so here the list says so. Press `<Space>bs` to see it, and Esc to close it.
 
 ```check

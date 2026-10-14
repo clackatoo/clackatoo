@@ -17,6 +17,15 @@
 //! writes `cancelled ID METHOD` there, and answers a question it still
 //! holds (see `--queue-hover`) with LSP's `RequestCancelled` error.
 //!
+//! Asked where the name at a place is used, it says every place the word
+//! there is in the file, whole: written where ` = ` follows it, just the
+//! same text, with no kind, on a line starting `//`, and read elsewhere.
+//! It writes `uses ID` to the `--log` file for each such question.
+//!
+//! Asked to format a file, it puts each `bad` in capitals and, if asked
+//! for spaces, makes each tab that starts a line that many; asked to
+//! format part of one, it does that only to what touches the range.
+//!
 //! Asked to rename a word, it renames it everywhere in every file open in
 //! it, and in `defs.fk` beside the file asked about, from disk if it isn't
 //! open, with the version of each open file it counted in.
@@ -56,6 +65,8 @@
 //! | `--flat-symbols` | Lists a file's symbols as a flat list of `SymbolInformation`s, not a tree |
 //! | `--hold-symbols FILE` | Answers what symbols are in a file or the project only once FILE exists, taking nothing else in meanwhile |
 //! | `--queue-symbols FILE` | Holds questions of what symbols are in a file or the project until FILE exists, taking everything else in meanwhile, then answers them in order |
+//! | `--queue-uses FILE` | Holds questions of where a name is used until FILE exists, taking everything else in meanwhile, then answers them in order |
+//! | `--format-error` | Answers formatting a file, or part of one, with an error, `RequestFailed`, as `gcsl lsp` does for a file with a syntax error |
 //! | `--prepare HOW` | Checks a rename first, answering as HOW says: `range` with the word's range, `placeholder` with its range and the word in capitals, `default` leaving it to its client, `error` with an error; and with `null` where there's no word |
 //!
 //! It writes `shutdown` to the `--log` file when it's asked to shut down,
@@ -127,6 +138,9 @@ fn main() {
         queue_symbols: value("--queue-symbols"),
         queued_symbols: Vec::new(),
         hold_symbols: value("--hold-symbols"),
+        queue_uses: value("--queue-uses"),
+        queued_uses: Vec::new(),
+        format_error: flag("--format-error"),
         prepare: value("--prepare"),
         action_files: flag("--action-files"),
         resolve_partly: flag("--resolve-partly"),
@@ -244,6 +258,12 @@ struct Fake {
     /// exists.
     queued_symbols: Vec<Value>,
     hold_symbols: Option<String>,
+    queue_uses: Option<String>,
+    /// The answers to questions of where a name is used, worked out in
+    /// the text as it was asked about, held, in order, until `queue_uses`
+    /// exists.
+    queued_uses: Vec<Value>,
+    format_error: bool,
     /// How it answers a rename checked first, if it checks them.
     prepare: Option<String>,
     action_files: bool,
@@ -422,6 +442,7 @@ impl Fake {
                 };
                 if held(&mut self.queued)
                     .or_else(|| held(&mut self.queued_symbols))
+                    .or_else(|| held(&mut self.queued_uses))
                     .is_some()
                 {
                     send(&json!({
@@ -467,7 +488,16 @@ impl Fake {
                 self.symbols(message);
             }
             "textDocument/prepareRename" => self.prepare_rename(message),
-            "textDocument/formatting" => self.format(message),
+            "textDocument/formatting" | "textDocument/rangeFormatting" => self.format(message),
+            "textDocument/documentHighlight" => {
+                self.note(&format!("uses {}", message["id"]));
+                let answer = self.uses(message);
+                if self.queue_uses.is_some() {
+                    self.queued_uses.push(answer);
+                } else {
+                    send(&answer);
+                }
+            }
             "textDocument/codeAction" => self.code_actions(message),
             "codeAction/resolve" => {
                 if let Some(gate) = &self.hold_resolve {
@@ -506,6 +536,51 @@ impl Fake {
                 self.symbols(&message);
             }
         }
+        let open =
+            (self.queue_uses.as_ref()).is_some_and(|gate| std::path::Path::new(gate).exists());
+        if open && !self.queued_uses.is_empty() {
+            for answer in std::mem::take(&mut self.queued_uses) {
+                send(&answer);
+            }
+        }
+    }
+
+    /// The answer to where the word at the place `message` asks about is
+    /// used in its file: everywhere it is, whole, written where ` = `
+    /// follows it, with no kind on a line that starts `//`, and read
+    /// elsewhere.
+    fn uses(&self, message: &Value) -> Value {
+        let params = &message["params"];
+        let uri = params["textDocument"]["uri"].as_str().unwrap();
+        let text = &self.files[uri];
+        let (_, word) = word_at(text, byte(text, &params["position"], self.utf16));
+        let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+        let result: Vec<Value> = if word.is_empty() {
+            Vec::new()
+        } else {
+            (text.match_indices(word))
+                .filter(|&(at, _)| {
+                    let before = text[..at].chars().next_back();
+                    let after = text[at + word.len()..].chars().next();
+                    !before.is_some_and(is_word) && !after.is_some_and(is_word)
+                })
+                .map(|(at, _)| {
+                    let range = json!({
+                        "start": place(text, at, self.utf16),
+                        "end": place(text, at + word.len(), self.utf16),
+                    });
+                    let line = text[..at].rfind('\n').map_or(0, |end| end + 1);
+                    if text[line..].starts_with("//") {
+                        json!({ "range": range })
+                    } else if text[at + word.len()..].starts_with(" = ") {
+                        json!({ "range": range, "kind": 3 })
+                    } else {
+                        json!({ "range": range, "kind": 2 })
+                    }
+                })
+                .collect()
+        };
+        json!({ "jsonrpc": "2.0", "id": message["id"], "result": result })
     }
 
     /// Answers what symbols are in a file, or the project, as `message`
@@ -703,9 +778,24 @@ impl Fake {
     /// start as spaces, if asked to indent with them; and the first
     /// character replaced with itself, which changes nothing.
     fn format(&self, message: &Value) {
+        if self.format_error {
+            let why = "not formatted: it has a syntax error (1:1)";
+            let error = json!({ "code": -32803, "message": why });
+            send(&json!({ "jsonrpc": "2.0", "id": message["id"], "error": error }));
+            return;
+        }
         let params = &message["params"];
         let uri = params["textDocument"]["uri"].as_str().unwrap();
         let text = &self.files[uri];
+        // For part of the file, only what touches it: the bytes it spans.
+        let range = params.get("range").map(|range| {
+            (
+                byte(text, &range["start"], self.utf16),
+                byte(text, &range["end"], self.utf16),
+            )
+        });
+        let touches =
+            |at: usize, len: usize| range.is_none_or(|(start, end)| at <= end && at + len >= start);
         let edit = |at: usize, len: usize, new: &str| {
             let range = json!({
                 "start": place(text, at, self.utf16),
@@ -715,10 +805,15 @@ impl Fake {
         };
         let mut edits: Vec<Value> = text
             .get(..1)
+            .filter(|_| touches(0, 1))
             .map(|first| edit(0, 1, first))
             .into_iter()
             .collect();
-        edits.extend(text.match_indices("bad").map(|(at, _)| edit(at, 3, "BAD")));
+        edits.extend(
+            (text.match_indices("bad"))
+                .filter(|&(at, _)| touches(at, 3))
+                .map(|(at, _)| edit(at, 3, "BAD")),
+        );
         let options = &params["options"];
         if options["insertSpaces"] == true {
             let width = options["tabSize"]
@@ -728,7 +823,7 @@ impl Fake {
             let starts = std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1));
             edits.extend(
                 starts
-                    .filter(|&at| text[at..].starts_with('\t'))
+                    .filter(|&at| text[at..].starts_with('\t') && touches(at, 1))
                     .map(|at| edit(at, 1, &spaces)),
             );
         }
@@ -1009,6 +1104,8 @@ impl Fake {
             capabilities["documentSymbolProvider"] = json!(true);
             capabilities["workspaceSymbolProvider"] = json!({});
             capabilities["documentFormattingProvider"] = json!(true);
+            capabilities["documentRangeFormattingProvider"] = json!(true);
+            capabilities["documentHighlightProvider"] = json!(true);
             capabilities["completionProvider"] = json!({
                 "triggerCharacters": ["."],
                 "resolveProvider": !self.no_resolve,

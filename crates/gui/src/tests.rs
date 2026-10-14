@@ -1750,6 +1750,7 @@ fn an_editors_completion_menu_and_signature_are_drawn_by_its_cursor() {
         signature: Some(vec!['(', ',']),
         signature_again: vec![')'],
         prepare_rename: false,
+        uses: false,
     }));
     let (cols, rows) = (84u16, 14u16);
     let mut editor = Editor::new(BufferId(1), &crate::options::Options::default());

@@ -79,7 +79,8 @@ pub use board::{
 pub use browser::{BrowserFrame, BrowserStatus, BrowserUpdate};
 pub use buffer::{
     Answer, Author, BufferId, BufferSnapshot, BufferUpdate, Change, CodeAction, CompletionItem,
-    FileLocation, OpenFile, Query, Resume, ServerFeatures, Symbol, TextChange, Trigger,
+    FileLocation, OpenFile, Query, Resume, ServerFeatures, Symbol, TextChange, Trigger, Use,
+    UseKind,
 };
 pub use chat::{
     AgentSession, ChatAction, ChatChoices, ChatNode, ChatPatch, ChatState, ChatSummary, Choice,
@@ -113,7 +114,7 @@ pub use workspace::{
 
 /// The protocol version this crate speaks. Bump it on any change to a
 /// message, and keep the change readable by older peers (see [`wire`]).
-pub const PROTOCOL_VERSION: u32 = 78;
+pub const PROTOCOL_VERSION: u32 = 79;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].

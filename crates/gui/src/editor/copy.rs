@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clackatoo_protocol::{
     Answer, BufferId, BufferSnapshot, BufferUpdate, Change, ChatName, ClientMessage, Edit, Query,
-    Resume, ServerFeatures,
+    Resume, ServerFeatures, Use,
 };
 use clackatoo_text::{
     AgentHunk, AgentHunks, Bias, Diagnostic, Diagnostics, Highlights, Hunk, Hunks, Rope, Span,
@@ -994,9 +994,35 @@ impl BufferCopy {
         }
     }
 
+    /// The uses of a name, counted in the daemon's text at `version`, each
+    /// moved past the window's edits `waiting`, as what a hover's about
+    /// is: one an edit has touched, or put text in beside, may not be the
+    /// name now, and is left out; and none for a version the copy isn't
+    /// at.
+    fn uses_past_waiting(&self, version: u64, mut uses: Vec<Use>, waiting: &[&Edit]) -> Vec<Use> {
+        if version != self.version {
+            log::debug!("buffer {}: uses for version {version}", self.id);
+            return Vec::new();
+        }
+        if !waiting.is_empty() {
+            uses.retain_mut(|used| {
+                let moved = (waiting.iter())
+                    .try_fold((used.start, used.end), |(start, end), edit| {
+                        edit.map_untouched(start, end)
+                    });
+                if let Some((start, end)) = moved {
+                    (used.start, used.end) = (start, end);
+                }
+                moved.is_some()
+            });
+        }
+        uses
+    }
+
     /// `answer`, with places in this buffer, counted in the daemon's text
     /// at `version`, moved past the window's edits waiting, as diagnostics
     /// are.
+    #[allow(clippy::too_many_lines, reason = "a part for each kind of answer")]
     fn past_waiting(&self, version: u64, answer: Answer) -> Answer {
         let waiting = (self.waiting.iter()).filter_map(|waiting| match waiting {
             Waiting::Edit { edit, .. } => Some(&**edit),
@@ -1070,6 +1096,10 @@ impl BufferCopy {
                 markdown,
                 range,
             };
+        }
+        if let Answer::Uses(uses) = answer {
+            let waiting: Vec<&Edit> = waiting.collect();
+            return Answer::Uses(self.uses_past_waiting(version, uses, &waiting));
         }
         let waiting: Vec<&Edit> = waiting.collect();
         let moved = |offset: &mut Option<usize>, line: &mut u64, col: &mut usize| {
@@ -1279,7 +1309,7 @@ impl BufferCopy {
                 // does the end of what's asked about from it.
                 Waiting::Query {
                     at,
-                    query: Query::CodeActions { end },
+                    query: Query::CodeActions { end } | Query::FormatRange { end, .. },
                     ..
                 } => {
                     *at = edit.map(*at, Bias::Before);
@@ -1442,7 +1472,9 @@ pub(crate) fn queries_asked() -> u64 {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use clackatoo_protocol::{Author, BufferSnapshot, FileLocation, LineIndent, Piece, Symbol};
+    use clackatoo_protocol::{
+        Author, BufferSnapshot, FileLocation, LineIndent, Piece, Symbol, UseKind,
+    };
     use clackatoo_text::History;
 
     use super::*;
@@ -2087,6 +2119,40 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_uses_of_a_name_move_past_the_windows_edits_waiting() {
+        let daemon = Daemon::new("ab = ab\n");
+        let mut copy = BufferCopy::new(BufferId(1));
+        copy.update(daemon.snapshot());
+        let id = copy.ask(Query::Uses, 0);
+        copy.take_outbox();
+        // Typed at the start, and not yet made by the daemon.
+        typed(&mut copy, 0, "!", true);
+        let used = |start, end| Use {
+            start,
+            end,
+            kind: UseKind::Read,
+        };
+        let answered = || Answer::Uses(vec![used(0, 2), used(5, 7)]);
+        let heard = copy.update(BufferUpdate::Answer {
+            id,
+            version: 0,
+            answer: answered(),
+        });
+        // The one text was put in beside may not be the name now, and is
+        // left out; the other moves past it.
+        let answer = Answer::Uses(vec![used(6, 8)]);
+        assert_eq!(heard, Heard::Answer { id, answer });
+        // None for a version the copy isn't at.
+        let heard = copy.update(BufferUpdate::Answer {
+            id,
+            version: 3,
+            answer: answered(),
+        });
+        let answer = Answer::Uses(Vec::new());
+        assert_eq!(heard, Heard::Answer { id, answer });
+    }
+
+    #[test]
     fn a_query_waits_for_the_edits_before_it_and_moves_with_others() {
         let mut daemon = Daemon::new("abc");
         let mut copy = BufferCopy::new(BufferId(1));
@@ -2239,29 +2305,40 @@ pub(super) mod tests {
 
     #[test]
     fn code_actions_are_asked_about_a_range_moving_with_others_edits() {
-        let mut daemon = Daemon::new("abcdef");
-        let mut copy = BufferCopy::new(BufferId(1));
-        copy.update(daemon.snapshot());
-        typed(&mut copy, 0, "X", true);
-        let sent = copy.take_outbox();
-        // From the "b" of "Xabcdef" to the "e".
-        let id = copy.ask(Query::CodeActions { end: 5 }, 2);
-        // An agent's edit inside it, made first, moves its end.
-        let agents = daemon.agent(2, "--");
-        let (ack, _) = daemon.take(sent.into_iter().next().unwrap());
-        copy.update(agents);
-        copy.update(ack);
-        assert_eq!(copy.text.to_string(), "Xab--cdef");
-        assert_eq!(
-            copy.take_outbox(),
-            [ClientMessage::Query {
-                buffer: BufferId(1),
-                id,
-                version: 2,
-                at: 2,
-                query: Query::CodeActions { end: 7 },
-            }]
-        );
+        // As is part of the file to be formatted.
+        let format = |end| Query::FormatRange {
+            end,
+            tab_size: 4,
+            spaces: true,
+        };
+        for (asked, moved) in [
+            (Query::CodeActions { end: 5 }, Query::CodeActions { end: 7 }),
+            (format(5), format(7)),
+        ] {
+            let mut daemon = Daemon::new("abcdef");
+            let mut copy = BufferCopy::new(BufferId(1));
+            copy.update(daemon.snapshot());
+            typed(&mut copy, 0, "X", true);
+            let sent = copy.take_outbox();
+            // From the "b" of "Xabcdef" to the "e".
+            let id = copy.ask(asked, 2);
+            // An agent's edit inside it, made first, moves its end.
+            let agents = daemon.agent(2, "--");
+            let (ack, _) = daemon.take(sent.into_iter().next().unwrap());
+            copy.update(agents);
+            copy.update(ack);
+            assert_eq!(copy.text.to_string(), "Xab--cdef");
+            assert_eq!(
+                copy.take_outbox(),
+                [ClientMessage::Query {
+                    buffer: BufferId(1),
+                    id,
+                    version: 2,
+                    at: 2,
+                    query: moved,
+                }]
+            );
+        }
     }
 
     #[test]

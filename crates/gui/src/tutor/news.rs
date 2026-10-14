@@ -251,6 +251,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "words",
         what: "Names such as margin-top are one word to w, e, b, iw, * and completion, in languages whose packs say so",
     },
+    News {
+        id: "highlightuses",
+        date: "2026-10-14",
+        lesson: "finder",
+        what: "Uses of the name under the cursor are lit, gq formats a selection, and a failed format says why",
+    },
 ];
 
 impl News {

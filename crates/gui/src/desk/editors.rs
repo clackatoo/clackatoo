@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use clackatoo_protocol::{
     Answer, BufferId, BufferUpdate, ClientMessage, Content, FileLocation, OpenFile, PaneId,
-    PaneTerminal, Request, Size,
+    PaneTerminal, Request, Size, wire,
 };
 use clackatoo_text::Edit;
 
@@ -537,9 +537,12 @@ impl Desk {
         let was = copy.path().to_owned();
         let mut heard = copy.update(update);
         let filled = fill_finder(self.finder.as_mut(), &mut heard, copy.path());
-        // Completions, which may be thousands, are no format's answer.
+        // Completions and uses, which may be thousands, are no format's
+        // answer.
         let answered = match &heard {
-            Heard::Answer { id, answer } if !matches!(answer, Answer::Completions { .. }) => {
+            Heard::Answer { id, answer }
+                if !matches!(answer, Answer::Completions { .. } | Answer::Uses(_)) =>
+            {
                 Some((*id, answer.clone()))
             }
             _ => None,
@@ -871,6 +874,18 @@ impl Desk {
         Some((buffer, copy.ask(query, 0)))
     }
 
+    /// Asks `query` about byte `at` of `buffer`'s copy, returning its
+    /// number, or `None` if the window has no copy of it.
+    pub(super) fn ask_about(
+        &mut self,
+        buffer: BufferId,
+        query: clackatoo_protocol::Query,
+        at: usize,
+    ) -> Option<u64> {
+        let copy = self.editors.buffers.get_mut(&buffer)?;
+        Some(copy.ask(query, at))
+    }
+
     /// Hands `press` to the focused pane's editor, moving the cursors of
     /// the other editors of its buffer with any edits it makes. Returns
     /// whether the window must be redrawn.
@@ -954,6 +969,7 @@ impl Desk {
         let opening = editor.take_opening();
         let failed = editor.take_failed();
         let asked_macro = editor.take_macro();
+        let format = editor.take_format_asked();
         let made = copy.take_made();
         let astray = copy.take_astray();
         for pane in &others {
@@ -982,6 +998,10 @@ impl Desk {
         }
         if failed {
             self.stop_macro(None);
+        }
+        // `gq` or `:'<,'>Format`, as `:Format` is, for part of the file.
+        if let Some(range) = format {
+            self.format_part(buffer, range);
         }
         // Attaching again sends a fresh snapshot, which puts it right.
         if astray && self.connected {
@@ -1320,11 +1340,15 @@ impl Desk {
     /// Returns whether any asked anything, or gave up.
     pub(crate) fn tick_editors(&mut self, now: std::time::Instant) -> bool {
         let mut asked = self.give_up_off_focus();
+        // Only the focused editor asks where a name is used, of a daemon
+        // that reads the question.
+        let focused = (self.shown.map(|shown| shown.pane)).filter(|_| self.daemon_has(wire::USES));
         let editors = &mut self.editors;
         let mut gave_up = false;
-        for editor in editors.panes.values_mut() {
+        for (pane, editor) in &mut editors.panes {
             if let Some(copy) = editors.buffers.get_mut(&editor.buffer()) {
                 asked |= editor.tick(now, copy);
+                asked |= editor.watch_uses(now, focused == Some(*pane), copy);
             }
             // Given up on, as it waited too long, with no key to see to it.
             gave_up |= editor.take_gave_up();

@@ -133,6 +133,10 @@ gates! {
     /// `BufferUpdate::Language`: the characters a buffer's words are made
     /// of besides letters, digits and `_`, as its language says.
     WORDS = 78,
+    /// The other uses of a name, and formatting part of a file:
+    /// `Query::Uses` and `Answer::Uses`; `Query::FormatRange`; and
+    /// `ServerFeatures`' `uses`.
+    USES = 79,
 }
 
 /// The oldest protocol version any peer of this build can speak: older
@@ -344,6 +348,7 @@ impl Since for Answer {
             | Self::Indents(_)
             | Self::Staged => EARLIER,
             Self::Symbols { .. } | Self::Renamable { .. } => SYMBOLS,
+            Self::Uses(_) => USES,
         }
     }
 }
@@ -928,6 +933,7 @@ mod tests {
         assert_eq!(coloured.since(), HOVER);
         assert_eq!(Answer::Staged.since(), EARLIER);
         assert_eq!(Answer::Renamable { name: None }.since(), SYMBOLS);
+        assert_eq!(Answer::Uses(Vec::new()).since(), USES);
         assert_eq!(Found::Done(Done::All).since(), EARLIER);
         assert_eq!(Found::Symbols(Vec::new()).since(), SYMBOLS);
         let language = BufferUpdate::Language { word: "-".into() };
