@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.20 (2026-10-14)
+
+### Features
+
+- **editor:** light the other uses of the name the cursor rests on, format a selection, and say why a format failed (7838192)
+
 ## 2026.10.19 (2026-10-14)
 
 ### Features
