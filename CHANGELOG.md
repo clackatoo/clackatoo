@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.10.16 (2026-10-14)
+
+### Features
+
+- **editor:** colour the code in K's panel, underline what it's about, and cancel questions asked again (7761e3e)
+
+### Fixes
+
+- **daemon:** run agents, language servers, the browser and git in process groups of their own, so stopping one ends what it started; read agents' stderr a budget at a time (90f917d)
+
 ## 2026.10.15 (2026-10-14)
 
 ### Features
