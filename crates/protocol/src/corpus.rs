@@ -16,22 +16,36 @@
 
 use std::num::NonZeroU32;
 
+use clackatoo_term::mouse::{MouseEncoding, MouseTracking};
 use clackatoo_term::{
-    Attributes, Color, CursorShape, InputModes, LinkId, ShellState, Size, Style, Underline,
+    Attributes, Block, Color, CursorShape, InputModes, LinkId, Match, Position, Selection,
+    ShellState, Size, Style, Underline, Which,
 };
-use clackatoo_text::{AgentHunk, Diagnostic, Edit, Hunk, Kind, Severity, Span};
+use clackatoo_text::{
+    AgentHunk, Construct, Diagnostic, Edit, Hunk, Kind, LineIndent, Piece, Severity, Span,
+};
 
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
     Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
     ClientMessage, Content, CursorState, Diff, Error, Event, FilesId, GridNode, GridState,
-    HistoryLine, HistoryLines, Item, Layout, Line, LinkTarget, Location, NewAgent, NewTerminal,
-    Node, NodeId, Outcome, Pane, PaneId, PaneTerminal, Patch, Provider, ProviderModels, Question,
-    Request, Response, Resume, ResumeSession, ReviewId, Run, Sender, ServerMessage, Setting,
-    SettingChoice, SettingKind, Side, Subagent, SubagentStatus, Switch, Tab, TabId, TerminalId,
-    TerminalInfo, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus, Turn, TurnEnd,
-    TurnFiles, TurnFilesState, Usage, View, ViewUpdate, Workspace, WorkspaceId, Workspaces,
+    HistoryLine, HistoryLines, Item, Layout, Line, LinkTarget, Location, NewAgent, NewReview,
+    NewTerminal, Node, NodeId, Outcome, Pane, PaneId, PaneTerminal, Patch, Provider,
+    ProviderModels, Question, Request, Response, Resume, ResumeSession, ReviewId, Run, Sender,
+    ServerMessage, Setting, SettingChoice, SettingKind, Side, Subagent, SubagentStatus, Switch,
+    Tab, TabId, TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus,
+    Turn, TurnEnd, TurnFiles, TurnFilesState, Usage, View, ViewUpdate, Workspace, WorkspaceId,
+    Workspaces,
+};
+use crate::{
+    Answer, BoardAction, BoardAuthor, BoardEntry, BoardLink, BoardScope, BoardSummary, BoardUpdate,
+    BrowserFrame, BrowserStatus, BrowserUpdate, ChatChoices, ChatSummary, CodeAction, CommentPlace,
+    CompletionItem, Device, Done, Entry, EntryKind, Expect, FileLocation, FileOp, FileOpError,
+    FileStamp, FilesAction, FilesUpdate, Found, FoundLine, GitMark, Hunks, Made, OpenBoard,
+    OpenFile, OpenFiles, PairingAsk, PairingState, PostKind, Query, ReviewAction, ReviewChat,
+    ReviewComment, ReviewFile, ReviewHunk, ReviewList, ReviewScope, Search, ServerFeatures,
+    TextChange, Trigger, Udp,
 };
 
 /// One sample: a message either side sends.
@@ -89,31 +103,40 @@ pub fn fixture_name(wire: u32) -> String {
 /// # Errors
 ///
 /// If a frame can't be decoded as one, or there are more or fewer frames
-/// than samples.
-pub fn read_fixture(wire: u32, bytes: &[u8]) -> Result<Vec<Sample>, FrameError> {
+/// than samples, saying which.
+pub fn read_fixture(wire: u32, bytes: &[u8]) -> Result<Vec<Sample>, String> {
     let mut decoder = FrameDecoder::new();
     decoder.push(bytes);
     let mut read = Vec::new();
-    for sample in corpus(wire) {
-        let next = match sample {
-            Sample::Client(_) => decoder.decode()?.map(Sample::Client),
-            Sample::Server(_) => decoder.decode()?.map(Sample::Server),
+    for (index, sample) in corpus(wire).into_iter().enumerate() {
+        let next: Result<Option<Sample>, FrameError> = match sample {
+            Sample::Client(_) => decoder.decode().map(|next| next.map(Sample::Client)),
+            Sample::Server(_) => decoder.decode().map(|next| next.map(Sample::Server)),
         };
-        read.push(next.ok_or(FrameError::TrailingBytes(0))?);
+        match next {
+            Ok(Some(sample)) => read.push(sample),
+            Ok(None) => return Err(format!("the fixture ends before sample {index}")),
+            Err(err) => return Err(format!("sample {index}: {err}")),
+        }
     }
     if decoder.has_partial_frame() {
-        return Err(FrameError::TrailingBytes(bytes.len()));
+        return Err("the fixture has more than its samples".to_owned());
     }
     Ok(read)
 }
 
 /// Every sample, with the version it's in from.
+///
+/// A sample new in a version is tagged with it, and left out of older
+/// versions' corpora. A field gated at a version is filled in only when
+/// `wire` is that version or later: an older peer neither sends nor reads
+/// it, so the sample at its version is as that peer has it.
 #[allow(clippy::too_many_lines, reason = "a list of samples")]
 fn tagged(wire: u32) -> Vec<(u32, Sample)> {
     use Sample::{Client, Server};
     let terminal = TerminalId(7);
     let buffer = BufferId(3);
-    vec![
+    let mut samples = vec![
         // Opening a connection.
         (
             FIRST,
@@ -501,7 +524,728 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                 }]),
             })),
         ),
-    ]
+    ];
+    samples.extend(more().into_iter().map(|sample| (FIRST, sample)));
+    samples
+}
+
+/// More samples of protocol 72: the rest of what a window and the daemon
+/// say, and the last variant of every enum the samples reach, so a variant
+/// appended to any of them would show.
+#[allow(clippy::too_many_lines, reason = "a list of samples")]
+fn more() -> Vec<Sample> {
+    use Sample::{Client, Server};
+    let terminal = TerminalId(7);
+    let buffer = BufferId(3);
+    let files = FilesId(4);
+    let board = BoardId(5);
+    let review = ReviewId(6);
+    let request = |request| Client(ClientMessage::Request(request));
+    let response = |response| Server(ServerMessage::Response(response));
+    let event = |event| Server(ServerMessage::Event(event));
+    let buffer_update = |update| event(Event::Buffer { buffer, update });
+    let new_pane = |terminal| {
+        request(Request::Split {
+            pane: PaneId(1),
+            side: Side::Above,
+            terminal,
+        })
+    };
+    let mut samples = vec![
+        // The last of each top-level enum.
+        Client(ClientMessage::ListSessions {
+            id: 3,
+            agent: "claude".into(),
+            cwd: "/src".into(),
+        }),
+        Client(ClientMessage::Upgrade {
+            protocol_version: 72,
+            executable: b"/bin/clackatoo".to_vec(),
+        }),
+        Server(ServerMessage::NotUpgrading {
+            reason: "no".into(),
+        }),
+        response(Response::Error(Error::SessionOpen(terminal))),
+        response(Response::Error(Error::RecordingFailed {
+            path: "/x".into(),
+            reason: "no".into(),
+        })),
+        response(Response::TerminalCreated(terminal)),
+        response(Response::Terminals(vec![TerminalInfo {
+            id: terminal,
+            pid: None,
+            size: size(),
+            title: String::new(),
+            status: TerminalStatus::Killed(9),
+        }])),
+        response(Response::View(View {
+            title: "t".into(),
+            cwd: Some("/".into()),
+            root: Node::Grid(GridNode {
+                size: size(),
+                state: grid_state(),
+                lines: vec![line("x")],
+                links: links(),
+            }),
+        })),
+        response(Response::Text("text".into())),
+        request(Request::Search {
+            terminal,
+            query: "q".into(),
+            from: Position { line: 3, col: 4 },
+            backward: true,
+            exact: true,
+        }),
+        response(Response::Found(Some(Match {
+            start: Position { line: 3, col: 4 },
+            cells: 2,
+        }))),
+        request(Request::Block {
+            terminal,
+            line: 3,
+            which: Which::After,
+        }),
+        response(Response::Block(Some(Block {
+            first: 1,
+            last: 4,
+            output: Some(2),
+            command: Some("ls".into()),
+            cwd: Some("/".into()),
+            running: true,
+            exit: Some(1),
+        }))),
+        request(Request::CarryQuic),
+        response(Response::Carrying {
+            certificate: vec![1, 2, 3],
+            udp: Some(Udp {
+                port: 60000,
+                probe_key: [7; 16],
+            }),
+        }),
+        response(Response::Reviewed("kept".into())),
+        // Workspaces: what a new pane can show, every kind.
+        new_pane(PaneTerminal::Existing(terminal)),
+        new_pane(PaneTerminal::File(OpenFile {
+            path: "a.rs".into(),
+            cwd: Some("/src".into()),
+        })),
+        new_pane(PaneTerminal::Files(OpenFiles {
+            dir: Some("/src".into()),
+        })),
+        new_pane(PaneTerminal::Board(OpenBoard::Named("plan".into()))),
+        new_pane(PaneTerminal::Board(OpenBoard::Id(board))),
+        new_pane(PaneTerminal::Review(NewReview {
+            chat: Some(terminal),
+            scope: ReviewScope::Turn(Some(2)),
+            cwd: Some("/src".into()),
+        })),
+        new_pane(PaneTerminal::Review(NewReview {
+            chat: None,
+            scope: ReviewScope::Base,
+            cwd: None,
+        })),
+        new_pane(PaneTerminal::Browser(terminal)),
+        // Chats: what's asked of them, and choosing one.
+        request(Request::Chat {
+            terminal,
+            action: ChatAction::Set {
+                setting: "model".into(),
+                value: "haiku".into(),
+            },
+        }),
+        request(Request::Chat {
+            terminal,
+            action: ChatAction::Switch {
+                agent: "codex".into(),
+                model: Some("gpt".into()),
+                budget: 4000,
+            },
+        }),
+        request(Request::Chat {
+            terminal,
+            action: ChatAction::Open {
+                chat: TerminalId(8),
+            },
+        }),
+        request(Request::ChatChoices {
+            pane: Some(PaneId(1)),
+        }),
+        response(Response::ChatChoices(ChatChoices {
+            agents: vec![Provider {
+                agent: "codex".into(),
+                title: "Codex".into(),
+                models: ProviderModels::Failed("no".into()),
+            }],
+            default: "claude".into(),
+            cwd: "/src".into(),
+            home: "/home/jack".into(),
+            unshown: vec![summary()],
+        })),
+        request(Request::WatchChats),
+        response(Response::Chats(vec![summary()])),
+        event(Event::Chats(vec![summary()])),
+        event(Event::Sessions {
+            id: 3,
+            sessions: Err("can't list".into()),
+        }),
+        event(Event::View {
+            terminal,
+            update: ViewUpdate::Snapshot(View {
+                title: "Codex".into(),
+                cwd: None,
+                root: Node::Chat(Box::new(ChatNode {
+                    state: ChatState::Starting,
+                    settings: vec![Setting {
+                        kind: SettingKind::Browser,
+                        ..setting()
+                    }],
+                    turns: vec![Turn {
+                        items: vec![Item::Tool(Tool {
+                            status: ToolStatus::Failed,
+                            kind: ToolKind::Other,
+                            ..tool()
+                        })],
+                        end: Some(TurnEnd {
+                            at: 1,
+                            outcome: Outcome::Done,
+                        }),
+                        files: Some(TurnFiles {
+                            count: 1,
+                            state: TurnFilesState::TooOld,
+                        }),
+                        ..turn()
+                    }],
+                    question: Some(Question {
+                        choices: vec![Choice {
+                            id: "never".into(),
+                            name: "Never".into(),
+                            kind: ChoiceKind::RejectAlways,
+                        }],
+                        ..question()
+                    }),
+                    subagents: vec![Subagent {
+                        status: SubagentStatus::Closed,
+                        ..subagent()
+                    }],
+                    ..chat()
+                })),
+            }),
+        }),
+        // Buffers: the rest of what the daemon says of one.
+        buffer_update(BufferUpdate::NoChange(6)),
+        buffer_update(BufferUpdate::Modified(false)),
+        buffer_update(BufferUpdate::Features(ServerFeatures {
+            completion: Some(vec!['.']),
+            signature: Some(vec!['(']),
+            signature_again: vec![','],
+        })),
+        buffer_update(BufferUpdate::Offer {
+            language: "rust".into(),
+            grammar: true,
+            server: Some("rust-analyzer".into()),
+        }),
+        buffer_update(BufferUpdate::Moved("/src/b.rs".into())),
+        buffer_update(BufferUpdate::Notice("saved".into())),
+        buffer_update(BufferUpdate::ChangedOnDisk),
+        buffer_update(BufferUpdate::Diagnostics {
+            version: 6,
+            diagnostics: vec![Diagnostic {
+                start: 0,
+                end: 1,
+                severity: Severity::Hint,
+                message: "hint".into(),
+                source: Some("clippy".into()),
+                code: Some("H".into()),
+            }],
+        }),
+        buffer_update(BufferUpdate::Highlights {
+            version: 6,
+            start: 0,
+            end: 3,
+            spans: vec![Span {
+                start: 0,
+                end: 3,
+                kind: Kind::Tag,
+            }],
+        }),
+        Client(ClientMessage::Edit {
+            buffer,
+            seq: 11,
+            change: Change::Redo,
+        }),
+        Client(ClientMessage::Query {
+            buffer,
+            id: 4,
+            version: 6,
+            at: 2,
+            query: Query::Indent {
+                end: 9,
+                shiftwidth: 4,
+                tabstop: 8,
+            },
+        }),
+        Client(ClientMessage::Query {
+            buffer,
+            id: 5,
+            version: 6,
+            at: 2,
+            query: Query::Completion(Trigger::Again),
+        }),
+        Client(ClientMessage::Query {
+            buffer,
+            id: 6,
+            version: 6,
+            at: 2,
+            query: Query::Starts {
+                construct: Construct::Argument,
+                backward: true,
+                count: 2,
+            },
+        }),
+        Client(ClientMessage::Rename {
+            buffer,
+            id: 6,
+            version: 6,
+            at: 2,
+            name: "start".into(),
+        }),
+        Client(ClientMessage::Stage {
+            buffer,
+            id: 7,
+            version: 6,
+            at: 2,
+        }),
+    ];
+    let answers = [
+        Answer::Locations(vec![FileLocation {
+            path: "/src/a.rs".into(),
+            line: 3,
+            col: 4,
+            offset: Some(20),
+            text: "fn a()".into(),
+        }]),
+        Answer::Completions {
+            items: vec![CompletionItem {
+                label: "start".into(),
+                kind: 3,
+                detail: "fn()".into(),
+                filter: Some("st".into()),
+                sort: Some("a".into()),
+                preselect: true,
+                start: Some(1),
+                text: "start()".into(),
+                snippet: true,
+                more: vec![TextChange {
+                    start: 0,
+                    end: 0,
+                    text: "use x;\n".into(),
+                }],
+            }],
+            incomplete: true,
+        },
+        Answer::Resolved {
+            detail: Some("d".into()),
+            documentation: Some(("doc".into(), true)),
+        },
+        Answer::Signature {
+            label: "f(a)".into(),
+            parameter: Some((2, 3)),
+            index: 0,
+            count: 1,
+        },
+        Answer::CodeActions(vec![CodeAction {
+            title: "fix".into(),
+            kind: "quickfix".into(),
+            preferred: true,
+            disabled: Some("not here".into()),
+        }]),
+        Answer::Pieces(vec![Piece {
+            start: 0,
+            end: 9,
+            inner: Some((2, 7)),
+        }]),
+        Answer::Indents(vec![LineIndent {
+            line: 1,
+            width: Some(4),
+        }]),
+        Answer::Staged,
+    ];
+    samples.extend(answers.into_iter().map(|answer| {
+        buffer_update(BufferUpdate::Answer {
+            id: 4,
+            version: 6,
+            answer,
+        })
+    }));
+    samples.extend([
+        Client(ClientMessage::Find {
+            id: 8,
+            pane: Some(PaneId(1)),
+            search: Search::Preview {
+                path: "/src/a.rs".into(),
+                line: 3,
+                lines: 20,
+            },
+        }),
+        event(Event::Found {
+            id: 8,
+            found: Found::Lines(vec![FoundLine {
+                path: "/src/a.rs".into(),
+                line: 3,
+                col: 1,
+                text: "fn a()".into(),
+                matches: vec![(0, 2)],
+            }]),
+        }),
+        event(Event::Found {
+            id: 8,
+            found: Found::Done(Done::Failed("no".into())),
+        }),
+        Client(ClientMessage::Clipboard {
+            terminal,
+            id: 1,
+            text: Some("copied".into()),
+        }),
+        event(Event::Clipboard {
+            terminal,
+            selection: Selection::Primary,
+            text: "copied".into(),
+        }),
+        event(Event::ClipboardAsked {
+            terminal,
+            id: 1,
+            selection: Selection::Primary,
+        }),
+        event(Event::Installed {
+            language: "rust".into(),
+            outcome: Err("offline".into()),
+        }),
+        event(Event::Show {
+            pane: PaneId(1),
+            at: Some(FileLocation {
+                path: "/src/a.rs".into(),
+                line: 1,
+                col: 0,
+                offset: Some(0),
+                text: String::new(),
+            }),
+        }),
+        Client(ClientMessage::Present { here: true }),
+        // File explorers, and changing files.
+        request(Request::AttachFiles { files }),
+        Client(ClientMessage::Files {
+            files,
+            action: FilesAction::Refresh,
+        }),
+        Client(ClientMessage::Files {
+            files,
+            action: FilesAction::Expand("src".into()),
+        }),
+    ]);
+    samples.extend(
+        [
+            FilesUpdate::Root {
+                path: "/src".into(),
+                name: "src".into(),
+            },
+            FilesUpdate::Listed {
+                dir: "/src".into(),
+                entries: vec![
+                    entry(EntryKind::File { executable: true }),
+                    entry(EntryKind::Dir),
+                    entry(EntryKind::Link { dir: true }),
+                    entry(EntryKind::Other),
+                ],
+                cut_short: true,
+            },
+            FilesUpdate::Unlisted {
+                dir: "/root".into(),
+                reason: "denied".into(),
+            },
+            FilesUpdate::Git(vec![("a.rs".into(), GitMark::Conflicted)]),
+            FilesUpdate::NoGit("too old".into()),
+        ]
+        .into_iter()
+        .map(|update| event(Event::Files { files, update })),
+    );
+    let expect = Some(Expect {
+        kind: EntryKind::File { executable: false },
+        stamp: Some(stamp()),
+    });
+    samples.extend(
+        [
+            FileOp::Create {
+                path: "/src/new".into(),
+                dir: true,
+            },
+            FileOp::Move {
+                from: "/src/a".into(),
+                to: "/src/b".into(),
+                overwrite: Some(stamp()),
+                expect,
+            },
+            FileOp::Copy {
+                from: "/src/a".into(),
+                to: "/src/c".into(),
+                overwrite: Some(stamp()),
+                expect,
+            },
+            FileOp::Delete {
+                path: "/src/a".into(),
+                trash: true,
+                expect,
+            },
+        ]
+        .into_iter()
+        .map(|op| Client(ClientMessage::FileOp { id: 9, op })),
+    );
+    samples.extend([
+        event(Event::FileOp {
+            id: 9,
+            outcome: Ok(()),
+        }),
+        event(Event::FileOp {
+            id: 9,
+            outcome: Err(FileOpError::Exists {
+                path: "/src/b".into(),
+                what: "a file".into(),
+                stamp: stamp(),
+            }),
+        }),
+        event(Event::FileOp {
+            id: 9,
+            outcome: Err(FileOpError::Failed("no".into())),
+        }),
+        // Reviews.
+        request(Request::AttachReview { review }),
+        event(Event::Review {
+            review,
+            list: ReviewList {
+                chat: Some(terminal),
+                chat_name: "Claude".into(),
+                scope: Some(ReviewScope::Chat),
+                files: vec![ReviewFile {
+                    path: "/src/a.rs".into(),
+                    shown: "a.rs".into(),
+                    buffer: Some(buffer),
+                    hunks: vec![ReviewHunk {
+                        line: 3,
+                        before: vec!["a".into()],
+                        base: "b\n".into(),
+                        text: "c\n".into(),
+                        after: vec!["d".into()],
+                        agents: vec![1],
+                        by: Some(Made {
+                            chat: terminal,
+                            turn: 2,
+                        }),
+                        reviewed: true,
+                    }],
+                }],
+                comments: vec![ReviewComment {
+                    id: 1,
+                    path: "/src/a.rs".into(),
+                    shown: "a.rs".into(),
+                    line: 3,
+                    text: "why?".into(),
+                    in_change: true,
+                }],
+                note: Some("note".into()),
+                chats: vec![ReviewChat {
+                    chat: terminal,
+                    name: "Claude".into(),
+                    task: Some("look".into()),
+                    turn: Some(2),
+                    closed: true,
+                }],
+            },
+        }),
+        request(Request::Review(ReviewAction::Reject {
+            hunks: Hunks::Turn {
+                chat: terminal,
+                turn: 2,
+            },
+            force: true,
+        })),
+        request(Request::Review(ReviewAction::Keep(Hunks::Chat(terminal)))),
+        request(Request::Review(ReviewAction::Comment {
+            chat: terminal,
+            place: CommentPlace {
+                path: "/src/a.rs".into(),
+                line: 3,
+                at: Some((buffer, 6, 2)),
+            },
+            text: "why?".into(),
+        })),
+        request(Request::Review(ReviewAction::Refresh(review))),
+        // Boards.
+        request(Request::AttachBoard { board }),
+        event(Event::Board {
+            board,
+            update: BoardUpdate::Snapshot {
+                summary: board_summary(),
+                entries: vec![BoardEntry {
+                    id: 1,
+                    kind: PostKind::Result,
+                    by: BoardAuthor::Chat {
+                        chat: terminal,
+                        agent: "claude".into(),
+                        title: "Helper".into(),
+                    },
+                    at: 1,
+                    text: "done".into(),
+                    links: vec![
+                        BoardLink::File {
+                            path: "/src/a.rs".into(),
+                            line: Some(3),
+                        },
+                        BoardLink::Turn {
+                            chat: terminal,
+                            turn: 2,
+                        },
+                    ],
+                    subject: Some("a".into()),
+                    expires: Some(9),
+                    released: Some((5, BoardAuthor::User)),
+                    edits: vec![(4, BoardAuthor::User, "first".into())],
+                }],
+            },
+        }),
+        event(Event::Board {
+            board,
+            update: BoardUpdate::Gone("archived".into()),
+        }),
+        Client(ClientMessage::Board {
+            board,
+            action: BoardAction::Post {
+                kind: PostKind::Claim,
+                text: "mine".into(),
+            },
+        }),
+        Client(ClientMessage::Board {
+            board,
+            action: BoardAction::Archive(true),
+        }),
+        // A chat's browser.
+        request(Request::AttachBrowser {
+            chat: terminal,
+            width: 800,
+            height: 600,
+        }),
+        event(Event::Browser {
+            chat: terminal,
+            update: BrowserUpdate::Status(BrowserStatus {
+                url: "https://example.com".into(),
+                title: "Example".into(),
+                action: Some("clicked".into()),
+                running: true,
+                failure: Some("slow".into()),
+            }),
+        }),
+        event(Event::Browser {
+            chat: terminal,
+            update: BrowserUpdate::Frame(BrowserFrame {
+                jpeg: vec![0xff, 0xd8, 0xff],
+            }),
+        }),
+        // Devices on the web app.
+        request(Request::Devices),
+        response(Response::Devices(vec![Device {
+            id: 2,
+            name: "iPhone".into(),
+            paired: 1,
+            used: 2,
+            login: Some("jack@".into()),
+            notifications: true,
+            connected: true,
+        }])),
+        event(Event::Pairing(PairingState {
+            asking: vec![PairingAsk {
+                name: "iPad".into(),
+                from: "100.64.0.2".into(),
+                until: 9,
+            }],
+            locked: true,
+        })),
+        // A view whose modes and colours are the last of each.
+        event(Event::View {
+            terminal,
+            update: ViewUpdate::Patch(vec![Patch::Grid {
+                node: NodeId::ROOT,
+                state: GridState {
+                    modes: InputModes {
+                        mouse_tracking: MouseTracking::Motion,
+                        mouse_encoding: MouseEncoding::Urxvt,
+                        ..InputModes::default()
+                    },
+                    shell: ShellState::Busy,
+                    ..grid_state()
+                },
+                lines: vec![(
+                    0,
+                    Line {
+                        runs: vec![Run {
+                            style: Style {
+                                fg: Color::Rgb(9, 8, 7),
+                                underline: Underline::Dashed,
+                                ..Style::DEFAULT
+                            },
+                            text: "x".into(),
+                            separate: false,
+                        }],
+                        wrapped: false,
+                    },
+                )],
+                links: Vec::new(),
+            }]),
+        }),
+    ]);
+    samples
+}
+
+fn summary() -> ChatSummary {
+    ChatSummary {
+        chat: TerminalId(8),
+        title: "Helper".into(),
+        agent: "claude".into(),
+        state: ChatState::Failed("gone".into()),
+        asking: true,
+        unseen: true,
+        parent: Some(TerminalId(7)),
+        workspace: Some(WorkspaceId(1)),
+        active: 9,
+    }
+}
+
+fn stamp() -> FileStamp {
+    FileStamp {
+        device: 1,
+        inode: 2,
+        len: 3,
+        seconds: 4,
+        nanoseconds: 5,
+    }
+}
+
+fn entry(kind: EntryKind) -> Entry {
+    Entry {
+        name: "a".into(),
+        kind,
+        ignored: true,
+        stamp: Some(stamp()),
+    }
+}
+
+fn board_summary() -> BoardSummary {
+    BoardSummary {
+        id: BoardId(5),
+        name: "plan".into(),
+        purpose: "the plan".into(),
+        scope: BoardScope::Workspace("w".into()),
+        archived: true,
+        created: 1,
+        entries: 1,
+    }
 }
 
 fn size() -> Size {
@@ -795,10 +1539,22 @@ mod tests {
     }
 
     #[test]
-    fn each_fixture_reads_back_as_its_samples() {
+    fn each_fixture_reads_back_and_encodes_again_to_the_same_bytes() {
         for (wire, bytes) in fixtures() {
             let read = read_fixture(wire, &bytes).unwrap();
-            assert_eq!(read, corpus(wire), "protocol {wire}");
+            let again: Vec<u8> = (read.iter())
+                .flat_map(|sample| {
+                    match sample {
+                        Sample::Client(message) => frame::encode(message),
+                        Sample::Server(message) => frame::encode(message),
+                    }
+                    .unwrap()
+                })
+                .collect();
+            assert!(
+                again == bytes,
+                "protocol {wire}'s fixture changed on the way through"
+            );
         }
     }
 
