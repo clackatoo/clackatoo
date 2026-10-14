@@ -24,6 +24,8 @@ impl Setup {
         let at = |value: i64| usize::try_from(value).unwrap();
         self.editor
             .press((at(line), at(col + GUTTER)), clicks, &mut self.copy);
+        // As the desk notes what it ended or began, for `gv`.
+        (self.editor).note_selection(&self.copy, &mut self.shared.marks);
     }
 
     /// Drags to row `line` and column `col` of the text, as of `now`.
@@ -35,7 +37,9 @@ impl Setup {
 
     /// Lets go: what's selected, for the primary selection.
     fn release(&mut self) -> Option<String> {
-        self.editor.release(true, &self.copy)
+        let selected = self.editor.release(true, &self.copy);
+        (self.editor).note_selection(&self.copy, &mut self.shared.marks);
+        selected
     }
 
     /// The selection: where it started and where the cursor is, as lines
@@ -587,10 +591,11 @@ fn undo_after_a_drag_from_insert_mode_takes_back_the_delete_then_the_typing() {
     assert_eq!(setup.text(), "hello world!\n");
     setup.keys("u");
     assert_eq!(setup.text(), "hello world\n");
-    // `.` does the last change made in normal or insert mode again, `A!`:
-    // as before, a change in visual mode isn't one `.` repeats.
-    setup.keys(".");
-    assert_eq!(setup.text(), "hello world!\n");
+    // `.` deletes as much again, from the cursor, staying in normal mode:
+    // the selection it makes isn't one from insert mode.
+    setup.keys("0.");
+    assert_eq!(setup.text(), "world\n");
+    assert_eq!(setup.editor.mode, Mode::Normal);
 }
 
 #[test]
@@ -615,4 +620,56 @@ fn the_text_replaced_mid_drag_ends_it() {
     setup.editor.heard(&mut heard, false, &mut setup.copy);
     assert!(!setup.drag(0, 8, now), "the mouse no longer selects");
     assert_eq!(setup.release(), None);
+}
+
+#[test]
+fn gv_selects_what_was_dragged_again() {
+    let mut setup = Setup::new("hello world\nsecond line\n");
+    setup.editor.settle(&setup.copy);
+    let now = Instant::now();
+    setup.press(0, 2, 1);
+    setup.drag(1, 3, now);
+    setup.release();
+    // A click ends it, and `gv` brings it back.
+    setup.press(1, 8, 1);
+    assert_eq!(setup.selected(), None);
+    setup.keys("gv");
+    assert_eq!(
+        setup.selected(),
+        Some(((0, 2), (1, 3), Selection::Characters))
+    );
+    // Whole lines, by a triple click, ended by a drag that starts anew:
+    // in visual mode, `gv` swaps between the two.
+    setup.keys("<Esc>");
+    setup.press(1, 0, 3);
+    setup.release();
+    setup.press(0, 0, 1);
+    setup.drag(0, 4, now);
+    setup.release();
+    setup.keys("gv");
+    assert_eq!(setup.selected(), Some(((1, 0), (1, 0), Selection::Lines)));
+    setup.keys("gv");
+    assert_eq!(
+        setup.selected(),
+        Some(((0, 0), (0, 4), Selection::Characters))
+    );
+}
+
+#[test]
+fn dot_changes_as_much_as_was_dragged_over_typing_the_same() {
+    let mut setup = Setup::new("hello world\nsecond line\nthird row\n");
+    setup.editor.settle(&setup.copy);
+    setup.press(0, 0, 1);
+    setup.drag(0, 4, Instant::now());
+    setup.release();
+    setup.keys("cbye<Esc>j0.");
+    assert_eq!(setup.text(), "bye world\nbyed line\nthird row\n");
+    // From insert mode too: `c` types on in it, and `.` makes it all again.
+    setup.keys("ji");
+    setup.press(2, 0, 2);
+    setup.release();
+    setup.keys("cfourth<Esc>");
+    assert_eq!(setup.text(), "bye world\nbyed line\nfourth row\n");
+    setup.keys("gg0.");
+    assert_eq!(setup.text(), "fourthorld\nbyed line\nfourth row\n");
 }

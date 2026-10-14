@@ -7587,6 +7587,24 @@ mod tests {
     }
 
     #[test]
+    fn gv_and_the_selections_marks_are_each_files_own_and_kept_while_away() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/src/a.rs", A_RS);
+        type_text(&mut desk, "jwvy");
+        command(&mut desk, "e /src/b.rs");
+        open_asked(&mut desk, 8, "/src/b.rs", B_RS);
+        // b.rs has had no selection.
+        type_text(&mut desk, "gv");
+        let mode = |desk: &Desk| desk.focused_editor().expect("an editor").0.mode;
+        assert_eq!(mode(&desk), Mode::Normal);
+        command(&mut desk, "e /src/a.rs");
+        open_asked(&mut desk, 9, "/src/a.rs", A_RS);
+        type_text(&mut desk, "gvd");
+        assert_eq!(editor_text(&desk), "fn a() {}\nfn () {}\nfn c() {}\n");
+        assert_eq!(mode(&desk), Mode::Normal);
+    }
+
+    #[test]
     fn quote_quote_goes_back_and_forth_from_the_last_jump() {
         let mut desk = editing("/t.txt", "one two\nthree\nfour\nfive five\n");
         type_text(&mut desk, "wG");
@@ -7915,6 +7933,30 @@ mod tests {
         type_text(&mut desk, "0f!r?0l\"by$gg@b");
         serve(&mut desk, &mut daemons);
         assert_eq!(editor_text(&desk), "a!?\nb!\nc!\nd!\neA?<Esc>j\n");
+    }
+
+    #[test]
+    fn a_macro_makes_a_change_made_in_visual_mode_again_in_one_undo_step() {
+        let text = "one two\nthree four\nfive six\nseven\neight\n";
+        let mut desk = editing("/t.txt", text);
+        let mut daemons = daemon_of_7(text);
+        type_text(&mut desk, "vlcX");
+        escape(&mut desk);
+        type_text(&mut desk, "qaj0.q");
+        assert_eq!(register(&mut desk, 'a').as_deref(), Some("j0."));
+        serve(&mut desk, &mut daemons);
+        type_text(&mut desk, "2@a");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(
+            daemon_text(&daemons, 7),
+            "Xe two\nXree four\nXve six\nXven\neight\n"
+        );
+        type_text(&mut desk, "u");
+        serve(&mut desk, &mut daemons);
+        assert_eq!(
+            editor_text(&desk),
+            "Xe two\nXree four\nfive six\nseven\neight\n"
+        );
     }
 
     #[test]

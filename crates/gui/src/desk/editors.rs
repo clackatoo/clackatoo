@@ -131,8 +131,10 @@ fn follow_places(
     made: &[impl Borrow<Edit>],
     ours: bool,
 ) {
-    // A folder's listing isn't a file places are kept in.
+    // A folder's listing isn't a file places are kept in, but for its
+    // selections, for `gv`.
     if copy.is_scratch() {
+        marks.edited_selections(copy.path(), made, copy.text());
         return;
     }
     let (path, text) = (copy.path(), copy.text());
@@ -1308,6 +1310,8 @@ impl Desk {
             return false;
         };
         editor.press((line, col), clicks, copy);
+        // What it ended or began is the file's selection, for `gv`.
+        editor.note_selection(copy, &mut editors.shared.marks);
         self.editor_drag = Some(pane);
         true
     }
@@ -1365,7 +1369,9 @@ impl Desk {
         let editors = &mut self.editors;
         let selected = (editors.panes.get_mut(&pane)).and_then(|editor| {
             let copy = editors.buffers.get(&editor.buffer())?;
-            editor.release(wanted, copy)
+            let selected = editor.release(wanted, copy);
+            editor.note_selection(copy, &mut editors.shared.marks);
+            selected
         });
         if let Some(text) = selected {
             self.copied(text, Copy::Primary);
@@ -1376,10 +1382,14 @@ impl Desk {
     /// The window lost the focus mid-drag in an editor, so the button's
     /// release may never come: the drag ends, leaving what it selected.
     pub(super) fn editor_drag_lost(&mut self) {
+        let editors = &mut self.editors;
         if let Some(pane) = self.editor_drag.take()
-            && let Some(editor) = self.editors.panes.get_mut(&pane)
+            && let Some(editor) = editors.panes.get_mut(&pane)
         {
             editor.drag_lost();
+            if let Some(copy) = editors.buffers.get(&editor.buffer()) {
+                editor.note_selection(copy, &mut editors.shared.marks);
+            }
         }
     }
 

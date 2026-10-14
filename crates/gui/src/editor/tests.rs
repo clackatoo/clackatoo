@@ -22,6 +22,7 @@ mod mouse;
 mod snippets;
 mod substitute;
 mod uses;
+mod visual;
 mod words;
 mod wrapped;
 
@@ -106,6 +107,19 @@ impl Setup {
         (self.shared.marks).edited(self.copy.path(), &made, self.copy.text());
     }
 
+    /// Moves the marks through an edit the copy heard of, an undo or
+    /// another's, as the desk does.
+    fn heard_marks(&mut self, heard: &super::Heard) {
+        let (path, text) = (self.copy.path(), self.copy.text());
+        match heard {
+            super::Heard::Edited(edit) | super::Heard::Reversed(edit) => {
+                (self.shared.marks).edited(path, std::slice::from_ref(edit), text);
+            }
+            super::Heard::Replaced => self.shared.marks.replaced(path, text),
+            _ => {}
+        }
+    }
+
     /// Passes the window's changes to the daemon, and its answers back,
     /// keeping its queries for the language server.
     fn serve(&mut self) {
@@ -134,6 +148,7 @@ impl Setup {
                 let (answer, _) = self.daemon.take(message);
                 self.editor.hold(&self.copy);
                 let mut heard = self.copy.update(answer);
+                self.heard_marks(&heard);
                 self.editor.heard(&mut heard, true, &mut self.copy);
             }
         }

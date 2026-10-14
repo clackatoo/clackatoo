@@ -54,8 +54,7 @@ impl Pane {
             }
             (Key::Named(NamedKey::Escape), _) => {
                 if visual {
-                    self.mode = Mode::Normal;
-                    self.anchor = None;
+                    self.leave_visual();
                 } else {
                     self.found = None;
                 }
@@ -79,6 +78,7 @@ impl Pane {
                 return false;
             }
             (_, Some('i')) => return self.insert(),
+            (_, Some('v')) if after_g => return self.reselect(),
             (_, Some('v')) => return self.toggle_visual(Selection::Characters),
             (_, Some('V')) => return self.toggle_visual(Selection::Lines),
             (_, Some('o')) if visual => {
@@ -274,16 +274,54 @@ impl Pane {
 
     fn toggle_visual(&mut self, kind: Selection) -> bool {
         match self.mode {
-            Mode::Visual(current) if current == kind => {
-                self.mode = Mode::Normal;
-                self.anchor = None;
-            }
+            Mode::Visual(current) if current == kind => self.leave_visual(),
             Mode::Visual(_) => self.mode = Mode::Visual(kind),
             _ => {
                 self.mode = Mode::Visual(kind);
                 self.anchor = self.cursor.map(|cursor| cursor.at);
             }
         }
+        true
+    }
+
+    /// Ends a visual selection, back in normal mode, keeping it for `gv`.
+    pub(super) fn leave_visual(&mut self) {
+        if let (Mode::Visual(kind), Some(anchor), Some(cursor)) =
+            (self.mode, self.anchor, self.cursor)
+        {
+            self.last_visual = Some((anchor, cursor.at, kind));
+        }
+        if matches!(self.mode, Mode::Visual(_)) {
+            self.mode = Mode::Normal;
+        }
+        self.anchor = None;
+    }
+
+    /// `gv`: selects the last visual selection again, by what it was, with
+    /// the cursor where it was, kept within the lines there are now; in
+    /// visual mode, what's selected becomes the last, so it swaps between
+    /// the two, as in Vim.
+    fn reselect(&mut self) -> bool {
+        let (Some((anchor, head, kind)), Some(cursor)) = (self.last_visual, self.cursor) else {
+            return false;
+        };
+        if let (Mode::Visual(now), Some(was)) = (self.mode, self.anchor) {
+            self.last_visual = Some((was, cursor.at, now));
+        }
+        let document = Document(self);
+        let (first, last) = document.bounds();
+        let within = |point: Point| {
+            let line = point.line.clamp(first, last);
+            Point {
+                line,
+                col: point.col.min(document.last_cell(line)),
+            }
+        };
+        let (anchor, head) = (within(anchor), within(head));
+        self.mode = Mode::Visual(kind);
+        self.anchor = Some(anchor);
+        self.cursor = Some(Cursor::new(head));
+        self.follow_cursor();
         true
     }
 
@@ -294,8 +332,7 @@ impl Pane {
             return false;
         };
         self.copy(start, end, kind, Copy::Clipboard);
-        self.mode = Mode::Normal;
-        self.anchor = None;
+        self.leave_visual();
         self.cursor = Some(Cursor::new(start));
         self.follow_cursor();
         true

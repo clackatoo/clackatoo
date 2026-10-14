@@ -293,6 +293,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "explorer",
         what: "A folder's listing starts with a .. line that Enter or a double click goes up from",
     },
+    News {
+        id: "visual-repeat",
+        date: "2026-10-14",
+        lesson: "mouse",
+        what: "gv selects the last selection again, and the dot command makes a change made in visual mode again on as much text",
+    },
 ];
 
 impl News {

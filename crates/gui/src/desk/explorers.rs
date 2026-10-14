@@ -537,6 +537,7 @@ impl Desk {
                 );
                 let mut editor = Editor::new(buffer, &self.options);
                 editor.hide_starts(listing::mark_len);
+                editor.keep_lines(listing::is_up);
                 (editor, copy)
             }
             None => {
@@ -544,6 +545,11 @@ impl Desk {
                 return;
             }
         };
+        // A selection in the folder's listing before is of no use in a new
+        // one.
+        if new {
+            self.shared_mut().marks.forget_selections(&dir);
+        }
         if let Some(size) = size {
             editor.resize(size);
         }

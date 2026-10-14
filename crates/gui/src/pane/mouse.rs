@@ -186,8 +186,8 @@ impl Pane {
         // A click in normal mode moves the cursor there, and ends a visual
         // selection.
         if self.mode != Mode::Insert {
+            self.leave_visual();
             self.mode = Mode::Normal;
-            self.anchor = None;
             self.cursor = Some(Cursor::new(at));
         }
         let selection = match event.clicks {

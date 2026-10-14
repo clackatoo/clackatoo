@@ -336,6 +336,9 @@ pub(crate) enum Action {
     FormatSelection,
     /// `o` in visual mode: to the other end of the selection.
     OtherEnd,
+    /// `gv`: selects again what was selected last, as it was selected; in
+    /// visual mode, swapping it with what's selected now.
+    Reselect,
     /// `i` or `a` and an object, in visual mode: select it.
     Select {
         object: Object,
@@ -387,6 +390,15 @@ impl Action {
                 | Self::Join
                 | Self::Replace(_)
                 | Self::Insert(_)
+        )
+    }
+
+    /// Whether, in visual mode, it acts on what's selected: an operator,
+    /// `p` and `P`, `J` and `r`.
+    pub(crate) fn on_selection(self) -> bool {
+        matches!(
+            self,
+            Self::Operate(_, Target::Selection) | Self::Put { .. } | Self::Join | Self::Replace(_)
         )
     }
 
@@ -522,6 +534,8 @@ pub(crate) fn parse_with(keys: &[Stroke], visual: bool, tildeop: bool) -> Parsed
             Some(Stroke::Char { ch: 'd', .. }) => Action::ShowDiagnostics,
             Some(_) => return Parsed::Nothing,
         },
+        // Del deletes what's selected, as `x` does.
+        Stroke::Delete if visual => Action::Operate(Operator::Delete, Target::Selection),
         Stroke::Delete => Action::DeleteChars { before: false },
         Stroke::Char { ctrl: false, ch } => match reader.key(ch, first, visual) {
             Ok(action) => action,
@@ -781,6 +795,7 @@ impl Reader<'_> {
                     };
                     return Some(match next.plain() {
                         Some('g') => Read::Yes(Action::Move(Motion::First)),
+                        Some('v') => Read::Yes(Action::Reselect),
                         // By screen rows, where lines wrap.
                         Some('j') => Read::Yes(Action::Move(Motion::RowDown(1))),
                         Some('k') => Read::Yes(Action::Move(Motion::RowUp(1))),
@@ -1019,6 +1034,20 @@ mod tests {
             command(None, Action::Operate(Operator::Delete, Target::Selection))
         );
         assert_eq!(visual("o"), command(None, Action::OtherEnd));
+        assert_eq!(
+            parse(&[Stroke::Delete], true),
+            command(None, Action::Operate(Operator::Delete, Target::Selection))
+        );
+        // `gv` in either mode, but not as what an operator acts on.
+        assert_eq!(visual("gv"), command(None, Action::Reselect));
+        assert_eq!(read("gv"), command(None, Action::Reselect));
+        assert_eq!(read("dgv"), Parsed::Nothing);
+        assert!(!Action::Reselect.changes());
+        // What `.` makes again on as much text, made in visual mode.
+        assert!(Action::Operate(Operator::Indent, Target::Selection).on_selection());
+        assert!(Action::Replace('x').on_selection());
+        assert!(!Action::Operate(Operator::Change, Target::Lines).on_selection());
+        assert!(!Action::Insert(Entry::LineStart).on_selection());
         assert_eq!(
             visual("2<"),
             command(

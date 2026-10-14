@@ -3,7 +3,9 @@
 //! where the mouse is; a double click selects a word, and dragging after
 //! it whole words; a triple click selects the line, and dragging after it
 //! whole lines. Letting go leaves the selection for `y`, `d`, `c`, `>` and
-//! the rest. A plain click puts the cursor there and ends a selection.
+//! the rest. A plain click puts the cursor there and ends a selection,
+//! which `gv` selects again, as one made with keys: the desk notes it as
+//! the button goes down and comes up (see [`super::visual`]).
 //!
 //! The mouse finds its character through the rows as they're drawn: on a
 //! row a long line goes on over, the line's character there; on an inlay

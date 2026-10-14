@@ -61,6 +61,7 @@ mod snippet;
 mod substitute;
 mod text;
 mod uses;
+mod visual;
 mod wrap;
 
 use std::time::{Duration, Instant};
@@ -98,6 +99,7 @@ pub(crate) use registers::{Register, Registers};
 use text::{Text, Underlines, tab_end};
 #[cfg(test)]
 pub(crate) use uses::USES_WAIT;
+use visual::Again;
 use wrap::{Placed, Shown, Top, Wrapping};
 
 use crate::colors;
@@ -177,12 +179,14 @@ struct Span {
     lines: Option<(u64, u64)>,
 }
 
-/// A change being made, for `.` to make again: the command, and what was
-/// typed in insert mode after it.
+/// A change being made, for `.` to make again: the command, what was
+/// typed in insert mode after it, and for one made in visual mode, how
+/// much it took and what it put (see [`visual`]).
 #[derive(Clone, Debug)]
 struct Change {
     command: Command,
     typed: Vec<Typed>,
+    again: Option<Again>,
 }
 
 /// Something typed in insert mode, for `.` to type again.
@@ -409,6 +413,9 @@ pub(crate) struct Editor {
     /// How much of the start of a line is hidden, if any is, as a folder's
     /// listing hides each line's mark.
     hide: Option<fn(&str) -> usize>,
+    /// Which lines `r` and `J` leave as they are, if any are, as a folder's
+    /// listing's `..`, which names nothing as it is.
+    keep: Option<fn(&str) -> bool>,
     height: usize,
     width: usize,
     /// How lines are numbered.
@@ -622,6 +629,16 @@ pub(crate) struct Editor {
     /// The keys come from a binding or a macro being typed: going back to
     /// insert mode waits until they're all done, as the desk sees to.
     framed: bool,
+    /// A go of visual mode has had its selection noted as the file's
+    /// last, after the last before it was kept for `gv` to swap with (see
+    /// [`visual`]).
+    selecting: bool,
+    /// The selection was made by `.`, from the cursor, for a change made
+    /// in visual mode, and goes once that's made again.
+    repeat_selection: bool,
+    /// What `.` puts over the selection it made: what the change it makes
+    /// again put.
+    put_again: Option<std::rc::Rc<Register>>,
 }
 
 /// Lines of a lesson lit, as the tutor says: a step done, or being done.
@@ -645,6 +662,7 @@ impl Editor {
             resized: false,
             kept: Kept::default(),
             hide: None,
+            keep: None,
             height: 1,
             width: 1,
             numbers: Numbers::of(options),
@@ -729,6 +747,9 @@ impl Editor {
             clicked: None,
             insert_after: false,
             framed: false,
+            selecting: false,
+            repeat_selection: false,
+            put_again: None,
         }
     }
 
@@ -873,6 +894,13 @@ impl Editor {
     pub(crate) fn hide_starts(&mut self, hide: fn(&str) -> usize) {
         self.hide = Some(hide);
         self.kept = Kept::default();
+    }
+
+    /// Has `r` in visual mode leave the lines `keep` says as they are, and
+    /// `J` refuse to join them, as a folder's listing's `..` must stay
+    /// `..`, or it would name something.
+    pub(crate) fn keep_lines(&mut self, keep: fn(&str) -> bool) {
+        self.keep = Some(keep);
     }
 
     /// Enters normal mode, as the focus arriving here does while the
@@ -1125,6 +1153,7 @@ impl Editor {
         let edits = copy.edits_made();
         let done = self.read_key(stroke, copy, shared);
         self.snippet_after(edits, copy);
+        self.note_selection(copy, &mut shared.marks);
         done
     }
 
@@ -1133,11 +1162,9 @@ impl Editor {
         if self.hold_stroke(stroke) {
             return Done::default();
         }
-        // The selection as each key comes is the last, for `'<` and `'>`,
-        // which the key's edits then move.
-        if matches!(self.mode, Mode::Visual(_)) {
-            self.mark_selection(copy, &mut shared.marks);
-        }
+        // The selection as each key comes is the last, for `gv`, `'<` and
+        // `'>`, which the key's edits then move.
+        self.note_selection(copy, &mut shared.marks);
         if !std::mem::take(&mut self.keep_status) {
             self.status = None;
         }
@@ -1374,11 +1401,8 @@ impl Editor {
         }
         let done = Done::REDRAW;
         let visual = matches!(self.mode, Mode::Visual(_));
-        if command.action.changes() && !again && !visual {
-            self.changing = Some(Change {
-                command,
-                typed: Vec::new(),
-            });
+        if !again {
+            self.start_change(command, copy);
         }
         self.new_step = true;
         let times = command.times();
@@ -1403,7 +1427,9 @@ impl Editor {
             | Action::DeleteToEnd { .. }
             | Action::Substitute
             | Action::Put { .. } => self.keep_or_put(command, copy, shared),
+            Action::Join if visual => self.join_selection(copy),
             Action::Join => self.join(times.max(2) - 1, copy),
+            Action::Replace(ch) if visual => self.replace_selection(ch, copy),
             Action::Replace(ch) => self.replace_chars(ch, times, copy),
             Action::Insert(entry) => self.insert(entry, times, copy),
             Action::Undo | Action::Redo => {
@@ -1434,6 +1460,7 @@ impl Editor {
             | Action::FormatSelection => {
                 self.language_server(command.action, copy);
             }
+            Action::Reselect => self.reselect(copy, &mut shared.marks),
             Action::OtherEnd => {
                 if let Some(anchor) = self.anchor {
                     self.anchor = Some(self.cursor.at);
@@ -1470,6 +1497,21 @@ impl Editor {
             self.normal_cursor(copy);
         }
         done
+    }
+
+    /// Notes `command` as the change being made, for `.`, if it's one: in
+    /// visual mode, only if it acts on the selection, with how much it
+    /// takes (see [`visual`]).
+    fn start_change(&mut self, command: Command, copy: &BufferCopy) {
+        let visual = matches!(self.mode, Mode::Visual(_));
+        if command.action.changes() && (!visual || command.action.on_selection()) {
+            let extent = visual.then(|| self.extent(copy)).flatten();
+            self.changing = Some(Change {
+                command,
+                typed: Vec::new(),
+                again: extent.map(|extent| Again { extent, put: None }),
+            });
+        }
     }
 
     /// `&`, or `g&` if `all`, which is `:%s//~/&`, as in Vim: the last
@@ -1542,12 +1584,31 @@ impl Editor {
     /// `.`: makes the last change again, `count` times if given. A change
     /// that put text from a numbered register puts the next's, as in Vim,
     /// so `"1p` then `.` goes back through what was deleted.
+    ///
+    /// A change made in visual mode is made again on as much text from
+    /// the cursor, or in visual mode, on what's selected, keeping its own
+    /// count (see [`visual`]). No other change is made in visual mode.
     fn repeat(&mut self, count: Option<usize>, copy: &mut BufferCopy, shared: &mut Shared) -> Done {
         let Some(mut change) = self.last_change.clone() else {
             return Done::default();
         };
-        if count.is_some() {
-            change.command.count = count;
+        let visual = matches!(self.mode, Mode::Visual(_));
+        match &change.again {
+            Some(again) => {
+                if !visual {
+                    self.select_extent(again.extent, copy);
+                }
+                self.put_again.clone_from(&again.put);
+            }
+            None if visual => {
+                self.fail();
+                return Done::default();
+            }
+            None => {
+                if count.is_some() {
+                    change.command.count = count;
+                }
+            }
         }
         if let (Action::Put { .. }, Some(digit @ '1'..='8')) =
             (change.command.action, change.command.register)
@@ -1555,6 +1616,7 @@ impl Editor {
             change.command.register = char::from_digit(digit as u32 - '0' as u32 + 1, 10);
         }
         let done = self.execute(change.command, copy, shared, true);
+        self.put_again = None;
         // A command waiting for the daemon finishes once it answers.
         if let Some(change) = self.awaiting_again(change) {
             self.finish_repeat(change, copy);
@@ -1574,6 +1636,7 @@ impl Editor {
             }
             self.leave_insert(copy);
         }
+        self.end_repeat_selection(copy);
         self.last_change = Some(change);
     }
 
@@ -1693,6 +1756,15 @@ impl Editor {
         let Some(span) = span else {
             return false;
         };
+        // Characters over lines would join a listing's lines, taking the
+        // marks of all but the first.
+        if matches!(operator, Operator::Delete | Operator::Change)
+            && span.lines.is_none()
+            && self.takes_hidden((span.start, span.end), copy)
+        {
+            self.refuse_join();
+            return true;
+        }
         if let Operator::Recase(recase) = operator {
             self.recase(span.start, span.end, recase, copy);
             // To the start, as Vim goes, but for whole lines typed, which
@@ -2160,7 +2232,9 @@ impl Editor {
     /// `p` and `P` in visual mode: puts what the register `name` holds, or
     /// the unnamed, `times` over, in place of what's selected. What was selected
     /// is kept as a delete, after `p` but not `P`, as in Vim, so `P` can
-    /// put the same text over one selection after another.
+    /// put the same text over one selection after another. `.` puts the
+    /// same text again, whatever the register holds by then; with nothing
+    /// to put, it isn't a change for `.` to make again.
     fn put_over(
         &mut self,
         before: bool,
@@ -2168,13 +2242,26 @@ impl Editor {
         copy: &mut BufferCopy,
         (registers, name): (&mut Registers, Option<char>),
     ) {
-        let Some(register) = self.register(registers, name).cloned() else {
-            self.leave_visual();
-            return;
+        let register = if let Some(again) = self.put_again.take() {
+            Register::clone(&again)
+        } else {
+            let Some(register) = self.register(registers, name).cloned() else {
+                self.changing = None;
+                self.leave_visual();
+                return;
+            };
+            if let Some(again) = (self.changing.as_mut()).and_then(|change| change.again.as_mut()) {
+                again.put = Some(std::rc::Rc::new(register.clone()));
+            }
+            register
         };
         let Some(span) = self.span(Operator::Delete, Target::Selection, 1, copy) else {
             return;
         };
+        if span.lines.is_none() && self.takes_hidden((span.start, span.end), copy) {
+            self.refuse_join();
+            return;
+        }
         let mut taken = self.text(copy).slice(span.start, span.end);
         let lines = span.lines.is_some();
         if lines && !taken.ends_with('\n') {
@@ -2262,8 +2349,22 @@ impl Editor {
     }
 
     /// `J`: joins the cursor's line with the `times` lines after it, a
-    /// space between each, their indents gone.
+    /// space between each, their indents gone. Refused where it would take
+    /// a line's hidden start, as a listing's mark, into the line before,
+    /// or join a line kept as it is, as a listing's `..`.
     fn join(&mut self, times: usize, copy: &mut BufferCopy) {
+        let line = self.cursor.at.line;
+        let text = self.text(copy);
+        let joined = (line + 1)..=line.saturating_add(times as u64).min(text.last_line());
+        let kept = |line| self.keep.is_some_and(|keep| keep(&text.line_text(line)));
+        let hidden = (self.hide.is_some()
+            && (joined.clone()).any(|line| text.shown_start(line) > text.line_start(line)))
+            || (!joined.is_empty() && (kept(line) || joined.into_iter().any(kept)));
+        drop(text);
+        if hidden {
+            self.refuse_join();
+            return;
+        }
         for _ in 0..times {
             let text = self.text(copy);
             let line = self.cursor.at.line;
@@ -3645,25 +3746,29 @@ impl Editor {
         self.place_held(copy);
     }
 
+    /// The text is new, as when the file is read again: what was held of
+    /// the old is gone.
+    fn replaced(&mut self, copy: &BufferCopy) {
+        self.text_replaced();
+        // What the mouse held is gone with the text.
+        self.drag = None;
+        self.clicked = None;
+        self.corrections.clear();
+        self.held = None;
+        // What `:s///c` was asking about is gone.
+        if matches!(self.prompt, Some(Prompt::Confirm(_))) {
+            self.prompt = None;
+            self.found = None;
+        }
+        self.normal_cursor(copy);
+    }
+
     /// Takes in what an update from the daemon did: `jump` if this pane
     /// asked for the undo or redo it made. An answer to this pane's
     /// completion query is taken, leaving nothing for the others.
     pub(crate) fn heard(&mut self, heard: &mut Heard, jump: bool, copy: &mut BufferCopy) {
         match heard {
-            Heard::Replaced => {
-                self.text_replaced();
-                // What the mouse held is gone with the text.
-                self.drag = None;
-                self.clicked = None;
-                self.corrections.clear();
-                self.held = None;
-                // What `:s///c` was asking about is gone.
-                if matches!(self.prompt, Some(Prompt::Confirm(_))) {
-                    self.prompt = None;
-                    self.found = None;
-                }
-                self.normal_cursor(copy);
-            }
+            Heard::Replaced => self.replaced(copy),
             Heard::Edited(edit) => self.follow_edit(edit, copy),
             Heard::Reversed(edit) => {
                 if jump {
@@ -4013,25 +4118,6 @@ impl Editor {
         marks.set(mark, FilePlace::at(copy.path(), copy.text(), byte));
     }
 
-    /// Sets `<` and `>` at the start and end of the selection.
-    fn mark_selection(&self, copy: &BufferCopy, marks: &mut Marks) {
-        let Some(anchor) = self.anchor else {
-            return;
-        };
-        let (start, end) = if anchor <= self.cursor.at {
-            (anchor, self.cursor.at)
-        } else {
-            (self.cursor.at, anchor)
-        };
-        let text = self.text(copy);
-        for (mark, at) in [('<', start), ('>', end)] {
-            marks.set(
-                mark,
-                FilePlace::at(copy.path(), copy.text(), text.byte_at(at)),
-            );
-        }
-    }
-
     /// The command line is opened, with `:`: in visual mode, the
     /// selection's lines are marked and left, and the command line starts
     /// with them, `'<,'>`, as in Vim. A selection the mouse made from
@@ -4040,7 +4126,7 @@ impl Editor {
         if !matches!(self.mode, Mode::Visual(_)) {
             return "";
         }
-        self.mark_selection(copy, marks);
+        self.note_selection(copy, marks);
         self.leave_visual();
         self.insert_after = false;
         "'<,'>"

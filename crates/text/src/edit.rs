@@ -226,6 +226,53 @@ impl Edit {
         new.saturating_add(place.saturating_sub(old))
     }
 
+    /// Where `place` is after the edit, as [`map`](Self::map) has it, but
+    /// a place in text replaced, taken away with other text put in its
+    /// place, keeps its offset into what's put in, as far as that goes: so
+    /// a mark on a character whose case is changed stays on it, where
+    /// `map` would take it past.
+    #[must_use]
+    pub fn map_keeping(&self, place: usize, bias: Bias) -> usize {
+        let (mut old, mut new) = (0, 0);
+        // The text just put in where the next deletion starts, if any.
+        let mut put: Option<&str> = None;
+        for op in &self.ops {
+            match op {
+                Op::Retain(len) => {
+                    if place < old + len {
+                        return new + (place - old);
+                    }
+                    old += len;
+                    new += len;
+                    put = None;
+                }
+                Op::Insert(text) => {
+                    if place == old && bias == Bias::Before {
+                        return new;
+                    }
+                    new += text.len();
+                    put = Some(text);
+                }
+                Op::Delete(text) => {
+                    if place < old + text.len() {
+                        let Some(put) = put else {
+                            return new;
+                        };
+                        // Back to a character's start, in what's put in.
+                        let mut offset = (place - old).min(put.len());
+                        while !put.is_char_boundary(offset) {
+                            offset -= 1;
+                        }
+                        return new - put.len() + offset;
+                    }
+                    old += text.len();
+                    put = None;
+                }
+            }
+        }
+        new.saturating_add(place.saturating_sub(old))
+    }
+
     /// Where bytes `start` to `end` of the text before the edit are in the
     /// text after it, if it changes none of them and puts nothing in at
     /// either end: a name with anything typed beside it isn't that name
@@ -659,6 +706,28 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn map_keeping_keeps_places_in_replaced_text_and_is_map_elsewhere() {
+        // `bc` to `BC`, as a case changed: the places on them stay.
+        let edit = Edit::replace(5, 1, "bc", "BC");
+        assert_eq!(edit.map(1, Bias::After), 3);
+        assert_eq!(edit.map_keeping(1, Bias::After), 1);
+        assert_eq!(edit.map_keeping(2, Bias::Before), 2);
+        assert_eq!(edit.map_keeping(3, Bias::After), 3);
+        assert_eq!(edit.map_keeping(4, Bias::After), 4);
+        // Into shorter text, as far as it goes, on a character's start.
+        let edit = Edit::replace(6, 0, "abcd", "é");
+        assert_eq!(edit.map_keeping(3, Bias::After), 2);
+        assert_eq!(edit.map_keeping(1, Bias::After), 0);
+        assert_eq!(edit.map_keeping(4, Bias::After), 2);
+        // Text only taken away, or only put in, as `map` has it.
+        let edit = Edit::replace(5, 1, "bc", "");
+        assert_eq!(edit.map_keeping(2, Bias::After), 1);
+        let edit = Edit::replace(5, 1, "", "xy");
+        assert_eq!(edit.map_keeping(1, Bias::After), 3);
+        assert_eq!(edit.map_keeping(1, Bias::Before), 1);
+    }
 
     #[test]
     fn edits_keep_their_simplest_form() {

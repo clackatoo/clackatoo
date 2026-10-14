@@ -240,6 +240,10 @@ impl Editor {
     fn give_up_saying(&mut self, why: &str) {
         if self.awaiting.take().is_some() {
             self.status = Some(why.to_owned());
+            // The selection `.` made from the cursor goes with it.
+            if std::mem::take(&mut self.repeat_selection) {
+                self.leave_visual();
+            }
             // A macro waiting for it stops too: the desk sees to that.
             self.gave_up = true;
             self.resume_replaying = false;
@@ -306,6 +310,7 @@ impl Editor {
         if !replaying && !self.framed {
             self.back_to_insert();
         }
+        self.note_selection(copy, &mut shared.marks);
         for stroke in awaiting.strokes {
             // Held again if a command starts waiting.
             done.redraw |= self.stroke(stroke, copy, shared).redraw;

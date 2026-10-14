@@ -1,9 +1,12 @@
 //! Indenting as the grammar says: a new line's indent put right when the
 //! answer comes, whatever was typed meanwhile, and `=`.
 
+use std::time::Duration;
+
 use clackatoo_protocol::{Answer, Construct, LineIndent, Piece, Query};
 
 use super::{Mode, Setup};
+use crate::pane::Selection;
 
 /// The last question how lines should be indented: its number, the byte
 /// it asks about, and how many lines, as the text is now.
@@ -420,6 +423,29 @@ fn reindenting_lines_with_a_count_a_selection_and_again() {
     let (asked, at, lines) = last_indent(&setup);
     assert_eq!((at, lines), (0, 2));
     setup.answer(asked, indents(&[(0, Some(2)), (4, Some(2))]));
+    assert_eq!(setup.text(), "  a {\n  b\n\n    c\n}\n");
+    assert_eq!(setup.editor.mode, Mode::Normal);
+}
+
+#[test]
+fn dot_reindents_as_many_lines_as_were_selected_and_given_up_leaves_none_selected() {
+    let mut setup = Setup::new(BLOCK);
+    setup.keys("Vj=");
+    let (asked, _, _) = last_indent(&setup);
+    setup.answer(asked, indents(&[(0, Some(2)), (4, Some(2))]));
+    // As many lines from the cursor's.
+    setup.keys("jj.");
+    let (asked, at, lines) = last_indent(&setup);
+    assert_eq!((at, lines), (10, 2));
+    setup.answer(asked, indents(&[(10, Some(4)), (11, Some(4))]));
+    assert_eq!(setup.text(), "  a {\n  b\n\n    c\n}\n");
+    assert_eq!(setup.editor.mode, Mode::Normal);
+    // Waiting, the lines are selected; given up on, they aren't.
+    setup.keys("j.");
+    assert_eq!(setup.editor.mode, Mode::Visual(Selection::Lines));
+    let (asked, _, _) = last_indent(&setup);
+    setup.editor.age_awaiting(Duration::from_secs(2));
+    setup.answer(asked, indents(&[(11, Some(0)), (17, Some(0))]));
     assert_eq!(setup.text(), "  a {\n  b\n\n    c\n}\n");
     assert_eq!(setup.editor.mode, Mode::Normal);
 }

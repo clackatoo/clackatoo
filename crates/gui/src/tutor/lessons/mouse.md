@@ -1,6 +1,6 @@
 # The mouse in editors
 
-Selecting with the mouse, as in Neovim: dragging selects in visual mode, a double click and drag by words, a triple click and drag by lines, ready for `d`, `y`, `c` or `>`.
+Selecting with the mouse, as in Neovim: dragging selects in visual mode, a double click and drag by words, a triple click and drag by lines, ready for `d`, `y`, `c` or `>`; and what selections leave behind, for `gv` and `.`.
 
 ```practice fruit.txt
 apple banana cherry
@@ -54,6 +54,43 @@ Press `i` for insert mode, then drag across `fig`: the bar says `(insert) VISUAL
 mode insert
 register 0 "fig"
 ```
+
+## Select it again with gv
+
+```practice fruit.txt
+apple banana cherry
+damson elder fig
+grape honeydew kiwi
+lemon mango nectarine
+```
+
+Press Esc for normal mode. Drag across `banana cherry`, or select it with `v`, and press `y` to copy it. `gv` selects the last selection again, as it was made: by characters or by lines, with the cursor at the end it was at. It keeps to its text as lines are put in above it or text is typed in it. Press `gv`, then `U` to put it in capitals.
+
+```check
+has "BANANA CHERRY"
+```
+
+## Do it again with .
+
+```practice fruit.txt
+apple banana cherry
+damson elder fig
+grape honeydew kiwi
+lemon mango nectarine
+```
+
+```setup
+cursor 2
+```
+
+`.` makes a change made in visual mode again on as much text from the cursor, as Vim's does: as many lines, as many characters on a line, or over lines, as many lines, to the same column. On `damson`, press `ve` and `d`. Then go to the start of the line below with `j0`, and press `.`: as many characters go again.
+
+```check
+not has "damson"
+has "\nhoneydew kiwi"
+```
+
+In visual mode, `.` makes it again on what's selected, so `V>` and `.` indents the lines once more, as `>` keeps them selected; and `gv` swaps what's selected with the last selection.
 
 ## More
 

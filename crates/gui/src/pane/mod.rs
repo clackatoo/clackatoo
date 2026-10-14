@@ -140,6 +140,9 @@ pub(crate) struct Pane {
     cursor: Option<Cursor>,
     /// Where a visual selection started.
     anchor: Option<Point>,
+    /// The last visual selection, for `gv`: where it started, where the
+    /// cursor was, and by what.
+    last_visual: Option<(Point, Point, Selection)>,
     /// A search being typed.
     prompt: Option<normal::Prompt>,
     /// The last search, and whether it went backward.
@@ -197,6 +200,7 @@ impl Pane {
             mode: Mode::Insert,
             cursor: None,
             anchor: None,
+            last_visual: None,
             prompt: None,
             search: None,
             case: Case::default(),
@@ -493,10 +497,7 @@ impl Pane {
         if let Some(chat) = &mut self.chat {
             chat.leave();
         }
-        if matches!(self.mode, Mode::Visual(_)) {
-            self.mode = Mode::Normal;
-        }
-        self.anchor = None;
+        self.leave_visual();
         self.prefix = None;
         self.prompt = None;
     }
@@ -693,8 +694,8 @@ impl Pane {
             // From anywhere else, too: a selection or a search being typed
             // is left, and the cursor stays where it is.
             _ if to_normal => {
+                self.leave_visual();
                 self.mode = Mode::Normal;
-                self.anchor = None;
                 self.prompt = None;
                 true
             }
@@ -938,9 +939,9 @@ impl Pane {
 
     /// Back to insert mode, at the live screen.
     fn insert(&mut self) -> bool {
+        self.leave_visual();
         self.mode = Mode::Insert;
         self.cursor = None;
-        self.anchor = None;
         self.prompt = None;
         self.status = None;
         self.scroll = 0;
@@ -1611,6 +1612,46 @@ mod tests {
         assert_eq!(
             pane.take_yanked().map(|(text, _)| text).as_deref(),
             Some("second")
+        );
+    }
+
+    #[test]
+    fn gv_selects_the_last_selection_again_and_swaps_with_the_one_being_made() {
+        let terminal = terminal("hello world\r\nsecond");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let selected = |pane: &Pane| {
+            (pane.selection())
+                .map(|(start, end, kind)| ((start.line, start.col), (end.line, end.col), kind))
+        };
+        // Nothing's been selected yet.
+        keys(&mut pane, "gv");
+        assert_eq!(pane.mode, Mode::Normal);
+        keys(&mut pane, "k0vey");
+        serve(&mut pane, &terminal);
+        keys(&mut pane, "jgv");
+        assert_eq!(
+            selected(&pane),
+            Some(((0, 0), (0, 4), Selection::Characters))
+        );
+        assert_eq!(cursor(&pane), ("hello world".into(), 0, 4), "at its end");
+        // In visual mode, the two swap.
+        named(&mut pane, NamedKey::Escape);
+        keys(&mut pane, "jV");
+        named(&mut pane, NamedKey::Escape);
+        keys(&mut pane, "vgv");
+        assert_eq!(selected(&pane), Some(((1, 4), (1, 4), Selection::Lines)));
+        keys(&mut pane, "gv");
+        assert_eq!(
+            selected(&pane),
+            Some(((1, 4), (1, 4), Selection::Characters))
+        );
+        // Ended by leaving the pane, it's kept.
+        pane.leave();
+        keys(&mut pane, "gv");
+        assert_eq!(
+            selected(&pane),
+            Some(((1, 4), (1, 4), Selection::Characters))
         );
     }
 

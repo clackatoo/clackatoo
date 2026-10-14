@@ -451,6 +451,26 @@ fn enter_on_dot_dot_goes_up_as_minus_does_and_its_going_is_no_change() {
 }
 
 #[test]
+fn visual_r_and_j_leave_a_listings_marks_and_dot_dot_as_they_are() {
+    let mut desk = listing_src();
+    let marks = |desk: &Desk| -> Vec<String> {
+        (editor_text(desk).lines())
+            .map(|line| line[..crate::explorer::listing::mark_len(line)].to_owned())
+            .collect()
+    };
+    let before = marks(&desk);
+    type_keys(&mut desk, "ggVGr-");
+    assert_eq!(listing_shown(&desk), ["..", "-----", "-------"]);
+    assert_eq!(marks(&desk), before);
+    type_keys(&mut desk, "uggVjJ");
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
+    assert_eq!(
+        note(&desk),
+        "a listing's lines can't be joined: act on whole lines"
+    );
+}
+
+#[test]
 fn steps_out_of_the_folder_shown_say_where_they_go_in_full() {
     let mut desk = listing_src();
     // `/p/srcx` starts as `/p/src` does, but isn't in it.

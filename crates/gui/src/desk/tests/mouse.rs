@@ -392,3 +392,12 @@ fn a_binding_typing_keys_on_a_selection_from_insert_mode_goes_back_once_its_done
     assert_eq!(editor_text(&desk), "hellohello world\n");
     assert_eq!(editor_mode(&desk), Mode::Insert);
 }
+
+#[test]
+fn a_binding_copying_selecting_again_and_deleting_ends_in_insert_mode() {
+    let mut desk = hello_dragged_from_insert_mode(r#"client.keys.map("v", ",", "ygvd")"#);
+    type_keys(&mut desk, ",");
+    assert_eq!(editor_text(&desk), " world\n");
+    assert_eq!(editor_mode(&desk), Mode::Insert);
+    assert_eq!(bar_mode(&desk), Some(ModeName::Insert));
+}
