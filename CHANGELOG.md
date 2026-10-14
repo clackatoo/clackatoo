@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.19 (2026-10-14)
+
+### Features
+
+- **editor:** words as each language reads them, so names such as margin-top complete, move and search as one word (2a4e028)
+
 ## 2026.10.18 (2026-10-14)
 
 ### Features
