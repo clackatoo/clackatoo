@@ -187,6 +187,8 @@ pub(crate) struct Browser {
     /// waiting for the thread, which may be waiting for a page to load.
     running: Arc<Running>,
     thread: Option<JoinHandle<()>>,
+    /// When it was told to stop, if it has been.
+    told_to_stop: Option<Instant>,
 }
 
 /// The running browser's process, if one is, shared between the thread
@@ -252,6 +254,7 @@ impl Browser {
             outbox,
             running,
             thread,
+            told_to_stop: None,
         }
     }
 
@@ -267,17 +270,29 @@ impl Browser {
         std::mem::take(&mut *locked(&self.outbox))
     }
 
-    /// Stops the browser and its thread, waiting for them. The browser is
-    /// told to stop at once, so whatever the thread waits on fails, rather
-    /// than the daemon waiting for a page to load; one that hasn't gone
-    /// after a moment is killed.
-    pub(crate) fn stop(&mut self) {
+    /// Tells the browser and its thread to stop, without waiting for them,
+    /// so the moment [`stop`](Self::stop) gives them can go by while the
+    /// daemon does something else. Told once.
+    pub(crate) fn begin_stop(&mut self) {
+        if self.told_to_stop.is_some() {
+            return;
+        }
+        self.told_to_stop = Some(Instant::now());
         let _ = self.inputs.send(Input::Job(Job::Stop));
         self.running.stop(rustix::process::Signal::TERM);
+    }
+
+    /// Stops the browser and its thread, waiting for them. The browser is
+    /// told to stop at once, if it hasn't been, so whatever the thread waits
+    /// on fails, rather than the daemon waiting for a page to load; one that
+    /// hasn't gone a moment after it was told is killed.
+    pub(crate) fn stop(&mut self) {
+        self.begin_stop();
         let Some(thread) = self.thread.take() else {
             return;
         };
-        let deadline = Instant::now() + STOP_GRACE;
+        let told = self.told_to_stop.unwrap_or_else(Instant::now);
+        let deadline = told + STOP_GRACE;
         while !thread.is_finished() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }

@@ -911,6 +911,7 @@ pub(super) mod tests {
             languages: None,
             servers: None,
             declined: None,
+            lsp_trace: None,
             server_idle: std::time::Duration::ZERO,
             prompt_wait: crate::DEFAULT_PROMPT_WAIT,
             probe_wait: crate::DEFAULT_PROBE_WAIT,

@@ -49,6 +49,9 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 # Loads fontconfig only when the window first needs a font, so CLI commands
 # and the daemon don't pay for linking it and its dependencies.
 fontique = { version = "0.11", features = ["fontconfig-dlopen"] }
+# Matches the files language servers ask to hear of changes to, by the
+# glob patterns LSP gives. Already built, for `ignore`.
+globset = { version = "0.4.20", default-features = false }
 # Walks a project for the finder as ripgrep does (it's ripgrep's walker),
 # leaving out ignored and hidden files, on several threads.
 ignore = "0.4.33"

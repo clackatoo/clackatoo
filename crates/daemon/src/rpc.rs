@@ -7,14 +7,21 @@
 //! This only moves messages. It frames them, unframes what comes back,
 //! and keeps what the program writes to stderr for the log. What the
 //! messages mean is for the agent's and language servers' own modules.
+//! Every message either way can also be written to a trace file, a line
+//! each, to see what was said (see [`Peer::trace_to`]).
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use rustix::fs::OFlags;
+use rustix::process::WaitIdStatus;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -70,6 +77,8 @@ pub(crate) struct Peer {
     errors: Vec<u8>,
     /// The last lines of stderr, to say why it stopped if it stops soon.
     last_errors: VecDeque<String>,
+    /// Where every message to and from it is written, if anywhere.
+    trace: Option<File>,
 }
 
 /// How many of a program's last lines of stderr are kept.
@@ -122,6 +131,7 @@ impl Peer {
             incoming: Vec::new(),
             errors: Vec::new(),
             last_errors: VecDeque::new(),
+            trace: None,
         })
     }
 
@@ -129,9 +139,70 @@ impl Peer {
         &self.name
     }
 
+    /// Writes every message to and from the program from now on, and what
+    /// it writes to stderr, to the end of the file at `path`, a line each,
+    /// stamped with the time in UTC and the program's name and pid: `->`
+    /// before what it's sent, `<-` before what it sends, `!!` before a
+    /// line of its stderr. The file is made readable by its owner only, as
+    /// messages hold files' text. Only a regular file is written: never
+    /// one through a link, nor a pipe, which could hold up the loop. If
+    /// it can't be, the log says why.
+    pub(crate) fn trace_to(&mut self, path: &Path) {
+        let opened = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(
+                i32::try_from((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits()).unwrap_or_default(),
+            )
+            .open(path)
+            .and_then(|file| {
+                if file.metadata()?.is_file() {
+                    Ok(file)
+                } else {
+                    Err(io::Error::other("it isn't a regular file"))
+                }
+            });
+        match opened {
+            Ok(file) => self.trace = Some(file),
+            Err(err) => log::warn!("{}: can't trace to {}: {err}", self.name, path.display()),
+        }
+    }
+
+    /// Writes `body`, which went the way `way` says, to the trace, if
+    /// there's one: on one line, as JSON breaks lines only between its
+    /// parts, where a space does as well.
+    fn trace(&mut self, way: &str, body: &[u8]) {
+        let Some(file) = &mut self.trace else { return };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let mut line = format!(
+            "{}.{:03}Z {}[{}] {way} ",
+            crate::explorer::date(now.as_secs()),
+            now.subsec_millis(),
+            self.name,
+            self.process.pid().as_raw_nonzero(),
+        )
+        .into_bytes();
+        line.extend(body.iter().map(|&byte| match byte {
+            b'\n' | b'\r' => b' ',
+            byte => byte,
+        }));
+        line.push(b'\n');
+        // In one write, so the lines of servers tracing to one file never
+        // run into each other.
+        if let Err(err) = file.write_all(&line) {
+            log::warn!("{}: tracing stopped: {err}", self.name);
+            self.trace = None;
+        }
+    }
+
     /// Queues `message`, framed.
     pub(crate) fn send(&mut self, message: &Value) {
-        frame(self.framing, message, &mut self.outgoing);
+        let body = message.to_string();
+        self.trace("->", body.as_bytes());
+        frame_body(self.framing, &body, &mut self.outgoing);
     }
 
     /// Writes queued messages until the pipe is full. An error means the
@@ -174,7 +245,20 @@ impl Peer {
                 Ok(n) => {
                     total += n;
                     self.incoming.extend_from_slice(&buffer[..n]);
-                    unframe(&self.name, self.framing, &mut self.incoming, messages)?;
+                    if self.trace.is_none() {
+                        unframe(&self.name, self.framing, &mut self.incoming, messages)?;
+                    } else {
+                        let mut bodies = Vec::new();
+                        let unframed =
+                            unframe_bodies(&self.name, self.framing, &mut self.incoming, |body| {
+                                bodies.push(body.to_vec());
+                            });
+                        for body in bodies {
+                            self.trace("<-", &body);
+                            messages.extend(parse(&self.name, &body));
+                        }
+                        unframed?;
+                    }
                     if total >= budget {
                         return Ok(true);
                     }
@@ -186,18 +270,26 @@ impl Peer {
         }
     }
 
-    /// Reads what the program wrote to stderr, and logs it at debug level.
-    pub(crate) fn read_errors(&mut self, buffer: &mut [u8]) {
+    /// Reads what the program wrote to stderr, up to `budget` bytes, and
+    /// logs it at debug level. Returns whether more may be waiting, as when
+    /// the budget ran out.
+    pub(crate) fn read_errors(&mut self, buffer: &mut [u8], budget: usize) -> bool {
+        let mut total = 0;
         loop {
+            if total >= budget {
+                return true;
+            }
             match self.stderr.read(buffer) {
-                Ok(0) => return,
+                Ok(0) => return false,
                 Ok(n) => {
+                    total += n;
                     self.errors.extend_from_slice(&buffer[..n]);
                     while let Some(end) = self.errors.iter().position(|&byte| byte == b'\n') {
                         let line: Vec<u8> = self.errors.drain(..=end).collect();
                         let line = String::from_utf8_lossy(&line);
                         let line = line.trim();
                         log::debug!("{}: {line}", self.name);
+                        self.trace("!!", line.as_bytes());
                         if !line.is_empty() {
                             if self.last_errors.len() == LAST_ERRORS {
                                 self.last_errors.pop_front();
@@ -214,7 +306,7 @@ impl Peer {
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => return,
+                Err(_) => return false,
             }
         }
     }
@@ -242,6 +334,17 @@ impl Peer {
         self.process.as_raw_fd()
     }
 
+    /// Collects the program's exit status, if it has exited. After that
+    /// it's gone, and this mustn't be called again.
+    pub(crate) fn try_wait(&self) -> io::Result<Option<WaitIdStatus>> {
+        self.process.try_wait()
+    }
+
+    /// Kills the program, if it's still there.
+    pub(crate) fn kill(&self) {
+        self.process.kill();
+    }
+
     /// Stops the program: closing its pipes ends it. Returns its process,
     /// to be reaped once it has exited.
     pub(crate) fn stop(self) -> Process {
@@ -252,7 +355,12 @@ impl Peer {
 
 /// Queues `message` onto `outgoing`, framed as `framing` says.
 pub(crate) fn frame(framing: Framing, message: &Value, outgoing: &mut Vec<u8>) {
-    let body = message.to_string();
+    frame_body(framing, &message.to_string(), outgoing);
+}
+
+/// Queues `body`, a message's JSON, onto `outgoing`, framed as `framing`
+/// says.
+fn frame_body(framing: Framing, body: &str, outgoing: &mut Vec<u8>) {
     match framing {
         Framing::Lines => {
             outgoing.extend_from_slice(body.as_bytes());
@@ -275,12 +383,24 @@ pub(crate) fn unframe(
     incoming: &mut Vec<u8>,
     messages: &mut Vec<Message>,
 ) -> io::Result<()> {
+    unframe_bodies(name, framing, incoming, |body| {
+        messages.extend(parse(name, body));
+    })
+}
+
+/// As [`unframe`] does, but hands each whole message's bytes to `take`,
+/// as they came.
+fn unframe_bodies(
+    name: &str,
+    framing: Framing,
+    incoming: &mut Vec<u8>,
+    mut take: impl FnMut(&[u8]),
+) -> io::Result<()> {
     let mut start = 0;
     let broken = loop {
         match next_body(framing, &incoming[start..]) {
             Ok(Some((body, end))) => {
-                let body = &incoming[start + body.start..start + body.end];
-                messages.extend(parse(name, body));
+                take(&incoming[start + body.start..start + body.end]);
                 start += end;
             }
             Ok(None) => break None,
@@ -394,5 +514,31 @@ mod tests {
         assert!(next_body(Framing::Headers, b"X: 1\r\n\r\n{}").is_err());
         let huge = format!("Content-Length: {}\r\n\r\n", MAX_MESSAGE + 1);
         assert!(next_body(Framing::Headers, huge.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn a_flood_of_stderr_is_read_a_budget_at_a_time() {
+        let flood = [
+            "sh",
+            "-c",
+            "head -c 4000000 /dev/zero | tr '\\0' x >&2; sleep 5",
+        ];
+        let command: Vec<OsString> = flood.iter().map(OsString::from).collect();
+        let mut peer = Peer::start("flood", &command, None, Framing::Lines).unwrap();
+        let mut buffer = vec![0; 64 * 1024];
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Once a budget's worth is waiting, a read stops there, saying
+        // there's more.
+        while !peer.read_errors(&mut buffer, 1024) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never more than a budget"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        peer.kill();
+        while peer.try_wait().unwrap().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 }

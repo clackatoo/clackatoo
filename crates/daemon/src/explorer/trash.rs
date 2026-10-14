@@ -184,7 +184,7 @@ fn encoded(path: &Path) -> String {
 
 /// The date and time `seconds` after the Unix epoch, as `YYYY-MM-DDThh:mm:ss`,
 /// in UTC.
-fn date(seconds: u64) -> String {
+pub(crate) fn date(seconds: u64) -> String {
     let days = i64::try_from(seconds / 86_400).unwrap_or(0);
     let time = seconds % 86_400;
     // Howard Hinnant's days-to-civil.

@@ -78,6 +78,7 @@ impl TestDaemon {
             languages: None,
             servers: None,
             declined: None,
+            lsp_trace: None,
             server_idle: Duration::ZERO,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,

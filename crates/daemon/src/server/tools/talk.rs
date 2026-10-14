@@ -1116,7 +1116,7 @@ mod tests {
         assert_eq!(daemon.chat_workspace(b), daemon.chat_workspace(a));
 
         let config = daemon.config.clone();
-        let handover = daemon.hand_over().unwrap();
+        let handover = daemon.hand_over(std::time::Instant::now()).unwrap();
         drop(daemon);
         let resumed = Daemon::resume(handover, config).unwrap();
         assert_eq!(resumed.chat_ref(b).unwrap().limits(), Limits::ReadOnly);
@@ -1150,7 +1150,7 @@ mod tests {
         let message = daemon.message_from(b, "later".to_owned()).unwrap();
         daemon.chat(a).unwrap().deliver(message).unwrap();
         let config = daemon.config.clone();
-        let handover = daemon.hand_over().unwrap();
+        let handover = daemon.hand_over(std::time::Instant::now()).unwrap();
         drop(daemon);
         let mut resumed = Daemon::resume(handover, config).unwrap();
         assert!(resumed.tools.talk.inboxes.contains(&a));

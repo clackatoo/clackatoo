@@ -119,6 +119,144 @@ pub(crate) enum Incoming {
     /// [`answer_request`](LanguageServer::answer_request) answers once the
     /// edit has been made, or hasn't.
     ApplyEdit { id: Value, edit: Value },
+    /// It asks to hear of changes on disk to the files `watchers`, a
+    /// `DidChangeWatchedFilesRegistrationOptions`, says (see
+    /// [`watchers`]), until it asks to hear no more under `id`.
+    Watch { id: String, watchers: Value },
+    /// It asks to hear no more of the changes it asked to hear of under
+    /// `id`.
+    Unwatch { id: String },
+    /// It has answered `shutdown`, and so may be told to exit.
+    ShutDown,
+}
+
+/// A change on disk to a file, as LSP numbers them in a `FileEvent`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileChange {
+    Created = 1,
+    Changed = 2,
+    Deleted = 3,
+}
+
+impl FileChange {
+    /// What this change and then `next`, to the same file, come to, told
+    /// as one: a file made and then written was made; one deleted, at the
+    /// end, is deleted; and one that was there, changed and then made
+    /// anew, as by a new file renamed over it, has changed.
+    #[must_use]
+    pub(crate) fn then(self, next: Self) -> Self {
+        match (self, next) {
+            (_, Self::Deleted) => Self::Deleted,
+            (Self::Created, _) => Self::Created,
+            (Self::Changed | Self::Deleted, _) => Self::Changed,
+        }
+    }
+
+    /// Its bit in a `FileSystemWatcher`'s `kind`.
+    fn bit(self) -> u8 {
+        match self {
+            Self::Created => 1,
+            Self::Changed => 2,
+            Self::Deleted => 4,
+        }
+    }
+}
+
+/// Files a server has asked to hear of changes to: those a glob pattern
+/// matches, from a directory.
+#[derive(Clone, Debug)]
+pub(crate) struct Watcher {
+    /// The directory the pattern is matched from: what's after it in a
+    /// file's path is matched.
+    pub(crate) base: PathBuf,
+    glob: globset::GlobMatcher,
+    /// Whether it can match files in directories inside `base`, and not
+    /// only those in it.
+    pub(crate) deep: bool,
+    /// The changes it wants to hear of, as their bits.
+    kinds: u8,
+}
+
+impl Watcher {
+    /// Whether it wants to hear of `change` to the file at `path`.
+    pub(crate) fn wants(&self, path: &Path, change: FileChange) -> bool {
+        self.kinds & change.bit() != 0
+            && (path.strip_prefix(&self.base)).is_ok_and(|rest| self.glob.is_match(rest))
+    }
+}
+
+/// The watchers in `options`, a `DidChangeWatchedFilesRegistrationOptions`,
+/// of a server whose project is in `root`. Each pattern is matched from
+/// its base: a `RelativePattern`'s `baseUri`; for a pattern written whole,
+/// the root, or `/` if it starts with one. The parts of a pattern up to
+/// its first wildcard are taken into its base, so `src/**/*.rs` is matched
+/// from `src`, and a pattern with no wildcards, as `/a/Cargo.toml`, from
+/// its file's directory. Watchers that make no sense are left out, as are
+/// those with `..` in their pattern, which could reach out of its base.
+pub(crate) fn watchers(options: &Value, root: &Path) -> Vec<Watcher> {
+    let list = (options.get("watchers").and_then(Value::as_array)).map_or(&[][..], Vec::as_slice);
+    if list.len() > MOST_WATCHERS {
+        let dropped = list.len() - MOST_WATCHERS;
+        log::warn!(
+            "skipping {dropped} file watchers past the first {MOST_WATCHERS} asked for at once"
+        );
+    }
+    (list.iter().take(MOST_WATCHERS))
+        .filter_map(|watcher| {
+            let watched = watcher_of(watcher, root);
+            if watched.is_none() {
+                log::debug!("skipping a file watcher that makes no sense: {watcher}");
+            }
+            watched
+        })
+        .collect()
+}
+
+/// The most watchers one registration may ask for: far more than any
+/// server does, short of a pattern match per watcher for every change
+/// heard of costing much.
+const MOST_WATCHERS: usize = 1000;
+
+/// One watcher, as [`watchers`] reads them.
+fn watcher_of(watcher: &Value, root: &Path) -> Option<Watcher> {
+    let kinds = match watcher.get("kind") {
+        None | Some(Value::Null) => 7,
+        Some(kind) => u8::try_from(kind.as_u64()?).ok()? & 7,
+    };
+    let (base, pattern) = match watcher.get("globPattern")? {
+        Value::String(pattern) if pattern.starts_with('/') => {
+            (PathBuf::from("/"), pattern.as_str())
+        }
+        Value::String(pattern) => (root.to_owned(), pattern.as_str()),
+        relative @ Value::Object(_) => {
+            // A URI, or a workspace folder, which has one.
+            let base = relative.get("baseUri")?;
+            let uri = (base.as_str()).or_else(|| base.get("uri")?.as_str())?;
+            (path_of(uri)?, relative.get("pattern")?.as_str()?)
+        }
+        _ => return None,
+    };
+    let parts: Vec<&str> = (pattern.split('/'))
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    if kinds == 0 || parts.is_empty() || parts.contains(&"..") {
+        return None;
+    }
+    let wild = |part: &&str| part.contains(['*', '?', '[', '{']);
+    let plain = (parts.iter().take_while(|part| !wild(part)).count()).min(parts.len() - 1);
+    let base = (parts[..plain].iter()).fold(base, |base, part| base.join(part));
+    let rest = parts[plain..].join("/");
+    let glob = (globset::GlobBuilder::new(&rest))
+        .literal_separator(true)
+        .build()
+        .ok()?
+        .compile_matcher();
+    Some(Watcher {
+        base,
+        glob,
+        deep: parts.len() - plain > 1 || rest.contains("**"),
+        kinds,
+    })
 }
 
 /// The error a server answers a request with when what it was working on
@@ -143,6 +281,9 @@ pub(crate) struct LanguageServer {
     /// What it does beyond keeping files open, from its answer to
     /// `initialize`.
     offers: Offers,
+    /// The ID of the `shutdown` request, once it's been asked to shut
+    /// down.
+    shutdown: Option<u64>,
 }
 
 /// What a server does, beyond keeping files open and saying what's wrong
@@ -178,10 +319,20 @@ struct Offers {
 
 impl LanguageServer {
     /// Starts `command` for the project in `root`, and introduces the
-    /// daemon to it.
-    pub(crate) fn start(name: &str, command: &[OsString], root: &Path) -> io::Result<Self> {
+    /// daemon to it. Every message either way is written to the file at
+    /// `trace`, if given (see [`Peer::trace_to`]).
+    pub(crate) fn start(
+        name: &str,
+        command: &[OsString],
+        root: &Path,
+        trace: Option<&Path>,
+    ) -> io::Result<Self> {
+        let mut peer = Peer::start(name, command, Some(root), Framing::Headers)?;
+        if let Some(trace) = trace {
+            peer.trace_to(trace);
+        }
         let mut server = Self {
-            peer: Peer::start(name, command, Some(root), Framing::Headers)?,
+            peer,
             next_id: 0,
             initialize: None,
             ready: false,
@@ -191,6 +342,7 @@ impl LanguageServer {
             // Until it says, the whole text is safe.
             sync: Sync::Full,
             offers: Offers::default(),
+            shutdown: None,
         };
         // Completions: snippets are taken, filled in place by place in the
         // window; an item's range to insert over is used, not the one to
@@ -255,6 +407,11 @@ impl LanguageServer {
                     "workspace": {
                         "workspaceFolders": true,
                         "configuration": true,
+                        // The files it asks to hear of are watched for it.
+                        "didChangeWatchedFiles": {
+                            "dynamicRegistration": true,
+                            "relativePatternSupport": true,
+                        },
                         "workspaceEdit": { "documentChanges": true },
                         "applyEdit": true,
                         "executeCommand": {},
@@ -552,16 +709,36 @@ impl LanguageServer {
         self.request("textDocument/rename", &params)
     }
 
-    /// Tells the server the files at `paths`, which it has no buffers open
-    /// for, have been changed on disk, so it reads them again.
-    pub(crate) fn changed_on_disk(&mut self, paths: &[PathBuf]) {
-        let changes: Vec<Value> = (paths.iter())
-            .map(|path| json!({ "uri": uri(path), "type": 2 }))
+    /// Tells the server the files in `changes`, which it has no buffers
+    /// open for, have changed on disk as each says, so it reads them again.
+    pub(crate) fn changed_on_disk(&mut self, changes: &[(PathBuf, FileChange)]) {
+        let changes: Vec<Value> = (changes.iter())
+            .map(|(path, change)| json!({ "uri": uri(path), "type": *change as u8 }))
             .collect();
         self.notify(
             "workspace/didChangeWatchedFiles",
             &json!({ "changes": changes }),
         );
+    }
+
+    /// Asks the server to shut down, as LSP asks before it's told to exit,
+    /// if it's ready: before, it may be told nothing more but to exit.
+    /// Returns whether it was asked, and so will answer.
+    pub(crate) fn shut_down(&mut self) -> bool {
+        if !self.ready || self.shutdown.is_some() {
+            return false;
+        }
+        self.shutdown = Some(self.request("shutdown", &Value::Null));
+        true
+    }
+
+    /// Tells the server to exit, which ends it: cleanly if it has
+    /// answered `shutdown`. Its answer to `initialize`, if it hasn't
+    /// answered yet, is no longer waited for, so nothing more is sent.
+    pub(crate) fn exit(&mut self) {
+        self.initialize = None;
+        self.peer
+            .send(&json!({ "jsonrpc": "2.0", "method": "exit" }));
     }
 
     /// Writes queued messages until the pipe is full. An error means the
@@ -592,9 +769,27 @@ impl LanguageServer {
         read
     }
 
-    /// Reads what the server wrote to stderr, and logs it at debug level.
-    pub(crate) fn read_errors(&mut self, buffer: &mut [u8]) {
-        self.peer.read_errors(buffer);
+    /// Reads what the server wrote to stderr, up to `budget` bytes, and
+    /// logs it at debug level. Returns whether more may be waiting.
+    pub(crate) fn read_errors(&mut self, buffer: &mut [u8], budget: usize) -> bool {
+        self.peer.read_errors(buffer, budget)
+    }
+
+    /// The last few lines it wrote to stderr, on one line, if it wrote
+    /// any.
+    pub(crate) fn last_errors(&self) -> Option<String> {
+        self.peer.last_errors()
+    }
+
+    /// Collects its exit status, if it has exited. After that it's gone,
+    /// and this mustn't be called again.
+    pub(crate) fn try_wait(&self) -> io::Result<Option<rustix::process::WaitIdStatus>> {
+        self.peer.try_wait()
+    }
+
+    /// Kills it, if it's still there.
+    pub(crate) fn kill(&self) {
+        self.peer.kill();
     }
 
     fn receive(&mut self, message: Message, incoming: &mut Vec<Incoming>) {
@@ -624,10 +819,25 @@ impl LanguageServer {
                         let items = message.params.get("items").and_then(Value::as_array);
                         Value::Array(vec![Value::Null; items.map_or(0, Vec::len)])
                     }
-                    "client/registerCapability"
-                    | "client/unregisterCapability"
-                    | "window/workDoneProgress/create"
-                    | "window/showMessageRequest" => Value::Null,
+                    // Only watching files is taken up; the rest go on
+                    // without, as before they were offered.
+                    "client/registerCapability" => {
+                        incoming.extend(registered(&message.params, "registrations").map(
+                            |(id, options)| Incoming::Watch {
+                                id,
+                                watchers: options.clone(),
+                            },
+                        ));
+                        Value::Null
+                    }
+                    "client/unregisterCapability" => {
+                        // LSP spells it so.
+                        let unregistered = registered(&message.params, "unregisterations")
+                            .chain(registered(&message.params, "unregistrations"));
+                        incoming.extend(unregistered.map(|(id, _)| Incoming::Unwatch { id }));
+                        Value::Null
+                    }
+                    "window/workDoneProgress/create" | "window/showMessageRequest" => Value::Null,
                     _ => {
                         self.peer.send(&json!({
                             "jsonrpc": "2.0",
@@ -639,6 +849,9 @@ impl LanguageServer {
                 };
                 self.peer
                     .send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+            }
+            (None, Some(id)) if self.shutdown.is_some() && id.as_u64() == self.shutdown => {
+                incoming.push(Incoming::ShutDown);
             }
             (None, Some(id)) => {
                 if self.initialize.is_none() || id.as_u64() != self.initialize {
@@ -750,15 +963,29 @@ impl LanguageServer {
         self.peer.exit_fd()
     }
 
-    /// Stops the server: it's asked to exit, and closing its pipes ends
-    /// it if it doesn't. Returns its process, to be reaped once it has
-    /// exited.
-    pub(crate) fn stop(mut self) -> Process {
-        self.peer
-            .send(&json!({ "jsonrpc": "2.0", "method": "exit" }));
-        let _ = self.peer.flush();
+    /// Lets the server go, as it has gone by itself, or is going: closing
+    /// its pipes ends it if it hasn't. Returns its process, to be reaped
+    /// once it has exited.
+    pub(crate) fn stop(self) -> Process {
         self.peer.stop()
     }
+}
+
+/// The IDs, and the options, of the registrations for watching files in
+/// `params`, a `client/registerCapability`'s or `unregisterCapability`'s,
+/// under `list`.
+fn registered<'a>(params: &'a Value, list: &str) -> impl Iterator<Item = (String, &'a Value)> {
+    let list = (params.get(list).and_then(Value::as_array)).map_or(&[][..], Vec::as_slice);
+    (list.iter()).filter_map(|registration| {
+        if registration.get("method")?.as_str()? != "workspace/didChangeWatchedFiles" {
+            return None;
+        }
+        let id = registration.get("id")?.as_str()?.to_owned();
+        Some((
+            id,
+            registration.get("registerOptions").unwrap_or(&Value::Null),
+        ))
+    })
 }
 
 /// The places an answer such as `textDocument/definition`'s gives: one
@@ -1675,5 +1902,83 @@ mod tests {
             text.insert(start_char, change["text"].as_str().unwrap());
         }
         assert_eq!(text, after);
+    }
+
+    #[test]
+    fn watchers_match_from_their_base() {
+        let root = Path::new("/p");
+        let options = json!({ "watchers": [
+            { "globPattern": "**/*.rs" },
+            { "globPattern": "/abs/Cargo.toml", "kind": 2 },
+            { "globPattern": "src/*.{gcsl,txt}" },
+            { "globPattern": { "baseUri": "file:///lib", "pattern": "**/*.rs" }, "kind": 4 },
+            { "globPattern": { "baseUri": { "uri": "file:///w", "name": "w" }, "pattern": "x" } },
+            // Out of its base, or wanting nothing, or no pattern at all.
+            { "globPattern": "../*.rs" },
+            { "globPattern": "**/*.rs", "kind": 0 },
+            { "kind": 7 },
+        ]});
+        let watchers = watchers(&options, root);
+        let found: Vec<(&str, bool)> = (watchers.iter())
+            .map(|watcher| (watcher.base.to_str().unwrap(), watcher.deep))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("/p", true),
+                ("/abs", false),
+                ("/p/src", false),
+                ("/lib", true),
+                ("/w", false)
+            ]
+        );
+        let wants =
+            |index: usize, path: &str, change| watchers[index].wants(Path::new(path), change);
+        // `**/` matches no folders too, and `*` none of a path's slashes.
+        assert!(wants(0, "/p/a.rs", FileChange::Created));
+        assert!(wants(0, "/p/a/b/c.rs", FileChange::Deleted));
+        assert!(!wants(0, "/q/a.rs", FileChange::Created));
+        assert!(wants(1, "/abs/Cargo.toml", FileChange::Changed));
+        assert!(
+            !wants(1, "/abs/Cargo.toml", FileChange::Created),
+            "not that kind"
+        );
+        assert!(wants(2, "/p/src/a.txt", FileChange::Changed));
+        assert!(!wants(2, "/p/src/sub/a.txt", FileChange::Changed));
+        assert!(wants(3, "/lib/x/y.rs", FileChange::Deleted));
+        assert!(!wants(3, "/lib/x/y.rs", FileChange::Changed));
+        assert!(wants(4, "/w/x", FileChange::Created));
+    }
+
+    #[test]
+    fn changes_to_one_file_heard_together_come_to_one() {
+        use FileChange::{Changed, Created, Deleted};
+        assert_eq!(Created.then(Changed), Created);
+        assert_eq!(Created.then(Deleted), Deleted);
+        assert_eq!(Deleted.then(Created), Changed);
+        assert_eq!(Changed.then(Created), Changed, "a new file renamed over it");
+        assert_eq!(Changed.then(Deleted), Deleted);
+    }
+
+    #[test]
+    fn a_registration_may_ask_for_only_so_many_watchers() {
+        let many: Vec<Value> = (0..=MOST_WATCHERS)
+            .map(|n| json!({ "globPattern": format!("**/*.x{n}") }))
+            .collect();
+        let watchers = watchers(&json!({ "watchers": many }), Path::new("/p"));
+        assert_eq!(watchers.len(), MOST_WATCHERS);
+    }
+
+    #[test]
+    fn registrations_to_watch_files_are_told_apart_from_others() {
+        let params = json!({ "registrations": [
+            { "id": "1", "method": "textDocument/formatting" },
+            { "id": "2", "method": "workspace/didChangeWatchedFiles",
+              "registerOptions": { "watchers": [] } },
+        ]});
+        let found: Vec<(String, Value)> = (registered(&params, "registrations"))
+            .map(|(id, options)| (id, options.clone()))
+            .collect();
+        assert_eq!(found, [("2".to_owned(), json!({ "watchers": [] }))]);
     }
 }

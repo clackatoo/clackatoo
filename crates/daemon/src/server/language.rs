@@ -4,9 +4,11 @@
 //!
 //! One server runs for each command and project root, so every buffer in
 //! a project shares one, as do languages with the same server, such as
-//! JavaScript and TypeScript. A server goes when its last buffer closes,
-//! and doesn't come through an upgrade: the next build starts it again
-//! when a buffer of its is next attached to.
+//! JavaScript and TypeScript. A server goes a while after its last buffer
+//! closes, asked to shut down as LSP asks (see [`super::stopping`]), and
+//! doesn't come through an upgrade: the next build starts it again when a
+//! buffer of its is next attached to. The files it asks to hear of are
+//! watched for it (see [`super::watched`]).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
@@ -24,6 +26,8 @@ use serde_json::{Value, json};
 
 use super::buffers::BufferSlot;
 use super::rename::{Made, Purpose};
+use super::stopping::Stopping;
+use super::watched::{Walking, Wanted};
 use super::{Daemon, OUTPUT_BUDGET, Orphan, Source};
 use crate::lsp::{self, Incoming, LanguageServer, Reported};
 
@@ -55,24 +59,34 @@ const NOT_FOUND: u8 = u8::MAX;
 /// A language server, its event-loop registrations, and what it's for.
 #[derive(Debug)]
 pub(super) struct ServerSlot {
-    server: LanguageServer,
-    tokens: [Token; 4],
+    pub(super) server: LanguageServer,
+    pub(super) tokens: [Token; 4],
     /// Its read budget ran out with more of its output waiting.
     unread: bool,
-    command: Vec<String>,
-    root: PathBuf,
+    /// Its read budget ran out with more of its stderr waiting.
+    unread_errors: bool,
+    pub(super) command: Vec<String>,
+    pub(super) root: PathBuf,
     /// When its last file closed, if none is open in it now: it's stopped
     /// once it's been idle as long as the config says, so going to a
     /// library's file and back, or closing a project's last file and
     /// opening another, doesn't start it again and have it read the whole
     /// project again.
     idle_since: Option<Instant>,
+    /// The files it has asked to hear of changes to, and the changes
+    /// waiting to be told.
+    pub(super) wanted: Wanted,
 }
 
 /// The language servers, and how often each project's has been started.
 #[derive(Debug, Default)]
 pub(super) struct Servers {
-    slots: std::collections::BTreeMap<ServerId, ServerSlot>,
+    pub(super) slots: std::collections::BTreeMap<ServerId, ServerSlot>,
+    /// Servers stopped, on their way out.
+    pub(super) stopping: BTreeMap<ServerId, Stopping>,
+    /// The walks of directories to watch for servers, by their tickets.
+    pub(super) walks: HashMap<u64, Walking>,
+    pub(super) next_walk: u64,
     next: u32,
     started: Vec<(Vec<String>, PathBuf, u8)>,
     /// Clients' queries waiting for their servers' answers.
@@ -83,7 +97,7 @@ pub(super) struct Servers {
     reached: HashMap<PathBuf, ServerId>,
     /// What servers say is wrong in files not open, by path, with the
     /// server that said it.
-    elsewhere: HashMap<PathBuf, (ServerId, std::sync::Arc<[Reported]>)>,
+    pub(super) elsewhere: HashMap<PathBuf, (ServerId, std::sync::Arc<[Reported]>)>,
     /// Queries to ask again, and when: their servers said the text changed
     /// while they worked.
     again: Vec<(Instant, Again)>,
@@ -134,26 +148,28 @@ struct Again {
 impl Servers {
     /// Keeps what server `server` says is wrong in the file at `path`,
     /// which isn't open, in place of what it said before; or forgets it, if
-    /// nothing is. Past [`MAX_ELSEWHERE`] files, more aren't kept.
+    /// nothing is. Past [`MAX_ELSEWHERE`] files, more aren't kept. Returns
+    /// the server whose say about the file was forgotten, if one's was,
+    /// and it's no longer the one to say.
     fn elsewhere(
         &mut self,
         server: ServerId,
         path: &std::path::Path,
         mut diagnostics: Vec<Reported>,
-    ) {
+    ) -> Option<ServerId> {
+        let had = self.elsewhere.get(path).map(|(said, _)| *said);
         if diagnostics.is_empty() {
             // Another server's say about the file stays.
-            if self
-                .elsewhere
-                .get(path)
-                .is_some_and(|(said, _)| *said == server)
-            {
+            if had == Some(server) {
                 self.elsewhere.remove(path);
+                return had;
             }
-        } else if self.elsewhere.len() < MAX_ELSEWHERE || self.elsewhere.contains_key(path) {
+        } else if self.elsewhere.len() < MAX_ELSEWHERE || had.is_some() {
             diagnostics.truncate(MAX_ELSEWHERE_EACH);
             (self.elsewhere).insert(path.to_owned(), (server, diagnostics.into()));
+            return had.filter(|had| *had != server);
         }
+        None
     }
 
     /// What servers say is wrong in files not open, with each server's
@@ -369,7 +385,9 @@ impl Daemon {
             return;
         };
         // Open, it's its buffer's to say what's wrong with now.
-        self.servers.elsewhere.remove(&path);
+        if let Some((said, _)) = self.servers.elsewhere.remove(&path) {
+            self.unwatch_undiagnosed(said, &path);
+        }
         // A file an answer went to is opened in the server that answered,
         // if it's of the file's language.
         let reached = (self.servers.reached.get(&path).copied()).filter(|server| {
@@ -450,7 +468,8 @@ impl Daemon {
         {
             args[0] = program.into_os_string();
         }
-        let server = match LanguageServer::start(name, &args, &root) {
+        let trace = self.config.lsp_trace.as_deref();
+        let server = match LanguageServer::start(name, &args, &root, trace) {
             Ok(server) => server,
             Err(err) => {
                 log::warn!("{name} couldn't start for {}: {err}", root.display());
@@ -495,9 +514,11 @@ impl Daemon {
                 server,
                 tokens: tokens.try_into().expect("four pipes"),
                 unread: false,
+                unread_errors: false,
                 command: command.to_vec(),
                 root,
                 idle_since: None,
+                wanted: Wanted::default(),
             },
         );
         Some(id)
@@ -650,12 +671,20 @@ impl Daemon {
         Some(self.servers.slots.get(&id)?.server.encoding())
     }
 
-    /// Tells server `id` the files at `paths` have changed on disk.
-    pub(super) fn changed_on_disk(&mut self, id: ServerId, paths: &[PathBuf]) {
-        if let Some(slot) = self.servers.slots.get_mut(&id) {
-            slot.server.changed_on_disk(paths);
+    /// Handles what happened to server `id`'s pipe `pipe`.
+    pub(super) fn server_event(&mut self, id: ServerId, pipe: Pipe) {
+        if self.servers.stopping.contains_key(&id) {
+            return self.stopping_event(id, pipe);
         }
-        self.flush_server(id);
+        match pipe {
+            Pipe::Output => self.read_server(id),
+            Pipe::Errors => self.read_server_errors(id),
+            Pipe::Input => self.flush_server(id),
+            Pipe::Exit => {
+                self.read_server(id);
+                self.server_gone(id);
+            }
+        }
     }
 
     /// Writes what's queued for server `id`.
@@ -690,27 +719,36 @@ impl Daemon {
         }
     }
 
-    /// Reads what server `id` wrote to stderr, for the log.
-    pub(super) fn read_server_errors(&mut self, id: ServerId) {
+    /// Reads what server `id` wrote to stderr, for the log, as much as one
+    /// read budget allows.
+    fn read_server_errors(&mut self, id: ServerId) {
         if let Some(slot) = self.servers.slots.get_mut(&id) {
-            slot.server.read_errors(&mut self.buffer);
+            slot.unread_errors = slot.server.read_errors(&mut self.buffer, OUTPUT_BUDGET);
         }
     }
 
-    /// Reads again from servers whose read budget ran out.
+    /// Reads again from servers whose read budget ran out, those stopping
+    /// too.
     pub(super) fn read_servers_unread(&mut self) {
-        let unread: Vec<ServerId> = (self.servers.slots.iter())
-            .filter(|(_, slot)| slot.unread)
-            .map(|(&id, _)| id)
+        let unread: Vec<(ServerId, bool, bool)> = (self.servers.slots.iter())
+            .filter(|(_, slot)| slot.unread || slot.unread_errors)
+            .map(|(&id, slot)| (id, slot.unread, slot.unread_errors))
             .collect();
-        for id in unread {
-            self.read_server(id);
+        for (id, output, errors) in unread {
+            if output {
+                self.read_server(id);
+            }
+            if errors {
+                self.read_server_errors(id);
+            }
         }
+        self.read_stopping_unread();
     }
 
     /// Whether a server's read budget ran out with more waiting.
     pub(super) fn servers_unread(&self) -> bool {
-        self.servers.slots.values().any(|slot| slot.unread)
+        (self.servers.slots.values()).any(|slot| slot.unread || slot.unread_errors)
+            || self.stopping_unread()
     }
 
     fn receive_from_server(&mut self, server: ServerId, message: Incoming) {
@@ -724,6 +762,10 @@ impl Daemon {
             Incoming::Outdated { id } => self.outdated(server, id),
             Incoming::Ready => self.server_ready(server),
             Incoming::ApplyEdit { id, edit } => self.apply_edit(server, id, &edit),
+            Incoming::Watch { id, watchers } => self.watch_for_server(server, id, &watchers),
+            Incoming::Unwatch { id } => self.unwatch_for_server(server, &id),
+            // Asked only of servers stopping, which aren't here.
+            Incoming::ShutDown => {}
         }
     }
 
@@ -1499,7 +1541,7 @@ impl Daemon {
         Some(location(&text, line, col, None))
     }
 
-    fn diagnosed(
+    pub(super) fn diagnosed(
         &mut self,
         server: ServerId,
         path: &std::path::Path,
@@ -1513,8 +1555,15 @@ impl Daemon {
                     .as_ref()
                     .is_some_and(|opened| opened.server == server)
         }) else {
-            // A file not open, kept as it's said, to list.
-            self.servers.elsewhere(server, path, diagnostics);
+            // A file not open, kept as it's said, to list, and watched,
+            // for a server that watches nothing itself.
+            let any = !diagnostics.is_empty();
+            if let Some(forgotten) = self.servers.elsewhere(server, path, diagnostics) {
+                self.unwatch_undiagnosed(forgotten, path);
+            }
+            if any {
+                self.watch_diagnosed(server, path);
+            }
             return;
         };
         let Some(running) = self.servers.slots.get(&server) else {
@@ -1565,11 +1614,11 @@ impl Daemon {
         self.tell_viewers(id, None, &update);
     }
 
-    /// Stops server `id`, and watches its process until it exits.
-    pub(super) fn stop_server(&mut self, id: ServerId) {
-        let Some(slot) = self.servers.slots.remove(&id) else {
-            return;
-        };
+    /// Takes server `id` out of those running, forgetting what it was
+    /// asked, what it said and the files watched for it. Returns it, to be
+    /// stopped or let go.
+    pub(super) fn forget_server(&mut self, id: ServerId) -> Option<ServerSlot> {
+        let slot = self.servers.slots.remove(&id)?;
         self.servers.asked.retain(|asked| asked.server != id);
         self.servers.reached.retain(|_, server| *server != id);
         // The edits it asked for itself are its no more.
@@ -1579,6 +1628,16 @@ impl Daemon {
             .retain(|_, (server, _)| *server != id);
         // Its code actions can't be done now.
         self.servers.offered.retain(|offered| offered.server != id);
+        self.unwatch_files_for(id);
+        Some(slot)
+    }
+
+    /// Lets server `id` go, as it has gone by itself, and watches its
+    /// process until it exits, if it hasn't.
+    fn let_server_go(&mut self, id: ServerId) {
+        let Some(slot) = self.forget_server(id) else {
+            return;
+        };
         for token in slot.tokens {
             self.sources.remove(token.0);
         }
@@ -1592,7 +1651,8 @@ impl Daemon {
         self.watch_orphan(Orphan::new(process));
     }
 
-    /// Stops every server, as before an upgrade.
+    /// Stops every server, as before an upgrade: each is asked to shut
+    /// down, and goes on its way out (see [`super::stopping`]).
     pub(super) fn stop_servers(&mut self) {
         let ids: Vec<ServerId> = self.servers.slots.keys().copied().collect();
         for id in ids {
@@ -1602,13 +1662,16 @@ impl Daemon {
 
     /// Server `id` has gone by itself: its buffers lose their diagnostics,
     /// and it's started again for those shown, if it may be. Those not
-    /// shown are opened in it again when next attached to.
+    /// shown are opened in it again when next attached to. The last lines
+    /// it wrote to stderr are logged, as they may say why.
     pub(super) fn server_gone(&mut self, id: ServerId) {
-        let Some(slot) = self.servers.slots.get(&id) else {
+        let Some(slot) = self.servers.slots.get_mut(&id) else {
             return;
         };
+        slot.server.read_errors(&mut self.buffer, OUTPUT_BUDGET);
+        let last = (slot.server.last_errors()).map_or_else(String::new, |last| format!(": {last}"));
         log::warn!(
-            "{} stopped, for {}",
+            "{} stopped, for {}{last}",
             slot.command.join(" "),
             slot.root.display()
         );
@@ -1617,7 +1680,7 @@ impl Daemon {
             .filter(|asked| asked.server == id)
             .map(|asked| (asked.token, asked.buffer, asked.id))
             .collect();
-        self.stop_server(id);
+        self.let_server_go(id);
         for (token, buffer, id) in unanswered {
             let Some(slot) = self.buffers.get(&buffer) else {
                 continue;

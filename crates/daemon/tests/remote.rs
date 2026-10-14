@@ -61,6 +61,7 @@ impl TestDaemon {
             languages: None,
             servers: None,
             declined: None,
+            lsp_trace: None,
             server_idle: Duration::ZERO,
             rename_gate: None,
             trash: None,

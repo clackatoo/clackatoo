@@ -14,6 +14,9 @@
 //! Whether `.gitignore` leaves each out is worked out from the ignore files
 //! of the repository it's in, from its top down to the directory, as git
 //! does, with ripgrep's matcher.
+//!
+//! A thread of their own walks the directories language servers ask to
+//! hear of changes in, for the loop to watch (see [`Workers::walk`]).
 
 use std::cmp::Reverse;
 use std::fs;
@@ -35,6 +38,7 @@ mod trash;
 
 #[cfg(test)]
 pub(crate) use ops::PANICS;
+pub(crate) use trash::date;
 pub(crate) use trash::put as trash;
 
 /// The most a directory's listing holds: far more than anyone scrolls
@@ -73,6 +77,8 @@ pub(crate) enum Done {
         changed: Changed,
         outcome: Result<(), FileOpError>,
     },
+    /// What the walk the loop numbered `ticket` found.
+    Walked { ticket: u64, walk: Walk },
     /// For tests: the thread for file operations was let go of.
     #[cfg(test)]
     Held,
@@ -116,12 +122,23 @@ pub(crate) struct Listing {
     pub(crate) cut_short: bool,
 }
 
+/// What a walk of a directory found: the directories in it, and the files,
+/// if they were asked for.
+#[derive(Debug, Default)]
+pub(crate) struct Walk {
+    pub(crate) dirs: Vec<PathBuf>,
+    pub(crate) files: Vec<PathBuf>,
+    /// There were more directories than it was to find.
+    pub(crate) cut_short: bool,
+}
+
 /// The threads, and what they've done.
 #[derive(Debug)]
 pub(crate) struct Workers {
     listing: Sender<Job>,
     git: Sender<Job>,
     ops: Sender<Job>,
+    walking: Sender<Job>,
     done: Receiver<Done>,
 }
 
@@ -150,8 +167,23 @@ impl Workers {
             listing: spawn("explorer")?,
             git: spawn("explorer git")?,
             ops: spawn("file ops")?,
+            walking: spawn("watch walk")?,
             done,
         })
+    }
+
+    /// Walks the directory at `dir`, which the loop numbered `ticket`, for
+    /// a language server's watches: finds it and the directories in it,
+    /// all the way down, up to `most` of them, but git's own, those
+    /// `.gitignore` leaves out, and those [`CHURN`] names, below `dir`.
+    /// A directory `made` just now is passed over whole if `.gitignore`
+    /// leaves it out, as a build's output, and the files in what's found
+    /// are found too, as they may have been made before it was watched.
+    pub(crate) fn walk(&self, ticket: u64, dir: PathBuf, made: bool, most: usize) {
+        send(&self.walking, move || Done::Walked {
+            ticket,
+            walk: walk(&dir, made, most),
+        });
     }
 
     /// Lists the directory at `dir`.
@@ -287,6 +319,66 @@ pub(crate) fn list(dir: &Path) -> Result<Listing, String> {
     }
     entries.sort_by_cached_key(|entry| (!entry.kind.expands(), name_order(&entry.name)));
     Ok(Listing { entries, cut_short })
+}
+
+/// The names of directories builds and package managers fill with
+/// thousands of files no language server reads as sources, passed over by
+/// walks for servers' watches, even where git doesn't ignore them.
+/// Not `build` or `dist`, which are sources in some projects: a build's
+/// output there is left out by `.gitignore`, which walks read.
+const CHURN: [&str; 4] = ["target", "node_modules", ".venv", "__pycache__"];
+
+/// Whether `name` is one of [`CHURN`]'s.
+pub(crate) fn churns(name: &std::ffi::OsStr) -> bool {
+    CHURN.iter().any(|churn| name == *churn)
+}
+
+/// Walks `dir`, as [`Workers::walk`] says.
+fn walk(dir: &Path, made: bool, most: usize) -> Walk {
+    let mut found = Walk::default();
+    // Left out by `.gitignore`, as a walk of the folder it's in has it.
+    let ignored = || {
+        let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+            return false;
+        };
+        let name = name.to_owned();
+        let listed = (ignore::WalkBuilder::new(parent))
+            .hidden(false)
+            .require_git(false)
+            .max_depth(Some(1))
+            .filter_entry(move |entry| entry.depth() == 0 || entry.file_name() == name)
+            .build()
+            .flatten()
+            .any(|entry| entry.path() == dir);
+        !listed
+    };
+    if made && ignored() {
+        return found;
+    }
+    let walker = (ignore::WalkBuilder::new(dir))
+        .hidden(false)
+        .same_file_system(true)
+        // `.gitignore` says what's left out in a project with no git too.
+        .require_git(false)
+        .filter_entry(move |entry| {
+            let name = entry.file_name();
+            name != ".git"
+                && (entry.depth() == 0 || !churns(name))
+                && (made || entry.file_type().is_some_and(|kind| kind.is_dir()))
+        })
+        .build();
+    for entry in walker.flatten() {
+        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            if found.dirs.len() == most {
+                found.cut_short = true;
+                break;
+            }
+            found.dirs.push(entry.into_path());
+        } else if found.files.len() < MAX_ENTRIES {
+            found.files.push(entry.into_path());
+        }
+    }
+    found
 }
 
 /// What orders names: their letters, ignoring case, then their case, so

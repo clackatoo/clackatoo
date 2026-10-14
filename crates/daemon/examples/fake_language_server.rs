@@ -40,6 +40,14 @@
 //! | `--resolve-partly` | Offers to put the word in capitals with the command to mark the file too, and resolves it with only its edit |
 //! | `--resolve-null` | Resolves code actions with nothing |
 //! | `--apply-unasked` | Asks its client to edit a file whenever it has `unasked` in it, writing how that went to the `--log` file |
+//! | `--watch JSON` | Asks its client, once it's ready, to tell it of changes to the files JSON, a list of `FileSystemWatcher`s, says, writing each change told to the `--log` file; and to stop telling it once a file open has `unwatch` in it |
+//! | `--slow-shutdown` | Never answers `shutdown` |
+//! | `--stay` | Takes no notice of `exit`, so it has to be killed |
+//! | `--last-words TEXT` | Writes TEXT to stderr as it exits |
+//!
+//! It writes `shutdown` to the `--log` file when it's asked to shut down,
+//! and exits with code 0 when told to exit after that, or else with 1, as
+//! LSP says, writing why to stderr.
 //!
 //! Asked what could be typed, it offers every other word in the file,
 //! each replacing the word before the place, then `Imported`, which needs
@@ -97,6 +105,16 @@ fn main() {
         resolve_partly: flag("--resolve-partly"),
         resolve_null: flag("--resolve-null"),
         apply_unasked: flag("--apply-unasked"),
+        watch: (args.iter().position(|arg| arg == "--watch"))
+            .and_then(|at| serde_json::from_str(args.get(at + 1)?).ok()),
+        slow_shutdown: flag("--slow-shutdown"),
+        stay: flag("--stay"),
+        last_words: (args.iter().position(|arg| arg == "--last-words"))
+            .and_then(|at| args.get(at + 1).cloned()),
+        may_watch: false,
+        watching: false,
+        shut_down: false,
+        exited: false,
         running: None,
         files: BTreeMap::new(),
         versions: BTreeMap::new(),
@@ -106,6 +124,23 @@ fn main() {
         if !server.receive(&message) {
             break;
         }
+    }
+    if server.stay {
+        loop {
+            std::thread::park();
+        }
+    }
+    if let Some(words) = &server.last_words {
+        eprintln!("{words}");
+    }
+    if !server.shut_down {
+        let why = if server.exited {
+            "told to exit before shutdown"
+        } else {
+            "its client went without telling it to exit"
+        };
+        eprintln!("{why}");
+        std::process::exit(1);
     }
 }
 
@@ -135,6 +170,19 @@ struct Fake {
     resolve_partly: bool,
     resolve_null: bool,
     apply_unasked: bool,
+    /// The `FileSystemWatcher`s to ask its client for.
+    watch: Option<Value>,
+    slow_shutdown: bool,
+    stay: bool,
+    last_words: Option<String>,
+    /// Its client said it can be asked to watch files.
+    may_watch: bool,
+    /// It has asked its client to watch files, and not asked it to stop.
+    watching: bool,
+    /// It has been asked to shut down.
+    shut_down: bool,
+    /// It has been told to exit.
+    exited: bool,
     /// The `workspace/executeCommand` request it's running, by its number,
     /// until its client answers the edit it asked for.
     running: Option<Value>,
@@ -173,6 +221,7 @@ fn send(message: &Value) {
 
 impl Fake {
     /// Acts on `message`. Returns whether to go on.
+    #[allow(clippy::too_many_lines, reason = "one arm for each method, most short")]
     fn receive(&mut self, message: &Value) -> bool {
         let method = message["method"].as_str().unwrap_or_default();
         let params = &message["params"];
@@ -188,6 +237,8 @@ impl Fake {
         }
         match method {
             "initialize" => {
+                let offered = &params["capabilities"]["workspace"]["didChangeWatchedFiles"];
+                self.may_watch = offered["dynamicRegistration"] == true;
                 send(&json!({
                     "jsonrpc": "2.0",
                     "id": message["id"],
@@ -201,6 +252,20 @@ impl Fake {
                     "params": { "items": [{ "section": "fake" }] },
                 }));
             }
+            "initialized" => self.ask_to_watch(),
+            "workspace/didChangeWatchedFiles" => {
+                for change in params["changes"].as_array().unwrap() {
+                    let path = change["uri"].as_str().unwrap().strip_prefix("file://");
+                    self.note(&format!("changed: {} {}", change["type"], path.unwrap()));
+                }
+            }
+            "shutdown" => {
+                self.note("shutdown");
+                self.shut_down = true;
+                if !self.slow_shutdown {
+                    send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": Value::Null }));
+                }
+            }
             "textDocument/didOpen" => {
                 let document = &params["textDocument"];
                 let uri = document["uri"].as_str().unwrap().to_owned();
@@ -209,6 +274,7 @@ impl Fake {
                 self.versions
                     .insert(uri.clone(), document["version"].clone());
                 self.publish(&uri, &document["version"]);
+                self.unwatch_if_asked(&uri);
             }
             "textDocument/didChange" => {
                 let document = &params["textDocument"];
@@ -229,6 +295,7 @@ impl Fake {
                 self.versions
                     .insert(uri.clone(), document["version"].clone());
                 self.publish(&uri, &document["version"]);
+                self.unwatch_if_asked(&uri);
                 if self.apply_unasked && self.files[&uri].contains("unasked") {
                     let edit = self.edit(&uri, (0, 0), "asked ");
                     send(&json!({
@@ -270,12 +337,63 @@ impl Fake {
                 self.resolve_action(message);
             }
             "workspace/executeCommand" => self.execute(message),
-            "exit" => return false,
+            "exit" => {
+                self.exited = true;
+                return false;
+            }
             // Its client's answer to an edit it asked for.
             "" => self.applied(message),
             _ => {}
         }
         true
+    }
+
+    /// Writes `line` to the log, if it has one.
+    fn note(&self, line: &str) {
+        if let Some(log) = &self.log {
+            let mut file = (std::fs::OpenOptions::new().create(true).append(true))
+                .open(log)
+                .unwrap();
+            writeln!(file, "{line}").unwrap();
+        }
+    }
+
+    /// Asks its client to tell it of changes to the files it was told to
+    /// ask for, if it was, and its client can.
+    fn ask_to_watch(&mut self) {
+        let Some(watchers) = self.watch.clone().filter(|_| self.may_watch) else {
+            return;
+        };
+        self.watching = true;
+        let registration = json!({
+            "id": "watch",
+            "method": "workspace/didChangeWatchedFiles",
+            "registerOptions": { "watchers": watchers },
+        });
+        send(&json!({
+            "jsonrpc": "2.0",
+            "id": "register",
+            "method": "client/registerCapability",
+            "params": { "registrations": [registration] },
+        }));
+    }
+
+    /// Asks its client to stop telling it of changes to files, if it's
+    /// watching them and the file at `uri` says `unwatch`, writing that it
+    /// did to the log.
+    fn unwatch_if_asked(&mut self, uri: &str) {
+        if !self.watching || !self.files[uri].contains("unwatch") {
+            return;
+        }
+        self.watching = false;
+        let unregistration = json!({ "id": "watch", "method": "workspace/didChangeWatchedFiles" });
+        send(&json!({
+            "jsonrpc": "2.0",
+            "id": "unregister",
+            "method": "client/unregisterCapability",
+            "params": { "unregisterations": [unregistration] },
+        }));
+        self.note("unwatched");
     }
 
     /// Its client says how an edit it asked for went, in `message`: the
@@ -290,6 +408,9 @@ impl Fake {
                 .open(log)
                 .unwrap();
             writeln!(file, "unasked: {result}").unwrap();
+        }
+        if message["id"] == "unregister" {
+            self.note("unwatch answered");
         }
         if message["id"] != "apply" {
             return;

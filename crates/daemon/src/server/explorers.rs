@@ -29,7 +29,9 @@
 //! The same watches serve buffers: each buffer's file is watched through
 //! the directory it's in, as most programs write a file by renaming a new
 //! one over it, which a watch on the file itself wouldn't outlive. What
-//! the buffers make of a change is in [`super::disk`].
+//! the buffers make of a change is in [`super::disk`]. They serve language
+//! servers too, for the files they ask to hear of, up to
+//! [`MAX_SERVER_WATCHES`]: what's told them is in [`super::watched`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -48,6 +50,7 @@ use mio::Token;
 use rustix::fs::inotify;
 use rustix::io::Errno;
 
+use super::language::ServerId;
 use super::{Daemon, Source};
 use crate::explorer::{Changed, Done, Listing, Open, Workers};
 use crate::handover;
@@ -55,6 +58,15 @@ use crate::handover;
 /// The most directories watched at once: far more than anyone expands,
 /// and well inside the kernel's limit, which other programs need too.
 pub(super) const MAX_WATCHES: usize = 4096;
+
+/// The most of those watched for language servers, between them, so a
+/// project's thousands of directories never leave none for explorers and
+/// buffers. Each server may have an equal share (see [`super::watched`]).
+pub(super) const MAX_SERVER_WATCHES: usize = 3072;
+
+/// Something inotify said happened in a directory watched: the watch, the
+/// name in the directory it happened to, if it says, and what happened.
+type Touched = (i32, Option<Vec<u8>>, inotify::ReadFlags);
 
 /// The least time between two listings of a directory.
 const LIST_GAP: Duration = Duration::from_millis(100);
@@ -88,6 +100,9 @@ pub(super) struct Explorers {
     watches: HashMap<i32, Watched>,
     /// Watches weren't made for lack of room, which is said once.
     full: bool,
+    /// How many of the watches are for language servers, among other
+    /// things or alone.
+    server_watches: usize,
     /// File operations on their way, by the number the thread answers
     /// them with: the client that asked, and its number for it.
     ops: HashMap<u64, (Token, u64)>,
@@ -135,6 +150,7 @@ impl Default for Explorers {
             inotify: None,
             watches: HashMap::new(),
             full: false,
+            server_watches: 0,
             ops: HashMap::new(),
             next_ticket: 0,
             running: 0,
@@ -197,12 +213,17 @@ pub(super) struct Watched {
     repo: Option<PathBuf>,
     /// The buffers whose files are in it.
     pub(super) buffers: Vec<BufferId>,
+    /// The language servers it's watched for, and its path for each.
+    servers: Vec<(ServerId, PathBuf)>,
 }
 
 impl Watched {
     /// Whether it's on nothing any more, so the watch can go.
     fn unused(&self) -> bool {
-        self.dirs.is_empty() && self.repo.is_none() && self.buffers.is_empty()
+        self.dirs.is_empty()
+            && self.repo.is_none()
+            && self.buffers.is_empty()
+            && self.servers.is_empty()
     }
 }
 
@@ -271,7 +292,7 @@ impl Daemon {
     }
 
     /// The threads, started if they haven't been.
-    fn files_workers(&mut self) -> Option<&Workers> {
+    pub(super) fn files_workers(&mut self) -> Option<&Workers> {
         if self.explorers.workers.is_none() {
             let waker = Arc::clone(&self.waker);
             let wake = move || {
@@ -521,7 +542,7 @@ impl Daemon {
     /// Watches `dir`, as a directory expanded, or as the git directory of
     /// the repository whose top is `repo`, unless there's no room.
     fn watch(&mut self, dir: &Path, repo: Option<&Path>) {
-        let Some(watch) = self.add_watch(dir) else {
+        let Some(watch) = self.add_watch(dir, MAX_WATCHES) else {
             return;
         };
         let watched = self.explorers.watches.entry(watch).or_default();
@@ -544,7 +565,7 @@ impl Daemon {
         let Some(dir) = path.parent() else {
             return false;
         };
-        let Some(watch) = self.add_watch(dir) else {
+        let Some(watch) = self.add_watch(dir, MAX_WATCHES) else {
             return false;
         };
         let watched = self.explorers.watches.entry(watch).or_default();
@@ -558,6 +579,53 @@ impl Daemon {
     /// watch on its directory if that was all it was for.
     pub(super) fn unwatch_buffer_file(&mut self, id: BufferId) {
         self.unwatch(|watched| watched.buffers.retain(|&buffer| buffer != id));
+    }
+
+    /// Watches `dir` for language server `server`, unless there's no room
+    /// for any more watches: how many servers may have is for
+    /// [`super::watched`] to say. Returns whether it's watched.
+    pub(super) fn add_server_watch(&mut self, server: ServerId, dir: &Path) -> bool {
+        let Some(watch) = self.add_watch(dir, MAX_WATCHES) else {
+            return false;
+        };
+        let watched = self.explorers.watches.entry(watch).or_default();
+        if watched.servers.is_empty() {
+            self.explorers.server_watches += 1;
+        }
+        if !(watched.servers.iter()).any(|(watcher, at)| *watcher == server && at == dir) {
+            watched.servers.push((server, dir.to_owned()));
+        }
+        true
+    }
+
+    /// How many directories are watched, for anything.
+    pub(super) fn watch_count(&self) -> usize {
+        self.explorers.watches.len()
+    }
+
+    /// How many directories are watched for language servers.
+    pub(super) fn server_watch_count(&self) -> usize {
+        self.explorers.server_watches
+    }
+
+    /// No longer watches the directories `which` picks for language
+    /// servers, given each server and its path for the directory, taking
+    /// away the watches that were only for them.
+    pub(super) fn remove_server_watches(&mut self, which: impl Fn(ServerId, &Path) -> bool) {
+        self.unwatch(|watched| watched.servers.retain(|(server, dir)| !which(*server, dir)));
+    }
+
+    /// The directories watched for language server `server`, at its paths
+    /// for them, for tests to look at.
+    #[cfg(test)]
+    pub(super) fn watched_for_server(&self, server: ServerId) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = (self.explorers.watches.values())
+            .flat_map(|watched| &watched.servers)
+            .filter(|(watcher, _)| *watcher == server)
+            .map(|(_, dir)| dir.clone())
+            .collect();
+        dirs.sort();
+        dirs
     }
 
     /// The watches, by what each is on, for tests to look at.
@@ -578,9 +646,9 @@ impl Daemon {
     }
 
     /// Has inotify watch `dir`, the first time making the instance watches
-    /// are made with, unless there's no room. Returns the watch, which is
-    /// the one `dir` already had if it had one.
-    fn add_watch(&mut self, dir: &Path) -> Option<i32> {
+    /// are made with, unless there are `most` watches already. Returns the
+    /// watch, which is the one `dir` already had if it had one.
+    fn add_watch(&mut self, dir: &Path, most: usize) -> Option<i32> {
         if self.explorers.inotify.is_none() {
             let flags = inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK;
             let made = inotify::init(flags).map_err(std::io::Error::from);
@@ -610,7 +678,7 @@ impl Daemon {
             | inotify::WatchFlags::EXCL_UNLINK
             | inotify::WatchFlags::ONLYDIR
             | inotify::WatchFlags::MASK_ADD;
-        let full = self.explorers.watches.len() >= MAX_WATCHES;
+        let full = self.explorers.watches.len() >= most;
         match inotify::add_watch(inotify, dir, flags) {
             // The directory's watch already, which costs nothing more, or a
             // new one with room for it.
@@ -619,7 +687,8 @@ impl Daemon {
                 if let Err(err) = inotify::remove_watch(inotify, watch) {
                     log::debug!("a watch couldn't be taken away: {err}");
                 }
-                if !self.explorers.full {
+                // Language servers' limit is theirs to say.
+                if most == MAX_WATCHES && !self.explorers.full {
                     log::warn!("{MAX_WATCHES} directories are watched: no more will be");
                     self.explorers.full = true;
                 }
@@ -648,7 +717,11 @@ impl Daemon {
         let explorers = &mut self.explorers;
         let mut gone = Vec::new();
         for (&watch, watched) in &mut explorers.watches {
+            let served = !watched.servers.is_empty();
             change(watched);
+            if served && watched.servers.is_empty() {
+                explorers.server_watches -= 1;
+            }
             if watched.unused() {
                 gone.push(watch);
             }
@@ -671,9 +744,8 @@ impl Daemon {
             return;
         };
         let mut relist: Vec<i32> = Vec::new();
-        // What changed that git may say something new of: the watch, and
-        // the name in its directory, if the event names one.
-        let mut touched: Vec<(i32, Option<Vec<u8>>)> = Vec::new();
+        // What changed that git, buffers or servers may make something of.
+        let mut touched: Vec<Touched> = Vec::new();
         let mut index: Vec<i32> = Vec::new();
         let mut gone: Vec<i32> = Vec::new();
         let mut everything = false;
@@ -718,10 +790,10 @@ impl Daemon {
             }
             if listing || flags.contains(inotify::ReadFlags::CLOSE_WRITE) {
                 let name = event.file_name().map(|name| name.to_bytes().to_vec());
-                touched.push((wd, name));
+                touched.push((wd, name, flags));
             }
         }
-        self.buffer_files_touched(&touched, everything);
+        self.files_touched(&touched, everything);
         let now = Instant::now();
         let explorers = &mut self.explorers;
         if everything {
@@ -732,7 +804,7 @@ impl Daemon {
             }
         }
         let mut repos: Vec<PathBuf> = Vec::new();
-        for (wd, name) in &touched {
+        for (wd, name, _) in &touched {
             let Some(watched) = explorers.watches.get(wd) else {
                 continue;
             };
@@ -778,13 +850,45 @@ impl Daemon {
         self.forget_watches(&gone);
     }
 
+    /// Hands what's `touched` on to the buffers and language servers whose
+    /// files it may be. With `everything`, changes were lost.
+    fn files_touched(&mut self, touched: &[Touched], everything: bool) {
+        self.buffer_files_touched(touched, everything);
+        self.server_files_touched(touched, everything);
+    }
+
+    /// Hands what's `touched` in directories watched for language servers
+    /// on to those servers, each with its own path for the directory. A
+    /// directory watched for one that has moved is no longer watched for it
+    /// at the path it had, nor are those in it: they're watched afresh
+    /// where they are now, if that's anywhere it watches.
+    fn server_files_touched(&mut self, touched: &[Touched], everything: bool) {
+        let mut served: Vec<(ServerId, PathBuf, inotify::ReadFlags)> = Vec::new();
+        let mut moved: Vec<(ServerId, PathBuf)> = Vec::new();
+        for (wd, name, flags) in touched {
+            let Some(watched) = self.explorers.watches.get(wd) else {
+                continue;
+            };
+            if flags.contains(inotify::ReadFlags::MOVE_SELF) {
+                moved.extend(watched.servers.iter().cloned());
+            }
+            let Some(name) = name else { continue };
+            let name = std::ffi::OsStr::from_bytes(name);
+            served.extend(
+                (watched.servers.iter()).map(|(server, dir)| (*server, dir.join(name), *flags)),
+            );
+        }
+        self.heard_for_servers(served, everything);
+        self.server_dirs_gone(&moved);
+    }
+
     /// Has the files of buffers among what's `touched` looked at, as they
     /// may have changed: each watch, and the name in its directory written,
     /// made, moved or deleted. With `everything`, changes were lost, and
     /// every buffer's file is.
-    fn buffer_files_touched(&mut self, touched: &[(i32, Option<Vec<u8>>)], everything: bool) {
+    fn buffer_files_touched(&mut self, touched: &[Touched], everything: bool) {
         let mut buffers: Vec<BufferId> = Vec::new();
-        for (wd, name) in touched {
+        for (wd, name, _) in touched {
             let Some(watched) = self.explorers.watches.get(wd) else {
                 continue;
             };
@@ -815,6 +919,7 @@ impl Daemon {
         let explorers = &mut self.explorers;
         let now = Instant::now();
         let mut buffers = Vec::new();
+        let mut servers = Vec::new();
         for wd in gone {
             if let Some(watched) = explorers.watches.remove(wd) {
                 for dir in watched.dirs {
@@ -824,10 +929,15 @@ impl Daemon {
                     }
                 }
                 buffers.extend(watched.buffers);
+                if !watched.servers.is_empty() {
+                    explorers.server_watches -= 1;
+                }
+                servers.extend(watched.servers);
             }
         }
         self.watches_gone();
         self.buffer_files_unwatched(&buffers);
+        self.server_dirs_unwatched(servers);
     }
 
     /// Has git asked again about the repository the file at `path` is in,
@@ -874,6 +984,7 @@ impl Daemon {
                     changed,
                     outcome,
                 } => self.operated(ticket, changed, outcome),
+                Done::Walked { ticket, walk } => self.walked(ticket, walk),
                 #[cfg(test)]
                 Done::Held => {}
             }

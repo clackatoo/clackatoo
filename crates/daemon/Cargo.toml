@@ -21,6 +21,7 @@ clackatoo-protocol.workspace = true
 clackatoo-syntax.workspace = true
 clackatoo-term = { workspace = true, features = ["serde"] }
 clackatoo-text.workspace = true
+globset.workspace = true
 httparse.workspace = true
 ignore.workspace = true
 log.workspace = true

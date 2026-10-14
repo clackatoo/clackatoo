@@ -85,6 +85,12 @@ impl Process {
         self.pidfd.try_clone()
     }
 
+    /// Sends the process SIGKILL, through its pidfd, so it never reaches
+    /// another that took its pid. One gone already isn't sent anything.
+    pub(crate) fn kill(&self) {
+        let _ = rustix::process::pidfd_send_signal(&self.pidfd, rustix::process::Signal::KILL);
+    }
+
     /// Collects the process's exit status, if it has exited. After that the
     /// process is gone, and this mustn't be called again.
     pub(crate) fn try_wait(&self) -> io::Result<Option<WaitIdStatus>> {

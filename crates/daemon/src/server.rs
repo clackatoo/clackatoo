@@ -70,8 +70,10 @@ mod pieces;
 mod rename;
 mod review;
 mod signs;
+mod stopping;
 mod tools;
 mod turn_undo;
+mod watched;
 mod web;
 
 use buffers::{BufferSlot, WindowChange};
@@ -920,8 +922,9 @@ impl Daemon {
 
     /// Everything the next build needs, taken out of this daemon, which is
     /// left with nothing to hang up when it's dropped. The listening socket
-    /// is shared: closing this daemon's copy leaves it open.
-    fn hand_over(&mut self) -> io::Result<Handover> {
+    /// is shared: closing this daemon's copy leaves it open. Language
+    /// servers are waited for until `servers_until`.
+    fn hand_over(&mut self, servers_until: Instant) -> io::Result<Handover> {
         let mut fds = Fds::default();
         let listener = fds.add(self.listener.as_fd().try_clone_to_owned()?);
         let mut terminals = Vec::new();
@@ -940,6 +943,8 @@ impl Daemon {
         // them. The boards' last changes are written, for it to read.
         self.stop_agents();
         self.stop_servers();
+        self.begin_stopping_browser();
+        self.wait_for_servers(servers_until);
         self.stop_browser();
         self.stop_boards();
         let orphan_tokens: Vec<usize> = (self.sources.iter())
@@ -1040,6 +1045,8 @@ impl Daemon {
                     .chain(tools)
                     .chain(rewatch)
                     .chain(reviews)
+                    .chain(self.next_stopping_due())
+                    .chain(self.next_file_changes_due())
                     .chain(self.next_agent_due())
                     .chain(self.next_web_due())
                     .chain(self.upgrade_to.as_ref().map(|upgrading| upgrading.until))
@@ -1087,6 +1094,8 @@ impl Daemon {
             // it isn't taken for a change from outside.
             self.check_disk();
             self.stop_idle_servers();
+            self.push_stopping_servers();
+            self.tell_file_changes();
             self.compact_scrollbacks();
             self.time_out_clipboard_asks();
             self.time_out_tools();
@@ -1100,9 +1109,16 @@ impl Daemon {
             self.transmit_quic();
         }
         log::info!("shutting down");
+        // Asked first, to shut down while remote windows are told.
+        let servers_until = Instant::now() + stopping::STOP_WAIT;
+        self.stop_servers();
         self.close_web("the daemon stopped");
         self.close_remotes("the daemon stopped");
         self.abandon_renames();
+        // The browser's moment to stop goes by as the servers are waited
+        // for: together, well inside the time `clackatoo stop` gives.
+        self.begin_stopping_browser();
+        self.wait_for_servers(servers_until);
         self.stop_boards();
         self.stop_browser();
         Ok(None)
@@ -1149,6 +1165,10 @@ impl Daemon {
             self.refuse_upgrade(token, reason);
             return Ok(None);
         }
+        // There's no way back now. Language servers are asked to shut down
+        // first, to do so while remote windows are told.
+        let servers_until = Instant::now() + stopping::STOP_WAIT;
+        self.stop_servers();
         // The client that asked hears how it went: its connection closes
         // as the new build starts, or says why it didn't.
         self.close_remotes("the daemon is upgrading to a new build");
@@ -1164,7 +1184,7 @@ impl Daemon {
         };
         Ok(Some(Upgrade {
             executable,
-            handover: self.hand_over()?,
+            handover: self.hand_over(servers_until)?,
             requester,
         }))
     }
@@ -1204,15 +1224,7 @@ impl Daemon {
                 }
                 Some(Source::Orphan(_)) => self.reap_orphan(token),
                 Some(&Source::Agent(id, pipe)) => self.agent_event(id, pipe),
-                Some(&Source::Server(id, pipe)) => match pipe {
-                    Pipe::Output => self.read_server(id),
-                    Pipe::Errors => self.read_server_errors(id),
-                    Pipe::Input => self.flush_server(id),
-                    Pipe::Exit => {
-                        self.read_server(id);
-                        self.server_gone(id);
-                    }
-                },
+                Some(&Source::Server(id, pipe)) => self.server_event(id, pipe),
                 Some(Source::Index) => self.read_index_changes(),
                 Some(Source::Files) => self.read_files_changes(),
                 Some(Source::Client(_)) => self.serve_client(token),
@@ -2826,7 +2838,13 @@ impl Daemon {
                     token if matches!(self.sources.get(token.0), Some(Source::Carrier(_))) => {
                         self.serve_carrier(token, event);
                     }
-                    _ => {}
+                    // Language servers stopping meanwhile, as the daemon
+                    // stops, go on their way: their events come only once.
+                    token => {
+                        if let Some(&Source::Server(id, pipe)) = self.sources.get(token.0) {
+                            self.server_event(id, pipe);
+                        }
+                    }
                 }
             }
             if let Some(quic) = self.quic.as_mut() {

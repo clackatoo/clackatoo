@@ -605,6 +605,7 @@ dependencies = [
  "clackatoo-syntax",
  "clackatoo-term",
  "clackatoo-text",
+ "globset",
  "httparse",
  "ignore",
  "log",

@@ -90,6 +90,10 @@ pub struct DaemonConfig {
     /// The file the languages are listed in that the answer to an offer
     /// to install them was no, so they aren't offered again.
     pub declined: Option<PathBuf>,
+    /// A file every message to and from language servers is written to,
+    /// a line each, stamped with the time and the server, to see what was
+    /// said. `None` writes none.
+    pub lsp_trace: Option<PathBuf>,
     /// How long a language server is kept with no files open in it, so
     /// coming back to its project soon doesn't start it again.
     pub server_idle: std::time::Duration,
@@ -175,8 +179,10 @@ impl DaemonConfig {
     /// or `off` for none (or else Chromium or Chrome, as found on `PATH`),
     /// with its profile in `$CLACKATOO_BROWSER_PROFILE` (or else
     /// `clackatoo/browser` in the data directory, or for a snap, in its
-    /// own folder), and the web app as `daemon/web.toml` in [`config_dir`]
-    /// says, keeping its devices in `clackatoo/web` in the data directory.
+    /// own folder), the web app as `daemon/web.toml` in [`config_dir`]
+    /// says, keeping its devices in `clackatoo/web` in the data directory,
+    /// and `$CLACKATOO_LSP_TRACE`: a file to trace language servers'
+    /// messages to (or else none).
     #[must_use]
     pub fn from_env() -> Self {
         let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
@@ -225,6 +231,7 @@ impl DaemonConfig {
             languages: languages_dir(),
             servers: languages_dir().map(|dir| dir.with_file_name("servers")),
             declined: languages_dir().map(|dir| dir.with_file_name("declined")),
+            lsp_trace: non_empty("CLACKATOO_LSP_TRACE").map(PathBuf::from),
             server_idle: DEFAULT_SERVER_IDLE,
             prompt_wait: DEFAULT_PROMPT_WAIT,
             probe_wait: DEFAULT_PROBE_WAIT,

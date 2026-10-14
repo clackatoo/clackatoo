@@ -276,6 +276,16 @@ impl Daemon {
         }
     }
 
+    /// Tells the browser to stop, as the daemon stops or upgrades, without
+    /// waiting for it: its moment to go goes by while the daemon waits for
+    /// other things, such as language servers, before
+    /// [`stop_browser`](Self::stop_browser).
+    pub(super) fn begin_stopping_browser(&mut self) {
+        if let Some(browser) = &mut self.browsing.browser {
+            browser.begin_stop();
+        }
+    }
+
     /// Stops the browser and its thread, as the daemon stops or upgrades.
     pub(super) fn stop_browser(&mut self) {
         if let Some(mut browser) = self.browsing.browser.take() {

@@ -67,6 +67,7 @@ impl TestDaemon {
             languages: None,
             servers: None,
             declined: None,
+            lsp_trace: None,
             // Stopped with their last file, unless a test says otherwise.
             server_idle: Duration::ZERO,
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
@@ -4107,7 +4108,7 @@ fn a_language_server_says_whats_wrong_as_a_buffer_changes() {
 
         // Saving tells it, and closing the last buffer closes it there,
         // and stops the server once it has been idle long enough, which
-        // in tests is no time.
+        // in tests is no time: asked to shut down, then told to exit.
         let saved = client.request(&Request::Save {
             buffer,
             force: false,
@@ -4133,10 +4134,523 @@ fn a_language_server_says_whats_wrong_as_a_buffer_changes() {
                 "textDocument/didChange",
                 "textDocument/didSave",
                 "textDocument/didClose",
+                "shutdown",
                 "exit",
             ]
         );
     }
+}
+
+/// What the daemon logs about language servers tests start, as they read
+/// it: each line, from debug level, that names the fake language server,
+/// whose name in the log is its program's path, or gcsl's.
+fn fake_server_logged() -> Vec<String> {
+    use std::sync::{Mutex, Once};
+    static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static INSTALLED: Once = Once::new();
+    struct Kept;
+    impl log::Log for Kept {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.target().starts_with("clackatoo_daemon")
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                let line = record.args().to_string();
+                if line.contains("fake_language_server") || line.starts_with("gcsl") {
+                    LOGGED.lock().unwrap().push(line);
+                }
+            }
+        }
+        fn flush(&self) {}
+    }
+    INSTALLED.call_once(|| {
+        log::set_logger(&Kept).expect("no other logger in these tests");
+        log::set_max_level(log::LevelFilter::Debug);
+    });
+    LOGGED.lock().unwrap().clone()
+}
+
+/// Waits for the daemon to log a line about the fake language server
+/// that has `part` in it, and returns it.
+fn wait_for_fake_server_logged(part: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(line) = fake_server_logged()
+            .into_iter()
+            .find(|line| line.contains(part))
+        {
+            return line;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never logged {part:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Waits for the fake language server's log, `log`, to have a line for
+/// which `done` is true, and returns what it says.
+fn wait_for_server_log(log: &Path, done: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let heard = std::fs::read_to_string(log).unwrap_or_default();
+        if heard.lines().any(&done) {
+            return heard;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the server never said so: {heard}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_language_server_stopped_shuts_down_exits_cleanly_and_has_its_last_words_logged() {
+    // Its last words are told apart from other tests' by its directory.
+    let words = |dir: &Path| format!("last words from {}", dir.display());
+    fake_server_logged();
+    let daemon = with_fake_language_server(|dir| {
+        let log = dir.join("server.log").display().to_string();
+        vec!["--log".into(), log, "--last-words".into(), words(dir)]
+    });
+    let dir = daemon.dir.path().to_owned();
+    let words = words(&dir);
+    let _project = fake_project(&daemon, &[("a.fk", "bad\n")]);
+
+    // Stopped with the daemon, as it stops for good: asked to shut down,
+    // then told to exit, which it does with code 0, and what it wrote to
+    // stderr as it went is logged.
+    let mut daemon = daemon;
+    daemon.shutdown.shutdown();
+    daemon.thread.take().unwrap().join().unwrap();
+    let heard = std::fs::read_to_string(dir.join("server.log")).unwrap();
+    let heard: Vec<&str> = heard.lines().collect();
+    assert_eq!(heard[heard.len() - 2..], ["shutdown", "exit"], "{heard:?}");
+    let root = dir.join("app").canonicalize().unwrap();
+    let exited = format!("for {}: exited", root.display());
+    wait_for_fake_server_logged(&exited);
+    // A line of its stderr is logged after its name, its program's path.
+    let said = format!("{}: {words}", example("fake_language_server").display());
+    let logged = fake_server_logged();
+    assert!(logged.contains(&said), "its last words: {logged:?}");
+}
+
+#[test]
+fn a_language_server_that_doesnt_answer_shutdown_is_told_to_exit_and_one_that_stays_is_killed() {
+    fake_server_logged();
+    for (flag, said) in [
+        ("--slow-shutdown", "didn't answer shutdown in time"),
+        ("--stay", "killed, as it didn't exit when told"),
+    ] {
+        let daemon = with_fake_language_server(|dir| {
+            let log = dir.join("server.log").display().to_string();
+            vec!["--log".into(), log, flag.into()]
+        });
+        let dir = daemon.dir.path();
+        std::fs::create_dir(dir.join("app")).unwrap();
+        std::fs::write(dir.join("app/project"), "").unwrap();
+        std::fs::write(dir.join("app/a.fk"), "bad\n").unwrap();
+        let mut client = daemon.client();
+        client.watch_workspaces().unwrap();
+        let pane = (client.new_workspace(None, open_file(dir, "app/a.fk"))).unwrap();
+        let buffer = buffer_in(&mut client, pane);
+        attach_buffer(&mut client, buffer);
+        next_diagnostics(&mut client);
+        // Closed, it's stopped at once, as tests have it.
+        client.close_pane(pane).unwrap();
+        let log = dir.join("server.log");
+        let heard = wait_for_server_log(&log, |line| line == "exit");
+        let heard: Vec<&str> = heard.lines().collect();
+        assert_eq!(heard[heard.len() - 2..], ["shutdown", "exit"], "{flag}");
+        let root = dir.join("app").canonicalize().unwrap();
+        wait_for_fake_server_logged(&format!("for {}: {said}", root.display()));
+    }
+}
+
+/// Whether the fake language server's log, `log`, has the line `line`
+/// within `limit`.
+fn server_says_within(log: &Path, line: &str, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        let heard = std::fs::read_to_string(log).unwrap_or_default();
+        if heard.lines().any(|said| said == line) {
+            return true;
+        }
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Replaces the file at `path` with one holding `text`, renamed over it,
+/// as most programs write a file: inotify hears of a rename as it's made.
+fn replace_file(path: &Path, text: &str) {
+    let new = path.with_extension("new");
+    std::fs::write(&new, text).unwrap();
+    std::fs::rename(&new, path).unwrap();
+}
+
+/// Makes files at `paths`, one after another, renamed into place, until
+/// the fake language server says it was told one was made: its watches
+/// are made on a thread, so a change before then may go unheard.
+fn until_told(log: &Path, paths: impl Fn(usize) -> PathBuf) {
+    for attempt in 0..50 {
+        let path = paths(attempt);
+        replace_file(&path, "probe\n");
+        let told = format!("changed: 1 {}", path.display());
+        if server_says_within(log, &told, Duration::from_millis(200)) {
+            return;
+        }
+    }
+    panic!("it was never told of a change");
+}
+
+#[test]
+fn a_language_server_hears_of_changes_to_the_files_it_asks_to() {
+    let daemon = with_fake_language_server(|dir| {
+        let log = dir.join("server.log").display().to_string();
+        let watchers = r#"[{ "globPattern": "**/*.fk" }]"#.to_owned();
+        vec!["--log".into(), log, "--watch".into(), watchers]
+    });
+    let dir = daemon.dir.path();
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    let app = dir.join("app").canonicalize().unwrap();
+    let log = dir.join("server.log");
+    until_told(&log, |attempt| app.join(format!("probe{attempt}.fk")));
+    let told = |change: u8, path: &Path| format!("changed: {change} {}", path.display());
+    let says = |line: &str| server_says_within(&log, line, Duration::from_secs(5));
+
+    // Files made one after another are told of a few at a time, not one
+    // by one, and one it didn't ask for isn't told of at all.
+    let notifications = || {
+        let heard = std::fs::read_to_string(&log).unwrap();
+        (heard.lines())
+            .filter(|&line| line == "workspace/didChangeWatchedFiles")
+            .count()
+    };
+    let before = notifications();
+    let made: Vec<PathBuf> = (0..10).map(|n| app.join(format!("made{n}.fk"))).collect();
+    for path in &made {
+        replace_file(path, "made\n");
+    }
+    std::fs::write(app.join("notes.txt"), "notes\n").unwrap();
+    assert!(made.iter().all(|path| says(&told(1, path))));
+    assert!(notifications() - before < made.len(), "one at a time");
+    let (b, c) = (app.join("b.fk"), app.join("c.fk"));
+    replace_file(&b, "b\n");
+    replace_file(&c, "c\n");
+    assert!(says(&told(1, &b)) && says(&told(1, &c)));
+
+    // A file written is told of as changed, one deleted as deleted, and
+    // one in a folder made since as made.
+    std::fs::write(&b, "more\n").unwrap();
+    assert!(says(&told(2, &b)));
+    std::fs::remove_file(&c).unwrap();
+    assert!(says(&told(3, &c)));
+    std::fs::create_dir(app.join("sub")).unwrap();
+    let d = app.join("sub/d.fk");
+    std::fs::write(&d, "d\n").unwrap();
+    assert!(says(&told(1, &d)));
+
+    // A folder renamed is told of as deleted where it was, and what's in
+    // it as made where it is, and it's watched there, not where it was,
+    // which is watched again once it's made again.
+    let (sub, moved) = (app.join("sub"), app.join("moved"));
+    std::fs::rename(&sub, &moved).unwrap();
+    assert!(says(&told(3, &sub)) && says(&told(1, &moved.join("d.fk"))));
+    let in_moved = moved.join("f.fk");
+    replace_file(&in_moved, "f\n");
+    assert!(says(&told(1, &in_moved)));
+    std::fs::create_dir(&sub).unwrap();
+    let in_made_again = sub.join("g.fk");
+    replace_file(&in_made_again, "g\n");
+    assert!(says(&told(1, &in_made_again)));
+    // And a folder deleted is told of as deleted.
+    std::fs::remove_dir_all(&moved).unwrap();
+    assert!(says(&told(3, &moved)));
+
+    // The file open in it isn't told of, as it has it from its buffer:
+    // saving it says it's saved, not that it changed on disk.
+    let saved = client.request(&Request::Save {
+        buffer,
+        force: false,
+    });
+    assert!(matches!(saved, Ok(Response::Done)), "{saved:?}");
+
+    // Once it asks to hear no more, it isn't told.
+    send_change(&mut client, buffer, 0, insert(4, 0, "unwatch ", 0));
+    assert!(says("unwatch answered"));
+    let e = app.join("e.fk");
+    std::fs::write(&e, "e\n").unwrap();
+    assert!(!server_says_within(
+        &log,
+        &told(1, &e),
+        Duration::from_millis(500)
+    ));
+    let heard = std::fs::read_to_string(&log).unwrap();
+    assert!(!heard.contains("notes.txt"), "{heard}");
+    assert!(!heard.contains("a.fk"), "{heard}");
+    assert!(!heard.contains("sub/f.fk"), "told where it was: {heard}");
+}
+
+#[test]
+fn a_language_server_is_watched_for_only_in_its_project_and_not_in_build_output() {
+    // Its patterns reach out of its project through `..` and a link,
+    // and into folders builds fill and `.gitignore` leaves out, in a
+    // project that isn't a git repository.
+    let daemon = with_fake_language_server(|dir| {
+        let log = dir.join("server.log").display().to_string();
+        let app = dir.canonicalize().unwrap().join("app");
+        let watchers = serde_json::json!([
+            { "globPattern": "**/*.fk" },
+            { "globPattern": { "baseUri": format!("file://{}/..", app.display()), "pattern": "**/*.fk" } },
+            { "globPattern": "link/**/*.fk" },
+        ]);
+        vec!["--log".into(), log, "--watch".into(), watchers.to_string()]
+    });
+    let dir = daemon.dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(dir.join("outside")).unwrap();
+    std::fs::create_dir_all(dir.join("app/target/debug")).unwrap();
+    std::fs::create_dir_all(dir.join("app/node_modules/pkg")).unwrap();
+    std::fs::create_dir_all(dir.join("app/gen")).unwrap();
+    std::os::unix::fs::symlink(dir.join("outside"), dir.join("app/link")).unwrap();
+    std::fs::write(dir.join("app/project"), "").unwrap();
+    std::fs::write(dir.join("app/.gitignore"), "gen/\n").unwrap();
+    std::fs::write(dir.join("app/a.fk"), "bad\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(&dir, "app/a.fk"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    next_diagnostics(&mut client);
+    let log = dir.join("server.log");
+    until_told(&log, |attempt| dir.join(format!("app/probe{attempt}.fk")));
+    // Made since, too.
+    std::fs::create_dir_all(dir.join("app/__pycache__/out")).unwrap();
+    std::fs::create_dir_all(dir.join("app/gen/more")).unwrap();
+
+    let quiet = [
+        dir.join("beside.fk"),
+        dir.join("outside/far.fk"),
+        dir.join("app/target/debug/built.fk"),
+        dir.join("app/node_modules/pkg/dep.fk"),
+        dir.join("app/gen/made.fk"),
+        dir.join("app/__pycache__/out/later.fk"),
+        dir.join("app/gen/more/also.fk"),
+    ];
+    for path in &quiet {
+        replace_file(path, "quiet\n");
+    }
+    // Something told after them, so they'd have been told by then.
+    let last = dir.join("app/last.fk");
+    replace_file(&last, "last\n");
+    let said = format!("changed: 1 {}", last.display());
+    assert!(server_says_within(&log, &said, Duration::from_secs(5)));
+    std::thread::sleep(Duration::from_millis(300));
+    let heard = std::fs::read_to_string(&log).unwrap();
+    let names = [
+        "beside.fk",
+        "far.fk",
+        "built.fk",
+        "dep.fk",
+        "made.fk",
+        "later.fk",
+        "also.fk",
+    ];
+    for name in names {
+        assert!(!heard.contains(name), "{name}: {heard}");
+    }
+}
+
+#[test]
+fn a_language_server_that_watches_nothing_hears_of_changes_to_files_it_said_are_wrong() {
+    let daemon = with_fake_language_server(|dir| {
+        let log = dir.join("server.log").display().to_string();
+        let other = dir.join("app/other.fk").display().to_string();
+        vec!["--log".into(), log, "--elsewhere".into(), other]
+    });
+    let dir = daemon.dir.path();
+    let files = [("a.fk", "bad\n"), ("other.fk", "bad\n"), ("quiet.fk", "\n")];
+    let (mut client, buffer) = fake_project(&daemon, &files);
+    let app = dir.join("app").canonicalize().unwrap();
+    let log = dir.join("server.log");
+    let other = app.join("other.fk");
+    until_told(&log, |_| other.clone());
+
+    // A file it said nothing of isn't told of.
+    let quiet = app.join("quiet.fk");
+    replace_file(&quiet, "still quiet\n");
+    let told = format!("changed: 1 {}", quiet.display());
+    assert!(!server_says_within(&log, &told, Duration::from_millis(500)));
+
+    // Once it says nothing's wrong with the file, as it does when it
+    // says what's wrong with the file open, it's told of it no more.
+    let told_of_other = || {
+        let heard = std::fs::read_to_string(&log).unwrap();
+        let other = format!(" {}", other.display());
+        (heard.lines())
+            .filter(|line| line.ends_with(&other))
+            .count()
+    };
+    let told_before = told_of_other();
+    replace_file(&other, "fine\n");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while told_of_other() == told_before {
+        assert!(Instant::now() < deadline, "never told of the change");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let before = told_of_other();
+    send_change(&mut client, buffer, 0, insert(4, 0, "x ", 0));
+    next_diagnostics(&mut client);
+    std::thread::sleep(Duration::from_millis(200));
+    replace_file(&other, "fine again\n");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(told_of_other(), before);
+}
+
+#[test]
+fn every_message_to_and_from_a_language_server_can_be_traced() {
+    let daemon = TestDaemon::start_with(|dir, config| {
+        config.languages = Some(fake_language_server_pack(dir, Vec::new()));
+        config.lsp_trace = Some(dir.join("lsp.trace"));
+    });
+    let _project = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    let trace = std::fs::read_to_string(daemon.dir.path().join("lsp.trace")).unwrap();
+    // Each line: when, in UTC, to the millisecond; the server and its
+    // pid; which way; and the message.
+    let read: Vec<(&str, String)> = (trace.lines())
+        .map(|line| {
+            let mut parts = line.splitn(4, ' ');
+            let (when, who, way) = (parts.next().unwrap(), parts.next().unwrap(), parts.next());
+            assert!(
+                when.len() == 24 && when.ends_with('Z') && when.contains('T'),
+                "{line}"
+            );
+            assert!(
+                who.contains("fake_language_server") && who.ends_with(']'),
+                "{line}"
+            );
+            let message: serde_json::Value = serde_json::from_str(parts.next().unwrap()).unwrap();
+            let method = message["method"].as_str().unwrap_or_default().to_owned();
+            (way.unwrap(), method)
+        })
+        .collect();
+    assert_eq!(read[0], ("->", "initialize".to_owned()));
+    let diagnostics = ("<-", "textDocument/publishDiagnostics".to_owned());
+    assert!(read.contains(&diagnostics), "{trace}");
+    // Only its owner may read it, as it holds files' text.
+    let mode = std::fs::metadata(daemon.dir.path().join("lsp.trace"))
+        .unwrap()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn a_trace_is_written_only_to_a_regular_file() {
+    // A pipe no one reads, which would hold up the daemon, and a link,
+    // which would have it write wherever it points.
+    for (name, make) in [
+        (
+            "pipe",
+            (|path: &Path| {
+                let mode = rustix::fs::Mode::from_raw_mode(0o600);
+                rustix::fs::mknodat(rustix::fs::CWD, path, rustix::fs::FileType::Fifo, mode, 0)
+                    .unwrap();
+            }) as fn(&Path),
+        ),
+        ("link", |path: &Path| {
+            std::os::unix::fs::symlink(path.with_file_name("pointed"), path).unwrap();
+        }),
+    ] {
+        let daemon = TestDaemon::start_with(|dir, config| {
+            config.languages = Some(fake_language_server_pack(dir, Vec::new()));
+            make(&dir.join("lsp.trace"));
+            config.lsp_trace = Some(dir.join("lsp.trace"));
+        });
+        // Its server works as ever, untraced.
+        let _project = fake_project(&daemon, &[("a.fk", "bad\n")]);
+        assert!(!daemon.dir.path().join("pointed").exists(), "{name}");
+    }
+}
+
+/// gcsl's language server, as installed: a file not open changed on disk
+/// changes what it says of the file open, as it's told of the change, and
+/// it exits cleanly when the daemon stops.
+#[test]
+#[ignore = "needs gcsl on PATH: run with --ignored"]
+fn gcsl_hears_of_a_file_not_open_changing_and_exits_cleanly() {
+    fake_server_logged();
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let pack = dir.join("languages/gcsl");
+        std::fs::create_dir_all(&pack).unwrap();
+        let language = "grammar = \"gcsl\"\nextensions = [\"gcsl\"]\n\
+                        server = [\"gcsl\", \"lsp\"]\nroots = [\"workspace.gcsl\"]\n";
+        std::fs::write(pack.join("language.toml"), language).unwrap();
+        config.languages = Some(dir.join("languages"));
+        config.lsp_trace = Some(dir.join("lsp.trace"));
+    });
+    let dir = daemon.dir.path().to_owned();
+    std::fs::create_dir(dir.join("app")).unwrap();
+    std::fs::write(dir.join("app/workspace.gcsl"), "").unwrap();
+    std::fs::write(dir.join("app/a.gcsl"), "z = y + 1\n").unwrap();
+    std::fs::write(dir.join("app/b.gcsl"), "y = 1\n").unwrap();
+    let mut client = daemon.client();
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(&dir, "app/a.gcsl"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+
+    // Its watches are made once it's ready, on a thread: until then, a
+    // file made isn't told of, as the trace shows.
+    let told = |name: &str| {
+        let trace = std::fs::read_to_string(dir.join("lsp.trace")).unwrap_or_default();
+        (trace.lines()).any(|line| {
+            line.contains("] -> ") && line.contains("didChangeWatchedFiles") && line.contains(name)
+        })
+    };
+    let ready = (0..50).any(|attempt| {
+        let name = format!("probe{attempt}.gcsl");
+        replace_file(&dir.join("app").join(&name), &format!("p{attempt} = 1\n"));
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            if told(&name) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    });
+    assert!(ready, "gcsl was never told of a file made");
+
+    // `y` becomes a string in the file not open, so adding 1 to it is
+    // wrong, which it says once it's told.
+    replace_file(&dir.join("app/b.gcsl"), "y = \"s\"\n");
+    let wrong = loop {
+        let (_, wrong) = next_diagnostics(&mut client);
+        if !wrong.is_empty() {
+            break wrong;
+        }
+    };
+    assert_eq!(wrong, [(6, 7)], "the `y` added to");
+    assert!(told("b.gcsl"));
+
+    // Stopped with the daemon: shut down, then told to exit, which it
+    // does cleanly, with code 0.
+    let mut daemon = daemon;
+    daemon.shutdown.shutdown();
+    daemon.thread.take().unwrap().join().unwrap();
+    let root = dir.join("app").canonicalize().unwrap();
+    let exited = wait_for_fake_server_logged(&format!("gcsl lsp, for {}: ", root.display()));
+    let logged: Vec<String> = (fake_server_logged().into_iter())
+        .filter(|line| line.contains(&root.display().to_string()))
+        .collect();
+    assert!(
+        logged.iter().any(|line| line.ends_with(": exited")),
+        "{exited}: {logged:?}"
+    );
 }
 
 /// rust-analyzer, as installed, on a crate with a mistake in it.

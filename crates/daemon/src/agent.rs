@@ -479,9 +479,10 @@ impl Agent {
         read
     }
 
-    /// Reads what the agent wrote to stderr, and logs it at debug level.
+    /// Reads what the agent wrote to stderr, all of it, and logs it at
+    /// debug level.
     pub(crate) fn read_errors(&mut self, buffer: &mut [u8]) {
-        self.peer.read_errors(buffer);
+        self.peer.read_errors(buffer, usize::MAX);
     }
 
     fn receive(&mut self, message: Message, incoming: &mut Vec<Incoming>) {
