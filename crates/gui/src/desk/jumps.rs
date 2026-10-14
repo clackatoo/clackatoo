@@ -42,7 +42,8 @@ pub(super) struct Jump {
 }
 
 /// Where the cursor was in a folder's listing: the folder, and the path of
-/// the entry on the cursor's line, if it was on one. The entry is kept,
+/// the entry on the cursor's line, if it was on one, or `..` if it was on
+/// the way up. The entry is kept,
 /// not the line, as a folder listed again may have more lines, or fewer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct FolderPlace {

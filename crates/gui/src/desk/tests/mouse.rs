@@ -270,6 +270,42 @@ fn a_double_click_in_a_folders_listing_opens_the_entry() {
 }
 
 #[test]
+fn a_double_click_on_dot_dot_in_a_folders_listing_goes_up() {
+    let mut desk = showing_a_folder();
+    let up = on_entry(&mut desk, "..");
+    press(&mut desk, up, 1);
+    release(&mut desk, up);
+    press(&mut desk, up, 2);
+    release(&mut desk, up);
+    let rooted = (desk.take_outbox().into_iter()).any(|message| {
+        matches!(
+            message,
+            ClientMessage::Files { action: clackatoo_protocol::FilesAction::Root(dir), .. } if dir == "/"
+        )
+    });
+    assert!(rooted, "rooted at the folder above");
+    desk.files_changed(
+        FilesId(1),
+        FilesUpdate::Root {
+            path: "/".into(),
+            name: "/".into(),
+        },
+    );
+    desk.files_changed(
+        FilesId(1),
+        FilesUpdate::Listed {
+            dir: "/".into(),
+            entries: vec![entry("etc", true), entry("p", true)],
+            cut_short: false,
+        },
+    );
+    // At `/`, there's no `..`, and the cursor's on the folder come from.
+    assert_eq!(listing_shown(&desk), ["etc/", "p/"]);
+    assert_eq!(listing_line(&desk), 1);
+    assert_eq!(editor_mode(&desk), Mode::Normal, "nothing selected");
+}
+
+#[test]
 fn a_press_after_a_missed_release_is_had_as_any_press() {
     let layout = side_by_side(vec![file_pane(1, 7), pane(2)]);
     let mut desk = desk(one_tab(layout));

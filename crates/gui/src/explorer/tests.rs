@@ -1019,19 +1019,30 @@ fn nothing_that_acts_on_a_file_acts_on_dot_dot() {
         panic!("not the root's listing: {asks:?}");
     };
     assert_eq!(explorer.folder_shown(), Some("/home/me/p"));
-    // The listing has no `..`, and a line typed so is refused, so it
-    // can't make, move or delete the folder above.
+    // The listing starts with `..`, which has no mark, so it names
+    // nothing: gone, moved, put again or indented, it comes to nothing.
     let names: Vec<&str> = (text.lines())
         .map(|line| &line[listing::mark_len(line)..])
         .collect();
-    assert_eq!(names, ["src/", "target/", "Cargo.toml"]);
-    for typed in ["..", "../"] {
-        let planned = explorer.plan(&[&format!("{typed}\n{text}")]);
-        assert!(
-            matches!(&planned, Planned::Refused { at: Some((0, 0)), why } if why.contains("holds it")),
-            "{typed}: {planned:?}"
-        );
+    assert_eq!(names, ["..", "src/", "target/", "Cargo.toml"]);
+    let entries = text.strip_prefix("..\n").expect("`..` first");
+    for (before, after) in [
+        ("", ""),
+        ("", "..\n"),
+        ("../\n..\n", "\t..\n"),
+        ("  ../ \n", ""),
+    ] {
+        let planned = explorer.plan(&[&format!("{before}{entries}{after}")]);
+        assert_eq!(planned, Planned::Nothing, "{before:?} {after:?}");
     }
+    // An entry's line renamed `..` would name the folder above: refused.
+    let src = text.lines().nth(1).expect("src's line");
+    let renamed = text.replace(src, &format!("{}..", &src[..listing::mark_len(src)]));
+    let planned = explorer.plan(&[&renamed]);
+    assert!(
+        matches!(&planned, Planned::Refused { at: Some((0, 1)), why } if why.contains("holds it")),
+        "{planned:?}"
+    );
 }
 
 #[test]
@@ -1083,4 +1094,83 @@ fn an_explorer_kept_shows_its_cursor_where_it_was_on_a_file_or_on_dot_dot() {
     assert_eq!(at(&mut revealing), "/home/me/p/Cargo.toml");
     listed(&mut revealing, "/home/me/p", project());
     assert_eq!(at(&mut revealing), "/home/me/p/Cargo.toml");
+}
+
+/// The text of the listing `explorer` asks to show, and the mark of the
+/// line the cursor goes to, if it says.
+fn listing_asked(explorer: &mut Explorer) -> (String, Option<String>) {
+    let asks = explorer.take_asks();
+    match &asks[..] {
+        [Ask::Edit { text, at, .. }] => (text.clone().unwrap_or_default(), at.clone()),
+        _ => panic!("not a listing: {asks:?}"),
+    }
+}
+
+#[test]
+fn a_listing_starts_with_dot_dot_but_not_at_slash_nor_at_a_fence() {
+    // At `/`, none.
+    let mut explorer = explorer(10);
+    explorer.update(FilesUpdate::Root {
+        path: "/".into(),
+        name: "/".into(),
+    });
+    listed(&mut explorer, "/", vec![dir("etc"), dir("p")]);
+    keys(&mut explorer, "e");
+    let (text, _) = listing_asked(&mut explorer);
+    assert!(text.ends_with("p/\n") && !text.contains(".."), "{text:?}");
+    // At a fence, none, but below it, one, first.
+    let mut explorer = super::tests::explorer(10);
+    rooted(&mut explorer, project());
+    explorer.fence("/p".into());
+    keys(&mut explorer, "e");
+    let (text, _) = listing_asked(&mut explorer);
+    assert!(!text.contains(".."), "{text:?}");
+    // Shown once it's listed.
+    explorer.edit_folder("/p/src".into(), None);
+    assert_eq!(explorer.take_asks(), []);
+    listed(&mut explorer, "/p/src", vec![file("main.rs")]);
+    let (text, _) = listing_asked(&mut explorer);
+    let names: Vec<&str> = (text.lines())
+        .map(|line| &line[listing::mark_len(line)..])
+        .collect();
+    assert_eq!(names, ["..", "main.rs"]);
+    // Enter on it, however it's written, shows the folder above's, with
+    // the cursor on the folder come from.
+    for typed in ["..", "  ../ "] {
+        explorer.enter_line(typed);
+        let (_, at) = listing_asked(&mut explorer);
+        assert_eq!(explorer.folder_shown(), Some("/p"), "{typed:?}");
+        let at = at.expect("a line to go to");
+        assert_eq!(explorer.path_of_line(&at).as_deref(), Some("/p/src"));
+        explorer.edit_folder("/p/src".into(), None);
+        explorer.take_asks();
+    }
+    // At the fence, a `..` put there goes nowhere.
+    explorer.edit_folder("/p".into(), None);
+    explorer.take_asks();
+    explorer.enter_line("..");
+    assert_eq!(explorer.take_asks(), []);
+    assert_eq!(explorer.folder_shown(), Some("/p"));
+}
+
+#[test]
+fn paths_are_said_from_the_root_only_if_theyre_in_it() {
+    let mut explorer = explorer(10);
+    rooted(&mut explorer, project());
+    assert_eq!(explorer.relative("/p"), "");
+    assert_eq!(explorer.relative("/p/src/main.rs"), "src/main.rs");
+    // A name that only starts as the root's does isn't in it.
+    assert_eq!(explorer.relative("/px"), "/px");
+    assert_eq!(explorer.relative("/p.old/a"), "/p.old/a");
+    assert_eq!(explorer.relative("/"), "/");
+    assert_eq!(explorer.shown("/px"), "/px");
+    assert_eq!(explorer.shown("/p/src"), "~/p/src");
+    // From `/`, everything is in it.
+    let mut explorer = super::tests::explorer(10);
+    explorer.update(FilesUpdate::Root {
+        path: "/".into(),
+        name: "/".into(),
+    });
+    assert_eq!(explorer.relative("/"), "");
+    assert_eq!(explorer.relative("/etc/hosts"), "etc/hosts");
 }

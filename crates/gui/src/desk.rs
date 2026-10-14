@@ -9356,7 +9356,7 @@ mod tests {
             "nothing was done: a folder has changed since its listing was made. :q! and e again \
              shows it as it is"
         );
-        assert_eq!(listing_shown(&desk), ["b.txt"], "back to the text");
+        assert_eq!(listing_shown(&desk), ["..", "b.txt"], "back to the text");
         command(&mut desk, "q!");
         type_keys(&mut desk, "edd");
         command(&mut desk, "w");
@@ -9419,7 +9419,7 @@ mod tests {
         ];
         explore_with(&mut desk, entries);
         type_keys(&mut desk, "e");
-        assert_eq!(listing_shown(&desk), ["ok.txt"]);
+        assert_eq!(listing_shown(&desk), ["..", "ok.txt"]);
         assert_eq!(
             note(&desk),
             "2 names with line breaks or stray marks in them are left out, and left alone"
@@ -9464,7 +9464,7 @@ mod tests {
         escape(&mut desk);
         type_keys(&mut desk, "jcwa");
         escape(&mut desk);
-        assert_eq!(listing_shown(&desk), ["b.txt", "a.txt"]);
+        assert_eq!(listing_shown(&desk), ["..", "b.txt", "a.txt"]);
         command(&mut desk, "w");
         type_keys(&mut desk, "y");
         assert_eq!(file_ops(&mut desk).len(), 1);
@@ -9523,8 +9523,8 @@ mod tests {
         answer_all(&mut desk);
         type_keys(&mut desk, "je");
         // In an editor in the explorer's pane, on the line it was on.
-        assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
-        assert_eq!(listing_line(&desk), 1);
+        assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
+        assert_eq!(listing_line(&desk), 2);
         type_keys(&mut desk, "cwb");
         escape(&mut desk);
         type_keys(&mut desk, "onew/");
@@ -9532,11 +9532,11 @@ mod tests {
         type_keys(&mut desk, "u");
         assert_eq!(
             listing_shown(&desk),
-            ["src/", "b.txt"],
+            ["..", "src/", "b.txt"],
             "undone, as in any editor"
         );
         ctrl(&mut desk, "r");
-        assert_eq!(listing_shown(&desk), ["src/", "b.txt", "new/"]);
+        assert_eq!(listing_shown(&desk), ["..", "src/", "b.txt", "new/"]);
         // The text is the window's alone: nothing of it is sent.
         assert_eq!(sent(&mut desk), []);
         command(&mut desk, "w");
@@ -9579,7 +9579,7 @@ mod tests {
         assert_eq!(note(&desk), "make these 2 changes? (y/n)");
         // `n` goes back to the text, as it was left.
         type_keys(&mut desk, "n");
-        assert_eq!(listing_shown(&desk), ["src/", "x"]);
+        assert_eq!(listing_shown(&desk), ["..", "src/", "x"]);
         command(&mut desk, "q");
         assert_eq!(
             note(&desk),
@@ -9625,10 +9625,10 @@ mod tests {
             note(&desk),
             "can't: two lines are both a.txt: a copy needs a name of its own"
         );
-        assert_eq!(listing_line(&desk), 2);
+        assert_eq!(listing_line(&desk), 3, "counting the `..` line");
         assert_eq!(file_ops(&mut desk), []);
         command(&mut desk, "e!");
-        assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
+        assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
         type_keys(&mut desk, "dd");
         command(&mut desk, "q!");
         assert!(desk.focused_editor().is_none());
@@ -9654,12 +9654,12 @@ mod tests {
             cut_short: false,
         };
         desk.files_changed(FilesId(1), listed);
-        assert_eq!(listing_shown(&desk), ["main.rs"]);
+        assert_eq!(listing_shown(&desk), ["..", "main.rs"]);
         type_keys(&mut desk, "dd-");
-        assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
-        assert_eq!(listing_line(&desk), 0, "on the folder come from");
+        assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
+        assert_eq!(listing_line(&desk), 1, "on the folder come from");
         type_keys(&mut desk, "p");
-        assert_eq!(listing_shown(&desk), ["src/", "main.rs", "a.txt"]);
+        assert_eq!(listing_shown(&desk), ["..", "src/", "main.rs", "a.txt"]);
         command(&mut desk, "w");
         assert_eq!(
             explorer_rows(&mut desk),
@@ -9685,6 +9685,121 @@ mod tests {
         ));
     }
 
+    /// Whether the focused editor's bar says its text is modified.
+    fn modified(desk: &Desk) -> bool {
+        editor_label(desk).contains("[+]")
+    }
+
+    #[test]
+    fn dot_dot_tops_a_listing_goes_up_with_enter_and_comes_to_nothing() {
+        use clackatoo_protocol::{FilesId, FilesUpdate};
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "e");
+        enter(&mut desk);
+        let listed = FilesUpdate::Listed {
+            dir: "/p/src".into(),
+            entries: vec![entry("main.rs", false)],
+            cut_short: false,
+        };
+        desk.files_changed(FilesId(1), listed);
+        // On the first entry, not `..`.
+        assert_eq!(listing_shown(&desk), ["..", "main.rs"]);
+        assert_eq!(listing_line(&desk), 1);
+        // Enter on `..` goes up, as `-` does, to the folder come from.
+        type_keys(&mut desk, "gg");
+        enter(&mut desk);
+        assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
+        assert_eq!(listing_line(&desk), 1, "on src/");
+        // Deleted, it's no change, and writing does nothing.
+        type_keys(&mut desk, "ggdd");
+        assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
+        assert!(!modified(&desk));
+        command(&mut desk, "w");
+        assert_eq!(note(&desk), "nothing has changed");
+        assert_eq!(file_ops(&mut desk), []);
+        type_keys(&mut desk, "u");
+        assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
+        assert!(!modified(&desk));
+        // An entry's change is a change, and undone, isn't.
+        type_keys(&mut desk, "jx");
+        assert!(modified(&desk));
+        type_keys(&mut desk, "u");
+        assert!(!modified(&desk));
+        // Put three times more, or indented, it's still nothing.
+        type_keys(&mut desk, "ggyy3p>>");
+        assert_eq!(
+            listing_shown(&desk),
+            ["..", "    ..", "..", "..", "src/", "a.txt"]
+        );
+        assert!(!modified(&desk));
+        command(&mut desk, "w");
+        assert_eq!(note(&desk), "nothing has changed");
+        assert_eq!(file_ops(&mut desk), []);
+        command(&mut desk, "e!");
+        assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
+        // Cut here and put in another listing, it moves nothing, and
+        // leaving says nothing of changes.
+        type_keys(&mut desk, "ggdd");
+        enter(&mut desk);
+        assert_eq!(listing_shown(&desk), ["..", "main.rs"]);
+        type_keys(&mut desk, "p");
+        assert_eq!(listing_shown(&desk), ["..", "main.rs", ".."]);
+        assert!(!modified(&desk));
+        command(&mut desk, "w");
+        assert_eq!(note(&desk), "nothing has changed");
+        assert_eq!(file_ops(&mut desk), []);
+        // Gone back to, the listing it was cut from has it again.
+        type_keys(&mut desk, "-");
+        assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
+        command(&mut desk, "q");
+        assert!(
+            !desk.explorer(PaneId(2)).unwrap().editing(),
+            "back to the tree"
+        );
+        // Gone with others in a count, only the others go.
+        type_keys(&mut desk, "e-");
+        assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
+        type_keys(&mut desk, "ggddp");
+        assert_eq!(listing_shown(&desk), ["src/", "..", "a.txt"]);
+        type_keys(&mut desk, "2dd");
+        command(&mut desk, "w");
+        assert_eq!(note(&desk), "make this change? (y/n)");
+        assert_eq!(
+            explorer_rows(&mut desk),
+            ["to do", "  delete a.txt, to the trash"]
+        );
+    }
+
+    #[test]
+    fn an_empty_folders_listing_is_dot_dot_alone_and_its_going_is_no_change() {
+        use clackatoo_protocol::{FilesId, FilesUpdate};
+        let mut desk = desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
+        explore_p(&mut desk);
+        answer_all(&mut desk);
+        type_keys(&mut desk, "e");
+        enter(&mut desk);
+        let listed = FilesUpdate::Listed {
+            dir: "/p/src".into(),
+            entries: Vec::new(),
+            cut_short: false,
+        };
+        desk.files_changed(FilesId(1), listed);
+        assert_eq!(listing_shown(&desk), [".."]);
+        assert_eq!(listing_line(&desk), 0, "on `..`, the only line");
+        type_keys(&mut desk, "dd");
+        assert!(!modified(&desk), "{:?}", editor_text(&desk));
+        command(&mut desk, "w");
+        assert_eq!(note(&desk), "nothing has changed");
+        assert_eq!(file_ops(&mut desk), []);
+        command(&mut desk, "q");
+        assert!(
+            !desk.explorer(PaneId(2)).unwrap().editing(),
+            "back to the tree"
+        );
+    }
+
     #[test]
     fn colon_explore_bang_edits_the_folder_of_the_editors_file() {
         let mut desk = editing("/p/src/main.rs", "fn main() {}\n");
@@ -9705,7 +9820,7 @@ mod tests {
         answer_all(&mut desk);
         explore_p(&mut desk);
         assert_eq!(shown_pane(&desk), PaneId(2));
-        assert_eq!(listing_shown(&desk), ["main.rs"]);
+        assert_eq!(listing_shown(&desk), ["..", "main.rs"]);
         let (editor, _) = desk.focused_editor().expect("an editor");
         assert_eq!(editor.mode, Mode::Normal);
     }

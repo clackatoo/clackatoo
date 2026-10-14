@@ -1198,30 +1198,58 @@ fn the_explorer_lessons_editor_goes_to_its_folder_with_minus_and_opens_a_file_fr
         name: "explorer".into(),
     };
     desk.files_changed(FilesId(5), root);
-    let entries = ["done.txt", "notes.txt"].map(|name| clackatoo_protocol::Entry {
-        name: name.into(),
-        kind: clackatoo_protocol::EntryKind::File { executable: false },
-        ignored: false,
-        stamp: None,
-    });
-    let listed = FilesUpdate::Listed {
-        dir: dir.clone(),
-        entries: entries.to_vec(),
-        cut_short: false,
+    let entries = vec![
+        entry("drafts", true),
+        entry("done.txt", false),
+        entry("notes.txt", false),
+    ];
+    let listed = |desk: &mut Desk, dir: &str, entries: Vec<clackatoo_protocol::Entry>| {
+        let listed = FilesUpdate::Listed {
+            dir: dir.into(),
+            entries,
+            cut_short: false,
+        };
+        desk.files_changed(FilesId(5), listed);
     };
-    desk.files_changed(FilesId(5), listed);
+    let rooted = |desk: &mut Desk, path: &str| {
+        let root = FilesUpdate::Root {
+            path: path.into(),
+            name: path.rsplit('/').next().unwrap_or(path).into(),
+        };
+        desk.files_changed(FilesId(5), root);
+    };
+    let enter = |desk: &mut Desk| {
+        press(
+            desk,
+            Key::Named(NamedKey::Enter),
+            None,
+            Modifiers::default(),
+        );
+    };
+    listed(&mut desk, &dir, entries.clone());
     assert_eq!(step(&desk), browse + 1);
-    // Kept in the lesson's folder, as its explorer is.
+    // Kept in the lesson's folder, as its explorer is: no `..`, and `-`
+    // goes nowhere.
+    assert_eq!(listing_shown(&desk), ["drafts/", "done.txt", "notes.txt"]);
     type_keys(&mut desk, "-");
     assert!(answer_all(&mut desk).is_empty());
+    // Into drafts, which is empty but for `..`.
+    let drafts = format!("{dir}/drafts");
+    type_keys(&mut desk, "gg");
+    enter(&mut desk);
+    rooted(&mut desk, &drafts);
+    listed(&mut desk, &drafts, Vec::new());
+    assert_eq!(listing_shown(&desk), [".."]);
+    assert_eq!(step(&desk), browse + 2);
+    // Enter on `..` goes back up, onto drafts/.
+    enter(&mut desk);
+    rooted(&mut desk, &dir);
+    listed(&mut desk, &dir, entries);
+    assert_eq!(listing_shown(&desk), ["drafts/", "done.txt", "notes.txt"]);
+    assert_eq!(step(&desk), browse + 3);
     // Enter on notes.txt opens it in the listing's place.
-    type_keys(&mut desk, "j");
-    press(
-        &mut desk,
-        Key::Named(NamedKey::Enter),
-        None,
-        Modifiers::default(),
-    );
+    type_keys(&mut desk, "jj");
+    enter(&mut desk);
     let notes = format!("{dir}/notes.txt");
     let asked = answer_all(&mut desk);
     assert!(
@@ -1234,5 +1262,5 @@ fn the_explorer_lessons_editor_goes_to_its_folder_with_minus_and_opens_a_file_fr
     desk.workspaces_changed(workspaces(vec![with_lesson(layout, vec![], 2)]));
     answer_all(&mut desk);
     load(&mut desk, 9, &notes, "Notes for the explorer lesson.\n");
-    assert_eq!(step(&desk), browse + 2);
+    assert_eq!(step(&desk), browse + 4);
 }

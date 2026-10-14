@@ -22,7 +22,10 @@
 //! keeps, on a buffer only the window has: a scratch copy, answering its
 //! own changes. Each folder's listing has its own; those not shown wait
 //! here, with their cursors and undo, and all of them while what their
-//! edits come to is shown in the pane.
+//! edits come to is shown in the pane. Whether a listing has changes is
+//! said by [`listing::same`], which passes over its `..` lines, so a
+//! `..` deleted, moved or put again is never a change to keep or ask
+//! about.
 //!
 //! An editor showing a folder (`:e .`, `:e DIR`, `:Editor`) is a pane of
 //! the daemon's, [`Content::Folder`], with an explorer of its own that
@@ -491,7 +494,7 @@ impl Desk {
 
     /// Shows the explorer `pane`'s listing number `listing` in an editor in
     /// its pane, with the cursor on the line starting with the mark `at`,
-    /// if one does: the editor kept for it, or a new one, of `text`. The
+    /// if one does, or on the way up if `at` is [`listing::UP`]: the editor kept for it, or a new one, of `text`. The
     /// one shown waits.
     fn show_listing(
         &mut self,
@@ -512,6 +515,7 @@ impl Desk {
         let listings = explorers.listings.entry(pane).or_default();
         let kept = (listings.buffers.get(listing).copied().flatten())
             .and_then(|buffer| listings.waiting.remove(&buffer));
+        let new = kept.is_none();
         let (mut editor, copy) = match kept {
             Some(kept) => kept,
             None if listing <= listings.buffers.len() => {
@@ -523,7 +527,14 @@ impl Desk {
                 } else {
                     listings.buffers[listing] = Some(buffer);
                 }
-                let copy = BufferCopy::scratch(buffer, &dir, &as_made.unwrap_or_default());
+                // Changed only once it says something else: not by its
+                // `..` alone.
+                let copy = BufferCopy::scratch_judged(
+                    buffer,
+                    &dir,
+                    &as_made.unwrap_or_default(),
+                    listing::same_rope,
+                );
                 let mut editor = Editor::new(buffer, &self.options);
                 editor.hide_starts(listing::mark_len);
                 (editor, copy)
@@ -542,13 +553,22 @@ impl Desk {
         {
             self.message = Some(message);
         }
-        if let Some(at) = at {
-            let text = copy.text();
-            let line =
-                (0..text.len_lines()).find(|&line| text.line(line).to_string().starts_with(at));
-            if let Some(line) = line {
-                editor.go_to(line as u64, 0, &copy);
-            }
+        let text = copy.text();
+        let line = at.and_then(|at| {
+            (0..text.len_lines()).find(|&line| {
+                let line = text.line(line).to_string();
+                if at == listing::UP {
+                    listing::is_up(&line)
+                } else {
+                    line.starts_with(at)
+                }
+            })
+        });
+        // A new one starts on its first entry, not the way up above it.
+        let first =
+            (new && text.len_lines() > 2 && listing::is_up(&text.line(0).to_string())).then_some(1);
+        if let Some(line) = line.or(first) {
+            editor.go_to(line as u64, 0, &copy);
         }
         self.put_listing_editor(pane, editor, copy);
     }
@@ -566,7 +586,8 @@ impl Desk {
         let explorer = self.explorers.panes.get_mut(&pane);
         if let (Some(place), Some(explorer)) = (place, explorer)
             && place != next
-            && explorer.listing_as_made(place) == Some(copy.text().to_string().as_str())
+            && (explorer.listing_as_made(place))
+                .is_some_and(|made| listing::same_rope(copy.text(), &made.into()))
         {
             explorer.settle_listing(place);
             listings.buffers[place] = None;
@@ -611,8 +632,9 @@ impl Desk {
         let Some(explorer) = self.explorers.panes.get(&pane) else {
             return false;
         };
-        (self.listing_texts(pane).iter().enumerate())
-            .any(|(listing, text)| explorer.listing_as_made(listing) != Some(text.as_str()))
+        (self.listing_texts(pane).iter().enumerate()).any(|(place, text)| {
+            !(explorer.listing_as_made(place)).is_some_and(|made| listing::same(made, text))
+        })
     }
 
     /// `:w` in an explorer editing folders as text: shows what the edits
@@ -894,13 +916,17 @@ impl Desk {
     }
 
     /// The path of the entry on the cursor's line in the listing `pane`
-    /// shows, if it's on one.
+    /// shows, if it's on one, or [`listing::UP`] on the way up, for the
+    /// cursor to go back to.
     fn path_at_listing_cursor(&self, pane: PaneId) -> Option<String> {
         let editor = self.editor(pane)?;
         let copy = self.buffer_copy(editor.buffer())?;
         let text = copy.text();
         let byte = editor.cursor_byte(copy).min(text.len_bytes());
         let line = text.line(text.byte_to_line(byte)).to_string();
+        if listing::is_up(&line) {
+            return Some(listing::UP.to_owned());
+        }
         self.explorers.panes.get(&pane)?.path_of_line(&line)
     }
 
@@ -958,7 +984,9 @@ impl Desk {
             return;
         };
         for place in gone {
-            if texts.get(place).map(String::as_str) == explorer.listing_as_made(place) {
+            if let (Some(text), Some(made)) = (texts.get(place), explorer.listing_as_made(place))
+                && listing::same(made, text)
+            {
                 explorer.settle_listing(place);
             }
         }

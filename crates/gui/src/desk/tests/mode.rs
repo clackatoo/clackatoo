@@ -421,7 +421,7 @@ fn an_editor_showing_a_folder_follows_the_mode_once_its_listing_comes() {
         // No editor until the listing comes: the window keeps its mode.
         assert!(desk.focused_editor().is_none());
         lists_p(&mut desk, 1);
-        assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
+        assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
         let expected = if insert { Mode::Insert } else { Mode::Normal };
         assert_eq!(editor_mode(&desk), expected);
     }
@@ -436,9 +436,10 @@ fn going_into_a_folder_keeps_the_windows_mode() {
     answer_all(&mut desk);
     lists_p(&mut desk, 1);
     assert_eq!(editor_mode(&desk), Mode::Insert);
-    // Esc, then Enter on `src/`: its listing comes in normal mode.
+    // Esc, then Enter on `src/`, below `..`: its listing comes in normal
+    // mode.
     escape(&mut desk);
-    key(&mut desk, "gg");
+    key(&mut desk, "ggj");
     enter(&mut desk);
     answer_all(&mut desk);
     desk.files_changed(
@@ -449,7 +450,7 @@ fn going_into_a_folder_keeps_the_windows_mode() {
             cut_short: false,
         },
     );
-    assert_eq!(listing_shown(&desk), ["main.rs"]);
+    assert_eq!(listing_shown(&desk), ["..", "main.rs"]);
     assert_eq!(editor_mode(&desk), Mode::Normal);
     // And the terminal, gone to from there, is in normal mode.
     ctrl_b(&mut desk, "h");

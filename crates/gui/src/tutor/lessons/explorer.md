@@ -111,9 +111,32 @@ Go to the editor showing `done.txt`, and press `-`.
 focused folder
 ```
 
+## Go into a folder
+
+Enter on a folder's line shows that folder's listing in its place.
+
+Press Enter on `drafts/`.
+
+```check
+focused folder
+rooted "drafts"
+```
+
+## Go up with .. in a listing
+
+A listing starts with `..`, as the tree does: Enter or a double click on it goes up, as `-` does, with the cursor on the folder you came from. It names nothing, so deleting it, moving it or putting it in another listing changes nothing, and `:w` leaves it alone. There's none at `/`, nor at the lesson's folder, which this editor stays in.
+
+`drafts` is empty, so `..` is its only line. Press Enter on it.
+
+```check
+focused folder
+not rooted "drafts"
+at "drafts/"
+```
+
 ## Open a file from the listing
 
-Enter on a file opens it in the listing's place, and on a folder goes into it; `-` goes up. `g.` shows hidden files, or hides them, as `explorerhidden` starts them. `<Space>pf` finds files in the folder shown, and Ctrl+O goes back through the folders and files you've been to.
+Enter on a file opens it in the listing's place. `g.` shows hidden files, or hides them, as `explorerhidden` starts them. `<Space>pf` finds files in the folder shown, and Ctrl+O goes back through the folders and files you've been to.
 
 Open `notes.txt` with Enter.
 

@@ -474,12 +474,17 @@ impl Explorer {
         &self.name
     }
 
-    /// `path`, from the root, or whole if it isn't under it.
+    /// `path`, from the root, or whole if it isn't in it, so a path
+    /// outside, as `../x` in a listing names, is never taken for one
+    /// inside: `/p/srcx` isn't `x` from `/p/src`.
     fn relative<'a>(&self, path: &'a str) -> &'a str {
         let Some(root) = &self.root else { return path };
         match path.strip_prefix(root.as_str()) {
-            Some(rest) => rest.trim_start_matches('/'),
-            None => path,
+            Some(rest) if root.ends_with('/') => rest,
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                rest.strip_prefix('/').unwrap_or(rest)
+            }
+            _ => path,
         }
     }
 
@@ -828,8 +833,13 @@ impl Explorer {
     /// unless it's `/`, or the folder above is outside the fence, or it's
     /// an editor's folder, which shows no tree.
     fn shows_up(&self) -> bool {
-        (self.root.as_deref())
-            .is_some_and(|root| !self.folder && root != "/" && !self.fenced_out(parent_of(root)))
+        (self.root.as_deref()).is_some_and(|root| !self.folder && self.goes_up_from(root))
+    }
+
+    /// Whether there's a way up from the folder `dir`, as `..` shows: not
+    /// from `/`, nor out of the fence.
+    fn goes_up_from(&self, dir: &str) -> bool {
+        dir != "/" && !self.fenced_out(parent_of(dir))
     }
 
     /// How many rows come before the tree's lines: one, `..`'s, if it

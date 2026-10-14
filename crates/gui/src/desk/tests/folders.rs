@@ -111,7 +111,7 @@ fn listing_src() -> Desk {
 #[test]
 fn e_dot_shows_the_folder_and_enter_opens_a_file_in_its_place() {
     let mut desk = listing_src();
-    assert_eq!(listing_shown(&desk), ["util/", "main.rs"]);
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
     let (editor, _) = desk.focused_editor().expect("an editor");
     assert_eq!(editor.mode, Mode::Normal);
     assert_eq!(desk.tab_title(desk.shown_tab().unwrap()), Some("/p/src"));
@@ -134,8 +134,8 @@ fn minus_goes_up_from_a_file_to_its_line_and_from_a_folder_and_ctrl_o_comes_back
     // As a folder, ending `/`, so one gone since isn't made a file.
     assert_eq!(opened_here(&mut desk), ["/p/src/"]);
     shows_folder(&mut desk, 2, "/p/src", src());
-    assert_eq!(listing_shown(&desk), ["util/", "main.rs"]);
-    assert_eq!(listing_line(&desk), 1);
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
+    assert_eq!(listing_line(&desk), 2);
     // From a folder: the folder above, on the folder come from, which
     // the explorer is rooted at, for the finder.
     type_keys(&mut desk, "-");
@@ -143,12 +143,12 @@ fn minus_goes_up_from_a_file_to_its_line_and_from_a_folder_and_ctrl_o_comes_back
     assert_eq!(roots(&sent), ["/p"]);
     rooted(&mut desk, 2, "/p");
     listed(&mut desk, 2, "/p", p());
-    assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
-    assert_eq!(listing_line(&desk), 0);
+    assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
+    assert_eq!(listing_line(&desk), 1);
     // Back into the folder, on the line it was on...
     ctrl(&mut desk, "o");
-    assert_eq!(listing_shown(&desk), ["util/", "main.rs"]);
-    assert_eq!(listing_line(&desk), 1);
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
+    assert_eq!(listing_line(&desk), 2);
     assert_eq!(roots(&desk.take_outbox()), ["/p/src"]);
     // ...then to the file, in place of the listing...
     ctrl(&mut desk, "o");
@@ -160,7 +160,7 @@ fn minus_goes_up_from_a_file_to_its_line_and_from_a_folder_and_ctrl_o_comes_back
     ctrl(&mut desk, "i");
     assert_eq!(opened_here(&mut desk), ["/p/src/"]);
     shows_folder(&mut desk, 3, "/p/src", src());
-    assert_eq!(listing_line(&desk), 1);
+    assert_eq!(listing_line(&desk), 2);
 }
 
 #[test]
@@ -234,18 +234,18 @@ fn w_and_y_make_a_listings_changes_then_its_folder_is_listed_afresh() {
     desk.file_op_done(0, Ok(()));
     assert_eq!(note(&desk), "made the change");
     // A listing again, not a tree, made afresh as the folder changes.
-    assert_eq!(listing_shown(&desk), ["util/", "main.rs"]);
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
     listed(
         &mut desk,
         1,
         "/p/src",
         vec![entry("util", true), entry("lib.rs", false)],
     );
-    assert_eq!(listing_shown(&desk), ["util/", "lib.rs"]);
+    assert_eq!(listing_shown(&desk), ["..", "util/", "lib.rs"]);
     // Not while a change is being typed, though nothing's changed yet.
     type_keys(&mut desk, "jA");
     listed(&mut desk, 1, "/p/src", src());
-    assert_eq!(listing_shown(&desk), ["util/", "lib.rs"]);
+    assert_eq!(listing_shown(&desk), ["..", "util/", "lib.rs"]);
     let (editor, _) = desk.focused_editor().expect("an editor");
     assert_eq!(editor.mode, Mode::Insert);
     escape(&mut desk);
@@ -257,7 +257,7 @@ fn w_and_y_make_a_listings_changes_then_its_folder_is_listed_afresh() {
         "/p/src",
         vec![entry("util", true), entry("lib.rs", false)],
     );
-    assert_eq!(listing_shown(&desk), ["util/"]);
+    assert_eq!(listing_shown(&desk), ["..", "util/"]);
 }
 
 #[test]
@@ -271,19 +271,19 @@ fn g_dot_shows_hidden_files_as_the_explorer_does_and_dot_still_repeats() {
         entry("a.txt", false),
     ];
     shows_folder(&mut desk, 1, "/p", entries);
-    assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
+    assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
     type_keys(&mut desk, "jg.");
     assert_eq!(note(&desk), "hidden files show");
-    assert_eq!(listing_shown(&desk), [".git/", "src/", "a.txt"]);
-    assert_eq!(listing_line(&desk), 2, "still on a.txt");
+    assert_eq!(listing_shown(&desk), ["..", ".git/", "src/", "a.txt"]);
+    assert_eq!(listing_line(&desk), 3, "still on a.txt");
     type_keys(&mut desk, "g.");
-    assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
+    assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
     // `.` alone is Vim's: it does the last change again.
     type_keys(&mut desk, "x.");
-    assert_eq!(listing_shown(&desk), ["src/", "txt"]);
+    assert_eq!(listing_shown(&desk), ["..", "src/", "txt"]);
     // Not while it has changes, which a listing made afresh would lose.
     type_keys(&mut desk, "g.");
-    assert_eq!(listing_shown(&desk), ["src/", "txt"]);
+    assert_eq!(listing_shown(&desk), ["..", "src/", "txt"]);
 }
 
 #[test]
@@ -307,7 +307,7 @@ fn the_root_follows_the_folder_shown_however_quickly_it_moves_and_goes_first() {
     type_keys(&mut desk, "-");
     listed(&mut desk, 1, "/p", p());
     enter(&mut desk);
-    assert_eq!(listing_shown(&desk), ["util/", "main.rs"]);
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
     assert_eq!(roots(&desk.take_outbox()), ["/p", "/p/src"]);
     // The finder's search goes after it is rooted where it shows, though
     // the daemon said otherwise since, as another window's moves do.
@@ -363,10 +363,10 @@ fn browsing_many_folders_keeps_only_those_with_changes_listed() {
         enter(&mut desk);
         let dir = format!("/p/d{index}");
         listed(&mut desk, 1, &dir, vec![entry("x.txt", false)]);
-        assert_eq!(listing_shown(&desk), ["x.txt"]);
+        assert_eq!(listing_shown(&desk), ["..", "x.txt"]);
         type_keys(&mut desk, "-");
         listed(&mut desk, 1, "/p", dirs.clone());
-        assert_eq!(listing_line(&desk), index, "on d{index}");
+        assert_eq!(listing_line(&desk), index + 1, "on d{index}");
         sent.extend(desk.take_outbox());
     }
     // Each folder left as it was made is no longer listed, nor watched.
@@ -413,6 +413,63 @@ fn a_jump_isnt_gone_to_while_a_listings_changes_are_shown_to_be_made() {
 }
 
 #[test]
+fn enter_on_dot_dot_goes_up_as_minus_does_and_its_going_is_no_change() {
+    let mut desk = listing_src();
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
+    assert_eq!(listing_line(&desk), 1, "on the first entry, not `..`");
+    // `l` moves along it, as along any text: it opens nothing.
+    type_keys(&mut desk, "ggl");
+    assert_eq!(roots(&desk.take_outbox()), Vec::<String>::new());
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
+    // Deleted, it's no change: nothing keeps the editor from going
+    // elsewhere, and `:e!` puts it back.
+    type_keys(&mut desk, "dd");
+    assert_eq!(listing_shown(&desk), ["util/", "main.rs"]);
+    assert_eq!(desk.keeps_its_folder(PaneId(1)), None);
+    command(&mut desk, "e!");
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
+    // Enter on it goes up, rooted at the folder above, on the folder
+    // come from.
+    desk.take_outbox();
+    type_keys(&mut desk, "gg");
+    enter(&mut desk);
+    assert_eq!(roots(&desk.take_outbox()), ["/p"]);
+    rooted(&mut desk, 1, "/p");
+    listed(&mut desk, 1, "/p", p());
+    assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
+    assert_eq!(listing_line(&desk), 1, "on src/");
+    // And back, as a jump, to `..`, where the cursor was.
+    ctrl(&mut desk, "o");
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
+    assert_eq!(listing_line(&desk), 0);
+    // `:e!` there, listing it afresh, keeps it on `..` too.
+    command(&mut desk, "e!");
+    rooted(&mut desk, 1, "/p/src");
+    listed(&mut desk, 1, "/p/src", src());
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs"]);
+    assert_eq!(listing_line(&desk), 0);
+}
+
+#[test]
+fn steps_out_of_the_folder_shown_say_where_they_go_in_full() {
+    let mut desk = listing_src();
+    // `/p/srcx` starts as `/p/src` does, but isn't in it.
+    type_keys(&mut desk, "ggcc../srcx");
+    escape(&mut desk);
+    type_keys(&mut desk, "Gcc../srcold/main.rs");
+    escape(&mut desk);
+    command(&mut desk, "w");
+    assert_eq!(
+        folder_rows(&mut desk),
+        [
+            "to do",
+            "  make   /p/srcx",
+            "  move   main.rs to /p/srcold/main.rs"
+        ]
+    );
+}
+
+#[test]
 fn e_bang_in_a_folder_throws_away_every_listings_changes() {
     let mut desk = listing_src();
     type_keys(&mut desk, "dd-");
@@ -424,7 +481,7 @@ fn e_bang_in_a_folder_throws_away_every_listings_changes() {
         "the listing has changes: :w makes them, :e! throws them away"
     );
     command(&mut desk, "e!");
-    assert_eq!(listing_shown(&desk), ["src/", "a.txt"]);
+    assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
     type_keys(&mut desk, "j");
     enter(&mut desk);
     assert_eq!(opened_here(&mut desk), ["/p/a.txt"]);
@@ -496,7 +553,7 @@ fn a_line_yanked_before_its_folder_is_listed_afresh_still_pastes_as_a_copy() {
         entry("new.rs", false),
     ];
     listed(&mut desk, 1, "/p/src", more);
-    assert_eq!(listing_shown(&desk), ["util/", "main.rs", "new.rs"]);
+    assert_eq!(listing_shown(&desk), ["..", "util/", "main.rs", "new.rs"]);
     type_keys(&mut desk, "pcwz");
     escape(&mut desk);
     command(&mut desk, "w");

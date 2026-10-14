@@ -702,6 +702,133 @@ fn names_are_checked_before_anything_is_done() {
 }
 
 #[test]
+fn a_way_up_without_a_mark_comes_to_nothing_wherever_it_is() {
+    let session = Session::new(
+        &[
+            ("/p", vec![dir("src"), file("a.txt")]),
+            ("/p/src", vec![file("main.rs")]),
+        ],
+        &[],
+    );
+    let (src, a, main) = (
+        session.line("/p/src"),
+        session.line("/p/a.txt"),
+        session.line("/p/src/main.rs"),
+    );
+    // Gone, moved to the end, put three times, indented as `>>` does, or
+    // written as a folder is, in either listing: nothing.
+    for (p, inside) in [
+        (format!("{src}\n{a}\n"), format!("..\n{main}\n")),
+        (format!("{src}\n{a}\n..\n"), format!("{main}\n")),
+        (
+            format!("..\n..\n{src}\n..\n{a}\n"),
+            format!("..\n{main}\n..\n"),
+        ),
+        (format!("\t..\n{src}\n    ../  \n{a}\n"), main.clone()),
+    ] {
+        assert_eq!(
+            session.plan(&[&p, &inside]),
+            Ok(Vec::new()),
+            "{p:?} {inside:?}"
+        );
+    }
+    // Beside a real change, only the change is made.
+    let p = format!("..\n{src}\n{}\n", session.renamed("/p/a.txt", "b.txt"));
+    assert_eq!(
+        session.plan(&[&p, &format!("{main}\n..\n")]),
+        Ok(vec![moved("/p/a.txt", "/p/b.txt")])
+    );
+    // In a listing of `/`, which shows none, one put there is nothing too.
+    let root = Session::new(&[("/", vec![dir("p")])], &[]);
+    let text = format!("..\n{}\n../\n", root.line("/p"));
+    assert_eq!(root.plan(&[&text]), Ok(Vec::new()));
+    // The lines' numbers still count it, to say where a problem is.
+    let p = format!("..\n{src}\n{a}\n{a}\n");
+    assert_eq!(
+        refused(&session, &[&p, &main]),
+        (
+            Some((0, 3)),
+            "two lines are both a.txt: a copy needs a name of its own".into()
+        )
+    );
+}
+
+#[test]
+fn dot_dot_in_a_name_means_what_it_did() {
+    let session = Session::new(&[("/q/p", vec![dir("src"), file("a.txt")])], &[]);
+    let src = session.line("/q/p/src");
+    // An entry's line renamed `..` names the folder holding the listing's.
+    for typed in ["..", "../", "src/../.."] {
+        let text = format!("..\n{src}\n{}\n", session.renamed("/q/p/a.txt", typed));
+        assert_eq!(
+            refused(&session, &[&text]),
+            (
+                Some((0, 2)),
+                format!("{typed} is where this listing's folder is, or holds it")
+            ),
+            "{typed}"
+        );
+    }
+    // A new line naming the listing's folder, or one above it, is refused.
+    let a = session.line("/q/p/a.txt");
+    for typed in [".", "./", "src/..", "../..", "../../"] {
+        let text = format!("..\n{src}\n{a}\n{typed}\n");
+        let why = refused(&session, &[&text]);
+        assert_eq!(why.0, Some((0, 3)), "{typed}");
+        assert!(
+            why.1
+                .contains("is where this listing's folder is, or holds it")
+                || why.1.contains("the root of everything"),
+            "{typed}: {why:?}"
+        );
+    }
+    // `../x` is the folder above's `x`, and `..x` a name like any other.
+    let text = format!(
+        "..\n{src}\n{}\n../x\n..x\n",
+        session.renamed("/q/p/a.txt", "../a.txt")
+    );
+    assert_eq!(
+        session.plan(&[&text]),
+        Ok(vec![
+            created("/q/x", false),
+            created("/q/p/..x", false),
+            moved("/q/p/a.txt", "/q/a.txt"),
+        ])
+    );
+}
+
+#[test]
+fn listings_are_the_same_whatever_becomes_of_their_ways_up() {
+    let made = "..\na\nb/\n";
+    for text in [
+        made,
+        "a\nb/\n",
+        "a\nb/\n..\n",
+        "..\n..\na\n  ../\nb/\n",
+        "a\nb/",
+    ] {
+        assert!(same(made, text), "{text:?}");
+        assert!(same_rope(&made.into(), &text.into()), "{text:?}");
+    }
+    for text in [
+        "..\na\n",
+        "..\nb/\na\n",
+        "..\na\n\nb/\n",
+        "x..\na\nb/\n",
+        "../x\na\nb/\n",
+    ] {
+        assert!(!same(made, text), "{text:?}");
+        assert!(!same_rope(&made.into(), &text.into()), "{text:?}");
+    }
+    // A marked line saying `..` isn't a way up: it's an entry's.
+    let marked = format!("{}..", mark(SESSION, 0));
+    assert!(!is_up(&marked));
+    assert!(!same("a\n", &format!("{marked}\na\n")));
+    // Nor is the empty listing's text changed by its `..` going.
+    assert!(same("..\n", ""));
+}
+
+#[test]
 fn a_line_cut_from_one_listing_and_put_in_another_is_a_move() {
     let session = Session::new(
         &[
@@ -968,7 +1095,32 @@ fn random_edits(
             text.push(format!("{name}.moving/n"));
         }
     }
+    // Ways up, as listings start with, put anywhere, any number of times.
+    for text in &mut texts {
+        for _ in 0..dice.roll(3) {
+            let at = dice.roll(text.len() + 1);
+            text.insert(at, WAYS_UP[dice.roll(WAYS_UP.len())].to_owned());
+        }
+    }
     texts
+}
+
+/// Ways up as a listing's lines may come to be written: indented, as
+/// `>>` does, as a folder's written, or with a stray carriage return.
+const WAYS_UP: [&str; 8] = [
+    "..", "../", "  ..", "\t../", ".. ", "..\r", "../\r", "\t ..\t",
+];
+
+/// [`same`], the slow way: every line of each, a line break ending each,
+/// but for ways up.
+fn same_slowly(a: &str, b: &str) -> bool {
+    let said = |text: &str| -> Vec<String> {
+        (text.split_terminator('\n'))
+            .filter(|line| !is_up(line))
+            .map(str::to_owned)
+            .collect()
+    };
+    said(a) == said(b)
 }
 
 #[test]
@@ -987,10 +1139,23 @@ fn edits_at_random_are_planned_or_refused_and_planned_steps_lose_nothing() {
         let texts = random_edits(&mut dice, &session, &folders, &NAMES);
         let joined: Vec<String> = texts.iter().map(|lines| lines.join("\n")).collect();
         let joined: Vec<&str> = joined.iter().map(String::as_str).collect();
+        // Ways up come to nothing: without them, it comes to the same.
+        let without: Vec<String> = (texts.iter())
+            .map(|lines| {
+                let lines: Vec<&str> = (lines.iter().map(String::as_str))
+                    .filter(|line| !is_up(line))
+                    .collect();
+                lines.join("\n")
+            })
+            .collect();
+        let without: Vec<&str> = without.iter().map(String::as_str).collect();
+        let planned_without = session.plan(&without);
         let Ok(steps) = session.plan(&joined) else {
+            assert!(planned_without.is_err(), "{texts:#?}");
             refused += 1;
             continue;
         };
+        assert_eq!(Ok(&steps), planned_without.as_ref(), "{texts:#?}");
         planned += 1;
         let entries: usize = folders.iter().map(|(_, entries)| entries.len()).sum();
         let lines: usize = texts.iter().map(Vec::len).sum();
@@ -1028,6 +1193,112 @@ fn edits_at_random_are_planned_or_refused_and_planned_steps_lose_nothing() {
     assert!(
         planned > 300 && refused > 300,
         "{planned} planned, {refused} refused"
+    );
+}
+
+#[test]
+fn a_listing_said_to_be_the_same_as_made_comes_to_nothing() {
+    const NAMES: [&str; 5] = ["a", "b", "proj", "x", "d"];
+    let mut dice = Dice(0x2545_f491_4f6c_dd1d);
+    let mut alike = 0;
+    for _ in 0..3000 {
+        let (_, folders) = random_tree(&mut dice, &NAMES);
+        let folders_shown: Vec<(&str, Vec<Entry>)> = (folders.iter())
+            .map(|(dir, entries)| (dir.as_str(), entries.clone()))
+            .collect();
+        let session = Session::new(&folders_shown, &[]);
+        // Each listing as it's made: `..`, then its entries' lines.
+        let made: Vec<String> = (folders.iter())
+            .map(|(dir, entries)| {
+                let mut text = String::from("..\n");
+                for entry in entries {
+                    text.push_str(&session.line(&join(dir, &entry.name)));
+                    text.push('\n');
+                }
+                text
+            })
+            .collect();
+        // Edited at random, or only its ways up moved about, gone, put
+        // again and written otherwise, with its last line break or not.
+        let edited: Vec<String> = if dice.roll(2) == 0 {
+            let texts = random_edits(&mut dice, &session, &folders, &NAMES);
+            texts.iter().map(|lines| lines.join("\n") + "\n").collect()
+        } else {
+            (made.iter())
+                .map(|text| {
+                    let mut lines: Vec<String> = (text.lines())
+                        .filter(|line| *line != "..")
+                        .map(str::to_owned)
+                        .collect();
+                    for _ in 0..dice.roll(4) {
+                        let at = dice.roll(lines.len() + 1);
+                        lines.insert(at, WAYS_UP[dice.roll(WAYS_UP.len())].to_owned());
+                    }
+                    let mut text = lines.join("\n");
+                    if dice.roll(2) == 0 {
+                        text.push('\n');
+                    }
+                    text
+                })
+                .collect()
+        };
+        let mut all_alike = true;
+        for (made, edited) in made.iter().zip(&edited) {
+            let same = same(made, edited);
+            assert_eq!(same, same_slowly(made, edited), "{made:?} {edited:?}");
+            assert_eq!(
+                same,
+                same_rope(&made.as_str().into(), &edited.as_str().into()),
+                "{made:?} {edited:?}"
+            );
+            all_alike &= same;
+        }
+        if all_alike {
+            alike += 1;
+            let edited: Vec<&str> = edited.iter().map(String::as_str).collect();
+            assert_eq!(session.plan(&edited), Ok(Vec::new()), "{edited:#?}");
+        }
+    }
+    assert!(alike > 1000, "only {alike} alike");
+}
+
+#[test]
+fn same_reads_as_lines_only_what_differs() {
+    // Texts alike but for a line deep inside, or at either end, or with
+    // a character of several bytes where they part.
+    let lines: Vec<String> = (0..2000).map(|at| format!("entry {at}é")).collect();
+    let made = format!("..\n{}\n", lines.join("\n"));
+    let rope = |text: &str| -> Rope { text.into() };
+    for (from, to) in [
+        ("entry 1000é", "entry 1000ê"),
+        ("..\n", ""),
+        ("..\n", "..\n..\n"),
+        ("entry 1999é\n", "entry 1999é\n  ../\n"),
+        ("entry 0é\n", "entry 0é\n..\n"),
+        ("entry 5é", "entry 5"),
+        ("entry 1999é\n", "entry 1999é"),
+    ] {
+        let edited = made.replacen(from, to, 1);
+        let alike = same_slowly(&made, &edited);
+        assert_eq!(same(&made, &edited), alike, "{from:?} to {to:?}");
+        assert_eq!(same(&edited, &made), alike, "{from:?} to {to:?}");
+        assert_eq!(
+            same_rope(&rope(&made), &rope(&edited)),
+            alike,
+            "{from:?} to {to:?}"
+        );
+    }
+    // A big listing's every edit is cheap: only the line edited is read.
+    let edited = made.replacen("entry 1000é", "entry 1000ê", 1);
+    let (made, edited) = (rope(&made), rope(&edited));
+    let started = std::time::Instant::now();
+    for _ in 0..100 {
+        assert!(!same_rope(&made, &edited));
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(200),
+        "{:?} for 100",
+        started.elapsed()
     );
 }
 

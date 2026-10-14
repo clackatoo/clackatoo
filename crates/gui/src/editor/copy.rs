@@ -251,7 +251,19 @@ impl BufferCopy {
     /// `text`, which answers its own changes (see [`Scratch`]): `id` must
     /// be one the daemon never gives.
     pub(crate) fn scratch(id: BufferId, path: &str, text: &str) -> Self {
-        let scratch = Scratch::new(path, text);
+        Self::scratch_judged(id, path, text, |text, first| text == first)
+    }
+
+    /// A copy as [`scratch`](Self::scratch) makes, which is modified once
+    /// `same` says its text no longer says what it began with: as a
+    /// folder's listing isn't, whatever becomes of its `..` line.
+    pub(crate) fn scratch_judged(
+        id: BufferId,
+        path: &str,
+        text: &str,
+        same: fn(&Rope, &Rope) -> bool,
+    ) -> Self {
+        let scratch = Scratch::new(path, text, same);
         let mut copy = Self::new(id);
         copy.replace(scratch.snapshot());
         copy.scratch = Some(Box::new(scratch));

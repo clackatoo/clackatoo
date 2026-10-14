@@ -21,18 +21,22 @@ pub(crate) struct Scratch {
     text: Rope,
     history: History<Author>,
     /// The text as it began, to say whether it's changed since.
-    first: String,
+    first: Rope,
+    /// Whether two texts say the same, as far as being changed goes.
+    same: fn(&Rope, &Rope) -> bool,
     modified: bool,
 }
 
 impl Scratch {
-    /// A buffer called `path`, holding `text`.
-    pub(crate) fn new(path: &str, text: &str) -> Self {
+    /// A buffer called `path`, holding `text`, changed once `same` says
+    /// its text no longer says what it began with.
+    pub(crate) fn new(path: &str, text: &str, same: fn(&Rope, &Rope) -> bool) -> Self {
         Self {
             path: path.to_owned(),
             text: Rope::from_str(text),
             history: History::new(0),
-            first: text.to_owned(),
+            first: Rope::from_str(text),
+            same,
             modified: false,
         }
     }
@@ -123,7 +127,7 @@ impl Scratch {
                 Vec::new()
             }
         };
-        let modified = self.text != self.first.as_str();
+        let modified = !(self.same)(&self.text, &self.first);
         if modified != self.modified {
             self.modified = modified;
             answers.push(BufferUpdate::Modified(modified));

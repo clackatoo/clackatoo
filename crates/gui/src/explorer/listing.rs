@@ -21,6 +21,14 @@
 //! | An entry's, twice or more | Copies, beside the one that stays or moves |
 //! | None of an entry's | A delete, to the trash |
 //! | One with no mark | A new file, or a new folder if it ends `/` |
+//! | `..` with no mark | Nothing: it's the way up, and names nothing |
+//!
+//! A listing of any folder but `/` starts with a `..` line, which Enter
+//! on goes up, as `-` does. It has no mark, so it can't name the folder
+//! above: deleted, moved, copied or left alone, it comes to nothing, and
+//! so does any other line that's `..` or `../` alone without a mark. A
+//! marked line renamed `..`, or `..` in a path that ends up at the
+//! listing's folder or one holding it, is still refused.
 //!
 //! A name is read from its listing's folder: `sub/x` is in the folder
 //! `sub`, made if it isn't there, `../x` in the folder above, and `/x`
@@ -31,10 +39,12 @@
 //! before anything is done: two lines with one name, a name something
 //! already has, a mark damaged or from another listing.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
 use clackatoo_protocol::{Entry, EntryKind, Expect, FileOp, FileStamp};
+use clackatoo_text::Rope;
 
 #[cfg(test)]
 mod tests;
@@ -251,6 +261,159 @@ fn shown_name(name: &str, kind: EntryKind) -> String {
     }
 }
 
+/// The way up, which a listing shows as its first line.
+pub(crate) const UP: &str = "..";
+
+/// Whether `line` is a way up: `..`, or `../` as a folder's written,
+/// alone and without a mark, however it's indented. It names nothing, so
+/// it comes to nothing wherever it is.
+pub(crate) fn is_up(line: &str) -> bool {
+    let text = line.trim_start_matches([' ', '\t']);
+    !text.starts_with(MARK_START) && matches!(text.trim(), ".." | "../")
+}
+
+/// Whether the listing texts `a` and `b` say the same, as far as what
+/// they come to is concerned: line for line, a line break ending each,
+/// but for ways up, which come to nothing. So a `..` deleted, moved or
+/// put twice leaves a listing as it was.
+///
+/// It's asked on every edit of a listing, which may have thousands of
+/// lines, so only the lines between what the two start and end with
+/// alike are read as lines: an edit's are all that differ.
+pub(crate) fn same(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (a_bytes, b_bytes) = (a.as_bytes(), b.as_bytes());
+    let prefix = common_prefix(std::iter::once(a_bytes), std::iter::once(b_bytes));
+    let suffix = common_suffix(std::iter::once(a_bytes), std::iter::once(b_bytes))
+        .min(a.len().min(b.len()) - prefix);
+    // From the start of the line the prefix ends in, to the end of the
+    // line the suffix starts in: whole lines, the same in both outside.
+    let start = (a_bytes[..prefix].iter())
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |at| at + 1);
+    let from = a.len() - suffix;
+    let end = (a_bytes[from..].iter())
+        .position(|&byte| byte == b'\n')
+        .map_or(a.len(), |at| from + at + 1);
+    let tail = a.len() - end;
+    let (a, b) = (&a[start..end], &b[start..b.len() - tail]);
+    said(a.split_terminator('\n').map(Cow::Borrowed))
+        .eq(said(b.split_terminator('\n').map(Cow::Borrowed)))
+}
+
+/// [`same`], of texts kept as ropes, as an editor's are.
+pub(crate) fn same_rope(a: &Rope, b: &Rope) -> bool {
+    if a == b {
+        return true;
+    }
+    let prefix = common_prefix(a.chunks().map(str::as_bytes), b.chunks().map(str::as_bytes));
+    let suffix =
+        common_suffix(backward(a), backward(b)).min(a.len_bytes().min(b.len_bytes()) - prefix);
+    let start = a.line_to_byte(a.byte_to_line(prefix));
+    let end = a.line_to_byte(a.byte_to_line(a.len_bytes() - suffix) + 1);
+    let tail = a.len_bytes() - end;
+    said_between(a, start, end).eq(said_between(b, start, b.len_bytes() - tail))
+}
+
+/// The pieces of `text`, last first.
+fn backward(text: &Rope) -> impl Iterator<Item = &[u8]> {
+    let (chunks, ..) = text.chunks_at_byte(text.len_bytes());
+    chunks.reversed().map(str::as_bytes)
+}
+
+/// What the lines of `text` from byte `start` to `end`, a line's start or
+/// the end, say, for [`same_rope`].
+fn said_between(text: &Rope, start: usize, end: usize) -> impl Iterator<Item = Cow<'_, str>> {
+    // The last, empty, unless a line break ends what's before it, isn't a
+    // line.
+    let lines = (text.byte_slice(start..end).lines()).filter(|line| line.len_bytes() > 0);
+    said(lines.map(|line| match Cow::from(line) {
+        Cow::Borrowed(line) => Cow::Borrowed(line.strip_suffix('\n').unwrap_or(line)),
+        Cow::Owned(mut line) => {
+            if line.ends_with('\n') {
+                line.pop();
+            }
+            Cow::Owned(line)
+        }
+    }))
+}
+
+/// How many bytes the texts whose pieces are `a` and `b` start with
+/// alike: a piece at a time, a byte at a time only in the piece they part
+/// in.
+fn common_prefix<'a>(
+    mut a: impl Iterator<Item = &'a [u8]>,
+    mut b: impl Iterator<Item = &'a [u8]>,
+) -> usize {
+    let (mut x, mut y): (&[u8], &[u8]) = (&[], &[]);
+    let mut alike = 0;
+    loop {
+        if x.is_empty() {
+            match a.next() {
+                Some(piece) => x = piece,
+                None => return alike,
+            }
+            continue;
+        }
+        if y.is_empty() {
+            match b.next() {
+                Some(piece) => y = piece,
+                None => return alike,
+            }
+            continue;
+        }
+        let len = x.len().min(y.len());
+        if x[..len] != y[..len] {
+            let parted = (x.iter().zip(y)).position(|(x, y)| x != y);
+            return alike + parted.unwrap_or(len);
+        }
+        alike += len;
+        (x, y) = (&x[len..], &y[len..]);
+    }
+}
+
+/// How many bytes the texts whose pieces are `a` and `b`, last first,
+/// end with alike, as [`common_prefix`] counts.
+fn common_suffix<'a>(
+    mut a: impl Iterator<Item = &'a [u8]>,
+    mut b: impl Iterator<Item = &'a [u8]>,
+) -> usize {
+    let (mut x, mut y): (&[u8], &[u8]) = (&[], &[]);
+    let mut alike = 0;
+    loop {
+        if x.is_empty() {
+            match a.next() {
+                Some(piece) => x = piece,
+                None => return alike,
+            }
+            continue;
+        }
+        if y.is_empty() {
+            match b.next() {
+                Some(piece) => y = piece,
+                None => return alike,
+            }
+            continue;
+        }
+        let len = x.len().min(y.len());
+        let (x_end, y_end) = (&x[x.len() - len..], &y[y.len() - len..]);
+        if x_end != y_end {
+            let parted = (x_end.iter().rev().zip(y_end.iter().rev())).position(|(x, y)| x != y);
+            return alike + parted.unwrap_or(len);
+        }
+        alike += len;
+        (x, y) = (&x[..x.len() - len], &y[..y.len() - len]);
+    }
+}
+
+/// What of `lines`, a listing's, says anything, for [`same`]: those that
+/// aren't ways up.
+fn said<'a>(lines: impl Iterator<Item = Cow<'a, str>>) -> impl Iterator<Item = Cow<'a, str>> {
+    lines.filter(|line| !is_up(line))
+}
+
 /// One line of a listing, read.
 #[derive(Debug)]
 struct Read {
@@ -452,6 +615,10 @@ fn read_line(
             )),
             None => Ok(None),
         };
+    }
+    // The way up, or a copy of it, without a mark: it names nothing.
+    if original.is_none() && is_up(typed) {
+        return Ok(None);
     }
     if typed.contains('\0') {
         return Err(problem("a name can't hold a NUL".to_owned()));

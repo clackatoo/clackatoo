@@ -1,9 +1,10 @@
 //! Editing folders as text, as oil.nvim does: `e` in the explorer, or
 //! `:Explore!`, shows the folder's listing in an editor in the explorer's
 //! pane, an entry a line (see [`listing`]). Enter on a folder's line shows
-//! its listing, and `-` the folder above's, so a line can be cut in one
-//! and put in another. `:w` works out what the edits to every listing come
-//! to, and the pane shows each step, asking whether to do them; `y` does
+//! its listing, and `-` the folder above's, as Enter on the `..` line at
+//! the top does, so a line can be cut in one and put in another. `:w`
+//! works out what the edits to every listing come to, and the pane shows
+//! each step, asking whether to do them; `y` does
 //! them, one at a time, through the daemon's file operations, which never
 //! write over anything, and delete to the trash. The first that fails
 //! stops the rest, and the pane says what was done and what wasn't.
@@ -323,7 +324,8 @@ impl Explorer {
     }
 
     /// Shows the listing of the folder `dir` to edit, with the cursor on
-    /// the line of the entry at `at`, if it's there: made from the
+    /// the line of the entry at `at`, if it's there, or on the way up if
+    /// `at` is [`listing::UP`]: made from the
     /// explorer's listing of it, which is asked for if there isn't one.
     pub(crate) fn edit_folder(&mut self, dir: String, at: Option<&str>) {
         if self.fenced_out(&dir) {
@@ -345,6 +347,10 @@ impl Explorer {
         });
         let mark = |editing: &Editing| {
             let at = at?;
+            // The way up has no mark: it's found by what it says.
+            if at == listing::UP {
+                return Some(listing::UP.to_owned());
+            }
             let id = (editing.originals.iter())
                 .position(|original| original.path == at && !original.retired)?;
             Some(listing::mark(editing.session, id))
@@ -368,8 +374,14 @@ impl Explorer {
         let Some(listing) = self.listings.get(&dir).cloned() else {
             return self.list_to_edit(dir, at);
         };
+        let up = self.goes_up_from(&dir);
         let editing = self.editing.as_mut().expect("made above");
         let mut text = String::new();
+        // The way up first, which names nothing (see [`listing::is_up`]).
+        if up {
+            text.push_str(listing::UP);
+            text.push('\n');
+        }
         let mut left_out = 0;
         for entry in &listing.entries {
             if !self.view.hidden && entry.name.starts_with('.') {
@@ -478,7 +490,8 @@ impl Explorer {
     }
 
     /// Enter on `line`, a line of the listing shown: shows the listing of
-    /// the folder it's of, or opens the file it's of.
+    /// the folder it's of, or opens the file it's of, or on the way up,
+    /// shows the folder above's, as `-` does.
     pub(crate) fn enter_line(&mut self, line: &str) {
         let Some(editing) = &self.editing else { return };
         let text = line.trim_start_matches([' ', '\t']);
@@ -499,6 +512,7 @@ impl Explorer {
                     how: Opening::Here,
                 });
             }
+            None if listing::is_up(text) => self.edit_above(),
             None if text.trim_end().ends_with('/') => {
                 self.say("that folder isn't made yet: :w makes it".to_owned());
             }
