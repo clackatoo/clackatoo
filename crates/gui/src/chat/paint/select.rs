@@ -373,7 +373,7 @@ impl ChatView {
         let items = (turn.items.iter().enumerate())
             .filter(|&(at, _)| at >= shape.answer || shape.open)
             .map(|(_, item)| match item {
-                Item::Words(text) | Item::Thought(text) => blocks_text(text),
+                Item::Words(text) | Item::Thought(text) | Item::Other(text) => blocks_text(text),
                 Item::Tool(tool) => Card::of(tool).map_or_else(
                     || super::tool_text(tool.status, &tool.title),
                     |card| card.text(),

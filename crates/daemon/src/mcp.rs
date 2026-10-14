@@ -33,7 +33,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::browser::Act;
-use crate::client::{ClientError, receive};
+use crate::client::{ClientError, agree, receive};
 use crate::rpc::{self, Framing, Message};
 
 /// What the agent knows the tools by: Claude Code calls them
@@ -1396,23 +1396,19 @@ pub fn relay(
 fn open(stream: &mut StdUnixStream, chat: TerminalId) -> Result<(), ClientError> {
     // A socket nothing serves would otherwise hang.
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.write_all(&frame::encode(&ClientMessage::Hello {
-        protocol_version: PROTOCOL_VERSION,
-    })?)?;
+    // The relay is usually the daemon's own program, but needn't be after
+    // an upgrade: it agrees a version as any client does.
+    stream.write_all(&frame::encode(
+        PROTOCOL_VERSION,
+        &ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )?)?;
     let mut decoder = FrameDecoder::new();
-    match receive(stream, &mut decoder)? {
-        ServerMessage::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => {}
-        ServerMessage::Hello { protocol_version } => {
-            return Err(ClientError::VersionMismatch {
-                ours: PROTOCOL_VERSION,
-                daemon: protocol_version,
-            });
-        }
-        other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
-    }
+    let wire = agree(receive(stream, &mut decoder, PROTOCOL_VERSION)?)?;
     let carry = ClientMessage::Request(Request::CarryMcp { chat });
-    stream.write_all(&frame::encode(&carry)?)?;
-    match receive(stream, &mut decoder)? {
+    stream.write_all(&frame::encode(wire, &carry)?)?;
+    match receive(stream, &mut decoder, wire)? {
         ServerMessage::Response(Response::Done) => {}
         ServerMessage::Response(Response::Error(err)) => return Err(ClientError::Daemon(err)),
         other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
@@ -1472,6 +1468,73 @@ pub(crate) fn server_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the relay's `open` makes of a daemon answering its hello with
+    /// `reply`, then its request with `Done`.
+    fn open_against(reply: u32) -> Result<(), ClientError> {
+        use std::io::Read;
+
+        let (mut relay, mut daemon) = StdUnixStream::pair().unwrap();
+        let fake = std::thread::spawn(move || {
+            let mut decoder = FrameDecoder::new();
+            let mut buffer = [0; 256];
+            let mut next = |daemon: &mut StdUnixStream| loop {
+                if let Some(message) = decoder
+                    .decode::<ClientMessage>(reply.min(PROTOCOL_VERSION))
+                    .unwrap()
+                {
+                    return Some(message);
+                }
+                match daemon.read(&mut buffer) {
+                    Ok(0) | Err(_) => return None,
+                    Ok(n) => decoder.push(&buffer[..n]),
+                }
+            };
+            next(&mut daemon)?;
+            let hello = ServerMessage::Hello {
+                protocol_version: reply,
+            };
+            daemon
+                .write_all(&frame::encode(PROTOCOL_VERSION, &hello).unwrap())
+                .ok()?;
+            let carry = next(&mut daemon)?;
+            let done = ServerMessage::Response(Response::Done);
+            daemon
+                .write_all(&frame::encode(reply, &done).unwrap())
+                .ok()?;
+            Some(carry)
+        });
+        let opened = open(&mut relay, TerminalId(3));
+        drop(relay);
+        let carried = fake.join().unwrap();
+        if opened.is_ok() {
+            assert_eq!(
+                carried,
+                Some(ClientMessage::Request(Request::CarryMcp {
+                    chat: TerminalId(3)
+                }))
+            );
+        }
+        opened
+    }
+
+    #[test]
+    fn the_relay_agrees_a_version_with_the_daemon_as_any_client_does() {
+        assert!(open_against(PROTOCOL_VERSION).is_ok());
+        assert!(open_against(clackatoo_protocol::wire::MIN_DAEMON).is_ok());
+        for refused in [
+            clackatoo_protocol::wire::MIN_DAEMON - 1,
+            PROTOCOL_VERSION + 1,
+        ] {
+            assert!(
+                matches!(
+                    open_against(refused),
+                    Err(ClientError::VersionMismatch { daemon, .. }) if daemon == refused
+                ),
+                "{refused}"
+            );
+        }
+    }
 
     #[test]
     fn calls_parse_with_their_defaults_and_limits() {

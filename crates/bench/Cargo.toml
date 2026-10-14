@@ -37,5 +37,9 @@ harness = false
 name = "signs"
 harness = false
 
+[[bench]]
+name = "frames"
+harness = false
+
 [lints]
 workspace = true

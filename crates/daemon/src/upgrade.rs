@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use clackatoo_protocol::ServerMessage;
 use clackatoo_protocol::frame;
+use clackatoo_protocol::{PROTOCOL_VERSION, ServerMessage};
 use rustix::fs::MemfdFlags;
 use rustix::net::{
     AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags,
@@ -203,7 +203,8 @@ fn tell_failure(requester: mio::net::UnixStream, err: &io::Error) {
     let sent = stream
         .set_nonblocking(false)
         .and_then(|()| stream.set_write_timeout(Some(Duration::from_secs(1))))
-        .and_then(|()| frame::encode(&refusal).map_err(io::Error::other))
+        // The refusal is the same in every version.
+        .and_then(|()| frame::encode(PROTOCOL_VERSION, &refusal).map_err(io::Error::other))
         .and_then(|bytes| stream.write_all(&bytes));
     if let Err(err) = sent {
         log::debug!("telling the client failed: {err}");

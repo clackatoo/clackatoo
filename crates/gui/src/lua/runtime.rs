@@ -611,6 +611,7 @@ fn info(lua: &Lua, world: &World, kind: &str, id: u32) -> mlua::Result<Option<Ta
                 Content::Board(_) => "board",
                 Content::Review(_) => "review",
                 Content::Browser(_) => "browser",
+                Content::Other { .. } => "other",
                 Content::Terminal(_) if known.is_some_and(|known| known.chat) => "chat",
                 Content::Terminal(_) => "terminal",
             };

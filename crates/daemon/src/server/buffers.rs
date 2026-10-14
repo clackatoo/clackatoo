@@ -733,7 +733,7 @@ impl Daemon {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return;
         };
-        match frame::encode(&ServerMessage::Event(event)) {
+        match frame::encode(client.wire, &ServerMessage::Event(event)) {
             Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
             Err(err) => {
                 log::error!("encoding an event failed: {err}");

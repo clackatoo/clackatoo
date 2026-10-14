@@ -34,6 +34,9 @@ pub enum Node {
     /// A chat with an agent, boxed, as it's the larger, and views go
     /// in every update.
     Chat(Box<ChatNode>),
+    /// A node of a kind newer than the client, which a newer daemon sent
+    /// in place of one: the client says it needs a newer clackatoo.
+    Other,
 }
 
 /// Names a node within a view, so patches can say which one they change.
@@ -245,7 +248,7 @@ impl View {
     pub fn grid(&self) -> Option<&GridNode> {
         match &self.root {
             Node::Grid(grid) => Some(grid),
-            Node::Chat(_) => None,
+            Node::Chat(_) | Node::Other => None,
         }
     }
 
@@ -254,7 +257,7 @@ impl View {
     pub fn chat(&self) -> Option<&ChatNode> {
         match &self.root {
             Node::Chat(chat) => Some(chat),
-            Node::Grid(_) => None,
+            Node::Grid(_) | Node::Other => None,
         }
     }
 

@@ -6,7 +6,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
-use clackatoo_protocol::frame::{self, FrameDecoder, FrameError};
+use clackatoo_protocol::frame::{self, FrameDecoder, FrameError, Head};
+use clackatoo_protocol::wire;
 use clackatoo_protocol::{
     Block, BufferId, Change, ChatAction, ClientMessage, Error, Event, FileOp, FilesAction, FilesId,
     HistoryLines, NewTerminal, PROTOCOL_VERSION, PaneId, PaneTerminal, Query, Request, Response,
@@ -38,6 +39,9 @@ pub enum UdpTarget {
 pub struct Client {
     stream: UnixStream,
     decoder: FrameDecoder,
+    /// The protocol version the connection runs at, agreed in the
+    /// `Hello`s: the daemon's, if it's older than this build.
+    wire: u32,
     events: VecDeque<Event>,
     /// What carries the connection to a remote daemon.
     carried: Option<Carried>,
@@ -66,16 +70,18 @@ impl Client {
         Self::over(stream)
     }
 
-    /// Greets the daemon on the other end of `stream`, and checks that it
-    /// speaks our protocol version.
+    /// Greets the daemon on the other end of `stream`, and agrees a
+    /// protocol version with it: see [`wire`].
     ///
     /// # Errors
     ///
-    /// If the daemon doesn't answer, or speaks another version.
+    /// If the daemon doesn't answer, or speaks a version this build can't
+    /// talk at, or won't talk to this build.
     pub fn over(stream: UnixStream) -> Result<Self, ClientError> {
         let mut client = Self {
             stream,
             decoder: FrameDecoder::new(),
+            wire: PROTOCOL_VERSION,
             events: VecDeque::new(),
             carried: None,
             window: random_window(),
@@ -85,17 +91,25 @@ impl Client {
         client.send(&ClientMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
         })?;
-        match client.receive()? {
-            ServerMessage::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => {
-                client.stream.set_read_timeout(None)?;
-                Ok(client)
-            }
-            ServerMessage::Hello { protocol_version } => Err(ClientError::VersionMismatch {
-                ours: PROTOCOL_VERSION,
-                daemon: protocol_version,
-            }),
-            other => Err(ClientError::UnexpectedMessage(Box::new(other))),
-        }
+        let wire = agree(client.receive()?)?;
+        client.wire = wire;
+        client.stream.set_read_timeout(None)?;
+        Ok(client)
+    }
+
+    /// The protocol version the connection runs at: the older of the
+    /// daemon's and this build's.
+    #[must_use]
+    pub fn wire(&self) -> u32 {
+        self.wire
+    }
+
+    /// Whether the daemon has what arrived in protocol version `gate`, one
+    /// of [`wire`]'s gates: a window asks before it offers something that
+    /// needs a request new then.
+    #[must_use]
+    pub fn daemon_has(&self, gate: u32) -> bool {
+        wire::daemon_has(self.wire, gate)
     }
 
     /// Greets the daemon on the other end of `stream`, a connection to its
@@ -191,12 +205,19 @@ impl Client {
     pub fn request(&mut self, request: &Request) -> Result<Response, ClientError> {
         self.send(&ClientMessage::Request(request.clone()))?;
         loop {
-            match self.receive()? {
-                ServerMessage::Response(response) => return Ok(response),
-                ServerMessage::Event(event) => self.events.push_back(event),
-                other @ (ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. }) => {
+            match self.receive() {
+                Ok(ServerMessage::Response(response)) => return Ok(response),
+                Ok(ServerMessage::Event(event)) => self.events.push_back(event),
+                Ok(other @ (ServerMessage::Hello { .. } | ServerMessage::NotUpgrading { .. })) => {
                     return Err(ClientError::UnexpectedMessage(Box::new(other)));
                 }
+                // An answer from a newer daemon this build can't read: still
+                // the answer, so the next request's is its own.
+                Err(ClientError::Unreadable(head)) if head.is_response() => {
+                    return Ok(Response::Error(Error::Unsupported));
+                }
+                Err(ClientError::Unreadable(_)) => {}
+                Err(err) => return Err(err),
             }
         }
     }
@@ -211,9 +232,14 @@ impl Client {
         if let Some(event) = self.events.pop_front() {
             return Ok(event);
         }
-        match self.receive()? {
-            ServerMessage::Event(event) => Ok(event),
-            other => Err(ClientError::UnexpectedMessage(Box::new(other))),
+        loop {
+            match self.receive() {
+                Ok(ServerMessage::Event(event)) => return Ok(event),
+                Ok(other) => return Err(ClientError::UnexpectedMessage(Box::new(other))),
+                // An event from a newer daemon this build can't read.
+                Err(ClientError::Unreadable(_)) => {}
+                Err(err) => return Err(err),
+            }
         }
     }
 
@@ -233,10 +259,12 @@ impl Client {
     pub fn split(self) -> Result<(Sender, Receiver), ClientError> {
         let sender = Sender {
             stream: self.stream.try_clone()?,
+            wire: self.wire,
         };
         let receiver = Receiver {
             stream: self.stream,
             decoder: self.decoder,
+            wire: self.wire,
             events: self.events,
             carried: self.carried,
         };
@@ -531,12 +559,13 @@ impl Client {
     /// as when the daemon stopped, the error says why, as receiving would:
     /// what's sent after its thread hung up finds the stream closed.
     fn send(&mut self, message: &ClientMessage) -> Result<(), ClientError> {
-        let bytes = frame::encode(message)?;
+        let bytes = frame::encode(self.wire, message)?;
         (self.stream.write_all(&bytes)).map_err(|err| why(err.into(), self.carried.as_ref()))
     }
 
     fn receive(&mut self) -> Result<ServerMessage, ClientError> {
-        receive(&mut self.stream, &mut self.decoder).map_err(|err| why(err, self.carried.as_ref()))
+        receive(&mut self.stream, &mut self.decoder, self.wire)
+            .map_err(|err| why(err, self.carried.as_ref()))
     }
 
     /// Lists every terminal.
@@ -776,6 +805,8 @@ impl Client {
 #[derive(Debug)]
 pub struct Sender {
     stream: UnixStream,
+    /// The protocol version the connection runs at.
+    wire: u32,
 }
 
 impl Sender {
@@ -785,7 +816,7 @@ impl Sender {
     ///
     /// If the connection fails.
     pub fn send(&mut self, message: &ClientMessage) -> Result<(), ClientError> {
-        self.stream.write_all(&frame::encode(message)?)?;
+        self.stream.write_all(&frame::encode(self.wire, message)?)?;
         Ok(())
     }
 }
@@ -795,6 +826,8 @@ impl Sender {
 pub struct Receiver {
     stream: UnixStream,
     decoder: FrameDecoder,
+    /// The protocol version the connection runs at.
+    wire: u32,
     /// Events that arrived before the split.
     events: VecDeque<Event>,
     /// What carries the connection to a remote daemon.
@@ -806,12 +839,17 @@ impl Receiver {
     ///
     /// # Errors
     ///
-    /// If the connection fails or closes.
+    /// If the connection fails or closes; or, leaving it open,
+    /// [`ClientError::Unreadable`] for a message from a newer daemon that
+    /// this build can't read, which the caller makes up for: by taking it
+    /// as an error answer to the oldest request waiting, or attaching
+    /// again to what changed.
     pub fn receive(&mut self) -> Result<ServerMessage, ClientError> {
         if let Some(event) = self.events.pop_front() {
             return Ok(ServerMessage::Event(event));
         }
-        receive(&mut self.stream, &mut self.decoder).map_err(|err| why(err, self.carried.as_ref()))
+        receive(&mut self.stream, &mut self.decoder, self.wire)
+            .map_err(|err| why(err, self.carried.as_ref()))
     }
 }
 
@@ -825,8 +863,8 @@ fn why(err: ClientError, carried: Option<&Carried>) -> ClientError {
     }
 }
 
-/// Greets the daemon on the other end of `stream`, checking that it speaks
-/// our protocol version, then turns the connection into a carrier of QUIC
+/// Greets the daemon on the other end of `stream`, agreeing a protocol
+/// version with it, then turns the connection into a carrier of QUIC
 /// packets. Returns the certificate the daemon's QUIC endpoint presents,
 /// and where it takes packets over UDP, if it does.
 ///
@@ -836,22 +874,17 @@ fn why(err: ClientError, carried: Option<&Carried>) -> ClientError {
 /// speaks.
 pub(crate) fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<Udp>), ClientError> {
     stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
-    stream.write_all(&frame::encode(&ClientMessage::Hello {
-        protocol_version: PROTOCOL_VERSION,
-    })?)?;
+    stream.write_all(&frame::encode(
+        PROTOCOL_VERSION,
+        &ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )?)?;
     let mut decoder = FrameDecoder::new();
-    match receive(stream, &mut decoder)? {
-        ServerMessage::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => {}
-        ServerMessage::Hello { protocol_version } => {
-            return Err(ClientError::VersionMismatch {
-                ours: PROTOCOL_VERSION,
-                daemon: protocol_version,
-            });
-        }
-        other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
-    }
-    stream.write_all(&frame::encode(&ClientMessage::Request(Request::CarryQuic))?)?;
-    let carrying = match receive(stream, &mut decoder)? {
+    let wire = agree(receive(stream, &mut decoder, PROTOCOL_VERSION)?)?;
+    let carry = ClientMessage::Request(Request::CarryQuic);
+    stream.write_all(&frame::encode(wire, &carry)?)?;
+    let carrying = match receive(stream, &mut decoder, wire)? {
         ServerMessage::Response(Response::Carrying { certificate, udp }) => (certificate, udp),
         ServerMessage::Response(response) => return Err(unexpected(response)),
         other => return Err(ClientError::UnexpectedMessage(Box::new(other))),
@@ -864,15 +897,49 @@ pub(crate) fn open_carrier(stream: &mut UnixStream) -> Result<(Vec<u8>, Option<U
     Ok(carrying)
 }
 
-/// Reads until a whole message has arrived.
+/// The protocol version to run a connection at, from the daemon's answer
+/// to its `Hello`, or why it can't be run.
+///
+/// A daemon older than [`wire::MIN_DAEMON`] isn't talked to even if it
+/// seems to agree: one older than [`wire::FALLBACKS`] refuses a client
+/// by answering with its own version and hanging up, which is just what
+/// agreeing would look like. Taking it would leave a remote window
+/// connecting again and again into the same refusal, never saying the
+/// daemon needs updating.
+pub(crate) fn agree(reply: ServerMessage) -> Result<u32, ClientError> {
+    match reply {
+        ServerMessage::Hello { protocol_version } if wire::takes_reply(protocol_version) => {
+            Ok(protocol_version)
+        }
+        ServerMessage::Hello { protocol_version } => Err(ClientError::VersionMismatch {
+            ours: PROTOCOL_VERSION,
+            daemon: protocol_version,
+        }),
+        other => Err(ClientError::UnexpectedMessage(Box::new(other))),
+    }
+}
+
+/// Reads until a whole message has arrived, as a build of protocol `wire`
+/// wrote it.
 pub(crate) fn receive(
     stream: &mut UnixStream,
     decoder: &mut FrameDecoder,
+    wire: u32,
 ) -> Result<ServerMessage, ClientError> {
     let mut buffer = [0; 16 * 1024];
     loop {
-        if let Some(message) = decoder.decode()? {
-            return Ok(message);
+        match decoder.decode(wire) {
+            Ok(Some(message)) => return Ok(message),
+            Ok(None) => {}
+            Err(err) => {
+                return Err(match err.skipped() {
+                    Some(head) => {
+                        log::warn!("the daemon sent a message this build can't read: {err}");
+                        ClientError::Unreadable(head)
+                    }
+                    None => err.into(),
+                });
+            }
         }
         match stream.read(&mut buffer) {
             Ok(0) => return Err(ClientError::Disconnected),
@@ -925,4 +992,8 @@ pub enum ClientError {
     /// A message couldn't be encoded or decoded.
     #[error(transparent)]
     Frame(#[from] FrameError),
+    /// The daemon, a newer one, sent a message this build can't read,
+    /// which began so. The connection goes on.
+    #[error("the daemon sent a message this build can't read")]
+    Unreadable(Head),
 }

@@ -969,7 +969,10 @@ impl Desk {
                     (root.is_some_and(in_scratch), false)
                 }
                 Content::Terminal(_) => (Some(pane.id) == open.practice, false),
-                Content::Board(_) | Content::Review(_) | Content::Browser(_) => (false, false),
+                Content::Board(_)
+                | Content::Review(_)
+                | Content::Browser(_)
+                | Content::Other { .. } => (false, false),
             };
             if discard && let Content::Buffer(buffer) = pane.content {
                 self.request(Request::Discard { buffer }, Asked::Quiet);
@@ -1113,6 +1116,7 @@ impl DeskFacts<'_> {
             Content::Board(_) => Kind::Board,
             Content::Review(_) => Kind::Review,
             Content::Browser(_) => Kind::Browser,
+            Content::Other { .. } => Kind::Other,
         }
     }
 }

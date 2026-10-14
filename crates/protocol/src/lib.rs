@@ -4,9 +4,17 @@
 //! serialized with `postcard`. The client sends [`ClientMessage`]s and the
 //! daemon sends [`ServerMessage`]s.
 //!
-//! The client's first message must be [`ClientMessage::Hello`]. The daemon
-//! answers with [`ServerMessage::Hello`], giving its own
-//! [`PROTOCOL_VERSION`], and closes the connection if the versions differ.
+//! The client's first message must be [`ClientMessage::Hello`], giving its
+//! [`PROTOCOL_VERSION`]. A daemon that talks to clients of that version
+//! (see [`wire::MIN_CLIENT`]) answers with [`ServerMessage::Hello`] giving
+//! the older of the two versions, which the connection then runs at both
+//! ways (see [`wire`]). One that doesn't answers with its own version and
+//! closes the connection, as daemons older than protocol 73 do whenever
+//! the versions differ. A client takes the answer only if it talks to
+//! daemons of that version too (see [`wire::MIN_DAEMON`]). A client that
+//! says a version past the daemon's is told the daemon's own, which is how
+//! one asks which version a daemon speaks.
+//!
 //! Both `Hello`s are variant 0 of their enums and must stay that way. That
 //! keeps them decodable across versions, so a version mismatch is always
 //! reported as one, not as a garbled message.
@@ -53,6 +61,7 @@ mod find;
 pub mod frame;
 mod review;
 mod view;
+pub mod wire;
 mod workspace;
 
 use std::fmt;
@@ -98,13 +107,13 @@ pub use view::{
     NodeId, Patch, Run, View, ViewUpdate,
 };
 pub use workspace::{
-    Axis, Content, Layout, MAX_NESTING, Pane, PaneId, PaneTerminal, Side, Tab, TabId, Workspace,
-    WorkspaceId, Workspaces,
+    Axis, Content, Layout, MAX_NESTING, Pane, PaneId, PaneKind, PaneTerminal, Side, Tab, TabId,
+    Workspace, WorkspaceId, Workspaces,
 };
 
-/// The protocol version this crate speaks. Bump it on any incompatible
-/// change to a message.
-pub const PROTOCOL_VERSION: u32 = 72;
+/// The protocol version this crate speaks. Bump it on any change to a
+/// message, and keep the change readable by older peers (see [`wire`]).
+pub const PROTOCOL_VERSION: u32 = 73;
 
 /// The first protocol version whose daemons can upgrade in place: see
 /// [`ClientMessage::Upgrade`].
@@ -1096,6 +1105,15 @@ pub enum Error {
     /// another workspace: a session is never opened twice.
     #[error("chat {0}, in another workspace, has that session open")]
     SessionOpen(TerminalId),
+    /// The daemon couldn't take the request: it came from a newer release
+    /// of clackatoo than the daemon's, which it couldn't read, or from an
+    /// older one, without something the daemon needs to do it safely.
+    #[error("the daemon can't do that: it's from another release of clackatoo than this")]
+    Unsupported,
+    /// A failure this build doesn't know, from a newer daemon, saying
+    /// what went wrong.
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Identifies a terminal within one daemon. IDs are never reused while

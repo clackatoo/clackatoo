@@ -309,6 +309,9 @@ pub enum Item {
     Thought(String),
     /// A tool it used.
     Tool(Tool),
+    /// Something newer than the client, which a newer daemon sent in place
+    /// of it, as text to show: what it was.
+    Other(String),
 }
 
 /// A tool the agent used, such as reading a file or running a command.
@@ -373,6 +376,9 @@ pub enum ToolContent {
     /// A command's output as it ran, as plain text, streamed apart from
     /// the tool's other content, as Codex's adapter streams it.
     Output(String),
+    /// Something newer than the client, which a newer daemon sent in place
+    /// of it, as text to show, in Markdown.
+    Other(String),
 }
 
 impl Tool {
@@ -777,7 +783,7 @@ impl ChatNode {
             }
             for item in &turn.items {
                 match item {
-                    Item::Words(words) => {
+                    Item::Words(words) | Item::Other(words) => {
                         text.push_str(words.trim_end());
                         text.push_str("\n\n");
                     }

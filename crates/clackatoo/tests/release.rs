@@ -223,3 +223,81 @@ fn a_release_is_refused_with_changes_not_committed_or_a_version_tagged_already()
     assert!(!wrong.status.success());
     assert!(String::from_utf8_lossy(&wrong.stderr).contains("isn't a version"));
 }
+
+#[test]
+fn a_release_commits_the_protocol_fixture_once_per_protocol_version() {
+    let repo = Repo::new();
+    // A protocol crate whose fixture writer, as the real one does, writes
+    // the fixture if it isn't there, and fails if it's there and differs.
+    repo.write(
+        "Cargo.toml",
+        "[workspace]\nresolver = \"3\"\nmembers = [\"one\", \"crates/protocol\"]\n\n\
+         [workspace.package]\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [workspace.dependencies]\n",
+    );
+    repo.write(
+        "crates/protocol/Cargo.toml",
+        "[package]\nname = \"clackatoo-protocol\"\nversion.workspace = true\n\
+         edition.workspace = true\n",
+    );
+    repo.write("crates/protocol/src/lib.rs", "");
+    repo.write(".gitignore", "/target\n");
+    repo.write(
+        "crates/protocol/examples/fixture.rs",
+        r#"fn main() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let path = dir.join("protocol-v1.bin");
+    match std::fs::read(&path) {
+        Ok(there) if there == b"one" => {}
+        Ok(_) => std::process::exit(1),
+        Err(_) => {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(&path, b"one").unwrap();
+        }
+    }
+    println!("{}", path.display());
+}
+"#,
+    );
+    let lock = repo
+        .command(cargo())
+        .args(["generate-lockfile", "--offline", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(lock.status.success(), "{lock:?}");
+    repo.git(&["add", "."]);
+    repo.commit("feat: a protocol", "");
+
+    repo.write("crates/protocol/fixtures/stray", "not the release's");
+    let made = repo.release("2026-10-13", &[]);
+    assert!(made.status.success(), "{made:?}");
+    let committed = repo.git(&["show", "--name-only", "--format=", "HEAD"]);
+    assert!(
+        committed.contains("crates/protocol/fixtures/protocol-v1.bin"),
+        "{committed}"
+    );
+    // Only what the writer named: not a file left beside it.
+    assert!(!committed.contains("stray"), "{committed}");
+    assert!(repo.git(&["status", "--porcelain"]).contains("stray"));
+    std::fs::remove_file(repo.path().join("crates/protocol/fixtures/stray")).unwrap();
+
+    // The next release at the same protocol version leaves it as it is.
+    repo.commit("fix: something", "");
+    let next = repo.release("2026-10-14", &[]);
+    assert!(next.status.success(), "{next:?}");
+    let committed = repo.git(&["show", "--name-only", "--format=", "HEAD"]);
+    assert!(!committed.contains("fixtures"), "{committed}");
+    assert_eq!(repo.read("crates/protocol/fixtures/protocol-v1.bin"), "one");
+
+    // One whose protocol encodes otherwise, unbumped, is stopped.
+    repo.write("crates/protocol/fixtures/protocol-v1.bin", "two");
+    repo.git(&["add", "."]);
+    repo.commit("feat: a changed protocol", "");
+    let refused = repo.release("2026-10-15", &[]);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("fixture couldn't be written"),
+        "{refused:?}"
+    );
+    assert!(!repo.git(&["tag"]).contains("v2026.10.2"));
+}

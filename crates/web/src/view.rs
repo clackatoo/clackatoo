@@ -319,7 +319,9 @@ fn fold_label(node: &ChatNode, turn: &Turn, now: u64) -> String {
 /// One thing the agent did.
 fn item_view(item: &Item, open: &OpenChat, turn: usize, at: usize) -> Element {
     match item {
-        Item::Words(words) => el("div").class("words").children(markdown::render(words)),
+        Item::Words(words) | Item::Other(words) => {
+            el("div").class("words").children(markdown::render(words))
+        }
         Item::Thought(thought) => {
             let key = format!("t{turn}i{at}");
             folded(open, key, "thought", el("summary").text("Thinking"))
@@ -360,7 +362,9 @@ fn tool_view(tool: &Tool, open: &OpenChat, key: String) -> Element {
     });
     for content in &tool.content {
         details = details.child(match content {
-            ToolContent::Text(text) => el("div").class("words").children(markdown::render(text)),
+            ToolContent::Text(text) | ToolContent::Other(text) => {
+                el("div").class("words").children(markdown::render(text))
+            }
             ToolContent::Diff(diff) => diff_view(diff),
             ToolContent::Output(output) => el("pre").class("output").text(last_lines(output)),
         });

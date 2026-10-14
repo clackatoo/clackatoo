@@ -18,9 +18,10 @@ use std::time::Duration;
 use clackatoo_daemon::launch::{self, LaunchError};
 use clackatoo_daemon::remote::{self, Askpass, Remote, RemoteError};
 use clackatoo_daemon::{Client, ClientError, Contact, Receiver, RuntimeDir, Sender};
+use clackatoo_protocol::frame::Head;
 use clackatoo_protocol::{
-    BrowserUpdate, Event, NewTerminal, PROTOCOL_VERSION, PaneTerminal, ServerMessage, Size,
-    TerminalStatus, Workspaces,
+    BrowserUpdate, BufferId, Error, Event, NewTerminal, PROTOCOL_VERSION, PaneTerminal, Response,
+    ServerMessage, Size, TerminalId, TerminalStatus, Workspaces,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -64,6 +65,9 @@ pub(crate) enum SessionEvent {
         contact: Option<Contact>,
         /// Which release of clackatoo the daemon is, if it said.
         daemon_version: Option<String>,
+        /// The protocol version the connection runs at: the daemon's, if
+        /// it's older than the window.
+        wire: u32,
     },
     /// A daemon on another machine went out of contact, or came back.
     Contact,
@@ -75,6 +79,23 @@ pub(crate) enum SessionEvent {
     },
     /// A message from the daemon.
     Message(ServerMessage),
+    /// A change to a terminal's view, from a newer daemon, couldn't be
+    /// read: the window attaches to it again.
+    MissedView {
+        terminal: TerminalId,
+        /// Whether it was a snapshot, as attaching to it again brings.
+        snapshot: bool,
+    },
+    /// A change to a buffer, from a newer daemon, couldn't be read: the
+    /// window attaches to it again.
+    MissedBuffer {
+        buffer: BufferId,
+        /// Whether it was what attaching to it again brings.
+        snapshot: bool,
+    },
+    /// The workspaces, from a newer daemon, couldn't be read: the window
+    /// asks for them again.
+    MissedWorkspaces,
     /// A picture of a chat's page, decoded on the session's thread, as it
     /// came, so the window never waits on decoding one.
     BrowserPicture {
@@ -311,6 +332,7 @@ fn run(
         }
     };
     let contact = client.contact();
+    let wire = client.wire();
     if let Some(contact) = &contact {
         let proxy = proxy.clone();
         contact.on_change(move || drop(proxy.send_event(SessionEvent::Contact)));
@@ -322,6 +344,7 @@ fn run(
                 workspaces,
                 contact,
                 daemon_version,
+                wire,
             };
             if proxy.send_event(connected).is_err() {
                 return;
@@ -343,12 +366,39 @@ fn run(
                 None => continue,
             },
             Ok(message) => SessionEvent::Message(message),
+            Err(ClientError::Unreadable(head)) => match missed(head) {
+                Some(event) => event,
+                None => continue,
+            },
             Err(err) => return lost(err.to_string()),
         };
         if proxy.send_event(event).is_err() {
             return;
         }
     }
+}
+
+/// What the window makes of a message from a newer daemon that couldn't
+/// be read, which began `head`, or `None` if nothing: an answer is still
+/// the answer to the oldest request waiting, an error, so later answers
+/// go to their own requests; a change to a view or a buffer is made up
+/// for by attaching to it again, and the workspaces by asking for them
+/// again; anything else is passed over. (The window doesn't watch the
+/// chats, so there's no list of them to ask for again.)
+fn missed(head: Head) -> Option<SessionEvent> {
+    if head.is_response() {
+        let answer = Response::Error(Error::Unsupported);
+        return Some(SessionEvent::Message(ServerMessage::Response(answer)));
+    }
+    if let Some(terminal) = head.view() {
+        let snapshot = head.is_view_snapshot();
+        return Some(SessionEvent::MissedView { terminal, snapshot });
+    }
+    if head.is_workspaces() {
+        return Some(SessionEvent::MissedWorkspaces);
+    }
+    let snapshot = head.is_buffer_snapshot();
+    (head.buffer()).map(|buffer| SessionEvent::MissedBuffer { buffer, snapshot })
 }
 
 /// Connects to the daemon at `location`, starting it if it isn't running,

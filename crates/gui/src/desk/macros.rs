@@ -511,7 +511,7 @@ impl Desk {
 /// of the window's requests, but for a split resized, or one whose
 /// failure is only logged.
 pub(super) fn waits_for(asker: &Asker) -> bool {
-    matches!(asker, Asker::Window(what) if !matches!(what, Asked::Quiet | Asked::Resize))
+    matches!(asker, Asker::Window(what) if !matches!(what, Asked::Quiet | Asked::Resize | Asked::Workspaces | Asked::Reattached(_)))
 }
 
 /// Whether `key` types into the finder's query, and so needn't wait for

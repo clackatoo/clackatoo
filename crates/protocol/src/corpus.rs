@@ -26,12 +26,13 @@ use clackatoo_text::{
 };
 
 use crate::frame::{self, FrameDecoder, FrameError};
+use crate::wire::FALLBACKS;
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
     Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
     ClientMessage, Content, CursorState, Diff, Error, Event, FilesId, GridNode, GridState,
     HistoryLine, HistoryLines, Item, Layout, Line, LinkTarget, Location, NewAgent, NewReview,
-    NewTerminal, Node, NodeId, Outcome, Pane, PaneId, PaneTerminal, Patch, Provider,
+    NewTerminal, Node, NodeId, Outcome, Pane, PaneId, PaneKind, PaneTerminal, Patch, Provider,
     ProviderModels, Question, Request, Response, Resume, ResumeSession, ReviewId, Run, Sender,
     ServerMessage, Setting, SettingChoice, SettingKind, Side, Subagent, SubagentStatus, Switch,
     Tab, TabId, TerminalId, TerminalInfo, TerminalStatus, Tool, ToolContent, ToolKind, ToolStatus,
@@ -82,8 +83,8 @@ pub fn fixture(wire: u32) -> Vec<u8> {
         .iter()
         .flat_map(|sample| {
             match sample {
-                Sample::Client(message) => frame::encode(message),
-                Sample::Server(message) => frame::encode(message),
+                Sample::Client(message) => frame::encode(wire, message),
+                Sample::Server(message) => frame::encode(wire, message),
             }
             .expect("samples encode")
         })
@@ -110,8 +111,8 @@ pub fn read_fixture(wire: u32, bytes: &[u8]) -> Result<Vec<Sample>, String> {
     let mut read = Vec::new();
     for (index, sample) in corpus(wire).into_iter().enumerate() {
         let next: Result<Option<Sample>, FrameError> = match sample {
-            Sample::Client(_) => decoder.decode().map(|next| next.map(Sample::Client)),
-            Sample::Server(_) => decoder.decode().map(|next| next.map(Sample::Server)),
+            Sample::Client(_) => decoder.decode(wire).map(|next| next.map(Sample::Client)),
+            Sample::Server(_) => decoder.decode(wire).map(|next| next.map(Sample::Server)),
         };
         match next {
             Ok(Some(sample)) => read.push(sample),
@@ -526,6 +527,73 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         ),
     ];
     samples.extend(more().into_iter().map(|sample| (FIRST, sample)));
+    // The fallbacks a newer daemon sends in place of what's newer.
+    samples.extend([
+        (
+            FALLBACKS,
+            Server(ServerMessage::Event(Event::Workspaces(Workspaces {
+                list: vec![Workspace {
+                    id: WorkspaceId(1),
+                    name: "newer".into(),
+                    tabs: vec![Tab {
+                        id: TabId(2),
+                        layout: Layout::Pane(Pane {
+                            id: PaneId(1),
+                            content: Content::Other {
+                                kind: PaneKind::new("notebook"),
+                            },
+                        }),
+                        focused: PaneId(1),
+                        name: None,
+                    }],
+                    active_tab: TabId(2),
+                }],
+                active: None,
+            }))),
+        ),
+        (
+            FALLBACKS,
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Snapshot(View {
+                    title: "newer".into(),
+                    cwd: None,
+                    root: Node::Other,
+                }),
+            })),
+        ),
+        (
+            FALLBACKS,
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Patch(vec![
+                    Patch::Chat(ChatPatch::Item {
+                        turn: 0,
+                        item: 0,
+                        value: Item::Other("a picture".into()),
+                    }),
+                    Patch::Chat(ChatPatch::Item {
+                        turn: 0,
+                        item: 1,
+                        value: Item::Tool(Tool {
+                            content: vec![ToolContent::Other("a chart".into())],
+                            ..tool()
+                        }),
+                    }),
+                ]),
+            })),
+        ),
+        (
+            FALLBACKS,
+            Server(ServerMessage::Response(Response::Error(Error::Unsupported))),
+        ),
+        (
+            FALLBACKS,
+            Server(ServerMessage::Response(Response::Error(Error::Other(
+                "no such notebook".into(),
+            )))),
+        ),
+    ]);
     samples
 }
 
@@ -1545,8 +1613,8 @@ mod tests {
             let again: Vec<u8> = (read.iter())
                 .flat_map(|sample| {
                     match sample {
-                        Sample::Client(message) => frame::encode(message),
-                        Sample::Server(message) => frame::encode(message),
+                        Sample::Client(message) => frame::encode(wire, message),
+                        Sample::Server(message) => frame::encode(wire, message),
                     }
                     .unwrap()
                 })

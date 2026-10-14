@@ -155,13 +155,14 @@ pub fn daemon_protocol(runtime: &RuntimeDir) -> Result<Option<u32>, LaunchError>
         Err(err) => return Err(ClientError::Connect(err).into()),
     };
     stream.set_read_timeout(Some(DEADLINE))?;
-    stream.write_all(
-        &frame::encode(&ClientMessage::Hello {
-            protocol_version: PROTOCOL_VERSION,
-        })
-        .map_err(ClientError::from)?,
-    )?;
-    match client::receive(&mut stream, &mut FrameDecoder::new())? {
+    // A version past any daemon's: one that talks to older clients would
+    // otherwise answer with this build's version, if it's older, not its
+    // own. Every daemon answers this with its own.
+    let hello = ClientMessage::Hello {
+        protocol_version: u32::MAX,
+    };
+    stream.write_all(&frame::encode(PROTOCOL_VERSION, &hello).map_err(ClientError::from)?)?;
+    match client::receive(&mut stream, &mut FrameDecoder::new(), PROTOCOL_VERSION)? {
         ServerMessage::Hello { protocol_version } => Ok(Some(protocol_version)),
         other => Err(ClientError::UnexpectedMessage(Box::new(other)).into()),
     }
@@ -187,28 +188,32 @@ pub fn upgrade(runtime: &RuntimeDir) -> Result<Client, LaunchError> {
     let mut stream = UnixStream::connect(&socket).map_err(ClientError::Connect)?;
     stream.set_read_timeout(Some(DEADLINE))?;
     let executable = std::env::current_exe()?;
-    stream.write_all(
-        &frame::encode(&ClientMessage::Upgrade {
-            protocol_version: PROTOCOL_VERSION,
-            executable: executable.as_os_str().as_bytes().to_vec(),
-        })
-        .map_err(ClientError::from)?,
-    )?;
+    let upgrade = ClientMessage::Upgrade {
+        protocol_version: PROTOCOL_VERSION,
+        executable: executable.as_os_str().as_bytes().to_vec(),
+    };
+    // Upgrade, and the answer, are the same in every version.
+    stream.write_all(&frame::encode(PROTOCOL_VERSION, &upgrade).map_err(ClientError::from)?)?;
     // The daemon hangs up as it upgrades.
-    match client::receive(&mut stream, &mut FrameDecoder::new()) {
+    match client::receive(&mut stream, &mut FrameDecoder::new(), PROTOCOL_VERSION) {
         Err(ClientError::Disconnected) => {}
         Ok(ServerMessage::NotUpgrading { reason }) => return Err(LaunchError::NotUpgraded(reason)),
         Ok(other) => return Err(ClientError::UnexpectedMessage(Box::new(other)).into()),
         Err(err) => return Err(err.into()),
     }
     // Connections wait in the socket's queue while the new build starts.
+    // The old build may still talk to this one, at its older version.
+    let still = |daemon| {
+        LaunchError::NotUpgraded(format!(
+            "it still speaks protocol {daemon}; {} says why",
+            runtime.path().join("daemon.log").display()
+        ))
+    };
     match Client::connect(&socket) {
         Err(ClientError::VersionMismatch { daemon, .. }) if daemon != PROTOCOL_VERSION => {
-            Err(LaunchError::NotUpgraded(format!(
-                "it still speaks protocol {daemon}; {} says why",
-                runtime.path().join("daemon.log").display()
-            )))
+            Err(still(daemon))
         }
+        Ok(client) if client.wire() != PROTOCOL_VERSION => Err(still(client.wire())),
         result => Ok(result?),
     }
 }

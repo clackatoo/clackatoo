@@ -182,6 +182,10 @@ pub(crate) struct BufferCopy {
     /// The connection was lost, and the next snapshot is the new one's:
     /// the changes waiting are kept, to be brought past it and sent again.
     reattaching: bool,
+    /// An update from a newer daemon couldn't be read: what comes before
+    /// the snapshot asked for since is passed over, as the snapshot, or
+    /// the edits it resumes with, take it all in.
+    missed: bool,
     /// What answers its changes, if it's a buffer only the window has,
     /// rather than the daemon, and the answers not yet taken in.
     scratch: Option<Box<Scratch>>,
@@ -216,6 +220,7 @@ impl BufferCopy {
             batch: None,
             astray: false,
             reattaching: false,
+            missed: false,
             scratch: None,
             answers: Vec::new(),
         }
@@ -832,11 +837,35 @@ impl BufferCopy {
         }
     }
 
+    /// Whether `update` follows one that couldn't be read, and is passed
+    /// over until the snapshot asked for since comes: see
+    /// [`missed`](Self::missed).
+    fn passes_over(&mut self, update: &BufferUpdate) -> bool {
+        if !self.missed {
+            return false;
+        }
+        let fresh = matches!(
+            update,
+            BufferUpdate::Snapshot(_) | BufferUpdate::Resumed { .. }
+        );
+        self.missed = !fresh;
+        !fresh
+    }
+
     /// Takes in what the daemon says about the buffer.
     pub(crate) fn update(&mut self, update: BufferUpdate) -> Heard {
+        if self.passes_over(&update) {
+            return Heard::Nothing;
+        }
         if self.kept.is_some() {
             return self.update_kept(update);
         }
+        self.update_text(update)
+    }
+
+    /// Takes in what the daemon says about the buffer, while the window's
+    /// text is the daemon's, as it is unless kept.
+    fn update_text(&mut self, update: BufferUpdate) -> Heard {
         match update {
             BufferUpdate::Snapshot(snapshot) => self.replace(snapshot),
             BufferUpdate::Resumed {
@@ -1103,6 +1132,27 @@ impl BufferCopy {
             return;
         }
         self.reattaching = true;
+    }
+
+    /// An update from a newer daemon couldn't be read. The window attaches
+    /// again, as after a lost connection, to be brought up to date from
+    /// the copy's version (see [`resume`](Self::resume)); until then,
+    /// what the daemon says is passed over, as it follows what was missed.
+    /// Returns whether to attach again: not if it's attaching again
+    /// already, as what that brings takes in everything sent before it.
+    /// Whether it's attaching again, having missed an update, and the
+    /// snapshot asked for hasn't come.
+    pub(crate) fn is_missing(&self) -> bool {
+        self.missed
+    }
+
+    pub(crate) fn missed(&mut self) -> bool {
+        if self.is_scratch() || self.missed {
+            return false;
+        }
+        self.reattaching = true;
+        self.missed = true;
+        true
     }
 
     /// Brings the changes waiting past `snapshot`, the first of a new

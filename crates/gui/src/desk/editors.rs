@@ -1492,6 +1492,46 @@ impl Desk {
         }
     }
 
+    /// An update to `buffer` from a newer daemon couldn't be read: the
+    /// window attaches to it again, to be brought up to date as after a
+    /// lost connection, so its copy can't go astray from the daemon's
+    /// text. What its editors asked won't be answered.
+    ///
+    /// Every miss counts towards how often it asks, those while it waits
+    /// too, so a copy whose answer never comes readable says so. One that
+    /// couldn't be read, being a snapshot or the edits it resumes with if
+    /// `snapshot`, is the answer it waited for, so it asks again.
+    pub(crate) fn missed_buffer(&mut self, buffer: BufferId, snapshot: bool) {
+        if !self.connected || !self.editors.attached.contains(&buffer) {
+            return;
+        }
+        let Some(missing) = (self.editors.buffers.get(&buffer)).map(BufferCopy::is_missing) else {
+            return;
+        };
+        if !self.ask_again(super::Missed::Buffer(buffer)) || (missing && !snapshot) {
+            return;
+        }
+        let Some(copy) = self.editors.buffers.get_mut(&buffer) else {
+            return;
+        };
+        if !missing && !copy.missed() {
+            return;
+        }
+        let resume = copy.resume();
+        for editor in self.editors.panes.values_mut() {
+            if editor.buffer() == buffer {
+                editor.reconnected();
+            }
+        }
+        let window = self.editors.window.0;
+        let attach = Request::AttachBuffer {
+            buffer,
+            window,
+            resume,
+        };
+        self.request(attach, Asked::Quiet);
+    }
+
     /// Forgets what was attached on the last connection.
     pub(super) fn editors_reconnected(&mut self) {
         self.editors.reconnected();

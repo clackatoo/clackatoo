@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
-use clackatoo_protocol::{ChatAction, TerminalId};
+use clackatoo_protocol::{ChatAction, PROTOCOL_VERSION, TerminalId};
 use js_sys::{Reflect, Uint8Array};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
@@ -650,7 +650,8 @@ impl App {
         };
         socket.decoder.push(bytes);
         loop {
-            let message = match socket.decoder.decode() {
+            // The daemon serves the app, so they're always of one build.
+            let message = match socket.decoder.decode(PROTOCOL_VERSION) {
                 Ok(Some(message)) => message,
                 Ok(None) => break,
                 Err(err) => {
@@ -730,7 +731,7 @@ impl App {
         }
         let mut bytes = Vec::new();
         for message in &messages {
-            match frame::encode(message) {
+            match frame::encode(PROTOCOL_VERSION, message) {
                 Ok(frame) => bytes.extend_from_slice(&frame),
                 Err(err) => web_sys::console::error_1(&format!("{err}").into()),
             }
@@ -1111,16 +1112,16 @@ mod tests {
         ];
         let mut bytes = Vec::new();
         for message in &messages {
-            bytes.extend(frame::encode(message).unwrap());
+            bytes.extend(frame::encode(PROTOCOL_VERSION, message).unwrap());
         }
         let mut decoder = FrameDecoder::new();
         decoder.push(&bytes);
         assert_eq!(
-            decoder.decode::<ClientMessage>().unwrap(),
+            decoder.decode::<ClientMessage>(PROTOCOL_VERSION).unwrap(),
             Some(messages[0].clone())
         );
         assert_eq!(
-            decoder.decode::<ClientMessage>().unwrap(),
+            decoder.decode::<ClientMessage>(PROTOCOL_VERSION).unwrap(),
             Some(messages[1].clone())
         );
     }

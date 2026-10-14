@@ -42,6 +42,7 @@ mod lua;
 mod motion;
 mod objects;
 mod options;
+mod other;
 mod pane;
 mod render;
 mod review;

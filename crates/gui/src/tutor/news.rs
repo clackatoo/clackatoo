@@ -209,6 +209,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: ":Agent opens a start page: start a chat, or go on with one, the agent's own past sessions too",
     },
+    News {
+        id: "compat",
+        date: "2026-10-14",
+        lesson: "remote",
+        what: "Windows and daemons a release or so apart work together: your laptop needn't update first",
+    },
 ];
 
 impl News {

@@ -12,6 +12,7 @@ use clackatoo_daemon::{
     AgentConfig, Client, ClientError, CustomAgent, Daemon, DaemonConfig, ShutdownHandle,
 };
 use clackatoo_protocol::frame::{self, FrameDecoder};
+use clackatoo_protocol::wire;
 use clackatoo_protocol::{
     AgentTools, Answer, Author, Axis, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction,
     ChatNode, ChatState, ClientMessage, CompletionItem, Construct, Content, Diff, Done, Edit,
@@ -441,7 +442,7 @@ fn read_until_hangup(stream: &mut UnixStream) -> Vec<u8> {
 fn raw_exchange(socket: &Path, messages: &[ClientMessage]) -> Vec<ServerMessage> {
     let mut stream = UnixStream::connect(socket).expect("connect");
     for message in messages {
-        match stream.write_all(&frame::encode(message).unwrap()) {
+        match stream.write_all(&frame::encode(PROTOCOL_VERSION, message).unwrap()) {
             Ok(()) => {}
             // The daemon may hang up on a client that breaks the protocol
             // before it's sent all it means to, as a busy machine lets the
@@ -454,7 +455,7 @@ fn raw_exchange(socket: &Path, messages: &[ClientMessage]) -> Vec<ServerMessage>
     let bytes = read_until_hangup(&mut stream);
     let mut decoder = FrameDecoder::new();
     decoder.push(&bytes);
-    std::iter::from_fn(|| decoder.decode().unwrap()).collect()
+    std::iter::from_fn(|| decoder.decode(PROTOCOL_VERSION).unwrap()).collect()
 }
 
 #[test]
@@ -470,24 +471,273 @@ fn requests_before_hello_are_refused() {
     );
 }
 
+/// A connection that sends frames by hand, as a client of another version
+/// might, and reads what comes back as one of protocol `wire` would.
+struct Raw {
+    stream: UnixStream,
+    decoder: FrameDecoder,
+    wire: u32,
+}
+
+impl Raw {
+    fn open(daemon: &TestDaemon, wire: u32) -> Self {
+        let stream = UnixStream::connect(daemon.socket()).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        Self {
+            stream,
+            decoder: FrameDecoder::new(),
+            wire,
+        }
+    }
+
+    /// Says hello as a client of protocol `version`.
+    fn hello(&mut self, version: u32) {
+        let hello = ClientMessage::Hello {
+            protocol_version: version,
+        };
+        self.send(&frame::encode(self.wire, &hello).unwrap());
+    }
+
+    fn send(&mut self, frame: &[u8]) {
+        // The daemon may have hung up: what comes back says so.
+        let _ = self.stream.write_all(frame);
+    }
+
+    fn request(&mut self, request: Request) {
+        let request = ClientMessage::Request(request);
+        self.send(&frame::encode(self.wire, &request).unwrap());
+    }
+
+    /// The next message, or `None` once the daemon hangs up.
+    fn next(&mut self) -> Option<ServerMessage> {
+        let mut chunk = [0; 4096];
+        loop {
+            if let Some(message) = self.decoder.decode(self.wire).unwrap() {
+                return Some(message);
+            }
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return None,
+                Ok(n) => self.decoder.push(&chunk[..n]),
+                Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => return None,
+                Err(err) => panic!("read failed: {err}"),
+            }
+        }
+    }
+}
+
+/// A frame holding `payload` as it is: what a newer client might send.
+fn raw_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = frame::header(payload.len()).to_vec();
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// A request of a kind past any this build has, as a newer client's.
+const NEWER_REQUEST: [u8; 3] = [2, 0xff, 0x7f];
+
+/// A message of a kind past any this build has, as a newer client's.
+const NEWER_MESSAGE: [u8; 3] = [0xc8, 0x01, 1];
+
+fn hello(version: u32) -> ServerMessage {
+    ServerMessage::Hello {
+        protocol_version: version,
+    }
+}
+
+const NO_TERMINALS: Option<ServerMessage> =
+    Some(ServerMessage::Response(Response::Terminals(Vec::new())));
+
 #[test]
-fn a_version_mismatch_gets_our_version_then_a_hangup() {
+fn a_client_too_old_gets_our_version_then_a_hangup() {
     let daemon = TestDaemon::start();
-    let responses = raw_exchange(
-        &daemon.socket(),
-        &[
-            ClientMessage::Hello {
-                protocol_version: PROTOCOL_VERSION + 1,
-            },
-            ClientMessage::Request(Request::ListTerminals),
-        ],
-    );
-    assert_eq!(
-        responses,
-        [ServerMessage::Hello {
-            protocol_version: PROTOCOL_VERSION
-        }]
-    );
+    let old = wire::MIN_CLIENT - 1;
+    let mut raw = Raw::open(&daemon, old);
+    raw.hello(old);
+    raw.request(Request::ListTerminals);
+    assert_eq!(raw.next(), Some(hello(PROTOCOL_VERSION)));
+    assert_eq!(raw.next(), None);
+}
+
+#[test]
+fn a_client_of_an_older_version_in_the_window_is_talked_to_at_its_own() {
+    let daemon = TestDaemon::start();
+    for (client, wire) in [
+        (wire::MIN_CLIENT, wire::MIN_CLIENT),
+        (PROTOCOL_VERSION, PROTOCOL_VERSION),
+        // A newer client is told this build's, and talks at it.
+        (PROTOCOL_VERSION + 1, PROTOCOL_VERSION),
+    ] {
+        let mut raw = Raw::open(&daemon, wire);
+        raw.hello(client);
+        raw.request(Request::ListTerminals);
+        assert_eq!(
+            raw.next(),
+            Some(hello(wire)),
+            "a client of protocol {client}"
+        );
+        assert_eq!(raw.next(), NO_TERMINALS, "a client of protocol {client}");
+    }
+}
+
+#[test]
+fn a_request_the_daemon_cant_read_is_answered_and_the_rest_go_on() {
+    let daemon = TestDaemon::start();
+    let mut raw = Raw::open(&daemon, PROTOCOL_VERSION);
+    raw.hello(PROTOCOL_VERSION);
+    raw.send(&raw_frame(&NEWER_REQUEST));
+    raw.request(Request::ListTerminals);
+    // Not a request: passed over, unanswered.
+    raw.send(&raw_frame(&NEWER_MESSAGE));
+    raw.request(Request::ListTerminals);
+    assert_eq!(raw.next(), Some(hello(PROTOCOL_VERSION)));
+    let unsupported = ServerMessage::Response(Response::Error(Error::Unsupported));
+    assert_eq!(raw.next(), Some(unsupported));
+    assert_eq!(raw.next(), NO_TERMINALS);
+    assert_eq!(raw.next(), NO_TERMINALS);
+}
+
+#[test]
+fn what_cant_be_read_drops_a_client_older_than_the_fallbacks_or_sending_a_stream_of_it() {
+    let daemon = TestDaemon::start();
+    // A client from before the fallbacks sends nothing a daemon can't
+    // read, so what it does is broken, as it always was.
+    let old = wire::FALLBACKS - 1;
+    let mut raw = Raw::open(&daemon, old);
+    raw.hello(old);
+    assert_eq!(raw.next(), Some(hello(old)));
+    raw.send(&raw_frame(&NEWER_REQUEST));
+    raw.request(Request::ListTerminals);
+    assert_eq!(raw.next(), None);
+    // Before a hello, nothing is passed over.
+    let mut raw = Raw::open(&daemon, PROTOCOL_VERSION);
+    raw.send(&raw_frame(&NEWER_REQUEST));
+    raw.hello(PROTOCOL_VERSION);
+    assert_eq!(raw.next(), None);
+    // A message of a kind this build has that can't be read is broken, not
+    // newer: an edit with nothing in it.
+    let mut raw = Raw::open(&daemon, PROTOCOL_VERSION);
+    raw.hello(PROTOCOL_VERSION);
+    assert_eq!(raw.next(), Some(hello(PROTOCOL_VERSION)));
+    raw.send(&raw_frame(&[4]));
+    raw.request(Request::ListTerminals);
+    assert_eq!(raw.next(), None);
+    // Nor a flood of them.
+    let mut raw = Raw::open(&daemon, PROTOCOL_VERSION);
+    raw.hello(PROTOCOL_VERSION);
+    assert_eq!(raw.next(), Some(hello(PROTOCOL_VERSION)));
+    raw.send(&raw_frame(&NEWER_MESSAGE).repeat(65));
+    raw.request(Request::ListTerminals);
+    assert_eq!(raw.next(), None);
+    daemon
+        .client()
+        .list_terminals()
+        .expect("daemon still serves others");
+}
+
+#[test]
+fn a_daemon_older_than_the_fallbacks_is_never_taken_to_agree() {
+    // Such a daemon refuses a client by answering with its own version and
+    // hanging up: taken for agreement, a remote window would connect again
+    // and again into the same refusal.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let old = std::thread::spawn(move || {
+        for reply in [wire::FALLBACKS - 1, wire::MIN_DAEMON] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut decoder = FrameDecoder::new();
+            let mut buffer = [0; 1024];
+            while decoder
+                .decode::<ClientMessage>(PROTOCOL_VERSION)
+                .unwrap()
+                .is_none()
+            {
+                let n = stream.read(&mut buffer).unwrap();
+                decoder.push(&buffer[..n]);
+            }
+            let hello = ServerMessage::Hello {
+                protocol_version: reply,
+            };
+            stream
+                .write_all(&frame::encode(PROTOCOL_VERSION, &hello).unwrap())
+                .unwrap();
+            if reply == wire::MIN_DAEMON {
+                // One that agreed is talked to at its version.
+                let _ = read_until_hangup(&mut stream);
+            }
+        }
+    });
+    match Client::connect(&path) {
+        Err(ClientError::VersionMismatch { daemon, ours }) => {
+            assert_eq!((daemon, ours), (wire::FALLBACKS - 1, PROTOCOL_VERSION));
+        }
+        other => panic!("expected a version mismatch, got {other:?}"),
+    }
+    let client = Client::connect(&path).expect("a daemon in the window");
+    assert_eq!(client.wire(), wire::MIN_DAEMON);
+    assert!(client.daemon_has(wire::FALLBACKS));
+    assert!(!client.daemon_has(wire::MIN_DAEMON + 1));
+    drop(client);
+    old.join().unwrap();
+}
+
+/// The next message a client sent on `stream`.
+fn read_message(stream: &mut UnixStream, decoder: &mut FrameDecoder) -> ClientMessage {
+    let mut buffer = [0; 1024];
+    loop {
+        if let Some(message) = decoder.decode(PROTOCOL_VERSION).unwrap() {
+            return message;
+        }
+        let n = stream.read(&mut buffer).unwrap();
+        assert!(n > 0, "the client hung up");
+        decoder.push(&buffer[..n]);
+    }
+}
+
+#[test]
+fn what_a_newer_daemon_sends_that_a_client_cant_read_is_made_up_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("newer.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let newer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = FrameDecoder::new();
+        let send = |stream: &mut UnixStream, message: &ServerMessage| {
+            stream
+                .write_all(&frame::encode(PROTOCOL_VERSION, message).unwrap())
+                .unwrap();
+        };
+        let hello = read_message(&mut stream, &mut decoder);
+        assert!(matches!(hello, ClientMessage::Hello { .. }), "{hello:?}");
+        let hello = ServerMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        };
+        send(&mut stream, &hello);
+        // For the first request, an event and an answer of kinds past any
+        // this build has; for the second, an answer it reads.
+        read_message(&mut stream, &mut decoder);
+        stream.write_all(&raw_frame(&[3, 0xc8, 0x01, 9])).unwrap();
+        stream.write_all(&raw_frame(&[2, 0xff, 0x7f, 9])).unwrap();
+        read_message(&mut stream, &mut decoder);
+        send(
+            &mut stream,
+            &ServerMessage::Response(Response::Terminals(Vec::new())),
+        );
+        let _ = read_until_hangup(&mut stream);
+    });
+    let mut client = Client::connect(&path).expect("connects");
+    // The answer it couldn't read is still the first request's, an error.
+    match client.list_terminals() {
+        Err(ClientError::Daemon(Error::Unsupported)) => {}
+        other => panic!("expected the daemon not to support it, got {other:?}"),
+    }
+    // The next answer is the next request's.
+    assert_eq!(client.list_terminals().unwrap(), Vec::new());
+    assert!(client.take_events().is_empty(), "the event was passed over");
+    drop(client);
+    newer.join().unwrap();
 }
 
 #[test]
@@ -1307,7 +1557,11 @@ fn a_daemon_from_an_older_build_can_say_its_version_before_carrying() {
         let (mut stream, _) = listener.accept().unwrap();
         let mut decoder = FrameDecoder::new();
         let mut buffer = [0; 1024];
-        while decoder.decode::<ClientMessage>().unwrap().is_none() {
+        while decoder
+            .decode::<ClientMessage>(PROTOCOL_VERSION)
+            .unwrap()
+            .is_none()
+        {
             let n = stream.read(&mut buffer).unwrap();
             decoder.push(&buffer[..n]);
         }
@@ -1320,7 +1574,9 @@ fn a_daemon_from_an_older_build_can_say_its_version_before_carrying() {
         let hello = ServerMessage::Hello {
             protocol_version: 1,
         };
-        stream.write_all(&frame::encode(&hello).unwrap()).unwrap();
+        stream
+            .write_all(&frame::encode(PROTOCOL_VERSION, &hello).unwrap())
+            .unwrap();
     });
     let stream = UnixStream::connect(&path).unwrap();
     match Client::over_quic(stream) {

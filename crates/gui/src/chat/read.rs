@@ -322,7 +322,7 @@ impl ChatView {
                 Some(alone.text().trim_end().to_owned())
             }
             piece => match turn.items.get(piece - ITEMS)? {
-                Item::Words(text) | Item::Thought(text) => Some(text.clone()),
+                Item::Words(text) | Item::Thought(text) | Item::Other(text) => Some(text.clone()),
                 Item::Tool(tool) => {
                     Some(Card::of(tool).map_or_else(|| tool.title.clone(), |card| card.text()))
                 }

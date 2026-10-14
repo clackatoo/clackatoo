@@ -162,9 +162,12 @@ impl Connection {
         let mut stream = UnixStream::connect(daemon.root().join("daemon.sock")).expect("connect");
         stream
             .write_all(
-                &frame::encode(&ClientMessage::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                })
+                &frame::encode(
+                    PROTOCOL_VERSION,
+                    &ClientMessage::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                    },
+                )
                 .expect("encode"),
             )
             .expect("say hello");
@@ -182,7 +185,7 @@ impl Connection {
                 };
                 decoder.push(&buffer[..n]);
                 loop {
-                    match decoder.decode::<ServerMessage>() {
+                    match decoder.decode::<ServerMessage>(PROTOCOL_VERSION) {
                         Ok(Some(ServerMessage::Response(response))) => {
                             if sender.send(response).is_err() {
                                 return;
@@ -212,7 +215,7 @@ impl Connection {
 
     /// Sends `message`. False if the daemon has hung up.
     fn send(&mut self, message: &ClientMessage) -> bool {
-        let frame = frame::encode(message).expect("made-up messages encode");
+        let frame = frame::encode(PROTOCOL_VERSION, message).expect("made-up messages encode");
         self.stream.write_all(&frame).is_ok()
     }
 
@@ -269,9 +272,12 @@ fn survives(messages: &[ClientMessage]) {
 #[test]
 fn bad_frames_cost_only_their_own_connection() {
     let daemon = TestDaemon::start();
-    let hello = frame::encode(&ClientMessage::Hello {
-        protocol_version: PROTOCOL_VERSION,
-    })
+    let hello = frame::encode(
+        PROTOCOL_VERSION,
+        &ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )
     .expect("encode");
     let mut rng = Rng(7);
     let mut garbage: Vec<Vec<u8>> = vec![

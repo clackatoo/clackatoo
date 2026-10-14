@@ -849,7 +849,7 @@ fn turn_text(number: Option<usize>, turn: &Turn) -> String {
     }
     for item in &turn.items {
         match item {
-            Item::Words(words) => {
+            Item::Words(words) | Item::Other(words) => {
                 text.push_str(words.trim_end());
                 text.push('\n');
             }

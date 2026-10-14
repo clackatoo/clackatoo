@@ -20,7 +20,7 @@ In a window, `:connect`, or Ctrl+B r, opens the same picker over your panes, and
 
 ## What the other machine needs
 
-The same build of clackatoo, or at least one speaking the same protocol. A window meeting a daemon from a newer build offers to update this clackatoo to the latest release, and opens again as it, connected where it was. One meeting an older daemon offers to upgrade it in place. The other machine needs clackatoo on the `PATH` ssh's commands get, which is often shorter than your shell's: `--remote-command` names it otherwise, as `--remote-command ~/.cargo/bin/clackatoo`. On a server nobody's logged in to, run `loginctl enable-linger` there once, so the daemon's socket stays.
+clackatoo, of the same release or one a little older or newer. A window and a daemon a release or so apart talk at the older one's protocol, so your laptop's window keeps working when your desktop's daemon is updated before it, and the other way round. Panes of a kind the window doesn't have yet say they need a newer clackatoo, and what it offers that the daemon doesn't have yet says the daemon needs updating, naming its release. Further apart, a window meeting a daemon from a newer build offers to update this clackatoo to the latest release, and opens again as it, connected where it was; one meeting an older daemon offers to upgrade it in place. The other machine needs clackatoo on the `PATH` ssh's commands get, which is often shorter than your shell's: `--remote-command` names it otherwise, as `--remote-command ~/.cargo/bin/clackatoo`. On a server nobody's logged in to, run `loginctl enable-linger` there once, so the daemon's socket stays.
 
 ## Surviving the network
 

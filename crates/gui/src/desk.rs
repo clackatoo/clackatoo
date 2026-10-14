@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use clackatoo_protocol::{
     Axis, BufferId, ClientMessage, Content, FileLocation, Layout, NewAgent, NewTerminal, PaneId,
-    PaneTerminal, Request, Response, Side, Size, Tab, TabId, TerminalId, ViewUpdate, WorkspaceId,
-    Workspaces,
+    PaneKind, PaneTerminal, Request, Response, Side, Size, Tab, TabId, TerminalId, ViewUpdate,
+    WorkspaceId, Workspaces,
 };
 use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
@@ -30,6 +30,7 @@ use crate::input::{self, KeptPress, KeyPress, Modifiers};
 use crate::keymap::{Chord, Pressed};
 use crate::layout::{Area, Direction, Divider, Placement};
 use crate::options::Options;
+use crate::other::OtherPane;
 use crate::pane::{self, Copy, Mode, Pane, PaneMouse, Selection};
 use bindings::Binding;
 pub(crate) use updating::UpdateAsked;
@@ -108,7 +109,29 @@ enum Asked {
     Devices,
     /// What a new chat could be, for the start page.
     ChatChoices,
+    /// The workspaces, asked for again after a newer daemon sent them as
+    /// this window couldn't read.
+    Workspaces,
+    /// A terminal attached to again after a newer daemon sent a change to
+    /// its view as this window couldn't read: refused, no snapshot comes.
+    Reattached(TerminalId),
 }
+
+/// What the window attaches to again, or asks for again, when a newer
+/// daemon sends something about it the window can't read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Missed {
+    View(TerminalId),
+    Buffer(BufferId),
+    Workspaces,
+}
+
+/// How many times a minute the window asks again for one thing it missed,
+/// before it takes it that it will only miss it again.
+const MOST_MISSED: usize = 5;
+
+/// The time those are counted over.
+const MISSED_OVER: std::time::Duration = std::time::Duration::from_mins(1);
 
 mod bindings;
 mod boards;
@@ -262,6 +285,8 @@ pub(crate) struct Desk {
     boards: boards::Boards,
     /// Panes showing chats' pages.
     browsers: browsers::Browsers,
+    /// Panes of kinds this window doesn't know, which a newer daemon has.
+    others: HashMap<PaneId, OtherPane>,
     /// Reviews of what agents changed.
     reviews: reviews::Reviews,
     /// The macros being typed, and what's noted of keys pressed for the
@@ -303,6 +328,15 @@ pub(crate) struct Desk {
     notice: Option<String>,
     /// `:update`, asked for and waiting for the window to carry out.
     update_asked: Option<UpdateAsked>,
+    /// The protocol version the connection to the daemon runs at, and the
+    /// daemon's release, if it said: see [`Desk::daemon_has`].
+    daemon: Option<(u32, Option<String>)>,
+    /// When the window last asked again for each thing it missed, a newer
+    /// daemon having sent it as this window couldn't read: see
+    /// [`MOST_MISSED`].
+    missed: HashMap<Missed, VecDeque<std::time::Instant>>,
+    /// The terminals attached to again, for a snapshot not yet come.
+    reattaching: HashSet<TerminalId>,
     /// Whether `:connect` asked for the picker of a machine, waiting for
     /// the window to open it.
     connect_asked: bool,
@@ -690,6 +724,7 @@ impl Desk {
                 Content::Board(_) => self.board(pane.id).map(crate::board::BoardPane::title),
                 Content::Review(_) => self.review(pane.id).map(crate::review::Review::title),
                 Content::Browser(_) => self.browser(pane.id).map(BrowserPane::title),
+                Content::Other { .. } => self.other(pane.id).map(OtherPane::title),
             })
             .map(str::trim)
             .filter(|title| !title.is_empty())
@@ -936,6 +971,7 @@ impl Desk {
         self.attach_shown_boards();
         self.attach_shown_reviews();
         self.attach_shown_browsers();
+        self.show_others();
         if !self.connected {
             return;
         }
@@ -952,6 +988,34 @@ impl Desk {
             self.attached.insert(terminal);
             self.request(Request::Attach { terminal }, Asked::Quiet);
         }
+    }
+
+    /// Makes a pane saying it needs a newer clackatoo for every pane of
+    /// the tab shown of a kind this window doesn't know, and forgets those
+    /// gone.
+    fn show_others(&mut self) {
+        let shown: Vec<(PaneId, PaneKind)> = (self.shown_tab())
+            .map(|tab| {
+                (tab.layout.panes().iter())
+                    .filter_map(|pane| match pane.content {
+                        Content::Other { kind } => Some((pane.id, kind)),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.others
+            .retain(|pane, other| shown.contains(&(*pane, other.kind())));
+        for (pane, kind) in shown {
+            self.others
+                .entry(pane)
+                .or_insert_with(|| OtherPane::new(kind));
+        }
+    }
+
+    /// The pane `pane` is, if it's of a kind this window doesn't know.
+    pub(crate) fn other(&self, pane: PaneId) -> Option<&OtherPane> {
+        self.others.get(&pane)
     }
 
     /// Asks the daemon to size each terminal shown to its pane.
@@ -995,6 +1059,14 @@ impl Desk {
                 }
                 Content::Browser(_) => {
                     self.fit_browser(id, tile);
+                    continue;
+                }
+                Content::Other { .. } => {
+                    if let (Some(other), Ok(size)) =
+                        (self.others.get_mut(&id), Size::new(tile.cols, tile.rows))
+                    {
+                        other.resize(size);
+                    }
                     continue;
                 }
             };
@@ -1052,6 +1124,7 @@ impl Desk {
     /// drags under way.
     fn forget_asked(&mut self) {
         self.attached.clear();
+        self.reattaching.clear();
         self.editors_reconnected();
         self.explorers_reconnected();
         self.boards_reconnected();
@@ -1092,9 +1165,66 @@ impl Desk {
         self.settle_lesson();
     }
 
+    /// A view update for `terminal` from a newer daemon couldn't be read,
+    /// a snapshot if `snapshot`: the window attaches to it again, for a
+    /// fresh snapshot, unless it has already and the snapshot hasn't come.
+    /// One that couldn't be read is what it waited for, so it asks again.
+    /// Every miss counts towards how often it asks.
+    pub(crate) fn missed_view(&mut self, terminal: TerminalId, snapshot: bool) {
+        if !self.connected || !self.attached.contains(&terminal) {
+            return;
+        }
+        if snapshot {
+            self.reattaching.remove(&terminal);
+        }
+        if self.ask_again(Missed::View(terminal)) && self.reattaching.insert(terminal) {
+            self.request(Request::Attach { terminal }, Asked::Reattached(terminal));
+        }
+    }
+
+    /// The workspaces, from a newer daemon, couldn't be read: the window
+    /// asks for them again.
+    pub(crate) fn missed_workspaces(&mut self) {
+        if self.connected && self.ask_again(Missed::Workspaces) {
+            self.request(Request::WatchWorkspaces, Asked::Workspaces);
+        }
+    }
+
+    /// Whether to ask again for `what`, which a newer daemon sent as this
+    /// window couldn't read: not if it's been asked for again too often
+    /// lately, as it would only come the same way again. The bar says so
+    /// then.
+    fn ask_again(&mut self, what: Missed) -> bool {
+        let now = std::time::Instant::now();
+        let times = self.missed.entry(what).or_default();
+        while times
+            .front()
+            .is_some_and(|&at| now.saturating_duration_since(at) >= MISSED_OVER)
+        {
+            times.pop_front();
+        }
+        if times.len() >= MOST_MISSED {
+            let what = match what {
+                Missed::View(terminal) => format!("terminal {terminal}"),
+                Missed::Buffer(_) => "a file being edited".to_owned(),
+                Missed::Workspaces => "the workspaces".to_owned(),
+            };
+            self.message = Some(format!(
+                "the daemon keeps sending what this window can't read about {what}: it's from \
+                 a newer clackatoo, and `:update` updates this window's"
+            ));
+            return false;
+        }
+        times.push_back(now);
+        true
+    }
+
     /// Applies a view update for `terminal`. Returns whether it's shown,
     /// and so the window must be redrawn.
     pub(crate) fn view_changed(&mut self, terminal: TerminalId, update: &ViewUpdate) -> bool {
+        if matches!(update, ViewUpdate::Snapshot(_)) {
+            self.reattaching.remove(&terminal);
+        }
         let Some(pane) = self.panes.get_mut(&terminal) else {
             return false;
         };
@@ -1204,6 +1334,23 @@ impl Desk {
             }
             Some(Asker::Window(Asked::Devices)) => self.devices_answered(response),
             Some(Asker::Window(Asked::ChatChoices)) => self.chat_choices(response),
+            Some(Asker::Window(Asked::Reattached(terminal))) => {
+                if let Response::Error(err) = response {
+                    log::warn!("the daemon wouldn't attach to terminal {terminal} again: {err}");
+                    self.reattaching.remove(&terminal);
+                }
+                false
+            }
+            Some(Asker::Window(Asked::Workspaces)) => match response {
+                Response::Workspaces(workspaces) => {
+                    self.workspaces_changed(workspaces);
+                    true
+                }
+                other => {
+                    log::warn!("the daemon answered the workspaces with {other:?}");
+                    false
+                }
+            },
             Some(Asker::Window(Asked::Explorer { reveal, edit })) => {
                 match response {
                     Response::PaneCreated(pane) => self.explorer_made(pane, reveal, edit),
@@ -3701,6 +3848,325 @@ mod tests {
             matches!(&resent[..], [Change::Edit { base: 1, .. }]),
             "{resent:?}"
         );
+    }
+
+    #[test]
+    fn a_view_update_that_cant_be_read_is_made_up_for_by_attaching_again() {
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, pane(3))])]);
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        desk.missed_view(TerminalId(3), false);
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::Attach {
+                terminal: TerminalId(3)
+            }]
+        );
+        // One it doesn't follow is none of its business.
+        desk.missed_view(TerminalId(9), false);
+        assert!(answer_all(&mut desk).is_empty());
+        desk.lost();
+        desk.missed_view(TerminalId(3), false);
+        assert!(desk.take_outbox().is_empty());
+    }
+
+    #[test]
+    fn missing_a_view_attaches_once_till_its_snapshot_and_not_without_end() {
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, pane(3))])]);
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        let terminal = TerminalId(3);
+        let attach = Request::Attach { terminal };
+        let snapshot = ViewUpdate::Snapshot(View::capture(&Terminal::new(
+            Size::new(10, 2).unwrap(),
+            &Config::default(),
+        )));
+        // Missed twice before the snapshot asked for comes: asked once.
+        desk.missed_view(terminal, false);
+        desk.missed_view(terminal, false);
+        assert_eq!(answer_all(&mut desk), std::slice::from_ref(&attach));
+        desk.view_changed(terminal, &snapshot);
+        // Missed again and again, each miss counting: after a few in a
+        // minute, the window stops asking, and says why.
+        for _ in 2..MOST_MISSED {
+            desk.missed_view(terminal, false);
+            assert_eq!(answer_all(&mut desk), std::slice::from_ref(&attach));
+            desk.view_changed(terminal, &snapshot);
+        }
+        desk.missed_view(terminal, false);
+        assert!(answer_all(&mut desk).is_empty());
+        assert!(
+            desk.message
+                .as_deref()
+                .is_some_and(|said| said.contains("can't read about terminal 3")),
+            "{:?}",
+            desk.message
+        );
+    }
+
+    #[test]
+    fn missing_the_workspaces_asks_for_them_again() {
+        let list = |name: &str| workspaces(vec![workspace(1, name, vec![tab(1, pane(3))])]);
+        let mut desk = Desk::default();
+        desk.connected(list("w"), false);
+        answer_all(&mut desk);
+        desk.missed_workspaces();
+        let sent = desk.take_outbox();
+        assert_eq!(requests(&sent), [&Request::WatchWorkspaces]);
+        assert!(desk.answered(Response::Workspaces(list("renamed"))));
+        assert_eq!(desk.workspaces.list[0].name, "renamed");
+    }
+
+    #[test]
+    fn missing_a_buffer_again_and_again_stops_asking() {
+        use clackatoo_protocol::{BufferSnapshot, BufferUpdate};
+
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+        });
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
+        let snapshot = BufferUpdate::Snapshot(BufferSnapshot {
+            path: "/notes".into(),
+            text: "x\n".into(),
+            version: 0,
+            modified: false,
+            applied: None,
+            landed: None,
+            daemon: 5,
+        });
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        desk.buffer_changed(buffer, snapshot.clone());
+        let attaches = |desk: &mut Desk| {
+            (answer_all(desk).into_iter())
+                .filter(|request| matches!(request, Request::AttachBuffer { .. }))
+                .count()
+        };
+        for _ in 0..MOST_MISSED {
+            desk.missed_buffer(buffer, false);
+            assert_eq!(attaches(&mut desk), 1);
+            desk.buffer_changed(buffer, snapshot.clone());
+        }
+        desk.missed_buffer(buffer, false);
+        assert_eq!(attaches(&mut desk), 0);
+        assert!(
+            desk.message
+                .as_deref()
+                .is_some_and(|said| said.contains("can't read about a file being edited")),
+            "{:?}",
+            desk.message
+        );
+    }
+
+    #[test]
+    fn a_view_attached_again_isnt_left_waiting_for_a_snapshot_that_wont_come() {
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, pane(3))])]);
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        let terminal = TerminalId(3);
+        let attaches = |desk: &mut Desk| {
+            let sent = desk.take_outbox();
+            requests(&sent)
+                .into_iter()
+                .filter(|request| matches!(request, Request::Attach { .. }))
+                .count()
+        };
+        // Refused: the next miss attaches again.
+        desk.missed_view(terminal, false);
+        assert_eq!(attaches(&mut desk), 1);
+        desk.answered(Response::Error(clackatoo_protocol::Error::NoSuchTerminal(
+            terminal,
+        )));
+        desk.missed_view(terminal, false);
+        assert_eq!(attaches(&mut desk), 1);
+        desk.answered(Response::Done);
+        // The snapshot it waits for, unreadable too: it asks again.
+        desk.missed_view(terminal, true);
+        assert_eq!(attaches(&mut desk), 1);
+    }
+
+    #[test]
+    fn a_buffer_copy_whose_answer_never_comes_readable_says_so() {
+        use clackatoo_protocol::{BufferSnapshot, BufferUpdate};
+
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+        });
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        desk.buffer_changed(
+            buffer,
+            BufferUpdate::Snapshot(BufferSnapshot {
+                path: "/notes".into(),
+                text: "x\n".into(),
+                version: 0,
+                modified: false,
+                applied: None,
+                landed: None,
+                daemon: 5,
+            }),
+        );
+        let attaches = |desk: &mut Desk| {
+            (answer_all(desk).into_iter())
+                .filter(|request| matches!(request, Request::AttachBuffer { .. }))
+                .count()
+        };
+        desk.missed_buffer(buffer, false);
+        assert_eq!(attaches(&mut desk), 1);
+        // Its answer, unreadable: it attaches again.
+        desk.missed_buffer(buffer, true);
+        assert_eq!(attaches(&mut desk), 1);
+        // What follows, unreadable too, counts while it waits, and once
+        // too many have, the bar says so.
+        for _ in 2..MOST_MISSED {
+            desk.missed_buffer(buffer, false);
+            assert_eq!(attaches(&mut desk), 0);
+        }
+        assert_eq!(desk.message, None);
+        desk.missed_buffer(buffer, false);
+        assert!(
+            desk.message
+                .as_deref()
+                .is_some_and(|said| said.contains("can't read about a file being edited")),
+            "{:?}",
+            desk.message
+        );
+    }
+
+    #[test]
+    fn buffer_updates_missed_while_attaching_again_attach_only_once() {
+        use clackatoo_protocol::{BufferSnapshot, BufferUpdate};
+
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+        });
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
+        let snapshot = |text: &str, version, applied| {
+            BufferUpdate::Snapshot(BufferSnapshot {
+                path: "/notes".into(),
+                text: text.into(),
+                version,
+                modified: true,
+                applied,
+                landed: applied.map(|_| version),
+                daemon: 5,
+            })
+        };
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        desk.buffer_changed(buffer, snapshot("x\n", 0, None));
+        type_text(&mut desk, "Aa");
+        let [(seq, _)] = buffer_changes(&mut desk)[..] else {
+            panic!("one change on its way");
+        };
+        // Two in one round trip: one attaching again takes in both.
+        desk.missed_buffer(buffer, false);
+        desk.missed_buffer(buffer, false);
+        let attaches = answer_all(&mut desk)
+            .into_iter()
+            .filter(|request| matches!(request, Request::AttachBuffer { .. }))
+            .count();
+        assert_eq!(attaches, 1);
+        // Its answer, then a key typed after: no second, older snapshot
+        // comes to undo it.
+        desk.buffer_changed(buffer, snapshot("xa\n", 1, Some(seq)));
+        type_text(&mut desk, "b");
+        assert_eq!(buffer_changes(&mut desk).len(), 1);
+        assert_eq!(editor_text(&desk), "xab\n");
+    }
+
+    #[test]
+    fn a_buffer_update_that_cant_be_read_brings_the_copy_up_to_date_once() {
+        use clackatoo_protocol::{Author, BufferSnapshot, BufferUpdate, Edit};
+
+        let buffer = BufferId(7);
+        let layout = Layout::Pane(LayoutPane {
+            id: PaneId(1),
+            content: Content::Buffer(buffer),
+        });
+        let list = || workspaces(vec![workspace(1, "w", vec![tab(1, layout.clone())])]);
+        let mut desk = Desk::default();
+        desk.connected(list(), false);
+        answer_all(&mut desk);
+        desk.buffer_changed(
+            buffer,
+            BufferUpdate::Snapshot(BufferSnapshot {
+                path: "/notes".into(),
+                text: "x\n".into(),
+                version: 0,
+                modified: false,
+                applied: None,
+                landed: None,
+                daemon: 5,
+            }),
+        );
+        type_text(&mut desk, "Aa");
+        let sent = buffer_changes(&mut desk);
+        let [(seq, _)] = sent[..] else {
+            panic!("one change on its way: {sent:?}");
+        };
+
+        // Someone else's edit came, from a newer daemon, as something this
+        // window couldn't read: it attaches again, from what it knew.
+        desk.missed_buffer(buffer, false);
+        let window = desk.editors.window.0;
+        let resume = Some(clackatoo_protocol::Resume {
+            daemon: 5,
+            version: 0,
+        });
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::AttachBuffer {
+                buffer,
+                window,
+                resume
+            }]
+        );
+        // What came after it, before the answer, follows what was missed:
+        // it's passed over.
+        desk.buffer_changed(buffer, BufferUpdate::Acked { version: 2, seq });
+        desk.buffer_changed(
+            buffer,
+            BufferUpdate::Edited {
+                version: 3,
+                edit: Edit::replace(4, 4, "", "!"),
+                author: Author::User,
+                answers: None,
+            },
+        );
+        assert_eq!(editor_text(&desk), "xa\n");
+        // The answer: the edit missed, then the window's own, which landed.
+        let resumed = BufferUpdate::Resumed {
+            daemon: 5,
+            path: "/notes".into(),
+            edits: vec![
+                Edit::replace(2, 0, "", "Y"),
+                Edit::replace(3, 2, "", "a"),
+                Edit::replace(4, 4, "", "!"),
+            ],
+            applied: Some(seq),
+            landed: Some(2),
+            modified: true,
+        };
+        desk.buffer_changed(buffer, resumed);
+        assert_eq!(editor_text(&desk), "Yxa\n!", "each, once");
+        assert!(buffer_changes(&mut desk).is_empty(), "nothing goes twice");
+        // And it goes on as before.
+        type_text(&mut desk, "b");
+        assert_eq!(buffer_changes(&mut desk).len(), 1);
     }
 
     /// A window with buffer 7 open at "x\n", from daemon 5, which typed

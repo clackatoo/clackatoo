@@ -263,7 +263,8 @@ impl Daemon {
                 let update = BrowserUpdate::Frame(BrowserFrame {
                     jpeg: Arc::unwrap_or_clone(jpeg),
                 });
-                match frame::encode(&ServerMessage::Event(Event::Browser { chat, update })) {
+                let event = ServerMessage::Event(Event::Browser { chat, update });
+                match frame::encode(client.wire, &event) {
                     Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
                     Err(err) => log::error!("encoding a picture of a page failed: {err}"),
                 }

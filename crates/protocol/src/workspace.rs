@@ -164,6 +164,84 @@ pub enum Content {
     /// the folder, whose root follows the folder shown. One pane shows
     /// each.
     Folder(FilesId),
+    /// A pane of a kind newer than the client, which a newer daemon sent
+    /// in place of it: the client says it needs a newer clackatoo, naming
+    /// the kind.
+    Other {
+        /// What kind of pane it is, as the daemon names it: `browser`.
+        kind: PaneKind,
+    },
+}
+
+/// What a pane of a kind the client doesn't know is called, such as
+/// `browser`, for [`Content::Other`].
+///
+/// Sent as a string, of any length, and kept as at most [`MAX`] bytes of
+/// it, in place, so that [`Content`] stays small and `Copy`.
+///
+/// [`MAX`]: Self::MAX
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PaneKind {
+    len: u8,
+    bytes: [u8; Self::MAX],
+}
+
+impl PaneKind {
+    /// The most bytes of a name kept: a longer one is cut short, between
+    /// characters.
+    pub const MAX: usize = 23;
+
+    /// The kind called `name`, cut short if it's long.
+    #[must_use]
+    pub fn new(name: &str) -> Self {
+        let name = &name[..name.floor_char_boundary(Self::MAX)];
+        let mut bytes = [0; Self::MAX];
+        bytes[..name.len()].copy_from_slice(name.as_bytes());
+        #[allow(clippy::cast_possible_truncation, reason = "at most MAX, which fits")]
+        let len = name.len() as u8;
+        Self { len, bytes }
+    }
+
+    /// What it's called.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+}
+
+impl fmt::Debug for PaneKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl fmt::Display for PaneKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for PaneKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for PaneKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Reads a string of any length, keeping what fits.
+        struct Name;
+        impl serde::de::Visitor<'_> for Name {
+            type Value = PaneKind;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a pane kind's name")
+            }
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<PaneKind, E> {
+                Ok(PaneKind::new(name))
+            }
+        }
+        deserializer.deserialize_str(Name)
+    }
 }
 
 impl From<TerminalId> for Content {
@@ -207,7 +285,8 @@ impl Content {
             | Self::Board(_)
             | Self::Review(_)
             | Self::Browser(_)
-            | Self::Folder(_) => None,
+            | Self::Folder(_)
+            | Self::Other { .. } => None,
         }
     }
 
@@ -221,7 +300,8 @@ impl Content {
             | Self::Board(_)
             | Self::Review(_)
             | Self::Browser(_)
-            | Self::Folder(_) => None,
+            | Self::Folder(_)
+            | Self::Other { .. } => None,
         }
     }
 
@@ -235,7 +315,8 @@ impl Content {
             | Self::Buffer(_)
             | Self::Board(_)
             | Self::Review(_)
-            | Self::Browser(_) => None,
+            | Self::Browser(_)
+            | Self::Other { .. } => None,
         }
     }
 
@@ -255,7 +336,8 @@ impl Content {
             | Self::Files(_)
             | Self::Review(_)
             | Self::Browser(_)
-            | Self::Folder(_) => None,
+            | Self::Folder(_)
+            | Self::Other { .. } => None,
         }
     }
 
@@ -269,7 +351,8 @@ impl Content {
             | Self::Files(_)
             | Self::Board(_)
             | Self::Browser(_)
-            | Self::Folder(_) => None,
+            | Self::Folder(_)
+            | Self::Other { .. } => None,
         }
     }
     /// The chat whose page it is, if it's a browser's.
@@ -282,7 +365,8 @@ impl Content {
             | Self::Files(_)
             | Self::Board(_)
             | Self::Review(_)
-            | Self::Folder(_) => None,
+            | Self::Folder(_)
+            | Self::Other { .. } => None,
         }
     }
 }
@@ -481,5 +565,31 @@ impl Layout {
                 Self::Pane(_) => None,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pane_kind_goes_as_a_string_and_keeps_what_fits() {
+        let kind = PaneKind::new("browser");
+        assert_eq!(kind.as_str(), "browser");
+        let sent = postcard::to_allocvec(&kind).unwrap();
+        assert_eq!(sent, postcard::to_allocvec("browser").unwrap());
+        assert_eq!(postcard::from_bytes::<PaneKind>(&sent).unwrap(), kind);
+        // As it comes in a pane: the variant, then the name.
+        let content = Content::Other { kind };
+        let sent = postcard::to_allocvec(&content).unwrap();
+        assert_eq!(sent[0], 7);
+        assert_eq!(postcard::from_bytes::<Content>(&sent).unwrap(), content);
+        // A long name, from a daemon that sent one, is cut between
+        // characters.
+        let long = "ü".repeat(40);
+        let sent = postcard::to_allocvec(&long).unwrap();
+        let kind = postcard::from_bytes::<PaneKind>(&sent).unwrap();
+        assert_eq!(kind.as_str(), "ü".repeat(11));
+        assert_eq!(PaneKind::new("").as_str(), "");
     }
 }

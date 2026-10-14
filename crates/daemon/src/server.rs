@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
+use clackatoo_protocol::wire;
 use clackatoo_protocol::{
     BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine, HistoryLines,
     Line, LinkTarget, NodeId, PROTOCOL_VERSION, Pane, PaneId, PaneTerminal, Patch, Request,
@@ -118,6 +119,13 @@ const CLOSING_WAIT: Duration = Duration::from_millis(500);
 /// before it's refused: short of how long `clackatoo upgrade` waits to
 /// hear back, so it hears why.
 const UPGRADE_OPS_WAIT: Duration = Duration::from_secs(3);
+
+/// How many messages a client may have sent lately that couldn't be read,
+/// as from a newer client, before it's taken to be broken and dropped.
+const MOST_UNREADABLE: u32 = 64;
+
+/// How many of those are forgotten each second.
+const UNREADABLE_FORGOTTEN: u32 = 8;
 
 /// An upgrade a client asked for, waiting to go ahead.
 #[derive(Debug)]
@@ -284,6 +292,11 @@ struct Slot {
 struct Client {
     link: Link,
     decoder: FrameDecoder,
+    /// The protocol version the connection runs at, agreed in the
+    /// `Hello`s: the client's, if it's older than this build.
+    wire: u32,
+    /// The messages it has sent lately that couldn't be read.
+    unreadable: Unreadable,
     /// Encoded responses not yet written.
     outgoing: Vec<u8>,
     greeted: bool,
@@ -323,6 +336,116 @@ struct Client {
     later: Vec<u8>,
 }
 
+/// The messages a client has sent lately that couldn't be read, as from a
+/// newer client: a total that's forgotten as time goes by, so a client
+/// that sends a few now and then is never dropped, and one that sends a
+/// stream of them soon is.
+///
+/// Four bytes, as every client has one: a count of 255 at most, and when
+/// it was last forgotten down, in the daemon's whole seconds (see
+/// [`seconds`]), which wrap round every 18 hours: a count left that long
+/// is forgotten as if no time had passed, which only drops a client that
+/// keeps sending them sooner.
+#[derive(Debug, Default)]
+struct Unreadable {
+    /// How many, as of `at`.
+    count: u8,
+    /// Whether any has been: the first is logged as a warning, the rest
+    /// for debugging.
+    any: bool,
+    at: u16,
+}
+
+impl Unreadable {
+    /// Counts one more, at `now`. Returns whether to go on with the
+    /// client, not having had too many lately.
+    fn one_more(&mut self, now: Instant) -> bool {
+        let now = seconds(now);
+        let forgotten = u32::from(now.wrapping_sub(self.at)).saturating_mul(UNREADABLE_FORGOTTEN);
+        if forgotten > 0 || self.count == 0 {
+            self.at = now;
+        }
+        let count = u32::from(self.count).saturating_sub(forgotten) + 1;
+        self.count = u8::try_from(count).unwrap_or(u8::MAX);
+        count <= MOST_UNREADABLE
+    }
+}
+
+/// `now`, in whole seconds of the daemon's own clock, which starts the
+/// first time it's read, round and round 65,536 of them.
+fn seconds(now: Instant) -> u16 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(|| now);
+    let seconds = now.saturating_duration_since(start).as_secs();
+    u16::try_from(seconds % 65_536).expect("less than 65,536")
+}
+
+/// Queues `update`, of terminal `id`'s view, on `outgoing` for a client at
+/// protocol `wire`, which `subscription` is of. Returns whether it was:
+/// one dropped as newer than the client, or that can't be encoded, never
+/// arrives, so the subscription forgets what it recorded as sent, and its
+/// next update is a snapshot.
+fn queue_update(
+    subscription: &mut Subscription,
+    wire: u32,
+    id: TerminalId,
+    update: ViewUpdate,
+    outgoing: &mut Vec<u8>,
+) -> bool {
+    let event = ServerMessage::Event(clackatoo_protocol::Event::View {
+        terminal: id,
+        update,
+    });
+    match frame::encode(wire, &event) {
+        Ok(bytes) if !bytes.is_empty() => {
+            outgoing.extend_from_slice(&bytes);
+            subscription.awaiting_ack = true;
+            true
+        }
+        Ok(_) => {
+            subscription.forget_sent();
+            false
+        }
+        Err(err) => {
+            log::error!("encoding a view update failed: {err}");
+            subscription.forget_sent();
+            false
+        }
+    }
+}
+
+/// A message going to many clients, encoded once for each protocol
+/// version they run at, and only for those.
+pub(super) struct Broadcast<'a> {
+    message: &'a ServerMessage,
+    /// What it is, for the log, if it can't be encoded.
+    what: &'static str,
+    encoded: Vec<(u32, Option<Vec<u8>>)>,
+}
+
+impl<'a> Broadcast<'a> {
+    pub(super) fn new(message: &'a ServerMessage, what: &'static str) -> Self {
+        Self {
+            message,
+            what,
+            encoded: Vec::new(),
+        }
+    }
+
+    /// The message, encoded for a connection at `wire`, or `None` if it
+    /// can't be, which is logged once.
+    pub(super) fn to(&mut self, wire: u32) -> Option<&[u8]> {
+        if let Some(at) = self.encoded.iter().position(|&(at, _)| at == wire) {
+            return self.encoded[at].1.as_deref();
+        }
+        let bytes = frame::encode(wire, self.message)
+            .inspect_err(|err| log::error!("encoding {} failed: {err}", self.what))
+            .ok();
+        self.encoded.push((wire, bytes));
+        self.encoded.last().and_then(|(_, bytes)| bytes.as_deref())
+    }
+}
+
 /// A stream a QUIC client is sent one terminal's view updates on.
 #[derive(Debug)]
 struct ViewStream {
@@ -336,6 +459,8 @@ impl Client {
         Self {
             link,
             decoder: FrameDecoder::new(),
+            wire: PROTOCOL_VERSION,
+            unreadable: Unreadable::default(),
             outgoing: Vec::new(),
             greeted: false,
             finished: false,
@@ -424,6 +549,12 @@ impl Subscription {
             chat: ChatSent::default(),
             awaiting_ack: false,
         }
+    }
+
+    /// Forgets what the client was sent, so the next update is a snapshot,
+    /// as after a re-attach.
+    fn forget_sent(&mut self) {
+        *self = Self::new();
     }
 
     /// The update that brings the client from what it was last sent to what
@@ -1044,7 +1175,7 @@ impl Daemon {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return;
         };
-        match frame::encode(&ServerMessage::NotUpgrading { reason }) {
+        match frame::encode(client.wire, &ServerMessage::NotUpgrading { reason }) {
             Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
             Err(err) => log::error!("encoding a refusal to upgrade failed: {err}"),
         }
@@ -1196,19 +1327,10 @@ impl Daemon {
                     None if quic.is_some() && !client.outgoing.is_empty() => continue,
                     None => &mut client.outgoing,
                 };
-                if let Some(update) = subscription.update_from(&slot.terminal) {
-                    subscription.awaiting_ack = true;
-                    let event = ServerMessage::Event(clackatoo_protocol::Event::View {
-                        terminal: id,
-                        update,
-                    });
-                    match frame::encode(&event) {
-                        Ok(bytes) => {
-                            outgoing.extend_from_slice(&bytes);
-                            ready.push(Token(key));
-                        }
-                        Err(err) => log::error!("encoding a view update failed: {err}"),
-                    }
+                if let Some(update) = subscription.update_from(&slot.terminal)
+                    && queue_update(subscription, client.wire, id, update, outgoing)
+                {
+                    ready.push(Token(key));
                 }
             }
         }
@@ -1503,7 +1625,7 @@ impl Daemon {
             Content::Files(files) | Content::Folder(files) => {
                 Some(self.files_root(files)?.display().to_string())
             }
-            Content::Board(_) => None,
+            Content::Board(_) | Content::Other { .. } => None,
             Content::Review(review) => Some(self.review_root_of(review)?.display().to_string()),
             Content::Browser(chat) => Some(self.chat_ref(chat)?.working_directory().to_owned()),
         }
@@ -1519,7 +1641,9 @@ impl Daemon {
                 Content::Files(files) | Content::Folder(files) => {
                     self.close_files_pane(pane.id, files);
                 }
-                Content::Board(_) | Content::Browser(_) => self.close_board_pane(pane.id),
+                Content::Board(_) | Content::Browser(_) | Content::Other { .. } => {
+                    self.close_board_pane(pane.id);
+                }
                 Content::Review(review) => self.close_review_pane(pane.id, review),
             }
         }
@@ -1590,20 +1714,15 @@ impl Daemon {
         let event = ServerMessage::Event(clackatoo_protocol::Event::Workspaces(
             self.workspaces.get().clone(),
         ));
-        let bytes = match frame::encode(&event) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                log::error!("encoding the workspaces failed: {err}");
-                return;
-            }
-        };
+        let mut event = Broadcast::new(&event, "the workspaces");
         let mut watchers = Vec::new();
         for (key, source) in &mut self.sources {
             if let Source::Client(client) = source
                 && client.watching_workspaces
                 && !client.finished
+                && let Some(bytes) = event.to(client.wire)
             {
-                client.outgoing.extend_from_slice(&bytes);
+                client.outgoing.extend_from_slice(bytes);
                 watchers.push(Token(key));
             }
         }
@@ -1668,23 +1787,35 @@ impl Daemon {
             };
             let greeted = client.greeted;
             let reply = match message {
-                ClientMessage::Hello { protocol_version } => {
-                    let compatible = protocol_version == PROTOCOL_VERSION;
-                    if !compatible {
-                        log::warn!(
-                            "client speaks protocol {protocol_version}, we speak {PROTOCOL_VERSION}"
-                        );
+                // A request it couldn't read, from a newer client: answered
+                // all the same, so the answers to the rest stay in order.
+                None => ServerMessage::Response(Response::Error(Error::Unsupported)),
+                Some(ClientMessage::Hello { protocol_version }) => {
+                    let wire = wire::for_client(protocol_version);
+                    match wire {
+                        None => log::warn!(
+                            "client speaks protocol {protocol_version}, older than any we talk \
+                             to ({}); we speak {PROTOCOL_VERSION}",
+                            wire::MIN_CLIENT
+                        ),
+                        Some(wire) if wire < PROTOCOL_VERSION => {
+                            log::info!("client speaks protocol {protocol_version}: talking at it");
+                        }
+                        Some(_) => {}
                     }
-                    client.greeted = compatible;
-                    client.finished |= !compatible;
+                    client.greeted = wire.is_some();
+                    client.finished |= wire.is_none();
+                    // Refused, it's told this build's own, as daemons older
+                    // than the window of versions always say.
+                    client.wire = wire.unwrap_or(PROTOCOL_VERSION);
                     ServerMessage::Hello {
-                        protocol_version: PROTOCOL_VERSION,
+                        protocol_version: client.wire,
                     }
                 }
-                ClientMessage::Upgrade {
+                Some(ClientMessage::Upgrade {
                     protocol_version,
                     executable,
-                } if !greeted => {
+                }) if !greeted => {
                     client.finished = true;
                     let local = matches!(client.link, Link::Unix(_));
                     let executable = PathBuf::from(std::ffi::OsString::from_vec(executable));
@@ -1704,7 +1835,7 @@ impl Daemon {
                         }
                     }
                 }
-                ClientMessage::Upgrade { .. } => {
+                Some(ClientMessage::Upgrade { .. }) => {
                     client.finished = true;
                     ServerMessage::NotUpgrading {
                         reason: "an upgrade must be asked for instead of Hello".to_owned(),
@@ -1714,31 +1845,33 @@ impl Daemon {
                     client.finished = true;
                     ServerMessage::Response(Response::Error(Error::HelloRequired))
                 }
-                ClientMessage::FrameDone { terminal } => {
+                Some(ClientMessage::FrameDone { terminal }) => {
                     if let Some(subscription) = client.views.get_mut(&terminal) {
                         subscription.awaiting_ack = false;
                         self.views_pending = true;
                     }
                     continue;
                 }
-                ClientMessage::Present { here } => {
+                Some(ClientMessage::Present { here }) => {
                     self.present(token, here);
                     continue;
                 }
-                ClientMessage::Request(request) => {
+                Some(ClientMessage::Request(request)) => {
                     ServerMessage::Response(self.respond(request, token))
                 }
-                message @ (ClientMessage::Edit { .. }
-                | ClientMessage::Query { .. }
-                | ClientMessage::Rename { .. }
-                | ClientMessage::Find { .. }
-                | ClientMessage::StopFinding { .. }
-                | ClientMessage::Stage { .. }
-                | ClientMessage::Clipboard { .. }
-                | ClientMessage::Files { .. }
-                | ClientMessage::FileOp { .. }
-                | ClientMessage::Board { .. }
-                | ClientMessage::ListSessions { .. }) => {
+                Some(
+                    message @ (ClientMessage::Edit { .. }
+                    | ClientMessage::Query { .. }
+                    | ClientMessage::Rename { .. }
+                    | ClientMessage::Find { .. }
+                    | ClientMessage::StopFinding { .. }
+                    | ClientMessage::Stage { .. }
+                    | ClientMessage::Clipboard { .. }
+                    | ClientMessage::Files { .. }
+                    | ClientMessage::FileOp { .. }
+                    | ClientMessage::Board { .. }
+                    | ClientMessage::ListSessions { .. }),
+                ) => {
                     self.serve_unanswered(token, message);
                     continue;
                 }
@@ -1747,7 +1880,7 @@ impl Daemon {
             let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
                 return;
             };
-            match frame::encode(&reply) {
+            match frame::encode(client.wire, &reply) {
                 Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
                 Err(err) => {
                     log::error!("encoding a response failed: {err}");
@@ -1839,9 +1972,10 @@ impl Daemon {
         crate::upgrade::check_takes_over(executable, &self.upgrade_args)
     }
 
-    /// Reads and decodes everything a client has sent. Returns `None` if the
-    /// client was dropped.
-    fn receive_messages(&mut self, token: Token) -> Option<Vec<ClientMessage>> {
+    /// Reads and decodes everything a client has sent: `None` in place of
+    /// each request it couldn't read, as from a newer client. Returns
+    /// `None` if the client was dropped.
+    fn receive_messages(&mut self, token: Token) -> Option<Vec<Option<ClientMessage>>> {
         let Some(Source::Client(client)) = self.sources.get_mut(token.0) else {
             return None;
         };
@@ -1884,10 +2018,42 @@ impl Daemon {
         }
 
         let mut messages = Vec::new();
+        let mut greeted = client.greeted;
         loop {
-            match client.decoder.decode::<ClientMessage>() {
-                Ok(Some(message)) => messages.push(message),
+            match client.decoder.decode::<ClientMessage>(client.wire) {
+                Ok(Some(message)) => {
+                    // What comes after a hello is read at the version it
+                    // agrees, as it will be answered.
+                    if let ClientMessage::Hello { protocol_version } = message
+                        && let Some(wire) = wire::for_client(protocol_version)
+                    {
+                        client.wire = wire;
+                        greeted = true;
+                    }
+                    messages.push(Some(message));
+                }
                 Ok(None) => break,
+                // A message from a newer client, which knows what this build
+                // doesn't: one that's greeted it, and so knows it may be
+                // older, and that skips what it can't read too. It's a
+                // request, which is answered, or a kind this build hasn't;
+                // one of a kind it has is broken, as are a stream of them.
+                Err(err)
+                    if err.skipped().is_some_and(|head| {
+                        head.is_request() || !head.is_known_client_message()
+                    }) && greeted
+                        && client.wire >= wire::FALLBACKS
+                        && client.unreadable.one_more(Instant::now()) =>
+                {
+                    if std::mem::replace(&mut client.unreadable.any, true) {
+                        log::debug!("a client sent a message this build can't read: {err}");
+                    } else {
+                        log::warn!("a client sent a message this build can't read: {err}");
+                    }
+                    if err.skipped().is_some_and(|head| head.is_request()) {
+                        messages.push(None);
+                    }
+                }
                 Err(err) => {
                     log::warn!("dropping a client that sent a bad frame: {err}");
                     self.drop_client(token);
@@ -2080,7 +2246,7 @@ impl Daemon {
                     self.close_files_pane(pane, files);
                     Ok(Response::Done)
                 }
-                Content::Board(_) | Content::Browser(_) => {
+                Content::Board(_) | Content::Browser(_) | Content::Other { .. } => {
                     self.close_board_pane(pane);
                     Ok(Response::Done)
                 }
@@ -2781,6 +2947,86 @@ mod tests {
     use clackatoo_term::Config;
 
     use super::*;
+
+    #[test]
+    fn messages_that_cant_be_read_are_forgotten_as_time_goes_by() {
+        // Past whenever the daemon's clock started, in this test process.
+        let start = Instant::now() + Duration::from_secs(100);
+        let mut unreadable = Unreadable::default();
+        for _ in 0..MOST_UNREADABLE {
+            assert!(unreadable.one_more(start));
+        }
+        // A stream of them is too many.
+        assert!(!unreadable_as(&unreadable).one_more(start));
+        // A few seconds later, as many as were forgotten fit again.
+        let later = start + Duration::from_secs(2);
+        for _ in 0..2 * UNREADABLE_FORGOTTEN {
+            assert!(unreadable.one_more(later));
+        }
+        assert!(!unreadable.one_more(later));
+        // And a long while later, all of them.
+        let much_later = later + Duration::from_hours(1);
+        for _ in 0..MOST_UNREADABLE {
+            assert!(unreadable.one_more(much_later));
+        }
+    }
+
+    /// A copy of `unreadable`, to try one more on without changing it.
+    fn unreadable_as(unreadable: &Unreadable) -> Unreadable {
+        Unreadable {
+            count: unreadable.count,
+            at: unreadable.at,
+            any: unreadable.any,
+        }
+    }
+
+    #[test]
+    fn a_view_update_dropped_for_an_older_client_is_followed_by_a_snapshot() {
+        let size = Size::new(10, 2).expect("test sizes are valid");
+        let mut terminal = Terminal::new(size, &Config::default());
+        let mut sent = Subscription::new();
+        assert!(matches!(
+            sent.update(&terminal),
+            Some(ViewUpdate::Snapshot(_))
+        ));
+        terminal.advance(b"a");
+        let Some(update @ ViewUpdate::Patch(_)) = sent.update(&terminal) else {
+            panic!("a patch");
+        };
+        // A patch queued for a client of this build's version goes.
+        let mut outgoing = Vec::new();
+        assert!(queue_update(
+            &mut sent,
+            PROTOCOL_VERSION,
+            TerminalId(1),
+            update,
+            &mut outgoing
+        ));
+        assert!(sent.awaiting_ack && !outgoing.is_empty());
+        sent.awaiting_ack = false;
+        // A view newer than the oldest client is dropped for it: it never
+        // has it, so the next update starts afresh.
+        let newer = ViewUpdate::Snapshot(View {
+            title: String::new(),
+            cwd: None,
+            root: clackatoo_protocol::Node::Other,
+        });
+        let mut outgoing = Vec::new();
+        let oldest = clackatoo_protocol::wire::MIN_CLIENT;
+        assert!(!queue_update(
+            &mut sent,
+            oldest,
+            TerminalId(1),
+            newer,
+            &mut outgoing
+        ));
+        assert!(outgoing.is_empty() && !sent.awaiting_ack);
+        terminal.advance(b"b");
+        assert!(matches!(
+            sent.update(&terminal),
+            Some(ViewUpdate::Snapshot(_))
+        ));
+    }
 
     #[test]
     fn renumbering_history_sends_a_snapshot() {

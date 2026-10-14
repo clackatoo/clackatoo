@@ -1897,6 +1897,10 @@ fn browser_images<'a>(
 /// What each of the shown tab's terminals draws, as `placement` lays out
 /// `panes`, `focused` having the focus, and the window having it if
 /// `window_focused`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm per kind of pane, each short"
+)]
 fn drawings<'a>(
     desk: &'a Desk,
     window_focused: bool,
@@ -1977,6 +1981,13 @@ fn drawings<'a>(
             Content::Browser(_) => {
                 if let Some(browser) = desk.browser(id) {
                     let shown = ((browser.scene(), None), Vec::new());
+                    drawings.push(list_drawing(tile, shown, (has_focus, window_focused)));
+                }
+                continue;
+            }
+            Content::Other { .. } => {
+                if let Some(other) = desk.other(id) {
+                    let shown = ((other.scene(), None), Vec::new());
                     drawings.push(list_drawing(tile, shown, (has_focus, window_focused)));
                 }
                 continue;
@@ -2709,6 +2720,7 @@ impl App {
                 workspaces,
                 contact,
                 daemon_version,
+                wire,
             } => {
                 let tries = self.reconnecting.take().map_or(0, |reconnecting| {
                     log::info!(
@@ -2727,6 +2739,7 @@ impl App {
                 self.contact = contact;
                 self.sender = Some(sender);
                 let remote = self.session.host().is_some();
+                self.desk.daemon_is(wire, daemon_version.clone());
                 self.desk.connected(workspaces, remote);
                 let host = self.session.host();
                 let news = self.updates.daemon_is(daemon_version.as_deref(), host);
@@ -2790,6 +2803,13 @@ impl App {
                     self.update_title();
                 }
             }
+            SessionEvent::MissedView { terminal, snapshot } => {
+                self.desk.missed_view(terminal, snapshot);
+            }
+            SessionEvent::MissedBuffer { buffer, snapshot } => {
+                self.desk.missed_buffer(buffer, snapshot);
+            }
+            SessionEvent::MissedWorkspaces => self.desk.missed_workspaces(),
             SessionEvent::Message(ServerMessage::Event(Event::Buffer { buffer, update })) => {
                 if self.desk.buffer_changed(buffer, update) {
                     self.update_title();

@@ -40,7 +40,7 @@ use mio::event::Event;
 use mio::{Interest, Token};
 use serde_json::Value;
 
-use super::{Daemon, Link, Source, write_out};
+use super::{Broadcast, Daemon, Link, Source, write_out};
 use crate::browser::Act;
 use crate::chat::Choices;
 use crate::mcp::{self, Connection, Incoming, Tool};
@@ -818,20 +818,15 @@ impl Daemon {
     /// keyboard focus.
     fn show(&mut self, pane: PaneId, at: Option<FileLocation>) {
         let event = ServerMessage::Event(clackatoo_protocol::Event::Show { pane, at });
-        let bytes = match clackatoo_protocol::frame::encode(&event) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                log::error!("encoding a pane to show failed: {err}");
-                return;
-            }
-        };
+        let mut event = Broadcast::new(&event, "a pane to show");
         let mut watchers = Vec::new();
         for (key, source) in &mut self.sources {
             if let Source::Client(client) = source
                 && client.watching_workspaces
                 && !client.finished
+                && let Some(bytes) = event.to(client.wire)
             {
-                client.outgoing.extend_from_slice(&bytes);
+                client.outgoing.extend_from_slice(bytes);
                 watchers.push(Token(key));
             }
         }
@@ -881,6 +876,7 @@ impl Daemon {
             Content::Board(_) => Err(format!("pane {pane} shows a board, not a terminal")),
             Content::Review(_) => Err(format!("pane {pane} is a review, not a terminal")),
             Content::Browser(_) => Err(format!("pane {pane} shows a browser, not a terminal")),
+            Content::Other { kind } => Err(format!("pane {pane} shows a {kind}, not a terminal")),
         }
     }
 
@@ -1064,6 +1060,7 @@ impl Daemon {
             },
             Content::Review(_) => "review of what agents changed".to_owned(),
             Content::Browser(chat) => format!("browser, watching chat {chat}'s page"),
+            Content::Other { kind } => kind.to_string(),
             Content::Terminal(terminal) => {
                 let Some(slot) = self.terminals.get(&terminal) else {
                     return "terminal".to_owned();

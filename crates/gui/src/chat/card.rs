@@ -68,7 +68,7 @@ impl Card {
         let diffs: Vec<&Diff> = (tool.content.iter())
             .filter_map(|content| match content {
                 ToolContent::Diff(diff) => Some(diff),
-                ToolContent::Text(_) | ToolContent::Output(_) => None,
+                ToolContent::Text(_) | ToolContent::Output(_) | ToolContent::Other(_) => None,
             })
             .collect();
         if !diffs.is_empty() {
@@ -84,7 +84,7 @@ impl Card {
                     output.extend(text.trim_end_matches('\n').lines().map(str::to_owned));
                     continue;
                 }
-                ToolContent::Text(text) => text,
+                ToolContent::Text(text) | ToolContent::Other(text) => text,
                 ToolContent::Diff(_) => continue,
             };
             match fenced(text) {

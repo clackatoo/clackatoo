@@ -75,6 +75,9 @@ pub(crate) enum Kind {
     Board,
     Review,
     Browser,
+    /// A pane of a kind this window doesn't know, from a newer daemon: no
+    /// lesson asks for one.
+    Other,
 }
 
 /// Which pane has the focus, as a check names it.

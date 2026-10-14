@@ -2139,7 +2139,7 @@ impl HostedChat {
     fn wrote(&self, tool: &Tool) -> Option<Wrote> {
         let diffs = (tool.content.iter()).filter_map(|content| match content {
             ToolContent::Diff(diff) => Some(&diff.path),
-            ToolContent::Text(_) | ToolContent::Output(_) => None,
+            ToolContent::Text(_) | ToolContent::Output(_) | ToolContent::Other(_) => None,
         });
         let edits = matches!(tool.kind, ToolKind::Edit | ToolKind::Delete)
             || diffs.clone().next().is_some();
@@ -2544,11 +2544,13 @@ fn merge(last: &mut ChatPatch, patch: &ChatPatch) -> bool {
 /// About how many bytes `patch` takes.
 fn weight(patch: &ChatPatch) -> usize {
     let item = |item: &Item| match item {
-        Item::Words(text) | Item::Thought(text) => text.len(),
+        Item::Words(text) | Item::Thought(text) | Item::Other(text) => text.len(),
         Item::Tool(tool) => {
             let content: usize = (tool.content.iter())
                 .map(|content| match content {
-                    ToolContent::Text(text) | ToolContent::Output(text) => text.len(),
+                    ToolContent::Text(text)
+                    | ToolContent::Output(text)
+                    | ToolContent::Other(text) => text.len(),
                     ToolContent::Diff(diff) => {
                         diff.path.len() + diff.old.as_ref().map_or(0, String::len) + diff.new.len()
                     }
@@ -2873,7 +2875,8 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
         sent: turn.sent,
         items: (turn.items.into_iter())
             .map(|item| match item {
-                Item::Words(words) => handover::ChatItem::Words(words),
+                // The daemon makes no Other: it's what a newer one sends.
+                Item::Words(words) | Item::Other(words) => handover::ChatItem::Words(words),
                 Item::Thought(words) => handover::ChatItem::Thought(words),
                 Item::Tool(tool) => handover::ChatItem::Tool {
                     id: tool.id,
@@ -2896,7 +2899,9 @@ fn turn_to_handover(turn: Turn) -> handover::ChatTurn {
                     },
                     content: (tool.content.into_iter())
                         .map(|content| match content {
-                            ToolContent::Text(text) => handover::ToolContent::Text(text),
+                            ToolContent::Text(text) | ToolContent::Other(text) => {
+                                handover::ToolContent::Text(text)
+                            }
                             ToolContent::Output(text) => handover::ToolContent::Output(text),
                             ToolContent::Diff(diff) => handover::ToolContent::Diff {
                                 path: diff.path,

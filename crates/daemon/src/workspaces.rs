@@ -64,6 +64,14 @@ impl WorkspaceState {
                         id: pane.id.0,
                         files: files.0,
                     },
+                    // Only what a newer daemon sends a client is Other:
+                    // no request makes one, so no daemon's workspaces hold
+                    // one.
+                    Content::Other { kind } => {
+                        unreachable!(
+                            "the daemon's workspaces hold a {kind} pane, of no kind it has"
+                        )
+                    }
                 },
                 Layout::Split {
                     axis,

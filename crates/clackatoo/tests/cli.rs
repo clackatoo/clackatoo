@@ -263,9 +263,12 @@ fn the_bridge_relays_over_pipes() {
     let mut output = bridge.stdout.take().unwrap();
     input
         .write_all(
-            &frame::encode(&ClientMessage::Hello {
-                protocol_version: PROTOCOL_VERSION,
-            })
+            &frame::encode(
+                PROTOCOL_VERSION,
+                &ClientMessage::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                },
+            )
             .unwrap(),
         )
         .unwrap();
@@ -285,7 +288,7 @@ fn the_bridge_relays_over_pipes() {
             if let Some(at) = bytes.windows(marker.len()).position(|w| w == marker) {
                 let mut decoder = FrameDecoder::new();
                 decoder.push(&bytes[at + marker.len()..]);
-                if let Ok(Some(message)) = decoder.decode::<ServerMessage>() {
+                if let Ok(Some(message)) = decoder.decode::<ServerMessage>(PROTOCOL_VERSION) {
                     let _ = sender.send(message);
                     return;
                 }
@@ -705,12 +708,15 @@ fn ask_to_upgrade(runtime: &Path, executable: &Path) -> Option<clackatoo_protoco
         protocol_version: clackatoo_protocol::PROTOCOL_VERSION,
         executable: executable.as_os_str().as_bytes().to_vec(),
     };
-    stream.write_all(&frame::encode(&upgrade).unwrap()).unwrap();
+    let upgrade = frame::encode(clackatoo_protocol::PROTOCOL_VERSION, &upgrade).unwrap();
+    stream.write_all(&upgrade).unwrap();
     let mut answer = Vec::new();
     stream.read_to_end(&mut answer).unwrap();
     let mut decoder = FrameDecoder::new();
     decoder.push(&answer);
-    decoder.decode().unwrap()
+    decoder
+        .decode(clackatoo_protocol::PROTOCOL_VERSION)
+        .unwrap()
 }
 
 #[test]

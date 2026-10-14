@@ -199,7 +199,7 @@ impl Daemon {
                     id: finding.id,
                     found,
                 });
-                match frame::encode(&message) {
+                match frame::encode(client.wire, &message) {
                     Ok(bytes) => client.outgoing.extend_from_slice(&bytes),
                     Err(err) => log::error!("encoding what was found failed: {err}"),
                 }
@@ -254,7 +254,7 @@ impl Daemon {
                 let dir = pane.and_then(|pane| self.working_directory(pane));
                 Project::Dir(dir.map_or_else(|| home.clone(), PathBuf::from))
             }
-            Some(Content::Board(_)) | None => Project::Dir(home.clone()),
+            Some(Content::Board(_) | Content::Other { .. }) | None => Project::Dir(home.clone()),
         }
     }
 }

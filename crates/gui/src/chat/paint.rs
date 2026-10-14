@@ -699,7 +699,9 @@ impl ChatView {
                 continue;
             }
             let (text, look) = match item {
-                Item::Words(words) => (Cow::Borrowed(words.as_str()), Look::Words),
+                Item::Words(words) | Item::Other(words) => {
+                    (Cow::Borrowed(words.as_str()), Look::Words)
+                }
                 Item::Thought(words) => (Cow::Borrowed(words.as_str()), Look::Thought),
                 Item::Tool(tool) => (
                     Cow::Owned(tool_text(tool.status, &tool.title)),
@@ -1992,7 +1994,9 @@ fn guess(m: Measures, column: f32, turn: &Turn, open: bool, divided: bool) -> f3
             continue;
         }
         height += match item {
-            Item::Words(text) | Item::Thought(text) => lines(text, column) * line + m.em(0.75),
+            Item::Words(text) | Item::Thought(text) | Item::Other(text) => {
+                lines(text, column) * line + m.em(0.75)
+            }
             Item::Tool(tool) if Card::shows(tool) => 12.0 * line,
             Item::Tool(_) => line + m.em(0.35),
         };

@@ -14,7 +14,7 @@ use clackatoo_protocol::{
 };
 use mio::{Interest, Token};
 
-use super::{Client, Daemon, Link, Source, WEB};
+use super::{Broadcast, Client, Daemon, Link, Source, WEB};
 use crate::web::{self, Filled, Handled, HttpConn, Read, State, Web};
 
 /// The most HTTP connections open at once, WebSocket connections apart:
@@ -510,17 +510,16 @@ impl Daemon {
             return;
         }
         let event = ServerMessage::Event(Event::Pairing(web.pairing()));
-        let Ok(bytes) = frame::encode(&event) else {
-            return;
-        };
+        let mut event = Broadcast::new(&event, "the devices asking to pair");
         let mut told = Vec::new();
         for (key, source) in &mut self.sources {
             if let Source::Client(client) = source
                 && client.watching_workspaces
                 && !client.finished
                 && !matches!(client.link, Link::Web(_))
+                && let Some(bytes) = event.to(client.wire)
             {
-                client.outgoing.extend_from_slice(&bytes);
+                client.outgoing.extend_from_slice(bytes);
                 told.push(Token(key));
             }
         }
@@ -540,7 +539,8 @@ impl Daemon {
         }
         if let Some(Source::Client(client)) = self.sources.get_mut(token.0)
             && !matches!(client.link, Link::Web(_))
-            && let Ok(bytes) = frame::encode(&ServerMessage::Event(Event::Pairing(pairing)))
+            && let Ok(bytes) =
+                frame::encode(client.wire, &ServerMessage::Event(Event::Pairing(pairing)))
         {
             client.later.extend_from_slice(&bytes);
         }
@@ -919,16 +919,15 @@ impl Daemon {
         }
         self.chat_watch.sent = Some(chats.clone());
         let event = ServerMessage::Event(Event::Chats(chats));
-        let Ok(bytes) = frame::encode(&event) else {
-            return;
-        };
+        let mut event = Broadcast::new(&event, "the chats");
         let mut told = Vec::new();
         for (key, source) in &mut self.sources {
             if let Source::Client(client) = source
                 && client.watching_chats
                 && !client.finished
+                && let Some(bytes) = event.to(client.wire)
             {
-                client.outgoing.extend_from_slice(&bytes);
+                client.outgoing.extend_from_slice(bytes);
                 told.push(Token(key));
             }
         }

@@ -447,14 +447,14 @@ impl Phone {
     }
 
     fn send(&mut self, message: &ClientMessage) {
-        let frame = frame::encode(message).unwrap();
+        let frame = frame::encode(PROTOCOL_VERSION, message).unwrap();
         self.socket.send(Message::binary(frame)).unwrap();
     }
 
     /// The next message, or the close that came instead.
     fn receive(&mut self) -> Result<ServerMessage, Option<CloseCode>> {
         loop {
-            if let Some(message) = self.decoder.decode().unwrap() {
+            if let Some(message) = self.decoder.decode(PROTOCOL_VERSION).unwrap() {
                 return Ok(message);
             }
             match self.socket.read() {
@@ -1188,11 +1188,13 @@ fn a_device_cant_upgrade_the_daemon_carry_quic_or_serve_tools() {
         executable: b"/bin/true".to_vec(),
     };
     socket
-        .send(Message::binary(frame::encode(&upgrade).unwrap()))
+        .send(Message::binary(
+            frame::encode(PROTOCOL_VERSION, &upgrade).unwrap(),
+        ))
         .unwrap();
     let mut decoder = FrameDecoder::new();
     let refused = loop {
-        if let Some(message) = decoder.decode::<ServerMessage>().unwrap() {
+        if let Some(message) = decoder.decode::<ServerMessage>(PROTOCOL_VERSION).unwrap() {
             break message;
         }
         if let Message::Binary(bytes) = socket.read().unwrap() {
