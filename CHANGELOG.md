@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.41 (2026-10-15)
+
+### Features
+
+- **gui:** lessons that read like the chat, explorer keys, and selections that end at the text (ac43cd8)
+
 ## 2026.10.40 (2026-10-15)
 
 ### Features
