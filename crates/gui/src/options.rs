@@ -743,17 +743,48 @@ choice! {
     }
 }
 
-/// The option called `name`, or by its short name.
+/// The option called `name`, or by its short name; or why there's none,
+/// with the name nearest it if it looks like a slip. Tab lists them all,
+/// so the error doesn't.
 pub(crate) fn find(name: &str) -> Result<&'static Info, String> {
+    lookup(name).ok_or_else(|| match nearest_name(name, false) {
+        Some(near) => format!("no option ‘{name}’: did you mean ‘{near}’?"),
+        None => format!("no option ‘{name}’"),
+    })
+}
+
+fn lookup(name: &str) -> Option<&'static Info> {
     ALL.iter()
         .find(|info| info.name == name || info.short == name)
-        .ok_or_else(|| {
-            let names: Vec<&str> = ALL.iter().map(|info| info.name).collect();
-            format!(
-                "there's no option called `{name}`: the options are {}",
-                names.join(", ")
-            )
-        })
+}
+
+/// The name of an option, or its short name, nearest `name`, of those
+/// that are true or false if `bools`.
+fn nearest_name(name: &str, bools: bool) -> Option<&'static str> {
+    let names = (ALL.iter())
+        .filter(|info| !bools || info.kind == Kind::Bool)
+        .flat_map(|info| [info.name, info.short])
+        .filter(|name| !name.is_empty());
+    crate::cmdline::nearest::nearest(name, names)
+}
+
+/// Why `word`, set with `:set`, means nothing, as `name`, the part of it
+/// naming the option, names none: with the word as it was probably meant,
+/// if it looks like a slip, as `:set nonumbr` for `:set nonumber`.
+fn unknown(word: &str, name: &str) -> String {
+    let near = nearest_name(name, false).map(str::to_owned).or_else(|| {
+        // Turned off, or over, as only what's true or false can be.
+        let (prefix, rest) = (name.strip_prefix("no").map(|rest| ("no", rest)))
+            .or_else(|| name.strip_prefix("inv").map(|rest| ("inv", rest)))?;
+        nearest_name(rest, true).map(|near| format!("{prefix}{near}"))
+    });
+    match near {
+        Some(near) => format!(
+            "no option ‘{name}’: did you mean ‘:set {}’?",
+            word.replacen(name, &near, 1)
+        ),
+        None => format!("no option ‘{name}’"),
+    }
 }
 
 impl Options {
@@ -916,6 +947,7 @@ fn parse_setting(word: &str) -> Result<Setting, String> {
             "can't read {word}: an option is set with =, and +=, -= and ^= aren't supported yet"
         ));
     }
+    let find = |name| lookup(name).ok_or_else(|| unknown(word, name));
     if let Some((name, value)) = word.split_once('=') {
         let info = find(name)?;
         return Ok(Setting::To(info, info.parse(value)?));
@@ -927,15 +959,21 @@ fn parse_setting(word: &str) -> Result<Setting, String> {
     let (name, flip) = match word.strip_suffix('!') {
         Some(name) => (name, true),
         None => match word.strip_prefix("inv") {
-            Some(name) if find(name).is_ok() => (name, true),
+            Some(name) if lookup(name).is_some() => (name, true),
             _ => (word, false),
         },
     };
-    let (info, on) = match find(name) {
-        Ok(info) => (info, true),
-        Err(err) => match name.strip_prefix("no").map(find) {
-            Some(Ok(info)) if info.kind == Kind::Bool => (info, false),
-            _ => return Err(err),
+    let (info, on) = match lookup(name) {
+        Some(info) => (info, true),
+        None => match name.strip_prefix("no").and_then(lookup) {
+            Some(info) if info.kind == Kind::Bool => (info, false),
+            Some(info) => {
+                return Err(format!(
+                    "{} isn't true or false, so can't be turned off",
+                    info.name
+                ));
+            }
+            None => return Err(unknown(word, name)),
         },
     };
     match info.kind {
@@ -961,11 +999,42 @@ mod tests {
     fn options_are_found_by_name_or_short_name() {
         assert_eq!(info("nu").name, "number");
         assert_eq!(info("relativenumber").short, "rnu");
-        let err = find("spell").unwrap_err();
-        assert!(
-            err.contains("`spell`") && err.contains("number, relativenumber"),
-            "{err}"
+        // In a clause, with no list of them all, which Tab has.
+        assert_eq!(find("spell").unwrap_err(), "no option ‘spell’");
+        assert_eq!(
+            find("numbr").unwrap_err(),
+            "no option ‘numbr’: did you mean ‘number’?"
         );
+    }
+
+    #[test]
+    fn a_slip_in_set_offers_the_setting_meant() {
+        for (words, said) in [
+            ("nosuchoption", "no option ‘nosuchoption’"),
+            ("numbr", "no option ‘numbr’: did you mean ‘:set number’?"),
+            (
+                "nonumbr",
+                "no option ‘nonumbr’: did you mean ‘:set nonumber’?",
+            ),
+            (
+                "invnumbr",
+                "no option ‘invnumbr’: did you mean ‘:set invnumber’?",
+            ),
+            ("numbr!", "no option ‘numbr’: did you mean ‘:set number!’?"),
+            ("numbr?", "no option ‘numbr’: did you mean ‘:set number?’?"),
+            (
+                "numberwidht=3",
+                "no option ‘numberwidht’: did you mean ‘:set numberwidth=3’?",
+            ),
+            // Only what's true or false is offered turned off.
+            ("nonumberwidht", "no option ‘nonumberwidht’"),
+            (
+                "nonuw",
+                "numberwidth isn't true or false, so can't be turned off",
+            ),
+        ] {
+            assert_eq!(parse_set(words).unwrap_err(), said, "{words}");
+        }
     }
 
     #[test]
@@ -1174,12 +1243,12 @@ mod tests {
             ("nuw=50", "from 1 to 20"),
             ("nuw=x", "from 1 to 20"),
             ("nu=1", "set with number or nonumber"),
-            ("nonuw", "no option called `nonuw`"),
+            ("nonuw", "numberwidth isn't true or false"),
             ("nuw!", "can't be turned over"),
             ("cc!", "can't be turned over"),
-            ("nocc", "no option called `nocc`"),
+            ("nocc", "colorcolumn isn't true or false"),
             ("cc=80,x", "with commas between them"),
-            ("nospell", "no option called `nospell`"),
+            ("nospell", "no option ‘nospell’"),
             ("nuw+=1", "+=, -= and ^= aren't supported"),
         ] {
             let err = parse_set(words).unwrap_err();

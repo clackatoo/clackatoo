@@ -17,6 +17,7 @@
 //! sees that as [`Keyed::Emptied`].
 
 pub(crate) mod complete;
+pub(crate) mod nearest;
 pub(crate) mod recall;
 
 use winit::keyboard::{Key, NamedKey};

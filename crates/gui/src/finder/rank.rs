@@ -58,6 +58,9 @@ pub(crate) struct Ranking {
     /// Whether shorter things come first among those scored the same, as
     /// for paths, or else the first to come.
     by_length: bool,
+    /// Whether the query leaves out what it doesn't match, or only picks
+    /// out the characters it does (see [`Ranking::only_pick_out`]).
+    filters: bool,
     /// The things matched, as keys that sort best first (see [`key`]).
     matched: Vec<u64>,
     /// How many of the things have been scored.
@@ -85,11 +88,20 @@ impl Ranking {
             query: String::new(),
             case,
             by_length,
+            filters: true,
             matched: Vec::new(),
             scored: 0,
             sorted: true,
             chars: Vec::new(),
         }
+    }
+
+    /// Keeps every thing, in the order they came, whatever the query, which
+    /// then only picks out the characters it matches: for a list matched
+    /// already, as a language server matches a project's symbols, which it
+    /// may match as nucleo wouldn't.
+    pub(crate) fn only_pick_out(&mut self) {
+        self.filters = false;
     }
 
     /// Matches `query` instead.
@@ -169,7 +181,7 @@ impl Ranking {
     /// Scores the things at `indices` in `items`, returning the keys of
     /// those that match, on several threads if there are many.
     fn score(&mut self, items: &Items, indices: &[usize]) -> Vec<u64> {
-        if self.pattern.atoms.is_empty() {
+        if self.pattern.atoms.is_empty() || !self.filters {
             return (indices.iter())
                 .map(|&index| self.key(0, items.get(index), index))
                 .collect();
@@ -374,6 +386,21 @@ mod tests {
             .collect();
         assert_eq!(shared, keys);
         assert_eq!(shared[0], "dir5/file102.rs");
+    }
+
+    #[test]
+    fn a_ranking_that_only_picks_out_keeps_everything_in_order() {
+        let list = items(&["area", "Circle", "parse"]);
+        let mut ranking = Ranking::new(Case::default(), false);
+        ranking.only_pick_out();
+        ranking.add(&list);
+        ranking.set_query("ar", &list);
+        assert_eq!(ranked(&mut ranking, &list), ["area", "Circle", "parse"]);
+        assert_eq!(ranking.matched_chars("area"), [0, 1]);
+        assert_eq!(ranking.matched_chars("parse"), [1, 2]);
+        assert!(ranking.matched_chars("Circle").is_empty());
+        ranking.set_query("are", &list);
+        assert_eq!(ranking.len(), 3, "narrowed, all the same");
     }
 
     #[test]

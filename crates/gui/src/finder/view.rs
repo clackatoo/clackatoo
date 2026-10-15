@@ -1,9 +1,12 @@
 //! How the finder looks: a panel in the middle of the window, over the
 //! panes, as the palette is, with what's typed along its top, the things
 //! matching under it, best first, with the characters matched picked out,
-//! and beside them, if there's room, a preview of the one picked. Its list
-//! and preview are in the terminal's font, a cell per character, so what's
-//! picked out is runs of text side by side.
+//! and beside them, if there's room, a preview of the one picked, coloured
+//! as its file's buffer is if it's open, with what a grep matched picked
+//! out in its line. Its list and preview are in the terminal's font, a
+//! cell per character, so what's picked out is runs of text side by side.
+
+use clackatoo_protocol::Span;
 
 use crate::chrome::{Geometry, Painted, push_shadow};
 use crate::layout::Rect;
@@ -70,37 +73,39 @@ impl PreviewView {
         first: u64,
         lines: &[String],
         line: Option<u64>,
+        size: (usize, usize),
+    ) -> Self {
+        Self::coloured(first, lines, line, size, &[], &[])
+    }
+
+    /// The preview of `lines`, as [`PreviewView::new`] makes it, coloured
+    /// as `spans` say, in order, as bytes of the lines each followed by a
+    /// line break; and with `matched`, byte ranges of line `line`, picked
+    /// out as the list picks out what a grep matched. Only the lines shown
+    /// are coloured.
+    pub(crate) fn coloured(
+        first: u64,
+        lines: &[String],
+        line: Option<u64>,
         (rows, cols): (usize, usize),
+        spans: &[Span],
+        matched: &[(usize, usize)],
     ) -> Self {
         let rows_before = u64::try_from(rows / 3).unwrap_or(0);
         let start = line.map_or(first, |line| line.saturating_sub(rows_before).max(first));
         let skip = usize::try_from(start - first).unwrap_or(usize::MAX);
         let last = first + lines.len() as u64;
         let width = last.to_string().len();
-        let shown: Vec<Row> = (lines.iter().skip(skip).take(rows).zip(start..))
-            .map(|(text, number)| {
-                let number = format!("{:>width$} ", number + 1);
-                // Tabs as four spaces, and other controls as one.
-                let mut shown = number.clone();
-                for ch in text.chars() {
-                    match ch {
-                        '\t' => shown.push_str("    "),
-                        ch if ch.is_control() => shown.push(' '),
-                        ch => shown.push(ch),
-                    }
-                }
-                let inks: Vec<Ink> = (shown.chars().enumerate())
-                    .map(|(at, _)| {
-                        if at < number.len() {
-                            Ink::Muted
-                        } else {
-                            Ink::Plain
-                        }
-                    })
-                    .collect();
-                fit(&shown, &inks, cols, false)
-            })
-            .collect();
+        // Where the line starts among the lines, as `spans` count.
+        let mut from: usize = (lines.iter().take(skip)).map(|text| text.len() + 1).sum();
+        let mut shown = Vec::with_capacity(rows.min(lines.len()));
+        for (text, number) in lines.iter().skip(skip).take(rows).zip(start..) {
+            let picked = if line == Some(number) { matched } else { &[] };
+            let lit = spans.partition_point(|span| span.end <= from);
+            let (row, inks) = numbered_line(number + 1, width, text, from, &spans[lit..], picked);
+            shown.push(fit(&row, &inks, cols, false));
+            from += text.len() + 1;
+        }
         let at = line
             .and_then(|line| line.checked_sub(start))
             .and_then(|at| usize::try_from(at).ok())
@@ -118,6 +123,45 @@ impl PreviewView {
             at: None,
         }
     }
+}
+
+/// Line `number` of a preview, `text`, numbered `width` cells wide, with
+/// its characters inked: those in `picked`, byte ranges of it, picked out;
+/// the rest as the first of `spans`, bytes of the lines from `from` where
+/// `text` starts, colour them, or plainly. Tabs are four spaces, and other
+/// controls one. Its text, and each character's ink.
+fn numbered_line(
+    number: u64,
+    width: usize,
+    text: &str,
+    from: usize,
+    spans: &[Span],
+    picked: &[(usize, usize)],
+) -> (String, Vec<Ink>) {
+    let mut shown = format!("{number:>width$} ");
+    let mut inks = vec![Ink::Muted; shown.len()];
+    let mut spans = spans.iter().peekable();
+    for (at, ch) in text.char_indices() {
+        let ink = if (picked.iter()).any(|&(start, end)| (start..end).contains(&at)) {
+            Ink::Accent
+        } else {
+            while spans.next_if(|span| span.end <= from + at).is_some() {}
+            match spans.peek() {
+                Some(span) if span.start <= from + at => crate::colors::syntax_ink(span.kind),
+                _ => Ink::Plain,
+            }
+        };
+        let (shown_as, cells) = match ch {
+            '\t' => (' ', 4),
+            ch if ch.is_control() => (' ', 1),
+            ch => (ch, 1),
+        };
+        for _ in 0..cells {
+            shown.push(shown_as);
+            inks.push(ink);
+        }
+    }
+    (shown, inks)
 }
 
 /// `text`, each character in its ink in `inks`, in at most `cols` cells:

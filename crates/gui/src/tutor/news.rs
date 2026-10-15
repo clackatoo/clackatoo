@@ -389,6 +389,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "agents",
         what: "Chats say Running: cargo test · 12s, their questions say Reject, and long messages type faster",
     },
+    News {
+        id: "did-you-mean",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "A command, option or lesson that isn't one says so in a clause, and asks \"did you mean…?\" of a slip",
+    },
+    News {
+        id: "finder-colours",
+        date: "2026-10-15",
+        lesson: "finder",
+        what: "The finder picks out what's typed in every list, colours what's wrong, and colours open files' previews",
+    },
 ];
 
 impl News {

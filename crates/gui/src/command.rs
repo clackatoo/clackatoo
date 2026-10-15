@@ -58,6 +58,7 @@ use clackatoo_daemon::forward::Spec;
 use clackatoo_protocol::{ReviewScope, Side};
 
 use crate::cmdline::complete::unescape;
+use crate::cmdline::nearest::nearest;
 use crate::editor::HunkAction;
 use crate::finder;
 
@@ -282,13 +283,6 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
     ("prev_hunk", HunkAction::Next { forward: false }),
 ];
 
-/// The window's own commands, for messages.
-const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, messages, \
-                        update, connect, w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, \
-                        Buffers, Diagnostics, Boards, Browser, Gitsigns, Explore, AgentUndo, AgentRedo, \
-                        Review, ReviewKeep, ReviewReject, ReviewSend, Blame, Devices and \
-                        PortForward";
-
 /// What `line` asks for, or why it means nothing.
 pub(crate) fn parse(line: &str) -> Result<Command, String> {
     let line = line.trim();
@@ -340,8 +334,8 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
     if let Some(command) = pane_of(rest, place, argument) {
         return command;
     }
-    let agent = agent_named(word, rest, argument)?;
     if !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit()) {
+        agent_named(word, rest, argument)?;
         return match word.parse() {
             Err(_) => Err(format!("there's no tab or line {word}")),
             Ok(number) => Ok(Command::Tab(number)),
@@ -352,38 +346,62 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         Some((name, daemon)) => (name, Some(daemon.to_owned())),
         None => (rest, None),
     };
-    // A split mark alone opens a terminal.
-    if name.is_empty() && place != Place::Tab {
-        return Ok(Command::Open {
-            place,
-            kind: Kind::Terminal,
-            daemon,
-            agent: None,
-        });
+    let kind = match KINDS.iter().find(|(kind, _)| *kind == name) {
+        Some(&(_, kind)) => kind,
+        // A split mark alone opens a terminal.
+        None if name.is_empty() && place != Place::Tab => Kind::Terminal,
+        // Said before anything after it is, which means nothing either.
+        None => {
+            return Err(unknown(
+                &word[..word.len() - rest.len()],
+                name,
+                daemon,
+                place,
+            ));
+        }
+    };
+    let agent = agent_named(word, rest, argument)?;
+    Ok(Command::Open {
+        place,
+        kind,
+        daemon,
+        agent,
+    })
+}
+
+/// Why `name`, after a split's `mark` if it has one, and before
+/// `@daemon` if it has that, means nothing: in one clause, and with the
+/// name nearest it if it looks like a slip. Tab lists every name, so the
+/// error doesn't.
+fn unknown(mark: &str, name: &str, daemon: Option<String>, place: Place) -> String {
+    let at = daemon.map(|daemon| format!("@{daemon}"));
+    let at = at.as_deref().unwrap_or_default();
+    if name.is_empty() {
+        return if at.is_empty() {
+            "no command: Tab lists them".to_owned()
+        } else {
+            format!("{at} needs a kind of pane before it, as ‘:Terminal{at}’")
+        };
     }
-    if let Some(&(_, kind)) = KINDS.iter().find(|(kind, _)| *kind == name) {
-        return Ok(Command::Open {
-            place,
-            kind,
-            daemon,
-            agent,
-        });
-    }
-    let kinds = PANES.join(", ");
-    if name.starts_with(char::is_uppercase) {
-        Err(format!(
-            "no kind of pane called {name}; the kinds are {kinds}"
-        ))
-    } else if name.is_empty() {
-        Err(format!(
-            "a command, such as {COMMANDS}, or a kind of pane, such as {kinds}"
-        ))
+    // After a split's mark, only a kind of pane can come.
+    let (what, names) = if place == Place::Tab {
+        ("command", NAMES)
     } else {
-        Err(format!(
-            "no command called {name}; commands: {COMMANDS}; panes: {kinds}"
-        ))
+        ("kind of pane", PANES)
+    };
+    // What closes a pane is offered only for a slip of case: `:wa` isn't
+    // `:wq`.
+    let names = (names.iter().copied())
+        .filter(|near| !CLOSING.contains(near) || near.eq_ignore_ascii_case(name));
+    match nearest(name, names) {
+        Some(near) => format!("no {what} ‘{name}’: did you mean ‘:{mark}{near}{at}’?"),
+        None => format!("no {what} ‘{name}’"),
     }
 }
+
+/// The commands that close a pane, which a slip is never offered, as
+/// running one by mistake loses the pane.
+const CLOSING: [&str; 2] = ["quit", "wq"];
 
 /// `:Devices`, with what to do as `argument` says.
 fn devices_command(argument: Option<&str>) -> Result<DevicesCommand, String> {
@@ -424,14 +442,21 @@ fn forwarding(stop: bool, argument: Option<&str>) -> Result<Forwarding, String> 
 /// `:Gitsigns`, with what to do to the hunk at the cursor, as `argument`
 /// names it.
 fn hunk_command(argument: Option<&str>) -> Result<Command, String> {
-    let names = || HUNK_ACTIONS.map(|(name, _)| name).join(", ");
     let Some(argument) = argument else {
-        return Err(format!("Gitsigns needs what to do: {}", names()));
+        return Err("Gitsigns needs what to do, as ‘:Gitsigns stage_hunk’".into());
     };
     (HUNK_ACTIONS.iter())
         .find(|(name, _)| *name == argument)
         .map(|&(_, action)| Command::Hunk(action))
-        .ok_or_else(|| format!("Gitsigns can't {argument:?}; it can {}", names()))
+        .ok_or_else(|| {
+            let names = HUNK_ACTIONS.iter().map(|&(name, _)| name);
+            match nearest(argument, names) {
+                Some(near) => {
+                    format!("Gitsigns can't ‘{argument}’: did you mean ‘:Gitsigns {near}’?")
+                }
+                None => format!("Gitsigns can't ‘{argument}’"),
+            }
+        })
 }
 
 /// The agent named after `word`, a kind of pane, as `rest`, without its
@@ -1019,23 +1044,41 @@ mod tests {
     }
 
     #[test]
-    fn mistakes_say_what_there_is() {
-        assert!(
-            parse("Telescope")
-                .unwrap_err()
-                .contains("the kinds are Terminal, Agent, Editor")
+    fn mistakes_say_so_in_a_clause_and_offer_the_name_nearest() {
+        let err = |line| parse(line).unwrap_err();
+        // No list of every name: Tab has those.
+        assert_eq!(err("Telescope"), "no command ‘Telescope’");
+        assert_eq!(err("nonsense"), "no command ‘nonsense’");
+        assert_eq!(err("nonsense foo"), "no command ‘nonsense’");
+        assert_eq!(err("Fils"), "no command ‘Fils’: did you mean ‘:Files’?");
+        assert_eq!(err("wrte"), "no command ‘wrte’: did you mean ‘:write’?");
+        // The daemon named, kept.
+        assert_eq!(
+            err("Termnal@box"),
+            "no command ‘Termnal’: did you mean ‘:Terminal@box’?"
         );
-        assert!(
-            parse("split")
-                .unwrap_err()
-                .contains("no command called split")
+        // After a split's mark, only a kind of pane, kept with its mark.
+        assert_eq!(err("|Fils"), "no kind of pane ‘Fils’");
+        assert_eq!(
+            err("-^Explor"),
+            "no kind of pane ‘Explor’: did you mean ‘:-^Explore’?"
         );
-        assert!(parse("").is_err());
-        assert!(
-            parse("Terminal htop")
-                .unwrap_err()
-                .contains("takes nothing")
+        assert_eq!(
+            err("|Termnal@box"),
+            "no kind of pane ‘Termnal’: did you mean ‘:|Terminal@box’?"
         );
+        // What closes a pane isn't offered for a slip, only for its case.
+        assert_eq!(err("wqq"), "no command ‘wqq’");
+        assert_eq!(err("quiy"), "no command ‘quiy’");
+        assert_eq!(err("QUIT"), "no command ‘QUIT’: did you mean ‘:quit’?");
+        assert_eq!(err(""), "no command: Tab lists them");
+        assert_eq!(
+            err("@box"),
+            "@box needs a kind of pane before it, as ‘:Terminal@box’"
+        );
+        assert!(err("Terminal htop").contains("takes nothing"));
+        assert!(err("| htop").contains("takes nothing"));
+        assert_eq!(parse("|").unwrap(), parse("|Terminal").unwrap());
     }
 
     #[test]
@@ -1048,8 +1091,19 @@ mod tests {
             parse("Gitsigns prev_hunk").unwrap(),
             Command::Hunk(HunkAction::Next { forward: false })
         );
-        assert!(parse("Gitsigns").unwrap_err().contains("preview_hunk"));
-        assert!(parse("Gitsigns blame").unwrap_err().contains("reset_hunk"));
+        assert!(
+            parse("Gitsigns")
+                .unwrap_err()
+                .contains("‘:Gitsigns stage_hunk’")
+        );
+        assert_eq!(
+            parse("Gitsigns blame").unwrap_err(),
+            "Gitsigns can't ‘blame’"
+        );
+        assert_eq!(
+            parse("Gitsigns stage_hnk").unwrap_err(),
+            "Gitsigns can't ‘stage_hnk’: did you mean ‘:Gitsigns stage_hunk’?"
+        );
     }
 
     #[test]
@@ -1201,14 +1255,14 @@ mod tests {
             parse("-Explore!").unwrap(),
             explore(None, true, Some(Side::Below))
         );
-        // Every kind a mark comes before is one, and the messages name them.
+        // Every kind a mark comes before is one, and the messages offer
+        // them, as Tab does.
         for kind in PANES {
             assert!(parse(&format!("|{kind}")).is_ok(), "{kind}");
         }
-        let refused = parse("|Nothing").unwrap_err();
-        assert!(
-            refused.contains("Explore") && refused.contains("Review"),
-            "{refused}"
+        assert_eq!(
+            parse("|Revew").unwrap_err(),
+            "no kind of pane ‘Revew’: did you mean ‘:|Review’?"
         );
     }
 

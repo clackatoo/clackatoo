@@ -90,7 +90,7 @@ panes 2
 
 ## Complete with Tab
 
-On the command line, Tab completes the word before the caret, as in Vim: a command's name, an option after `:set`, a file or folder after `:e`, a lesson after `:Tutor`. With more than one choice, they're listed under the line, and Tab and Shift+Tab go through them.
+On the command line, Tab completes the word before the caret, as in Vim: a command's name, an option after `:set`, a file or folder after `:e`, a lesson after `:Tutor`. With more than one choice, they're listed under the line, and Tab and Shift+Tab go through them. Tab is where the names are listed: a name that isn't one only says so, in red, and offers the nearest if a letter or two is off, so `:set norelativenumbr` asks "did you mean ‘:set norelativenumber’?".
 
 Type `:set norel`, press Tab to make it `:set norelativenumber`, and press Enter: editors number their lines from the top now, not from the cursor.
 

@@ -8213,6 +8213,52 @@ fn a_buffer_in_a_language_with_a_pack_is_highlighted_as_it_changes() {
     );
 }
 
+#[test]
+fn a_preview_of_an_open_file_is_coloured_as_its_buffer_is() {
+    let daemon = TestDaemon::start_with(|_, config| {
+        config.languages =
+            Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../syntax/tests/fixtures/languages"));
+    });
+    let dir = daemon.dir.path();
+    let path = dir.join("a.json");
+    std::fs::write(&path, "[\n  1,\n  \"x\"\n]\n").unwrap();
+    let mut client = daemon.client();
+    let preview = |client: &mut Client, id| {
+        let search = Search::Preview {
+            path: path.display().to_string(),
+            line: 2,
+            lines: 3,
+        };
+        client.find(id, None, search).unwrap();
+        found(client, id).0
+    };
+    let span = |start, end, kind| Span { start, end, kind };
+    // Not open: plain, as read from disk.
+    let lines = ["  1,", "  \"x\"", "]"].map(str::to_owned).to_vec();
+    assert_eq!(
+        preview(&mut client, 1),
+        [Found::Preview {
+            first: 1,
+            lines: lines.clone(),
+            spans: Vec::new(),
+        }]
+    );
+    client.watch_workspaces().unwrap();
+    let pane = (client.new_workspace(None, open_file(dir, "a.json"))).unwrap();
+    let buffer = buffer_in(&mut client, pane);
+    attach_buffer(&mut client, buffer);
+    next_highlights(&mut client);
+    // Open: only its lines' highlights, as bytes of the lines shown.
+    assert_eq!(
+        preview(&mut client, 2),
+        [Found::Preview {
+            first: 1,
+            lines,
+            spans: vec![span(2, 3, Kind::Number), span(7, 10, Kind::String)],
+        }]
+    );
+}
+
 /// A daemon with the test language packs, a client following the file
 /// `name`, whose text is `text`, and its buffer.
 fn parsed_buffer(text: &str, name: &str) -> (TestDaemon, Client, BufferId) {
@@ -9158,18 +9204,19 @@ fn the_finder_greps_a_project_previews_its_files_and_lists_buffers() {
         client.find(id, None, search).unwrap();
         found(client, id)
     };
+    // Plain, as these files are in no language.
+    let lines = |shown: &[Found]| match shown {
+        [Found::Preview { lines, spans, .. }] if spans.is_empty() => lines.clone(),
+        _ => panic!("not a plain preview: {shown:?}"),
+    };
     let (shown, done) = preview(&mut client, 5, &project.join("src/deep/b.rs"));
     assert_eq!(done, Done::All);
-    let lines = vec!["pub fn run() {}".to_owned(), "fn Run() {}".to_owned()];
-    assert_eq!(shown, [Found::Preview { first: 0, lines }]);
+    assert_eq!(lines(&shown), ["pub fn run() {}", "fn Run() {}"]);
     attach_buffer(&mut client, a);
     send_change(&mut client, a, 0, insert(25, 0, "// new\n", 0));
     next_buffer_update(&mut client);
     let (shown, _) = preview(&mut client, 6, &project.join("src/a.rs"));
-    let lines = ["// new", "fn main() {", "    run();"]
-        .map(str::to_owned)
-        .to_vec();
-    assert_eq!(shown, [Found::Preview { first: 0, lines }]);
+    assert_eq!(lines(&shown), ["// new", "fn main() {", "    run();"]);
     let (shown, done) = preview(&mut client, 7, &project.join("src/blob.bin"));
     assert!(shown.is_empty());
     assert_eq!(done, Done::Failed("it isn't text".to_owned()));

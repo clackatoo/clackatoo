@@ -8,7 +8,8 @@
 //! finds a batch at a time (see `clackatoo_protocol::Found`). The finder
 //! matches what's typed against what's come (see [`rank`]), except for a
 //! grep, whose pattern goes to the daemon instead, and a search of the
-//! project's symbols, which its language server matches; and keeps what's
+//! project's symbols, which its language server matches, and where what's
+//! typed only picks out the letters it matches; and keeps what's
 //! picked and the preview beside it. It does no I/O and draws nothing: the
 //! desk talks to the daemon for it, and [`view`] lays it out.
 //!
@@ -29,7 +30,7 @@ pub(crate) mod view;
 use std::fmt::Write as _;
 
 use clackatoo_protocol::{
-    Answer, Done, FileLocation, Found, FoundBuffer, FoundLine, FoundSymbol, Side, Symbol,
+    Answer, Done, FileLocation, Found, FoundBuffer, FoundLine, FoundSymbol, Side, Span, Symbol,
 };
 use winit::keyboard::{Key, NamedKey};
 
@@ -121,6 +122,10 @@ struct Entry {
     /// Byte ranges of its text to pick out, beside what's typed matches:
     /// where a grep's pattern matched.
     matched: Vec<(usize, usize)>,
+    /// For a line with `matched` in it, where its text after the path
+    /// starts in the file's line, in bytes, so the line in the preview has
+    /// the same picked out.
+    in_line: usize,
     /// For a symbol, how deep it is in its file's outline, which it's
     /// indented by, and how much of its text is its name, which is drawn
     /// plainly and the rest quieter.
@@ -168,8 +173,9 @@ struct Shown {
     /// The file, and the line asked about.
     path: String,
     line: u64,
-    /// The first line's number, and the lines; or why there are none.
-    lines: Result<(u64, Vec<String>), String>,
+    /// The first line's number, the lines, and how they're coloured (see
+    /// `Found::Preview`); or why there are none.
+    lines: Result<(u64, Vec<String>, Vec<Span>), String>,
 }
 
 /// The finder's state.
@@ -219,6 +225,12 @@ impl Finder {
     pub(crate) fn new(kind: Kind, query: String, case: Case) -> Self {
         // Paths are better short; lines and places, in their order.
         let mut ranking = Ranking::new(case, matches!(kind, Kind::Files | Kind::Buffers));
+        // A project's symbols are matched by their language server: what's
+        // typed only picks out the letters it matches, as in a list of
+        // files. A grep's lines say where its pattern matched instead.
+        if kind == Kind::ProjectSymbols {
+            ranking.only_pick_out();
+        }
         let items = Items::default();
         // A grep's query is the daemon's to look for.
         if !kind.searched() {
@@ -253,6 +265,7 @@ impl Finder {
                 at: None,
                 path_len: item.name_len,
                 matched: Vec::new(),
+                in_line: 0,
                 symbol: None,
             });
             finder.local_previews.push(item.preview);
@@ -311,6 +324,10 @@ impl Finder {
         self.ranking.clear();
         self.selected = 0;
         self.top = 0;
+        // What it searches for picks out the letters in what it finds.
+        if self.kind == Kind::ProjectSymbols {
+            self.ranking.set_query(&self.query, &self.items);
+        }
     }
 
     /// The query to a file's language server whose answer fills the list,
@@ -364,6 +381,7 @@ impl Finder {
                         path,
                         at: None,
                         matched: Vec::new(),
+                        in_line: 0,
                         symbol: None,
                     });
                 }
@@ -393,6 +411,7 @@ impl Finder {
                         path,
                         at: None,
                         matched: Vec::new(),
+                        in_line: 0,
                         symbol: None,
                     });
                 }
@@ -414,6 +433,7 @@ impl Finder {
                         at: None,
                         path_len: 0,
                         matched: Vec::new(),
+                        in_line: 0,
                         symbol: None,
                     });
                 }
@@ -449,6 +469,10 @@ impl Finder {
             .map(|ch| if ch.is_ascii_control() { ' ' } else { ch })
             .collect();
         let prefix = format!("{path}:{}: ", line + 1);
+        // The text may start some way into the line, but its first match
+        // is at `col` in both.
+        let in_line =
+            (matched.first()).map_or(0, |&(first, _)| (col + indent).saturating_sub(first));
         let matched = (matched.iter())
             .filter(|&&(start, _)| start >= indent)
             .map(|&(start, end)| (start - indent + prefix.len(), end - indent + prefix.len()))
@@ -459,6 +483,7 @@ impl Finder {
             at: Some((line, col)),
             path_len: prefix.len(),
             matched,
+            in_line,
             symbol: None,
         });
     }
@@ -483,6 +508,7 @@ impl Finder {
             at: Some((symbol.line, symbol.col)),
             path_len: 0,
             matched: Vec::new(),
+            in_line: 0,
             // A project's are in no outline.
             symbol: Some((if with_path { 0 } else { symbol.depth }, name_len)),
         });
@@ -654,7 +680,11 @@ impl Finder {
             return;
         };
         let lines = match found {
-            Found::Preview { first, lines } => Ok((first, lines)),
+            Found::Preview {
+                first,
+                lines,
+                spans,
+            } => Ok((first, lines, spans)),
             Found::Done(Done::Failed(why)) => Err(why),
             Found::Done(_) => {
                 self.preview.asked = None;
@@ -735,7 +765,13 @@ impl Finder {
         let index = self.ranking.get(rank)?;
         let entry = &self.entries[index];
         let text = self.items.get(index);
-        let accents = self.ranking.matched_chars(text);
+        let accents = match entry.symbol {
+            // A project's symbols are found by their names alone.
+            Some((_, name_len)) if self.kind == Kind::ProjectSymbols => {
+                self.ranking.matched_chars(&text[..name_len])
+            }
+            _ => self.ranking.matched_chars(text),
+        };
         if let Some((depth, name_len)) = entry.symbol {
             return Some(symbol_row(text, &accents, (depth, name_len), cols));
         }
@@ -749,16 +785,20 @@ impl Finder {
                 .map_or(0, |slash| slash + 1)
         };
         let modified_from = entry.path_len;
+        // How much what's wrong matters, coloured as in an editor.
+        let severity = (self.kind == Kind::Diagnostics)
+            .then(|| severity(&text[entry.path_len..]))
+            .flatten()
+            .map(|(len, ink)| (entry.path_len..entry.path_len + len, ink));
         let inks: Vec<Ink> = (text.char_indices().zip(0_u32..))
             .map(|((at, _), char_index)| {
                 let picked = accents.binary_search(&char_index).is_ok()
                     || (entry.matched.iter()).any(|&(start, end)| (start..end).contains(&at));
-                if picked {
-                    Ink::Accent
-                } else if at < quiet_to || (entry.at.is_none() && at >= modified_from) {
-                    Ink::Muted
-                } else {
-                    Ink::Plain
+                match &severity {
+                    _ if picked => Ink::Accent,
+                    Some((word, ink)) if word.contains(&at) => *ink,
+                    _ if at < quiet_to || (entry.at.is_none() && at >= modified_from) => Ink::Muted,
+                    _ => Ink::Plain,
                 }
             })
             .collect();
@@ -789,9 +829,34 @@ impl Finder {
         let line = entry.at.map(|(line, _)| line);
         Some(match &shown.lines {
             Err(why) => PreviewView::note(why.clone()),
-            Ok((first, lines)) => PreviewView::new(*first, lines, line, (rows, cols)),
+            Ok((0, lines, _)) if lines.is_empty() => PreviewView::note("Empty file".into()),
+            Ok((first, lines, spans)) => {
+                // Where a grep matched, picked out in its line as in the
+                // list.
+                let in_line = |at: usize| at.saturating_sub(entry.path_len) + entry.in_line;
+                let matched: Vec<(usize, usize)> = (entry.matched.iter())
+                    .map(|&(start, end)| (in_line(start), in_line(end)))
+                    .collect();
+                PreviewView::coloured(*first, lines, line, (rows, cols), spans, &matched)
+            }
         })
     }
+}
+
+/// How much what a diagnostic's `text` says is wrong matters, as the daemon
+/// writes it, starting `error: ` or the like: how long that word is, and
+/// its ink, as an editor colours it.
+fn severity(text: &str) -> Option<(usize, Ink)> {
+    use clackatoo_text::Severity;
+    let (word, _) = text.split_once(": ")?;
+    let severity = match word {
+        "error" => Severity::Error,
+        "warning" => Severity::Warning,
+        "info" => Severity::Info,
+        "hint" => Severity::Hint,
+        _ => return None,
+    };
+    Some((word.len(), Ink::Color(crate::colors::diagnostic(severity))))
 }
 
 /// The row for a symbol whose text is `text`, `cols` cells wide, its

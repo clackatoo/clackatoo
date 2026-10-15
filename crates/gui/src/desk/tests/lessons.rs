@@ -959,11 +959,11 @@ fn the_tutor_says_why_it_cant_open_a_lesson() {
     command(&mut desk, "Tutor basics");
     assert!(desk.message.as_deref().unwrap().contains("on this machine"));
     command(&mut desk, "Tutor nothing");
-    assert!(
-        desk.message
-            .as_deref()
-            .unwrap()
-            .starts_with("there's no lesson called nothing")
+    assert_eq!(desk.message.as_deref(), Some("no lesson ‘nothing’"));
+    command(&mut desk, "Tutor basic");
+    assert_eq!(
+        desk.message.as_deref(),
+        Some("no lesson ‘basic’: did you mean ‘:Tutor basics’?")
     );
 }
 

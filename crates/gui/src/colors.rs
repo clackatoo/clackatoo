@@ -170,6 +170,16 @@ pub(crate) const fn syntax(kind: Kind) -> Style {
     }
 }
 
+/// The ink code of `kind` is drawn in, in the window's own text, such as a
+/// hover's or the finder's preview: as in an editor (see [`syntax`]).
+#[must_use]
+pub(crate) fn syntax_ink(kind: Kind) -> crate::render::Ink {
+    match syntax(kind).fg {
+        Color::Default => crate::render::Ink::Plain,
+        color => crate::render::Ink::Color(color),
+    }
+}
+
 /// The tick by a lesson's step that's done: the bright green its title
 /// is lit in.
 #[must_use]

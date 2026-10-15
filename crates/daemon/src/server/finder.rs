@@ -127,9 +127,11 @@ impl Daemon {
             Search::Boards => return,
             Search::Preview { path, line, lines } => {
                 let path = self.config.home.join(path);
+                let first = crate::find::preview_first(line, lines);
+                let first = usize::try_from(first).unwrap_or(usize::MAX);
                 let open = (self.buffers.values())
                     .find(|slot| slot.buffer.path() == path)
-                    .map(|slot| slot.buffer.text().clone());
+                    .map(|slot| slot.preview(first, first.saturating_add(usize::from(lines))));
                 Job::Preview {
                     path,
                     line,

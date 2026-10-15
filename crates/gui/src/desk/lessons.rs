@@ -305,11 +305,12 @@ impl Desk {
     /// at, ending the one open, if any.
     pub(super) fn open_lesson(&mut self, id: &str) {
         let Some(lesson) = tutor::lesson(id) else {
-            let names: Vec<&str> = tutor::lessons().iter().map(|lesson| lesson.id).collect();
-            self.refuse(format!(
-                "there's no lesson called {id}: the lessons are {}",
-                names.join(", ")
-            ));
+            // Tab, or `:Tutor` alone, lists them.
+            let names = tutor::lessons().iter().map(|lesson| lesson.id);
+            self.refuse(match crate::cmdline::nearest::nearest(id, names) {
+                Some(near) => format!("no lesson ‘{id}’: did you mean ‘:Tutor {near}’?"),
+                None => format!("no lesson ‘{id}’"),
+            });
             return;
         };
         let scratch = match &self.tutor.scratch {

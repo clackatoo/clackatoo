@@ -590,10 +590,7 @@ mod tests {
         });
         assert_eq!(bound(&mut lua, 1, 1).1, [set("number", Value::Bool(true))]);
         for (config, wanted) in [
-            (
-                "client.opt.spell = true",
-                "init.lua:1: there's no option called `spell`",
-            ),
+            ("client.opt.spell = true", "init.lua:1: no option ‘spell’"),
             ("client.opt.nu = 1", "init.lua:1: number is true or false"),
             (
                 "client.opt.sbr = 1",
@@ -607,10 +604,7 @@ mod tests {
                 "\nclient.opt.nuw = 0",
                 "init.lua:2: numberwidth is a whole number from 1 to 20",
             ),
-            (
-                "print(client.opt.list)",
-                "init.lua:1: there's no option called `list`",
-            ),
+            ("print(client.opt.list)", "init.lua:1: no option ‘list’"),
         ] {
             let (_, said) = start(config);
             assert!(

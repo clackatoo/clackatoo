@@ -1,7 +1,7 @@
 //! The finder driven by keys, with what the daemon finds given it as it
 //! would come.
 
-use clackatoo_protocol::{Done, FileLocation, Found, FoundBuffer, FoundLine, Side};
+use clackatoo_protocol::{Done, FileLocation, Found, FoundBuffer, FoundLine, FoundSymbol, Side};
 use winit::keyboard::{Key, KeyLocation, NamedKey};
 
 use super::*;
@@ -380,7 +380,11 @@ fn the_preview_follows_what_is_picked() {
     assert_eq!(finder.preview_search(), Some(7));
     assert_eq!(finder.preview_wanted(), None, "asked for already");
     let lines: Vec<String> = (0..100).map(|n| format!("line {}", n + 30)).collect();
-    finder.preview_found(Found::Preview { first: 30, lines });
+    finder.preview_found(Found::Preview {
+        first: 30,
+        lines,
+        spans: Vec::new(),
+    });
     finder.preview_found(Found::Done(Done::All));
     assert_eq!(finder.preview_search(), None);
     let preview = finder.view((10, 60), Some((9, 40))).preview.unwrap();
@@ -458,4 +462,247 @@ fn a_symbols_name_is_plain_and_what_it_is_quieter_indented_as_deep_as_it_is() {
             place: Place::Here,
         })
     );
+}
+
+/// A row's runs, as text and ink.
+fn inked(row: &Row) -> Vec<(&str, Ink)> {
+    let mut start = 0;
+    (row.runs.iter())
+        .map(|&(end, ink)| {
+            let text = &row.text[start..end];
+            start = end;
+            (text, ink)
+        })
+        .collect()
+}
+
+#[test]
+fn every_list_picks_out_the_letters_typed_as_files_does() {
+    // Buffers, a language server's places, and lessons.
+    let mut finder = Finder::new(Kind::Buffers, String::new(), Case::default());
+    finder.searching(1);
+    finder.found(Found::Buffers(vec![FoundBuffer {
+        path: "src/area.rs".into(),
+        modified: false,
+    }]));
+    type_text(&mut finder, "area");
+    assert_eq!(picked_out(&mut finder), "area");
+    let found = [place("/p/a.rs", 1, "let area = 2;")];
+    let mut finder = Finder::places(Kind::Places, &found, "/p/main.rs", Case::default());
+    type_text(&mut finder, "area");
+    assert_eq!(picked_out(&mut finder), "area");
+    let mut finder = Finder::local(
+        Kind::Lessons,
+        vec![LocalItem {
+            name: "basics".into(),
+            text: "basics  The basics".into(),
+            name_len: 6,
+            preview: Vec::new(),
+        }],
+        Case::default(),
+    );
+    type_text(&mut finder, "basics");
+    assert_eq!(picked_out(&mut finder), "basics");
+}
+
+#[test]
+fn a_projects_symbols_have_the_letters_searched_for_picked_out_in_their_names() {
+    let symbol = |name: &str| FoundSymbol {
+        path: "src/area.rs".into(),
+        symbol: Symbol {
+            name: name.into(),
+            kind: 12,
+            depth: 0,
+            container: String::new(),
+            line: 0,
+            col: 0,
+            offset: None,
+        },
+    };
+    let mut finder = Finder::new(Kind::ProjectSymbols, String::new(), Case::default());
+    assert_eq!(type_text(&mut finder, "ar"), Outcome::Search);
+    finder.searching(2);
+    root(&mut finder);
+    // The server matches as it likes: none is left out, nor reordered.
+    finder.found(Found::Symbols(vec![symbol("parse"), symbol("Circle")]));
+    assert_eq!(
+        shown(&mut finder),
+        [
+            "parse  function  src/area.rs:1",
+            "Circle  function  src/area.rs:1"
+        ]
+    );
+    // In the name only, not the path, which the server didn't match.
+    assert_eq!(picked_out(&mut finder), "ar");
+    let view = finder.view((10, 60), None);
+    assert!(
+        inked(&view.rows[1])
+            .iter()
+            .all(|&(_, ink)| ink != Ink::Accent)
+    );
+    // Typed but not yet searched for: what was searched for stays lit.
+    assert_eq!(type_text(&mut finder, "s"), Outcome::Search);
+    assert_eq!(picked_out(&mut finder), "ar");
+    finder.searching(3);
+    finder.found(Found::Symbols(vec![symbol("parse")]));
+    assert_eq!(picked_out(&mut finder), "ars");
+}
+
+#[test]
+fn whats_wrong_is_coloured_by_how_much_it_matters() {
+    let mut finder = Finder::new(Kind::Diagnostics, String::new(), Case::default());
+    finder.searching(1);
+    let line = |text: &str| FoundLine {
+        path: "a.fk".into(),
+        line: 2,
+        col: 0,
+        text: text.into(),
+        matches: Vec::new(),
+    };
+    finder.found(Found::Lines(vec![
+        line("error: bad is bad [7 fake]"),
+        line("hint: errors: none"),
+        line("odd: not ours"),
+    ]));
+    let view = finder.view((10, 60), None);
+    let red = Ink::Color(crate::colors::diagnostic(clackatoo_text::Severity::Error));
+    let cyan = Ink::Color(crate::colors::diagnostic(clackatoo_text::Severity::Hint));
+    assert_eq!(
+        inked(&view.rows[0]),
+        [
+            ("a.fk:3: ", Ink::Muted),
+            ("error", red),
+            (": bad is bad [7 fake]", Ink::Plain)
+        ]
+    );
+    assert_eq!(inked(&view.rows[1])[1], ("hint", cyan));
+    assert_eq!(inked(&view.rows[2])[1], ("odd: not ours", Ink::Plain));
+    // What's typed is picked out over it.
+    type_text(&mut finder, "err");
+    let view = finder.view((10, 60), None);
+    assert_eq!(inked(&view.rows[0])[1], ("err", Ink::Accent));
+    assert_eq!(inked(&view.rows[0])[2], ("or", red));
+}
+
+#[test]
+fn a_preview_is_coloured_as_its_buffer_and_a_greps_matches_picked_out_in_its_line() {
+    let mut finder = Finder::new(Kind::Grep, String::new(), Case::default());
+    type_text(&mut finder, "finder");
+    finder.searching(2);
+    root(&mut finder);
+    // The line's text from some way in, as a long one comes: its matches
+    // are at bytes 8 and 17 of the line.
+    finder.found(Found::Lines(vec![FoundLine {
+        path: "a.rs".into(),
+        line: 2,
+        col: 8,
+        text: "t finder = finder();".into(),
+        matches: vec![(2, 8), (11, 17)],
+    }]));
+    let path = "/home/jack/project/a.rs";
+    assert_eq!(finder.preview_wanted(), Some((path.into(), 2)));
+    finder.previewing(3, path.into(), 2);
+    let lines = ["// one", "fn two() {", "    let finder = finder();", "}"];
+    let span = |start, end, kind| Span { start, end, kind };
+    finder.preview_found(Found::Preview {
+        first: 0,
+        lines: lines.map(str::to_owned).to_vec(),
+        // A comment, and `let`, as bytes of the lines with their breaks.
+        spans: vec![
+            span(0, 6, clackatoo_text::Kind::Comment),
+            span(22, 25, clackatoo_text::Kind::Keyword),
+        ],
+    });
+    let preview = finder.view((10, 60), Some((9, 40))).preview.unwrap();
+    assert_eq!(preview.at, Some(2));
+    let comment = crate::colors::syntax_ink(clackatoo_text::Kind::Comment);
+    let keyword = crate::colors::syntax_ink(clackatoo_text::Kind::Keyword);
+    assert_eq!(
+        inked(&preview.lines[0]),
+        [("1 ", Ink::Muted), ("// one", comment)]
+    );
+    assert_eq!(
+        inked(&preview.lines[2]),
+        [
+            ("3 ", Ink::Muted),
+            ("    ", Ink::Plain),
+            ("let", keyword),
+            (" ", Ink::Plain),
+            ("finder", Ink::Accent),
+            (" = ", Ink::Plain),
+            ("finder", Ink::Accent),
+            ("();", Ink::Plain),
+        ]
+    );
+    // Only the place's line has them picked out.
+    assert_eq!(
+        inked(&preview.lines[3]),
+        [("4 ", Ink::Muted), ("}", Ink::Plain)]
+    );
+}
+
+#[test]
+fn an_indented_greps_match_is_picked_out_in_a_preview_coloured_by_bytes() {
+    let mut finder = Finder::new(Kind::Grep, String::new(), Case::default());
+    type_text(&mut finder, "x*");
+    finder.searching(2);
+    root(&mut finder);
+    // As the daemon sends `x*` on "\té x": its place is its first match
+    // that isn't empty, at byte 4.
+    finder.found(Found::Lines(vec![FoundLine {
+        path: "a.rs".into(),
+        line: 0,
+        col: 4,
+        text: "\té x".into(),
+        matches: vec![(4, 5)],
+    }]));
+    assert_eq!(shown(&mut finder), ["a.rs:1: é x"]);
+    let path = "/home/jack/project/a.rs";
+    finder.previewing(3, path.into(), 0);
+    // `é` coloured, by its two bytes.
+    let span = Span {
+        start: 1,
+        end: 3,
+        kind: clackatoo_text::Kind::String,
+    };
+    finder.preview_found(Found::Preview {
+        first: 0,
+        lines: vec!["\té x".into()],
+        spans: vec![span],
+    });
+    let preview = finder.view((10, 60), Some((9, 40))).preview.unwrap();
+    assert_eq!(
+        inked(&preview.lines[0]),
+        [
+            ("1 ", Ink::Muted),
+            ("    ", Ink::Plain),
+            ("é", crate::colors::syntax_ink(clackatoo_text::Kind::String)),
+            (" ", Ink::Plain),
+            ("x", Ink::Accent),
+        ]
+    );
+}
+
+#[test]
+fn an_empty_file_says_so_in_the_preview() {
+    let mut finder = Finder::new(Kind::Files, String::new(), Case::default());
+    finder.searching(1);
+    root(&mut finder);
+    files(&mut finder, &["empty.txt", "blank.txt"]);
+    let preview = |finder: &mut Finder, lines: &[&str]| {
+        let (path, line) = finder.preview_wanted().unwrap();
+        finder.previewing(2, path, line);
+        finder.preview_found(Found::Preview {
+            first: 0,
+            lines: lines.iter().map(|&line| line.to_owned()).collect(),
+            spans: Vec::new(),
+        });
+        let view = finder.view((10, 60), Some((9, 40)));
+        view.preview.unwrap().lines[0].clone()
+    };
+    let empty = preview(&mut finder, &[]);
+    assert_eq!(inked(&empty), [("Empty file", Ink::Muted)]);
+    // A file of one empty line isn't empty.
+    named(&mut finder, NamedKey::ArrowDown);
+    assert_eq!(preview(&mut finder, &[""]).text, "1 ");
 }

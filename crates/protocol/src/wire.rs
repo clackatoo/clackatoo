@@ -155,6 +155,9 @@ gates! {
     /// Colouring the code in agents' words: `ClientMessage::Colour`
     /// (`Code`), answered with `Event::Coloured`.
     COLOURS = 84,
+    /// A preview's colours, as the file's buffer is highlighted:
+    /// `Found::Preview`'s `spans`.
+    PREVIEW_COLOURS = 85,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

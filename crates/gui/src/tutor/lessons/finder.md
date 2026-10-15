@@ -29,7 +29,7 @@ finder files
 
 ## Pick one
 
-What you type matches as fzf's does: letters in order, `'word` exactly, `^word` at the start, `word$` at the end, and `!word` leaves out. When nothing matches, the list says so. Down and Up, or Ctrl+N and Ctrl+P, pick. Enter opens it in place of the focused pane's file, Ctrl+V and Ctrl+X beside or below, and Ctrl+T in a new tab. Esc closes the finder.
+What you type matches as fzf's does: letters in order, `'word` exactly, `^word` at the start, `word$` at the end, and `!word` leaves out. The letters it matched are picked out in every list. When nothing matches, the list says so. Beside the list, the file picked is previewed, coloured as it is in an editor if it's open, and an empty file says so. Down and Up, or Ctrl+N and Ctrl+P, pick. Enter opens it in place of the focused pane's file, Ctrl+V and Ctrl+X beside or below, and Ctrl+T in a new tab. Esc closes the finder.
 
 Type `bet`, and press Enter.
 
@@ -49,7 +49,7 @@ file "alpha.txt"
 
 ## Grep
 
-`<Space>pgf` greps the project's files as you type: a regular expression, or plain text if it isn't one. Enter goes to the line picked.
+`<Space>pgf` greps the project's files as you type: a regular expression, or plain text if it isn't one. What it matched is picked out in the list, and in the line in the preview. Enter goes to the line picked.
 
 Press `<Space>pgf`, type `kiwi`, and press Enter.
 
@@ -70,7 +70,7 @@ finder buffers
 
 ## What's wrong
 
-`<Space>ds` lists what the language servers say is wrong in the project's files, the worst first: those open, and those a server has checked, as rust-analyzer checks a whole crate. In an editor, mistakes are underlined, the worst on each line is written dimly after it, and `]d` and `[d` go to the next and the one before. `K` shows what's under the cursor, with what's wrong there, and Ctrl+W `d` just what's wrong. The code in what `K` shows is coloured in its language once the daemon has read it, and what it's about is underlined while it's shown.
+`<Space>ds` lists what the language servers say is wrong in the project's files, the worst first, each `error`, `warning`, `info` or `hint` in its colour from the editor: those open, and those a server has checked, as rust-analyzer checks a whole crate. In an editor, mistakes are underlined, the worst on each line is written dimly after it, and `]d` and `[d` go to the next and the one before. `K` shows what's under the cursor, with what's wrong there, and Ctrl+W `d` just what's wrong. The code in what `K` shows is coloured in its language once the daemon has read it, and what it's about is underlined while it's shown.
 
 These text files have no language server, so here the list is empty. Press `<Space>ds` to see it, and Esc to close it.
 
@@ -80,7 +80,7 @@ finder diagnostics
 
 ## Symbols
 
-`<Space>bs` lists the symbols in the file, as its language server knows them: its functions, its types and their fields, each with what it is, indented inside what it's in. What you type narrows them down, and Enter goes to the one picked, as a jump, so Ctrl+O comes back. `<Space>ps` finds symbols in the whole project, asking the server again as you type, and opens the file of the one picked. A server that can tell is asked first by `grn` whether what's under the cursor can be renamed: if it can't, the bar says so at once, and if it can, the new name starts as the server suggests.
+`<Space>bs` lists the symbols in the file, as its language server knows them: its functions, its types and their fields, each with what it is, indented inside what it's in. What you type narrows them down, and Enter goes to the one picked, as a jump, so Ctrl+O comes back. `<Space>ps` finds symbols in the whole project, asking the server again as you type, with the letters it asked for picked out in their names, and opens the file of the one picked. A server that can tell is asked first by `grn` whether what's under the cursor can be renamed: if it can't, the bar says so at once, and if it can, the new name starts as the server suggests.
 
 Once the cursor rests on a name in normal mode, the other places it's used in the file are lit, as its language server says: where it's written a little brighter than where it's read. `:set nohlu` turns that off. `gq` on a selection, or `:'<,'>Format`, has the server format just those lines, one undo step, as `:Format` does the whole file; a server that can't says why.
 

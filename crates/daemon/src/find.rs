@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use clackatoo_protocol::{Done, Found, FoundBuffer, FoundLine, FoundSymbol, Symbol};
 use clackatoo_syntax::Server;
-use clackatoo_text::{Diagnostic, Rope, Severity};
+use clackatoo_text::{Diagnostic, Highlights, Rope, Severity, Span};
 
 use ignore::{DirEntry, ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
 use regex::bytes::{Regex, RegexBuilder};
@@ -164,12 +164,13 @@ pub(crate) enum Job {
         more: bool,
     },
     /// Up to `lines` lines of the file at `path`, around line `line`, from
-    /// its buffer's text if it's open.
+    /// its buffer's text if it's open, coloured with its buffer's
+    /// highlights over those lines (see [`preview_first`]).
     Preview {
         path: PathBuf,
         line: u64,
         lines: u16,
-        open: Option<Rope>,
+        open: Option<(Rope, Vec<Span>)>,
     },
 }
 
@@ -401,14 +402,18 @@ fn run(job: Job, home: &Path, out: &Out) {
             lines,
             open,
         } => {
-            let first = line.saturating_sub(u64::from(lines / 3));
+            let first = preview_first(line, lines);
             let found = match open {
-                Some(text) => Ok(preview_text(&text, first, lines)),
-                None => preview_file(&path, first, lines),
+                Some((text, spans)) => Ok(preview_text(&text, first, lines, &spans)),
+                None => preview_file(&path, first, lines).map(|lines| (lines, Vec::new())),
             };
             match found {
-                Ok(lines) => {
-                    out.send(Found::Preview { first, lines });
+                Ok((lines, spans)) => {
+                    out.send(Found::Preview {
+                        first,
+                        lines,
+                        spans,
+                    });
                     out.done();
                 }
                 Err(why) => out.send(Found::Done(Done::Failed(why))),
@@ -791,7 +796,10 @@ fn grep(regex: &Regex, text: &[u8], found: &mut dyn FnMut(FoundLine) -> bool) {
         let matches: Vec<(usize, usize)> = (regex.find_iter(whole))
             .map(|matched| (matched.start(), matched.end()))
             .collect();
-        if let Some(&(col, _)) = matches.first()
+        // Where the first match that's more than empty starts, as an empty
+        // one isn't sent: `x*` matches nothing at the start of every line.
+        let first = (matches.iter()).find(|&&(start, end)| start < end);
+        if let Some(&(col, _)) = first.or(matches.first())
             && !found(found_line(whole, line as u64, col, &matches))
         {
             return;
@@ -850,17 +858,77 @@ fn cut(mut text: String, max: usize) -> String {
     text
 }
 
-/// Up to `count` lines of `text` from line `first`.
-fn preview_text(text: &Rope, first: u64, count: u16) -> Vec<String> {
+/// The first line a preview of `lines` lines round line `line` starts at:
+/// a third of them before it.
+pub(crate) fn preview_first(line: u64, lines: u16) -> u64 {
+    line.saturating_sub(u64::from(lines / 3))
+}
+
+/// The spans of `highlights`, of `text`, that a preview of lines `first`
+/// to `last` shows, in order: those over each line's first
+/// [`MAX_PREVIEW_LINE`] bytes, which is as much as a preview keeps. So a
+/// preview copies at most a few hundred a line on the event loop, however
+/// long the lines are, as in a minified file.
+pub(crate) fn preview_spans(
+    text: &Rope,
+    highlights: &Highlights,
+    first: usize,
+    last: usize,
+) -> Vec<Span> {
+    let mut spans: Vec<Span> = Vec::new();
+    for line in first..last.min(text.len_lines()) {
+        let start = text.line_to_byte(line);
+        let end = text.line_to_byte(line + 1).min(start + MAX_PREVIEW_LINE);
+        for &span in highlights.within(start, end) {
+            // One over several lines, as a long comment, is had once.
+            if spans.last() != Some(&span) {
+                spans.push(span);
+            }
+        }
+    }
+    spans
+}
+
+/// Up to `count` lines of `text` from line `first`, as [`preview_file`]
+/// reads a file's, so the empty line after a last line break is none; and
+/// what of `spans`, highlights of `text` in order, is in them, as bytes of
+/// the lines each followed by a line break (see `Found::Preview`).
+fn preview_text(text: &Rope, first: u64, count: u16, spans: &[Span]) -> (Vec<String>, Vec<Span>) {
     let first = usize::try_from(first).unwrap_or(usize::MAX);
-    let lines = text.len_lines();
-    (first..lines.min(first.saturating_add(usize::from(count))))
-        .map(|line| {
-            let line = text.line(line).to_string();
-            let line = line.strip_suffix('\n').unwrap_or(&line);
-            cut(line.to_owned(), MAX_PREVIEW_LINE)
-        })
-        .collect()
+    let mut lines = text.len_lines();
+    if text.line(lines - 1).len_bytes() == 0 {
+        lines -= 1;
+    }
+    let mut shown = Vec::new();
+    let mut coloured = Vec::new();
+    let mut spans = spans.iter().peekable();
+    // Where the line starts among those shown.
+    let mut at = 0;
+    for line in first..lines.min(first.saturating_add(usize::from(count))) {
+        let start = text.line_to_byte(line);
+        let whole = text.line(line).to_string();
+        // Without its line break, a CR and all, as `preview_file` reads it.
+        let bare = whole.strip_suffix('\n').unwrap_or(&whole);
+        let bare = bare.strip_suffix('\r').unwrap_or(bare);
+        let kept = cut(bare.to_owned(), MAX_PREVIEW_LINE);
+        let end = start + kept.len();
+        while spans.next_if(|span| span.end <= start).is_some() {}
+        // A span may go on into the lines after, as a long comment does.
+        // None that ends before the line is kept, nor is anything empty, if
+        // the spans aren't quite in order.
+        let within = (spans.clone().take_while(|span| span.start < end))
+            .filter(|span| span.end > start && span.start < span.end);
+        for span in within {
+            coloured.push(Span {
+                start: span.start.saturating_sub(start) + at,
+                end: span.end.min(end).saturating_sub(start) + at,
+                kind: span.kind,
+            });
+        }
+        at += kept.len() + 1;
+        shown.push(kept);
+    }
+    (shown, coloured)
 }
 
 /// Up to `count` lines of the file at `path` from line `first`, read no
@@ -940,6 +1008,15 @@ mod tests {
         // An empty match still matches the line, but there's no line after
         // the last line's end.
         assert_eq!(lines("x*", true, "a\nb").len(), 2);
+        // Its place is its first match that isn't empty, the one sent.
+        assert_eq!(
+            lines("x*", true, "  ab x\n\tx"),
+            [
+                (0, 5, "  ab x".into(), vec![(5, 6)]),
+                (1, 1, "\tx".into(), vec![(1, 2)]),
+            ]
+        );
+        assert_eq!(lines("a|", true, "  ba")[0].1, 3);
         assert_eq!(lines("^", true, "a\nb\n").len(), 2);
         assert_eq!(lines("$", true, "a\n\n").len(), 2);
         assert!(lines("^", true, "").is_empty());
@@ -963,8 +1040,23 @@ mod tests {
         std::fs::write(&path, &text).unwrap();
         let from_file = preview_file(&path, 10, 3).unwrap();
         assert_eq!(from_file, ["line 10", "line 11", "line 12"]);
-        assert_eq!(preview_text(&Rope::from_str(&text), 10, 3), from_file);
+        assert_eq!(
+            preview_text(&Rope::from_str(&text), 10, 3, &[]).0,
+            from_file
+        );
         assert_eq!(preview_file(&path, 99, 3).unwrap(), ["line 99"]);
+        // Both read the lines of a file as its lines, not the empty one
+        // after its last line break: none in an empty file.
+        assert_eq!(
+            preview_text(&Rope::from_str(&text), 99, 3, &[]).0,
+            ["line 99"]
+        );
+        for text in ["", "\n", "a\n\n"] {
+            std::fs::write(&path, text).unwrap();
+            let from_file = preview_file(&path, 0, 3).unwrap();
+            assert_eq!(preview_text(&Rope::from_str(text), 0, 3, &[]).0, from_file);
+        }
+        assert!(preview_file(&path, 0, 0).unwrap().is_empty());
         std::fs::write(&path, b"ELF\0\x01").unwrap();
         assert_eq!(preview_file(&path, 0, 3), Err("it isn't text".into()));
         // A pipe, which nothing writes, isn't waited on, nor a directory.
@@ -977,6 +1069,87 @@ mod tests {
         let mut read = Vec::new();
         assert!(read_text(Path::new("/proc/self/status"), &mut read).is_some());
         assert!(!read.is_empty());
+    }
+
+    #[test]
+    fn a_previews_colours_are_its_lines_highlights_cut_where_they_are() {
+        use clackatoo_text::Kind;
+        let span = |start, end, kind| Span { start, end, kind };
+        // A comment over three lines, a keyword, and a string past where
+        // its line is cut.
+        let long = "x".repeat(MAX_PREVIEW_LINE);
+        let text = format!("/* a\nb\nc */ fn\n\"{long}\"\nend\n");
+        let after = 17 + long.len();
+        // And one out of order, ending before the lines shown, which is
+        // passed over rather than taken from where they start.
+        let spans = [
+            span(0, 11, Kind::Comment),
+            span(2, 3, Kind::Keyword),
+            span(12, 14, Kind::Keyword),
+            span(15, after, Kind::String),
+        ];
+        let (lines, coloured) = preview_text(&Rope::from_str(&text), 1, 3, &spans);
+        assert_eq!(lines[..2], ["b", "c */ fn"]);
+        assert_eq!(lines[2].len(), MAX_PREVIEW_LINE);
+        // Shown from line 1: "b\n" is bytes 0 to 2, "c */ fn\n" 2 to 10.
+        assert_eq!(
+            coloured,
+            [
+                span(0, 1, Kind::Comment),
+                span(2, 6, Kind::Comment),
+                span(7, 9, Kind::Keyword),
+                span(10, 10 + MAX_PREVIEW_LINE, Kind::String),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_previews_colours_count_bytes_and_leave_out_a_lines_cr() {
+        use clackatoo_text::Kind;
+        let span = |start, end, kind| Span { start, end, kind };
+        let text = "é = 1;\r\nfn x\r\n";
+        // `1`, `fn`, and `x` with the CR after it.
+        let spans = [
+            span(5, 6, Kind::Number),
+            span(9, 11, Kind::Keyword),
+            span(12, 14, Kind::String),
+        ];
+        let (lines, coloured) = preview_text(&Rope::from_str(text), 0, 5, &spans);
+        assert_eq!(lines, ["é = 1;", "fn x"]);
+        // As a file's lines are read from disk.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(preview_file(&path, 0, 5).unwrap(), lines);
+        // "é = 1;\n" is bytes 0 to 8, and `x` is cut at its line's end.
+        assert_eq!(
+            coloured,
+            [
+                span(5, 6, Kind::Number),
+                span(8, 10, Kind::Keyword),
+                span(11, 12, Kind::String),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_preview_copies_only_the_highlights_it_shows() {
+        use clackatoo_text::Kind;
+        let span = |start, end, kind| Span { start, end, kind };
+        // A minified file: one long line, a span every other byte.
+        let long = "a;".repeat(5000);
+        let text = Rope::from_str(&format!("/* x\ny */\n{long}\nlast\n"));
+        let mut highlights = Highlights::new();
+        let mut spans = vec![span(0, 9, Kind::Comment)];
+        spans.extend((0..5000).map(|n| span(10 + 2 * n, 11 + 2 * n, Kind::Variable)));
+        highlights.replace(0, text.len_bytes(), spans);
+        let shown = preview_spans(&text, &highlights, 0, 4);
+        // The comment over two lines once, and the long line's first
+        // MAX_PREVIEW_LINE bytes' only.
+        assert_eq!(shown[0], span(0, 9, Kind::Comment));
+        assert_eq!(shown[1..].len(), MAX_PREVIEW_LINE / 2);
+        assert_eq!(shown.last(), Some(&span(408, 409, Kind::Variable)));
+        assert!(preview_spans(&text, &highlights, 3, 9).is_empty());
     }
 
     #[test]

@@ -11,8 +11,7 @@
 //! and made again in its colours once the daemon has read it (see
 //! [`Panel::colour`]).
 
-use clackatoo_protocol::Color;
-use clackatoo_text::{Diagnostic, Kind, Severity, Span};
+use clackatoo_text::{Diagnostic, Severity, Span};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::colors;
@@ -588,14 +587,6 @@ fn code(text: String, ink: Ink) -> Block {
     }])
 }
 
-/// The ink code of `kind` is drawn in, as in an editor.
-fn ink_of(kind: Kind) -> Ink {
-    match colors::syntax(kind).fg {
-        Color::Default => Ink::Plain,
-        color => Ink::Color(color),
-    }
-}
-
 /// `text`, which starts at byte `from` of the markdown it's from, if it's
 /// the markdown's own text there, as runs coloured as `spans`, bytes of
 /// the markdown in order, say. Text whose place isn't known is plain.
@@ -631,7 +622,7 @@ fn coloured(text: &str, from: Option<usize>, spans: &[Span]) -> Vec<Run> {
         if !before.is_empty() {
             runs.push(run(before, Ink::Plain));
         }
-        runs.push(run(inside, ink_of(span.kind)));
+        runs.push(run(inside, colors::syntax_ink(span.kind)));
         done = stop;
     }
     if done < end {
@@ -1015,6 +1006,7 @@ fn line_of(cells: &[(char, usize)], runs: &[Run]) -> Line {
 mod tests {
     use super::*;
     use crate::motion::Point;
+    use clackatoo_text::Kind;
 
     fn texts(lines: &[Line]) -> Vec<String> {
         lines.iter().map(Line::text).collect()
@@ -1185,7 +1177,7 @@ mod tests {
                 .map(|run| (run.text, run.ink))
                 .collect()
         };
-        let keyword = ("fn".to_owned(), ink_of(Kind::Keyword));
+        let keyword = ("fn".to_owned(), colors::syntax_ink(Kind::Keyword));
         // One within the one before is passed over, as is one ending
         // inside a character.
         assert_eq!(
@@ -1199,7 +1191,7 @@ mod tests {
         // One overlapping the one before is coloured past it.
         assert_eq!(
             runs(&[span(10, 12, Kind::Keyword), span(10, 15, Kind::String)]),
-            [keyword, (" é".to_owned(), ink_of(Kind::String))]
+            [keyword, (" é".to_owned(), colors::syntax_ink(Kind::String))]
         );
     }
 

@@ -14,6 +14,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::wire;
+
 /// What a client asks the daemon to find.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Search {
@@ -88,6 +90,15 @@ pub enum Found {
         first: u64,
         /// The lines, without their line ends.
         lines: Vec<String>,
+        /// How they're coloured, as the file's buffer is highlighted, if
+        /// it's open: in order, as bytes of the lines each followed by a
+        /// line break, none past the end of a line. Empty for a file not
+        /// open, and from a daemon older than protocol 85.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::PREVIEW_COLOURS }, _>",
+            deserialize_with = "wire::since::<{ wire::PREVIEW_COLOURS }, _, _>"
+        )]
+        spans: Vec<crate::Span>,
     },
     /// The search has finished: nothing more comes of it.
     Done(Done),

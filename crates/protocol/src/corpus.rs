@@ -28,7 +28,7 @@ use clackatoo_text::{
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
     COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER, INLAY_HINTS, LIMITS,
-    PHONE_TERMINALS, SYMBOLS, USES, WORDS,
+    PHONE_TERMINALS, PREVIEW_COLOURS, SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
@@ -753,6 +753,22 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             })),
         ),
     ]);
+    // A preview of an open file, coloured as its buffer is.
+    samples.push((
+        PREVIEW_COLOURS,
+        Server(ServerMessage::Event(Event::Found {
+            id: 9,
+            found: Found::Preview {
+                first: 2,
+                lines: vec!["fn a() {".into(), "}".into()],
+                spans: vec![Span {
+                    start: 0,
+                    end: 2,
+                    kind: Kind::Keyword,
+                }],
+            },
+        })),
+    ));
     samples
 }
 

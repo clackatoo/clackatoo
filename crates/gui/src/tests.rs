@@ -2164,7 +2164,11 @@ fn grep_finder_view(layout: &crate::finder::view::Layout) -> crate::finder::view
             _ => format!("// line {n}"),
         })
         .collect();
-    finder.preview_found(Found::Preview { first: 0, lines });
+    finder.preview_found(Found::Preview {
+        first: 0,
+        lines,
+        spans: Vec::new(),
+    });
     finder.view((layout.rows, layout.cols), layout.preview_size)
 }
 

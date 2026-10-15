@@ -11,7 +11,7 @@ use clackatoo_protocol::{
     OpenFiles, PaneId, Response, Resume, ServerMessage, frame,
 };
 use clackatoo_syntax::{Found, Highlighted, Syntax, pack};
-use clackatoo_text::{AgentHunks, Highlights, Hunks, Maker};
+use clackatoo_text::{AgentHunks, Highlights, Hunks, Maker, Rope, Span};
 use mio::Token;
 
 use super::language::Opened;
@@ -99,6 +99,14 @@ impl BufferSlot {
             unreadable: None,
             applied: HashMap::new(),
         }
+    }
+
+    /// Its text, and its highlights over what a preview of lines `first`
+    /// to `last` shows (see [`crate::find::preview_spans`]).
+    pub(super) fn preview(&self, first: usize, last: usize) -> (Rope, Vec<Span>) {
+        let text = self.buffer.text();
+        let spans = crate::find::preview_spans(text, &self.highlights, first, last);
+        (text.clone(), spans)
     }
 
     /// Whether its file has changed on disk, not only by an agent, since
