@@ -557,7 +557,7 @@ impl Desk {
         if let Some(message) =
             (self.explorers.panes.get_mut(&pane)).and_then(Explorer::take_message)
         {
-            self.message = Some(message);
+            self.say(message);
         }
         let text = copy.text();
         let line = at.and_then(|at| {
@@ -654,7 +654,7 @@ impl Desk {
             return;
         };
         if !explorer.editing_text() {
-            self.message = Some("y makes the changes, n goes back to the listing".into());
+            self.say("y makes the changes, n goes back to the listing".into());
             return;
         }
         let folder = explorer.is_folder();
@@ -663,12 +663,12 @@ impl Desk {
                 self.request(Request::ClosePane { pane }, Asked::Command);
             }
             Planned::Nothing if quit => self.drop_listings(pane),
-            Planned::Nothing => self.message = Some("nothing has changed".into()),
+            Planned::Nothing => self.say("nothing has changed".into()),
             Planned::Asking if !self.connected => {
                 if let Some(explorer) = self.explorers.panes.get_mut(&pane) {
                     explorer.back_to_text();
                 }
-                self.message = Some("not connected: nothing can be changed".into());
+                self.warn("not connected: nothing can be changed".into());
             }
             Planned::Asking => {
                 if let Some((editor, copy)) = self.take_listing_editor(pane) {
@@ -688,7 +688,7 @@ impl Desk {
                     }
                     self.with_editor(pane, |editor, copy| editor.go_to(line, 0, copy));
                 }
-                self.message = Some(format!("can't: {why}"));
+                self.warn(format!("can't: {why}"));
             }
         }
     }
@@ -698,12 +698,11 @@ impl Desk {
     /// changed, which `force` throws away.
     pub(super) fn leave_listings(&mut self, pane: PaneId, force: bool) {
         if (self.explorers.panes.get(&pane)).is_some_and(|explorer| !explorer.editing_text()) {
-            self.message = Some("y makes the changes, n goes back to the listing".into());
+            self.say("y makes the changes, n goes back to the listing".into());
             return;
         }
         if !force && self.listings_changed(pane) {
-            self.message =
-                Some("the listings have changes: :w makes them, :q! throws them away".into());
+            self.say("the listings have changes: :w makes them, :q! drops them".into());
             return;
         }
         if self.is_folder(pane) {
@@ -797,6 +796,8 @@ impl Desk {
             explorer.edit_above();
         }
         if let Some(message) = explorer.take_message() {
+            // Said through the fields, as the explorer is held still.
+            self.said.keep(&message);
             self.message = Some(message);
         }
         let asks = explorer.take_asks();
@@ -855,7 +856,7 @@ impl Desk {
     /// changes, listing the folder shown afresh.
     pub(super) fn list_shown_again(&mut self, pane: PaneId) {
         if (self.explorers.panes.get(&pane)).is_some_and(|explorer| !explorer.editing_text()) {
-            self.message = Some("y makes the changes, n goes back to the listing".into());
+            self.say("y makes the changes, n goes back to the listing".into());
             return;
         }
         let at = self.path_at_listing_cursor(pane);
@@ -901,9 +902,8 @@ impl Desk {
     /// which would be lost.
     fn toggle_listed_hidden(&mut self, pane: PaneId) {
         if self.listings_changed(pane) {
-            self.message = Some(
-                "the listings have changes: :w makes them, or :e! throws them away, before g."
-                    .into(),
+            self.say(
+                "the listings have changes: :w makes them, or :e! drops them, before g.".into(),
             );
             return;
         }
@@ -916,6 +916,8 @@ impl Desk {
         };
         explorer.toggle_hidden();
         if let Some(message) = explorer.take_message() {
+            // Said through the fields, as the explorer is held still.
+            self.said.keep(&message);
             self.message = Some(message);
         }
         self.list_again(pane, dir, at.as_deref());
@@ -1015,7 +1017,7 @@ impl Desk {
             return Some("y makes the changes, n goes back to the listing");
         }
         self.listings_changed(pane)
-            .then_some("the listing has changes: :w makes them, :e! throws them away")
+            .then_some("the listing has changes: :w makes them, :e! drops them")
     }
 
     /// Where the editor `pane`'s cursor is, if it shows a folder: the
@@ -1041,7 +1043,7 @@ impl Desk {
             && explorer.editing()
             && !explorer.editing_text()
         {
-            self.message = Some("y makes the changes, n goes back to the listing".into());
+            self.say("y makes the changes, n goes back to the listing".into());
             return;
         }
         if let Some(explorer) = self.explorers.panes.get_mut(&pane)
@@ -1049,6 +1051,8 @@ impl Desk {
         {
             explorer.edit_folder(place.dir.clone(), place.entry.as_deref());
             if let Some(message) = explorer.take_message() {
+                // Said through the fields, as the explorer is held still.
+                self.said.keep(&message);
                 self.message = Some(message);
             }
             let asks = explorer.take_asks();
@@ -1226,8 +1230,7 @@ impl Desk {
                 if self.shown.is_some_and(|shown| shown.pane == pane)
                     && self.listings_changed(pane) =>
             {
-                self.message =
-                    Some("the listings have changes: :w makes them, :q! throws them away".into());
+                self.say("the listings have changes: :w makes them, :q! drops them".into());
             }
             Some(pane) if self.shown.is_some_and(|shown| shown.pane == pane) => {
                 self.request(Request::ClosePane { pane }, Asked::Command);

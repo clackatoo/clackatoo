@@ -23,7 +23,7 @@ use clackatoo_term::mouse::{MouseAction, MouseButton};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::browser::BrowserPane;
-use crate::chrome::{ModeName, Status, WorkspaceName};
+use crate::chrome::{ModeName, NoteKind, Status, WorkspaceName};
 use crate::command::{self, Command, Kind, Place};
 use crate::finder::Finder;
 use crate::input::{self, KeptPress, KeyPress, Modifiers};
@@ -151,6 +151,7 @@ mod jumps;
 mod lessons;
 mod links;
 mod macros;
+mod messages;
 mod mode;
 mod offers;
 mod reviews;
@@ -247,6 +248,9 @@ pub(crate) struct Desk {
     /// A message for the focused pane's label, until the next key, such as
     /// why a command failed.
     message: Option<String>,
+    /// What's been said lately, for `:messages`, and whether the message
+    /// is a warning.
+    said: messages::Said,
     /// The daemon's offer to install a language, asked in the bar until
     /// the next key.
     offer: Option<offers::Offer>,
@@ -537,7 +541,7 @@ impl Desk {
     /// Turns down a key that can't reach the daemon in time: says so, and
     /// lights the focused pane up for a moment.
     pub(crate) fn refuse_offline(&mut self) {
-        self.message = Some("not connected: keys aren't sent".to_owned());
+        self.warn("not connected: keys aren't sent".to_owned());
         if let Some(shown) = self.shown {
             self.pointed = Some((shown.pane, std::time::Instant::now() + REFUSED_FOR));
         }
@@ -691,16 +695,12 @@ impl Desk {
                     choices: Vec::new(),
                 };
             }
-            let note = (self.keymap.hint())
-                .or_else(|| self.message.clone())
-                .unwrap_or(label);
-            let note = match self.recording() {
-                Some(register) => format!("recording @{register}  {note}"),
-                None => note,
-            };
+            let said = editor.said().map(str::to_owned);
+            let (note, kind) = self.note(said, Some(label));
             return Status::Tabs {
                 mode: Some(editor_mode_name(editor)),
-                note: Some(note),
+                note: note.map(|note| self.recording_before(note)),
+                kind,
                 panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
             };
         }
@@ -712,16 +712,11 @@ impl Desk {
                     choices: Vec::new(),
                 };
             }
-            let note = (self.keymap.hint())
-                .or_else(|| self.message.clone())
-                .unwrap_or(label);
-            let note = match self.recording() {
-                Some(register) => format!("recording @{register}  {note}"),
-                None => note,
-            };
+            let (note, kind) = self.note(None, Some(label));
             return Status::Tabs {
                 mode: Some(ModeName::Normal),
-                note: Some(note),
+                note: note.map(|note| self.recording_before(note)),
+                kind,
                 panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
             };
         }
@@ -739,15 +734,37 @@ impl Desk {
             };
         }
         let mode = pane.map(|pane| mode_name(pane.mode));
+        let label = pane.and_then(Pane::label).or_else(|| self.notice());
+        let (note, kind) = self.note(None, label);
         Status::Tabs {
             mode,
-            note: self
-                .keymap
-                .hint()
-                .or_else(|| self.message.clone())
-                .or_else(|| pane.and_then(Pane::label))
-                .or_else(|| self.notice()),
+            note,
+            kind,
             panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
+        }
+    }
+
+    /// The bottom bar's note, and what kind it is: the keys that can come
+    /// next, while some wait; or else the window's message, or what the
+    /// focused pane has `said`, until the next key; or else its `label`.
+    fn note(&self, said: Option<String>, label: Option<String>) -> (Option<String>, NoteKind) {
+        if let Some(keys) = self.keymap.hint() {
+            return (Some(keys), NoteKind::Keys);
+        }
+        if let Some((message, kind)) = self.message_note() {
+            return (Some(message), kind);
+        }
+        match (said, label) {
+            (Some(said), _) => (Some(said), NoteKind::Message),
+            (None, label) => (label, NoteKind::Label),
+        }
+    }
+
+    /// `note`, after the register a macro is being recorded into, if one is.
+    fn recording_before(&self, note: String) -> String {
+        match self.recording() {
+            Some(register) => format!("recording @{register}  {note}"),
+            None => note,
         }
     }
 
@@ -1263,9 +1280,8 @@ impl Desk {
                 Missed::Buffer(_) => "a file being edited".to_owned(),
                 Missed::Workspaces => "the workspaces".to_owned(),
             };
-            self.message = Some(format!(
-                "the daemon keeps sending what this window can't read about {what}: it's from \
-                 a newer clackatoo, and `:update` updates this window's"
+            self.warn(format!(
+                "can't read what the daemon says about {what}: the daemon is newer · :update"
             ));
             return false;
         }
@@ -1382,15 +1398,15 @@ impl Desk {
                             self.land_at(pane, landing);
                         }
                     }
-                    Response::Error(err) => self.message = Some(err.to_string()),
+                    Response::Error(err) => self.warn(err.to_string()),
                     _ => {}
                 }
                 true
             }
             Some(Asker::Window(Asked::Reviewed)) => {
                 match response {
-                    Response::Reviewed(said) if !said.is_empty() => self.message = Some(said),
-                    Response::Error(err) => self.message = Some(err.to_string()),
+                    Response::Reviewed(said) if !said.is_empty() => self.say(said),
+                    Response::Error(err) => self.warn(err.to_string()),
                     _ => {}
                 }
                 true
@@ -1418,7 +1434,7 @@ impl Desk {
             Some(Asker::Window(Asked::Explorer { reveal, edit })) => {
                 match response {
                     Response::PaneCreated(pane) => self.explorer_made(pane, reveal, edit),
-                    Response::Error(err) => self.message = Some(err.to_string()),
+                    Response::Error(err) => self.warn(err.to_string()),
                     _ => {}
                 }
                 true
@@ -1433,7 +1449,7 @@ impl Desk {
                 };
                 self.opened_here(pane, failed.is_some());
                 if let Some(err) = failed {
-                    self.message = Some(err);
+                    self.warn(err);
                 }
                 true
             }
@@ -1443,7 +1459,7 @@ impl Desk {
                     false
                 }
                 (_, Response::Error(err)) => {
-                    self.message = Some(err.to_string());
+                    self.warn(err.to_string());
                     true
                 }
                 // The workspaces came first, so the pane is there to show.
@@ -1519,11 +1535,13 @@ impl Desk {
         self.user_active();
         self.key_coming();
         self.record_press(press);
+        // Any key but Shift and the like closes `:messages`.
+        let closed = !input::is_modifier(press.key) && self.key_closes_messages();
         let redraw = self.key_with(press, true);
         let typed = self.type_macros();
         self.recorded_press();
         self.settle_lesson();
-        redraw || typed
+        redraw || typed || closed
     }
 
     /// Handles a key press, as [`key`](Self::key) does, but for the
@@ -2230,7 +2248,7 @@ impl Desk {
                 daemon: Some(daemon),
                 ..
             } => {
-                self.message = Some(format!(
+                self.say(format!(
                     "panes on {daemon} come with :connect, which isn't built yet"
                 ));
             }
@@ -2310,6 +2328,7 @@ impl Desk {
             Command::Find { kind, query } => self.open_finder(kind, query),
             Command::Hunk(action) => self.editor_hunk(action),
             Command::Registers => self.show_registers(),
+            Command::Messages => self.show_messages(),
             Command::Devices(command) => self.devices_command(command),
             Command::Marks => self.open_finder(crate::finder::Kind::Marks, String::new()),
             Command::Editor(line) => self.editor_command(&line),
@@ -2420,6 +2439,7 @@ fn mode_name(mode: Mode) -> ModeName {
 mod tests {
     mod folders;
     mod lessons;
+    mod messages;
     mod mode;
     mod mouse;
 
@@ -3449,6 +3469,7 @@ mod tests {
             Status::Tabs {
                 mode: Some(ModeName::Insert),
                 note: Some("pane 1-9".into()),
+                kind: NoteKind::Keys,
                 panes: 3
             }
         );
@@ -4404,7 +4425,7 @@ mod tests {
         assert!(
             desk.message
                 .as_deref()
-                .is_some_and(|said| said.contains("can't read about terminal 3")),
+                .is_some_and(|said| said.contains("says about terminal 3")),
             "{:?}",
             desk.message
         );
@@ -4461,7 +4482,7 @@ mod tests {
         assert!(
             desk.message
                 .as_deref()
-                .is_some_and(|said| said.contains("can't read about a file being edited")),
+                .is_some_and(|said| said.contains("says about a file being edited")),
             "{:?}",
             desk.message
         );
@@ -4541,7 +4562,7 @@ mod tests {
         assert!(
             desk.message
                 .as_deref()
-                .is_some_and(|said| said.contains("can't read about a file being edited")),
+                .is_some_and(|said| said.contains("says about a file being edited")),
             "{:?}",
             desk.message
         );
@@ -4748,17 +4769,25 @@ mod tests {
         assert_eq!(
             first.message.as_deref(),
             Some(
-                "the file changed since the daemon restarted; your unsaved changes to /notes are \
-                 kept in this window: `:w!` to replace it with them, or `:e!` to take the daemon's"
+                "the file changed since the daemon restarted; your changes to /notes are kept \
+                 here: :w! writes them, :e! takes the daemon's"
             )
         );
+        // It's a warning, in the warning colour.
+        assert!(matches!(
+            first.status(),
+            Status::Tabs {
+                kind: NoteKind::Warning { .. },
+                ..
+            }
+        ));
         assert_eq!(
             edits_and_save(&mut first),
             (vec![], None),
             "nothing unasked"
         );
-        let refused = "the file changed since the daemon restarted: `:w!` to replace it with this \
-                       window's text, or `:e!` to take the daemon's";
+        let refused = "the file changed since the daemon restarted: :w! writes this window's \
+                       text, :e! takes the daemon's";
         command(&mut first, "w");
         assert_eq!(first.message.as_deref(), Some(refused));
         assert_eq!(edits_and_save(&mut first), (vec![], None));
@@ -5158,7 +5187,7 @@ mod tests {
         assert!(requests(&desk.take_outbox()).is_empty());
         assert_eq!(
             desk.message.as_deref(),
-            Some("notes.txt changed on disk: `:e!` to take it, `:w!` to keep yours")
+            Some("notes.txt changed on disk: :e! takes it, :w! keeps yours")
         );
         command(&mut desk, "q");
         assert_eq!(
@@ -6364,8 +6393,9 @@ mod tests {
         command(&mut desk, "%Format");
         assert!(format_asked(&mut desk).is_empty());
         assert!(
-            (desk.message.as_deref()).is_some_and(|message| message
-                .starts_with("formatting a selection needs a newer clackatoo daemon")),
+            (desk.message.as_deref()).is_some_and(
+                |message| message.starts_with("formatting a selection needs a newer daemon")
+            ),
             "{:?}",
             desk.message
         );
@@ -6748,8 +6778,9 @@ mod tests {
         type_keys(&mut desk, " bs");
         assert!(desk.finder_view((10, 60), None).is_none());
         assert!(
-            (desk.message.as_deref()).is_some_and(|message| message
-                .starts_with("listing a file's symbols needs a newer clackatoo daemon")),
+            (desk.message.as_deref()).is_some_and(
+                |message| message.starts_with("listing a file's symbols needs a newer daemon")
+            ),
             "{:?}",
             desk.message
         );
@@ -7170,7 +7201,7 @@ mod tests {
         // Federation isn't built, and says so.
         command(&mut desk, "connect server");
         assert!(!desk.take_connect_asked());
-        assert!(note(&desk).starts_with("bringing server's workspaces in here isn't built yet"));
+        assert!(note(&desk).starts_with(":connect server isn't built yet"));
     }
 
     #[test]
@@ -9437,8 +9468,7 @@ mod tests {
         assert_eq!(file_ops(&mut desk), [], "nothing done");
         assert_eq!(
             note(&desk),
-            "nothing was done: a folder has changed since its listing was made. :q! and e again \
-             shows it as it is"
+            "nothing was done: a folder changed since it was listed. :q! then e shows it afresh"
         );
         assert_eq!(listing_shown(&desk), ["..", "b.txt"], "back to the text");
         command(&mut desk, "q!");
@@ -9506,7 +9536,7 @@ mod tests {
         assert_eq!(listing_shown(&desk), ["..", "ok.txt"]);
         assert_eq!(
             note(&desk),
-            "2 names with line breaks or stray marks in them are left out, and left alone"
+            "2 names with line breaks or stray marks are left out, untouched"
         );
         type_keys(&mut desk, "dd");
         command(&mut desk, "w");
@@ -9667,7 +9697,7 @@ mod tests {
         command(&mut desk, "q");
         assert_eq!(
             note(&desk),
-            "the listings have changes: :w makes them, :q! throws them away"
+            "the listings have changes: :w makes them, :q! drops them"
         );
         command(&mut desk, "w");
         type_keys(&mut desk, "y");

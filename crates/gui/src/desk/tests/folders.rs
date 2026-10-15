@@ -197,7 +197,7 @@ fn a_listing_with_changes_isnt_left_until_theyre_made_or_thrown_away() {
     type_keys(&mut desk, "dd");
     // Enter on a file, `:e`, and Ctrl+O would lose them.
     enter(&mut desk);
-    let refusal = "the listing has changes: :w makes them, :e! throws them away";
+    let refusal = "the listing has changes: :w makes them, :e! drops them";
     assert_eq!(note(&desk), refusal);
     command(&mut desk, "e /p/a.txt");
     assert_eq!(note(&desk), refusal);
@@ -205,7 +205,7 @@ fn a_listing_with_changes_isnt_left_until_theyre_made_or_thrown_away() {
     command(&mut desk, "q");
     assert_eq!(
         note(&desk),
-        "the listings have changes: :w makes them, :q! throws them away"
+        "the listings have changes: :w makes them, :q! drops them"
     );
     assert!(answer_all(&mut desk).is_empty());
     // `:q!` closes the pane, as for a file.
@@ -498,7 +498,7 @@ fn e_bang_in_a_folder_throws_away_every_listings_changes() {
     enter(&mut desk);
     assert_eq!(
         note(&desk),
-        "the listing has changes: :w makes them, :e! throws them away"
+        "the listing has changes: :w makes them, :e! drops them"
     );
     command(&mut desk, "e!");
     assert_eq!(listing_shown(&desk), ["..", "src/", "a.txt"]);
@@ -541,7 +541,7 @@ fn a_folder_with_changes_gone_from_disk_keeps_every_change_from_being_made() {
     assert_eq!(note(&desk), "make these 2 changes? (y/n)");
     type_keys(&mut desk, "y");
     assert_eq!(file_ops(&mut desk), [], "nothing done");
-    assert!(note(&desk).starts_with("nothing was done: a folder has changed"));
+    assert!(note(&desk).starts_with("nothing was done: a folder changed"));
 }
 
 #[test]

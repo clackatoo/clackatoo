@@ -366,9 +366,12 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     assert_eq!(desk.shown().unwrap().tab, TabId(2));
     assert_eq!(step(&desk), 12);
 
+    // What the bar has said.
+    command(&mut desk, "messages");
+    assert_eq!(step(&desk), 13);
     // The last step is to read: `]s` goes on, to the end.
     let lesson = tutor::lesson("basics").unwrap();
-    assert!(lesson.steps[12].checks.is_empty());
+    assert!(lesson.steps[13].checks.is_empty());
     ctrl(&mut desk, "l");
     assert_eq!(shown_pane(&desk), PaneId(2));
     type_keys(&mut desk, "]s");
@@ -976,7 +979,7 @@ fn whats_new_is_noticed_once_for_each_build_with_something_new() {
     );
     assert_eq!(
         desk.message.as_deref(),
-        Some("Welcome to clackatoo: :Tutor to start")
+        Some("Welcome to clackatoo · :Tutor to start")
     );
     // Once a window at most, even if it couldn't be written down, as in a
     // directory the window may only read: connecting again says nothing.
@@ -1008,7 +1011,7 @@ fn whats_new_is_noticed_once_for_each_build_with_something_new() {
     );
     assert_eq!(
         desk.message.as_deref(),
-        Some("clackatoo updated: see what's new (:Tutor new)")
+        Some("clackatoo updated · :Tutor new")
     );
 }
 
@@ -1029,10 +1032,7 @@ fn whats_new_has_the_bar_until_a_key_then_a_release_out_says_so() {
     );
     answer_all(&mut desk);
     snapshot(&mut desk, 1);
-    assert_eq!(
-        note(&desk),
-        "clackatoo updated: see what's new (:Tutor new)"
-    );
+    assert_eq!(note(&desk), "clackatoo updated · :Tutor new");
     normal_mode(&mut desk);
     assert_eq!(note(&desk), "clackatoo 2026.10.3 is out: :update");
 }

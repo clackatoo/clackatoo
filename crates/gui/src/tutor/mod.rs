@@ -367,6 +367,9 @@ mod tests {
         fn recording(&self) -> Option<char> {
             None
         }
+        fn messages_shown(&self) -> bool {
+            false
+        }
     }
 
     #[test]

@@ -20,9 +20,9 @@ impl Desk {
         match host {
             None => self.connect_asked = true,
             Some(host) => {
-                self.message = Some(format!(
-                    "bringing {host}'s workspaces in here isn't built yet; :connect alone opens \
-                     a window on a machine you pick"
+                self.say(format!(
+                    ":connect {host} isn't built yet: :connect alone opens a window on a machine \
+                     you pick"
                 ));
             }
         }

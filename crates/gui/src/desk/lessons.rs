@@ -43,10 +43,10 @@ use crate::tutor::{self, Io, Lesson, Rendered, Setup, Start, State};
 const TICK: Duration = Duration::from_millis(900);
 
 /// What the notice says when there's something new.
-const UPDATED: &str = "clackatoo updated: see what's new (:Tutor new)";
+const UPDATED: &str = "clackatoo updated · :Tutor new";
 
 /// What the notice says the first time clackatoo runs.
-const WELCOME: &str = "Welcome to clackatoo: :Tutor to start";
+const WELCOME: &str = "Welcome to clackatoo · :Tutor to start";
 
 /// What the tutor asked the daemon for, whose answer it waits on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,7 +217,7 @@ impl Desk {
     /// a bar to give it in.
     pub(super) fn tutor_connected(&mut self) {
         if let Some(notice) = self.tutor.notice.take() {
-            self.message = Some(notice.into());
+            self.say(notice.into());
         }
     }
 
@@ -431,7 +431,7 @@ impl Desk {
             (LessonAsked::Setup, response) => {
                 open.waiting = open.waiting.saturating_sub(1);
                 if let Response::Error(err) = response {
-                    self.message = Some(err.to_string());
+                    self.warn(err.to_string());
                 }
             }
             (LessonAsked::Block { again }, Response::Block(block)) => {
@@ -440,7 +440,7 @@ impl Desk {
             }
             (LessonAsked::Block { .. }, _) => open.asking_exit = false,
             (_, Response::Error(err)) => {
-                self.message = Some(format!("the lesson couldn't open: {err}"));
+                self.warn(format!("the lesson couldn't open: {err}"));
                 self.end_lesson();
             }
             (LessonAsked::Practice, Response::PaneCreated(pane)) => {
@@ -522,7 +522,7 @@ impl Desk {
         } else {
             state.steps.remove(id);
             state.done.insert(id.to_owned());
-            self.message = Some(format!(
+            self.say(format!(
                 "that's the end of {}: :q closes it, and :Tutor picks another",
                 lesson.title
             ));
@@ -760,8 +760,7 @@ impl Desk {
             if let Some(open) = &mut self.tutor.open {
                 open.healing = true;
             }
-            self.message =
-                Some("the lesson can't be changed: practise in the pane beside it".into());
+            self.say("the lesson can't be changed: practise in the pane beside it".into());
             self.request(
                 Request::Discard { buffer },
                 self.lesson_asked(LessonAsked::Heal),
@@ -1261,5 +1260,9 @@ impl Facts for DeskFacts<'_> {
 
     fn recording(&self) -> Option<char> {
         self.desk.registers().recording()
+    }
+
+    fn messages_shown(&self) -> bool {
+        self.desk.messages_listed().is_some()
     }
 }

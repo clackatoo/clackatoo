@@ -313,7 +313,7 @@ impl Desk {
         self.macros.paused = None;
         self.macros.waiting_in = None;
         if let Some(why) = why {
-            self.message = Some(why);
+            self.say(why);
         }
     }
 
@@ -321,7 +321,7 @@ impl Desk {
     /// command that isn't one: it's said, and the macro typing the key
     /// stops, as in Vim.
     pub(super) fn refuse(&mut self, message: String) {
-        self.message = Some(message);
+        self.warn(message);
         self.stop_macro(None);
     }
 

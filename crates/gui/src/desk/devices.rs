@@ -76,13 +76,17 @@ impl Desk {
     /// The daemon's answer to something `:Devices` asked: what to say in
     /// the bar.
     pub(super) fn devices_answered(&mut self, response: Response) -> bool {
-        self.message = Some(match response {
+        let said = match response {
             Response::Devices(devices) => listing(&devices, now_millis()),
             Response::Text(said) => said,
             Response::Done => "Unpaired the device".to_owned(),
-            Response::Error(err) => err.to_string(),
+            Response::Error(err) => {
+                self.warn(err.to_string());
+                return true;
+            }
             other => format!("the daemon answered {other:?}"),
-        });
+        };
+        self.say(said);
         true
     }
 

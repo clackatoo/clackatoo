@@ -120,6 +120,16 @@ The tutor workspace closes with its last pane: `:close` it before you go, if you
 shown lesson
 ```
 
+## When there's more than fits
+
+When a workspace has more tabs than the bottom bar has room for, it shows those around the tab shown, with a quiet count at either end, such as `‹3` or `5›`, of how many are hidden that way. Click a count to scroll that way. The workspaces in the top bar do the same.
+
+A message keeps to the room the tabs leave, cut short with `…` if it must be: hold the mouse over it to read it all. Type `:messages` to see what the bar has said lately, until the next key.
+
+```check
+messages
+```
+
 ## Where you've been
 
 Ctrl+O and Ctrl+I go back and forward through the places you've been in the tab, panes and places in files alike, as Vim's jump list does; Ctrl+Shift+O and Ctrl+Shift+I through everywhere: panes, tabs and workspaces.

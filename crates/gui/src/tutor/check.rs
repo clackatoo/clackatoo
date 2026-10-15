@@ -21,6 +21,7 @@
 //! | `rooted "PATH"` | A file explorer in the lesson's tab is rooted at PATH, from the lesson's folder: `.` for the folder itself. |
 //! | `file "NAME"` | The focused editor's file is called NAME. |
 //! | `recording R` | A macro is being recorded into register R. |
+//! | `messages` | `:messages` shows what the bar has said lately. |
 //! | `saved` | The practice file has no changes that aren't written. |
 //! | `not CHECK` | CHECK doesn't hold. |
 //!
@@ -52,6 +53,7 @@ pub(crate) enum Check {
     Rooted(String),
     File(String),
     Recording(char),
+    Messages,
     Saved,
     Not(Box<Check>),
 }
@@ -143,6 +145,8 @@ pub(crate) trait Facts {
     fn file(&self) -> Option<String>;
     /// The register a macro is being recorded into.
     fn recording(&self) -> Option<char>;
+    /// Whether `:messages` shows what the bar has said lately.
+    fn messages_shown(&self) -> bool;
 }
 
 impl Check {
@@ -204,6 +208,7 @@ impl Check {
             ["rooted", path] => Self::Rooted((*path).to_owned()),
             ["file", name] => Self::File((*name).to_owned()),
             ["recording", name] => Self::Recording(register(name)?),
+            ["messages"] => Self::Messages,
             ["saved"] => Self::Saved,
             _ => return Err("that isn't a check".into()),
         })
@@ -245,6 +250,7 @@ impl Check {
             Self::Rooted(path) => facts.rooted(path),
             Self::File(name) => facts.file().is_some_and(|file| file == *name),
             Self::Recording(name) => facts.recording() == Some(*name),
+            Self::Messages => facts.messages_shown(),
             Self::Saved => facts.practice_saved() == Some(true),
             Self::Not(check) => !check.holds(facts),
         }
@@ -348,6 +354,7 @@ mod tests {
         rooted: Option<String>,
         file: Option<String>,
         recording: Option<char>,
+        messages: bool,
     }
 
     impl Facts for Made {
@@ -402,6 +409,9 @@ mod tests {
         }
         fn recording(&self) -> Option<char> {
             self.recording
+        }
+        fn messages_shown(&self) -> bool {
+            self.messages
         }
     }
 
@@ -461,6 +471,12 @@ mod tests {
         assert!(!holds(r#"register a "one""#, &facts));
         assert!(holds(r#"copied "42""#, &facts));
         assert!(holds("recording q", &facts));
+        assert!(!holds("messages", &facts));
+        let facts = Made {
+            messages: true,
+            ..facts
+        };
+        assert!(holds("messages", &facts));
         assert!(!holds("recording a", &facts));
         assert!(Check::parse(r#"register ab "x""#).is_err());
     }

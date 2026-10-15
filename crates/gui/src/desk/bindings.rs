@@ -357,7 +357,7 @@ impl Desk {
             Action::ToggleInlayHints => {
                 self.run_set("inlayhints!");
                 let on = self.options.inlayhints;
-                self.message = Some(
+                self.say(
                     if on {
                         "inlay hints on"
                     } else {
@@ -452,7 +452,7 @@ impl Desk {
             .and_then(|placement| placement.panes.get(number - 1).map(|&(id, _)| id));
         match pane {
             Some(pane) => self.show_pane(pane),
-            None => self.message = Some(format!("there's no pane {number} in this tab")),
+            None => self.say(format!("there's no pane {number} in this tab")),
         }
     }
 

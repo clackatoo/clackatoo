@@ -23,17 +23,12 @@ impl Desk {
     /// Carries out `:update`, here, or on the machine named.
     pub(super) fn ask_update(&mut self, host: Option<String>) {
         self.update_asked = Some(host.map_or(UpdateAsked::Here, UpdateAsked::On));
-        self.message = Some("updating clackatoo…".into());
+        self.say("updating clackatoo…".into());
     }
 
     /// Takes the last `:update` asked for, for the window to carry out.
     pub(crate) fn take_update_asked(&mut self) -> Option<UpdateAsked> {
         self.update_asked.take()
-    }
-
-    /// Says `message` in the bar, until the next key.
-    pub(crate) fn say(&mut self, message: String) {
-        self.message = Some(message);
     }
 
     /// Sets what the bar says when nothing else has a say, such as that a
@@ -70,7 +65,7 @@ impl Desk {
             return true;
         }
         let (at, release) = self.daemon.clone().unwrap_or((PROTOCOL_VERSION, None));
-        self.message = Some(needs_newer(what, gate, at, release.as_deref(), self.remote));
+        self.warn(needs_newer(what, gate, at, release.as_deref(), self.remote));
         false
     }
 
@@ -99,14 +94,11 @@ impl Desk {
 fn needs_newer(what: &str, gate: u32, at: u32, release: Option<&str>, remote: bool) -> String {
     let release = release.map_or_else(String::new, |release| format!("{release}, "));
     let how = if remote {
-        "`clackatoo update` there updates it"
+        "clackatoo update there updates it"
     } else {
-        "`clackatoo upgrade` moves it onto this window's build"
+        "clackatoo upgrade moves it onto this build"
     };
-    format!(
-        "{what} needs a newer clackatoo daemon: it's {release}protocol {at}, and this needs \
-         protocol {gate}. {how}"
-    )
+    format!("{what} needs a newer daemon ({release}protocol {at} < {gate}): {how}")
 }
 
 #[cfg(test)]
@@ -129,14 +121,13 @@ mod tests {
         assert_eq!(
             desk.message.as_deref(),
             Some(
-                ":Thing needs a newer clackatoo daemon: it's 2026.10.11, protocol 73, and this \
-                 needs protocol 74. `clackatoo upgrade` moves it onto this window's build"
+                ":Thing needs a newer daemon (2026.10.11, protocol 73 < 74): clackatoo upgrade \
+                 moves it onto this build"
             )
         );
         assert_eq!(
             needs_newer(":Thing", 80, 75, None, true),
-            ":Thing needs a newer clackatoo daemon: it's protocol 75, and this needs protocol \
-             80. `clackatoo update` there updates it"
+            ":Thing needs a newer daemon (protocol 75 < 80): clackatoo update there updates it"
         );
     }
 }

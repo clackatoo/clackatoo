@@ -152,7 +152,7 @@ fn outcome(succeeded: bool, stdout: &str, stderr: &str) -> Result<String, String
         Some(rest) => {
             let version = rest.split_whitespace().next().unwrap_or_default();
             Ok(format!(
-                "clackatoo {version} is installed: open the window again to use it"
+                "clackatoo {version} installed: reopen the window to use it"
             ))
         }
         None => Ok(last(stdout).unwrap_or_else(|| "clackatoo is updated".into())),
@@ -240,28 +240,26 @@ pub(crate) fn skew_notice(ours: &str, theirs: &str, host: Option<&str>) -> Optio
         (ours.parse::<Version>(), theirs.parse::<Version>())
     else {
         return Some(match host {
-            Some(host) => {
-                format!("the daemon on {host} is clackatoo {theirs}, and this window {ours}")
-            }
-            None => format!("the daemon is clackatoo {theirs}, and this window {ours}"),
+            Some(host) => format!("{host}'s daemon is clackatoo {theirs}, this window {ours}"),
+            None => format!("the daemon is clackatoo {theirs}, this window {ours}"),
         });
     };
     Some(match (theirs_version < ours_version, host) {
-        (true, Some(host)) => format!(
-            "the daemon on {host} is clackatoo {theirs}, older than this window's {ours}: :update {host}"
-        ),
-        (true, None) => format!(
-            "the daemon is clackatoo {theirs}, older than this window's {ours}: `clackatoo upgrade` \
-             moves it onto this build"
-        ),
-        (false, Some(host)) => format!(
-            "this window is clackatoo {ours}, older than the daemon on {host}'s {theirs}: :update, \
-             then open the window again"
-        ),
-        (false, None) => format!(
-            "this window is clackatoo {ours}, older than the daemon's {theirs}: open the window \
-             again to use it"
-        ),
+        (true, Some(host)) => {
+            format!("{host}'s daemon is {theirs}, older than this window's {ours}: :update {host}")
+        }
+        (true, None) => {
+            format!("the daemon is {theirs}, older than this window's {ours}: clackatoo upgrade")
+        }
+        (false, Some(host)) => {
+            format!(
+                "this window is {ours}, older than {host}'s daemon ({theirs}): :update, then \
+                 reopen the window"
+            )
+        }
+        (false, None) => {
+            format!("this window is {ours}, older than the daemon's {theirs}: reopen the window")
+        }
     })
 }
 
@@ -297,13 +295,12 @@ mod tests {
         assert_eq!(skew_notice("2026.10.2", "2026.10.2", Some("desk")), None);
         assert_eq!(
             skew_notice("2026.10.2", "2026.10.1", Some("desk")).unwrap(),
-            "the daemon on desk is clackatoo 2026.10.1, older than this window's 2026.10.2: \
-             :update desk"
+            "desk's daemon is 2026.10.1, older than this window's 2026.10.2: :update desk"
         );
         assert_eq!(
             skew_notice("2026.10.2", "2026.11.0", Some("desk")).unwrap(),
-            "this window is clackatoo 2026.10.2, older than the daemon on desk's 2026.11.0: \
-             :update, then open the window again"
+            "this window is 2026.10.2, older than desk's daemon (2026.11.0): :update, then reopen \
+             the window"
         );
         // Compared as numbers: 10 is newer than 9.
         assert!(
@@ -319,7 +316,7 @@ mod tests {
         // A version that isn't one is only reported.
         assert_eq!(
             skew_notice("2026.10.2", "custom", Some("desk")).unwrap(),
-            "the daemon on desk is clackatoo custom, and this window 2026.10.2"
+            "desk's daemon is clackatoo custom, this window 2026.10.2"
         );
     }
 
@@ -333,7 +330,7 @@ mod tests {
                          keeping 2026.10.2 as /x.previous\nno daemon is running\n";
         assert_eq!(
             outcome(true, installed, ""),
-            Ok("clackatoo 2026.10.3 is installed: open the window again to use it".into())
+            Ok("clackatoo 2026.10.3 installed: reopen the window to use it".into())
         );
         assert_eq!(
             outcome(

@@ -719,8 +719,8 @@ impl Explorer {
             Stage::Asking if yes && changed => {
                 editing.plan = None;
                 self.message = Some(
-                    "nothing was done: a folder has changed since its listing was made. \
-                     :q! and e again shows it as it is"
+                    "nothing was done: a folder changed since it was listed. :q! then e shows \
+                     it afresh"
                         .to_owned(),
                 );
                 self.asks.push(Ask::BackToText);
@@ -1050,9 +1050,7 @@ fn left_out_said(count: usize) -> String {
             "a name with a line break or a stray mark in it is left out, and left alone".to_owned()
         }
         count => {
-            format!(
-                "{count} names with line breaks or stray marks in them are left out, and left alone"
-            )
+            format!("{count} names with line breaks or stray marks are left out, untouched")
         }
     }
 }

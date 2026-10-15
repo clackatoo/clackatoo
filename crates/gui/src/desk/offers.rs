@@ -64,7 +64,7 @@ impl Desk {
     }
 
     fn install(&mut self, offer: Offer) {
-        self.message = Some(format!("Installing {}…", offer.what()));
+        self.say(format!("Installing {}…", offer.what()));
         let request = Request::Install {
             language: offer.language,
             grammar: offer.grammar,
@@ -90,7 +90,7 @@ impl Desk {
             return true;
         }
         if matches!(press.text, Some("n" | "N")) {
-            self.message = Some(format!(
+            self.say(format!(
                 "{} won't be offered again; `clackatoo language install {}` installs it",
                 offer.what(),
                 offer.language
@@ -128,9 +128,9 @@ impl Desk {
     /// An install the window asked for has ended, as `outcome` says: what
     /// was installed, or why it couldn't be.
     pub(crate) fn installed(&mut self, outcome: Result<String, String>) {
-        self.message = Some(match outcome {
-            Ok(what) => format!("Installed {what}"),
-            Err(why) => why,
-        });
+        match outcome {
+            Ok(what) => self.say(format!("Installed {what}")),
+            Err(why) => self.warn(why),
+        }
     }
 }

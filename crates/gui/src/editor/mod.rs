@@ -949,6 +949,12 @@ impl Editor {
             .take_if(|(_, asking)| matches!(asking, Asking::Hover(_) | Asking::Renaming(..)));
     }
 
+    /// What the editor says in the bar until the next key, such as `not
+    /// found`, if it's saying anything.
+    pub(crate) fn said(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
     /// What the bar says: a search or a name being typed, a message, or
     /// the file and where the cursor is in it.
     pub(crate) fn label(&self, copy: &BufferCopy) -> String {

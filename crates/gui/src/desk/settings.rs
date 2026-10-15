@@ -96,7 +96,7 @@ impl Desk {
                 let font = options::find("font").expect("an option");
                 let family = self.font_in_use.family.clone();
                 self.set_option(font, Value::Text(family.clone()));
-                self.message = Some(format!("{err:#}, so the font stays as it was"));
+                self.warn(format!("{err:#}, so the font stays as it was"));
                 let used = FontInUse {
                     family,
                     size: wanted.size,
@@ -133,7 +133,7 @@ impl Desk {
         let settings = match options::parse_set(words) {
             Ok(settings) => settings,
             Err(err) => {
-                self.message = Some(err);
+                self.warn(err);
                 return;
             }
         };
@@ -144,7 +144,7 @@ impl Desk {
                 .filter(|info| self.options.get(info) != start.get(info))
                 .map(|info| self.options.show(info))
                 .collect();
-            self.message = Some(if changed.is_empty() {
+            self.say(if changed.is_empty() {
                 "every option is as it started".into()
             } else {
                 changed.join("  ")
@@ -164,7 +164,7 @@ impl Desk {
             }
         }
         if !shown.is_empty() {
-            self.message = Some(shown.join("  "));
+            self.say(shown.join("  "));
         }
     }
 

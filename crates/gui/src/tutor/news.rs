@@ -311,6 +311,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "Opened from your app launcher, the window takes focus and the launcher stops spinning",
     },
+    News {
+        id: "bar-overflow",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "Crowded bars scroll their tabs and workspaces, messages keep off the tabs, and :messages shows them again",
+    },
 ];
 
 impl News {

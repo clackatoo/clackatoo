@@ -64,7 +64,7 @@ impl Desk {
         }
         // Two answers counted in one text would make the edits twice.
         if (self.formatting.values()).any(|formatting| formatting.buffer == buffer) {
-            self.message = Some("it's being formatted already".into());
+            self.say("it's being formatted already".into());
             return;
         }
         let (tab_size, spaces) = self.indenting();
@@ -106,12 +106,12 @@ impl Desk {
             match write {
                 Some(write) if pending.write.is_none() => pending.write = Some(write),
                 Some(_) => {}
-                None => self.message = Some("it's being formatted already".into()),
+                None => self.say("it's being formatted already".into()),
             }
             return;
         }
         let Some((buffer, id)) = self.ask_about_focused_file(query) else {
-            self.message = Some("this pane has no file to format".into());
+            self.say("this pane has no file to format".into());
             return;
         };
         self.formatting.insert(id, Formatting { buffer, write });
@@ -142,7 +142,7 @@ impl Desk {
                 }
                 self.write(formatting.buffer, &write);
             }
-            None => self.message = Some(said.unwrap_or_else(|| "formatted".into())),
+            None => self.say(said.unwrap_or_else(|| "formatted".into())),
         }
         true
     }

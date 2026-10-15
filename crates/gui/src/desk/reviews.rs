@@ -359,7 +359,7 @@ impl Desk {
     fn hunks_named(&mut self, which: ReviewWhich) -> Option<Hunks> {
         let chat = self.review_chat();
         let refuse = |desk: &mut Self, why: &str| {
-            desk.message = Some(why.to_owned());
+            desk.say(why.to_owned());
             None
         };
         match which {
@@ -429,11 +429,11 @@ impl Desk {
             return;
         }
         let Some(chat) = self.review_chat() else {
-            self.message = Some("which chat? open its review first".to_owned());
+            self.say("which chat? open its review first".to_owned());
             return;
         };
         let Some((editor, copy)) = self.focused_editor() else {
-            self.message = Some("this pane has no file to comment on".to_owned());
+            self.say("this pane has no file to comment on".to_owned());
             return;
         };
         let (line, at) = editor.line_here(copy);
@@ -447,7 +447,7 @@ impl Desk {
     pub(super) fn review_send(&mut self) {
         match self.review_chat() {
             Some(chat) => self.request(Request::Review(ReviewAction::Send(chat)), Asked::Reviewed),
-            None => self.message = Some("which chat? open its review first".to_owned()),
+            None => self.say("which chat? open its review first".to_owned()),
         }
     }
 
@@ -456,7 +456,7 @@ impl Desk {
     pub(super) fn toggle_blame(&mut self) {
         let toggled = self.in_focused_editor(|editor, _, _| editor.toggle_blame());
         if toggled.is_none() {
-            self.message = Some("this pane has no file".into());
+            self.say("this pane has no file".into());
         }
     }
 }

@@ -90,7 +90,7 @@ impl Desk {
         self.reset_options();
         self.script.lua = start.as_ref().and_then(|start| (start.0)(&self.options));
         self.script.running = self.script.lua.as_ref().map(|_| Instant::now());
-        self.message = Some(match &self.script.lua {
+        self.say(match &self.script.lua {
             Some(_) => "reloaded the config".into(),
             None => {
                 "there's no config to reload: it's client/init.lua in clackatoo's config directory"
@@ -359,10 +359,10 @@ impl Desk {
             FromLua::Command(line) => match crate::command::parse(&line) {
                 // Not from the config being run.
                 Ok(crate::command::Command::Reload) => {
-                    self.message = Some("the config can't reload itself".into());
+                    self.say("the config can't reload itself".into());
                 }
                 Ok(command) => self.run(command),
-                Err(message) => self.message = Some(message),
+                Err(message) => self.warn(message),
             },
             FromLua::Forward(spec) => {
                 self.forwards_asked
@@ -371,7 +371,7 @@ impl Desk {
             FromLua::Set { option, value } => self.config_sets(option, value),
             FromLua::Error(text) => {
                 log::warn!("config: {text}");
-                self.message = Some(text);
+                self.say(text);
             }
             FromLua::Ready => self.script.running = None,
             FromLua::Decided { .. } => {}

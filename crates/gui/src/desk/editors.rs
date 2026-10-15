@@ -367,13 +367,11 @@ impl Desk {
     /// won't. Returns whether it asked the daemon.
     pub(super) fn open_here(&mut self, pane: PaneId, path: String) -> bool {
         if let Some(why) = self.keeps_its_folder(pane) {
-            self.message = Some(why.into());
+            self.say(why.into());
             return false;
         }
         if self.is_explorer(pane) && !self.is_folder(pane) {
-            self.message = Some(
-                "this pane is editing folders as text: :w makes the changes, :q! leaves".into(),
-            );
+            self.say("editing folders as text: :w makes the changes, :q! leaves".into());
             return false;
         }
         self.editors.landings.remove(&pane);
@@ -389,7 +387,7 @@ impl Desk {
             .filter(|copy| !copy.is_scratch() && copy.modified() && copy.path() != path)
             .map(|copy| copy.path().to_owned());
         if let Some(kept) = kept {
-            self.message = Some(format!(
+            self.say(format!(
                 "{kept} has changes not written, kept unseen: :e it to go back"
             ));
         }
@@ -520,7 +518,7 @@ impl Desk {
                 server,
             } => self.offered(language, grammar, server),
             BufferUpdate::Notice(notice) => {
-                self.message = Some(notice);
+                self.say(notice);
                 true
             }
             BufferUpdate::ChangedOnDisk => self.changed_on_disk(buffer),
@@ -584,7 +582,19 @@ impl Desk {
                 marks.moved(from, copy.path());
             }
             Heard::Kept { .. } | Heard::Rejoined => {
-                self.message = kept_across_a_reconnect(&heard, copy.path());
+                match kept_across_a_reconnect(&heard, copy.path()) {
+                    // Said through the fields, as the editors are held
+                    // still.
+                    Some(kept) => {
+                        if matches!(heard, Heard::Kept { .. }) {
+                            self.said.warned(&kept);
+                        } else {
+                            self.said.keep(&kept);
+                        }
+                        self.message = Some(kept);
+                    }
+                    None => self.message = None,
+                }
             }
             _ => {}
         }
@@ -780,8 +790,7 @@ impl Desk {
             && !self.editors.held.is_empty()
         {
             self.editors.held.clear();
-            self.message =
-                Some("the editor waiting for the grammar closed: nothing was done".into());
+            self.say("the editor waiting for the grammar closed: nothing was done".into());
         }
     }
 
@@ -945,7 +954,7 @@ impl Desk {
             .in_focused_editor(|editor, copy, _| editor.hunk(action, copy))
             .is_none()
         {
-            self.message = Some("this pane has no file".into());
+            self.say("this pane has no file".into());
         }
     }
 
@@ -1138,13 +1147,12 @@ impl Desk {
     pub(super) fn show_registers(&mut self) {
         let editors = &mut self.editors;
         let Some(editor) = (self.shown).and_then(|shown| editors.panes.get_mut(&shown.pane)) else {
-            self.message =
-                Some("registers are listed by an editor's cursor: none has the focus".into());
+            self.say("registers need an editor focused".into());
             return;
         };
         let rows = editors.shared.registers.listing();
         if rows.is_empty() {
-            self.message = Some("the registers are empty".into());
+            self.say("the registers are empty".into());
             return;
         }
         editor.show_listing("type name content", rows);
@@ -1155,7 +1163,7 @@ impl Desk {
     /// window has it.
     pub(super) fn pick_mark(&mut self) {
         let Some((_, copy)) = self.focused_editor() else {
-            self.message = Some("marks are a file's: an editor has no focus".into());
+            self.say("marks are a file's: an editor has no focus".into());
             return;
         };
         let path = copy.path().to_owned();
@@ -1177,7 +1185,7 @@ impl Desk {
             })
             .collect();
         if found.is_empty() {
-            self.message = Some("no marks are set: m and a letter sets one".into());
+            self.say("no marks are set: m and a letter sets one".into());
             return;
         }
         let case = crate::options::Case::of(&self.options);
@@ -1560,7 +1568,7 @@ impl Desk {
             return self.write_listings(shown.pane, quit);
         }
         let Some((editor, _)) = self.focused_editor() else {
-            self.message = Some("this pane has no file to write".into());
+            self.say("this pane has no file to write".into());
             return;
         };
         let buffer = editor.buffer();
@@ -1572,14 +1580,12 @@ impl Desk {
             && let Some(why) = copy.kept_why()
         {
             if !force {
-                self.message = Some(format!(
-                    "{why}: `:w!` to replace it with this window's text, or `:e!` to take the \
-                     daemon's"
-                ));
+                let why = format!("{why}: :w! writes this window's text, :e! takes the daemon's");
+                self.warn(why);
                 return;
             }
             if !self.connected {
-                self.message = Some("not connected: the file can't be written yet".into());
+                self.warn("not connected: the file can't be written yet".into());
                 return;
             }
             copy.resend_kept();
@@ -1617,8 +1623,8 @@ impl Desk {
                 .any(|pane| pane.id != shown.pane && pane.content == Content::Buffer(buffer));
             if last && copy.modified() {
                 if !force {
-                    self.message = Some(format!(
-                        "{} has changes that aren't saved: :w writes them, :q! throws them away",
+                    self.say(format!(
+                        "{} has unsaved changes: :w writes them, :q! drops them",
                         copy.name()
                     ));
                     return;
@@ -1641,8 +1647,8 @@ impl Desk {
             return false;
         }
         let name = (self.editors.buffers.get(&buffer)).map_or("the file", BufferCopy::name);
-        self.message = Some(format!(
-            "{name} changed on disk: `:e!` to take it, `:w!` to keep yours"
+        self.warn(format!(
+            "{name} changed on disk: :e! takes it, :w! keeps yours"
         ));
         true
     }
@@ -1671,7 +1677,7 @@ impl Desk {
                 }
                 self.request(Request::Discard { buffer }, Asked::Command);
             }
-            None => self.message = Some("this pane has no file".into()),
+            None => self.say("this pane has no file".into()),
         }
     }
 
@@ -1684,7 +1690,7 @@ impl Desk {
     ) {
         let unformatted = self.unformatted.remove(&buffer);
         if let clackatoo_protocol::Response::Error(err) = response {
-            self.message = Some(match err {
+            self.warn(match err {
                 clackatoo_protocol::Error::ChangedOnDisk(path) => {
                     format!("{path} has changed since it was read: :w! writes over it")
                 }
@@ -1694,7 +1700,7 @@ impl Desk {
         }
         let name = self.editors.buffers.get(&buffer).map(BufferCopy::name);
         let name = name.unwrap_or("the file");
-        self.message = Some(match unformatted {
+        self.say(match unformatted {
             Some(why) => format!("{name} written, not formatted: {why}"),
             None => format!("{name} written"),
         });
@@ -1769,8 +1775,8 @@ fn fill_finder(finder: Option<&mut Finder>, heard: &mut Heard, path: &str) -> bo
 fn kept_across_a_reconnect(heard: &Heard, path: &str) -> Option<String> {
     match heard {
         Heard::Kept { why } => Some(format!(
-            "{why}; your unsaved changes to {path} are kept in this window: `:w!` to replace it \
-             with them, or `:e!` to take the daemon's"
+            "{why}; your changes to {path} are kept here: :w! writes them, :e! takes the \
+             daemon's"
         )),
         Heard::Rejoined => Some(format!(
             "reconnected; your unsaved changes to {path} were kept"

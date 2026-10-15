@@ -342,7 +342,7 @@ impl Desk {
             .unwrap_or("the keys typed before the file's text came were dropped")
             .to_owned();
         if self.shown.is_none_or(|shown| shown.pane != pane) || !self.say_past_key(pane, &why) {
-            self.message = Some(why);
+            self.say(why);
         }
     }
 

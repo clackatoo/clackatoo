@@ -28,7 +28,7 @@ use winit::window::{
 
 use crate::GraphicsApi;
 use crate::chat::{ChatPaint, Pointer};
-use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, Status};
+use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, NoteKind, Scrolls, Status};
 use crate::command::Forwarding;
 use crate::connect::{self, HostPicker, Purpose};
 use crate::desk::{Desk, TextTarget};
@@ -407,6 +407,13 @@ pub(crate) struct App {
     pointer: Option<[f32; 2]>,
     /// What the mouse is over.
     hover: Hit,
+    /// Where the strips of workspaces and tabs are scrolled to, kept from
+    /// one frame to the next so they hold still.
+    scrolls: Scrolls,
+    /// Whether the bar's note was cut short when last laid out, which is
+    /// when a warning shows whole above it for a while, so the window must
+    /// wake to take it away.
+    noticing: bool,
     /// The mouse cursor's shape, as last set.
     cursor_icon: CursorIcon,
     /// The last click, what it was on and where, and how many came quickly
@@ -488,6 +495,8 @@ impl App {
             buttons: ButtonLayout::default(),
             pointer: None,
             hover: Hit::Nothing,
+            scrolls: Scrolls::default(),
+            noticing: false,
             cursor_icon: CursorIcon::Default,
             last_click: None,
             menu: None,
@@ -624,6 +633,7 @@ impl App {
                 status: Status::Tabs {
                     mode: None,
                     note: None,
+                    kind: NoteKind::Label,
                     panes: 0,
                 },
                 buttons: &self.buttons,
@@ -632,9 +642,13 @@ impl App {
                 alert: None,
                 rounded,
                 finder: self.composing_in(picker),
+                scrolls: self.scrolls,
+                messages: None,
             }
         } else {
             let mut status = self.desk.status();
+            // Whatever the bar says, `:messages` says again later.
+            self.desk.remember();
             // What the input method is composing shows at the caret, where
             // it'll go, until it's committed.
             if let Status::Typing { text, .. } = &mut status
@@ -660,12 +674,18 @@ impl App {
                 alert: self.reconnecting().or_else(|| self.out_of_contact()),
                 rounded,
                 finder,
+                scrolls: self.scrolls,
+                messages: self.desk.messages_listed(),
             }
         };
         let fonts = &mut self.frame.as_mut()?.fonts;
-        Some(Chrome::new(geometry, contents, &mut |text, bold| {
+        let chrome = Chrome::new(geometry, contents, &mut |text, bold| {
             fonts.ui_width(text, bold)
-        }))
+        });
+        // The strips scroll only as far as they must, from where they were.
+        self.scrolls = chrome.scrolls;
+        self.noticing = chrome.cut.is_some();
+        Some(chrome)
     }
 
     /// `finder`, with what the input method is composing at its query's
@@ -762,6 +782,7 @@ impl App {
             | Hit::Tab(_)
             | Hit::NewWorkspace
             | Hit::NewTab
+            | Hit::Hidden(..)
             | Hit::Menu(_)
             | Hit::Finder(Some(_)) => CursorIcon::Pointer,
             Hit::Panes if let Some(axis) = self.desk.divider_at(point) => match axis {
@@ -782,7 +803,7 @@ impl App {
                 Pointer::Text => CursorIcon::Text,
             },
             Hit::Panes => CursorIcon::Text,
-            Hit::TopBar | Hit::Finder(None) | Hit::Nothing => CursorIcon::Default,
+            Hit::TopBar | Hit::Note | Hit::Finder(None) | Hit::Nothing => CursorIcon::Default,
         };
         if let Some(window) = self.frame.as_ref().and_then(Frame::window)
             && icon != self.cursor_icon
@@ -798,6 +819,8 @@ impl App {
                     | Hit::Tab(_)
                     | Hit::NewWorkspace
                     | Hit::NewTab
+                    | Hit::Hidden(..)
+                    | Hit::Note
                     | Hit::Menu(_)
             )
         };
@@ -926,7 +949,7 @@ impl App {
             )),
             (UpdateAsked::On(_), None) => self
                 .desk
-                .say("this window's daemon is on this machine, which :update alone updates".into()),
+                .say("the daemon is on this machine: :update alone updates it".into()),
         }
         self.send_outbox();
     }
@@ -1058,7 +1081,14 @@ impl App {
                 self.desk.new_tab();
                 Ok(())
             }
-            Hit::Panes | Hit::Menu(_) | Hit::Finder(_) | Hit::Nothing => Ok(()),
+            // A count of names hidden scrolls its strip that way.
+            Hit::Hidden(..) => {
+                if let Some(scrolls) = self.chrome().and_then(|chrome| chrome.scrolled(hit)) {
+                    self.scrolls = scrolls;
+                }
+                Ok(())
+            }
+            Hit::Panes | Hit::Note | Hit::Menu(_) | Hit::Finder(_) | Hit::Nothing => Ok(()),
         };
         if let Err(err) = result {
             log::warn!("the desktop wouldn't move or resize the window: {err}");
@@ -1354,10 +1384,7 @@ impl App {
         let args = reopen_args(std::env::args_os().skip(1), self.session.host());
         log::info!("opening the window again as the new build");
         let err = std::process::Command::new(&program).args(args).exec();
-        format!(
-            "clackatoo is updated, but the window couldn't open again as the new build: {err}. \
-             Open it again yourself."
-        )
+        format!("updated, but the window couldn't reopen ({err}): open it again yourself")
     }
 
     /// Opens a new window on the daemon on `host`, as `clackatoo --remote
@@ -1390,7 +1417,7 @@ impl App {
             }
             Err(err) => {
                 self.desk
-                    .say(format!("couldn't open a window on {host}: {err}"));
+                    .warn(format!("couldn't open a window on {host}: {err}"));
             }
         }
     }
@@ -2177,6 +2204,8 @@ fn frame_clicked(window: &Window, hit: Hit, double: bool) -> Result<(), External
         | Hit::Panes
         | Hit::NewWorkspace
         | Hit::NewTab
+        | Hit::Hidden(..)
+        | Hit::Note
         | Hit::Menu(_)
         | Hit::Finder(_)
         | Hit::Nothing => Ok(()),
@@ -2756,7 +2785,8 @@ impl App {
         // While the daemon is out of contact, the top bar counts the
         // seconds, a highlight on text just copied goes after a moment, an
         // editor asks its language server once typing pauses, and a chat
-        // counts the seconds its agent has been working; otherwise,
+        // counts the seconds its agent has been working, and a warning too
+        // long for the bar goes from above it; otherwise,
         // nothing wakes the window but events.
         let counting = (self.contact.as_ref())
             .and_then(Contact::silent_since)
@@ -2772,6 +2802,7 @@ impl App {
         (counting.into_iter())
             .chain(retry)
             .chain(self.desk.flash_ends())
+            .chain(self.desk.notice_ends().filter(|_| self.noticing))
             .chain(self.desk.grep_at())
             .chain(self.desk.format_at())
             .chain(self.desk.editor_wakes())
@@ -3325,6 +3356,8 @@ mod tests {
                     alert: None,
                     rounded: false,
                     finder: None,
+                    scrolls: Scrolls::default(),
+                    messages: None,
                 },
                 &mut |_, _| 0.0,
             )
@@ -3355,6 +3388,7 @@ mod tests {
                 status: Status::Tabs {
                     mode: None,
                     note: None,
+                    kind: NoteKind::Label,
                     panes: 1,
                 },
                 buttons: &buttons,
@@ -3363,6 +3397,8 @@ mod tests {
                 alert: None,
                 rounded: false,
                 finder: None,
+                scrolls: Scrolls::default(),
+                messages: None,
             },
             &mut |_, _| 0.0,
         );

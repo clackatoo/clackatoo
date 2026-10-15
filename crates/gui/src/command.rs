@@ -144,6 +144,8 @@ pub(crate) enum Command {
     /// `:marks`: the finder, on the marks the focused editor's file can go
     /// to.
     Marks,
+    /// `:messages`: what the bar has said lately, above it.
+    Messages,
     /// One of the focused editor's commands, for lines, as typed: `:s`,
     /// `:g`, `:d`, `:m` and their kin, with any range.
     Editor(String),
@@ -268,7 +270,7 @@ const HUNK_ACTIONS: [(&str, HunkAction); 5] = [
 ];
 
 /// The window's own commands, for messages.
-const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, \
+const COMMANDS: &str = "a tab's number, workspace, rename, close, reload, set, registers, marks, messages, \
                         update, connect, w, q, e, s, g, v, d, y, m, t, normal, Format, Files, Grep, \
                         Buffers, Diagnostics, Boards, Browser, Gitsigns, Explore, AgentUndo, AgentRedo, \
                         Review, ReviewKeep, ReviewReject, ReviewSend, Blame, Devices and \
@@ -294,6 +296,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "set" | "se" => return Ok(Command::Set(argument.unwrap_or_default().to_owned())),
         "registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
         "marks" => return Ok(Command::Marks),
+        "messages" | "mes" => return Ok(Command::Messages),
         "Explore" | "Ex" | "Explore!" | "Ex!" => return Ok(explore(word, argument)),
         "update" => return Ok(Command::Update(argument.map(str::to_owned))),
         "connect" => return Ok(Command::Connect(argument.map(str::to_owned))),
@@ -367,7 +370,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         ))
     } else {
         Err(format!(
-            "no command called {name}; the commands are {COMMANDS}, and the kinds of pane {kinds}"
+            "no command called {name}; commands: {COMMANDS}; panes: {kinds}"
         ))
     }
 }
@@ -387,9 +390,9 @@ fn devices_command(argument: Option<&str>) -> Result<DevicesCommand, String> {
         ("allow", None) => Err("allow needs the code the device shows: :Devices allow CODE".into()),
         ("deny", None) => Ok(DevicesCommand::Deny),
         ("unlock", None) => Ok(DevicesCommand::Unlock),
-        ("revoke", Some(number)) => (number.parse()).map(DevicesCommand::Revoke).map_err(|_| {
-            format!("revoke takes a device's number, as :Devices lists it, not {number}")
-        }),
+        ("revoke", Some(number)) => (number.parse())
+            .map(DevicesCommand::Revoke)
+            .map_err(|_| format!("{number} isn't a device's number, as :Devices lists them")),
         _ => Err(format!("no such thing to do to devices: {usage}")),
     }
 }
@@ -811,6 +814,8 @@ mod tests {
         assert!(matches!(parse("-Terminal"), Ok(Command::Open { .. })));
         assert_eq!(parse("set nowrap"), Ok(Command::Set("nowrap".into())));
         assert_eq!(parse("marks"), Ok(Command::Marks));
+        assert_eq!(parse("messages"), Ok(Command::Messages));
+        assert_eq!(parse("mes"), Ok(Command::Messages));
         assert_eq!(parse("Devices"), Ok(Command::Devices(DevicesCommand::List)));
         assert_eq!(
             parse("Devices allow 0042"),

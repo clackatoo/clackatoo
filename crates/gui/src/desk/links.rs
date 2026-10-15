@@ -47,7 +47,7 @@ impl Desk {
                 self.open_file_at(terminal, &path, cwd.as_deref(), line, col);
             }
             Target::Elsewhere { uri, host } => {
-                self.message = Some(format!("{uri} is on {host}, not this machine"));
+                self.say(format!("{uri} is on {host}, not this machine"));
             }
         }
     }

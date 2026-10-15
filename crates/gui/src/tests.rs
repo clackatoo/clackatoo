@@ -6,7 +6,8 @@ use clackatoo_term::{Config, Terminal};
 use clackatoo_protocol::{Axis, Content, Layout, Pane, PaneId, TabId, TerminalId, WorkspaceId};
 
 use crate::chrome::{
-    self, Chrome, Contents, Geometry, Hit, Metrics, ModeName, Status, WorkspaceName,
+    self, Bar, Chrome, Contents, Geometry, Hit, Metrics, ModeName, NoteKind, Scrolls, Status,
+    WorkspaceName,
 };
 use crate::desktop::ButtonLayout;
 use crate::fonts::{FontOptions, Fonts, Variant};
@@ -448,6 +449,8 @@ fn two_pane_window(
             alert,
             rounded: false,
             finder: None,
+            scrolls: Scrolls::default(),
+            messages: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -548,6 +551,7 @@ fn panes_are_drawn_side_by_side_between_the_bars() {
         Status::Tabs {
             mode: Some(ModeName::Normal),
             note: Some("↑3".into()),
+            kind: NoteKind::Label,
             panes: 2,
         },
         None,
@@ -712,6 +716,7 @@ fn nothing_is_drawn_past_a_rounded_windows_corners() {
         Status::Tabs {
             mode: Some(ModeName::Insert),
             note: None,
+            kind: NoteKind::Label,
             panes: 2,
         },
         None,
@@ -2048,6 +2053,8 @@ fn the_finder_is_drawn_over_the_panes_with_a_preview() {
             alert: None,
             rounded: false,
             finder: Some(view),
+            scrolls: Scrolls::default(),
+            messages: None,
         },
         &mut |text, bold| fonts.ui_width(text, bold),
     );
@@ -2531,4 +2538,260 @@ fn the_meters_detail_shows_above_the_box_when_asked() {
     // Above the box, where the conversation was: the detail's panel.
     let above = 380 * 720 * 4..560 * 720 * 4;
     assert_ne!(shut[above.clone()], open[above]);
+}
+
+/// The tabs of a crowded window: fifteen, some with long names.
+const CROWDED_TABS: [&str; 15] = [
+    "zsh",
+    "nvim crates/gui/src/chrome.rs",
+    "cargo test --workspace",
+    "Claude Code ⋯",
+    "htop",
+    "jj log -r @",
+    "ssh box",
+    "nvim README.md",
+    "Codex ?",
+    "make release",
+    "python3 manage.py runserver",
+    "tail -f daemon.log",
+    "zsh",
+    "lazygit",
+    "man tmux",
+];
+
+/// The workspaces of a crowded window.
+const CROWDED_WORKSPACES: [&str; 12] = [
+    "clackatoo",
+    "peios",
+    "homelab",
+    "dotfiles",
+    "learn",
+    "acta",
+    "website",
+    "notes",
+    "scratch",
+    "gcsl",
+    "phone",
+    "infra",
+];
+
+/// A window `width` wide at scale 1, its bars full: fifteen tabs with long
+/// names, the eighth shown, a dozen workspaces, the second shown, and
+/// `note`, of `kind`, with the mouse over what `hover` says. Returns its
+/// size and frame, and what's drawn.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn crowded_bars(
+    width: u32,
+    note: (&str, NoteKind),
+    hover: impl Fn(&Chrome) -> Hit,
+) -> Option<([u32; 2], Chrome, Vec<u8>)> {
+    crowded_bars_at(width, 1, note, hover)
+}
+
+/// As [`crowded_bars`] does, at `scale` times the size: `width` is in
+/// the screen's pixels.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn crowded_bars_at(
+    width: u32,
+    scale: u32,
+    (note, kind): (&str, NoteKind),
+    hover: impl Fn(&Chrome) -> Hit,
+) -> Option<([u32; 2], Chrome, Vec<u8>)> {
+    let gpu = gpu()?;
+    let mut fonts = fonts(f64::from(scale));
+    let metrics = Metrics {
+        cell: [fonts.cell.width as f32, fonts.cell.height as f32],
+        ui_line: fonts.ui.height,
+        padding: 4.0 * scale as f32,
+    };
+    let size = [width, 240 * scale];
+    let geometry = Geometry::new(size, metrics);
+    let buttons = ButtonLayout::default();
+    let tabs = (1_u32..)
+        .zip(CROWDED_TABS)
+        .map(|(id, name)| (TabId(id), format!("{id} {name}"), id == 8))
+        .collect();
+    let workspaces = (1_u32..)
+        .zip(CROWDED_WORKSPACES)
+        .map(|(id, name)| WorkspaceName::plain(id, name, id as usize % 4 + 1, id == 2))
+        .collect();
+    let chrome = Chrome::new(
+        geometry,
+        Contents {
+            workspaces,
+            tabs,
+            status: Status::Tabs {
+                mode: Some(ModeName::Normal),
+                note: Some(note.into()),
+                kind,
+                panes: 2,
+            },
+            buttons: &buttons,
+            bottom_shown: true,
+            menu: None,
+            alert: None,
+            rounded: false,
+            finder: None,
+            scrolls: Scrolls::default(),
+            messages: None,
+        },
+        &mut |text, bold| fonts.ui_width(text, bold),
+    );
+    let layout = Layout::Pane(Pane {
+        id: PaneId(1),
+        content: Content::Terminal(TerminalId(1)),
+    });
+    let placement = Placement::new(&layout, &geometry.area);
+    let screen = screen(
+        200,
+        8,
+        "$ cargo build\r\n   Compiling clackatoo v2026.10.35\r\n$ ",
+    );
+    let rows: Vec<_> = screen.rows.iter().collect();
+    let scenes = [Scene {
+        origin: placement.panes[0].1.origin,
+        size: placement.panes[0].1.cells_size(geometry.area.cell),
+        rows: &rows,
+        cursor: None,
+        normal_mode: true,
+        highlights: &[],
+    }];
+    let painted = chrome.paint(hover(&chrome));
+    let mut fills = vec![chrome::window_fill(&geometry, false)];
+    fills.extend(painted.fills);
+    fills.extend(chrome::paint_panes(&geometry, &placement, None, None));
+    let mut texts = painted.texts;
+    texts.extend(painted.over_texts);
+    let picture = Picture {
+        scenes: &scenes,
+        fills: &fills,
+        over: &painted.over,
+        texts: &texts,
+        glyphs: &[],
+        over_glyphs: &[],
+        images: &[],
+        transparent: false,
+    };
+    let pixels = draw(&gpu, size, &picture, &mut fonts);
+    Some((size, chrome, pixels))
+}
+
+/// A message too long for the bar of a narrow window.
+const LONG_MESSAGE: &str = "this window can't read what the daemon says of chats: it's from a \
+                            newer clackatoo, and :update updates this window";
+
+#[test]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn crowded_bars_scroll_their_names_and_keep_messages_off_the_tabs() {
+    let message = (LONG_MESSAGE, NoteKind::Message);
+    let Some((size, chrome, pixels)) = crowded_bars(900, message, |_| Hit::Nothing) else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    let pixel = |pixels: &[u8], [x, y]: [f32; 2]| {
+        let at = (y as usize * size[0] as usize + x as usize) * 4;
+        pixels[at..at + 3].to_vec()
+    };
+    drop((chrome, pixels));
+    for width in [900, 1400, 2000] {
+        let (size, chrome, pixels) = crowded_bars(width, message, |_| Hit::Nothing).unwrap();
+        save(&format!("bars-{width}"), size, &pixels);
+        // The tab shown is in view, and those hidden are counted.
+        assert!(
+            chrome.tabs.iter().any(|tab| tab.active),
+            "the tab shown shows at {width}"
+        );
+        assert!(chrome.hidden.iter().any(|count| count.bar == Bar::Bottom));
+        // So is the workspace shown, the second.
+        assert!(chrome.workspaces.iter().any(|item| item.active));
+        // The message starts after the tabs and their `+`, cut short.
+        let plus = chrome.new_tab.expect("a +");
+        let note = chrome.notes.first().expect("the message");
+        assert!(note.x >= plus.x + plus.width, "at {width}");
+        if width < 2000 {
+            assert!(
+                chrome.cut.is_some() && note.text.ends_with('…'),
+                "at {width}"
+            );
+        }
+        let (size, _, pixels) =
+            crowded_bars(width, ("↑3", NoteKind::Label), |_| Hit::Nothing).unwrap();
+        save(&format!("bars-short-{width}"), size, &pixels);
+    }
+    // With the mouse over it, the message shows whole above the bar.
+    let (_, chrome, hovered) = crowded_bars(900, message, |_| Hit::Note).unwrap();
+    save("bars-hover-900", size, &hovered);
+    let cut = chrome.cut.clone().unwrap();
+    let raised = cut.raised(&chrome.geometry);
+    assert!(raised.rect.y + raised.rect.height < chrome.geometry.bottom.y);
+    assert_eq!(
+        raised.lines.concat().replace(' ', ""),
+        LONG_MESSAGE.replace(' ', "")
+    );
+    let (_, _, plain) = crowded_bars(900, message, |_| Hit::Nothing).unwrap();
+    let inside = [raised.rect.x + 2.0, raised.rect.y + 2.0];
+    assert_ne!(
+        pixel(&hovered, inside),
+        pixel(&plain, inside),
+        "a box is drawn"
+    );
+    // A warning cut short shows whole for a moment without the mouse, in
+    // the warning colour.
+    let warning = (LONG_MESSAGE, NoteKind::Warning { notice: true });
+    let (_, chrome, pixels) = crowded_bars(900, warning, |_| Hit::Nothing).unwrap();
+    save("bars-warning-900", size, &pixels);
+    let cut = chrome.cut.clone().unwrap();
+    assert!(cut.raised(&chrome.geometry).warning);
+    assert_ne!(
+        pixel(&pixels, inside),
+        pixel(&plain, inside),
+        "a box is drawn"
+    );
+    // The mouse over a count of tabs hidden lights it up.
+    let (size, _, pixels) = crowded_bars(1400, ("↑3", NoteKind::Label), |chrome| {
+        let count = chrome.hidden.iter().find(|count| count.bar == Bar::Bottom);
+        count.map_or(Hit::Nothing, |count| Hit::Hidden(count.bar, count.end))
+    })
+    .unwrap();
+    save("bars-count-hover-1400", size, &pixels);
+}
+
+#[test]
+fn crowded_bars_keep_the_tab_shown_however_narrow_and_at_twice_the_size() {
+    let long = (LONG_MESSAGE, NoteKind::Message);
+    let short = ("↑3", NoteKind::Label);
+    if gpu().is_none() {
+        eprintln!("no GPU available; skipping");
+        return;
+    }
+    // Narrow windows at the usual size, and windows twice the size, as on
+    // a screen scaled to 2×.
+    for (width, scale) in [(360, 1), (430, 1), (720, 2), (860, 2), (1800, 2)] {
+        for (name, note) in [("", long), ("-short", short)] {
+            let (size, chrome, pixels) =
+                crowded_bars_at(width, scale, note, |_| Hit::Nothing).unwrap();
+            save(&format!("bars{name}-{width}-at-{scale}x"), size, &pixels);
+            let at = format!("{width} px at {scale}x, {note:?}");
+            let shown = chrome.tabs.iter().find(|tab| tab.active);
+            let shown = shown.unwrap_or_else(|| panic!("{at}: the tab shown"));
+            assert!(shown.rect.width > 0.0, "{at}");
+            assert!(chrome.workspaces.iter().any(|item| item.active), "{at}");
+            let plus = chrome.new_tab.expect("a +");
+            for note in &chrome.notes {
+                assert!(note.x >= plus.x + plus.width, "{at}");
+            }
+        }
+    }
 }
