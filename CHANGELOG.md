@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.48 (2026-10-15)
+
+### Features
+
+- **gui:** block visual mode, Ctrl+V, in editors and terminals (3e5858a)
+
 ## 2026.10.47 (2026-10-15)
 
 ### Features
