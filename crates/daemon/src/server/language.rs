@@ -170,6 +170,28 @@ struct Again {
 }
 
 impl Servers {
+    /// Server `server`, if it can be asked anything; or why not. One that
+    /// has gone, though it's still read, would never hear.
+    pub(super) fn askable(&self, server: ServerId) -> Result<&ServerSlot, &'static str> {
+        let running = (self.slots.get(&server)).ok_or("its language server has stopped")?;
+        if running.server.has_gone() {
+            return Err(HUNG_UP);
+        }
+        Ok(running)
+    }
+
+    /// As [`askable`](Self::askable), to ask it something.
+    pub(super) fn askable_mut(
+        &mut self,
+        server: ServerId,
+    ) -> Result<&mut ServerSlot, &'static str> {
+        let running = (self.slots.get_mut(&server)).ok_or("its language server has stopped")?;
+        if running.server.has_gone() {
+            return Err(HUNG_UP);
+        }
+        Ok(running)
+    }
+
     /// Keeps what server `server` says is wrong in the file at `path`,
     /// which isn't open, in place of what it said before; or forgets it, if
     /// nothing is. Past [`MAX_ELSEWHERE`] files, more aren't kept. Returns
@@ -333,6 +355,12 @@ const MAX_DOCUMENTATION: usize = 16 * 1024;
 /// The most code actions of one answer passed on: more than a menu by the
 /// cursor shows, scrolled.
 const MAX_ACTIONS: usize = 200;
+
+/// Why a language server isn't asked anything: it has been found to have
+/// gone, as its input broke or it exited, and would never hear. It may
+/// still be running, read until what it sent last is in; once it's been
+/// let go, it's "its language server has stopped".
+pub(super) const HUNG_UP: &str = "its language server has hung up";
 
 /// The most symbols of one answer passed on, a file's or a project's:
 /// more than anyone looks through, but short of a server's flood.
@@ -1175,10 +1203,7 @@ impl Daemon {
         if matches!(ask, Ask::Query(query) if query.formats()) && self.servers.formatting(buffer) {
             return Err("it's being formatted already");
         }
-        // One that has gone can't be asked: it would never hear.
-        let running = (self.servers.slots.get(&opened.server))
-            .filter(|running| !running.server.has_gone())
-            .ok_or("its language server has stopped")?;
+        let running = self.servers.askable(opened.server)?;
         if !running.server.ready() {
             return Err("its language server is still starting");
         }
@@ -1663,9 +1688,10 @@ impl Daemon {
         if lsp::is_command(&action) {
             return self.run_command(server, client, title, &action, 0);
         }
-        let Some(running) = self.servers.slots.get_mut(&server) else {
-            let why = "its language server has stopped";
-            return self.answer_client(client, Answer::Failed(why.into()));
+        // Reached from an answer, which one that has gone may still send.
+        let running = match self.servers.askable_mut(server) {
+            Ok(running) => running,
+            Err(why) => return self.answer_client(client, Answer::Failed(why.into())),
         };
         let complete = action.get("edit").is_some_and(|edit| !edit.is_null());
         let disabled = lsp::code_action(&action).is_none_or(|action| action.disabled.is_some());
@@ -1751,15 +1777,25 @@ impl Daemon {
         let (token, buffer, id) = client;
         // One at a time, so the edits the server asks for while it runs
         // are the one command's.
-        if self.running_command(server) {
+        if self.servers.askable(server).is_ok() && self.running_command(server) {
             let why = format!(
                 "{title}: its language server is running another command: try again once it's done"
             );
             return self.answer_client(client, Answer::Failed(why));
         }
-        let Some(running) = self.servers.slots.get_mut(&server) else {
-            let why = "its language server has stopped";
-            return self.answer_client(client, Answer::Failed(why.into()));
+        // Reached from an answer, or once a code action's edits are made,
+        // which one that has gone may still send: asked, it would never
+        // answer, and every other command would wait for it until it's
+        // let go.
+        let running = match self.servers.askable_mut(server) {
+            Ok(running) => running,
+            Err(why) if files > 0 => {
+                let why = format!("{title}: made its edits, but not its command: {why}");
+                return self.answer_client(client, Answer::Failed(why));
+            }
+            Err(why) => {
+                return self.answer_client(client, Answer::Failed(format!("{title}: {why}")));
+            }
         };
         let name = (command.get("command").and_then(Value::as_str)).unwrap_or_default();
         if !running.server.runs(name) {

@@ -395,6 +395,10 @@ impl Connection {
 
     /// When the connection, finished, is dropped however much of what the
     /// agent sent is still being parsed, once it's found to be finished.
+    /// It's the rule for programs that have gone (see
+    /// [`rpc::Inbox::gone_due`]), waits for a pipe's rest included, which
+    /// a finished socket never sends: harmless, as the connection is
+    /// dropped as soon as nothing of it is with the parser's thread.
     pub(crate) fn gone_due(&self) -> Option<std::time::Instant> {
         self.incoming.gone_due()
     }

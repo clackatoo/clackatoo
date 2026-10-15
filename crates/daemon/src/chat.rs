@@ -1762,6 +1762,30 @@ impl HostedChat {
         self.set_state(ChatState::Failed(reason.to_owned()));
     }
 
+    /// The chat's agent is going, so it can't be asked for the chat's
+    /// session: the chat waits for it to have gone, to ask a new one, and
+    /// any message it holds waits with it.
+    pub(crate) fn wait_for_agent_to_go(&mut self) {
+        self.clear_slow();
+        self.link = Link::Opening;
+        self.set_state(ChatState::Starting);
+        self.set_notice(Some(format!(
+            "{} is stopping. It starts again once it has.",
+            self.node.agent
+        )));
+    }
+
+    /// The agent the chat waited for to go has gone: returns whether the
+    /// chat is still waiting to ask a new one for its session, as it
+    /// hasn't been stopped meanwhile.
+    pub(crate) fn agent_went(&mut self) -> bool {
+        if self.link != Link::Opening {
+            return false;
+        }
+        self.set_notice(None);
+        true
+    }
+
     /// The agent has gone: it exited, or stopped answering. If it never
     /// started, `why` says why, as far as it said.
     pub(crate) fn disconnected(&mut self, why: Option<&str>) {

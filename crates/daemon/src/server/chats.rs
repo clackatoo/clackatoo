@@ -102,6 +102,9 @@ pub(super) struct Agents {
     /// The agents that said they can't list the sessions they kept, by
     /// name: none is started again just to be asked.
     unlisting: HashSet<String>,
+    /// The chats waiting for their agent, by its name, to have gone, to
+    /// ask a new one for their session (see [`Daemon::connect`]).
+    held: Vec<(TerminalId, String)>,
 }
 
 /// A list of an agent's sessions a client asked for, waiting for the
@@ -480,10 +483,11 @@ impl Daemon {
     /// Asks the chat's agent for its session, starting the agent if it
     /// isn't running, or offering to install it if it isn't installed.
     /// One that has gone, though still running, would never hear: the
-    /// chat fails to connect at once, and can try again once it's been let
-    /// go. Another isn't started beside it, as chats know their agent by
-    /// its name, and letting the old one go would cut off the new one's
-    /// chats as well.
+    /// chat waits, with any message it holds, and asks a new one once the
+    /// old has been let go (see [`ask_for_held`](Self::ask_for_held)).
+    /// Another isn't started beside it, as chats know their agent by its
+    /// name, and letting the old one go would cut off the new one's chats
+    /// as well.
     fn connect(&mut self, id: TerminalId) {
         let Some(chat) = self.chat(id) else { return };
         let name = chat.agent().to_owned();
@@ -491,8 +495,12 @@ impl Daemon {
         let gone = |slot: &AgentSlot| slot.agent.has_gone();
         if agent.is_some_and(|agent| self.agents.running.get(&agent).is_some_and(gone)) {
             if let Some(chat) = self.chat(id) {
-                chat.failed_to_connect("it's stopping: try again in a moment");
+                chat.wait_for_agent_to_go();
             }
+            // Once: a chat that moved to another agent since waits for
+            // that one.
+            self.agents.held.retain(|&(chat, _)| chat != id);
+            self.agents.held.push((id, name));
             self.collect_damage(id);
             return;
         }
@@ -669,6 +677,11 @@ impl Daemon {
     pub(super) fn act(&mut self, id: TerminalId, actions: Vec<Action>) {
         let mut agent = self.agent_of(id);
         for action in actions {
+            let gone = (agent.and_then(|agent| self.agents.running.get(&agent)))
+                .is_some_and(|slot| slot.agent.has_gone());
+            if gone && self.act_on_gone(id, &action) {
+                continue;
+            }
             let session = self
                 .chat(id)
                 .and_then(|chat| chat.session().map(str::to_owned));
@@ -709,6 +722,7 @@ impl Daemon {
                     if let Some(slot) = slot {
                         slot.agent.abandon_session(id);
                     }
+                    self.agents.held.retain(|&(held, _)| held != id);
                     self.agents.opening.remove(&id);
                     // Nor is the agent waited for, if it's being installed.
                     for waiting in self.agents.installing.values_mut() {
@@ -726,6 +740,31 @@ impl Daemon {
         if let Some(agent) = agent {
             self.flush_agent(agent);
         }
+    }
+
+    /// Carries out `action`, which the chat in `id` asked of its agent,
+    /// which has gone, if it's one the agent would have to hear: it never
+    /// would, so it's done at once, not once the agent's let go. Returns
+    /// whether it was.
+    fn act_on_gone(&mut self, id: TerminalId, action: &Action) -> bool {
+        let Some(chat) = self.chat(id) else {
+            return false;
+        };
+        match action {
+            // The turn ends, and the next message waits for the agent to
+            // go, then starts it again.
+            Action::Prompt(_) | Action::Briefed { .. } | Action::Carry { .. } => {
+                chat.disconnected(None);
+            }
+            Action::Set { .. } => chat.settings_changed(Err("its agent is stopping".to_owned())),
+            Action::Cancel => {
+                chat.answered(Ok(agent_client_protocol_schema::v1::StopReason::Cancelled));
+                self.settle_turn(id);
+            }
+            _ => return false,
+        }
+        self.collect_damage(id);
+        true
     }
 
     /// Writes what's queued for agent `id`. If writing fails, it has gone,
@@ -930,7 +969,38 @@ impl Daemon {
         Some(id)
     }
 
+    /// The agent of the chat in `terminal` answered its message, as
+    /// `result` says; it has `gone`, if so. Returns whether the chat took
+    /// the answer: it's there, and connected to the agent, if that has
+    /// gone.
+    fn prompt_answered(
+        &mut self,
+        terminal: TerminalId,
+        result: Result<agent_client_protocol_schema::v1::StopReason, String>,
+        gone: bool,
+    ) -> bool {
+        let Some(chat) = (self.chat(terminal)).filter(|chat| !gone || chat.is_connected()) else {
+            return false;
+        };
+        // A tool still running as the turn ends finishes with it, before
+        // anything is made of the end: see `writing_ended`.
+        if chat.writing() {
+            self.writing_ended(terminal);
+        }
+        let Some(chat) = self.chat(terminal) else {
+            return false;
+        };
+        chat.answered(result);
+        self.settle_turn(terminal);
+        true
+    }
+
     fn receive_from_agent(&mut self, agent: AgentId, name: &str, message: Incoming) {
+        // What one that has gone still says of a turn is taken only by
+        // chats still connected to it: one it has been let go by may be
+        // waiting with its next message, as a turn of its own, which what
+        // came late of the last must neither join nor end.
+        let gone = (self.agents.running.get(&agent)).is_some_and(|slot| slot.agent.has_gone());
         let id = match message {
             Incoming::Session {
                 terminal,
@@ -962,6 +1032,11 @@ impl Daemon {
                 terminal
             }
             Incoming::Update { session, update } => {
+                if gone
+                    && (self.chat_in(name, &session)).is_none_or(|(_, chat)| !chat.is_connected())
+                {
+                    return;
+                }
                 let Some(id) = self.session_updated(name, &session, *update) else {
                     return;
                 };
@@ -988,19 +1063,9 @@ impl Daemon {
             }
             Incoming::Closed { terminal } => return self.parked_session_ended(terminal, name),
             Incoming::Answered { terminal, result } => {
-                let Some(chat) = self.chat(terminal) else {
+                if !self.prompt_answered(terminal, result, gone) {
                     return;
-                };
-                // A tool still running as the turn ends finishes with it,
-                // before anything is made of the end: see `writing_ended`.
-                if chat.writing() {
-                    self.writing_ended(terminal);
                 }
-                let Some(chat) = self.chat(terminal) else {
-                    return;
-                };
-                chat.answered(result);
-                self.settle_turn(terminal);
                 terminal
             }
             Incoming::Permission {
@@ -1171,9 +1236,14 @@ impl Daemon {
         self.fail_listings(&name, &stopped);
         self.stop_agent(id);
         let mut chats = Vec::new();
+        let held = &self.agents.held;
         for (&id, slot) in &mut self.terminals {
+            // Those waiting for it to go never asked it for anything.
             if let Some(chat) = slot.terminal.chat()
                 && chat.agent() == name
+                && !held
+                    .iter()
+                    .any(|(held, agent)| *held == id && *agent == name)
             {
                 chat.disconnected(why.as_deref());
                 chats.push(id);
@@ -1186,8 +1256,40 @@ impl Daemon {
         // Asked for its settings, it never said.
         if self.agents.learning.remove(&name).is_some() {
             let why = why.unwrap_or_else(|| "it stopped".to_owned());
-            self.agents.unlearned.insert(name, (why, Instant::now()));
+            self.agents
+                .unlearned
+                .insert(name.clone(), (why, Instant::now()));
             self.offer_providers(None);
+        }
+        self.ask_for_held(&name);
+    }
+
+    /// The chats waiting for the agent called `name` to go, now it has,
+    /// that are still waiting: those it was let go for.
+    fn take_held(&mut self, name: &str) -> Vec<TerminalId> {
+        let (held, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.agents.held)
+            .into_iter()
+            .partition(|(_, agent)| agent == name);
+        self.agents.held = others;
+        let mut waiting = Vec::new();
+        for (id, _) in held {
+            // One that moved to another agent since waits for that one.
+            let chat = self.chat(id).filter(|chat| chat.agent() == name);
+            if chat.is_some_and(HostedChat::agent_went) {
+                waiting.push(id);
+            }
+            self.collect_damage(id);
+        }
+        waiting
+    }
+
+    /// The chats waiting for the agent called `name` to go ask a new one
+    /// for their session, now it has, and send what they hold once it's
+    /// open. If it fails to start, they say why.
+    fn ask_for_held(&mut self, name: &str) {
+        for id in self.take_held(name) {
+            log::info!("chat {id}: asking {name} again, now the one that was going has gone");
+            self.connect(id);
         }
     }
 
@@ -1247,6 +1349,8 @@ impl Daemon {
             return;
         };
         log::info!("chat {id} moved from {old} to {name}");
+        // It no longer waits for the agent it left to go.
+        self.agents.held.retain(|&(held, _)| held != id);
         // An install of the agent it left no longer has it waiting.
         for waiting in self.agents.installing.values_mut() {
             waiting.retain(|&waiting| waiting != id);
@@ -1543,6 +1647,9 @@ impl Daemon {
         }
         log::info!("chat {id}: starting {name} again, as it's slow to open a session");
         self.kill_agent(agent);
+        // Those waiting for it to go ask the new one below, as those
+        // waiting for a session from it do.
+        self.take_held(&name);
         // Asked for its models, it's asked again when the menu next opens.
         if self.agents.learning.remove(&name).is_some() {
             self.offer_providers(None);
@@ -1708,6 +1815,7 @@ impl Daemon {
         }
         self.agents.parking.remove(&id);
         self.agents.opening.remove(&id);
+        self.agents.held.retain(|&(held, _)| held != id);
         let Some(agent) = self.agents.named(chat.agent()) else {
             return;
         };

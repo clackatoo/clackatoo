@@ -61,6 +61,7 @@
 //! | `--hold-hover FILE` | Answers what's at a place only once FILE exists, taking nothing else in meanwhile |
 //! | `--queue-hover FILE` | Holds questions of what's at a place until FILE exists, taking everything else in meanwhile, then answers them in order |
 //! | `--hold-resolve FILE` | Resolves a code action only once FILE exists, taking nothing else in meanwhile |
+//! | `--hang-up-before-resolve FILE` | Closes its input as it's asked to resolve a code action, then asks its client for its settings every 20 ms, so answering fails, until FILE exists; then resolves it |
 //! | `--action-files` | Makes a file in each code action's edits, and its command's, which clackatoo refuses |
 //! | `--resolve-partly` | Offers to put the word in capitals with the command to mark the file too, and resolves it with only its edit |
 //! | `--resolve-null` | Resolves code actions with nothing |
@@ -159,6 +160,7 @@ fn main() {
             .unwrap_or(0),
         hold_completion: value("--hold-completion"),
         hold_resolve: value("--hold-resolve"),
+        hang_up_before_resolve: value("--hang-up-before-resolve"),
         hold_hover: value("--hold-hover"),
         queue_hover: value("--queue-hover"),
         queued: Vec::new(),
@@ -323,6 +325,7 @@ struct Fake {
     many: usize,
     hold_completion: Option<String>,
     hold_resolve: Option<String>,
+    hang_up_before_resolve: Option<String>,
     hold_hover: Option<String>,
     queue_hover: Option<String>,
     /// The questions of what's at a place held, in order, until
@@ -442,6 +445,26 @@ fn filler(length: usize) -> Vec<u8> {
     framed.resize(framed.len() + length - start.len() - end.len(), b'x');
     framed.extend_from_slice(end);
     framed
+}
+
+/// Closes its input, and asks its client for its settings, as `settings
+/// 1`. The thread reading its input, waiting in a read, holds the pipe
+/// open until something comes: the answer. Once that thread has read its
+/// input to the end, which this waits for, nothing holds the pipe, and its
+/// client's next answer fails.
+fn hang_up() {
+    let nothing = std::fs::File::open("/dev/null").unwrap();
+    rustix::stdio::dup2_stdin(&nothing).unwrap();
+    let mut out = std::io::stdout().lock();
+    out.write_all(&ask_settings("settings 1")).unwrap();
+    out.flush().unwrap();
+    drop(out);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !INPUT_ENDED.load(std::sync::atomic::Ordering::Acquire)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 /// A request for its client's settings, numbered `id`, framed.
@@ -648,24 +671,9 @@ impl Fake {
                     before.extend(filler(64 * 1024 * 1024));
                 }
                 if self.hang_up_before_hints {
-                    // The thread reading its input, waiting in a read, holds
-                    // the pipe open until something comes: the answer to the
-                    // first question. Once that thread has read its input to
-                    // the end, nothing holds the pipe, and answering the
-                    // second, past a filler that takes a while to read,
-                    // fails, however slowly each side runs.
-                    let nothing = std::fs::File::open("/dev/null").unwrap();
-                    rustix::stdio::dup2_stdin(&nothing).unwrap();
-                    let mut out = std::io::stdout().lock();
-                    out.write_all(&ask_settings("settings 1")).unwrap();
-                    out.flush().unwrap();
-                    drop(out);
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                    while !INPUT_ENDED.load(std::sync::atomic::Ordering::Acquire)
-                        && std::time::Instant::now() < deadline
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
+                    // Answering the second, past a filler that takes a while
+                    // to read, fails, however slowly each side runs.
+                    hang_up();
                     before.extend(filler(200_000));
                     before.extend(ask_settings("settings 2"));
                 }
@@ -717,6 +725,22 @@ impl Fake {
                 if let Some(gate) = &self.hold_resolve {
                     while !std::path::Path::new(gate).exists() {
                         std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+                if let Some(gate) = &self.hang_up_before_resolve {
+                    hang_up();
+                    // Asked again and again, its client finds it can't
+                    // answer, though a program another thread of a test is
+                    // starting may hold the pipe open a moment.
+                    let mut asked = 1;
+                    while !std::path::Path::new(gate).exists() {
+                        asked += 1;
+                        let mut out = std::io::stdout().lock();
+                        out.write_all(&ask_settings(&format!("settings {asked}")))
+                            .unwrap();
+                        out.flush().unwrap();
+                        drop(out);
+                        std::thread::sleep(std::time::Duration::from_millis(20));
                     }
                 }
                 self.resolve_action(message);

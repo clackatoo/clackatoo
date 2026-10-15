@@ -74,6 +74,7 @@ impl TestDaemon {
             prompt_wait: clackatoo_daemon::DEFAULT_PROMPT_WAIT,
             probe_wait: clackatoo_daemon::DEFAULT_PROBE_WAIT,
             session_wait: clackatoo_daemon::DEFAULT_SESSION_WAIT,
+            gone_wait: clackatoo_daemon::DEFAULT_GONE_WAIT,
             park_after: clackatoo_daemon::DEFAULT_PARK_AFTER,
             fit_lasts: clackatoo_daemon::DEFAULT_FIT_LASTS,
             rename_gate: None,
@@ -1657,7 +1658,12 @@ fn a_split_starts_where_the_split_pane_is() {
         .unwrap();
     let workspaces = next_workspaces(&mut client);
     let split = workspaces.list[0].terminals()[1];
-    wait_for_screen(&mut client, split, |text| text.contains("/project"));
+    // The whole path, which wraps on the small screen when it's long.
+    let project = daemon.dir.path().join("project").canonicalize().unwrap();
+    let project = project.to_str().unwrap();
+    wait_for_screen(&mut client, split, |text| {
+        text.replace('\n', "").contains(project)
+    });
 }
 
 #[test]
@@ -1682,7 +1688,12 @@ fn a_split_starts_where_the_program_in_front_is() {
         .unwrap();
     let workspaces = next_workspaces(&mut client);
     let split = workspaces.list[0].terminals()[1];
-    wait_for_screen(&mut client, split, |text| text.contains("/project"));
+    // The whole path, which wraps on the small screen when it's long.
+    let project = daemon.dir.path().join("project").canonicalize().unwrap();
+    let project = project.to_str().unwrap();
+    wait_for_screen(&mut client, split, |text| {
+        text.replace('\n', "").contains(project)
+    });
 }
 
 #[test]
@@ -2401,51 +2412,248 @@ fn what_an_agent_says_a_while_after_it_hangs_up_still_comes() {
     wait_for_fake_server_logged("agent hanging: its input broke");
 }
 
+/// A daemon whose agent called `name` is the fake agent, and which keeps
+/// an agent that has gone until it exits, however long that is, so a test
+/// can act while it's going.
+fn daemon_keeping_gone_agents(name: &str) -> TestDaemon {
+    TestDaemon::start_with(|_, config| {
+        config.agents.custom = vec![custom_agent(name, vec![fake_agent().into()])];
+        config.gone_wait = Duration::from_hours(1);
+    })
+}
+
 #[test]
-fn a_chat_opened_while_its_agent_is_going_fails_at_once_then_starts_it_again() {
+fn a_chat_whose_agent_is_going_waits_with_its_message_then_starts_it_again() {
     fake_server_logged();
     // Named for this test alone, as what it logs is looked for.
-    let daemon = TestDaemon::start_with(|_, config| {
-        config.agents.custom = vec![custom_agent("going", vec![fake_agent().into()])];
-    });
+    let daemon = daemon_keeping_gone_agents("going");
+    let exit = daemon.dir.path().join("exit");
     let mut client = daemon.client();
     let first = (client.new_workspace(None, new_chat_with(Some("going")))).unwrap();
     let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
     wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
-    // Once writing to it has failed, it's kept a while for what else it
-    // says: a new chat with it meanwhile isn't asked of it, as it would
-    // never hear, and it fails at once rather than when it's let go.
-    client
-        .chat(chat, ChatAction::Send("hang-up".to_owned()))
-        .unwrap();
+    // Once writing to it has failed, it's kept for what else it says,
+    // which still comes, until it exits.
+    let node = ask(
+        &mut client,
+        chat,
+        &format!("hang-up-until {}", exit.display()),
+    );
+    assert_eq!(last_words(&node), "still here\n");
     wait_for_fake_server_logged("agent going: its input broke");
-    let opened = Instant::now();
+    // A message meanwhile isn't sent, as it would never hear: its turn
+    // ends at once, not when the agent's let go.
+    let node = ask(&mut client, chat, "hello");
+    assert_eq!(
+        last_outcome(&node),
+        Some(&Outcome::Failed("the agent stopped".into()))
+    );
+    // Nor is a new chat with it asked of it: it waits for the agent to go,
+    // and a message sent meanwhile waits with it.
     client
         .split_pane(first, Side::Right, new_chat_with(Some("going")))
         .unwrap();
     let chats = client.watch_workspaces().unwrap().list[0].terminals();
     let second = *chats.iter().find(|&&id| id != chat).unwrap();
     let node = wait_for_chat(&mut client, second, |node| {
-        matches!(node.state, ChatState::Failed(_) | ChatState::Ready)
+        node.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("stopping"))
     });
-    assert!(
-        matches!(&node.state, ChatState::Failed(why) if why.contains("stopping")),
-        "{:?}, {:?} after the agent was found gone",
-        node.state,
-        opened.elapsed()
+    assert_eq!(node.state, ChatState::Starting);
+    client
+        .chat(second, ChatAction::Send("back".to_owned()))
+        .unwrap();
+    // The first chat closes: the fake agent numbers its sessions from one,
+    // so its session has the name the second's will have, and would take
+    // its words.
+    client.close_pane(first).unwrap();
+    // Once the agent has exited and been let go, the chat asks a new one
+    // for its session by itself, and sends what it held.
+    std::fs::write(&exit, "").unwrap();
+    let node = wait_for_chat_for(&mut client, second, Duration::from_secs(15), |node| {
+        last_outcome(node).is_some()
+    });
+    assert_eq!(last_words(&node), "echo: back\n");
+    assert_eq!(node.notice, None);
+}
+
+#[test]
+fn stopping_or_changing_a_chat_whose_agent_is_going_happens_at_once() {
+    fake_server_logged();
+    // Named for this test alone, as what it logs is looked for.
+    let daemon = daemon_keeping_gone_agents("halting");
+    let exit = daemon.dir.path().join("exit");
+    let mut client = daemon.client();
+    let first = (client.new_workspace(None, new_chat_with(Some("halting")))).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    client
+        .split_pane(first, Side::Right, new_chat_with(Some("halting")))
+        .unwrap();
+    let chats = client.watch_workspaces().unwrap().list[0].terminals();
+    let second = *chats.iter().find(|&&id| id != chat).unwrap();
+    wait_for_chat(&mut client, second, |node| node.state == ChatState::Ready);
+    // The second chat's agent is answering it when it goes.
+    client
+        .chat(second, ChatAction::Send("wait".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut client, second, |node| {
+        node.state == ChatState::Answering
+    });
+    let node = ask(
+        &mut client,
+        chat,
+        &format!("hang-up-until {}", exit.display()),
     );
-    // Once it's been let go, a message starts it again.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    // Its words may go to the first chat, as the fake agent numbers its
-    // sessions from one, so the first chat's session has the same name.
-    for tries in 0.. {
-        let node = ask(&mut client, second, &format!("back {tries}"));
-        if last_outcome(&node) == Some(&Outcome::Done) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "never started again: {node:?}");
-        std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(last_words(&node), "still here\n");
+    wait_for_fake_server_logged("agent halting: its input broke");
+    // It would never hear either: both are done at once, though it's kept.
+    client.chat(second, ChatAction::Stop).unwrap();
+    let node = wait_for_chat(&mut client, second, |node| last_outcome(node).is_some());
+    assert_eq!(last_outcome(&node), Some(&Outcome::Stopped));
+    client
+        .chat(
+            second,
+            ChatAction::Set {
+                setting: "model".into(),
+                value: "sonnet".into(),
+            },
+        )
+        .unwrap();
+    wait_for_chat(&mut client, second, |node| {
+        node.notice.as_deref() == Some("The setting couldn't be changed: its agent is stopping")
+    });
+    // A message now ends at once, and the next waits for the agent to go,
+    // as a turn of its own.
+    let node = ask(&mut client, second, "first");
+    assert_eq!(
+        last_outcome(&node),
+        Some(&Outcome::Failed("the agent stopped".into()))
+    );
+    client
+        .chat(second, ChatAction::Send("second".to_owned()))
+        .unwrap();
+    wait_for_chat(&mut client, second, |node| {
+        node.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("stopping"))
+    });
+    // The first chat closes: the fake agent numbers its sessions from one,
+    // and a new agent's session for the second may have its name.
+    client.close_pane(first).unwrap();
+    // As it exits, it says more of the turn that was stopped, and answers
+    // it: neither joins nor ends the turn waiting, which the agent started
+    // again answers.
+    std::fs::write(&exit, "").unwrap();
+    let node = wait_for_chat_for(&mut client, second, Duration::from_secs(15), |node| {
+        node.turns
+            .last()
+            .is_some_and(|turn| turn.prompt == "second")
+            && last_outcome(node).is_some()
+    });
+    assert_eq!(last_words(&node), "echo: second\n");
+    assert_eq!(last_outcome(&node), Some(&Outcome::Done));
+    let late = (node.turns.iter()).any(|turn| format!("{:?}", turn.items).contains("late"));
+    assert!(!late, "{node:#?}");
+}
+
+#[test]
+fn a_chat_waiting_for_its_agent_to_go_that_moves_to_another_asks_that_one_once() {
+    fake_server_logged();
+    // Named for this test alone, as what it logs is looked for. The agent
+    // it moves to never answers a request for a session, so it's still
+    // asking it as the first goes.
+    let daemon = TestDaemon::start_with(|dir, config| {
+        let log = dir.join("other.log");
+        let other = vec![
+            fake_agent().into(),
+            "--mute".into(),
+            "--log".into(),
+            log.into(),
+        ];
+        config.agents.custom = vec![
+            custom_agent("moving", vec![fake_agent().into()]),
+            custom_agent("other", other),
+        ];
+        config.gone_wait = Duration::from_hours(1);
+    });
+    let exit = daemon.dir.path().join("exit");
+    let mut client = daemon.client();
+    let first = (client.new_workspace(None, new_chat_with(Some("moving")))).unwrap();
+    let chat = client.watch_workspaces().unwrap().list[0].terminals()[0];
+    wait_for_chat(&mut client, chat, |node| node.state == ChatState::Ready);
+    let node = ask(
+        &mut client,
+        chat,
+        &format!("hang-up-until {}", exit.display()),
+    );
+    assert_eq!(last_words(&node), "still here\n");
+    wait_for_fake_server_logged("agent moving: its input broke");
+    client
+        .split_pane(first, Side::Right, new_chat_with(Some("moving")))
+        .unwrap();
+    let chats = client.watch_workspaces().unwrap().list[0].terminals();
+    let second = *chats.iter().find(|&&id| id != chat).unwrap();
+    wait_for_chat(&mut client, second, |node| {
+        node.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("stopping"))
+    });
+    // It moves to another agent while it waits for the first to go.
+    client
+        .chat(
+            second,
+            ChatAction::Switch {
+                agent: "other".to_owned(),
+                model: None,
+                budget: 20_000,
+            },
+        )
+        .unwrap();
+    let new = |log: &str| {
+        (log.lines())
+            .filter(|line| line.starts_with("new ") && !line.ends_with("/elsewhere"))
+            .count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while new(&agent_log(&daemon, "other.log")) == 0 {
+        assert!(Instant::now() < deadline, "the other agent was never asked");
+        std::thread::sleep(Duration::from_millis(10));
     }
+    // The first goes: the chat that moved doesn't ask its new agent again.
+    std::fs::write(&exit, "").unwrap();
+    wait_for_chat(&mut client, chat, |node| {
+        node.notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("stopped"))
+    });
+    // A third chat's request comes after any the second made then.
+    let elsewhere = daemon.dir.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    client
+        .split_pane(
+            first,
+            Side::Below,
+            PaneTerminal::Agent(NewAgent {
+                size: Size::new(40, 10).unwrap(),
+                cwd: Some(elsewhere.display().to_string()),
+                agent: Some("other".to_owned()),
+                tools: AgentTools::Ask,
+                task: true,
+                browser: false,
+                model: None,
+                resume: None,
+            }),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(agent_log(&daemon, "other.log").lines()).any(|line| line.ends_with("/elsewhere")) {
+        assert!(Instant::now() < deadline, "the third chat never asked");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let log = agent_log(&daemon, "other.log");
+    assert_eq!(new(&log), 1, "{log}");
 }
 
 #[test]
@@ -4341,6 +4549,15 @@ fn next_diagnostics(client: &mut Client) -> (u64, Vec<(usize, usize)>) {
 fn with_fake_language_server(args: impl FnOnce(&Path) -> Vec<String>) -> TestDaemon {
     TestDaemon::start_with(|dir, config| {
         config.languages = Some(fake_language_server_pack(dir, args(dir)));
+    })
+}
+
+/// As [`with_fake_language_server`], keeping a server that has gone until
+/// it exits, however long that is, so a test can act while it's going.
+fn with_fake_language_server_kept_gone(args: impl FnOnce(&Path) -> Vec<String>) -> TestDaemon {
+    TestDaemon::start_with(|dir, config| {
+        config.languages = Some(fake_language_server_pack(dir, args(dir)));
+        config.gone_wait = Duration::from_hours(1);
     })
 }
 
@@ -7033,13 +7250,12 @@ fn an_answer_sent_a_while_after_its_server_hangs_up_still_comes() {
 #[test]
 fn a_question_for_a_server_that_has_hung_up_fails_at_once() {
     fake_server_logged();
-    let daemon = with_fake_language_server(|dir| {
+    // It stays running once its input has ended, so it's kept, read, for a
+    // while: what's asked meanwhile hears it has hung up, not that it has
+    // stopped, as it would once it's been let go.
+    let daemon = with_fake_language_server_kept_gone(|dir| {
         let size = dir.join("size").display().to_string();
-        let args = [
-            "--exit-after-hints",
-            "--hang-up-before-hints",
-            "--pause-before-hints",
-        ];
+        let args = ["--stay", "--hang-up-before-hints", "--pause-before-hints"];
         let args = args.iter().map(|&arg| arg.to_owned());
         ["--big-hints".to_owned(), size]
             .into_iter()
@@ -7055,7 +7271,7 @@ fn a_question_for_a_server_that_has_hung_up_fails_at_once() {
     wait_for_server_input_broken(&daemon);
     client.query(buffer, 2, (0, 0), Query::Definition).unwrap();
     let answers = [next_answer(&mut client), next_answer(&mut client)];
-    let failed = Answer::Failed("its language server has stopped".to_owned());
+    let failed = Answer::Failed("its language server has hung up".to_owned());
     assert!(answers.contains(&(2, failed)), "{answers:?}");
     assert!(
         answers
@@ -7063,6 +7279,43 @@ fn a_question_for_a_server_that_has_hung_up_fails_at_once() {
             .any(|(id, answer)| *id == 1 && matches!(answer, Answer::InlayHints { .. })),
         "{answers:?}"
     );
+}
+
+#[test]
+fn a_command_from_a_server_that_has_hung_up_isnt_asked_for() {
+    fake_server_logged();
+    // Resolved with only its edit once its input has broken: the edit is
+    // made, as what it sends is still taken in, but its command isn't
+    // asked for, as it would never hear, and every other command would
+    // wait for it until it's let go.
+    let daemon = with_fake_language_server_kept_gone(|dir| {
+        let gate = dir.join("gate").display().to_string();
+        let args = ["--stay", "--resolve-partly", "--hang-up-before-resolve"];
+        let args = args.iter().map(|&arg| arg.to_owned());
+        args.chain([gate]).collect()
+    });
+    let text = "bad\nuse it\n";
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", text)]);
+    let at = text.find("use").unwrap();
+    client
+        .query(buffer, 1, (0, at), Query::CodeActions { end: at })
+        .unwrap();
+    assert_eq!(
+        action_titles(&next_answer(&mut client).1)[0],
+        "Capitalise the word"
+    );
+    client
+        .query(buffer, 2, (0, 0), Query::Act { list: 1, item: 0 })
+        .unwrap();
+    wait_for_server_input_broken(&daemon);
+    std::fs::write(daemon.dir.path().join("gate"), "").unwrap();
+    // It's kept running, and kept for an hour: asked, it would hold up the
+    // answer that long.
+    let (updates, answer) = updates_to_answer(&mut client);
+    let why = "Capitalise the word: made its edits, but not its command: its language server \
+               has hung up";
+    assert_eq!(answer, (2, Answer::Failed(why.to_owned())));
+    assert_eq!(edited(text, &updates), "bad\nUSE it\n");
 }
 
 #[test]

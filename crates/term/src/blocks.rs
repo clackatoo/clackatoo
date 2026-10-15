@@ -118,6 +118,11 @@ pub(crate) struct Blocks {
     /// doesn't, as bash before 4.4, where `PS0` does nothing, never
     /// says it has left its prompt, so it's never taken to be at one.
     marks_commands: bool,
+    /// How many times blocks have been numbered from 0 again, as numbers
+    /// ran out (see [`start_again`](Self::start_again)). Nothing else
+    /// changes it: not clearing history, which changes its generation,
+    /// nor a reset, which keeps the numbering.
+    renumbered: u64,
 }
 
 impl Blocks {
@@ -130,7 +135,20 @@ impl Blocks {
             typing: false,
             marks_typing: false,
             marks_commands,
+            renumbered: 0,
         }
+    }
+
+    /// These blocks, counted as numbered from 0 again `renumbered` times,
+    /// as blocks they carry on from were.
+    pub(crate) fn renumbered_as(mut self, renumbered: u64) -> Self {
+        self.renumbered = renumbered;
+        self
+    }
+
+    /// How many times blocks have been numbered from 0 again.
+    pub(crate) fn renumbered(&self) -> u64 {
+        self.renumbered
     }
 
     /// The number of the first block, and every block from it on.
@@ -243,6 +261,7 @@ impl Blocks {
         self.entries.clear();
         self.first = 0;
         self.typing = false;
+        self.renumbered += 1;
     }
 
     /// Whether a prompt or a command starting now would need a number
@@ -338,6 +357,16 @@ impl Terminal {
         let blocks = self.emulator_blocks();
         let last = blocks.parts().1.back()?;
         Some((blocks.last(), last.progress()))
+    }
+
+    /// How many times the terminal has numbered its blocks from 0 again,
+    /// once numbers ran out. A block number from before it changed means
+    /// nothing now. Clearing history doesn't change it, though it changes
+    /// [`Grid::history_generation`](crate::Grid::history_generation), nor
+    /// does a reset, as block numbers carry on through one.
+    #[must_use]
+    pub fn block_renumberings(&self) -> u64 {
+        self.emulator_blocks().renumbered()
     }
 
     /// The command the shell's latest block is running, if one is and
@@ -794,6 +823,7 @@ mod tests {
             Some((u32::MAX, Progress::Finished(Some(1))))
         );
         let generation = t.primary().history_generation();
+        assert_eq!(t.block_renumberings(), 0);
         t.advance(PROMPT.as_bytes());
         assert_eq!(t.latest_block(), Some((0, Progress::Prompt)));
         assert_eq!(
@@ -803,17 +833,38 @@ mod tests {
         );
         assert_eq!(t.block_progress(u32::MAX), None);
         assert_eq!(t.primary().history_generation(), generation + 1);
+        assert_eq!(t.block_renumberings(), 1);
         let marked: Vec<_> = t.primary().marks().map(|(_, mark)| mark.block).collect();
         assert_eq!(marked, [0], "the old marks are gone");
-        // A reset there starts from 0 too.
+        // A reset there starts from 0 too, which counts as numbering them
+        // again.
         t.restore_blocks(&crate::snapshot::BlocksSnapshot {
             first: u32::MAX,
             ..crate::snapshot::BlocksSnapshot::default()
         });
+        assert_eq!(t.block_renumberings(), 1, "a snapshot keeps the count");
         t.advance(PROMPT.as_bytes());
         t.advance(b"\x1bc");
+        assert_eq!(t.block_renumberings(), 2);
         t.advance(PROMPT.as_bytes());
         assert_eq!(t.latest_block(), Some((0, Progress::Prompt)));
+        t.assert_invariants();
+    }
+
+    #[test]
+    fn clearing_history_or_resetting_isnt_numbering_blocks_again() {
+        let mut t = terminal(20, 3, 100);
+        t.advance(PROMPT.as_bytes());
+        t.advance(command("seq", "1\r\n2\r\n3\r\n", 0).as_bytes());
+        let generation = t.primary().history_generation();
+        // `clear`, as a command's output: history's generation changes,
+        // and block numbers mean what they did.
+        t.advance(b"\x1b[H\x1b[2J\x1b[3J");
+        assert_ne!(t.primary().history_generation(), generation);
+        t.advance(b"\x1bc");
+        assert_eq!(t.block_renumberings(), 0);
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.latest_block(), Some((1, Progress::Prompt)));
         t.assert_invariants();
     }
 

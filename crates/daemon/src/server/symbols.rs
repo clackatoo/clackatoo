@@ -71,12 +71,9 @@ impl Daemon {
             return self.symbols_failed(token, id, "this file has no language server".into());
         };
         let project = self.project(pane);
-        // One that has gone can't be asked: it would never hear.
-        let running =
-            (self.servers.slots.get_mut(&server)).filter(|running| !running.server.has_gone());
-        let Some(running) = running else {
-            let why = "its language server has stopped";
-            return self.symbols_failed(token, id, why.into());
+        let running = match self.servers.askable_mut(server) {
+            Ok(running) => running,
+            Err(why) => return self.symbols_failed(token, id, why.into()),
         };
         if !running.server.ready() {
             let why = "its language server is still starting";
@@ -136,12 +133,17 @@ impl Daemon {
             .partition(|(due, _)| *due <= now);
         self.servers.symbol_retries = waiting;
         for (_, mut search) in due {
-            let Some(running) = (self.servers.slots.get_mut(&search.server))
-                .filter(|running| running.server.ready() && !running.server.has_gone())
-            else {
-                let why = "its language server has stopped";
-                self.symbols_failed(search.token, search.id, why.into());
-                continue;
+            let asked = (self.servers.askable_mut(search.server)).and_then(|running| {
+                (running.server.ready())
+                    .then_some(running)
+                    .ok_or("its language server has stopped")
+            });
+            let running = match asked {
+                Ok(running) => running,
+                Err(why) => {
+                    self.symbols_failed(search.token, search.id, why.into());
+                    continue;
+                }
             };
             search.request = running.server.find_symbols(&search.query);
             let server = search.server;

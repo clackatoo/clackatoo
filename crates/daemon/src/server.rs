@@ -951,7 +951,12 @@ impl Daemon {
         Ok(Self {
             poll,
             listener,
-            parser: crate::rpc::Parser::new(&waker),
+            parser: crate::rpc::Parser::new(
+                &waker,
+                config
+                    .gone_wait
+                    .clamp(crate::rpc::PARSE_WAIT, std::time::Duration::from_hours(24)),
+            ),
             waker,
             shutdown: Arc::new(AtomicBool::new(false)),
             sources: Slab::new(),

@@ -417,7 +417,9 @@ impl Terminal {
         let (marks, blocks) = snapshot.restore();
         let emulator = &mut self.emulator;
         emulator.primary.set_marks(&marks);
-        emulator.blocks = blocks;
+        // Snapshots don't carry the count, which counts only this
+        // process's renumberings.
+        emulator.blocks = blocks.renumbered_as(emulator.blocks.renumbered());
         emulator.cwd.clone_from(&snapshot.cwd);
     }
 
@@ -1490,15 +1492,19 @@ impl Emulator {
         let generation = self.primary.history_generation();
         let (_, next_link) = self.links.parts();
         // Numbers run out only after four billion commands; then they start
-        // again, which the reset's new history tells windows of anyway.
-        let next_block = self.blocks.next().unwrap_or(0);
+        // again, which the reset's new history tells windows of anyway,
+        // and which counts as numbering them again.
+        let next_block = self.blocks.next();
+        let renumbered = self.blocks.renumbered() + u64::from(next_block.is_none());
+        let next_block = next_block.unwrap_or(0);
         *self = Self::new(self.size, &self.config);
         self.replies = replies;
         self.clipboard = clipboard;
         // Link IDs are never reused (see crate::links), nor are block
         // numbers, which windows know how blocks ended by.
         self.links = Links::from_parts([], next_link);
-        self.blocks = Blocks::from_parts(next_block, std::collections::VecDeque::new());
+        self.blocks = Blocks::from_parts(next_block, std::collections::VecDeque::new())
+            .renumbered_as(renumbered);
         // History is numbered from 0 again.
         self.primary.follow_history(generation);
     }

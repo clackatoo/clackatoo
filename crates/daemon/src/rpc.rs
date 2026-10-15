@@ -61,9 +61,10 @@ const BIG: usize = 256 * 1024;
 const MAX_PARSING: usize = MAX_MESSAGE;
 
 /// How long a program that has gone is kept for what it sent last, unless
-/// the parser's thread is in the middle of one of its messages: from when
-/// it went, or from when the thread last finished one of its messages, if
-/// that was later, as what it sent after that may still be in its pipe.
+/// the parser's thread is busy while it has messages there: from when it
+/// went, or from when the thread last finished something, if that was
+/// later, as what it sent after that may still be in its pipe. The
+/// daemon's config may say otherwise (`DaemonConfig::gone_wait`).
 /// It's also how long one that has gone is kept while it, or something it
 /// started, still writes. Long enough for the thread to get to its
 /// messages, and for the rest to be read, short enough that a dead
@@ -72,9 +73,10 @@ pub(crate) const PARSE_WAIT: Duration = Duration::from_secs(2);
 
 /// The longest a program that has gone is kept for what it sent last,
 /// however the parser's thread is getting on with it. While the thread is
-/// in the middle of one of its messages, it's kept up to this, as a big
-/// message on a busy machine can take seconds to parse; but no longer,
-/// so a thread stuck somehow doesn't keep a dead program forever.
+/// busy and some of its messages are there, it's kept up to this, as a big
+/// message on a busy machine can take seconds to parse, and its own may
+/// wait behind another program's; but no longer, so a thread stuck
+/// somehow doesn't keep a dead program forever.
 const LONGEST_PARSE_WAIT: Duration = Duration::from_secs(10);
 
 /// How much of the start of a line too long to read is looked through
@@ -350,10 +352,14 @@ impl Peer {
     /// is read while the parser's thread is too far behind: once it catches
     /// up, [`parsed`](Self::parsed) says so.
     ///
-    /// Once the program has gone, what it asks is dropped as it's read:
-    /// no answer can reach it, so nothing it asks for is done, as making
-    /// an edit or writing a file it would never hear of. What it tells,
-    /// and its answers, are still taken in.
+    /// Once the program has been found to have gone, what it asks is
+    /// dropped as it's read: no answer can reach it, so nothing it asks
+    /// for is done, as making an edit or writing a file it would never
+    /// hear of. What it tells, and its answers, are still taken in. It's
+    /// found to have gone only by its caller, after a read: what came in
+    /// the read that found it, as by reaching the end of its output, or
+    /// before writing to it failed, is acted on as usual, requests and
+    /// all.
     pub(crate) fn read(
         &mut self,
         buffer: &mut [u8],
@@ -576,9 +582,17 @@ type Parsed = (Option<Message>, usize);
 struct Parsing {
     /// What it has parsed, in order, not yet taken.
     done: VecDeque<Parsed>,
-    /// Whether it's in the middle of one of them now.
-    busy: bool,
     /// When it last finished one, if it has.
+    finished: Option<Instant>,
+}
+
+/// How the parser's thread is getting on with its work, whoever's it is,
+/// shared between it and the loop.
+#[derive(Clone, Copy, Debug, Default)]
+struct Progress {
+    /// Whether it's in the middle of something now.
+    busy: bool,
+    /// When it last finished something, if it has.
     finished: Option<Instant>,
 }
 
@@ -803,25 +817,45 @@ impl Inbox {
     /// When a program that has gone is let go however much of what it
     /// sent is still being parsed, or still coming, if it's been found to
     /// have gone. It's waited for as long as the parser's thread is getting
-    /// on with its messages, as a big one parses slowly on a busy machine:
-    /// up to [`LONGEST_PARSE_WAIT`] while the thread is in the middle of
-    /// one, and otherwise [`PARSE_WAIT`] from when it went or the thread
-    /// last finished one, whichever was later. That leaves time to read
-    /// what it sent after a big message, which stayed in its pipe while
-    /// the thread caught up. With nothing of it ever on the thread, that's
-    /// [`PARSE_WAIT`] after it went: it may have only broken its input and
-    /// still be writing, or something it started may hold its output open
-    /// and write on without end. What's read from its pipe doesn't count,
-    /// or one writing on would be kept the longest.
+    /// on towards its messages, as a big one parses slowly on a busy
+    /// machine, and its own may wait behind another program's.
+    /// While some of its messages are with the thread: up to
+    /// [`LONGEST_PARSE_WAIT`] while the thread is busy with anything, and
+    /// otherwise [`PARSE_WAIT`] from when it went or the thread last
+    /// finished anything, whichever was later. Once none is: [`PARSE_WAIT`]
+    /// from when it went or the thread last finished one of its own. That
+    /// leaves time to read what it sent after a big message, which stayed
+    /// in its pipe while the thread caught up. With nothing of it ever on
+    /// the thread, that's [`PARSE_WAIT`] after it went: it may have only
+    /// broken its input and still be writing, or something it started may
+    /// hold its output open and write on without end. What's read from its
+    /// pipe doesn't count, or one writing on would be kept the longest.
+    ///
+    /// MCP connections to clackatoo's tools follow the same rule, though a
+    /// socket that has finished can't send more: then it only waits for
+    /// the thread, and the wait for a pipe's rest is harmless.
     pub(crate) fn gone_due(&self) -> Option<Instant> {
         let gone = self.gone?;
-        let longest = gone + LONGEST_PARSE_WAIT;
-        let parsing = self.parsed.lock().unwrap_or_else(PoisonError::into_inner);
-        if parsing.busy {
-            return Some(longest);
-        }
-        let since = parsing.finished.map_or(gone, |finished| finished.max(gone));
-        Some(longest.min(since + PARSE_WAIT))
+        let wait = self.parser.0.wait;
+        let longest =
+            (gone.checked_add(LONGEST_PARSE_WAIT.max(wait))).unwrap_or(gone + LONGEST_PARSE_WAIT);
+        let finished = if self.parsing > 0 {
+            let progress = self.parser.progress();
+            if progress.busy {
+                return Some(longest);
+            }
+            progress.finished
+        } else {
+            (self.parsed.lock())
+                .unwrap_or_else(PoisonError::into_inner)
+                .finished
+        };
+        let since = finished.map_or(gone, |finished| finished.max(gone));
+        Some(
+            since
+                .checked_add(wait)
+                .map_or(longest, |due| due.min(longest)),
+        )
     }
 }
 
@@ -985,6 +1019,12 @@ struct Shared {
     /// Where work goes, once the thread has started; `None` if it
     /// couldn't be, and then messages are parsed on the loop.
     jobs: OnceLock<Option<Sender<Job>>>,
+    /// How the thread is getting on: apart from the rest, as the thread
+    /// mustn't hold where its work comes from, or it would never end.
+    progress: Arc<Mutex<Progress>>,
+    /// How long a program that has gone is kept for what it sent last,
+    /// [`PARSE_WAIT`] unless the daemon is told otherwise.
+    wait: Duration,
 }
 
 /// Work for the parser's thread.
@@ -1004,12 +1044,22 @@ enum Job {
 }
 
 impl Parser {
-    /// A parser that wakes the loop with `waker`, with no thread yet.
-    pub(crate) fn new(waker: &Arc<Waker>) -> Self {
+    /// A parser that wakes the loop with `waker`, with no thread yet, for
+    /// programs kept `wait` for what they sent last once they've gone
+    /// (see [`Inbox::gone_due`]).
+    pub(crate) fn new(waker: &Arc<Waker>, wait: Duration) -> Self {
         Self(Arc::new(Shared {
             waker: Arc::clone(waker),
             jobs: OnceLock::new(),
+            progress: Arc::default(),
+            wait,
         }))
+    }
+
+    /// Whether the thread is busy now, and when it last finished
+    /// something.
+    fn progress(&self) -> Progress {
+        *(self.0.progress.lock()).unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Where work for the thread goes, if it has been started.
@@ -1022,11 +1072,12 @@ impl Parser {
         let jobs = self.0.jobs.get_or_init(|| {
             let (jobs, work) = mpsc::channel();
             let waker = Arc::clone(&self.0.waker);
+            let progress = Arc::clone(&self.0.progress);
             let started = std::thread::Builder::new()
                 .name("parse".to_owned())
                 .spawn(move || {
                     for job in work {
-                        run(job, &waker);
+                        run(job, &waker, &progress);
                     }
                 });
             match started {
@@ -1075,15 +1126,24 @@ impl Parser {
     /// A parser for tests, waking a loop nobody polls.
     pub(crate) fn idle() -> Self {
         let poll = Box::leak(Box::new(mio::Poll::new().unwrap()));
-        Self::new(&Arc::new(
-            Waker::new(poll.registry(), mio::Token(0)).unwrap(),
-        ))
+        Self::new(
+            &Arc::new(Waker::new(poll.registry(), mio::Token(0)).unwrap()),
+            PARSE_WAIT,
+        )
     }
 }
 
 /// Does `job`, on the parser's thread, waking the loop with `waker` once a
-/// message is ready.
-fn run(job: Job, waker: &Waker) {
+/// message is ready, and saying in `progress` how it's getting on.
+fn run(job: Job, waker: &Waker, progress: &Mutex<Progress>) {
+    let progressed = |busy: bool| {
+        let mut progress = progress.lock().unwrap_or_else(PoisonError::into_inner);
+        progress.busy = busy;
+        if !busy {
+            progress.finished = Some(Instant::now());
+        }
+    };
+    progressed(true);
     match job {
         Job::Parse {
             name,
@@ -1093,24 +1153,27 @@ fn run(job: Job, waker: &Waker) {
             into,
         } => {
             let length = body.len();
-            let lock = || into.lock().unwrap_or_else(PoisonError::into_inner);
-            lock().busy = true;
             let mut message = parse(&name, &bytes[body]);
             // Here, not on the loop, as it may be megabytes.
             drop(bytes);
             if let Some(message) = &mut message {
                 message.trash = trash;
             }
-            let mut parsing = lock();
+            // Done before the message is handed over, so once it's been
+            // taken, the thread never seems busy with it still.
+            progressed(false);
+            let mut parsing = into.lock().unwrap_or_else(PoisonError::into_inner);
             parsing.done.push_back((message, length));
-            parsing.busy = false;
             parsing.finished = Some(Instant::now());
             drop(parsing);
             if let Err(err) = waker.wake() {
                 log::warn!("a message was parsed, but the loop can't be woken: {err}");
             }
         }
-        Job::Free(thing) => drop(thing),
+        Job::Free(thing) => {
+            drop(thing);
+            progressed(false);
+        }
     }
 }
 
@@ -1322,7 +1385,7 @@ mod tests {
     fn a_message_parsed_off_the_loop_wakes_it() {
         let mut poll = mio::Poll::new().unwrap();
         let waker = Arc::new(Waker::new(poll.registry(), mio::Token(7)).unwrap());
-        let mut inbox = Inbox::new(Framing::Headers, &Parser::new(&waker));
+        let mut inbox = Inbox::new(Framing::Headers, &Parser::new(&waker, PARSE_WAIT));
         let mut messages = Vec::new();
         let bytes = stream(Framing::Headers, &[message(1, BIG), message(2, 10)]);
         inbox.push("test", &bytes, &mut messages, |_| {}).unwrap();
@@ -1492,10 +1555,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
             inbox.take(&mut messages, usize::MAX);
         }
-        let parsing = inbox.parsed.lock().unwrap();
-        assert!(!parsing.busy, "the thread says it's done");
-        let finished = parsing.finished.expect("the thread says when");
-        drop(parsing);
+        assert!(!parser.progress().busy, "the thread says it's done");
+        let finished = (inbox.parsed.lock().unwrap().finished).expect("the thread says when");
         assert!(inbox.gone(), "what it sent last has come");
         // The rest is still read for a while, if it, or what it started,
         // writes on, as it may have after the big message.
@@ -1515,30 +1576,39 @@ mod tests {
         assert_eq!(inbox.gone_due(), Some(gone + PARSE_WAIT));
         inbox.gone = Some(ago(PARSE_WAIT));
         assert!(inbox.gone(), "the thread isn't getting to it");
-        // In the middle of being parsed, however long that takes, on a
-        // busy machine: up to the longest wait.
-        let mut inbox = Inbox::new(Framing::Lines, &Parser::idle());
+        // The thread busy, with one of its messages, or another program's
+        // it waits behind, however long that takes on a busy machine: up
+        // to the longest wait.
+        let parser = Parser::idle();
+        let mut inbox = Inbox::new(Framing::Lines, &parser);
         inbox.parsing = 1;
-        inbox.parsed.lock().unwrap().busy = true;
+        parser.0.progress.lock().unwrap().busy = true;
         inbox.gone = Some(ago(PARSE_WAIT * 2));
-        assert!(!inbox.gone(), "it's being parsed");
+        assert!(!inbox.gone(), "it's being parsed, or getting closer");
         let gone = inbox.gone.unwrap();
         assert_eq!(inbox.gone_due(), Some(gone + LONGEST_PARSE_WAIT));
         inbox.gone = Some(ago(LONGEST_PARSE_WAIT));
-        assert!(inbox.gone(), "a thread stuck in it keeps it no longer");
-        // One finished a moment ago, with more to come: from then.
-        let mut inbox = Inbox::new(Framing::Lines, &Parser::idle());
+        assert!(inbox.gone(), "a thread stuck keeps it no longer");
+        // With nothing of its own there, a busy thread doesn't keep it.
+        let mut idle = Inbox::new(Framing::Lines, &parser);
+        idle.gone = Some(ago(PARSE_WAIT * 2));
+        assert!(idle.gone());
+        assert_eq!(idle.gone_due(), Some(idle.gone.unwrap() + PARSE_WAIT));
+        // The thread finished something a moment ago, with more of its
+        // own to come: from then.
+        let parser = Parser::idle();
+        let mut inbox = Inbox::new(Framing::Lines, &parser);
         inbox.parsing = 2;
         inbox.gone = Some(ago(PARSE_WAIT * 2));
         let finished = ago(PARSE_WAIT / 4);
-        inbox.parsed.lock().unwrap().finished = Some(finished);
+        parser.0.progress.lock().unwrap().finished = Some(finished);
         assert!(!inbox.gone(), "the thread is getting on");
         assert_eq!(inbox.gone_due(), Some(finished + PARSE_WAIT));
-        inbox.parsed.lock().unwrap().finished = Some(ago(PARSE_WAIT));
+        parser.0.progress.lock().unwrap().finished = Some(ago(PARSE_WAIT));
         assert!(inbox.gone(), "the thread hasn't got on since");
         // Getting on however long: still no longer than the longest wait.
         inbox.gone = Some(ago(LONGEST_PARSE_WAIT));
-        inbox.parsed.lock().unwrap().finished = Some(Instant::now());
+        parser.0.progress.lock().unwrap().finished = Some(Instant::now());
         assert!(inbox.gone());
         // All taken a moment ago, long after it went: what it sent after,
         // held in its pipe while the thread caught up, is still read, so
@@ -1561,6 +1631,8 @@ mod tests {
         let parser = Parser(Arc::new(Shared {
             waker,
             jobs: OnceLock::from(Some(jobs)),
+            progress: Arc::default(),
+            wait: PARSE_WAIT,
         }));
         let mut inbox = Inbox::new(Framing::Lines, &parser);
         // As though messages had been handed to it before it went.

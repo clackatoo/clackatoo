@@ -916,6 +916,7 @@ pub(super) mod tests {
             prompt_wait: crate::DEFAULT_PROMPT_WAIT,
             probe_wait: crate::DEFAULT_PROBE_WAIT,
             session_wait: crate::DEFAULT_SESSION_WAIT,
+            gone_wait: crate::DEFAULT_GONE_WAIT,
             park_after: crate::DEFAULT_PARK_AFTER,
             fit_lasts: crate::DEFAULT_FIT_LASTS,
             rename_gate: None,

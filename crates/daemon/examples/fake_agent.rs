@@ -10,6 +10,7 @@
 //! | `busy` | Starts running a command, which goes on until the message is cancelled |
 //! | `exit` | Exits, as if it crashed |
 //! | `hang-up` | Closes its input, then asks to read `/dev/null` through the daemon, so answering fails, and asks again 300 ms later; then, 300 ms after that, says `still here`, ends its turn, and waits, still running, until it's stopped |
+//! | `hang-up-until PATH` | As `hang-up`, but once PATH, an absolute path, is there, says `late` in each session with a message waiting (`wait`), answers it, and exits |
 //! | `settings` | Its mode and model, as `mode model` |
 //! | `limits` | Says its account's limits as Claude Code's adapter does, in `usage_update`'s `_meta`: five hours' 42% used, the week's reached, with a nonsense time |
 //! | `read PATH` | Reads the file through the daemon, and says `read:` and its text |
@@ -37,7 +38,8 @@
 //! as Manual and Haiku, and each answer ends with how much context it uses.
 //!
 //! Run with `--log FILE`, it notes each session it's asked to close or
-//! resume there, and what came before the message in a prompt of several
+//! resume there, each new one it's asked for (`new CWD`, answered or not),
+//! and what came before the message in a prompt of several
 //! pieces of text, as a chat that moved to it sends what happened before:
 //! `carried SESSION`, the text, then `end carried`. A message is the last
 //! piece of its prompt.
@@ -406,6 +408,44 @@ fn tell_again(session: &str, cwd: &str, gap: Option<std::time::Duration>) {
     say(session, "You're welcome.");
 }
 
+/// Hangs up in `session`, answering the message `id`, as `hang-up` says:
+/// then waits, still running, until it's stopped, or until `until`, a
+/// path, is there, says `late` to each of the messages `waiting`, as a
+/// turn still going, answers them, and exits.
+fn hang_up(session: &str, id: &Value, until: Option<&str>, waiting: &[(Value, String)]) -> ! {
+    // Nothing reads what the daemon writes from now on, so its answer
+    // fails. Then a pause, as if thinking: an empty pipe isn't the end of
+    // what it says. It asks twice, a pause apart: a program another thread
+    // of a test is starting may hold its input open a moment, until it
+    // runs, and the first answer then goes through.
+    let nothing = std::fs::File::open("/dev/null").unwrap();
+    rustix::stdio::dup2_stdin(&nothing).unwrap();
+    for asked in ["f1", "f2"] {
+        send(
+            &json!({ "jsonrpc": "2.0", "id": asked, "method": "fs/read_text_file",
+                      "params": { "sessionId": session, "path": "/dev/null" } }),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    say(session, "still here\n");
+    done(id, "end_turn");
+    // Still running, so it's found to have gone only because answering it
+    // failed, not because it exited.
+    let Some(until) = until else {
+        loop {
+            std::thread::park();
+        }
+    };
+    while !std::path::Path::new(until).exists() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    for (id, session) in waiting {
+        say(session, "late\n");
+        done(id, "end_turn");
+    }
+    std::process::exit(0);
+}
+
 fn done(id: &Value, reason: &str) {
     reply(id, &json!({ "stopReason": reason }));
 }
@@ -517,8 +557,16 @@ impl Fake {
                 "error": { "code": -32000, "message": "Authentication required" } }));
             }
             Some("session/new") if self.answers.is_some_and(|most| self.sessions.len() >= most) => {
+                self.note(&format!(
+                    "new {}",
+                    params["cwd"].as_str().unwrap_or_default()
+                ));
             }
             Some("session/new") => {
+                self.note(&format!(
+                    "new {}",
+                    params["cwd"].as_str().unwrap_or_default()
+                ));
                 let session = format!("s{}", self.sessions.len() + 1);
                 self.sessions
                     .insert(session.clone(), params["cwd"].as_str().unwrap().to_owned());
@@ -860,29 +908,10 @@ impl Fake {
             "wait" => self.waits.push((id, session)),
             "busy" => self.busy(id, session),
             "exit" => return false,
-            "hang-up" => {
-                // Nothing reads what the daemon writes from now on, so its
-                // answer fails. Then a pause, as if thinking: an empty pipe
-                // isn't the end of what it says. It asks twice, a pause
-                // apart: a program another thread of a test is starting
-                // may hold its input open a moment, until it runs, and the
-                // first answer then goes through.
-                let nothing = std::fs::File::open("/dev/null").unwrap();
-                rustix::stdio::dup2_stdin(&nothing).unwrap();
-                for asked in ["f1", "f2"] {
-                    send(
-                        &json!({ "jsonrpc": "2.0", "id": asked, "method": "fs/read_text_file",
-                                  "params": { "sessionId": session, "path": "/dev/null" } }),
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                }
-                say(&session, "still here\n");
-                done(&id, "end_turn");
-                // Still running, so it's found to have gone only because
-                // answering it failed, not because it exited.
-                loop {
-                    std::thread::park();
-                }
+            "hang-up" => hang_up(&session, &id, None, &[]),
+            _ if text.starts_with("hang-up-until ") => {
+                let until = text.strip_prefix("hang-up-until ");
+                hang_up(&session, &id, until, &self.waits);
             }
             "tools" => {
                 let tools = self.tools.get(&session).cloned().unwrap_or_default();

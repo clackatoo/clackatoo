@@ -156,10 +156,68 @@ struct Commanded {
     /// The command was typed before the shell marked any prompt, so the
     /// first block it marks is the one to wait for.
     expect_first: bool,
-    /// The terminal's history generation when `expect` was set: blocks
-    /// numbered from 0 again, once numbers run out, renumber history too,
-    /// and then an `expect` from before means nothing.
-    generation: u64,
+    /// How many times the terminal had numbered its blocks from 0 again
+    /// when `expect` was set (see [`Terminal::block_renumberings`]): once
+    /// that changes, an `expect` from before means nothing.
+    renumbered: u64,
+}
+
+impl Commanded {
+    /// Notes that a command was typed into the shell `grid` shows, as it
+    /// was just before, and Enter pressed: the block it runs as is the one
+    /// to wait for.
+    fn typed(&mut self, grid: &Terminal) {
+        let latest = grid.latest_block();
+        self.expect = match latest {
+            Some((block, Progress::Prompt)) => Some(block),
+            // Its next prompt is coming.
+            // After the last number, numbers start again at 0.
+            Some((block, Progress::Finished(_))) => Some(block.checked_add(1).unwrap_or(0)),
+            // Typed into the command running, which is still the one
+            // to wait for.
+            Some((_, Progress::Running)) | None => None,
+        };
+        self.renumbered = grid.block_renumberings();
+        // Typed before any prompt: the first one marked is the one.
+        self.expect_first = latest.is_none();
+    }
+
+    /// Whether the command this says was typed into the shell `grid`
+    /// shows has finished, or else the one running in it, if this is
+    /// `None`: `None` if the shell doesn't say.
+    fn finished(this: Option<&Self>, grid: &Terminal) -> Option<bool> {
+        if this.is_some_and(|commanded| commanded.failed.is_some()) {
+            return Some(true);
+        }
+        if this.is_some_and(|commanded| commanded.typing.is_some()) {
+            return Some(false);
+        }
+        let (latest, progress) = grid.latest_block()?;
+        if this.is_some_and(|commanded| commanded.expect_first) {
+            return Some(false);
+        }
+        let Some(commanded) = this else {
+            return Some(progress != Progress::Running);
+        };
+        Some(match commanded.expect {
+            // Blocks numbered again from 0 since, and the one it waited
+            // for seems not to have started: it was before, so it has
+            // finished. One typed after the last number waits for block 0,
+            // which the renumbering starts.
+            Some(expect)
+                if latest < expect && commanded.renumbered != grid.block_renumberings() =>
+            {
+                true
+            }
+            Some(expect) if latest > expect => true,
+            // Its block hasn't started: the shell hasn't shown the prompt
+            // it was typed ahead of. History cleared meanwhile, as by
+            // `clear`, changes nothing.
+            Some(expect) if latest < expect => false,
+            Some(_) => matches!(progress, Progress::Finished(_)),
+            None => progress != Progress::Running,
+        })
+    }
 }
 
 /// A command waiting for its shell's first prompt.
@@ -1212,28 +1270,7 @@ impl Daemon {
     /// running in it, has finished: `None` if the shell doesn't say.
     fn finished(&self, terminal: TerminalId) -> Option<bool> {
         let grid = self.terminals.get(&terminal)?.terminal.grid()?;
-        let commanded = self.tools.commanded.get(&terminal);
-        if commanded.is_some_and(|commanded| commanded.failed.is_some()) {
-            return Some(true);
-        }
-        if commanded.is_some_and(|commanded| commanded.typing.is_some()) {
-            return Some(false);
-        }
-        let (latest, progress) = grid.latest_block()?;
-        if commanded.is_some_and(|commanded| commanded.expect_first) {
-            return Some(false);
-        }
-        // Blocks numbered again from 0 since: a block it waited for that
-        // seems not to have started yet, it's taken as finished.
-        let renumbered = commanded.is_some_and(|commanded| {
-            commanded.generation != grid.primary().history_generation()
-                && commanded.expect.is_some_and(|expect| latest < expect)
-        });
-        Some(match commanded.and_then(|commanded| commanded.expect) {
-            Some(expect) if latest > expect || renumbered => true,
-            Some(_) => matches!(progress, Progress::Finished(_)),
-            None => progress != Progress::Running,
-        })
+        Commanded::finished(self.tools.commanded.get(&terminal), grid)
     }
 
     /// `send_to_terminal`: types `text` into `pane`'s terminal, a newline
@@ -1260,26 +1297,14 @@ impl Daemon {
         let Some(pty) = slot.terminal.pty() else {
             return Err("the terminal has closed".to_owned());
         };
-        let latest = pty.emulator().latest_block();
-        let generation = pty.emulator().primary().history_generation();
         pty.send_input(bytes).map_err(|err| err.to_string())?;
-        self.update_pty_interest(terminal);
         if enter {
-            let expect = match latest {
-                Some((block, Progress::Prompt)) => Some(block),
-                // Its next prompt is coming.
-                // After the last number, numbers start again at 0.
-                Some((block, Progress::Finished(_))) => Some(block.checked_add(1).unwrap_or(0)),
-                // Typed into the command running, which is still the one
-                // to wait for.
-                Some((_, Progress::Running)) | None => None,
-            };
+            // What the shell says back is read on a later turn, so its
+            // terminal still shows it as it was before it heard them.
             let commanded = self.tools.commanded.entry(terminal).or_default();
-            commanded.expect = expect;
-            commanded.generation = generation;
-            // Typed before any prompt: the first one marked is the one.
-            commanded.expect_first = latest.is_none();
+            commanded.typed(pty.emulator());
         }
+        self.update_pty_interest(terminal);
         Ok(())
     }
 
@@ -1297,9 +1322,9 @@ impl Daemon {
             && let Some((block, _)) = latest
         {
             commanded.expect = Some(block);
-            commanded.generation = (self.terminals.get(&terminal))
+            commanded.renumbered = (self.terminals.get(&terminal))
                 .and_then(|slot| slot.terminal.grid())
-                .map_or(0, |grid| grid.primary().history_generation());
+                .map_or(0, Terminal::block_renumberings);
             commanded.expect_first = false;
         }
         if commanded.typing.is_some() {
@@ -1931,6 +1956,90 @@ mod tests {
             "{question}"
         );
         assert_eq!(whole, Some(long));
+    }
+
+    /// A shell's prompt, marked as fish marks it.
+    const PROMPT: &str = "\x1b]133;A\x07$ ";
+
+    /// `command`'s line typed, then its block run, printing `output`, and
+    /// finished with status 0, as fish marks it.
+    fn ran(command: &str, output: &str) -> String {
+        format!("{command}\r\n\x1b]133;C\x07{output}\x1b]133;D;0\x07")
+    }
+
+    fn shell() -> Terminal {
+        let size = clackatoo_term::Size::new(40, 5).unwrap();
+        Terminal::new(size, &clackatoo_term::Config::default())
+    }
+
+    #[test]
+    fn a_command_typed_at_a_prompt_has_finished_once_its_block_has() {
+        let mut grid = shell();
+        grid.advance(PROMPT.as_bytes());
+        let mut commanded = Commanded::default();
+        commanded.typed(&grid);
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
+        grid.advance(b"make\r\n\x1b]133;C\x07");
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
+        grid.advance(b"\x1b]133;D;2\x07");
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(true));
+    }
+
+    #[test]
+    fn a_command_typed_ahead_of_the_next_prompt_waits_for_it_through_clear() {
+        let mut grid = shell();
+        grid.advance(PROMPT.as_bytes());
+        grid.advance(ran("seq 9", "1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n").as_bytes());
+        // Typed once the last command has finished, before the shell shows
+        // its next prompt.
+        let mut commanded = Commanded::default();
+        commanded.typed(&grid);
+        assert_eq!(commanded.expect, Some(1));
+        assert_eq!(
+            Commanded::finished(Some(&commanded), &grid),
+            Some(false),
+            "the block before it finished, not it"
+        );
+        // History cleared, as `clear` does, before its block starts: block
+        // numbers still mean what they did.
+        let generation = grid.primary().history_generation();
+        grid.advance(b"\x1b[H\x1b[2J\x1b[3J");
+        assert_ne!(grid.primary().history_generation(), generation);
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
+        grid.advance(PROMPT.as_bytes());
+        grid.advance(b"sleep 1\r\n\x1b]133;C\x07");
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
+        grid.advance(b"\x1b]133;D;0\x07");
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(true));
+    }
+
+    #[test]
+    fn a_command_waited_for_from_before_blocks_were_numbered_again_has_finished() {
+        let mut grid = shell();
+        grid.advance(PROMPT.as_bytes());
+        let commanded = Commanded {
+            expect: Some(7),
+            renumbered: grid.block_renumberings() + 1,
+            ..Commanded::default()
+        };
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(true));
+        let commanded = Commanded {
+            renumbered: grid.block_renumberings(),
+            ..commanded
+        };
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
+        // Typed after the last number: block 0, which numbering them again
+        // starts, is the one, and it hasn't run yet.
+        let commanded = Commanded {
+            expect: Some(0),
+            renumbered: grid.block_renumberings() + 1,
+            ..Commanded::default()
+        };
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
+        grid.advance(b"make\r\n\x1b]133;C\x07");
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(false));
+        grid.advance(b"\x1b]133;D;0\x07");
+        assert_eq!(Commanded::finished(Some(&commanded), &grid), Some(true));
     }
 
     #[test]

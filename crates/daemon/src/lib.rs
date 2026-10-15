@@ -113,6 +113,15 @@ pub struct DaemonConfig {
     /// the chat says it hasn't, and what it may be waiting on, and offers
     /// to start it again. The chat goes on waiting.
     pub session_wait: std::time::Duration,
+    /// A setting for tests: how long an agent or language server that has
+    /// gone is kept for what it sent last, from when it went or the
+    /// parser's thread last got on with its messages (see
+    /// `rpc::Inbox::gone_due`); never less than ten seconds while the
+    /// thread is busy with them. One that exits is let go as soon as what
+    /// it sent has been read. Tests lengthen it, so a program that has gone
+    /// is kept until it exits. It's kept between [`DEFAULT_GONE_WAIT`] and
+    /// a day.
+    pub gone_wait: std::time::Duration,
     /// How long a chat an agent started, in the background, keeps its
     /// session once it has finished, before letting it go until its next
     /// message.
@@ -157,6 +166,10 @@ pub const DEFAULT_PROBE_WAIT: std::time::Duration = std::time::Duration::from_se
 /// it's slow to open it, unless the daemon is told otherwise. Codex opens
 /// one in about a second when nothing holds it up.
 pub const DEFAULT_SESSION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a program that has gone is kept for what it sent last, unless
+/// the daemon is told otherwise (see [`DaemonConfig::gone_wait`]).
+pub const DEFAULT_GONE_WAIT: std::time::Duration = crate::rpc::PARSE_WAIT;
 
 /// How long a chat an agent started keeps its session once it has
 /// finished in the background, unless the daemon is told otherwise.
@@ -248,6 +261,7 @@ impl DaemonConfig {
             prompt_wait: DEFAULT_PROMPT_WAIT,
             probe_wait: DEFAULT_PROBE_WAIT,
             session_wait: DEFAULT_SESSION_WAIT,
+            gone_wait: DEFAULT_GONE_WAIT,
             park_after: DEFAULT_PARK_AFTER,
             fit_lasts: DEFAULT_FIT_LASTS,
             rename_gate: None,
