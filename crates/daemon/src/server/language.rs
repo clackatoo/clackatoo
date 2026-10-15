@@ -32,7 +32,7 @@ use super::watched::{Walking, Wanted};
 use super::{Daemon, OUTPUT_BUDGET, Orphan, Source};
 use crate::lsp::{self, Incoming, LanguageServer, Prepared, Reported};
 use crate::pty::Process;
-use crate::rpc::Heavy;
+use crate::rpc::{Heavy, Trash};
 
 /// Identifies a language server within one daemon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -146,6 +146,19 @@ struct Listed {
     /// The client's number for the query.
     id: u64,
     items: Vec<Value>,
+    /// Where `items` are freed when they're let go, if their answer was
+    /// parsed off the loop: thousands of items parsed on another thread
+    /// take milliseconds to free here, and a new list replaces the last
+    /// with every key typed.
+    trash: Option<Trash>,
+}
+
+impl Drop for Listed {
+    fn drop(&mut self) {
+        if let Some(trash) = self.trash.take() {
+            trash.throw(std::mem::take(&mut self.items));
+        }
+    }
 }
 
 /// A query to ask again.
@@ -1827,19 +1840,10 @@ impl Daemon {
                 .min(len)
         };
         let (value, trash) = value.into_parts();
-        let (raw, mut incomplete) = lsp::completion_items(value);
-        let mut read: Vec<(lsp::Completion, Value)> = (raw.into_iter())
-            .filter_map(|item| Some((lsp::completion(&item)?, item)))
-            .collect();
-        if read.len() > MAX_COMPLETIONS {
-            read.sort_by_cached_key(|(item, _)| {
-                item.sort.clone().unwrap_or_else(|| item.label.clone())
-            });
-            let left = read.split_off(MAX_COMPLETIONS);
-            if let Some(trash) = trash {
-                trash.throw(left);
-            }
-            incomplete = true;
+        let (raw, incomplete) = lsp::completion_items(value);
+        let (read, cut, left) = lsp::best_completions(raw, MAX_COMPLETIONS);
+        if let Some(trash) = &trash {
+            trash.throw(left);
         }
         let mut items = Vec::with_capacity(read.len());
         let mut kept = Vec::with_capacity(read.len());
@@ -1875,8 +1879,12 @@ impl Daemon {
             buffer: asked.buffer,
             id: asked.id,
             items: kept,
+            trash,
         });
-        Answer::Completions { items, incomplete }
+        Answer::Completions {
+            items,
+            incomplete: incomplete || cut,
+        }
     }
 
     /// `position`, in the file at `path` as server `server` counts it, as a

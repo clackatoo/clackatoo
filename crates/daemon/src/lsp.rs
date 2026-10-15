@@ -1328,9 +1328,9 @@ pub(crate) struct NamedSymbol {
     end: Option<Position>,
 }
 
-/// How many of an answer's entries are looked at for each symbol taken, at
-/// most: entries that make no sense cost no more than that many symbols
-/// would, however many a server sends.
+/// How many of an answer's entries are looked at for each symbol, hint or
+/// completion item taken, at most: entries that make no sense cost no more
+/// than that many sensible ones would, however many a server sends.
 const LOOKED_AT_EACH: usize = 4;
 
 /// The symbols in an answer to `textDocument/documentSymbol` or
@@ -1656,6 +1656,110 @@ pub(crate) fn completion_items(answer: Value) -> (Vec<Value>, bool) {
         }
         _ => (Vec::new(), false),
     }
+}
+
+/// The items of `raw`, a completion answer's items as sent, to pass on: at
+/// most `most`, each read and with the item itself; whether more than that
+/// made sense, so some were left out; and what's left of `raw`, to free
+/// where it does no harm, with the items taken out of it now nothing.
+///
+/// Up to `most` sent, every one is read, and those that make sense are
+/// passed on in the server's order. Past that, the first `most` that make
+/// sense in the order the server sorts them, by `sortText` or else
+/// `label`, ties in the order sent, and in that order. But a server can
+/// send a hundred thousand, so the rest are never read beyond their sort
+/// key, nor sorted: the best are picked out in one pass, and only they are
+/// read and sorted. If no more than `most` make sense after all, they go
+/// in the server's order, as if it had sent no more.
+///
+/// At most [`LOOKED_AT_EACH`] items are read for each of `most`, so a
+/// flood of items that make no sense costs no more than that many would.
+/// Once that many are read, those passed on are the best of them, and the
+/// answer is taken to have more. Only for such floods does what's passed
+/// on differ from reading and sorting them all.
+pub(crate) fn best_completions(
+    mut raw: Vec<Value>,
+    most: usize,
+) -> (Vec<(Completion, Value)>, bool, Vec<Value>) {
+    let read = |at: usize, item: &Value| Some((completion(item)?, at));
+    let (picked, cut) = if raw.len() <= most {
+        let picked: Vec<(Completion, usize)> = (raw.iter().enumerate())
+            .filter_map(|(at, item)| read(at, item))
+            .collect();
+        (picked, false)
+    } else {
+        // Ties go by place, so the order is the one a stable sort gives.
+        let mut keys: Vec<(&str, usize)> = (raw.iter().enumerate())
+            .filter_map(|(at, item)| Some((sort_key(item)?, at)))
+            .collect();
+        let mut budget = most.saturating_mul(LOOKED_AT_EACH);
+        let mut picked: Vec<(Completion, usize)> = Vec::with_capacity(most.min(keys.len()));
+        // The best `most`, and if some of them made no sense, as many of
+        // the next best as the budget has left: never more than two picks.
+        let mut unread: &mut [(&str, usize)] = &mut keys;
+        let mut taking = most;
+        while picked.len() < most && budget > 0 && !unread.is_empty() {
+            let slice = std::mem::take(&mut unread);
+            let take = taking.min(budget).min(slice.len());
+            if take < slice.len() {
+                slice.select_nth_unstable(take);
+            }
+            slice[..take].sort_unstable();
+            let mut walked = 0;
+            for &(_, at) in &slice[..take] {
+                if picked.len() == most {
+                    break;
+                }
+                walked += 1;
+                picked.extend(read(at, &raw[at]));
+            }
+            budget -= walked;
+            unread = &mut slice[walked..];
+            taking = budget;
+        }
+        // Cut only if more made sense: usually the first left tells. If
+        // the budget runs out first, there may be more.
+        let mut cut = false;
+        for &(_, at) in &*unread {
+            if budget == 0 || completion(&raw[at]).is_some() {
+                cut = true;
+                break;
+            }
+            budget -= 1;
+        }
+        if !cut {
+            picked.sort_unstable_by_key(|&(_, at)| at);
+        }
+        (picked, cut)
+    };
+    let picked = (picked.into_iter())
+        .map(|(item, at)| (item, std::mem::take(&mut raw[at])))
+        .collect();
+    (picked, cut, raw)
+}
+
+/// What a completion item, as sent, is sorted by: its `sortText`, or else
+/// its label; or `None` if it has no label, so makes no sense.
+fn sort_key(item: &Value) -> Option<&str> {
+    let item = item.as_object()?;
+    // An item has a handful of fields, and going through them, comparing
+    // names only where the lengths match, reads less memory than looking
+    // up each by name. That halves the time for a hundred thousand.
+    let (label, sort) = if item.len() <= 32 {
+        let (mut label, mut sort) = (None, None);
+        for (key, value) in item {
+            match key.len() {
+                5 if key == "label" => label = Some(value),
+                8 if key == "sortText" => sort = Some(value),
+                _ => {}
+            }
+        }
+        (label, sort)
+    } else {
+        (item.get("label"), item.get("sortText"))
+    };
+    let label = label?.as_str()?;
+    Some(sort.and_then(Value::as_str).unwrap_or(label))
 }
 
 /// A completion item, as sent, read; or `None` if it makes no sense.
@@ -2297,6 +2401,260 @@ mod tests {
             Some(("*x*".to_owned(), true))
         );
         assert_eq!(documentation(&json!({ "documentation": " " })), None);
+    }
+
+    /// What the daemon passed on of a completion answer's items before
+    /// [`best_completions`], which must pass on the same but for a flood
+    /// of nonsense: every item read, and past `most`, all of them sorted
+    /// and cut.
+    fn read_sorted_and_cut(raw: Vec<Value>, most: usize) -> (Vec<(Completion, Value)>, bool) {
+        let mut read: Vec<(Completion, Value)> = (raw.into_iter())
+            .filter_map(|item| Some((completion(&item)?, item)))
+            .collect();
+        let cut = read.len() > most;
+        if cut {
+            read.sort_by_cached_key(|(item, _)| {
+                item.sort.clone().unwrap_or_else(|| item.label.clone())
+            });
+            read.truncate(most);
+        }
+        (read, cut)
+    }
+
+    /// Checks [`best_completions`] passes on of `raw` just what
+    /// [`read_sorted_and_cut`] does, and leaves the rest. Where so much
+    /// makes no sense that it may have read all it's allowed to, it must
+    /// still pass on the best of all that make sense, and if it says it
+    /// cut nothing, just what was passed on before.
+    fn picks_as_before(raw: &[Value], most: usize) {
+        let (picked, cut, left) = best_completions(raw.to_vec(), most);
+        let (before, cut_before) = read_sorted_and_cut(raw.to_vec(), most);
+        // Read: every one that makes sense passed on, one more to know
+        // there are more, and every one with a label that makes no sense.
+        let nonsense = (raw.iter())
+            .filter(|item| sort_key(item).is_some() && completion(item).is_none())
+            .count();
+        if raw.len() <= most || most + 1 + nonsense <= most * LOOKED_AT_EACH {
+            assert_eq!(cut, cut_before, "{most} of {}", raw.len());
+            assert!(picked == before, "{most} of {}", raw.len());
+        } else if cut {
+            let mut best: Vec<(Completion, Value)> = (raw.iter())
+                .filter_map(|item| Some((completion(item)?, item.clone())))
+                .collect();
+            best.sort_by_cached_key(|(item, _)| {
+                item.sort.clone().unwrap_or_else(|| item.label.clone())
+            });
+            assert!(picked.len() <= most);
+            assert!(
+                picked[..] == best[..picked.len()],
+                "{most} of {}",
+                raw.len()
+            );
+        } else {
+            assert!(picked == before && !cut_before, "{most} of {}", raw.len());
+        }
+        assert_eq!(left.len(), raw.len());
+        let taken = (left.iter().zip(raw))
+            .filter(|(left, raw)| left != raw)
+            .inspect(|(left, _)| assert!(left.is_null(), "taken out"))
+            .count();
+        assert_eq!(taken, picked.len(), "those taken are gone");
+    }
+
+    /// The next of a sequence of numbers that look random, from `state`,
+    /// below `below`.
+    fn random(state: &mut u64, below: u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state % below
+    }
+
+    /// A completion item made up from `state`: often the same label or
+    /// sort text as another, some not in ASCII, sometimes sorted by a
+    /// number (so by its label), sometimes with dozens of fields, and
+    /// sometimes making no sense, in each way it can.
+    fn made_up_item(state: &mut u64) -> Value {
+        const WORDS: [&str; 8] = ["w0", "w1", "w2", "Z", "z", "é", "éa", "ß"];
+        let range = json!({
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 1 },
+        });
+        let word = |state: &mut u64| WORDS[usize::try_from(random(state, 8)).unwrap()];
+        match random(state, 30) {
+            0 => return json!(3),
+            1 => return Value::Null,
+            _ => {}
+        }
+        let mut item = json!({ "label": word(state) });
+        match random(state, 10) {
+            0 => item["label"] = json!(3),
+            1 => drop(item.as_object_mut().unwrap().remove("label")),
+            _ => {}
+        }
+        match random(state, 4) {
+            0 => item["sortText"] = json!(word(state)),
+            1 => item["sortText"] = json!(5),
+            _ => {}
+        }
+        match random(state, 10) {
+            0 => item["textEdit"] = json!({ "newText": "no range" }),
+            1 => item["additionalTextEdits"] = json!([{ "newText": "no range" }]),
+            2 => item["textEdit"] = json!({ "range": range, "newText": "x" }),
+            _ => {}
+        }
+        // Too many fields to go through: looked up by name instead.
+        if random(state, 20) == 0 {
+            for field in 0..40 {
+                item[format!("x{field}")] = json!(field);
+            }
+        }
+        item
+    }
+
+    #[test]
+    fn completions_past_the_most_are_the_best_and_the_rest_as_before() {
+        // Few, against every cap a few is under or over, with labels and
+        // sort texts the same as others', and nonsense among them, so the
+        // best that make sense are found past those that don't.
+        let mut state = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..3000 {
+            let len = random(&mut state, 40);
+            let raw: Vec<Value> = (0..len).map(|_| made_up_item(&mut state)).collect();
+            let most = usize::try_from(random(&mut state, 14)).unwrap();
+            picks_as_before(&raw, most);
+        }
+        // Exactly as many make sense as are passed on, with nonsense left
+        // over: not cut, so in the order sent.
+        let raw = [
+            json!({ "label": "b" }),
+            json!({ "label": "c", "textEdit": { "newText": "no range" } }),
+            json!({ "label": "a" }),
+        ];
+        picks_as_before(&raw, 2);
+        let (picked, cut, _) = best_completions(raw.to_vec(), 2);
+        let labels: Vec<&str> = picked.iter().map(|(item, _)| item.label.as_str()).collect();
+        assert_eq!((labels, cut), (vec!["b", "a"], false));
+        // The best by sort text, label where there's none, and the order
+        // sent among the same; the rest cut.
+        let raw = [
+            json!({ "label": "z", "sortText": "1" }),
+            json!({ "label": "b" }),
+            json!({ "label": "a", "sortText": "b" }),
+            json!({ "label": "y", "sortText": "1" }),
+        ];
+        picks_as_before(&raw, 3);
+        let (picked, cut, left) = best_completions(raw.to_vec(), 3);
+        let labels: Vec<&str> = picked.iter().map(|(item, _)| item.label.as_str()).collect();
+        assert_eq!((labels, cut), (vec!["z", "y", "b"], true));
+        assert_eq!(left[2], raw[2], "left to be freed");
+        // Sorted by bytes, as before, where not in ASCII: "Z" before "z"
+        // before "é", by label or sort text alike.
+        let raw = [
+            json!({ "label": "é" }),
+            json!({ "label": "z" }),
+            json!({ "label": "Z" }),
+            json!({ "label": "a", "sortText": "é" }),
+            json!({ "label": "b", "sortText": "Z" }),
+        ];
+        picks_as_before(&raw, 4);
+        let (picked, cut, _) = best_completions(raw.to_vec(), 4);
+        let labels: Vec<&str> = picked.iter().map(|(item, _)| item.label.as_str()).collect();
+        assert_eq!((labels, cut), (vec!["Z", "b", "z", "é"], true));
+        // Many, in no order, against the daemon's own cap.
+        let raw: Vec<Value> = (0..100_000)
+            .map(|_| {
+                let n = random(&mut state, 1_000_000);
+                json!({ "label": format!("made{n:06}"), "kind": 6 })
+            })
+            .collect();
+        picks_as_before(&raw, 5000);
+    }
+
+    #[test]
+    fn a_flood_of_completions_that_make_no_sense_is_read_only_so_far() {
+        // 5000 that make sense and 95,000 with labels that don't, so
+        // they're picked out but make no sense once read.
+        let item = |at: usize, sense: bool| {
+            let mut item = json!({ "label": format!("w{at:06}") });
+            if !sense {
+                item["textEdit"] = json!({ "newText": "no range" });
+            }
+            item
+        };
+        let flood = |good_first: bool| -> Vec<Value> {
+            (0..100_000)
+                .map(|at| item(at, if good_first { at < 5000 } else { at >= 95_000 }))
+                .collect()
+        };
+        // Those that make sense sort first: all passed on, and of the rest
+        // only so many are read to see whether there are more, so it's
+        // taken that there are, though there aren't.
+        let (picked, cut, _) = best_completions(flood(true), 5000);
+        assert_eq!((picked.len(), cut), (5000, true));
+        assert_eq!(picked[4999].0.label, "w004999");
+        // The nonsense sorts first: no more are read than four for each
+        // that could be passed on, so those that make sense, sorted last,
+        // are never reached.
+        let (picked, cut, left) = best_completions(flood(false), 5000);
+        assert_eq!((picked.len(), cut), (0, true));
+        assert_eq!(left.len(), 100_000, "all left to be freed");
+    }
+
+    #[test]
+    fn a_hundred_times_as_many_completions_take_far_less_than_a_hundred_times_as_long() {
+        // A server can send a hundred thousand items, as some do for wide
+        // imports. Only those passed on are read beyond what they sort by,
+        // and only they are sorted, so a hundred thousand take nowhere near
+        // a hundred times as long as a thousand, all read, though the
+        // thousand are under the cap and the hundred thousand pass on five
+        // times as many.
+        let items = |len: u64| -> Vec<Value> {
+            let mut state = 0x9e37_79b9_7f4a_7c15;
+            (0..len)
+                .map(|_| {
+                    let word = format!("made{:06}", random(&mut state, 1_000_000));
+                    json!({
+                        "label": word,
+                        "kind": 6,
+                        "detail": "a word",
+                        "textEdit": {
+                            "range": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 4 },
+                            },
+                            "newText": word,
+                        },
+                        "data": { "word": word },
+                    })
+                })
+                .collect()
+        };
+        let (few, many) = (items(1000), items(100_000));
+        // How long picking from `raw` takes, without making its copy or
+        // freeing what's left, which the daemon leaves to another thread.
+        let picking = |raw: &[Value]| {
+            let raw = raw.to_vec();
+            let started = std::time::Instant::now();
+            let picked = best_completions(raw, 5000);
+            let took = started.elapsed();
+            drop(picked);
+            took
+        };
+        // Time is weighed against time, never against a clock's limit. The
+        // quickest of up to five goes at each counts, so a busy machine
+        // pausing during one doesn't. Picking takes about 20 times as long
+        // for the many, in a debug build or a release one; reading and
+        // sorting every item took 160 and 580 times.
+        let (mut on_few, mut on_many) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..5 {
+            on_few = on_few.min(picking(&few));
+            on_many = on_many.min(picking(&many));
+            if on_many < on_few * 60 {
+                break;
+            }
+        }
+        assert!(on_many < on_few * 60, "{on_many:?} against {on_few:?}");
     }
 
     #[test]
