@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.45 (2026-10-15)
+
+### Features
+
+- **gui:** a panel of the keys a prefix takes, prompts that leave one thing focused, and the :w plan asking in place (f1c804c)
+
 ## 2026.10.44 (2026-10-15)
 
 ### Features
