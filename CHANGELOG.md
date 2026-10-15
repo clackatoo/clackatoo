@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.39 (2026-10-15)
+
+### Fixes
+
+- **gui:** answer a chat's question from normal mode, and polish what's hard to see (72667a1)
+
 ## 2026.10.38 (2026-10-15)
 
 ### Speed
