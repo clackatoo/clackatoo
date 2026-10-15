@@ -15,15 +15,15 @@ use clackatoo_daemon::{
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::wire;
 use clackatoo_protocol::{
-    AgentTools, Answer, Author, Axis, BufferId, BufferSnapshot, BufferUpdate, Change, ChatAction,
-    ChatNode, ChatState, ClientMessage, CompletionItem, Construct, Content, Diff, Done, Edit,
-    Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId, FilesUpdate,
-    Found, FoundBuffer, FoundLine, FoundSymbol, GitMark, InlayHint, InlayHintKind, Item, Kind,
-    Layout, Limit, Location, NewAgent, NewTerminal, OpenFile, OpenFiles, Outcome, PROTOCOL_VERSION,
-    PaneId, PaneTerminal, Patch, Piece, ProviderModels, Query, Request, Response, Resume, Search,
-    Selection, ServerFeatures, ServerMessage, Side, Size, Span, SubagentStatus, Symbol, TerminalId,
-    TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus, Trigger, TurnFiles,
-    TurnFilesState, Usage, Use, UseKind, View, ViewUpdate, Workspaces,
+    AgentTools, Answer, Author, Axis, BlockMarks, BufferId, BufferSnapshot, BufferUpdate, Change,
+    ChatAction, ChatNode, ChatState, ClientMessage, CompletionItem, Construct, Content, Diff, Done,
+    Edit, Error, Event, FileLocation, FileOp, FileOpError, FileStamp, FilesAction, FilesId,
+    FilesUpdate, Found, FoundBuffer, FoundLine, FoundSymbol, GitMark, InlayHint, InlayHintKind,
+    Item, Kind, Layout, Limit, Location, NewAgent, NewTerminal, OpenFile, OpenFiles, Outcome,
+    PROTOCOL_VERSION, PaneId, PaneTerminal, Patch, Piece, ProviderModels, Query, Request, Response,
+    Resume, Search, Selection, ServerFeatures, ServerMessage, Side, Size, Span, SubagentStatus,
+    Symbol, TerminalId, TerminalStatus, TextChange, Tool, ToolContent, ToolKind, ToolStatus,
+    Trigger, TurnFiles, TurnFilesState, Usage, Use, UseKind, View, ViewUpdate, Workspaces,
 };
 use clackatoo_term::Terminal;
 use clackatoo_term::recording::Recording;
@@ -1122,6 +1122,142 @@ fn history_lines_keep_their_numbers() {
 }
 
 #[test]
+fn windows_hear_where_prompts_are_and_how_their_commands_ended() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    // Block 0 fails at once; block 1 waits for Enter, prints 12 lines,
+    // scrolling both prompts off the 10-line screen, and fails too.
+    let script = r"printf '\033]133;A\007$ false\r\n\033]133;C\007\033]133;D;1\007\033]133;A\007$ seq\r\n'; read go; printf '\033]133;C\007'; seq 12; printf '\033]133;D;3\007\033]133;A\007$ '; exec cat";
+    let terminal = spawn(&mut client, &["sh", "-c", script]);
+    wait_for_screen(&mut client, terminal, |text| text.contains("$ seq"));
+    let mut view = attach(&mut client, terminal);
+    let marks = &view.grid().unwrap().marks;
+    assert_eq!(marks.prompts, [(0, 0), (1, 1)]);
+    assert_eq!(marks.exits, [(0, 1)], "block 1 is still running");
+    client.frame_done(terminal).unwrap();
+
+    client.send_input(terminal, b"\r").unwrap();
+    let mut exits = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !(view.grid().unwrap().state.block == Some(2)
+        && view == client.capture(terminal).unwrap())
+    {
+        let update = next_update(&mut client, terminal);
+        if let ViewUpdate::Patch(patches) = &update {
+            for patch in patches {
+                if let Patch::Grid { marks, .. } = patch {
+                    exits.extend(marks.exits.iter().copied());
+                }
+            }
+        }
+        view.apply(update);
+        client.frame_done(terminal).unwrap();
+        assert!(Instant::now() < deadline, "the view never caught up");
+    }
+    assert_eq!(exits, [(1, 3)], "each block's end is told once");
+    assert_eq!(view.grid().unwrap().marks.prompts, [(9, 2)]);
+
+    // History has both prompts, by their places in what was fetched: the
+    // first two lines, before the echo of Enter and seq's output.
+    let end = view.grid().unwrap().state.history_end;
+    let history = client.history(terminal, end, 3).unwrap();
+    assert_eq!(history.first, end - 3);
+    assert_eq!(history.marks, BlockMarks::default());
+    let history = client.history(terminal, 3, 3).unwrap();
+    assert_eq!(history.first, 0);
+    assert_eq!(history.marks.prompts, [(0, 0), (1, 1)]);
+    assert_eq!(history.marks.exits, [(0, 1), (1, 3)]);
+    let history = client.history(terminal, 3, 2).unwrap();
+    assert_eq!(
+        history.marks.prompts,
+        [(0, 1)],
+        "numbered from the first fetched"
+    );
+    assert_eq!(history.marks.exits, [(1, 3)]);
+}
+
+#[test]
+fn windows_are_told_the_home_paths_are_written_from() {
+    let daemon = TestDaemon::start();
+    let workspaces = daemon.client().watch_workspaces().unwrap();
+    let home = daemon.dir.path().to_str().unwrap();
+    assert_eq!(workspaces.home.as_deref(), Some(home));
+}
+
+#[test]
+fn a_window_from_before_block_marks_is_sent_none() {
+    // Frames are read strictly, so a field it hasn't would fail them.
+    let daemon = TestDaemon::start();
+    let old = wire::BLOCK_MARKS - 1;
+    let mut raw = Raw::open(&daemon, old);
+    raw.hello(old);
+    assert_eq!(raw.next(), Some(hello(old)));
+    let script = r"printf '\033]133;A\007$ false\r\n\033]133;C\007\033]133;D;1\007\033]133;A\007$ x\r\n'; read go; printf '\033]133;C\007'; seq 12; printf '\033]133;D;3\007\033]133;A\007$ done'; exec cat";
+    raw.request(Request::NewTerminal(NewTerminal {
+        size: Size::new(40, 10).unwrap(),
+        command: Some(vec!["sh".into(), "-c".into(), script.into()]),
+        cwd: None,
+        record_to: None,
+    }));
+    let Some(ServerMessage::Response(Response::TerminalCreated(terminal))) = raw.next() else {
+        panic!("expected the terminal");
+    };
+    raw.request(Request::Attach { terminal });
+    let mut view: Option<View> = None;
+    let mut entered = false;
+    while view
+        .as_ref()
+        .is_none_or(|view| !screen_text(view).contains("done"))
+    {
+        match raw.next().expect("the view") {
+            ServerMessage::Event(Event::View { update, .. }) => {
+                if let ViewUpdate::Patch(patches) = &update {
+                    for patch in patches {
+                        if let Patch::Grid { marks, .. } = patch {
+                            assert_eq!(*marks, BlockMarks::default());
+                        }
+                    }
+                }
+                match (&mut view, update) {
+                    (_, ViewUpdate::Snapshot(snapshot)) => view = Some(snapshot),
+                    (Some(view), update) => view.apply(update),
+                    (None, ViewUpdate::Patch(_)) => panic!("a patch before a snapshot"),
+                }
+                let shown = view.as_ref().unwrap();
+                assert_eq!(shown.grid().unwrap().marks, BlockMarks::default());
+                raw.send(&frame::encode(old, &ClientMessage::FrameDone { terminal }).unwrap());
+                if !entered && screen_text(shown).contains("$ x") {
+                    entered = true;
+                    raw.request(Request::SendInput {
+                        terminal,
+                        bytes: b"\r".to_vec(),
+                    });
+                }
+            }
+            ServerMessage::Response(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    let end = view.unwrap().grid().unwrap().state.history_end;
+    raw.request(Request::History {
+        terminal,
+        end,
+        count: 5,
+    });
+    loop {
+        match raw.next().expect("history") {
+            ServerMessage::Response(Response::History(history)) => {
+                assert_eq!(history.lines.len(), 5);
+                assert_eq!(history.marks, BlockMarks::default());
+                break;
+            }
+            ServerMessage::Event(_) | ServerMessage::Response(Response::Done) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
 fn text_and_search_cover_history_and_screen() {
     use clackatoo_protocol::{Match, Position};
 
@@ -1404,11 +1540,21 @@ fn first_tab_panes(workspaces: &Workspaces) -> Vec<PaneId> {
         .collect()
 }
 
+impl TestDaemon {
+    /// The workspaces it has before any is made: none, at its home.
+    fn no_workspaces(&self) -> Workspaces {
+        Workspaces {
+            home: self.dir.path().to_str().map(str::to_owned),
+            ..Workspaces::default()
+        }
+    }
+}
+
 #[test]
 fn watchers_see_workspaces_made_split_and_closed() {
     let daemon = TestDaemon::start();
     let mut watcher = daemon.client();
-    assert_eq!(watcher.watch_workspaces().unwrap(), Workspaces::default());
+    assert_eq!(watcher.watch_workspaces().unwrap(), daemon.no_workspaces());
     let mut client = daemon.client();
 
     let first = client
@@ -1448,7 +1594,7 @@ fn a_pane_closes_when_its_program_exits_taking_its_tab_and_workspace() {
     let terminal = workspaces.list[0].terminals()[0];
 
     client.send_input(terminal, b"\r").unwrap();
-    assert_eq!(next_workspaces(&mut client), Workspaces::default());
+    assert_eq!(next_workspaces(&mut client), daemon.no_workspaces());
     assert!(client.list_terminals().unwrap().is_empty());
 }
 
@@ -1477,7 +1623,7 @@ fn those_attached_hear_a_program_ended_before_its_pane_closes_but_not_a_pane_clo
     client.attach(terminal).unwrap();
     client.send_input(terminal, b"\r").unwrap();
     assert_eq!(next_beside_views(&mut client), Event::Exited { terminal });
-    assert_eq!(next_workspaces(&mut client), Workspaces::default());
+    assert_eq!(next_workspaces(&mut client), daemon.no_workspaces());
 
     // A pane closed by a client, its program still running, says nothing
     // of its program.
@@ -1489,7 +1635,7 @@ fn those_attached_hear_a_program_ended_before_its_pane_closes_but_not_a_pane_clo
     client.close_pane(pane).unwrap();
     assert_eq!(
         next_beside_views(&mut client),
-        Event::Workspaces(Workspaces::default())
+        Event::Workspaces(daemon.no_workspaces())
     );
 }
 

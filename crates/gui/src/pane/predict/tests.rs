@@ -98,6 +98,7 @@ impl Fixture {
             state: GridState::of(&self.terminal),
             lines,
             links: Vec::new(),
+            marks: clackatoo_protocol::BlockMarks::default(),
         }]));
     }
 

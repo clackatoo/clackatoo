@@ -261,6 +261,9 @@ pub(crate) struct Desk {
     /// Whether the daemon is on another machine, which makes terminals
     /// guess at the echo of what's typed (see `pane::predict`).
     remote: bool,
+    /// This machine's home directory, for a daemon on it too old to say
+    /// its own (see [`Workspaces::home`]).
+    own_home: Option<String>,
     /// The terminals attached to on this connection.
     attached: HashSet<TerminalId>,
     /// Who sent each request not yet answered, oldest first: answers come
@@ -862,8 +865,12 @@ impl Desk {
         /// Longer titles are cut short, to leave room for the other tabs.
         const MAX_TITLE: usize = 24;
         let number = index + 1;
-        let title = tab.name.as_deref().or_else(|| self.tab_title(tab));
-        match title {
+        // A program's title, and a folder's name, are its own to choose:
+        // what would move the cursor or turn the text round is left out.
+        let title: Option<String> = (tab.name.as_deref().or_else(|| self.tab_title(tab)))
+            .map(|title| title.chars().filter(|&ch| shown_in_names(ch)).collect())
+            .filter(|title: &String| !title.trim().is_empty());
+        match title.as_deref() {
             Some(title) if title.chars().count() > MAX_TITLE => {
                 let short: String = title.chars().take(MAX_TITLE - 1).collect();
                 format!("{number} {short}…")
@@ -878,7 +885,7 @@ impl Desk {
         self.workspaces
             .find_pane(tab.focused)
             .and_then(|(_, _, pane)| match pane.content {
-                Content::Terminal(terminal) => self.panes.get(&terminal)?.title(),
+                Content::Terminal(terminal) => self.panes.get(&terminal)?.name(self.home()),
                 Content::Buffer(_) => self.editor_title(pane.id),
                 Content::Files(_) | Content::Folder(_) => {
                     self.explorer(pane.id).map(crate::explorer::Explorer::title)
@@ -890,6 +897,14 @@ impl Desk {
             })
             .map(str::trim)
             .filter(|title| !title.is_empty())
+    }
+
+    /// The daemon's user's home directory, which paths are written from
+    /// `~` under, as the daemon says, or as this machine has it for a
+    /// daemon on it too old to say.
+    fn home(&self) -> Option<&str> {
+        (self.workspaces.home.as_deref())
+            .or_else(|| self.own_home.as_deref().filter(|_| !self.remote))
     }
 
     /// Opens the palette to rename `workspace`, starting from its name.
@@ -905,12 +920,13 @@ impl Desk {
     /// Opens the palette to name `tab`, starting from its name or title.
     pub(crate) fn rename_tab(&mut self, tab: TabId) {
         if let Some((_, found)) = self.workspaces.find_tab(tab) {
-            let text = found
-                .name
-                .as_deref()
+            // What a name can't show isn't put in one.
+            let text: String = (found.name.as_deref())
                 .or_else(|| self.tab_title(found))
                 .unwrap_or_default()
-                .to_owned();
+                .chars()
+                .filter(|&ch| shown_in_names(ch))
+                .collect();
             self.input = Some(Input::renaming(Purpose::RenameTab(tab), text));
         }
     }
@@ -1228,6 +1244,7 @@ impl Desk {
     pub(crate) fn connected(&mut self, workspaces: Workspaces, remote: bool) {
         self.connected = true;
         self.remote = remote;
+        self.own_home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
         self.forget_asked();
         for pane in self.panes.values_mut() {
             pane.reconnected();
@@ -2499,6 +2516,15 @@ fn mode_name(mode: Mode) -> ModeName {
     }
 }
 
+/// Whether `ch` may show in a tab's name: not a control character, nor
+/// one that changes which way text runs (the marks U+200E and U+200F, the
+/// embeddings and overrides U+202A to U+202E, and the isolates U+2066 to
+/// U+2069), which a title or a folder's name could hold.
+fn shown_in_names(ch: char) -> bool {
+    !ch.is_control()
+        && !matches!(ch, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 #[cfg(test)]
 mod tests {
     mod folders;
@@ -2555,6 +2581,7 @@ mod tests {
         Workspaces {
             active: Some(list[0].id),
             list,
+            home: None,
         }
     }
 
@@ -2938,6 +2965,53 @@ mod tests {
         desk.agent_shows(PaneId(9), None);
         assert_eq!(desk.pointed(), Some(PaneId(3)));
         assert_eq!(shown_pane(&desk), PaneId(1));
+    }
+
+    #[test]
+    fn a_terminal_tab_with_no_title_is_named_after_its_folder_from_the_daemons_home() {
+        let tabs = vec![
+            tab(1, pane(1)),
+            tab(2, pane(2)),
+            tab(3, pane(3)),
+            tab(4, pane(4)),
+        ];
+        let mut list = workspaces(vec![workspace(1, "w", tabs)]);
+        list.home = Some("/home/me".into());
+        let mut desk = desk(list.clone());
+        for (terminal, output) in [
+            (1, "\x1b]7;file://host/home/me/src\x07"),
+            (2, "\x1b]7;file://host/home/me\x07"),
+            (3, ""),
+            // What a folder's name holds is decoded, escapes and all.
+            (
+                4,
+                "\x1b]7;file://host/home/me/a%1B[31m%09b%E2%80%AEc%E2%81%A6d\x07",
+            ),
+        ] {
+            let mut screen = Terminal::new(Size::new(40, 24).unwrap(), &Config::default());
+            screen.advance(output.as_bytes());
+            desk.view_changed(
+                TerminalId(terminal),
+                &ViewUpdate::Snapshot(View::capture(&screen)),
+            );
+        }
+        let names = |desk: &Desk| -> Vec<String> {
+            (desk.tab_names().into_iter())
+                .map(|(_, name, _)| name)
+                .collect()
+        };
+        assert_eq!(names(&desk), ["1 src", "2 ~", "3", "4 a[31mbcd"]);
+        // A daemon too old to say its home: this machine's, if it's on it.
+        list.home = None;
+        desk.workspaces_changed(list);
+        desk.own_home = Some("/home/me".into());
+        assert_eq!(names(&desk), ["1 src", "2 ~", "3", "4 a[31mbcd"]);
+        desk.remote = true;
+        assert_eq!(names(&desk), ["1 src", "2 me", "3", "4 a[31mbcd"]);
+        // Renaming starts from the name as shown: Enter mustn't store a
+        // line break.
+        desk.rename_tab(TabId(4));
+        assert_eq!(desk.input.as_ref().unwrap().line.text(), "a[31mbcd");
     }
 
     #[test]

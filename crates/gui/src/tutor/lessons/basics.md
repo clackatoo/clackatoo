@@ -38,7 +38,7 @@ exited 0
 
 ## Copy a line in normal mode
 
-Go to normal mode with Ctrl+;. The yellow block is normal mode's own cursor, which moves through the terminal's history and screen as one document, with Vim's keys: `h` `j` `k` `l`, `w` `b`, `gg` `G`, `/` to search.
+Go to normal mode with Ctrl+;. The yellow block is normal mode's own cursor, which moves through the terminal's history and screen as one document, with Vim's keys: `h` `j` `k` `l`, `w` `b`, `gg` `G`, `/` to search. Back in history, a pill at the pane's bottom right says how far, as `↓ 12 lines · G to return`, and a search that goes round the end says `search wrapped to top`.
 
 A count before a motion repeats it, as in Vim: `5k` goes up five lines, `3w` three words, and `10G` to line 10; `3yy` copies three lines. `v` selects by characters and `V` by lines, as in Vim: a selection by characters lights each line to a cell past its text, which is what `y` copies, and one by lines the pane's whole width.
 

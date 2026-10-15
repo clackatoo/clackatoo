@@ -560,6 +560,7 @@ mod tests {
                 active_tab: TabId(0),
             }],
             active: None,
+            home: None,
         }));
         let mut frames: Vec<_> = client
             .iter()
@@ -801,6 +802,7 @@ mod tests {
         let workspaces = ServerMessage::Event(crate::Event::Workspaces(crate::Workspaces {
             list: Vec::new(),
             active: None,
+            home: None,
         }));
         assert!(head(encode(PROTOCOL_VERSION, &workspaces).unwrap()).is_workspaces());
         let response = ServerMessage::Response(crate::Response::Done);

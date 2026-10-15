@@ -156,6 +156,10 @@ struct Commanded {
     /// The command was typed before the shell marked any prompt, so the
     /// first block it marks is the one to wait for.
     expect_first: bool,
+    /// The terminal's history generation when `expect` was set: blocks
+    /// numbered from 0 again, once numbers run out, renumber history too,
+    /// and then an `expect` from before means nothing.
+    generation: u64,
 }
 
 /// A command waiting for its shell's first prompt.
@@ -1219,8 +1223,14 @@ impl Daemon {
         if commanded.is_some_and(|commanded| commanded.expect_first) {
             return Some(false);
         }
+        // Blocks numbered again from 0 since: a block it waited for that
+        // seems not to have started yet, it's taken as finished.
+        let renumbered = commanded.is_some_and(|commanded| {
+            commanded.generation != grid.primary().history_generation()
+                && commanded.expect.is_some_and(|expect| latest < expect)
+        });
         Some(match commanded.and_then(|commanded| commanded.expect) {
-            Some(expect) if latest > expect => true,
+            Some(expect) if latest > expect || renumbered => true,
             Some(_) => matches!(progress, Progress::Finished(_)),
             None => progress != Progress::Running,
         })
@@ -1251,19 +1261,22 @@ impl Daemon {
             return Err("the terminal has closed".to_owned());
         };
         let latest = pty.emulator().latest_block();
+        let generation = pty.emulator().primary().history_generation();
         pty.send_input(bytes).map_err(|err| err.to_string())?;
         self.update_pty_interest(terminal);
         if enter {
             let expect = match latest {
                 Some((block, Progress::Prompt)) => Some(block),
                 // Its next prompt is coming.
-                Some((block, Progress::Finished(_))) => Some(block + 1),
+                // After the last number, numbers start again at 0.
+                Some((block, Progress::Finished(_))) => Some(block.checked_add(1).unwrap_or(0)),
                 // Typed into the command running, which is still the one
                 // to wait for.
                 Some((_, Progress::Running)) | None => None,
             };
             let commanded = self.tools.commanded.entry(terminal).or_default();
             commanded.expect = expect;
+            commanded.generation = generation;
             // Typed before any prompt: the first one marked is the one.
             commanded.expect_first = latest.is_none();
         }
@@ -1284,6 +1297,9 @@ impl Daemon {
             && let Some((block, _)) = latest
         {
             commanded.expect = Some(block);
+            commanded.generation = (self.terminals.get(&terminal))
+                .and_then(|slot| slot.terminal.grid())
+                .map_or(0, |grid| grid.primary().history_generation());
             commanded.expect_first = false;
         }
         if commanded.typing.is_some() {

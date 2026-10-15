@@ -338,7 +338,11 @@ fn searches_go_back_through_those_typed_in_terminals_and_editors() {
     key(&mut editor, NamedKey::ArrowUp);
     assert_eq!(text(&editor), "?bar▏");
     key(&mut editor, NamedKey::Enter);
-    assert!(editor_label(&editor).ends_with("1:5"), "found");
+    // From the top, backward, it went round to the bottom, and says so
+    // until the next key.
+    assert_eq!(editor_label(&editor), crate::pane::WRAPPED_TO_BOTTOM);
+    type_keys(&mut editor, "l");
+    assert!(editor_label(&editor).ends_with("1:6"), "found");
 }
 
 #[test]

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BoardId, BufferId, FilesId, NewAgent, NewReview, NewTerminal, OpenBoard, OpenFile, OpenFiles,
-    ReviewId, TerminalId,
+    ReviewId, TerminalId, wire,
 };
 
 /// Identifies a workspace within one daemon. Never reused while it runs.
@@ -55,6 +55,14 @@ pub struct Workspaces {
     pub list: Vec<Workspace>,
     /// The one any client last switched to: where a new window starts.
     pub active: Option<WorkspaceId>,
+    /// The home directory of the daemon's user, which windows write paths
+    /// under from `~`, as a tab named after its terminal's folder. `None`
+    /// from a daemon older than protocol 86.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::BLOCK_MARKS }, _>",
+        deserialize_with = "wire::since::<{ wire::BLOCK_MARKS }, _, _>"
+    )]
+    pub home: Option<String>,
 }
 
 /// A piece of distinct work, such as a project: its tabs.

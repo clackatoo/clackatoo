@@ -376,6 +376,20 @@ pub(crate) const fn git_mark(mark: clackatoo_protocol::GitMark) -> (&'static str
     (text, style)
 }
 
+/// How a terminal marks a command that failed, at the end of its prompt's
+/// line: as what's wrong with a line is written after it, red but quiet.
+#[must_use]
+pub(crate) fn block_failed() -> Style {
+    virtual_text(Severity::Error)
+}
+
+/// How a terminal marks a command that worked, with `blockmarks=all`: as
+/// faint as line numbers, as it's the usual case.
+#[must_use]
+pub(crate) const fn block_worked() -> Style {
+    line_number(false)
+}
+
 /// How an editor's line numbers are drawn: faint, but the cursor's line in
 /// clackatoo's accent, so the eye finds it.
 #[must_use]

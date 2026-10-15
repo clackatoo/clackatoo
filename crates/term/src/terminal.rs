@@ -1489,11 +1489,16 @@ impl Emulator {
         let clipboard = std::mem::take(&mut self.clipboard);
         let generation = self.primary.history_generation();
         let (_, next_link) = self.links.parts();
+        // Numbers run out only after four billion commands; then they start
+        // again, which the reset's new history tells windows of anyway.
+        let next_block = self.blocks.next().unwrap_or(0);
         *self = Self::new(self.size, &self.config);
         self.replies = replies;
         self.clipboard = clipboard;
-        // Link IDs are never reused (see crate::links).
+        // Link IDs are never reused (see crate::links), nor are block
+        // numbers, which windows know how blocks ended by.
         self.links = Links::from_parts([], next_link);
+        self.blocks = Blocks::from_parts(next_block, std::collections::VecDeque::new());
         // History is numbered from 0 again.
         self.primary.follow_history(generation);
     }
@@ -1559,6 +1564,10 @@ impl Emulator {
             // the shell's: a program printing marks of its own, or a
             // shell nested inside it, such as one over ssh.
             b"A" if self.blocks.running() => {}
+            b"A" | b"C" if self.blocks.run_out() => {
+                self.renumber_blocks();
+                self.shell_mark(kind, options);
+            }
             b"A" => {
                 let block = self.blocks.prompt();
                 self.mark_cursor_row(block, false);
@@ -1583,6 +1592,16 @@ impl Emulator {
             }
             _ => {}
         }
+    }
+
+    /// Numbers blocks from 0 again, once they've run out, forgetting every
+    /// mark: what windows know of blocks is by number, so history is
+    /// renumbered too, which has them start again from a snapshot.
+    fn renumber_blocks(&mut self) {
+        self.primary.set_marks(&[]);
+        self.blocks.start_again();
+        let generation = self.primary.history_generation();
+        self.primary.follow_history(generation);
     }
 
     fn mark_cursor_row(&mut self, block: u32, output: bool) {

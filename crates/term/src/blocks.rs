@@ -229,6 +229,30 @@ impl Blocks {
         }
     }
 
+    /// The number the next new block would get, if numbers haven't run
+    /// out: a terminal that has run four billion commands starts again
+    /// (see [`Terminal::shell_mark`]).
+    pub(crate) fn next(&self) -> Option<u32> {
+        self.first
+            .checked_add(u32::try_from(self.entries.len()).ok()?)
+    }
+
+    /// Forgets every block and numbers them from 0 again, once numbers
+    /// have run out, still knowing which marks the shell makes.
+    pub(crate) fn start_again(&mut self) {
+        self.entries.clear();
+        self.first = 0;
+        self.typing = false;
+    }
+
+    /// Whether a prompt or a command starting now would need a number
+    /// there's none left for: the last block isn't at its prompt, which
+    /// either would be.
+    pub(crate) fn run_out(&self) -> bool {
+        self.next().is_none()
+            && !(self.entries.back()).is_some_and(|last| last.phase == Phase::Prompt)
+    }
+
     fn push(&mut self, entry: Entry) -> u32 {
         self.entries.push_back(entry);
         self.last()
@@ -236,7 +260,7 @@ impl Blocks {
 
     fn last(&self) -> u32 {
         let len = u32::try_from(self.entries.len()).expect("far fewer blocks than 4 billion");
-        self.first + len - 1
+        self.first + (len - 1)
     }
 }
 
@@ -683,6 +707,113 @@ mod tests {
         assert_eq!(at(&t, 3), None);
         assert!(t.block_entry(0).is_none());
         assert!(t.block_entry(1).is_some());
+        t.assert_invariants();
+    }
+
+    #[test]
+    fn prompts_are_found_on_the_screen_and_in_history() {
+        let mut t = terminal(20, 3, 100);
+        t.advance(PROMPT.as_bytes());
+        t.advance(command("false", "", 1).as_bytes());
+        t.advance(PROMPT.as_bytes());
+        t.advance(command("seq", "1\r\n2\r\n", 0).as_bytes());
+        t.advance(PROMPT.as_bytes());
+        // Block 0's and block 1's prompts are in history. The screen
+        // shows block 1's output, whose mark isn't a prompt's, and block
+        // 2's prompt.
+        let grid = t.primary();
+        assert_eq!(grid.scrollback_end(), 2);
+        let all: Vec<_> = grid.history_prompts(0..2).collect();
+        assert_eq!(all, [(0, 0), (1, 1)]);
+        assert_eq!(grid.history_prompts(1..9).collect::<Vec<_>>(), [(1, 1)]);
+        assert_eq!(grid.history_prompts(0..1).collect::<Vec<_>>(), [(0, 0)]);
+        assert_eq!(grid.history_prompts(2..9).count(), 0);
+        let screen: Vec<_> = grid.rows().map(crate::Row::prompt_block).collect();
+        assert_eq!(screen, [None, None, Some(2)]);
+        // Compacted, history keeps them.
+        t.compact_scrollback();
+        assert_eq!(t.primary().history_prompts(0..2).count(), 2);
+        assert_eq!(t.block_progress(0), Some(Progress::Finished(Some(1))));
+    }
+
+    #[test]
+    fn prompts_and_exits_are_handed_over_to_the_next_build() {
+        let mut t = terminal(20, 3, 100);
+        t.advance(PROMPT.as_bytes());
+        t.advance(command("false", "", 1).as_bytes());
+        t.advance(PROMPT.as_bytes());
+        t.advance(command("seq", "1\r\n2\r\n", 0).as_bytes());
+        t.advance(PROMPT.as_bytes());
+        let (snapshot, links) = t.snapshot_with_links();
+        let config = Config {
+            scrollback_lines: 100,
+            ..Config::default()
+        };
+        let mut next = Terminal::restore_with_links(&snapshot, &links, &config).unwrap();
+        next.restore_blocks(&t.blocks_snapshot());
+        let prompts = |t: &Terminal| -> Vec<_> {
+            let grid = t.primary();
+            let screen = grid.rows().filter_map(crate::Row::prompt_block);
+            (grid.history_prompts(0..grid.scrollback_end()))
+                .map(|(_, block)| block)
+                .chain(screen)
+                .collect()
+        };
+        assert_eq!(prompts(&next), [0, 1, 2]);
+        assert_eq!(prompts(&next), prompts(&t));
+        assert_eq!(next.block_progress(0), Some(Progress::Finished(Some(1))));
+        assert_eq!(next.block_progress(1), Some(Progress::Finished(Some(0))));
+    }
+
+    #[test]
+    fn a_full_reset_numbers_blocks_on_from_where_it_was() {
+        let mut t = terminal(20, 3, 100);
+        t.advance(PROMPT.as_bytes());
+        t.advance(command("false", "", 1).as_bytes());
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.latest_block(), Some((1, Progress::Prompt)));
+        t.advance(b"\x1bc");
+        assert_eq!(t.latest_block(), None);
+        assert_eq!(t.block_progress(0), None);
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.latest_block(), Some((2, Progress::Prompt)));
+        t.assert_invariants();
+    }
+
+    #[test]
+    fn numbers_that_run_out_start_again_with_history_renumbered() {
+        let mut t = terminal(20, 3, 100);
+        t.restore_blocks(&crate::snapshot::BlocksSnapshot {
+            first: u32::MAX,
+            ..crate::snapshot::BlocksSnapshot::default()
+        });
+        t.advance(PROMPT.as_bytes());
+        t.advance(command("false", "", 1).as_bytes());
+        assert_eq!(
+            t.latest_block(),
+            Some((u32::MAX, Progress::Finished(Some(1))))
+        );
+        let generation = t.primary().history_generation();
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.latest_block(), Some((0, Progress::Prompt)));
+        assert_eq!(
+            t.shell_state(),
+            ShellState::Prompt,
+            "it still knows the shell marks its commands"
+        );
+        assert_eq!(t.block_progress(u32::MAX), None);
+        assert_eq!(t.primary().history_generation(), generation + 1);
+        let marked: Vec<_> = t.primary().marks().map(|(_, mark)| mark.block).collect();
+        assert_eq!(marked, [0], "the old marks are gone");
+        // A reset there starts from 0 too.
+        t.restore_blocks(&crate::snapshot::BlocksSnapshot {
+            first: u32::MAX,
+            ..crate::snapshot::BlocksSnapshot::default()
+        });
+        t.advance(PROMPT.as_bytes());
+        t.advance(b"\x1bc");
+        t.advance(PROMPT.as_bytes());
+        assert_eq!(t.latest_block(), Some((0, Progress::Prompt)));
         t.assert_invariants();
     }
 

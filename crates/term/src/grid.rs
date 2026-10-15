@@ -169,6 +169,20 @@ impl Grid {
         self.scrollback.numbered_rows(numbers)
     }
 
+    /// The history lines numbered within `numbers` that a block's prompt
+    /// starts on, oldest first, each with its number and the block's
+    /// (see [`Row::prompt_block`], which says it for the screen's rows).
+    pub fn history_prompts(
+        &self,
+        numbers: std::ops::Range<u64>,
+    ) -> impl Iterator<Item = (u64, u32)> + '_ {
+        self.scrollback
+            .marks_from(numbers.start)
+            .take_while(move |&(line, _)| line < numbers.end)
+            .filter(|(_, mark)| mark.prompt)
+            .map(|(line, mark)| (line, mark.block))
+    }
+
     /// Every line a shell marked (see [`crate::blocks`]), in history then
     /// on screen, numbered as in [`crate::document`].
     pub(crate) fn marks(&self) -> impl Iterator<Item = (u64, Mark)> + '_ {

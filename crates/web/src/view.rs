@@ -1105,6 +1105,7 @@ mod tests {
     fn chats_are_listed_by_workspace_what_needs_you_first() {
         let mut state = State::default();
         state.workspaces = Workspaces {
+            home: None,
             list: vec![Workspace {
                 id: WorkspaceId(1),
                 name: "clackatoo".into(),
@@ -1406,6 +1407,7 @@ mod tests {
     fn terminals_are_listed_beside_the_chats_saying_what_and_where() {
         let mut state = State::default();
         state.workspaces = Workspaces {
+            home: None,
             list: vec![Workspace {
                 id: WorkspaceId(1),
                 name: "clackatoo".into(),

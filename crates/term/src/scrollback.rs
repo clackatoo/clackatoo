@@ -208,6 +208,13 @@ impl Scrollback {
         self.marks.iter().copied()
     }
 
+    /// The marked lines numbered `first` or later, by number, oldest
+    /// first, found by halving rather than walked to.
+    pub(crate) fn marks_from(&self, first: u64) -> impl Iterator<Item = (u64, Mark)> + '_ {
+        let start = self.marks.partition_point(|&(line, _)| line < first);
+        self.marks.range(start..).copied()
+    }
+
     /// Marks the held lines in `marks`, by number, oldest first. Others are
     /// left out.
     pub(crate) fn set_marks(&mut self, marks: impl IntoIterator<Item = (u64, Mark)>) {

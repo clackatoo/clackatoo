@@ -338,6 +338,7 @@ mod tests {
                 },
                 lines: vec![Line::default(); usize::from(size.rows())],
                 links: Vec::new(),
+                marks: clackatoo_protocol::BlockMarks::default(),
             }),
         })
     }
@@ -348,12 +349,14 @@ mod tests {
             state,
             lines,
             links: Vec::new(),
+            marks: clackatoo_protocol::BlockMarks::default(),
         }])
     }
 
     fn history(first: u64, count: u64) -> HistoryLines {
         HistoryLines {
             first,
+            marks: clackatoo_protocol::BlockMarks::default(),
             lines: (first..first + count)
                 .map(|n| HistoryLine {
                     width: 10,

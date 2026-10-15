@@ -443,6 +443,24 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "finder",
         what: "The finder colours previews of files that aren't open too, and the first chat opens without a pause",
     },
+    News {
+        id: "failed-marks",
+        date: "2026-10-15",
+        lesson: "shell",
+        what: "A command that failed ends its prompt's line with ✗ and its exit status; blockmarks=all marks the rest ✓",
+    },
+    News {
+        id: "scrollback-pill",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "A terminal scrolled back says how far, and how to get back, in a pill; searches say when they wrap",
+    },
+    News {
+        id: "tab-folders",
+        date: "2026-10-15",
+        lesson: "shell",
+        what: "A terminal's tab with no title is named after its shell's folder, ~ for home",
+    },
 ];
 
 impl News {

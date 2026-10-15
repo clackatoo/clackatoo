@@ -12,7 +12,10 @@
 use clackatoo_protocol::{Match, Position, Request};
 use winit::keyboard::{Key, NamedKey};
 
-use super::{Copy, Document, Lines, Mode, Pane, Pending, Prefix, Selection};
+use super::{
+    Copy, Document, Lines, Mode, Pane, Pending, Prefix, Selection, WRAPPED_TO_BOTTOM,
+    WRAPPED_TO_TOP,
+};
 use crate::cmdline::{Keyed, Line};
 use crate::input::KeyPress;
 use crate::motion::{Cursor, Motion, Point, count_with, multiplied};
@@ -244,12 +247,25 @@ impl Pane {
         self.yanked = Some((text, to));
     }
 
-    pub(super) fn searched(&mut self, found: Option<Match>) {
+    /// Takes in where a search from `from` found its text, if anywhere,
+    /// going backward if `backward`. One that went round the end says so,
+    /// as Vim does.
+    pub(super) fn searched(&mut self, found: Option<Match>, (from, backward): (Point, bool)) {
         let Some(found) = found else {
             let query = self.search.as_ref().map_or("", |(query, _)| query);
             self.status = Some(format!("not found: {query}"));
             return;
         };
+        let at = Point {
+            line: found.start.line,
+            col: found.start.col,
+        };
+        // A match back where it started went all the way round.
+        if !backward && at <= from {
+            self.status = Some(WRAPPED_TO_TOP.into());
+        } else if backward && at >= from {
+            self.status = Some(WRAPPED_TO_BOTTOM.into());
+        }
         self.found = Some(found);
         self.cursor = Some(Cursor::new(Point {
             line: found.start.line,
@@ -310,15 +326,16 @@ impl Pane {
         let (Some((query, backward)), Some(cursor)) = (self.search.clone(), self.cursor) else {
             return false;
         };
+        let backward = backward != reverse;
         self.request(
             Request::Search {
                 terminal: self.terminal,
                 exact: self.case.exact(&query),
                 query,
                 from: position(cursor.at),
-                backward: backward != reverse,
+                backward,
             },
-            Pending::Search,
+            Pending::Search(cursor.at, backward),
         );
         false
     }

@@ -30,10 +30,10 @@ use std::time::{Duration, Instant};
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::wire;
 use clackatoo_protocol::{
-    BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine, HistoryLines,
-    Line, LinkTarget, NodeId, PROTOCOL_VERSION, Pane, PaneId, PaneTerminal, Patch, Request,
-    Response, ServerMessage, Side, Size, TabId, TerminalId, TerminalInfo, TerminalStatus, Udp,
-    View, ViewUpdate, WorkspaceId,
+    BlockMarks, BufferId, ChatAction, ClientMessage, Content, Error, GridState, HistoryLine,
+    HistoryLines, Line, LinkTarget, NodeId, PROTOCOL_VERSION, Pane, PaneId, PaneTerminal, Patch,
+    Request, Response, ServerMessage, Side, Size, TabId, TerminalId, TerminalInfo, TerminalStatus,
+    Udp, View, ViewUpdate, WorkspaceId,
 };
 use clackatoo_syntax::{Languages, Syntax};
 use clackatoo_term::{Damage, Terminal};
@@ -667,6 +667,10 @@ struct Subscription {
     state: GridState,
     /// For a chat: what was last sent of it.
     chat: ChatSent,
+    /// The newest block of the shell's the client has been told how it
+    /// ended, or needn't be: blocks finish in order, and a patch tells of
+    /// those finished after it (see [`BlockMarks::finished_after`]).
+    settled: Option<u32>,
     /// An update was sent and not yet acknowledged with `FrameDone`.
     awaiting_ack: bool,
 }
@@ -681,6 +685,7 @@ impl Subscription {
             cwd: None,
             state: GridState::default(),
             chat: ChatSent::default(),
+            settled: None,
             awaiting_ack: false,
         }
     }
@@ -691,18 +696,20 @@ impl Subscription {
         *self = Self::new();
     }
 
-    /// The update that brings the client from what it was last sent to what
-    /// `hosted` shows now, recorded as sent. `None` if nothing changed.
-    fn update_from(&mut self, hosted: &Hosted) -> Option<ViewUpdate> {
+    /// The update that brings the client, which speaks `wire`, from what
+    /// it was last sent to what `hosted` shows now, recorded as sent.
+    /// `None` if nothing changed.
+    fn update_from(&mut self, hosted: &Hosted, wire: u32) -> Option<ViewUpdate> {
         match hosted {
-            Hosted::Pty(terminal) => self.update(terminal.emulator()),
+            Hosted::Pty(terminal) => self.update(terminal.emulator(), wire),
             Hosted::Chat(chat) => chat.catch_up(&mut self.chat),
         }
     }
 
-    /// The update that brings the client from what it was last sent to what
-    /// `terminal` shows now, recorded as sent. `None` if nothing changed.
-    fn update(&mut self, terminal: &Terminal) -> Option<ViewUpdate> {
+    /// The update that brings the client, which speaks `wire`, from what
+    /// it was last sent to what `terminal` shows now, recorded as sent.
+    /// `None` if nothing changed.
+    fn update(&mut self, terminal: &Terminal, wire: u32) -> Option<ViewUpdate> {
         let size = terminal.size();
         let state = GridState::of(terminal);
         let history_generation = terminal.primary().history_generation();
@@ -712,6 +719,9 @@ impl Subscription {
             terminal.title().clone_into(&mut self.title);
             self.cwd = terminal.cwd().map(str::to_owned);
             self.state = state;
+            // The snapshot says how the blocks it shows the prompts of
+            // ended, and history how those it holds did.
+            self.settled = BlockMarks::settled(terminal);
             self.damage.clear();
             return Some(ViewUpdate::Snapshot(View::capture(terminal)));
         }
@@ -726,16 +736,31 @@ impl Subscription {
             patches.push(Patch::Cwd(self.cwd.clone()));
         }
         let grid = terminal.grid();
-        let lines: Vec<(u16, Line)> = self
+        let damaged: Vec<u16> = self
             .damage
             .lines(grid.height())
-            .map(|line| {
-                let index = u16::try_from(line).expect("screen lines are bounded by Size::MAX");
-                (index, Line::from_row(grid.row(line)))
-            })
+            .map(|line| u16::try_from(line).expect("screen lines are bounded by Size::MAX"))
             .collect();
         self.damage.clear();
-        if !lines.is_empty() || state != self.state {
+        let row = |line: u16| grid.row(usize::from(line));
+        let lines: Vec<(u16, Line)> = (damaged.iter())
+            .map(|&line| (line, Line::from_row(row(line))))
+            .collect();
+        // Only a window that reads them is told where prompts are, or how
+        // blocks ended: a look at each line sent, and at the blocks after
+        // the last one it was told of, which is the newest but after a
+        // burst of commands.
+        let marks = if wire::daemon_has(wire, wire::BLOCK_MARKS) {
+            let (exits, settled) = BlockMarks::finished_after(terminal, self.settled);
+            self.settled = settled;
+            BlockMarks {
+                prompts: BlockMarks::prompts_of(damaged.iter().map(|&line| (line, row(line)))),
+                exits,
+            }
+        } else {
+            BlockMarks::default()
+        };
+        if !lines.is_empty() || state != self.state || !marks.exits.is_empty() {
             self.state = state;
             let shown = LinkTarget::of(lines.iter().map(|(_, line)| line), terminal);
             patches.push(Patch::Grid {
@@ -743,6 +768,7 @@ impl Subscription {
                 state,
                 lines,
                 links: shown,
+                marks,
             });
         }
         (!patches.is_empty()).then_some(ViewUpdate::Patch(patches))
@@ -931,7 +957,7 @@ impl Daemon {
             sources: Slab::new(),
             terminals: BTreeMap::new(),
             next_id: 1,
-            workspaces: WorkspaceState::new(),
+            workspaces: WorkspaceState::with_home(&config.home),
             buffers: BTreeMap::new(),
             next_buffer: 1,
             id: crate::client::random_window(),
@@ -1008,6 +1034,7 @@ impl Daemon {
             log::error!("the workspaces couldn't be taken over: {err}");
             WorkspaceState::new()
         });
+        daemon.workspaces.set_home(&daemon.config.home);
 
         for terminal in &state.terminals {
             let id = TerminalId(terminal.id);
@@ -1710,7 +1737,7 @@ impl Daemon {
                     None if quic.is_some() && !client.outgoing.is_empty() => continue,
                     None => &mut client.outgoing,
                 };
-                if let Some(update) = subscription.update_from(&slot.terminal)
+                if let Some(update) = subscription.update_from(&slot.terminal, client.wire)
                     && queue_update(subscription, client.wire, id, update, outgoing)
                 {
                     ready.push(Token(key));
@@ -3390,10 +3417,13 @@ fn history(terminal: &Terminal, end: u64, count: u16) -> HistoryLines {
             }
         })
         .collect::<Vec<_>>();
+    let first = first.unwrap_or(end);
+    let count = u16::try_from(lines.len()).expect("no more lines than were asked for");
     HistoryLines {
-        first: first.unwrap_or(end),
+        first,
         links: LinkTarget::of(lines.iter().map(|line| &line.line), terminal),
         lines,
+        marks: BlockMarks::of_history(terminal, first, count),
     }
 }
 
@@ -3441,11 +3471,11 @@ mod tests {
         let mut terminal = Terminal::new(size, &Config::default());
         let mut sent = Subscription::new();
         assert!(matches!(
-            sent.update(&terminal),
+            sent.update(&terminal, PROTOCOL_VERSION),
             Some(ViewUpdate::Snapshot(_))
         ));
         terminal.advance(b"a");
-        let Some(update @ ViewUpdate::Patch(_)) = sent.update(&terminal) else {
+        let Some(update @ ViewUpdate::Patch(_)) = sent.update(&terminal, PROTOCOL_VERSION) else {
             panic!("a patch");
         };
         // A patch queued for a client of this build's version goes.
@@ -3478,7 +3508,7 @@ mod tests {
         assert!(outgoing.is_empty() && !sent.awaiting_ack);
         terminal.advance(b"b");
         assert!(matches!(
-            sent.update(&terminal),
+            sent.update(&terminal, PROTOCOL_VERSION),
             Some(ViewUpdate::Snapshot(_))
         ));
     }
@@ -3490,18 +3520,21 @@ mod tests {
         terminal.advance(b"abcdefghijklmnopqrstuvwxy");
         let mut sent = Subscription::new();
         assert!(matches!(
-            sent.update(&terminal),
+            sent.update(&terminal, PROTOCOL_VERSION),
             Some(ViewUpdate::Snapshot(_))
         ));
         terminal.advance(b"z");
-        assert!(matches!(sent.update(&terminal), Some(ViewUpdate::Patch(_))));
+        assert!(matches!(
+            sent.update(&terminal, PROTOCOL_VERSION),
+            Some(ViewUpdate::Patch(_))
+        ));
 
         // Back at the same size before the client heard of the first
         // resize, but the line in history was taken back and rewrapped.
         terminal.resize(size(7));
         terminal.resize(size(10));
         assert!(matches!(
-            sent.update(&terminal),
+            sent.update(&terminal, PROTOCOL_VERSION),
             Some(ViewUpdate::Snapshot(_))
         ));
     }
@@ -3512,7 +3545,7 @@ mod tests {
         let mut terminal = Terminal::new(size, &Config::default());
         terminal.advance(b"\x1b]8;id=d;https://docs/\x07docs\x1b]8;;\x07\r\n");
         let mut sent = Subscription::new();
-        let Some(ViewUpdate::Snapshot(view)) = sent.update(&terminal) else {
+        let Some(ViewUpdate::Snapshot(view)) = sent.update(&terminal, PROTOCOL_VERSION) else {
             panic!("a snapshot first");
         };
         let grid = view.grid().expect("a grid");
@@ -3528,7 +3561,7 @@ mod tests {
         terminal.take_damage(&mut Damage::new());
         terminal.advance(b"\x1b]7;file:///w\x07\x1b]8;;https://new/\x07new\x1b]8;;\x07");
         terminal.take_damage(&mut sent.damage);
-        let Some(ViewUpdate::Patch(patches)) = sent.update(&terminal) else {
+        let Some(ViewUpdate::Patch(patches)) = sent.update(&terminal, PROTOCOL_VERSION) else {
             panic!("a patch");
         };
         assert!(patches.contains(&Patch::Cwd(Some("/w".to_owned()))));
@@ -3554,19 +3587,157 @@ mod tests {
         );
     }
 
+    /// A command run at a prompt, ending with `exit`, as shell integration
+    /// marks it.
+    fn ran(exit: i32) -> Vec<u8> {
+        format!("\x1b]133;A\x07$ x\r\n\x1b]133;C\x07\x1b]133;D;{exit}\x07").into_bytes()
+    }
+
+    /// The marks of the grid patch in `update`, if it's a patch with one.
+    fn patch_marks(update: Option<ViewUpdate>) -> Option<BlockMarks> {
+        let Some(ViewUpdate::Patch(patches)) = update else {
+            return None;
+        };
+        patches.into_iter().find_map(|patch| match patch {
+            Patch::Grid { marks, .. } => Some(marks),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_burst_of_commands_tells_how_the_last_256_ended() {
+        let size = Size::new(20, 4).expect("test sizes are valid");
+        let mut terminal = Terminal::new(size, &Config::default());
+        let mut sent = Subscription::new();
+        sent.update(&terminal, PROTOCOL_VERSION);
+        for n in 0..300 {
+            terminal.advance(&ran(n % 3));
+        }
+        terminal.advance(b"\x1b]133;A\x07$ ");
+        terminal.take_damage(&mut sent.damage);
+        let marks = patch_marks(sent.update(&terminal, PROTOCOL_VERSION)).expect("a patch");
+        assert_eq!(marks.exits.len(), 256);
+        assert_eq!(marks.exits.first(), Some(&(44, 44 % 3)));
+        assert_eq!(marks.exits.last(), Some(&(299, 299 % 3)));
+        // Older ones come with their history.
+        let fetched = history(&terminal, 50, 10);
+        assert_eq!(fetched.marks.exits.first(), Some(&(40, 40 % 3)));
+        terminal.take_damage(&mut sent.damage);
+        terminal.advance(b"y");
+        terminal.take_damage(&mut sent.damage);
+        let marks = patch_marks(sent.update(&terminal, PROTOCOL_VERSION)).expect("a patch");
+        assert_eq!(marks.exits, [], "each told once");
+    }
+
+    #[test]
+    fn after_a_reset_blocks_are_told_from_its_snapshot_on() {
+        let size = Size::new(20, 4).expect("test sizes are valid");
+        let mut terminal = Terminal::new(size, &Config::default());
+        terminal.advance(&ran(1));
+        let mut sent = Subscription::new();
+        sent.update(&terminal, PROTOCOL_VERSION);
+        terminal.advance(b"\x1bc");
+        terminal.advance(&ran(2));
+        terminal.advance(b"\x1b]133;A\x07$ ");
+        let Some(ViewUpdate::Snapshot(view)) = sent.update(&terminal, PROTOCOL_VERSION) else {
+            panic!("a reset renumbers history, which a snapshot says");
+        };
+        // Numbers carry on past the reset, so block 0's end is never
+        // taken for the new block's.
+        let marks = &view.grid().expect("a grid").marks;
+        assert_eq!(marks.prompts, [(0, 1), (1, 2)]);
+        assert_eq!(marks.exits, [(1, 2)]);
+        terminal.take_damage(&mut sent.damage);
+        terminal.advance(b"x\r\n\x1b]133;C\x07\x1b]133;D;3\x07\x1b]133;A\x07$ ");
+        terminal.take_damage(&mut sent.damage);
+        let marks = patch_marks(sent.update(&terminal, PROTOCOL_VERSION)).expect("a patch");
+        assert_eq!(marks.exits, [(2, 3)]);
+    }
+
+    #[test]
+    fn blocks_numbered_again_send_a_snapshot() {
+        let size = Size::new(20, 4).expect("test sizes are valid");
+        let mut terminal = Terminal::new(size, &Config::default());
+        // Blocks handed over at the last number, as if four billion
+        // commands had run: the snapshot's fields in order, as postcard
+        // writes them.
+        let last: (Option<String>, Vec<()>, u32, Vec<()>) =
+            (None, Vec::new(), u32::MAX, Vec::new());
+        let blocks: clackatoo_term::BlocksSnapshot =
+            postcard::from_bytes(&postcard::to_allocvec(&last).unwrap()).unwrap();
+        terminal.restore_blocks(&blocks);
+        terminal.advance(&ran(1));
+        let mut sent = Subscription::new();
+        sent.update(&terminal, PROTOCOL_VERSION);
+        assert_eq!(
+            terminal.latest_block().map(|(block, _)| block),
+            Some(u32::MAX)
+        );
+        // The next prompt needs a number there's none left for.
+        terminal.take_damage(&mut sent.damage);
+        terminal.advance(b"\x1b]133;A\x07$ ");
+        terminal.take_damage(&mut sent.damage);
+        let Some(ViewUpdate::Snapshot(view)) = sent.update(&terminal, PROTOCOL_VERSION) else {
+            panic!("numbered again, history is too, which a snapshot says");
+        };
+        assert_eq!(view.grid().expect("a grid").state.block, Some(0));
+        assert_eq!(sent.settled, None);
+    }
+
+    #[test]
+    fn a_blocks_end_is_told_once_and_only_to_windows_that_read_it() {
+        const PROMPT: &[u8] = b"\x1b]133;A\x07$ ";
+        let size = Size::new(20, 4).expect("test sizes are valid");
+        for wire in [PROTOCOL_VERSION, wire::BLOCK_MARKS - 1] {
+            let mut terminal = Terminal::new(size, &Config::default());
+            terminal.advance(PROMPT);
+            terminal.advance(b"false\r\n\x1b]133;C\x07");
+            let mut sent = Subscription::new();
+            sent.update(&terminal, wire);
+            let mut patched = |terminal: &mut Terminal, output: &[u8]| {
+                terminal.take_damage(&mut Damage::new());
+                terminal.advance(output);
+                terminal.take_damage(&mut sent.damage);
+                let Some(ViewUpdate::Patch(patches)) = sent.update(terminal, wire) else {
+                    return None;
+                };
+                patches.into_iter().find_map(|patch| match patch {
+                    Patch::Grid { marks, .. } => Some(marks),
+                    _ => None,
+                })
+            };
+            // Its end, with nothing drawn: a patch says it, to a window
+            // that reads it.
+            let ended = patched(&mut terminal, b"\x1b]133;D;1\x07");
+            let prompt = patched(&mut terminal, PROMPT);
+            let again = patched(&mut terminal, b"x");
+            if wire < wire::BLOCK_MARKS {
+                assert_eq!(ended, None, "nothing changed it can read");
+                assert_eq!(prompt.unwrap(), BlockMarks::default());
+                assert_eq!(again.unwrap(), BlockMarks::default());
+                continue;
+            }
+            assert_eq!(ended.unwrap().exits, [(0, 1)]);
+            let prompt = prompt.unwrap();
+            assert_eq!(prompt.prompts, [(1, 1)], "the new prompt's line");
+            assert_eq!(prompt.exits, [], "said once");
+            assert_eq!(again.unwrap().prompts, [(1, 1)], "typing sends its line");
+        }
+    }
+
     #[test]
     fn a_reset_sends_a_snapshot() {
         let size = Size::new(10, 2).expect("test sizes are valid");
         let mut terminal = Terminal::new(size, &Config::default());
         terminal.advance(b"one\r\ntwo\r\nthree\r\n");
         let mut sent = Subscription::new();
-        sent.update(&terminal);
+        sent.update(&terminal, PROTOCOL_VERSION);
         // A reset numbers history from 0 again, and more output can take
         // it past where it was before the client hears of either.
         terminal.advance(b"\x1bc");
         terminal.advance(&b"line\r\n".repeat(10));
         assert!(matches!(
-            sent.update(&terminal),
+            sent.update(&terminal, PROTOCOL_VERSION),
             Some(ViewUpdate::Snapshot(_))
         ));
     }

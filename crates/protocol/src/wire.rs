@@ -158,6 +158,12 @@ gates! {
     /// A preview's colours, as the file's buffer is highlighted:
     /// `Found::Preview`'s `spans`.
     PREVIEW_COLOURS = 85,
+    /// Where shells' blocks start and how they ended, for windows to mark
+    /// failed commands by: `GridNode`'s, `Patch::Grid`'s and
+    /// `HistoryLines`' `marks` (`BlockMarks`); and the daemon's home
+    /// directory, for windows to write paths from `~` by: `Workspaces`'
+    /// `home`.
+    BLOCK_MARKS = 86,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

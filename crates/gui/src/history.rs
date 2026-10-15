@@ -24,6 +24,9 @@ const MAX_LINES: usize = 4000;
 #[derive(Debug, Default)]
 pub(crate) struct History {
     rows: BTreeMap<u64, Row>,
+    /// The lines fetched that a block's prompt starts on, by number, each
+    /// with the block's number.
+    prompts: BTreeMap<u64, u32>,
     /// The oldest line the daemon still holds, once a fetch has shown it.
     pub(crate) start: Option<u64>,
     /// Lines asked for and not yet received.
@@ -41,6 +44,14 @@ impl History {
     /// Every line kept.
     pub(crate) fn rows(&self) -> impl Iterator<Item = &Row> {
         self.rows.values()
+    }
+
+    /// The lines kept numbered within `numbers` that a block's prompt
+    /// starts on, in order, each with the block's number.
+    pub(crate) fn prompts(&self, numbers: Range<u64>) -> impl Iterator<Item = (u64, u32)> + '_ {
+        self.prompts
+            .range(numbers)
+            .map(|(&number, &block)| (number, block))
     }
 
     /// Forgets everything, as when history is renumbered.
@@ -108,11 +119,17 @@ impl History {
         for (number, line) in (lines.first..).zip(&lines.lines) {
             self.rows
                 .insert(number, line.line.to_row(usize::from(line.width)));
+            self.prompts.remove(&number);
         }
+        self.prompts.extend(
+            (lines.marks.prompts.iter())
+                .map(|&(line, block)| (lines.first + u64::from(line), block)),
+        );
         if self.rows.len() > MAX_LINES {
             let keep =
                 view.start.saturating_sub(MAX_LINES as u64 / 2)..view.end + MAX_LINES as u64 / 2;
             self.rows.retain(|number, _| keep.contains(number));
+            self.prompts.retain(|number, _| keep.contains(number));
         }
     }
 }
@@ -132,9 +149,39 @@ mod tests {
             first: asked.end,
             lines: Vec::new(),
             links: Vec::new(),
+            marks: clackatoo_protocol::BlockMarks::default(),
         };
         history.receive(&answer, &asked, generation, &(90..100));
         assert_eq!(history.start, None);
         assert_eq!(history.fetch(40..50, 50), Some(0..50));
+    }
+
+    #[test]
+    fn prompts_are_kept_with_their_lines() {
+        use clackatoo_protocol::{BlockMarks, HistoryLine};
+
+        let mut history = History::default();
+        let asked = history.fetch(10..14, 14).expect("nothing is fetched yet");
+        let line = HistoryLine {
+            width: 4,
+            line: clackatoo_protocol::Line::default(),
+        };
+        let answer = HistoryLines {
+            first: 10,
+            lines: vec![line; 4],
+            links: Vec::new(),
+            marks: BlockMarks {
+                prompts: vec![(1, 7), (3, 8)],
+                exits: vec![(7, 2)],
+            },
+        };
+        history.receive(&answer, &asked, history.generation(), &(10..14));
+        assert_eq!(
+            history.prompts(0..20).collect::<Vec<_>>(),
+            [(11, 7), (13, 8)]
+        );
+        assert_eq!(history.prompts(12..13).count(), 0);
+        history.clear();
+        assert_eq!(history.prompts(0..20).count(), 0);
     }
 }

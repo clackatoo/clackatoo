@@ -31,6 +31,23 @@ impl WorkspaceState {
         }
     }
 
+    /// No workspaces yet, on a machine whose user's home is `home`.
+    pub(crate) fn with_home(home: &std::path::Path) -> Self {
+        let mut state = Self::new();
+        state.set_home(home);
+        state
+    }
+
+    /// Tells windows the user's home is `home`, as they write paths under
+    /// it from `~`. A home that isn't UTF-8 isn't told, nor is `/`, which
+    /// the daemon starts terminals in when `$HOME` isn't set: a window
+    /// would name every terminal at the root `~`.
+    pub(crate) fn set_home(&mut self, home: &std::path::Path) {
+        self.workspaces.home = (home.to_str())
+            .filter(|home| !home.trim_end_matches('/').is_empty())
+            .map(str::to_owned);
+    }
+
     /// The workspaces, for the next build.
     pub(crate) fn hand_over(&self) -> handover::Workspaces {
         fn layout(node: &Layout) -> handover::Layout {
@@ -181,7 +198,11 @@ impl WorkspaceState {
             return Err(HandoverError::Damaged("the active workspace is missing"));
         }
         Ok(Self {
-            workspaces: Workspaces { list, active },
+            workspaces: Workspaces {
+                list,
+                active,
+                home: None,
+            },
             next_workspace: handed.next_workspace,
             next_tab: handed.next_tab,
             next_pane: handed.next_pane,
@@ -1111,5 +1132,15 @@ mod tests {
         assert_eq!(tab.layout.depth(), MAX_NESTING);
         assert_eq!(tab.layout.panes(), before, "every pane kept, in order");
         assert_eq!(tab.focused, pane);
+    }
+
+    #[test]
+    fn the_home_is_told_unless_its_the_root_used_for_no_home() {
+        let home = |path: &str| {
+            let state = WorkspaceState::with_home(std::path::Path::new(path));
+            state.get().home.clone()
+        };
+        assert_eq!(home("/home/j").as_deref(), Some("/home/j"));
+        assert_eq!(home("/"), None);
     }
 }

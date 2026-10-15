@@ -1929,29 +1929,46 @@ impl App {
             _ => (None, None),
         };
         let ime_area = bar_area.or(ime_area).or(chat_paint.ime);
-        let composed_rows = composed
-            .as_ref()
-            .zip(focused)
-            .map(|((row, cursor), drawing)| {
-                let mut rows = drawing.rows.clone();
-                rows[cursor.line] = row;
-                rows
-            });
-        let scenes: Vec<Scene<'_>> = drawings
+        // Rows drawn in place of what panes show: marks of how commands
+        // ended, and the text being composed on the cursor's row.
+        let replaced: Vec<Option<Vec<&Row>>> = drawings
             .iter()
             .map(|drawing| {
+                let composing = composed.as_ref().filter(|_| drawing.focused);
+                if drawing.marked.is_empty() && composing.is_none() {
+                    return None;
+                }
+                let mut rows = drawing.rows.clone();
+                for (line, row) in &drawing.marked {
+                    if let Some(shown) = rows.get_mut(*line) {
+                        *shown = row;
+                    }
+                }
+                if let Some((row, cursor)) = composing {
+                    rows[cursor.line] = row;
+                }
+                Some(rows)
+            })
+            .collect();
+        let scenes: Vec<Scene<'_>> = drawings
+            .iter()
+            .zip(&replaced)
+            .map(|(drawing, replaced)| {
                 let composing = composed.as_ref().filter(|_| drawing.focused);
                 Scene {
                     origin: drawing.tile.origin,
                     size: drawing.tile.cells_size(cell),
-                    rows: composed_rows
-                        .as_deref()
-                        .filter(|_| drawing.focused)
-                        .unwrap_or(&drawing.rows),
+                    rows: replaced.as_deref().unwrap_or(&drawing.rows),
                     cursor: composing.map_or(drawing.cursor, |&(_, cursor)| Some(cursor)),
                     normal_mode: drawing.normal_mode,
                     highlights: &drawing.highlights,
                 }
+            })
+            .collect();
+        let pills: Vec<(Tile, String)> = (drawings.iter())
+            .filter_map(|drawing| {
+                let pill = desk.pane(drawing.terminal?)?.pill(drawing.focused)?;
+                Some((drawing.tile, pill))
             })
             .collect();
         let mut texts = painted.texts;
@@ -1972,6 +1989,16 @@ impl App {
         }
         over.extend(painted.over.into_iter().chain(chat_paint.over));
         over.extend(bar_underline);
+        // A pill over each terminal scrolled back from its live screen,
+        // but for while something is raised over the panes, which its
+        // text would show through, as texts are drawn over every fill.
+        if !chrome.raises_over_panes(self.hover) && !desk.numbering_panes() {
+            for (tile, pill) in &pills {
+                let (fill, pill_texts) = chrome::paint_pill(geometry, tile, pill);
+                over.push(fill);
+                texts.extend(pill_texts);
+            }
+        }
         // Ctrl+B p: each pane's number, over it, to pick it by.
         if desk.numbering_panes() {
             let (fills, numbers) = chrome::paint_pane_numbers(geometry, &placement);
@@ -2098,6 +2125,7 @@ fn list_drawing(
         terminal: None,
         tile,
         rows,
+        marked: Vec::new(),
         cursor,
         highlights,
         normal_mode: has_focus,
@@ -2188,6 +2216,7 @@ fn drawings<'a>(
                     terminal: None,
                     tile,
                     rows,
+                    marked: Vec::new(),
                     cursor,
                     highlights: editor.highlights(),
                     normal_mode: has_focus && editor.mode != Mode::Insert,
@@ -2210,6 +2239,7 @@ fn drawings<'a>(
                     terminal: None,
                     tile,
                     rows,
+                    marked: Vec::new(),
                     cursor,
                     highlights: explorer.highlights(),
                     normal_mode: has_focus,
@@ -2262,6 +2292,7 @@ fn drawings<'a>(
             terminal: Some(terminal),
             tile,
             rows,
+            marked: state.block_marks(height),
             cursor,
             highlights: state.highlights(height),
             normal_mode: has_focus && normal,
@@ -2407,6 +2438,9 @@ struct Drawing<'a> {
     terminal: Option<TerminalId>,
     tile: Tile,
     rows: Vec<&'a Row>,
+    /// Rows drawn in place of some of `rows`, by their line in view: a
+    /// terminal's, with how a command ended marked after its prompt.
+    marked: Vec<(usize, Row)>,
     cursor: Option<SceneCursor>,
     highlights: Vec<Highlight>,
     normal_mode: bool,

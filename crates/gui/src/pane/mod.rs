@@ -26,11 +26,12 @@ use crate::fonts::Fonts;
 use crate::history::History;
 use crate::input::{self, KeyPress};
 use crate::motion::{Cursor, Lines, Point};
-use crate::options::{Case, Options};
+use crate::options::{BlockMarks, Case, Options};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 use crate::screen::Screen;
 
 mod links;
+mod marks;
 mod mouse;
 mod normal;
 mod operator;
@@ -94,6 +95,18 @@ pub(crate) enum Selection {
 /// nothing.
 pub(crate) const NO_BLOCK_SELECTION: &str = "block selection isn't here yet";
 
+/// The fewest rows a pane shows the pill saying it's scrolled back in:
+/// fewer, and it would cover too much of what's being read.
+const PILL_ROWS: u16 = 4;
+
+/// What a search that went past the end and round to the top says, in
+/// terminals and editors alike, as Vim does: the match may be a long way
+/// back.
+pub(crate) const WRAPPED_TO_TOP: &str = "search wrapped to top";
+
+/// What a backward search that went round to the bottom says.
+pub(crate) const WRAPPED_TO_BOTTOM: &str = "search wrapped to bottom";
+
 /// A request sent to the daemon and not yet answered. Answers arrive in
 /// the order requests were sent.
 #[derive(Debug)]
@@ -103,8 +116,8 @@ enum Pending {
     History(Range<u64>, u64),
     /// Text to copy, and where to.
     Text(Copy),
-    /// A search.
-    Search,
+    /// A search, from where, and whether it went backward.
+    Search(Point, bool),
     /// A block, and what for.
     Block(operator::BlockUse),
     /// Input for the program, numbered by the [`Predictor`].
@@ -155,6 +168,9 @@ pub(crate) struct Pane {
     search: Option<(String, bool)>,
     /// How searches treat case, as the options say.
     case: Case,
+    /// Which finished commands are marked at the end of their prompt's
+    /// line, as the options say.
+    blockmarks: BlockMarks,
     /// About the most of the conversation, in tokens, the chat it shows
     /// tells an agent it moves to, as the options say.
     carryover: u32,
@@ -213,6 +229,7 @@ impl Pane {
             prompt: None,
             search: None,
             case: Case::default(),
+            blockmarks: Options::default().blockmarks,
             carryover: Options::default().carryover,
             found: None,
             status: None,
@@ -237,6 +254,7 @@ impl Pane {
     /// Takes in the options, as they've changed.
     pub(crate) fn set_options(&mut self, options: &Options) {
         self.case = Case::of(options);
+        self.blockmarks = options.blockmarks;
         self.carryover = options.carryover;
         self.predictor.set_choice(options.predictecho);
         self.refresh_overlay();
@@ -355,6 +373,24 @@ impl Pane {
             (None, Some(chat)) => Some(&chat.title),
             (None, None) => None,
         }
+    }
+
+    /// What a tab showing it is named: the title its program set, or its
+    /// chat has, or else the name of the folder its shell last said it's
+    /// in, `~` for `home`.
+    pub(crate) fn name(&self, home: Option<&str>) -> Option<&str> {
+        let title = self.title()?;
+        if !title.trim().is_empty() || self.chat.is_some() {
+            return Some(title);
+        }
+        let Some(cwd) = self
+            .screen
+            .as_ref()
+            .and_then(|screen| screen.cwd.as_deref())
+        else {
+            return Some(title);
+        };
+        Some(folder_name(cwd, home))
     }
 
     /// Lays out and draws the chat it shows, if it shows one, in a pane
@@ -694,6 +730,9 @@ impl Pane {
                 self.history.receive(&lines, &asked, generation, &shown);
                 if generation == self.history.generation() {
                     self.learn_links(&lines.links);
+                    if let Some(screen) = &mut self.screen {
+                        screen.exits.learn(&lines.marks.exits);
+                    }
                 }
                 self.scroll = self.scroll.min(self.max_scroll());
                 self.fetch_history();
@@ -703,8 +742,8 @@ impl Pane {
                 self.copied(text, to);
                 true
             }
-            (Some(Pending::Search), Response::Found(found)) => {
-                self.searched(found);
+            (Some(Pending::Search(from, backward)), Response::Found(found)) => {
+                self.searched(found, (from, backward));
                 true
             }
             (Some(Pending::Block(use_)), Response::Block(block)) => {
@@ -1024,7 +1063,8 @@ impl Pane {
             return Some(format!("{slash}{}", prompt.line.shown()));
         }
         let mut label = self.status.clone();
-        if self.scroll > 0 {
+        // The pill over the pane says it, where it fits.
+        if self.scroll > 0 && self.pill(true).is_none() {
             let up = format!("↑{}", self.scroll);
             label = Some(match label {
                 Some(label) => format!("{label}  {up}"),
@@ -1039,6 +1079,40 @@ impl Pane {
             });
         }
         label
+    }
+
+    /// What the pill at the pane's bottom right says while the view is
+    /// scrolled back from the live screen: how far, and, if the pane is
+    /// `focused`, the key that goes back. In insert mode typing does, as
+    /// keys go to the program; a pane without the focus takes the
+    /// window's mode when it gets it, so says only how far. `None` at the
+    /// live screen, or in a pane too small for it, where the bar says how
+    /// far instead.
+    pub(crate) fn pill(&self, focused: bool) -> Option<String> {
+        let screen = self.screen.as_ref().filter(|_| self.scroll > 0)?;
+        let lines = if self.scroll == 1 { "line" } else { "lines" };
+        let mut pill = format!("↓ {} {lines}", self.scroll);
+        if focused {
+            let back = if self.mode == Mode::Insert {
+                "type"
+            } else {
+                "G"
+            };
+            pill = format!("{pill} · {back} to return");
+        }
+        // A cell of room either side of its text, and a cell from the
+        // pane's edge, over its last row, with rows above to read.
+        let pane = self.shown_size(screen);
+        let fits = pane.rows() >= PILL_ROWS
+            && usize::from(pane.cols()) >= crate::render::mono_width(&pill) + 4;
+        fits.then_some(pill)
+    }
+
+    /// How many cells the pane shows `screen` in: the size asked of the
+    /// daemon for it, which the terminal is unless another window decides
+    /// that, or else the terminal's.
+    fn shown_size(&self, screen: &Screen) -> Size {
+        self.requested_size.unwrap_or(screen.size)
     }
 
     /// Back to insert mode, at the live screen.
@@ -1215,6 +1289,19 @@ fn overlaid(row: &Row, cells: &[(usize, char)]) -> Row {
     builder.finish(row.is_wrapped())
 }
 
+/// The name of the folder `cwd`, as a tab is named after it: its last
+/// part, `~` if it's `home`, and `/` for the root.
+fn folder_name<'a>(cwd: &'a str, home: Option<&str>) -> &'a str {
+    let cwd = cwd.trim_end_matches('/');
+    if home.is_some_and(|home| home.trim_end_matches('/') == cwd) {
+        return "~";
+    }
+    match cwd.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name,
+        _ => "/",
+    }
+}
+
 /// Where a selection going on past `row`'s end stops: a cell after its
 /// last that isn't blank, for its line break, or the row's width if it
 /// goes on over the next.
@@ -1344,10 +1431,13 @@ mod tests {
                         })
                         .collect();
                     let shown = LinkTarget::of(lines.iter().map(|line| &line.line), terminal);
+                    let first = first.unwrap_or(end);
+                    let count = u16::try_from(lines.len()).unwrap();
                     Response::History(HistoryLines {
-                        first: first.unwrap_or(end),
+                        first,
                         lines,
                         links: shown,
+                        marks: clackatoo_protocol::BlockMarks::of_history(terminal, first, count),
                     })
                 }
                 ClientMessage::Request(Request::Text {
@@ -1823,6 +1913,100 @@ mod tests {
         named(&mut pane, NamedKey::Enter);
         serve(&mut pane, &terminal);
         assert_eq!(pane.label().as_deref(), Some("not found: zebra"));
+    }
+
+    #[test]
+    fn a_search_that_goes_round_an_end_says_so_once() {
+        let terminal = terminal("cat dog\r\nbird cat\r\nfish");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg/cat");
+        named(&mut pane, NamedKey::Enter);
+        serve(&mut pane, &terminal);
+        assert_eq!(pane.label(), None);
+        keys(&mut pane, "n");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).1, 0);
+        assert_eq!(pane.label().as_deref(), Some(WRAPPED_TO_TOP));
+        keys(&mut pane, "N");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).1, 1);
+        assert_eq!(pane.label().as_deref(), Some(WRAPPED_TO_BOTTOM));
+        keys(&mut pane, "N");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane).1, 0);
+        assert_eq!(pane.label(), None, "no end was gone round");
+        // The only match, from on it, is all the way round.
+        keys(&mut pane, "/dog");
+        named(&mut pane, NamedKey::Enter);
+        serve(&mut pane, &terminal);
+        keys(&mut pane, "n");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("cat dog".into(), 0, 4));
+        assert_eq!(pane.label().as_deref(), Some(WRAPPED_TO_TOP));
+    }
+
+    #[test]
+    fn a_pill_says_how_far_back_the_view_is_where_it_fits() {
+        let output = numbered_lines("line ");
+        let wide = |rows| {
+            let mut terminal = Terminal::new(Size::new(40, rows).unwrap(), &Config::default());
+            terminal.advance(output.as_bytes());
+            terminal
+        };
+        let terminal = wide(5);
+        let mut pane = pane(&terminal);
+        assert_eq!(pane.pill(true), None, "at the live screen");
+        pane.wheel(1, ([0, 0], [0.0, 0.0]), Modifiers::default());
+        assert_eq!(
+            pane.pill(true).as_deref(),
+            Some("↓ 1 line · type to return")
+        );
+        assert_eq!(pane.label(), None, "the pill says it");
+        pane.wheel(2, ([0, 0], [0.0, 0.0]), Modifiers::default());
+        assert_eq!(
+            pane.pill(true).as_deref(),
+            Some("↓ 3 lines · type to return")
+        );
+        pane.enter_normal_mode();
+        assert_eq!(pane.pill(true).as_deref(), Some("↓ 3 lines · G to return"));
+        assert_eq!(pane.pill(false).as_deref(), Some("↓ 3 lines"), "unfocused");
+        // The pane's own size counts, not the terminal's, which another
+        // window may decide.
+        pane.resize(Size::new(40, 3).unwrap());
+        assert_eq!(pane.pill(true), None, "too short a pane");
+        pane.resize(Size::new(40, 5).unwrap());
+        keys(&mut pane, "G");
+        assert_eq!(pane.pill(true), None, "G went back");
+
+        // Too short a pane, or too narrow, and the bar says it.
+        let mut short = self::pane(&wide(3));
+        short.wheel(2, ([0, 0], [0.0, 0.0]), Modifiers::default());
+        assert_eq!(short.pill(true), None);
+        assert_eq!(short.label().as_deref(), Some("↑2"));
+        let mut narrow = self::pane(&self::terminal(&output));
+        narrow.wheel(2, ([0, 0], [0.0, 0.0]), Modifiers::default());
+        assert_eq!(narrow.pill(true), None);
+        assert_eq!(narrow.label().as_deref(), Some("↑2"));
+    }
+
+    #[test]
+    fn a_terminal_with_no_title_is_named_after_its_folder() {
+        let named = |output: &str, home| {
+            let pane = pane(&terminal(output));
+            pane.name(home).map(str::to_owned)
+        };
+        assert_eq!(named("", None).as_deref(), Some(""), "no folder said");
+        let src = "\x1b]7;file://host/home/j/src/\x07";
+        assert_eq!(named(src, Some("/home/j")).as_deref(), Some("src"));
+        let home = "\x1b]7;file://host/home/j\x07";
+        assert_eq!(named(home, Some("/home/j/")).as_deref(), Some("~"));
+        assert_eq!(named(home, None).as_deref(), Some("j"), "no home known");
+        let root = "\x1b]7;file://host/\x07";
+        assert_eq!(named(root, Some("/home/j")).as_deref(), Some("/"));
+        // A program's title comes first.
+        let titled = format!("{src}\x1b]2;vim\x07");
+        assert_eq!(named(&titled, None).as_deref(), Some("vim"));
     }
 
     #[test]

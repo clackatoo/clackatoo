@@ -27,12 +27,12 @@ use clackatoo_text::{
 
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
-    COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER, INLAY_HINTS, LIMITS,
+    BLOCK_MARKS, COLOURS, EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER, INLAY_HINTS, LIMITS,
     PHONE_TERMINALS, PREVIEW_COLOURS, SYMBOLS, USES, WORDS,
 };
 use crate::{
-    AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
-    Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
+    AgentSession, AgentTools, Author, Axis, BlockMarks, BoardId, BufferId, BufferSnapshot,
+    BufferUpdate, Change, ChatAction, ChatName, ChatNode, ChatPatch, ChatState, Choice, ChoiceKind,
     ClientMessage, Content, CursorState, Diff, Error, Event, FilesId, GridNode, GridState,
     HistoryLine, HistoryLines, Item, Layout, Limit, Line, LinkTarget, Location, NewAgent,
     NewReview, NewTerminal, Node, NodeId, Outcome, Pane, PaneId, PaneKind, PaneTerminal, Patch,
@@ -137,7 +137,7 @@ pub fn read_fixture(wire: u32, bytes: &[u8]) -> Result<Vec<Sample>, String> {
 /// `wire` is that version or later: an older peer neither sends nor reads
 /// it, so the sample at its version is as that peer has it.
 #[allow(clippy::too_many_lines, reason = "a list of samples")]
-fn tagged(wire: u32) -> Vec<(u32, Sample)> {
+pub(crate) fn tagged(wire: u32) -> Vec<(u32, Sample)> {
     use Sample::{Client, Server};
     let terminal = TerminalId(7);
     let buffer = BufferId(3);
@@ -216,6 +216,7 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                         state: grid_state(),
                         lines: vec![line("$ ls"), line("Cargo.toml")],
                         links: links(),
+                        marks: BlockMarks::default(),
                     }),
                 }),
             })),
@@ -240,6 +241,7 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                         state: grid_state(),
                         lines: vec![(1, line("src"))],
                         links: links(),
+                        marks: BlockMarks::default(),
                     },
                 ]),
             })),
@@ -268,6 +270,7 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     line: line("old"),
                 }],
                 links: links(),
+                marks: BlockMarks::default(),
             }))),
         ),
         (
@@ -555,6 +558,7 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
                     active_tab: TabId(2),
                 }],
                 active: None,
+                home: None,
             }))),
         ),
         (
@@ -769,6 +773,63 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
             },
         })),
     ));
+    // A shell's blocks: where their prompts start on the screen, in a
+    // patch and in history, and how they ended; and the daemon's home.
+    let marks = |prompts: Vec<(u16, u32)>| BlockMarks {
+        prompts,
+        exits: vec![(4, 2), (5, 0)],
+    };
+    samples.extend([
+        (
+            BLOCK_MARKS,
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Snapshot(View {
+                    title: String::new(),
+                    cwd: Some("/home/jack".into()),
+                    root: Node::Grid(GridNode {
+                        size: size(),
+                        state: grid_state(),
+                        lines: vec![line("$ false"), line("$ true")],
+                        links: links(),
+                        marks: marks(vec![(0, 4), (1, 5)]),
+                    }),
+                }),
+            })),
+        ),
+        (
+            BLOCK_MARKS,
+            Server(ServerMessage::Event(Event::View {
+                terminal,
+                update: ViewUpdate::Patch(vec![Patch::Grid {
+                    node: NodeId::ROOT,
+                    state: grid_state(),
+                    lines: vec![(2, line("$ ls"))],
+                    links: links(),
+                    marks: marks(vec![(2, 6)]),
+                }]),
+            })),
+        ),
+        (
+            BLOCK_MARKS,
+            Server(ServerMessage::Response(Response::History(HistoryLines {
+                first: 98,
+                lines: vec![HistoryLine {
+                    width: 80,
+                    line: line("$ false"),
+                }],
+                links: links(),
+                marks: marks(vec![(0, 4)]),
+            }))),
+        ),
+        (
+            BLOCK_MARKS,
+            Server(ServerMessage::Response(Response::Workspaces(Workspaces {
+                home: Some("/home/jack".into()),
+                ..workspaces()
+            }))),
+        ),
+    ]);
     samples
 }
 
@@ -1045,6 +1106,7 @@ fn more() -> Vec<Sample> {
                 state: grid_state(),
                 lines: vec![line("x")],
                 links: links(),
+                marks: BlockMarks::default(),
             }),
         })),
         response(Response::Text("text".into())),
@@ -1662,6 +1724,7 @@ fn more() -> Vec<Sample> {
                     },
                 )],
                 links: Vec::new(),
+                marks: BlockMarks::default(),
             }]),
         }),
     ]);
@@ -1765,6 +1828,7 @@ fn workspaces() -> Workspaces {
             active_tab: TabId(2),
         }],
         active: Some(WorkspaceId(1)),
+        home: None,
     }
 }
 

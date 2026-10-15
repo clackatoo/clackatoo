@@ -366,6 +366,38 @@ fn search_finds_and_wraps() {
 }
 
 #[test]
+fn a_search_that_goes_round_an_end_says_so() {
+    let mut setup = Setup::new("a two\nb two\nc\n");
+    setup.keys("/two<CR>");
+    assert_eq!(setup.editor.status, None);
+    setup.keys("n");
+    assert_eq!(setup.editor.status, None);
+    setup.keys("n");
+    assert_eq!(setup.cursor(), (0, 2));
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some(crate::pane::WRAPPED_TO_TOP)
+    );
+    setup.keys("n");
+    assert_eq!(setup.editor.status, None, "it says it once");
+    setup.keys("N");
+    assert_eq!(setup.editor.status, None);
+    setup.keys("N");
+    assert_eq!(setup.cursor(), (1, 2));
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some(crate::pane::WRAPPED_TO_BOTTOM)
+    );
+    // The only match, from on it, goes all the way round to itself.
+    let mut setup = Setup::new("one\nx\n");
+    setup.keys("/one<CR>");
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some(crate::pane::WRAPPED_TO_TOP)
+    );
+}
+
+#[test]
 fn a_tab_is_one_character_to_move_over() {
     let mut setup = Setup::new("\tx\ty");
     setup.keys("l");

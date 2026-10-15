@@ -38,6 +38,26 @@ copied "printf"
 copied "three"
 ```
 
+## Commands that failed
+
+A command that fails, exiting with a status other than 0, ends its prompt's line with a dim red `✗` and the status, as `✗ 1`, in history too, so you can find it scrolling back. The mark isn't part of the text: nothing copies it.
+
+In the terminal, run `false`, which only fails.
+
+```check
+exited 1
+```
+
+## Marking every command
+
+`:set blockmarks=all` marks the commands that worked too, with a faint `✓`; `none` marks none, and `failed`, as it starts, marks only those that failed. The tab's name is the shell's folder, while the program sets no title.
+
+Type `:set blockmarks=all` in normal mode.
+
+```check
+option blockmarks=all
+```
+
 ## Open a file name
 
 Programs print file names and places in them, as `grep -n` and compilers do: `src/main.rs:12:5`. Ctrl+click opens one, as does `gx` on it in normal mode: a URL in your browser, and a file in an editor at that line. A relative name is from the directory the shell is in.

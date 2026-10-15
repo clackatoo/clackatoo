@@ -112,6 +112,7 @@ mod tests {
             state: GridState::default(),
             lines,
             links: Vec::new(),
+            marks: clackatoo_protocol::BlockMarks::default(),
         }
     }
 

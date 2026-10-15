@@ -545,6 +545,17 @@ impl Row {
         }
     }
 
+    /// The number of the block whose prompt starts on this row, if one
+    /// does (see [`crate::blocks`]): where a window marks how the block's
+    /// command ended. Rows in history keep no marks: see
+    /// [`Grid::history_prompts`](crate::Grid::history_prompts).
+    #[must_use]
+    pub fn prompt_block(&self) -> Option<u32> {
+        self.mark()
+            .filter(|mark| mark.prompt)
+            .map(|mark| mark.block)
+    }
+
     /// The shell's mark on this row, if any.
     pub(crate) fn mark(&self) -> Option<Mark> {
         self.extras.as_ref()?.mark

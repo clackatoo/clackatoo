@@ -8,11 +8,12 @@
 use std::collections::BTreeMap;
 
 use clackatoo_term::{
-    CursorShape, InputModes, LinkId, Row, RowBuilder, ShellState, Size, Style, Terminal,
+    CursorShape, InputModes, LinkId, Progress, Row, RowBuilder, ShellState, Size, Style, Terminal,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::chat::{ChatNode, ChatPatch};
+use crate::wire;
 
 /// What a pane shows at one moment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +68,144 @@ pub struct GridNode {
     pub lines: Vec<Line>,
     /// What the links the lines are part of point to.
     pub links: Links,
+    /// Where the shell's blocks start among the lines, and how they
+    /// ended. Empty from a daemon older than protocol 86.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::BLOCK_MARKS }, _>",
+        deserialize_with = "wire::since::<{ wire::BLOCK_MARKS }, _, _>"
+    )]
+    pub marks: BlockMarks,
+}
+
+/// The most blocks a patch says have finished: more than a screen shows
+/// the prompts of, after a burst of short commands.
+const FINISHED_MAX: u32 = 256;
+
+/// Where blocks of a shell's commands start among the lines a message
+/// carries, and how blocks ended (see [`Block`]): what a window marks the
+/// commands that failed by.
+///
+/// Blocks are numbered in order for as long as the terminal lives, so a
+/// number names the same block in every message.
+///
+/// [`Block`]: clackatoo_term::Block
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockMarks {
+    /// The lines a block's prompt starts on, numbered as the message
+    /// numbers its lines (a screen's line, or a history line's place from
+    /// the first fetched), each with the block's number. A line the
+    /// message carries that isn't here starts no prompt, whatever it did
+    /// before.
+    pub prompts: Vec<(u16, u32)>,
+    /// How blocks ended, as the numbers of those whose command has
+    /// finished and their exit status, of those the shell said it for:
+    /// in a snapshot or a fetch of history, the blocks in
+    /// [`prompts`](Self::prompts); in a patch, those finished since the
+    /// last.
+    pub exits: Vec<(u32, i32)>,
+}
+
+impl BlockMarks {
+    /// Takes in a patch's marks, `patched`, which come with `lines`: what
+    /// the lines it carries start replaces what they started, and how
+    /// blocks no line here starts ended is forgotten, as what's kept is a
+    /// screen's. `lines` are in order, as the daemon sends them.
+    pub fn apply(&mut self, lines: &[(u16, Line)], patched: Self) {
+        self.prompts
+            .retain(|(line, _)| lines.binary_search_by_key(line, |&(sent, _)| sent).is_err());
+        self.prompts.extend(patched.prompts);
+        self.prompts.sort_unstable();
+        self.exits.extend(patched.exits);
+        let prompts = &self.prompts;
+        self.exits
+            .retain(|(block, _)| prompts.iter().any(|(_, prompt)| prompt == block));
+        self.exits.sort_unstable();
+        self.exits.dedup_by_key(|(block, _)| *block);
+    }
+
+    /// The prompts among `rows`, each a row with its line, with how their
+    /// blocks ended, as `terminal` knows it.
+    pub fn of_rows<'a>(
+        rows: impl IntoIterator<Item = (u16, &'a Row)>,
+        terminal: &Terminal,
+    ) -> Self {
+        Self::with_exits(Self::prompts_of(rows), terminal)
+    }
+
+    /// The prompts among `rows`, each a row with its line.
+    pub fn prompts_of<'a>(rows: impl IntoIterator<Item = (u16, &'a Row)>) -> Vec<(u16, u32)> {
+        (rows.into_iter())
+            .filter_map(|(line, row)| Some((line, row.prompt_block()?)))
+            .collect()
+    }
+
+    /// The prompts among `terminal`'s history lines numbered from `first`
+    /// on, `count` of them, each numbered from `first`, with how their
+    /// blocks ended.
+    #[must_use]
+    pub fn of_history(terminal: &Terminal, first: u64, count: u16) -> Self {
+        let prompts = (terminal.primary())
+            .history_prompts(first..first + u64::from(count))
+            .filter_map(|(line, block)| Some((u16::try_from(line - first).ok()?, block)))
+            .collect();
+        Self::with_exits(prompts, terminal)
+    }
+
+    /// `prompts`, with how each one's block ended, once its command has.
+    fn with_exits(prompts: Vec<(u16, u32)>, terminal: &Terminal) -> Self {
+        let mut exits: Vec<(u32, i32)> = (prompts.iter())
+            .filter_map(|&(_, block)| Some((block, Self::exit(terminal, block)?)))
+            .collect();
+        // A prompt drawn again, as after a resize, is the same block's.
+        exits.dedup();
+        Self { prompts, exits }
+    }
+
+    /// How the blocks of `terminal`'s shell numbered after `after` ended,
+    /// of those finished that the shell said it for, as a patch tells
+    /// them: at most the last 256, as a window fetches what
+    /// it shows of older ones with their history. Also the newest block
+    /// that has finished (see [`settled`](Self::settled)), to pass as
+    /// `after` next time. Blocks finish in order, so all but the newest
+    /// have.
+    #[must_use]
+    pub fn finished_after(
+        terminal: &Terminal,
+        after: Option<u32>,
+    ) -> (Vec<(u32, i32)>, Option<u32>) {
+        let settled = Self::settled(terminal);
+        let Some(last) = settled else {
+            return (Vec::new(), settled);
+        };
+        let from = after
+            .map_or(0, |after| after.saturating_add(1))
+            .max(last.saturating_sub(FINISHED_MAX - 1));
+        let exits = (from..=last)
+            .filter_map(|block| Some((block, Self::exit(terminal, block)?)))
+            .collect();
+        (exits, settled)
+    }
+
+    /// The newest block of `terminal`'s shell that has finished, if any:
+    /// its latest, once that's finished, or else the one before.
+    #[must_use]
+    pub fn settled(terminal: &Terminal) -> Option<u32> {
+        let (latest, progress) = terminal.latest_block()?;
+        match progress {
+            Progress::Finished(_) => Some(latest),
+            Progress::Prompt | Progress::Running => latest.checked_sub(1),
+        }
+    }
+
+    /// How block `block` of `terminal`'s shell ended, if its command has
+    /// finished and the shell said.
+    #[must_use]
+    pub fn exit(terminal: &Terminal, block: u32) -> Option<i32> {
+        match terminal.block_progress(block)? {
+            Progress::Finished(exit) => exit,
+            Progress::Prompt | Progress::Running => None,
+        }
+    }
 }
 
 /// What links point to, by the ID cells name them by in their
@@ -156,6 +295,14 @@ pub struct HistoryLines {
     pub lines: Vec<HistoryLine>,
     /// What the links the lines are part of point to.
     pub links: Links,
+    /// Where the shell's blocks start among the lines, numbered from
+    /// [`first`](Self::first), and how they ended. Empty from a daemon
+    /// older than protocol 86.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::BLOCK_MARKS }, _>",
+        deserialize_with = "wire::since::<{ wire::BLOCK_MARKS }, _, _>"
+    )]
+    pub marks: BlockMarks,
 }
 
 /// One line of history.
@@ -235,6 +382,14 @@ pub enum Patch {
         lines: Vec<(u16, Line)>,
         /// What the links those lines are part of point to.
         links: Links,
+        /// Where the shell's blocks start among those lines, and blocks
+        /// that finished since the last patch. Empty from a daemon older
+        /// than protocol 86.
+        #[serde(
+            skip_serializing_if = "wire::before::<{ wire::BLOCK_MARKS }, _>",
+            deserialize_with = "wire::since::<{ wire::BLOCK_MARKS }, _, _>"
+        )]
+        marks: BlockMarks,
     },
     /// The chat changed.
     Chat(ChatPatch),
@@ -289,9 +444,11 @@ impl View {
                         state,
                         lines,
                         links,
+                        marks,
                     },
                     Node::Grid(grid),
                 ) => {
+                    grid.marks.apply(&lines, marks);
                     grid.state = state;
                     for (index, line) in lines {
                         if let Some(old) = grid.lines.get_mut(usize::from(index)) {
@@ -317,12 +474,14 @@ impl GridNode {
     /// What `terminal`'s screen shows.
     #[must_use]
     pub fn capture(terminal: &Terminal) -> Self {
-        let lines: Vec<Line> = terminal.grid().rows().map(Line::from_row).collect();
+        let grid = terminal.grid();
+        let lines: Vec<Line> = grid.rows().map(Line::from_row).collect();
         Self {
             size: terminal.size(),
             state: GridState::of(terminal),
             links: LinkTarget::of(&lines, terminal),
             lines,
+            marks: BlockMarks::of_rows((0..).zip(grid.rows()), terminal),
         }
     }
 }
@@ -561,6 +720,7 @@ mod tests {
                 state: GridState::of(&t),
                 lines: vec![(1, Line::from_row(t.grid().row(1))), (9, Line::default())],
                 links: Vec::new(),
+                marks: BlockMarks::default(),
             },
         ]));
         assert_eq!(view, View::capture(&t));
@@ -595,11 +755,102 @@ mod tests {
                 state: GridState::of(&t),
                 links: LinkTarget::of(lines.iter().map(|(_, line)| line), &t),
                 lines,
+                marks: BlockMarks::default(),
             },
         ]));
         assert_eq!(view, View::capture(&t));
         let shown = &view.grid().unwrap().links;
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].1.uri, "https://b/");
+    }
+
+    #[test]
+    fn views_carry_where_prompts_start_and_how_their_blocks_ended() {
+        const PROMPT: &str = "\x1b]133;A\x07$ ";
+        let mut t = terminal(10, 3, "");
+        t.advance(format!("{PROMPT}false\r\n\x1b]133;C\x07\x1b]133;D;1\x07{PROMPT}").as_bytes());
+        let mut view = View::capture(&t);
+        let marks = &view.grid().unwrap().marks;
+        assert_eq!(marks.prompts, [(0, 0), (1, 1)]);
+        assert_eq!(marks.exits, [(0, 1)], "block 1 is still at its prompt");
+
+        // `true` prints two lines, scrolling `false` off the screen.
+        t.advance(format!("true\r\n\x1b]133;C\x07a\r\nb\r\n\x1b]133;D;0\x07{PROMPT}").as_bytes());
+        let lines: Vec<(u16, Line)> = (0..3)
+            .map(|line| (line, Line::from_row(t.grid().row(usize::from(line)))))
+            .collect();
+        let rows = lines
+            .iter()
+            .map(|&(line, _)| (line, t.grid().row(usize::from(line))));
+        view.apply(ViewUpdate::Patch(vec![Patch::Grid {
+            node: NodeId::ROOT,
+            state: GridState::of(&t),
+            links: Vec::new(),
+            marks: BlockMarks {
+                prompts: BlockMarks::prompts_of(rows),
+                exits: vec![(1, 0)],
+            },
+            lines,
+        }]));
+        assert_eq!(view, View::capture(&t));
+        assert_eq!(view.grid().unwrap().marks.prompts, [(2, 2)]);
+
+        // History has both finished blocks' prompts.
+        let history = BlockMarks::of_history(&t, 0, 2);
+        assert_eq!(history.prompts, [(0, 0), (1, 1)]);
+        assert_eq!(history.exits, [(0, 1), (1, 0)]);
+        assert_eq!(BlockMarks::of_history(&t, 1, 5).prompts, [(0, 1)]);
+    }
+
+    /// `message` sent at `wire` and read back at it.
+    fn through(wire: u32, message: &crate::ServerMessage) -> crate::ServerMessage {
+        let mut decoder = crate::frame::FrameDecoder::new();
+        decoder.push(&crate::frame::encode(wire, message).unwrap());
+        decoder.decode(wire).unwrap().unwrap()
+    }
+
+    #[test]
+    fn marks_and_the_home_reach_only_peers_that_have_them() {
+        use crate::corpus::{Sample, tagged};
+
+        let samples: Vec<_> = (tagged(wire::BLOCK_MARKS).into_iter())
+            .filter(|&(since, _)| since == wire::BLOCK_MARKS)
+            .map(|(_, sample)| sample)
+            .collect();
+        assert_eq!(samples.len(), 4);
+        for sample in samples {
+            let Sample::Server(message) = sample else {
+                panic!("the daemon sends them");
+            };
+            assert_eq!(through(wire::BLOCK_MARKS, &message), message);
+            // An older peer gets none, and reads none from an older daemon:
+            // no prompts, no exits, no home, as before.
+            let mut older = message.clone();
+            match &mut older {
+                crate::ServerMessage::Event(crate::Event::View { update, .. }) => match update {
+                    ViewUpdate::Snapshot(View {
+                        root: Node::Grid(grid),
+                        ..
+                    }) => grid.marks = BlockMarks::default(),
+                    ViewUpdate::Patch(patches) => {
+                        for patch in patches {
+                            if let Patch::Grid { marks, .. } = patch {
+                                *marks = BlockMarks::default();
+                            }
+                        }
+                    }
+                    ViewUpdate::Snapshot(_) => unreachable!(),
+                },
+                crate::ServerMessage::Response(crate::Response::History(history)) => {
+                    history.marks = BlockMarks::default();
+                }
+                crate::ServerMessage::Response(crate::Response::Workspaces(workspaces)) => {
+                    workspaces.home = None;
+                }
+                other => panic!("{other:?} isn't sampled"),
+            }
+            assert_ne!(older, message);
+            assert_eq!(through(wire::BLOCK_MARKS - 1, &message), older);
+        }
     }
 }

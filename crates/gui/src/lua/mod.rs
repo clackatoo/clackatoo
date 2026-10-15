@@ -335,6 +335,7 @@ mod tests {
         };
         World {
             workspaces: Workspaces {
+                home: None,
                 active: Some(WorkspaceId(1)),
                 list: vec![Workspace {
                     id: WorkspaceId(1),

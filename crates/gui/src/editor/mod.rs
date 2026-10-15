@@ -3569,6 +3569,12 @@ impl Editor {
                 .max(found.start);
             self.found = Some((text.point_of(found.start), text.point_of(last)));
             self.cursor = Cursor::new(text.point_of(found.start));
+            // A match back where it started went all the way round.
+            if !backward && found.start <= from {
+                self.status = Some(crate::pane::WRAPPED_TO_TOP.into());
+            } else if backward && found.start >= from {
+                self.status = Some(crate::pane::WRAPPED_TO_BOTTOM.into());
+            }
         } else {
             self.found = None;
             self.status = Some(compiled.not_found(format!("{pattern} isn't in the file")));

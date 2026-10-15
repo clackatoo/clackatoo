@@ -27,7 +27,7 @@ use clackatoo_protocol::PaneId;
 use crate::desktop::{Button, ButtonLayout};
 use crate::editor::PanelView;
 use crate::finder::{self, view::FinderView};
-use crate::layout::{Area, Placement, Rect};
+use crate::layout::{Area, Placement, Rect, Tile};
 use crate::render::{Fill, Ink, Paint, Text, TextFont};
 
 /// The sizes everything else is worked out from, in pixels.
@@ -732,6 +732,20 @@ impl Chrome {
             () if right => ResizeDirection::East,
             () => return None,
         })
+    }
+
+    /// Whether something is raised over the panes, with the mouse at
+    /// `hover`: the palette, the finder, a menu, the keys a prefix takes,
+    /// the messages said lately, or the note cut short, whole. What's
+    /// drawn over panes, such as a terminal's scrolled pill, waits.
+    pub(crate) fn raises_over_panes(&self, hover: Hit) -> bool {
+        let messages = (self.messages.as_ref()).is_some_and(|raised| !raised.lines.is_empty());
+        let cut = self.cut.is_some() && (hover == Hit::Note || self.notice);
+        self.palette.is_some()
+            || self.finder.is_some()
+            || self.menu.is_some()
+            || self.keys.is_some()
+            || (self.bottom_shown && (messages || cut))
     }
 
     /// The frame's rectangles and text, with `hover` under the mouse: those
@@ -1963,6 +1977,50 @@ pub(crate) fn paint_pane_numbers(
     (fills, texts)
 }
 
+/// The pill over `tile`'s bottom right that says how far its terminal is
+/// scrolled back, `pill`, as [`Pane::pill`](crate::pane::Pane::pill) words
+/// it: raised as the palette is, its distance in the text colour and the
+/// way back muted after it, in the terminal's font, a cell of room either
+/// side and a cell from the pane's right edge.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn paint_pill<'a>(
+    geometry: &Geometry,
+    tile: &Tile,
+    pill: &'a str,
+) -> (Fill, Vec<Text<'a>>) {
+    let metrics = geometry.metrics;
+    let [cell_width, cell_height] = metrics.cell;
+    let width = ((crate::render::mono_width(pill) + 2) as f32 * cell_width).round();
+    let height = (cell_height + metrics.padding).round();
+    let rect = tile.rect;
+    let x = (rect.x + rect.width - width - cell_width).round();
+    let y = (rect.y + rect.height - height - metrics.padding).round();
+    let fill = Fill::rounded([x, y, width, height], Paint::Palette, geometry.radius)
+        .bordered(geometry.edge, Paint::PaletteEdge);
+    let top = (y + (height - cell_height) / 2.0).round();
+    let left = x + cell_width;
+    let far = pill.split_once(" · ").map_or(pill, |(far, _)| far);
+    let back = &pill[far.len()..];
+    let mut texts = vec![Text {
+        origin: [left, top],
+        content: far,
+        ink: Ink::Plain,
+        font: TextFont::Mono,
+    }];
+    if !back.is_empty() {
+        texts.push(Text {
+            origin: [
+                left + crate::render::mono_width(far) as f32 * cell_width,
+                top,
+            ],
+            content: back,
+            ink: Ink::Muted,
+            font: TextFont::Mono,
+        });
+    }
+    (fill, texts)
+}
+
 /// An editor's panel by its cursor, as `view` places it in the pane whose
 /// cells start at `origin`: raised over the panes as the palette is, with
 /// its text in the terminal's font, code on a faint band or box, and a
@@ -2321,6 +2379,25 @@ mod tests {
         for mode in [ModeName::InsertVisual, ModeName::InsertVisualLine] {
             assert_eq!(width(mode), 15.0 * 10.0 + 24.0, "{mode:?}");
         }
+    }
+
+    #[test]
+    fn what_is_raised_over_the_panes_is_known() {
+        let status = |note: &str| Status::Tabs {
+            mode: Some(ModeName::Normal),
+            note: Some(note.into()),
+            kind: NoteKind::Label,
+            panes: 1,
+        };
+        let mut plain = chrome(status("short"), &ButtonLayout::default());
+        assert!(!plain.raises_over_panes(Hit::Nothing));
+        plain.palette = Some(Rect::default());
+        assert!(plain.raises_over_panes(Hit::Nothing));
+        // A note cut short is raised whole while the mouse is over it.
+        let long = chrome(status(&"long ".repeat(200)), &ButtonLayout::default());
+        assert!(long.cut.is_some());
+        assert!(!long.raises_over_panes(Hit::Nothing));
+        assert!(long.raises_over_panes(Hit::Note));
     }
 
     #[test]

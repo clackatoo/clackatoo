@@ -998,6 +998,7 @@ mod tests {
                         ..clackatoo_protocol::GridState::default()
                     },
                     lines: vec![clackatoo_protocol::Line::default(); usize::from(size.rows())],
+                    marks: clackatoo_protocol::BlockMarks::default(),
                     links: Vec::new(),
                 }),
             }),
@@ -1307,6 +1308,7 @@ mod tests {
         };
         let mut state = State {
             workspaces: Workspaces {
+                home: None,
                 list: vec![Workspace {
                     id: WorkspaceId(1),
                     name: "clackatoo".into(),

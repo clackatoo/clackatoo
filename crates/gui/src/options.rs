@@ -616,6 +616,12 @@ options! {
     /// trip is over 30 ms or a key has just taken a long time; `always`
     /// does it even for a daemon on this machine; `never` doesn't.
     predictecho("pe"): PredictEcho = PredictEcho::Auto;
+    /// Which commands a terminal marks at the end of their prompt's line,
+    /// once they've finished, where the shell says how they ended:
+    /// `failed` marks those that failed with a dim red `✗` and their exit
+    /// status, as `✗ 2`; `all` marks those that worked too, with a dim
+    /// `✓`; `none` marks none.
+    blockmarks("bm"): BlockMarks = BlockMarks::Failed;
     /// Ports forwarded to a daemon on another machine (`:PortForward`)
     /// send as background traffic: only as fast as the link takes them
     /// without a queue growing, so keys and screens never wait behind a
@@ -649,6 +655,18 @@ choice! {
         Always = "always",
         /// Never.
         Never = "never",
+    }
+}
+
+choice! {
+    /// Which finished commands `blockmarks` marks.
+    BlockMarks {
+        /// Those that failed.
+        Failed = "failed",
+        /// Every one, those that worked too.
+        All = "all",
+        /// None.
+        Off = "none",
     }
 }
 

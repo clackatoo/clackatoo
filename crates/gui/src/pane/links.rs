@@ -512,6 +512,7 @@ mod tests {
                 first: numbered[0].0,
                 lines,
                 links: shown,
+                marks: clackatoo_protocol::BlockMarks::default(),
             }));
         }
     }
@@ -636,6 +637,7 @@ mod tests {
                 first: numbered[0].0,
                 lines,
                 links: shown,
+                marks: clackatoo_protocol::BlockMarks::default(),
             }));
         }
         assert_eq!(pane.scene(2).0[0].text(), "old");

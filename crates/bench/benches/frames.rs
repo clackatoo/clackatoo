@@ -11,8 +11,8 @@ use std::hint::black_box;
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
-    Event, GridState, Line, NodeId, PROTOCOL_VERSION, Patch, ServerMessage, TerminalId, View,
-    ViewUpdate,
+    BlockMarks, Event, GridState, Line, NodeId, PROTOCOL_VERSION, Patch, ServerMessage, TerminalId,
+    View, ViewUpdate,
 };
 use clackatoo_term::{Config, Size, Terminal};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
@@ -57,6 +57,7 @@ fn patches(terminal: &Terminal) -> Vec<ServerMessage> {
                         (at + 1, lines[usize::from(at) + 1].clone()),
                     ],
                     links: Vec::new(),
+                    marks: BlockMarks::default(),
                 }]),
             })
         })
