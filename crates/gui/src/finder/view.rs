@@ -155,26 +155,30 @@ pub(crate) fn fit(text: &str, inks: &[Ink], cols: usize, keep_end: bool) -> Row 
 }
 
 /// `text` in at most `cols` cells of the terminal's font, a wide character
-/// two: cut short with `…` at its end if it's wider.
-pub(crate) fn cut(text: &str, cols: usize) -> String {
+/// two: cut short with `…` if it's wider, at its start if `keep_end`, as
+/// a long path keeps its last folders, or else at its end.
+pub(crate) fn cut(text: &str, cols: usize, keep_end: bool) -> String {
     use crate::render::{mono_cells, mono_width};
     if mono_width(text) <= cols {
         return text.to_owned();
     }
-    let mut cut = String::new();
+    if cols == 0 {
+        return String::new();
+    }
+    // Room is kept for the `…`.
     let mut width = 0;
-    for ch in text.chars() {
-        // Room is kept for the `…`.
-        width += mono_cells(ch);
-        if width + 1 > cols {
-            break;
-        }
-        cut.push(ch);
+    let mut fits = |ch: &char| {
+        width += mono_cells(*ch);
+        width < cols
+    };
+    if keep_end {
+        let mut kept: Vec<char> = text.chars().rev().take_while(&mut fits).collect();
+        kept.push('…');
+        kept.into_iter().rev().collect()
+    } else {
+        let kept = text.chars().take_while(&mut fits);
+        kept.chain(std::iter::once('…')).collect()
     }
-    if cols > 0 {
-        cut.push('…');
-    }
-    cut
 }
 
 /// Where the finder's parts go, in a window of one size.

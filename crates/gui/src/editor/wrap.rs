@@ -9,6 +9,11 @@
 //! one. The rows the line goes on over start with its indent, with
 //! `breakindent`, and `showbreak`.
 //!
+//! Prose, as a lesson is, wraps as a book's lines do: a row ends only
+//! after a blank, the blanks there hang at its end rather than start the
+//! next, and stretches kept together, such as a lesson's code, never
+//! break, unless one's wider than a row.
+//!
 //! Rows are worked out a line at a time, as they're needed, from the
 //! view's top or the cursor, never from the file's start, so a long file
 //! scrolls as fast as a short one.
@@ -20,6 +25,8 @@
 //! cells, and the hints on it those drawn before its characters, from its
 //! first to its last, and on its last row, those after the line's end.
 
+use std::ops::Range;
+
 use clackatoo_term::{RowBuilder, Style};
 
 use super::text::{Laid, Text};
@@ -29,10 +36,16 @@ use crate::options::Options;
 
 /// What the options say about wrapping long lines.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "options each on or off, none a state of another"
+)]
 pub(crate) struct Wrapping {
     /// They wrap (`wrap`).
     pub(crate) on: bool,
     linebreak: bool,
+    /// They're prose, as a lesson's are (see the module's notes).
+    prose: bool,
     breakindent: bool,
     showbreak: String,
     /// The cells `showbreak` takes.
@@ -46,10 +59,16 @@ impl Wrapping {
         Self {
             on: options.wrap,
             linebreak: options.linebreak,
+            prose: false,
             breakindent: options.breakindent,
             showbreak: options.showbreak.clone(),
             showbreak_cells: measure.filled(),
         }
+    }
+
+    /// The same, wrapping lines as prose if `prose`, as a lesson's are.
+    pub(crate) fn for_prose(self, prose: bool) -> Self {
+        Self { prose, ..self }
     }
 
     /// How lines wrap in rows of `width` cells, if they do.
@@ -57,6 +76,7 @@ impl Wrapping {
         self.on.then_some(Wrap {
             width,
             linebreak: self.linebreak,
+            prose: self.prose,
             breakindent: self.breakindent,
             showbreak: self.showbreak_cells,
         })
@@ -83,6 +103,8 @@ pub(crate) struct Wrap {
     pub(crate) width: usize,
     /// Break between words, as `linebreak` says.
     pub(crate) linebreak: bool,
+    /// Wrap as prose (see the module's notes).
+    pub(crate) prose: bool,
     /// Indent the rows a line goes on over as the line is (`breakindent`).
     pub(crate) breakindent: bool,
     /// The cells `showbreak` takes.
@@ -102,14 +124,17 @@ const LEAST_TEXT: usize = 20;
 /// The screen rows `laid` goes on over, wrapped as `wrap` says, with
 /// `inlays`, its inlay hints, each the cell it's drawn before and the
 /// cells it takes, in order. If `room_after`, the cell after the line's
-/// last has to fit too, for the cursor typing there.
+/// last has to fit too, for the cursor typing there. Prose never breaks
+/// inside what `keep` says, each a cell and the one after the last kept
+/// with it, in order.
 pub(crate) fn rows(
     laid: &Laid,
     wrap: Wrap,
     room_after: bool,
     inlays: &[(usize, usize)],
+    keep: &[Range<usize>],
 ) -> Vec<ScreenRow> {
-    match Rows::of(laid, wrap, room_after, inlays) {
+    match Rows::of(laid, wrap, room_after, inlays, keep) {
         Some(rows) => rows.go_on(laid, vec![ScreenRow::WHOLE], inlays),
         None => vec![ScreenRow::WHOLE],
     }
@@ -120,7 +145,7 @@ pub(crate) fn rows(
 /// rest against.
 #[cfg(test)]
 pub(crate) fn rows_by_cells(laid: &Laid, wrap: Wrap, room_after: bool) -> Vec<ScreenRow> {
-    match Rows::of(laid, wrap, room_after, &[]) {
+    match Rows::of(laid, wrap, room_after, &[], &[]) {
         Some(rows) => rows.go_on_cells(laid, vec![ScreenRow::WHOLE], &[]),
         None => vec![ScreenRow::WHOLE],
     }
@@ -132,18 +157,21 @@ pub(crate) fn rows_by_cells(laid: &Laid, wrap: Wrap, room_after: bool) -> Vec<Sc
 /// the row before it decided, looking no further than that row's edge:
 /// those whose rows before end before `changed` are kept, and only the
 /// rest worked out again, so an edit far along a long line with hints
-/// wraps only from there.
+/// wraps only from there. Prose, whose rows can end past their edge with
+/// the blanks that hang there, and which `keep` holds together, is
+/// wrapped afresh.
 pub(crate) fn rows_again(
     laid: &Laid,
     wrap: Wrap,
     room_after: bool,
     old: &[ScreenRow],
     (changed, inlays): (usize, &[(usize, usize)]),
+    keep: &[Range<usize>],
 ) -> Vec<ScreenRow> {
-    let Some(rows) = Rows::of(laid, wrap, room_after, inlays) else {
+    let Some(rows) = Rows::of(laid, wrap, room_after, inlays, keep) else {
         return vec![ScreenRow::WHOLE];
     };
-    if old.first() != Some(&ScreenRow::WHOLE) {
+    if old.first() != Some(&ScreenRow::WHOLE) || wrap.prose {
         return rows.go_on(laid, vec![ScreenRow::WHOLE], inlays);
     }
     // Hints after the line's end go with its last character, wherever an
@@ -165,7 +193,7 @@ pub(crate) fn rows_again(
 }
 
 /// How a line goes on over rows.
-struct Rows {
+struct Rows<'k> {
     /// The cells a row has for text.
     width: usize,
     /// The cells before the text on the rows after the first.
@@ -173,12 +201,23 @@ struct Rows {
     linebreak: bool,
     /// Whether the cell after the line's last has to fit too.
     room_after: bool,
+    /// It's prose (see the module's notes).
+    prose: bool,
+    /// The cells prose never breaks inside, each the first and the one
+    /// after the last, in order.
+    keep: &'k [Range<usize>],
 }
 
-impl Rows {
+impl<'k> Rows<'k> {
     /// How `laid` goes on over rows, wrapped as `wrap` says, if it doesn't
-    /// fit on one with `inlays`.
-    fn of(laid: &Laid, wrap: Wrap, room_after: bool, inlays: &[(usize, usize)]) -> Option<Self> {
+    /// fit on one with `inlays`, and as prose, keeping `keep` together.
+    fn of(
+        laid: &Laid,
+        wrap: Wrap,
+        room_after: bool,
+        inlays: &[(usize, usize)],
+        keep: &'k [Range<usize>],
+    ) -> Option<Self> {
         let width = wrap.width.max(1);
         // The hints counted only for a line that might fit without them.
         let fits = laid.cells() + usize::from(room_after) <= width
@@ -203,7 +242,45 @@ impl Rows {
             indent: (indent + wrap.showbreak).min(width - 1),
             linebreak: wrap.linebreak,
             room_after,
+            prose: wrap.prose,
+            keep: if wrap.prose { keep } else { &[] },
         })
+    }
+
+    /// Whether a row can end after `ch`: after a blank or punctuation, as
+    /// `linebreak` says, or in prose, only after a blank.
+    fn breaks_after(&self, ch: char) -> bool {
+        if self.prose {
+            ch == ' ' || ch == '\t'
+        } else {
+            BREAK_AFTER.contains(&ch)
+        }
+    }
+
+    /// Whether a row can start at cell `cell`: not inside what's kept
+    /// together.
+    fn may_start(&self, cell: usize) -> bool {
+        let at = self.keep.partition_point(|kept| kept.end <= cell);
+        self.keep.get(at).is_none_or(|kept| cell <= kept.start)
+    }
+
+    /// Where the row after one ending at cell `to` starts: there, or in
+    /// prose, past the blanks there, which hang at the end of the row
+    /// before. `None` if they go on to the line's end, which then needs
+    /// no row more.
+    fn after_blanks(&self, laid: &Laid, to: usize) -> Option<usize> {
+        if !self.prose {
+            return Some(to);
+        }
+        let mut at = to;
+        while at < laid.cells() {
+            let (_, next, ch) = laid.piece(laid.piece_at(at));
+            if ch != ' ' {
+                return Some(at);
+            }
+            at = next;
+        }
+        (at == to).then_some(to)
     }
 
     /// The cells the `row`th row has for text.
@@ -292,6 +369,9 @@ impl Rows {
                 let edge = (start + room).saturating_sub(used + extra);
                 let to = if ch == '\t' && cell < edge {
                     Some(edge)
+                } else if self.prose && ch == ' ' && words && self.may_start(cell) {
+                    // The blank that doesn't fit ends the row, full.
+                    Some(cell)
                 } else if let Some(at) = break_at.filter(|&at| at > start && at <= cell) {
                     Some(at)
                 } else {
@@ -300,6 +380,9 @@ impl Rows {
                     (cell > start).then_some(cell)
                 };
                 if let Some(to) = to {
+                    let Some(to) = self.after_blanks(laid, to) else {
+                        return rows;
+                    };
                     rows.push(ScreenRow {
                         start: to,
                         indent: self.indent,
@@ -312,7 +395,7 @@ impl Rows {
             }
             used += extra;
             words |= ch != ' ' && ch != '\t';
-            if self.linebreak && words && BREAK_AFTER.contains(&ch) {
+            if self.linebreak && words && self.breaks_after(ch) && self.may_start(next) {
                 break_at = Some(next);
             }
             index += 1;
@@ -387,14 +470,23 @@ impl Rows {
                 return rows;
             }
             let on = &bytes[start..to.min(len)];
+            let word = |end: usize| on[..end].iter().any(|&byte| byte != b' ');
+            // In prose, the blank that doesn't fit ends the row, full.
+            let full =
+                self.prose && bytes.get(to) == Some(&b' ') && word(on.len()) && self.may_start(to);
             // With `linebreak`, after the last blank or punctuation, if
             // there's a word at or before it.
-            let last = self.linebreak.then(|| {
-                (on.iter())
-                    .rposition(|&byte| BREAK_AFTER.contains(&char::from(byte)))
-                    .filter(|&last| on[..=last].iter().any(|&byte| byte != b' '))
+            let last = (self.linebreak && !full).then(|| {
+                (0..on.len()).rev().find(|&last| {
+                    self.breaks_after(char::from(on[last]))
+                        && word(last + 1)
+                        && self.may_start(start + last + 1)
+                })
             });
             let to = last.flatten().map_or(to, |last| start + last + 1);
+            let Some(to) = self.after_blanks(laid, to) else {
+                return rows;
+            };
             rows.push(ScreenRow {
                 start: to,
                 indent: self.indent,
@@ -664,6 +756,7 @@ mod tests {
         Wrap {
             width,
             linebreak: false,
+            prose: false,
             breakindent: false,
             showbreak: 0,
         }
@@ -672,8 +765,18 @@ mod tests {
     /// Where `text`'s rows start, and their indents, wrapped as `wrap`
     /// says.
     fn starts(text: &str, wrap: Wrap) -> Vec<(usize, usize)> {
+        starts_keeping(text, wrap, &[])
+    }
+
+    /// One stretch kept together, as `keep` takes them.
+    fn one(range: Range<usize>) -> Vec<Range<usize>> {
+        vec![range]
+    }
+
+    /// The same, keeping the cells `keep` gives together, as prose does.
+    fn starts_keeping(text: &str, wrap: Wrap, keep: &[Range<usize>]) -> Vec<(usize, usize)> {
         let laid = Laid::new(text.to_owned(), 4);
-        (rows(&laid, wrap, false, &[]).iter())
+        (rows(&laid, wrap, false, &[], keep).iter())
             .map(|row| (row.start, row.indent))
             .collect()
     }
@@ -697,7 +800,7 @@ mod tests {
     fn a_tab_goes_on_over_the_row_after() {
         // "ab" and a tab to cell 8, in rows of 5: the tab goes on over.
         let laid = Laid::new("ab\tc".to_owned(), 8);
-        let rows = rows(&laid, wrap(5), false, &[]);
+        let rows = rows(&laid, wrap(5), false, &[], &[]);
         assert_eq!(
             rows,
             [
@@ -737,6 +840,55 @@ mod tests {
             starts("abcdefghijkl    mnopqrstuvwxyz", linebreak),
             [(0, 0), (12, 0), (24, 0)]
         );
+    }
+
+    #[test]
+    fn prose_breaks_only_after_blanks_which_hang_and_keeps_code_together() {
+        let prose = Wrap {
+            linebreak: true,
+            prose: true,
+            ..wrap(10)
+        };
+        // A row that fills, then a blank: the blank hangs at its end and
+        // the next row starts with the word, where `linebreak` alone
+        // would start it with the blank.
+        let text = "aaaaaaaaa, rooted at";
+        assert_eq!(starts(text, prose), [(0, 0), (11, 0)]);
+        let linebreak = Wrap {
+            prose: false,
+            ..prose
+        };
+        assert_eq!(starts(text, linebreak), [(0, 0), (10, 0)]);
+        // Not after punctuation.
+        assert_eq!(starts("abc def:ghijkl", prose), [(0, 0), (4, 0)]);
+        assert_eq!(starts("abc def:ghijkl", linebreak), [(0, 0), (8, 0)]);
+        // Several blanks hang together.
+        assert_eq!(starts("abcdefgh   ijk", prose), [(0, 0), (11, 0)]);
+        // A stretch kept together, a blank in it, goes whole onto the
+        // next row...
+        let wide = Wrap { width: 14, ..prose };
+        let code = "see :Explore DIR now";
+        assert_eq!(starts(code, wide), [(0, 0), (13, 0)]);
+        assert_eq!(
+            starts_keeping(code, wide, &one(4..16)),
+            [(0, 0), (4, 0), (17, 0)]
+        );
+        // ...unless it's wider than a row, which it breaks at the edge of.
+        assert_eq!(
+            starts_keeping("a :Explore DIR/x", prose, &one(2..16)),
+            [(0, 0), (2, 0), (12, 0)]
+        );
+        // Without `prose`, what's kept together is nothing to it.
+        let lines = Wrap {
+            prose: false,
+            ..wide
+        };
+        assert_eq!(
+            starts_keeping(code, lines, &one(4..16)),
+            starts(code, lines)
+        );
+        // Blanks that go on to the line's end need no row.
+        assert_eq!(starts("abcdefghij     ", prose), [(0, 0)]);
     }
 
     #[test]
@@ -809,10 +961,19 @@ mod tests {
             let wrap = Wrap {
                 width: 1 + below(20),
                 linebreak: below(2) == 0,
+                prose: below(2) == 0,
                 breakindent: below(2) == 0,
                 showbreak: below(4),
             };
             let room_after = below(2) == 0;
+            // Prose keeps some stretches together.
+            let mut keep = Vec::new();
+            let mut cell = below(6);
+            while cell < laid.cells() {
+                let end = (cell + 1 + below(8)).min(laid.cells());
+                keep.push(cell..end);
+                cell = end + below(10);
+            }
             // With hints before some characters, and after the end.
             let mut inlays: Vec<(usize, usize)> = Vec::new();
             for col in 0..laid.cells() {
@@ -827,13 +988,13 @@ mod tests {
                 inlays.push((laid.cells(), 1 + below(5)));
             }
             let inlays = if below(2) == 0 { &inlays[..] } else { &[] };
-            let Some(rows) = Rows::of(&laid, wrap, room_after, inlays) else {
+            let Some(rows) = Rows::of(&laid, wrap, room_after, inlays, &keep) else {
                 continue;
             };
             assert_eq!(
                 rows.go_on(&laid, vec![ScreenRow::WHOLE], inlays),
                 rows.go_on_cells(&laid, vec![ScreenRow::WHOLE], inlays),
-                "{:?} with {inlays:?} in {wrap:?}, room after: {room_after}",
+                "{:?} with {inlays:?} in {wrap:?}, keeping {keep:?}, room after: {room_after}",
                 laid.text(),
             );
         }
@@ -871,10 +1032,11 @@ mod tests {
             let wrap = Wrap {
                 width: 1 + below(16),
                 linebreak: below(2) == 0,
+                prose: false,
                 breakindent: below(2) == 0,
                 showbreak: below(3),
             };
-            let rows = rows(&laid, wrap, false, &inlays);
+            let rows = rows(&laid, wrap, false, &inlays, &[]);
             let context = format!("{:?} with {inlays:?} in {wrap:?}: {rows:?}", laid.text());
             assert_eq!(rows[0], ScreenRow::WHOLE, "{context}");
             for (index, row) in rows.iter().enumerate() {
@@ -947,10 +1109,11 @@ mod tests {
             let wrap = Wrap {
                 width: 2 + random.below(14),
                 linebreak: random.below(2) == 0,
+                prose: random.below(4) == 0,
                 breakindent: random.below(2) == 0,
                 showbreak: random.below(3),
             };
-            let rows_before = rows(&old, wrap, false, &old_inlays);
+            let rows_before = rows(&old, wrap, false, &old_inlays, &[]);
             // As kept rows find it: where the text changed, or the first
             // hint that isn't as it was.
             let differ = (old_inlays.iter().zip(&new_inlays))
@@ -961,8 +1124,8 @@ mod tests {
                 .map(|&(col, _)| col)
                 .fold(from, usize::min);
             assert_eq!(
-                rows_again(&new, wrap, false, &rows_before, (changed, &new_inlays)),
-                rows(&new, wrap, false, &new_inlays),
+                rows_again(&new, wrap, false, &rows_before, (changed, &new_inlays), &[]),
+                rows(&new, wrap, false, &new_inlays, &[]),
                 "{:?} to {:?}, {old_inlays:?} to {new_inlays:?}, in {wrap:?}",
                 old.text(),
                 new.text(),
@@ -973,8 +1136,8 @@ mod tests {
     #[test]
     fn the_cell_after_the_end_fits_while_its_typed_at() {
         let laid = Laid::new("abcd".to_owned(), 4);
-        assert_eq!(rows(&laid, wrap(4), false, &[]).len(), 1);
-        let rows = rows(&laid, wrap(4), true, &[]);
+        assert_eq!(rows(&laid, wrap(4), false, &[], &[]).len(), 1);
+        let rows = rows(&laid, wrap(4), true, &[], &[]);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].start, 4);
     }

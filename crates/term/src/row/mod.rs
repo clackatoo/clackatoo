@@ -182,6 +182,17 @@ impl Row {
         }
     }
 
+    /// Where the row's text ends: one past its last cell that isn't a
+    /// blank. What's copied of it stops there, and so does what's lit of
+    /// a selection going on past it.
+    #[must_use]
+    pub fn text_end(&self) -> usize {
+        self.cells()
+            .iter()
+            .rposition(|cell| cell.ch() != ' ' || cell.is_wide_spacer())
+            .map_or(0, |last| last + 1)
+    }
+
     /// The row's text, without trailing spaces.
     #[must_use]
     pub fn text(&self) -> String {
@@ -652,6 +663,13 @@ mod tests {
         let row = row_with("a字b", 8);
         assert_eq!(row.text(), "a字b");
         row.assert_invariants();
+    }
+
+    #[test]
+    fn text_ends_after_the_last_cell_that_isnt_blank() {
+        assert_eq!(row_with("a字b", 8).text_end(), 4);
+        assert_eq!(row_with("ab 字", 8).text_end(), 5, "a wide last character");
+        assert_eq!(row_with("", 8).text_end(), 0);
     }
 
     #[test]

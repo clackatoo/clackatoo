@@ -282,16 +282,18 @@ impl Desk {
     /// Carries out a command about reviewing.
     pub(super) fn run_review(&mut self, command: ReviewCommand) {
         match command {
-            ReviewCommand::Open(scope) => self.open_review(scope),
+            ReviewCommand::Open { scope, side } => self.open_review(scope, side),
             ReviewCommand::Act { keep, force, which } => self.review_act(keep, force, which),
             ReviewCommand::Send => self.review_send(),
             ReviewCommand::Blame => self.toggle_blame(),
         }
     }
 
-    /// `:Review`: a review of `scope` beside the focused pane, or the
-    /// tab's, if it's of the same.
-    pub(super) fn open_review(&mut self, scope: ReviewScope) {
+    /// `:Review`: a review of `scope` beside the focused pane, to its
+    /// right, or the tab's, if it's of the same; or with a `side`, as
+    /// `:-Review` asks, a new one there, as a split's mark always opens
+    /// one.
+    pub(super) fn open_review(&mut self, scope: ReviewScope, side: Option<Side>) {
         let Some(shown) = self.shown else { return };
         let chat = self.review_chat();
         let same = |review: &Review| {
@@ -300,7 +302,9 @@ impl Desk {
                 (shown, scope) => shown == scope,
             }) && (chat.is_none() || review.chat() == chat)
         };
-        if let Some(pane) = self.review_in_tab(same) {
+        if side.is_none()
+            && let Some(pane) = self.review_in_tab(same)
+        {
             self.show_pane(pane);
             return;
         }
@@ -309,7 +313,7 @@ impl Desk {
             .map(|(dir, _)| dir.to_owned());
         let request = Request::Split {
             pane: shown.pane,
-            side: Side::Right,
+            side: side.unwrap_or(Side::Right),
             terminal: PaneTerminal::Review(NewReview { chat, scope, cwd }),
         };
         self.request(request, Asked::Pane);
@@ -323,7 +327,7 @@ impl Desk {
                 self.request(Request::ClosePane { pane }, Asked::Command);
             }
             Some(pane) => self.show_pane(pane),
-            None => self.open_review(ReviewScope::Chat),
+            None => self.open_review(ReviewScope::Chat, None),
         }
     }
 

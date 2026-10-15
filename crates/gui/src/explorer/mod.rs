@@ -13,10 +13,10 @@
 //! directory of ten thousand files costs a frame what any other does.
 //!
 //! Above the tree's lines, under the root's heading, is `..`, the way up,
-//! unless the root is `/`. The cursor moves onto it as onto any line, and
-//! Enter on it does what `-` does. It names no file: nothing that acts on
-//! a file acts on it, and nothing about the folder above is listed until
-//! it's gone up to.
+//! unless the root is `/`, drawn as a folder's name is. The cursor moves
+//! onto it as onto any line, and Enter on it does what `-` does. It names
+//! no file: nothing that acts on a file acts on it, and nothing about the
+//! folder above is listed until it's gone up to.
 //!
 //! The keys are Vim's, as netrw's and nvim-tree's are:
 //!
@@ -38,6 +38,10 @@
 //! | `x` `y`, then `p` | Cuts or copies what's at the cursor, then moves or copies it where the cursor is |
 //! | `e` | Edits the folder at the cursor as text (see [`editing`]) |
 //! | `q` | Closes the explorer |
+//! | `g?` | Lists these keys at the explorer's foot, or stops |
+//!
+//! The heading is the root, cut short from its start to fit, or for a
+//! lesson's explorer at the lesson's folder, the lesson's name.
 //!
 //! An editor showing a folder ([`Content::Folder`](clackatoo_protocol::Content::Folder))
 //! is an explorer too, of its own, rooted at the folder, that only ever
@@ -184,7 +188,7 @@ enum Prompt {
     clippy::struct_excessive_bools,
     reason = "unrelated flags, none a state of another: whether the tree needs \
               flattening, the option, an editor's folder, the cursor on `..`, the \
-              root unlistable"
+              root unlistable, the keys listed"
 )]
 pub(crate) struct Explorer {
     files: FilesId,
@@ -238,6 +242,11 @@ pub(crate) struct Explorer {
     /// The directory it may not go above, nor change anything outside, as
     /// a lesson's explorer may not leave the lesson's scratch directory.
     fence: Option<String>,
+    /// What the heading says while the root is the fence's directory, in
+    /// place of its path: the lesson's name.
+    fence_name: Option<String>,
+    /// Its keys are listed at its foot (`g?`).
+    help: bool,
     /// Folders' listings being edited as text, if they are, and one to
     /// show once it's listed.
     editing: Option<editing::Editing>,
@@ -296,6 +305,8 @@ impl Explorer {
             asks: Vec::new(),
             message: None,
             fence: None,
+            fence_name: None,
+            help: false,
             editing: None,
             pending_edit: None,
             folder: false,
@@ -402,6 +413,13 @@ impl Explorer {
         self.fence = Some(dir);
     }
 
+    /// Has the heading say `name` while the root is the directory it's
+    /// kept in (see [`fence`](Self::fence)), as a lesson's explorer is
+    /// named after the lesson.
+    pub(crate) fn name_fence(&mut self, name: String) {
+        self.fence_name = Some(name);
+    }
+
     /// Whether it's kept in a directory `path` isn't in.
     pub(crate) fn fenced_out(&self, path: &str) -> bool {
         (self.fence.as_deref()).is_some_and(|fence| !std::path::Path::new(path).starts_with(fence))
@@ -438,7 +456,7 @@ impl Explorer {
     }
 
     /// What the bar says: what's being typed, a message, or the root and
-    /// the path at the cursor, from it.
+    /// the path at the cursor, from it, and that `g?` lists the keys.
     pub(crate) fn label(&self) -> String {
         if let Some(label) = self.plan_label() {
             return label;
@@ -462,10 +480,17 @@ impl Explorer {
         if let Some(message) = &self.message {
             return message.clone();
         }
-        match self.line() {
+        let label = match self.line() {
             Some(line) => format!("{}  {}", self.name, self.relative(&line.path())),
             None if self.on_up() => format!("{}  ..", self.name),
             None => self.name.clone(),
+        };
+        // How to see the keys, as the board's bar lists its own, until
+        // they're shown.
+        if self.help || self.folder {
+            label
+        } else {
+            format!("{label}  g? keys")
         }
     }
 
@@ -822,9 +847,21 @@ impl Explorer {
         self.sync();
     }
 
-    /// The lines shown below the root's.
+    /// The lines shown below the root's, and above the keys, if they're
+    /// listed.
     fn list_height(&self) -> usize {
-        self.height.saturating_sub(1).max(1)
+        (self.height.saturating_sub(1) - self.footer_height()).max(1)
+    }
+
+    /// The rows the keys take at the foot, while they're listed: a blank
+    /// one, then theirs, leaving the heading and a line of the tree; none
+    /// in a pane with no room for two rows of them.
+    fn footer_height(&self) -> usize {
+        let room = self.height.saturating_sub(2);
+        if !self.help || room < 3 {
+            return 0;
+        }
+        (key_rows(self.width).len() + 1).min(room)
     }
 
     // --- `..` ---------------------------------------------------------------
@@ -953,6 +990,7 @@ impl Explorer {
             (Some('z'), 'a') => self.toggle_at_cursor(),
             (Some('z'), 'R') => self.expand_all_shown(),
             (Some('z'), 'M') => self.collapse_all(),
+            (Some('g'), '?') => self.help = !self.help,
             (Some(_), _) => {}
             (None, 'g' | 'z') => {
                 self.count = count;
@@ -1455,7 +1493,11 @@ impl Explorer {
     /// Returns whether it should be drawn again.
     pub(crate) fn click(&mut self, row: usize, double: bool) -> bool {
         self.flatten_if_stale();
-        let Some(row) = (row.checked_sub(1)).map(|row| self.top + row) else {
+        // Not the heading, nor the keys at the foot.
+        let Some(row) = (row.checked_sub(1))
+            .filter(|&row| row < self.list_height())
+            .map(|row| self.top + row)
+        else {
             return false;
         };
         if row >= self.rows_len() || self.prompt.is_some() || self.editing.is_some() {
@@ -1516,7 +1558,7 @@ impl Explorer {
             attributes: Attributes::BOLD,
             ..colors::line_number(true)
         };
-        header.push(&self.name, &heading, true);
+        header.push(&self.heading(), &heading, true);
         rows.push(header.finish(false));
         self.name_cols.clear();
         self.cursor_cell = None;
@@ -1532,11 +1574,75 @@ impl Explorer {
             self.name_cols.push(name_col);
             rows.push(row);
         }
-        while rows.len() < self.height {
+        let footer = self.footer_height();
+        while rows.len() < self.height.saturating_sub(footer) {
             rows.push(RowBuilder::new(self.width).finish(false));
+        }
+        if footer > 0 {
+            rows.push(RowBuilder::new(self.width).finish(false));
+            let mut keys = self.draw_keys();
+            if keys.len() > footer - 1 {
+                // Too many for the pane: as many as fit, and how to hide
+                // them, last.
+                keys.truncate(footer - 2);
+                keys.push(self.draw_more_keys());
+            }
+            rows.extend(keys);
         }
         rows.truncate(self.height);
         self.rows = rows;
+    }
+
+    /// What the heading says: the root, cut short from its start to fit,
+    /// or the fence's name while the root is the fence's directory.
+    fn heading(&self) -> String {
+        match (&self.fence_name, &self.fence, &self.root) {
+            (Some(name), Some(fence), Some(root))
+                if std::path::Path::new(fence) == std::path::Path::new(root) =>
+            {
+                crate::finder::view::cut(name, self.width, false)
+            }
+            _ => crate::finder::view::cut(&self.name, self.width, true),
+        }
+    }
+
+    /// The last row of the keys, when they don't all fit: `…`, then `g?`,
+    /// which hides them.
+    fn draw_more_keys(&self) -> Row {
+        let faint = colors::line_number(false);
+        let mut builder = RowBuilder::new(self.width);
+        builder.push("… ", &faint, true);
+        builder.push("g?", &Style::DEFAULT, true);
+        let room = self.width.saturating_sub(builder.filled());
+        builder.push(
+            &crate::finder::view::cut(" hide keys", room, false),
+            &faint,
+            true,
+        );
+        builder.finish(false)
+    }
+
+    /// The keys listed at the foot, as the board lists its own: each key,
+    /// then what it does, faint, with `·` between them, as many to a row
+    /// as fit.
+    fn draw_keys(&self) -> Vec<Row> {
+        let faint = colors::line_number(false);
+        (key_rows(self.width).into_iter())
+            .map(|keys| {
+                let mut builder = RowBuilder::new(self.width);
+                for (index, (key, does)) in keys.into_iter().enumerate() {
+                    if index > 0 {
+                        builder.push(" · ", &faint, true);
+                    }
+                    builder.push(key, &Style::DEFAULT, true);
+                    // Cut short, in a pane too narrow for the one key.
+                    let room = self.width.saturating_sub(builder.filled());
+                    let does = crate::finder::view::cut(&format!(" {does}"), room, false);
+                    builder.push(&does, &faint, true);
+                }
+                builder.finish(false)
+            })
+            .collect()
     }
 
     /// Draws `line`: its git mark, the guides of the directories it's in,
@@ -1573,16 +1679,13 @@ impl Explorer {
         (builder.finish(false), name_col)
     }
 
-    /// Draws `..`: as a directory's name, but muted, as an ignored one's
-    /// is, with no chevron, as it doesn't expand. Returns the row and where
-    /// the name starts.
+    /// Draws `..`: as a directory's name, with no chevron, as it doesn't
+    /// expand. Returns the row and where the name starts.
     fn draw_up(&self) -> (Row, usize) {
         let mut builder = RowBuilder::new(self.width);
         builder.push("    ", &Style::DEFAULT, true);
         let name_col = builder.filled();
-        let mut style = name_style(EntryKind::Dir);
-        style.attributes |= Attributes::DIM;
-        builder.push("..", &style, true);
+        builder.push("..", &name_style(EntryKind::Dir), true);
         (builder.finish(false), name_col)
     }
 
@@ -1670,10 +1773,58 @@ impl Explorer {
     }
 }
 
+/// The keys `g?` lists at an explorer's foot, each with what it does: those
+/// that change files first, then the rest.
+const KEYS: &[(&str, &str)] = &[
+    ("a", "new"),
+    ("r", "rename"),
+    ("d", "delete"),
+    ("-", "up"),
+    ("R", "refresh"),
+    ("l", "open"),
+    ("h", "collapse"),
+    ("x", "cut"),
+    ("y", "copy"),
+    ("p", "paste"),
+    ("e", "edit as text"),
+    ("/", "search"),
+    (".", "hidden files"),
+    ("zR", "expand all"),
+    ("zM", "collapse all"),
+    ("Ctrl+V", "split"),
+    ("Ctrl+S", "below"),
+    ("Ctrl+T", "tab"),
+    ("q", "close"),
+    ("g?", "hide keys"),
+];
+
+/// [`KEYS`] in rows of `width` cells, as many to a row as fit, with ` · `
+/// between them: a key and what it does stay together.
+fn key_rows(width: usize) -> Vec<Vec<(&'static str, &'static str)>> {
+    use crate::render::mono_width;
+    let mut rows: Vec<Vec<(&str, &str)>> = Vec::new();
+    let mut used = 0;
+    for &(key, does) in KEYS {
+        let cells = mono_width(key) + 1 + mono_width(does);
+        match rows.last_mut() {
+            Some(row) if used + 3 + cells <= width => {
+                row.push((key, does));
+                used += 3 + cells;
+            }
+            _ => {
+                rows.push(vec![(key, does)]);
+                used = cells;
+            }
+        }
+    }
+    rows
+}
+
 /// How a name is coloured, by what it names, as `ls` colours them: the
 /// palette's blue for directories, cyan for links, green for programs,
-/// and yellow for pipes, sockets and devices.
-fn name_style(kind: EntryKind) -> Style {
+/// and yellow for pipes, sockets and devices. A folder's listing colours
+/// its folders' lines so too (see [`listing::style`]).
+pub(crate) fn name_style(kind: EntryKind) -> Style {
     let (fg, attributes) = match kind {
         EntryKind::Dir => (Color::Indexed(4), Attributes::BOLD),
         EntryKind::Link { .. } => (Color::Indexed(6), Attributes::empty()),

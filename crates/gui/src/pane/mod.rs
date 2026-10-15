@@ -960,7 +960,10 @@ impl Pane {
     }
 
     /// Highlights the text from `start` to `end`, characters or whole
-    /// lines, where it's in a view `height` lines tall.
+    /// lines, where it's in a view `height` lines tall. Whole lines go the
+    /// pane's width; characters go on past a row's text by one cell, for
+    /// its line break, as the editor's do, unless the row goes on over the
+    /// next, so the selection shows what `y` copies.
     fn highlight(
         &self,
         highlights: &mut Vec<Highlight>,
@@ -985,7 +988,7 @@ impl Pane {
                             .is_some_and(|cell| cell.is_wide());
                         (end.col + if wide { 2 } else { 1 }).min(width.max(end.col + 1))
                     } else {
-                        width
+                        row.map_or(from + 1, |row| past_text(row).max(from + 1))
                     };
                     from..to
                 }
@@ -1198,6 +1201,17 @@ fn overlaid(row: &Row, cells: &[(usize, char)]) -> Row {
         }
     }
     builder.finish(row.is_wrapped())
+}
+
+/// Where a selection going on past `row`'s end stops: a cell after its
+/// last that isn't blank, for its line break, or the row's width if it
+/// goes on over the next.
+fn past_text(row: &Row) -> usize {
+    if row.is_wrapped() {
+        return row.width();
+    }
+    // Where copying it stops, as the daemon copies it.
+    (row.text_end() + 1).min(row.width())
 }
 
 /// Whether `press` is Ctrl+\\.
@@ -1706,6 +1720,33 @@ mod tests {
     }
 
     #[test]
+    fn a_characterwise_selection_ends_a_cell_past_each_rows_text_and_lines_go_the_width() {
+        // Three lines of 12 cells: one short, one empty, one with wide
+        // characters, and one the cursor ends on.
+        let terminal = terminal("hello\r\n\r\n日本\r\nend");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "ggllv3j0l");
+        let cols = |pane: &Pane| {
+            (pane.highlights(5).iter())
+                .map(|highlight| (highlight.line, highlight.cols.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cols(&pane), [(0, 2..6), (1, 0..1), (2, 0..5), (3, 0..2)]);
+        // Whole lines go the pane's width.
+        keys(&mut pane, "V");
+        assert_eq!(
+            cols(&pane),
+            [(0, 0..12), (1, 0..12), (2, 0..12), (3, 0..12)]
+        );
+        // Starting past a row's text, a cell is still shown there.
+        named(&mut pane, NamedKey::Escape);
+        keys(&mut pane, "gg$v");
+        keys(&mut pane, "j");
+        assert_eq!(cols(&pane)[0], (0, 4..6));
+    }
+
+    #[test]
     fn gv_selects_the_last_selection_again_and_swaps_with_the_one_being_made() {
         let terminal = terminal("hello world\r\nsecond");
         let mut pane = pane(&terminal);
@@ -2158,6 +2199,17 @@ mod mouse_tests {
         );
         // It stays shown, and Ctrl+Shift+C copies it to the clipboard.
         assert_eq!(pane.highlights(5).len(), 2);
+        // A short row's band ends a cell past its text.
+        let short = self::terminal("hi\r\nsecond");
+        let mut other = self::pane(&short);
+        mouse(&mut other, MouseAction::Press(LEFT), [0, 1], 1);
+        mouse(&mut other, MouseAction::Motion(Some(LEFT)), [1, 2], 1);
+        assert_eq!(
+            (other.highlights(5).iter())
+                .map(|highlight| (highlight.line, highlight.cols.clone()))
+                .collect::<Vec<_>>(),
+            [(0, 1..3), (1, 0..3)]
+        );
         let key = Key::Character("C".into());
         pane.key(&KeyPress {
             key: &key,

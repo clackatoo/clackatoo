@@ -29,7 +29,7 @@ use clackatoo_protocol::{
 };
 
 use super::{Asked, Desk};
-use crate::editor::Lit;
+use crate::editor::{Lit, Prose, Stretch};
 use crate::finder::{self, Finder, LocalItem};
 use crate::input::{KeptPress, KeyPress};
 use crate::keymap::KeyMode;
@@ -720,9 +720,10 @@ impl Desk {
     fn fence_explorers(&mut self) {
         let Some(open) = &self.tutor.open else { return };
         let dir = path_text(&open.dir);
+        let name = format!("Practice: {}", open.lesson.title);
         for pane in self.lesson_tab_panes() {
             if matches!(pane.content, Content::Files(_) | Content::Folder(_)) {
-                self.fence_explorer(pane.id, &dir);
+                self.fence_explorer(pane.id, &dir, &name);
             }
         }
     }
@@ -770,6 +771,8 @@ impl Desk {
         if changed {
             return;
         }
+        // Shown as prose from the first, once.
+        let first = (self.editor(pane)).is_some_and(|editor| !editor.shows_lesson());
         let Some(open) = &mut self.tutor.open else {
             return;
         };
@@ -800,13 +803,10 @@ impl Desk {
             });
         }
         let place = !std::mem::replace(&mut open.placed, true);
-        // Shown as prose from the first, once.
-        let options = (self.editor(pane))
-            .is_some_and(|editor| !editor.shows_lesson())
-            .then(|| self.options.clone());
+        let options = first.then(|| (self.options.clone(), prose(&open.rendered)));
         self.with_editor(pane, |editor, copy| {
-            if let Some(options) = options {
-                editor.show_lesson(&options, copy);
+            if let Some((options, prose)) = options {
+                editor.show_lesson(&options, copy, prose);
             }
             editor.light(lit);
             if place {
@@ -1063,6 +1063,33 @@ impl Desk {
             .map(|tab| tab.layout.panes())
             .unwrap_or_default()
     }
+}
+
+/// How the lesson pane draws `rendered`: what's strong, as its titles
+/// are, bold, what's emphasised in italics, and its code on a background
+/// of its own, kept on one row.
+fn prose(rendered: &Rendered) -> Prose {
+    use clackatoo_protocol::Attributes;
+    let mut prose = Prose::default();
+    for (bytes, look) in &rendered.marks {
+        let mut attributes = Attributes::empty();
+        attributes.set(Attributes::BOLD, look.strong);
+        attributes.set(Attributes::ITALIC, look.italic);
+        if !attributes.is_empty() {
+            prose.styled.push(Stretch {
+                start: bytes.start,
+                end: bytes.end,
+                style: clackatoo_protocol::Style {
+                    attributes,
+                    ..clackatoo_protocol::Style::DEFAULT
+                },
+            });
+        }
+        if look.code {
+            prose.code.push((bytes.start, bytes.end));
+        }
+    }
+    prose
 }
 
 /// The path as text, as the daemon takes it.

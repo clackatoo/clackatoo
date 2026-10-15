@@ -19,6 +19,7 @@ use crate::render::{HighlightKind, Ink};
 mod hints;
 mod indent;
 mod mouse;
+mod prose;
 mod snippets;
 mod substitute;
 mod uses;

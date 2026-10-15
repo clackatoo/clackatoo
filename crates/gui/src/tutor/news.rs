@@ -353,6 +353,24 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "A terminal's normal mode takes counts, as 5k, 3w, 10G and 3yy, and Ctrl+V says block selection isn't here yet",
     },
+    News {
+        id: "lessons-read-well",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "Lessons draw their code as the chat does, keep it on one row, and tick off the steps done in green",
+    },
+    News {
+        id: "explorer-keys",
+        date: "2026-10-15",
+        lesson: "explorer",
+        what: "g? lists an explorer's keys, listings colour folders, an empty one says how to make a file, and :|Explore and :-Review open beside the focused pane",
+    },
+    News {
+        id: "visual-ends-at-text",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "A terminal's selection ends a cell past each line's text, as what y copies does, not at the pane's edge",
+    },
 ];
 
 impl News {

@@ -365,6 +365,8 @@ mod tests {
         assert_eq!(choices("tut", &none()), ["Tutor"]);
         assert_eq!(choices("|Te", &none()), ["|Terminal"]);
         assert_eq!(choices("-^B", &none()), ["-^Board", "-^Browser"]);
+        assert_eq!(choices("|E", &none()), ["|Editor", "|Explore"]);
+        assert_eq!(choices("-Re", &none()), ["-Review"]);
         assert!(choices("zzz", &none()).is_empty());
         let Found::Done(Some(completion)) = Completion::of("  Ex", &none()).unwrap() else {
             panic!("a choice");

@@ -200,7 +200,7 @@ fn keys_move_with_counts_and_pages_and_the_view_follows_the_cursor() {
     assert_eq!(shown(&mut explorer).last().unwrap(), "    f099");
     // `..` is a line as any other: the first.
     keys(&mut explorer, "gg");
-    assert_eq!(explorer.label(), "~/p  ..");
+    assert_eq!(explorer.label(), "~/p  ..  g? keys");
     keys(&mut explorer, "j");
     assert_eq!(at(&mut explorer), "/p/f000");
     keys(&mut explorer, "12G");
@@ -666,6 +666,96 @@ fn deleting_a_folder_for_good_says_it_deletes_everything_in_it() {
 }
 
 #[test]
+fn g_question_lists_the_keys_at_the_foot_and_again_hides_them() {
+    let mut explorer = explorer(14);
+    explorer.resize(Size::new(30, 14).unwrap());
+    let entries = (0..20).map(|n| file(&format!("f{n:02}"))).collect();
+    rooted(&mut explorer, entries);
+    assert!(explorer.label().ends_with("g? keys"), "the bar says how");
+    keys(&mut explorer, "g?");
+    let rows = shown(&mut explorer);
+    assert_eq!(rows.len(), 14, "the pane's height, no more");
+    assert_eq!(
+        rows[4..],
+        [
+            "",
+            "a new · r rename · d delete",
+            "- up · R refresh · l open",
+            "h collapse · x cut · y copy",
+            "p paste · e edit as text",
+            "/ search · . hidden files",
+            "zR expand all",
+            "zM collapse all · Ctrl+V split",
+            "Ctrl+S below · Ctrl+T tab",
+            "q close · g? hide keys",
+        ],
+        "a key and what it does kept together, as many to a row as fit"
+    );
+    assert!(!explorer.label().contains("g?"));
+    // The tree is the three rows above them: the cursor stays in view
+    // there.
+    keys(&mut explorer, "G");
+    let rows = shown(&mut explorer);
+    assert_eq!(rows[3], "    f19");
+    // A click on the keys does nothing.
+    keys(&mut explorer, "gg");
+    shown(&mut explorer);
+    assert!(!explorer.click(4, false));
+    assert!(!explorer.click(9, false));
+    assert!(explorer.click(2, false));
+    // Too narrow for a key and what it does, it's cut short.
+    explorer.resize(Size::new(12, 30).unwrap());
+    assert!(shown(&mut explorer).contains(&"e edit as t…".to_owned()));
+    // Too many for the pane, as many as fit, then how to hide them.
+    explorer.resize(Size::new(12, 14).unwrap());
+    let rows = shown(&mut explorer);
+    assert_eq!(rows.len(), 14);
+    assert_eq!(rows[12..], ["p paste", "… g? hide k…"]);
+    // In a short pane they leave the heading and a line of the tree...
+    explorer.resize(Size::new(30, 5).unwrap());
+    let rows = shown(&mut explorer);
+    assert_eq!(rows.len(), 5);
+    assert_eq!(
+        rows[2..],
+        ["", "a new · r rename · d delete", "… g? hide keys"]
+    );
+    // ...and in one shorter still, there are none.
+    explorer.resize(Size::new(30, 4).unwrap());
+    assert!(!shown(&mut explorer).iter().any(|row| row.contains("g?")));
+    explorer.resize(Size::new(30, 5).unwrap());
+    keys(&mut explorer, "g?");
+    assert_eq!(shown(&mut explorer).len(), 5, "the tree to the foot");
+    assert!(
+        !shown(&mut explorer)
+            .iter()
+            .any(|row| row.contains("rename"))
+    );
+}
+
+#[test]
+fn the_heading_is_cut_from_its_start_and_a_lesson_names_its_own() {
+    let mut explorer = explorer(6);
+    explorer.resize(Size::new(12, 6).unwrap());
+    explorer.update(FilesUpdate::Root {
+        path: "/home/me/.cache/clackatoo/tutor/116/explorer".into(),
+        name: "~/.cache/clackatoo/tutor/116/explorer".into(),
+    });
+    assert_eq!(shown(&mut explorer)[0], "…16/explorer");
+    // Written with a slash after it, it's still the root's folder.
+    explorer.fence("/home/me/.cache/clackatoo/tutor/116/explorer/".into());
+    explorer.name_fence("Practice: The file explorer".into());
+    assert_eq!(shown(&mut explorer)[0], "Practice: T…", "at the fence");
+    explorer.resize(Size::new(40, 6).unwrap());
+    assert_eq!(shown(&mut explorer)[0], "Practice: The file explorer");
+    // Deeper, it's the path again.
+    explorer.update(FilesUpdate::Root {
+        path: "/home/me/.cache/clackatoo/tutor/116/explorer/drafts".into(),
+        name: "drafts".into(),
+    });
+    assert_eq!(shown(&mut explorer)[0], "drafts");
+}
+
+#[test]
 fn an_explorer_kept_in_a_directory_goes_no_higher() {
     let mut explorer = explorer(10);
     rooted(&mut explorer, project());
@@ -740,7 +830,7 @@ fn dot_dot_tops_the_tree_and_enter_on_it_goes_up_to_the_folder_come_from() {
     // Moved onto as any line is: k from the first, and gg.
     keys(&mut explorer, "k");
     assert!(explorer.on_up());
-    assert_eq!(explorer.label(), "~/p  ..");
+    assert_eq!(explorer.label(), "~/p  ..  g? keys");
     keys(&mut explorer, "jgg");
     assert!(explorer.on_up());
     // A listing come again doesn't move it off.

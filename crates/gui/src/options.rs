@@ -102,10 +102,12 @@ impl std::fmt::Display for Decimal {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Bool,
-    /// A whole number from `min` to `max`.
+    /// A whole number from `min` to `max`, or 0 too if `or_zero`, which
+    /// means the window's own choice, as `explorerwidth`'s does.
     Number {
         min: u32,
         max: u32,
+        or_zero: bool,
     },
     /// A number from `min` to `max`, to two decimal places.
     Decimal {
@@ -138,7 +140,9 @@ impl Info {
     fn check(&self, value: &Value) -> Result<(), String> {
         match (self.kind, value) {
             (Kind::Bool, Value::Bool(_)) => Ok(()),
-            (Kind::Number { min, max }, Value::Number(number)) if (min..=max).contains(number) => {
+            (Kind::Number { min, max, or_zero }, Value::Number(number))
+                if (min..=max).contains(number) || (or_zero && *number == 0) =>
+            {
                 Ok(())
             }
             (Kind::Decimal { min, max }, Value::Decimal(number))
@@ -185,7 +189,12 @@ impl Info {
     pub(crate) fn wants(&self) -> String {
         match self.kind {
             Kind::Bool => format!("{} is true or false", self.name),
-            Kind::Number { min, max } => {
+            Kind::Number {
+                min,
+                max,
+                or_zero: true,
+            } => format!("{} is 0, or a whole number from {min} to {max}", self.name),
+            Kind::Number { min, max, .. } => {
                 format!("{} is a whole number from {min} to {max}", self.name)
             }
             Kind::Decimal { min, max } => format!(
@@ -226,6 +235,11 @@ impl Held for bool {
         }
     }
 }
+
+/// A whole number that may be 0 as well as in its range, which means the
+/// window's own choice: an option of this type is a [`Kind::Number`] with
+/// `or_zero`.
+pub(crate) type OrZero = u32;
 
 impl Held for u32 {
     fn value(&self) -> Value {
@@ -329,6 +343,14 @@ macro_rules! kind {
         Kind::Number {
             min: $min,
             max: $max,
+            or_zero: false,
+        }
+    };
+    (OrZero $min:literal ..= $max:literal) => {
+        Kind::Number {
+            min: $min,
+            max: $max,
+            or_zero: true,
         }
     };
     (Decimal $min:literal ..= $max:literal) => {
@@ -434,8 +456,9 @@ options! {
     agentsigns("as"): bool = true;
     /// How wide a file explorer down the tab's left opens, in cells, as
     /// `<Space>e` and `:Explore` open it. It keeps its share of the tab as
-    /// the window resizes.
-    explorerwidth("ew"): u32 (10..=200) = 30;
+    /// the window resizes. 0, as it starts, opens it at 30 cells, or a
+    /// quarter of the tab if that's narrower, but never under 10.
+    explorerwidth("ew"): OrZero (10..=200) = 0;
     /// File explorers show hidden files, those whose names start with `.`,
     /// as they open. `.` shows or hides them in each.
     explorerhidden("eh"): bool = false;
@@ -963,6 +986,14 @@ mod tests {
         );
         assert_eq!(options.show(info("number")), "nonumber");
         assert_eq!(options.show(info("numberwidth")), "numberwidth=6");
+        // 0, the window's choice, or one in the range, but nothing between.
+        assert_eq!(options.set(info("ew"), Value::Number(30)), Ok(true));
+        assert_eq!(options.set(info("ew"), Value::Number(0)), Ok(true));
+        assert_eq!(
+            options.set(info("ew"), Value::Number(5)),
+            Err("explorerwidth is 0, or a whole number from 10 to 200".into())
+        );
+        assert_eq!(options.explorerwidth, 0);
     }
 
     #[test]

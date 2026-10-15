@@ -15,6 +15,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::ops::Range;
 use std::rc::Rc;
 
 use clackatoo_protocol::BufferId;
@@ -476,7 +477,10 @@ impl Kept {
     /// if they were worked out with the same hints, or else worked out
     /// now, from those kept if they're out of date and the line had no
     /// hints, nor has. The hints are asked for only if the buffer's have
-    /// changed since, so a frame with nothing changed asks nothing.
+    /// changed since, so a frame with nothing changed asks nothing. Prose
+    /// keeps the cells `keep` gives together, which are asked for only as
+    /// rows are worked out: they're the line's for as long as its text is
+    /// as it was.
     pub(super) fn rows(
         &self,
         line: u64,
@@ -484,10 +488,12 @@ impl Kept {
         wrap: Wrap,
         room_after: bool,
         (hinted, inlays): (Hinted, impl FnOnce() -> Vec<(usize, usize)>),
+        keep: impl FnOnce() -> Vec<Range<usize>>,
     ) -> Rc<[ScreenRow]> {
         let mut kept = self.0.borrow_mut();
+        let keep = || if wrap.prose { keep() } else { Vec::new() };
         let Some(old) = kept.lines.get_mut(&line) else {
-            return wrap::rows(laid, wrap, room_after, &inlays()).into();
+            return wrap::rows(laid, wrap, room_after, &inlays(), &keep()).into();
         };
         let slot = &mut old.rows[usize::from(room_after)];
         if let Some(rows) = slot.as_ref().filter(|rows| rows.stale.is_none())
@@ -520,9 +526,10 @@ impl Kept {
                     *kept_for = hinted;
                     return Rc::clone(rows);
                 };
-                wrap::rows_again(laid, wrap, room_after, rows, (changed, &inlays)).into()
+                let keep = keep();
+                wrap::rows_again(laid, wrap, room_after, rows, (changed, &inlays), &keep).into()
             }
-            None => wrap::rows(laid, wrap, room_after, &inlays).into(),
+            None => wrap::rows(laid, wrap, room_after, &inlays, &keep()).into(),
         };
         *slot = Some(KeptRows {
             rows: Rc::clone(&rows),
@@ -628,6 +635,7 @@ pub(super) mod tests {
         Wrap {
             width,
             linebreak: true,
+            prose: false,
             breakindent: true,
             showbreak: 0,
         }
@@ -783,6 +791,7 @@ pub(super) mod tests {
             let wrap = (random.below(4) > 0).then(|| Wrap {
                 width: 1 + random.below(24),
                 linebreak: random.below(2) == 0,
+                prose: false,
                 breakindent: random.below(2) == 0,
                 showbreak: random.below(3),
             });

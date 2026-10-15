@@ -93,7 +93,7 @@ impl Terminal {
             let wrapped = row.is_wrapped() && end == row.width();
             if !wrapped {
                 // Blanks up to the end of the line aren't text.
-                if end >= text_end(&row) {
+                if end >= row.text_end() {
                     text.truncate(at + text[at..].trim_end_matches(' ').len());
                 }
                 if line != to.line.min(last) {
@@ -149,15 +149,6 @@ impl Terminal {
         }
         None
     }
-}
-
-/// Where the row's text ends: one past its last character that isn't a
-/// blank.
-fn text_end(row: &Row) -> usize {
-    row.cells()
-        .iter()
-        .rposition(|cell| cell.ch() != ' ' || cell.is_wide_spacer())
-        .map_or(0, |last| last + 1)
 }
 
 /// Every place `query` starts in `row`, as a column and the cells it

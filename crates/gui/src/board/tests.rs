@@ -61,6 +61,20 @@ fn typed(pane: &mut BoardPane, keys: &str) {
 }
 
 #[test]
+fn an_empty_board_says_how_to_post_under_its_heading_and_its_title_is_capitalised() {
+    let pane = pane(Vec::new());
+    assert_eq!(
+        text(&pane)[..2],
+        [
+            "plan  workspace w · 0 entries · the rewr",
+            "Nothing here yet: i posts a note.",
+        ],
+        "lined up with the heading"
+    );
+    assert_eq!(pane.title(), "Board: plan");
+}
+
+#[test]
 fn entries_show_who_wrote_them_and_wrap_under_their_heading() {
     let mut claim = entry(2, PostKind::Claim, "rewriting it");
     claim.subject = Some("the lexer".into());

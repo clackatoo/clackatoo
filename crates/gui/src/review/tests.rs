@@ -81,6 +81,20 @@ fn rows(review: &mut Review) -> Vec<String> {
 }
 
 #[test]
+fn the_keys_line_is_cut_short_with_an_ellipsis_in_a_narrow_pane() {
+    let mut review = review();
+    review.resize(Size::new(30, 30).unwrap());
+    let shown = rows(&mut review);
+    assert_eq!(shown[1], "a keep  x reject  …", "whole keys only");
+    // Narrower than one key, it's cut.
+    review.resize(Size::new(5, 30).unwrap());
+    assert_eq!(rows(&mut review)[1], "a ke…");
+    // It's whole where it fits.
+    review.resize(Size::new(120, 30).unwrap());
+    assert!(rows(&mut review)[1].ends_with("q close"));
+}
+
+#[test]
 fn hunks_show_the_lines_around_them_old_on_red_and_new_on_green() {
     let mut review = review();
     let shown = rows(&mut review);

@@ -103,8 +103,9 @@ impl Desk {
 
     /// Keeps the explorer `pane` in `dir`, if it's rooted there and not
     /// kept somewhere already, as a lesson's explorer is kept in the
-    /// lesson's folder.
-    pub(super) fn fence_explorer(&mut self, pane: PaneId, dir: &str) {
+    /// lesson's folder, its heading saying `name` while it's rooted
+    /// there.
+    pub(super) fn fence_explorer(&mut self, pane: PaneId, dir: &str, name: &str) {
         if let Some(explorer) = self.explorers.panes.get_mut(&pane)
             && !explorer.fenced()
             && explorer
@@ -112,6 +113,7 @@ impl Desk {
                 .is_some_and(|root| std::path::Path::new(root).starts_with(dir))
         {
             explorer.fence(dir.to_owned());
+            explorer.name_fence(name.to_owned());
         }
     }
 
@@ -538,6 +540,8 @@ impl Desk {
                 let mut editor = Editor::new(buffer, &self.options);
                 editor.hide_starts(listing::mark_len);
                 editor.keep_lines(listing::is_up);
+                editor.style_lines(listing::style);
+                editor.note_when_empty(listing::EMPTY);
                 (editor, copy)
             }
             None => {
@@ -1197,7 +1201,9 @@ impl Desk {
     }
 
     /// The share of the tab's width an explorer opened down its left
-    /// takes, in thousandths, for `explorerwidth` cells.
+    /// takes, in thousandths, for `explorerwidth` cells, or with 0, for
+    /// 30, or a quarter of the tab if that's fewer, but at least 10, the
+    /// fewest the option takes.
     pub(super) fn explorer_share(&self) -> u16 {
         let cols = self.area.map_or(0, |area| {
             let whole = clackatoo_protocol::Layout::Pane(clackatoo_protocol::Pane {
@@ -1209,16 +1215,31 @@ impl Desk {
         if cols == 0 {
             return 250;
         }
-        let share = u64::from(self.options.explorerwidth) * 1000 / u64::from(cols);
+        let cells = match self.options.explorerwidth {
+            0 => u32::from(cols / 4).clamp(10, 30),
+            cells => cells,
+        };
+        let share = u64::from(cells) * 1000 / u64::from(cols);
         u16::try_from(share.clamp(1, 900)).unwrap_or(250)
     }
 
-    /// The explorer pane in the tab shown, if there's one.
+    /// The explorer pane in the tab shown, if there's one: the focused
+    /// pane, if it's one, as with two in a tab after `:|Explore`, or else
+    /// the first.
     fn explorer_in_tab(&self) -> Option<PaneId> {
         let tab = self.shown_tab()?;
-        (tab.layout.panes().iter())
-            .find(|pane| matches!(pane.content, Content::Files(_)))
-            .map(|pane| pane.id)
+        let explorers = (tab.layout.panes().into_iter())
+            .filter(|pane| matches!(pane.content, Content::Files(_)))
+            .map(|pane| pane.id);
+        let focused = self.shown.map(|shown| shown.pane);
+        let mut first = None;
+        for pane in explorers {
+            if Some(pane) == focused {
+                return Some(pane);
+            }
+            first = first.or(Some(pane));
+        }
+        first
     }
 
     /// `<Space>e`: closes the tab's explorer if it has the focus, goes to
@@ -1275,6 +1296,22 @@ impl Desk {
             side: Side::Left,
             terminal: PaneTerminal::Files(OpenFiles { dir }),
             share: Some(self.explorer_share()),
+        };
+        self.request(request, Asked::Explorer { reveal, edit });
+    }
+
+    /// `:|Explore` and its kin: a new explorer beside the focused pane, on
+    /// `side`, splitting it in half as any split's mark does, rooted at
+    /// `dir`, or else where the daemon roots one, with the focused file
+    /// shown in it. It's opened where it's asked for, though the tab has
+    /// an explorer already.
+    pub(super) fn open_explorer_beside(&mut self, dir: Option<String>, edit: bool, side: Side) {
+        let Some(shown) = self.shown else { return };
+        let reveal = self.file_in(shown.pane).map(str::to_owned);
+        let request = Request::Split {
+            pane: shown.pane,
+            side,
+            terminal: PaneTerminal::Files(OpenFiles { dir }),
         };
         self.request(request, Asked::Explorer { reveal, edit });
     }

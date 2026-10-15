@@ -715,7 +715,7 @@ impl Finder {
         let room = cols.saturating_sub(words).min(QUOTED);
         Some(format!(
             "Nothing matches ‘{}’",
-            view::cut(&self.query, room)
+            view::cut(&self.query, room, false)
         ))
     }
 

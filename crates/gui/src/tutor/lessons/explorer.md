@@ -18,7 +18,7 @@ Things to do.
 
 ## Go to the explorer
 
-`<Space>e` opens an explorer down the tab's left, rooted at the project the focused pane is in, or goes to the tab's explorer if there's one; pressed in the explorer, it closes it. `:Explore` does the same, and `:Explore DIR` roots it at DIR.
+`<Space>e` opens an explorer down the tab's left, rooted at the project the focused pane is in, or goes to the tab's explorer if there's one; pressed in the explorer, it closes it. `:Explore` does the same, and `:Explore DIR` roots it at DIR. With a split's mark before it, `:|Explore` or `:-Explore` opens a new one beside the focused pane, to its right or below. It opens 30 cells wide, or a quarter of the tab if that's narrower; `explorerwidth` sets its width in cells.
 
 Press `<Space>e` to go to the explorer.
 
@@ -126,7 +126,7 @@ rooted "drafts"
 
 A listing starts with `..`, as the tree does: Enter or a double click on it goes up, as `-` does, with the cursor on the folder you came from. It names nothing, so deleting it, moving it or putting it in another listing changes nothing, and `:w` leaves it alone. There's none at `/`, nor at the lesson's folder, which this editor stays in.
 
-`drafts` is empty, so `..` is its only line. Press Enter on it.
+`drafts` is empty, so `..` is its only line, and the listing says so under it. Press Enter on it.
 
 ```check
 focused folder
@@ -146,6 +146,6 @@ file "notes.txt"
 
 ## More
 
-`x` or `y` cuts or copies what's at the cursor, and `p` moves or copies it into the folder at the cursor. `.` shows hidden files, `/` searches the names shown, `R` lists everything again, and `q` closes the explorer.
+`x` or `y` cuts or copies what's at the cursor, and `p` moves or copies it into the folder at the cursor. `.` shows hidden files, `/` searches the names shown, `R` lists everything again, and `q` closes the explorer. `g?` lists the explorer's keys at its foot, and again hides them; the bar says so while they're hidden.
 
 Beside each file is what git says of it: `M` changed, `A` added, `?` untracked, `D` deleted, `!` in conflict. The daemon watches the folders open in the tree, so a file a terminal or an agent makes shows at once.

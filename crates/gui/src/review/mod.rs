@@ -706,7 +706,7 @@ impl Review {
             Line::Keys => {
                 let keys = "a keep  x reject  A X whole file  gc comment  S send  \
                             Enter go to  ]h [h hunks  q close";
-                builder.push(keys, &faint, true);
+                builder.push(&keys_that_fit(keys, self.width), &faint, true);
             }
             Line::Note(note) => builder.push(note, &faint, true),
             Line::Subagent { chat } => self.draw_subagent(&mut builder, *chat, &faint),
@@ -895,6 +895,34 @@ fn scope_words(scope: Option<ReviewScope>) -> String {
         Some(ReviewScope::Turn(None)) => "of the last turn".to_owned(),
         Some(ReviewScope::Chat) | None => "of the chat".to_owned(),
         Some(ReviewScope::Base) => "since the branch's base".to_owned(),
+    }
+}
+
+/// `keys`, a key and what it does at a time with two spaces between, in
+/// `width` cells: as many as fit whole, then `…`, rather than cut off at
+/// the pane's edge.
+fn keys_that_fit(keys: &str, width: usize) -> String {
+    use crate::render::mono_width;
+    if mono_width(keys) <= width {
+        return keys.to_owned();
+    }
+    let mut fit = String::new();
+    for key in keys.split("  ") {
+        let more = if fit.is_empty() {
+            key.to_owned()
+        } else {
+            format!("{fit}  {key}")
+        };
+        // Room is kept for the `…` after them.
+        if mono_width(&more) + 3 > width {
+            break;
+        }
+        fit = more;
+    }
+    if fit.is_empty() {
+        crate::finder::view::cut(keys, width, false)
+    } else {
+        fit + "  …"
     }
 }
 

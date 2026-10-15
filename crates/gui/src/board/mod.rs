@@ -108,7 +108,7 @@ impl BoardPane {
             summary: None,
             entries: Vec::new(),
             gone: None,
-            title: "board".to_owned(),
+            title: "Board".to_owned(),
             cursor: 0,
             at_end: true,
             top: 0,
@@ -157,7 +157,8 @@ impl BoardPane {
         self.count.is_some() || self.pending.is_some()
     }
 
-    /// What the window's title says: the board's name.
+    /// What the window's title says: "Board:" and the board's name, as
+    /// other panes' titles are capitalised.
     pub(crate) fn title(&self) -> &str {
         &self.title
     }
@@ -219,8 +220,8 @@ impl BoardPane {
             }
         }
         self.title = match &self.summary {
-            Some(summary) => format!("board {}", summary.name),
-            None => "board".to_owned(),
+            Some(summary) => format!("Board: {}", summary.name),
+            None => "Board".to_owned(),
         };
         if self.at_end {
             self.cursor = self.entries.len().saturating_sub(1);
@@ -549,7 +550,7 @@ impl BoardPane {
         if self.entries.is_empty() && self.summary.is_some() {
             let mut row = RowBuilder::new(self.width);
             row.push(
-                " Nothing here yet: i posts a note.",
+                "Nothing here yet: i posts a note.",
                 &colors::line_number(false),
                 true,
             );

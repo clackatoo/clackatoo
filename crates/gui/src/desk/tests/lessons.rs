@@ -1217,7 +1217,7 @@ fn the_explorer_lesson_roots_its_explorer_at_a_folder_and_goes_back_up_with_dot_
     // At the lesson's folder, which its explorer stays in, there's no `..`.
     assert_eq!(
         desk.explorer(PaneId(4)).unwrap().label(),
-        "explorer",
+        "explorer  g? keys",
         "no line at the cursor: the folder's empty, and has no .."
     );
     type_keys(&mut desk, ":Explore drafts");
@@ -1227,7 +1227,10 @@ fn the_explorer_lesson_roots_its_explorer_at_a_folder_and_goes_back_up_with_dot_
     assert_eq!(step(&desk), root_it + 1);
     // In drafts, `..` goes back up to the lesson's folder.
     type_keys(&mut desk, "gg");
-    assert_eq!(desk.explorer(PaneId(4)).unwrap().label(), "drafts  ..");
+    assert_eq!(
+        desk.explorer(PaneId(4)).unwrap().label(),
+        "drafts  ..  g? keys"
+    );
     enter(&mut desk);
     assert!(root_asked(&mut desk, &dir));
     rooted(&mut desk, &dir);

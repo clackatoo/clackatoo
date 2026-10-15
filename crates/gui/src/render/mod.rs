@@ -311,6 +311,9 @@ pub(crate) enum HighlightKind {
     LessonStep,
     /// It's a step of a lesson that's done.
     LessonDone,
+    /// It's code in a lesson's prose: on the faint background the chat
+    /// draws code on.
+    Code,
     /// It's a line added, as a review shows a change: on the faint green
     /// the chat's cards show one on.
     Added,
@@ -334,6 +337,7 @@ impl HighlightKind {
                 | Self::ColorColumn
                 | Self::LessonStep
                 | Self::LessonDone
+                | Self::Code
                 | Self::Added
                 | Self::Removed
                 | Self::Used

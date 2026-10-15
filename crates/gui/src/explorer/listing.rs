@@ -43,11 +43,20 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
-use clackatoo_protocol::{Entry, EntryKind, Expect, FileOp, FileStamp};
+use clackatoo_protocol::{Entry, EntryKind, Expect, FileOp, FileStamp, Style};
 use clackatoo_text::Rope;
 
 #[cfg(test)]
 mod tests;
+
+/// What a listing with nothing in it but `..` says under it.
+pub(crate) const EMPTY: &str = "empty folder: o makes a file";
+
+/// How a listing draws `line`: a folder's, ending `/`, and `..`, as the
+/// explorer draws folders, and others as plain text.
+pub(crate) fn style(line: &str) -> Option<Style> {
+    (line.ends_with('/') || is_up(line)).then(|| super::name_style(EntryKind::Dir))
+}
 
 /// The first character of a mark...
 const MARK_START: char = '\u{10FFFD}';

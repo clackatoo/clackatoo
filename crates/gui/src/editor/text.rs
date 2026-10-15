@@ -25,6 +25,7 @@ use clackatoo_protocol::BufferId;
 use clackatoo_term::{MAX_EXTRA, RowBuilder, Style, Underline};
 use clackatoo_text::{Diagnostic, Rope, Span};
 
+use super::Prose;
 use super::hints::{Hint, Hints};
 use super::kept::{Kept, LineLog};
 use super::wrap::{Placed, Wrap};
@@ -450,15 +451,15 @@ impl Laid {
     }
 
     /// Appends the line to `builder` as drawn in `width` cells from cell
-    /// `left`, coloured as `spans` say, with the lines under it
-    /// `underlines` says, and `inlays`, those from cell `left` on, in
-    /// order, each before the character it's at, or after the last. The
-    /// line starts at byte `start` of the text they're for.
-    pub(crate) fn show(
+    /// `left`, coloured as `spans` say, in order and none overlapping, with
+    /// the lines under it `underlines` says, and `inlays`, those from cell
+    /// `left` on, in order, each before the character it's at, or after
+    /// the last. The line starts at byte `start` of the text they're for.
+    pub(crate) fn show<S: Styled>(
         &self,
         builder: &mut RowBuilder,
         (left, width): (usize, usize),
-        spans: &[Span],
+        spans: &[S],
         underlines: &Underlines<'_>,
         inlays: &[Inlay<'_>],
         start: usize,
@@ -477,7 +478,7 @@ impl Laid {
         // through all that's before it.
         let first = self.starts.to_cell(left).saturating_sub(1);
         let first_byte = self.starts.get(first).map_or(0, |(_, byte)| byte);
-        let spans = &spans[spans.partition_point(|span| span.end <= start + first_byte)..];
+        let spans = &spans[spans.partition_point(|span| span.end() <= start + first_byte)..];
         let mut spans = spans.iter().peekable();
         // The most a diagnostic about bytes `from` to `to` of the line
         // matters, if one is. One about no text marks the character where
@@ -526,9 +527,9 @@ impl Laid {
                 hinted_at = next_inlay.map_or(usize::MAX, |inlay| inlay.col);
             }
             let piece = &self.text[byte..next_byte];
-            while spans.next_if(|span| span.end <= start + byte).is_some() {}
+            while spans.next_if(|span| span.end() <= start + byte).is_some() {}
             let style = match spans.peek() {
-                Some(span) if span.start <= start + byte => colors::syntax(span.kind),
+                Some(span) if span.start() <= start + byte => span.style(),
                 _ => Style::DEFAULT,
             };
             let style = if diagnostics.is_empty() {
@@ -715,6 +716,54 @@ fn push(builder: &mut RowBuilder, ch: char) {
     }
 }
 
+/// What colours some of a line, as [`Laid::show`] draws it: a highlight of
+/// the syntax, or a style of the editor's own.
+pub(crate) trait Styled {
+    /// Its first byte, in the text.
+    fn start(&self) -> usize;
+    /// The byte after its last.
+    fn end(&self) -> usize;
+    /// How it's drawn.
+    fn style(&self) -> Style;
+}
+
+impl Styled for Span {
+    fn start(&self) -> usize {
+        self.start
+    }
+
+    fn end(&self) -> usize {
+        self.end
+    }
+
+    fn style(&self) -> Style {
+        colors::syntax(self.kind)
+    }
+}
+
+/// Bytes of the text drawn in a style of their own, as a lesson's titles
+/// are bold and a listing's folders are coloured as the explorer's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stretch {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) style: Style,
+}
+
+impl Styled for Stretch {
+    fn start(&self) -> usize {
+        self.start
+    }
+
+    fn end(&self) -> usize {
+        self.end
+    }
+
+    fn style(&self) -> Style {
+        self.style
+    }
+}
+
 /// A buffer's text, laid out a line at a time as it's asked for. Lines
 /// laid out, and the rows they wrap onto, are kept in a [`Kept`], which an
 /// editor keeps from one frame to the next.
@@ -733,6 +782,9 @@ pub(crate) struct Text<'a> {
     words: Words,
     /// The inlay hints drawn between the text, if they're shown.
     hints: Option<&'a Hints>,
+    /// The lesson it is, if it's one, whose code is kept on one row as
+    /// it wraps as prose.
+    prose: Option<Rc<Prose>>,
     kept: Kept,
 }
 
@@ -747,8 +799,32 @@ impl<'a> Text<'a> {
             hide: None,
             words: Words::NONE,
             hints: None,
+            prose: None,
             kept: Kept::default(),
         }
+    }
+
+    /// The text as the lesson `prose` marks it, if it's one: its code
+    /// kept on one row as it wraps as prose.
+    pub(crate) fn for_lesson(self, prose: Option<Rc<Prose>>) -> Self {
+        Self { prose, ..self }
+    }
+
+    /// The cells of line `line`, laid out as `laid`, that prose keeps
+    /// together, each the first and the one after the last, in order.
+    fn together_in(&self, line: u64, laid: &Laid) -> Vec<std::ops::Range<usize>> {
+        let Some(prose) = &self.prose else {
+            return Vec::new();
+        };
+        let start = self.line_start(line);
+        let end = start + laid.text().len();
+        let from = prose.code.partition_point(|&(_, last)| last <= start);
+        (prose.code[from..].iter())
+            .take_while(|&&(first, _)| first < end)
+            .map(|&(first, last)| {
+                laid.col_of(first.max(start) - start)..laid.col_of(last.min(end) - start)
+            })
+            .collect()
     }
 
     /// The text with `hints` drawn between it, if they're shown: but on
@@ -1025,8 +1101,9 @@ impl Lines for Text<'_> {
         // rows are kept for.
         let hinted = (self.hints).map(|hints| (hints.generation(), typing.is_some()));
         let inlays = || self.inlay_cells(line, &laid);
+        let together = || self.together_in(line, &laid);
         self.kept
-            .rows(line, &laid, wrap, typed_at_end, (hinted, inlays))
+            .rows(line, &laid, wrap, typed_at_end, (hinted, inlays), together)
     }
 
     fn row_width(&self) -> Option<usize> {
@@ -1192,7 +1269,8 @@ mod tests {
         );
         // Drawn from far along, as a row it wraps onto is.
         let mut builder = RowBuilder::new(5);
-        laid.show(&mut builder, (69_998, 5), &[], &NO_UNDERLINES, &[], 0);
+        let spans: &[Span] = &[];
+        laid.show(&mut builder, (69_998, 5), spans, &NO_UNDERLINES, &[], 0);
         assert_eq!(builder.finish(false).text(), "aa字");
     }
 

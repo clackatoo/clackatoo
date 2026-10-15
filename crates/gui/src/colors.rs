@@ -170,6 +170,17 @@ pub(crate) const fn syntax(kind: Kind) -> Style {
     }
 }
 
+/// The tick by a lesson's step that's done: the bright green its title
+/// is lit in.
+#[must_use]
+pub(crate) const fn lesson_done() -> Style {
+    Style {
+        fg: Color::Indexed(10),
+        attributes: Attributes::BOLD,
+        ..Style::DEFAULT
+    }
+}
+
 /// The colour of the wavy line under text a diagnostic of `severity` is
 /// about: the palette's red, yellow, blue and cyan, so it follows the
 /// theme, as the syntax colours do.
@@ -400,6 +411,9 @@ impl Theme {
             HighlightKind::Link => self.accent,
             HighlightKind::LessonStep => white(0.04),
             HighlightKind::LessonDone => faint(self.added, 0.14),
+            // As the chat's code is, a little stronger, to show on the
+            // step being done too.
+            HighlightKind::Code => white(0.065),
             // Quieter than a search's match: the cursor merely rests there.
             HighlightKind::Used => white(0.09),
             HighlightKind::Written => faint(self.accent, 0.22),

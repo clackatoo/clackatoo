@@ -2354,7 +2354,16 @@ impl Desk {
             Command::Devices(command) => self.devices_command(command),
             Command::Marks => self.open_finder(crate::finder::Kind::Marks, String::new()),
             Command::Editor(line) => self.editor_command(&line),
-            Command::Explore { dir, edit } => self.open_explorer(dir, edit),
+            Command::Explore {
+                dir,
+                edit,
+                side: None,
+            } => self.open_explorer(dir, edit),
+            Command::Explore {
+                dir,
+                edit,
+                side: Some(side),
+            } => self.open_explorer_beside(dir, edit, side),
             Command::AgentUndo { turn, redo, force } => self.agent_undo(turn, redo, force),
             Command::Board { place, name } => self.open_board(name, place),
             Command::Browser(place) => self.open_browser(place),
@@ -8963,9 +8972,9 @@ mod tests {
                 tab: TabId(1),
                 side: Side::Left,
                 terminal: PaneTerminal::Files(OpenFiles { dir: None }),
-                share: Some(375),
+                share: Some(250),
             }],
-            "30 of the tab's 80 columns"
+            "20 cells, a quarter of the tab's 80 columns, as that's fewer than 30"
         );
         // The daemon makes it, telling of the pane first.
         let layout = side_by_side(vec![files_pane(2, 1), file_pane(1, 7)]);
@@ -8977,12 +8986,86 @@ mod tests {
             "attached"
         );
         explore_p(&mut desk);
-        assert_eq!(note(&desk), "~/p  src/main.rs", "at the editor's file");
+        assert_eq!(
+            note(&desk),
+            "~/p  src/main.rs  g? keys",
+            "at the editor's file"
+        );
         assert_eq!(desk.title(), Some("~/p"));
         type_keys(&mut desk, " e");
         assert_eq!(
             answer_all(&mut desk),
             [Request::ClosePane { pane: PaneId(2) }]
+        );
+        // Set, it's as many cells as it says.
+        let layout = one_tab(file_pane(1, 7));
+        desk.workspaces_changed(layout);
+        normal_mode(&mut desk);
+        command(&mut desk, "set explorerwidth=30");
+        type_keys(&mut desk, " e");
+        assert!(
+            (desk.take_outbox().iter()).any(|message| matches!(
+                message,
+                ClientMessage::Request(Request::SplitTab {
+                    share: Some(375),
+                    ..
+                })
+            )),
+            "30 of the tab's 80 columns"
+        );
+    }
+
+    #[test]
+    fn with_two_explorers_in_a_tab_space_e_closes_the_focused_one() {
+        let layout = side_by_side(vec![files_pane(2, 1), files_pane(3, 2)]);
+        let mut desk = super::tests::desk(one_tab(layout));
+        normal_mode(&mut desk);
+        ctrl(&mut desk, "l");
+        assert_eq!(shown_pane(&desk), PaneId(3));
+        answer_all(&mut desk);
+        type_keys(&mut desk, " e");
+        assert_eq!(
+            answer_all(&mut desk),
+            [Request::ClosePane { pane: PaneId(3) }],
+            "not the first"
+        );
+    }
+
+    #[test]
+    fn a_split_mark_opens_an_explorer_or_a_review_beside_the_focused_pane() {
+        use clackatoo_protocol::{NewReview, OpenFiles, ReviewScope};
+        let mut desk = editing("/p/src/main.rs", "fn main() {}\n");
+        let asked = |desk: &mut Desk| -> Vec<Request> {
+            (desk.take_outbox().into_iter())
+                .filter_map(|message| match message {
+                    ClientMessage::Request(request) => Some(request),
+                    _ => None,
+                })
+                .collect()
+        };
+        command(&mut desk, "|Explore src");
+        assert_eq!(
+            asked(&mut desk),
+            [Request::Split {
+                pane: PaneId(1),
+                side: Side::Right,
+                terminal: PaneTerminal::Files(OpenFiles {
+                    dir: Some("src".into())
+                }),
+            }]
+        );
+        command(&mut desk, "-Review base");
+        assert_eq!(
+            asked(&mut desk),
+            [Request::Split {
+                pane: PaneId(1),
+                side: Side::Below,
+                terminal: PaneTerminal::Review(NewReview {
+                    chat: None,
+                    scope: ReviewScope::Base,
+                    cwd: Some("/p/src".into()),
+                }),
+            }]
         );
     }
 
@@ -9069,7 +9152,7 @@ mod tests {
                 tab: TabId(1),
                 side: Side::Right,
                 terminal: file,
-                share: Some(625),
+                share: Some(750),
             }]
         );
     }
@@ -9157,13 +9240,13 @@ mod tests {
             desk.explorer(PaneId(id)).unwrap().label()
         };
         type_keys(&mut desk, "gg");
-        assert_eq!(note(&desk), "~/p  ..");
-        assert_eq!(reopened(&mut desk, 2), "~/p  ..");
+        assert_eq!(note(&desk), "~/p  ..  g? keys");
+        assert_eq!(reopened(&mut desk, 2), "~/p  ..  g? keys");
         let mut desk = super::tests::desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
         explore_p(&mut desk);
         type_keys(&mut desk, "G");
-        assert_eq!(note(&desk), "~/p  a.txt");
-        assert_eq!(reopened(&mut desk, 2), "~/p  a.txt");
+        assert_eq!(note(&desk), "~/p  a.txt  g? keys");
+        assert_eq!(reopened(&mut desk, 2), "~/p  a.txt  g? keys");
     }
 
     #[test]
@@ -9180,7 +9263,7 @@ mod tests {
                 terminal: PaneTerminal::Files(OpenFiles {
                     dir: Some("~/src".into())
                 }),
-                share: Some(375),
+                share: Some(250),
             }]
         );
         let mut desk = super::tests::desk(one_tab(side_by_side(vec![files_pane(2, 1), pane(3)])));
@@ -9354,7 +9437,7 @@ mod tests {
             update: snapshot,
         };
         assert!(desk.board_event(event), "shown, so drawn again");
-        assert_eq!(desk.title(), Some("board plan"));
+        assert_eq!(desk.title(), Some("Board: plan"));
         // Typed in the bar, posted as the user.
         type_keys(&mut desk, "i");
         assert_eq!(desk.text_goes_to(), Some(TextTarget::Bar));

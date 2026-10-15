@@ -115,11 +115,15 @@ fn nothing_matching_says_so_once_its_sure() {
 
 #[test]
 fn what_doesnt_fit_is_cut_short_by_cells() {
-    assert_eq!(view::cut("abc", 3), "abc");
-    assert_eq!(view::cut("abcd", 3), "ab…");
-    assert_eq!(view::cut("字字字", 5), "字字…");
-    assert_eq!(view::cut("字字字", 4), "字…");
-    assert_eq!(view::cut("abc", 0), "");
+    assert_eq!(view::cut("abc", 3, false), "abc");
+    assert_eq!(view::cut("abcd", 3, false), "ab…");
+    assert_eq!(view::cut("字字字", 5, false), "字字…");
+    assert_eq!(view::cut("字字字", 4, false), "字…");
+    assert_eq!(view::cut("abc", 0, false), "");
+    // From the start, keeping the end, as a long path is.
+    assert_eq!(view::cut("~/a/b/c", 5, true), "…/b/c");
+    assert_eq!(view::cut("字字字", 5, true), "…字字");
+    assert_eq!(view::cut("abc", 3, true), "abc");
 }
 
 #[test]

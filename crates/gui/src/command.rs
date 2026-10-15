@@ -18,7 +18,8 @@
 //! `Gitsigns`, with what to do to the hunk at the cursor, as gitsigns.nvim
 //! names it: `preview_hunk`, `reset_hunk`, `stage_hunk`, `next_hunk` or
 //! `prev_hunk`. `Explore`, or `Ex`, opens the tab's file explorer, with a
-//! directory for its root after it if wanted. `Tutor` opens the tutor's
+//! directory for its root after it if wanted, or with a split's mark
+//! before it, a new one beside the focused pane. `Tutor` opens the tutor's
 //! lessons, a lesson by its name, or with `new`, what's new. In a chat, `AgentUndo`
 //! undoes what a turn of the agent's changed in files, the turn's number
 //! after it, or else the last, and `AgentRedo` makes it again; with `!`,
@@ -41,7 +42,8 @@
 //!
 //! `Review` opens a review of what agents changed: of the chat's whole
 //! work (`chat`, the default), a turn (`turn`, the last, or `turn N`), or
-//! everything since the branch's base (`base`). `ReviewKeep` and
+//! everything since the branch's base (`base`), to the right of the
+//! focused pane, or with a split's mark, on that side. `ReviewKeep` and
 //! `ReviewReject` keep or reject the agent's change at the cursor, or
 //! every one of its `file`, of a `turn` (its, or `turn N`), or `all`;
 //! `ReviewReject!` rejects what it can though some can't be. `ReviewSend`
@@ -62,8 +64,13 @@ use crate::finder;
 /// A command about reviewing what agents changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReviewCommand {
-    /// `:Review`: a review of what agents changed, of this.
-    Open(ReviewScope),
+    /// `:Review`: a review of what agents changed, of `scope`, beside
+    /// the focused pane, on the side its mark says (`:|Review`,
+    /// `:-Review`), or else to its right.
+    Open {
+        scope: ReviewScope,
+        side: Option<Side>,
+    },
     /// `:ReviewKeep` or, unless `keep`, `:ReviewReject`, `force`d with
     /// `!`: to the agent's changes `which` names.
     Act {
@@ -154,8 +161,13 @@ pub(crate) enum Command {
     Review(ReviewCommand),
     /// `:Explore`: the tab's file explorer, rooted at this directory if
     /// given; with `!`, editing the folder at its cursor, or that
-    /// directory, as text.
-    Explore { dir: Option<String>, edit: bool },
+    /// directory, as text. With a mark before it (`:|Explore`), a new one
+    /// beside the focused pane, on that side.
+    Explore {
+        dir: Option<String>,
+        edit: bool,
+        side: Option<Side>,
+    },
     /// `:Tutor`: the lessons, to pick one; with a lesson's name, that
     /// lesson; with `new`, what's new.
     Tutor(Option<String>),
@@ -298,7 +310,6 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         "registers" | "reg" | "display" | "di" => return Ok(Command::Registers),
         "marks" => return Ok(Command::Marks),
         "messages" | "mes" => return Ok(Command::Messages),
-        "Explore" | "Ex" | "Explore!" | "Ex!" => return Ok(explore(word, argument)),
         "update" => return Ok(Command::Update(argument.map(str::to_owned))),
         "connect" => return Ok(Command::Connect(argument.map(str::to_owned))),
         "Tutor" => return Ok(Command::Tutor(argument.map(str::to_owned))),
@@ -308,7 +319,9 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         }
         _ => {}
     }
-    let command = (file_command(word, argument))
+    let (place, rest) = place(word);
+    let command = (marked_pane(rest, place, argument))
+        .or_else(|| file_command(word, argument))
         .or_else(|| agent_undo(word, argument))
         .or_else(|| review_command(word, argument));
     if let Some(command) = command {
@@ -324,7 +337,6 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
         let query = argument.unwrap_or_default().to_owned();
         return Ok(Command::Find { kind, query });
     }
-    let (place, rest) = place(word);
     if let Some(command) = pane_of(rest, place, argument) {
         return command;
     }
@@ -357,10 +369,7 @@ pub(crate) fn parse(line: &str) -> Result<Command, String> {
             agent,
         });
     }
-    let kinds = format!(
-        "{}, {EDITOR}, {BOARD}",
-        KINDS.map(|(kind, _)| kind).join(", ")
-    );
+    let kinds = PANES.join(", ");
     if name.starts_with(char::is_uppercase) {
         Err(format!(
             "no kind of pane called {name}; the kinds are {kinds}"
@@ -497,11 +506,35 @@ fn agent_undo(word: &str, argument: Option<&str>) -> Option<Result<Command, Stri
     }))
 }
 
-/// `:Explore`, typed as `word`, with `argument`: `!` edits as text.
-fn explore(word: &str, argument: Option<&str>) -> Command {
+/// The explorer or the review `rest` names, after the mark saying where
+/// it goes, `place`, if it's one: kinds of pane that open without a mark
+/// too, as the tab's explorer and a review to the right.
+fn marked_pane(
+    rest: &str,
+    place: Place,
+    argument: Option<&str>,
+) -> Option<Result<Command, String>> {
+    let side = match place {
+        Place::Beside(side) => Some(side),
+        Place::Tab | Place::Here => None,
+    };
+    match rest {
+        "Explore" | "Ex" | "Explore!" | "Ex!" => Some(Ok(explore(rest, argument, side))),
+        "Review" => Some(
+            review_scope(argument)
+                .map(|scope| Command::Review(ReviewCommand::Open { scope, side })),
+        ),
+        _ => None,
+    }
+}
+
+/// `:Explore`, typed as `word`, with `argument`: `!` edits as text. A
+/// `side` opens a new explorer there, beside the focused pane.
+fn explore(word: &str, argument: Option<&str>, side: Option<Side>) -> Command {
     Command::Explore {
         dir: argument.map(unescape),
         edit: word.ends_with('!'),
+        side,
     }
 }
 
@@ -543,7 +576,6 @@ fn pane_of(rest: &str, place: Place, argument: Option<&str>) -> Option<Result<Co
 /// or why it means nothing.
 fn review_command(word: &str, argument: Option<&str>) -> Option<Result<Command, String>> {
     let command = match word {
-        "Review" => review_scope(argument).map(ReviewCommand::Open),
         "ReviewSend" => Ok(ReviewCommand::Send),
         "Blame" => Ok(ReviewCommand::Blame),
         "ReviewKeep" | "ReviewReject" | "ReviewReject!" => {
@@ -613,7 +645,9 @@ pub(crate) const NAMES: &[&str] = &[
 ];
 
 /// The kinds of pane, which a split's mark can come before: `|Terminal`.
-pub(crate) const PANES: &[&str] = &["Terminal", "Agent", EDITOR, BOARD, BROWSER];
+pub(crate) const PANES: &[&str] = &[
+    "Terminal", "Agent", EDITOR, "Explore", BOARD, "Review", BROWSER,
+];
 
 /// What a command takes after it, for Tab to complete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -805,7 +839,8 @@ mod tests {
             parse("Explore a\\ b").unwrap(),
             Command::Explore {
                 dir: Some("a b".into()),
-                edit: false
+                edit: false,
+                side: None,
             }
         );
     }
@@ -1146,24 +1181,61 @@ mod tests {
     }
 
     #[test]
+    fn explore_opens_the_tabs_explorer_or_with_a_mark_one_beside() {
+        let explore = |dir: Option<&str>, edit, side| Command::Explore {
+            dir: dir.map(str::to_owned),
+            edit,
+            side,
+        };
+        assert_eq!(parse("Explore").unwrap(), explore(None, false, None));
+        assert_eq!(parse("Ex! src").unwrap(), explore(Some("src"), true, None));
+        assert_eq!(
+            parse("|Explore").unwrap(),
+            explore(None, false, Some(Side::Right))
+        );
+        assert_eq!(
+            parse("-^Ex src").unwrap(),
+            explore(Some("src"), false, Some(Side::Above))
+        );
+        assert_eq!(
+            parse("-Explore!").unwrap(),
+            explore(None, true, Some(Side::Below))
+        );
+        // Every kind a mark comes before is one, and the messages name them.
+        for kind in PANES {
+            assert!(parse(&format!("|{kind}")).is_ok(), "{kind}");
+        }
+        let refused = parse("|Nothing").unwrap_err();
+        assert!(
+            refused.contains("Explore") && refused.contains("Review"),
+            "{refused}"
+        );
+    }
+
+    #[test]
     fn review_commands_name_a_scope_or_which_changes() {
-        assert_eq!(
-            parse("Review").unwrap(),
-            Command::Review(ReviewCommand::Open(ReviewScope::Chat))
-        );
-        assert_eq!(
-            parse("Review base").unwrap(),
-            Command::Review(ReviewCommand::Open(ReviewScope::Base))
-        );
+        let open = |scope, side| Command::Review(ReviewCommand::Open { scope, side });
+        assert_eq!(parse("Review").unwrap(), open(ReviewScope::Chat, None));
+        assert_eq!(parse("Review base").unwrap(), open(ReviewScope::Base, None));
         assert_eq!(
             parse("Review turn 2").unwrap(),
-            Command::Review(ReviewCommand::Open(ReviewScope::Turn(Some(1))))
+            open(ReviewScope::Turn(Some(1)), None)
         );
         assert_eq!(
             parse("Review turn").unwrap(),
-            Command::Review(ReviewCommand::Open(ReviewScope::Turn(None)))
+            open(ReviewScope::Turn(None), None)
         );
         assert!(parse("Review everything").is_err());
+        // With a split's mark, beside the focused pane on that side.
+        assert_eq!(
+            parse("-Review base").unwrap(),
+            open(ReviewScope::Base, Some(Side::Below))
+        );
+        assert_eq!(
+            parse("|<Review").unwrap(),
+            open(ReviewScope::Chat, Some(Side::Left))
+        );
+        assert!(parse("|ReviewKeep").is_err(), "not a kind of pane");
         let act = |keep, force, which| Command::Review(ReviewCommand::Act { keep, force, which });
         assert_eq!(
             parse("ReviewKeep").unwrap(),

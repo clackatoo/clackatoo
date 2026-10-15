@@ -96,6 +96,7 @@ pub(crate) use pieces::{GiveUp, PATIENCE};
 use preview::Preview;
 use registers::Wrote;
 pub(crate) use registers::{Register, Registers};
+pub(crate) use text::Stretch;
 use text::{Text, Underlines, tab_end};
 #[cfg(test)]
 pub(crate) use uses::USES_WAIT;
@@ -607,6 +608,8 @@ pub(crate) struct Editor {
     lesson: bool,
     /// Lines lit as the tutor says, while it shows a lesson.
     lit: Vec<Lit>,
+    /// What it draws in styles of its own: a lesson's, or a listing's.
+    styling: Styling,
     /// The other uses of the name the cursor rests on are lit
     /// (`highlightuses`).
     highlight_uses: bool,
@@ -643,6 +646,35 @@ pub(crate) struct Editor {
     /// What `.` puts over the selection it made: what the change it makes
     /// again put.
     put_again: Option<std::rc::Rc<Register>>,
+}
+
+/// How a lesson's text is drawn, as the tutor marks it: its titles, and
+/// what it says strongly, in styles of their own, and its code on a
+/// background of its own, kept on one row as the lesson wraps.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Prose {
+    /// Bytes drawn in a style of their own, in order, none overlapping.
+    pub(crate) styled: Vec<Stretch>,
+    /// The code: each its first byte and the byte after its last, in
+    /// order, none overlapping.
+    pub(crate) code: Vec<(usize, usize)>,
+}
+
+/// What an editor draws in styles of its own, in place of the syntax's
+/// colours: a lesson's prose, or a folder's listing.
+#[derive(Debug, Default)]
+struct Styling {
+    /// How the lesson it shows is marked, while it shows one.
+    prose: Option<std::rc::Rc<Prose>>,
+    /// The lesson's code in view, as of the last settle, each from its
+    /// first character to its last, lit as code is.
+    code_lit: Vec<(Point, Point)>,
+    /// What draws each line in a style of its own, from its text, as a
+    /// listing colours its folders.
+    line_style: Option<fn(&str) -> Option<Style>>,
+    /// What's written under the text while it's only lines `keep` says,
+    /// or blank, as an empty folder's listing says how to make a file.
+    empty_note: Option<&'static str>,
 }
 
 /// Lines of a lesson lit, as the tutor says: a step done, or being done.
@@ -742,6 +774,7 @@ impl Editor {
             indents_by_grammar: false,
             lesson: false,
             lit: Vec::new(),
+            styling: Styling::default(),
             highlight_uses: options.highlightuses,
             uses: uses::Uses::default(),
             format_asked: None,
@@ -759,12 +792,29 @@ impl Editor {
 
     /// Shows one of the tutor's lessons from now on: prose, drawn without
     /// line numbers, signs, marked columns or the cursor's line lit, and
-    /// wrapped between words, whatever `options` say for files.
-    pub(crate) fn show_lesson(&mut self, options: &Options, copy: &BufferCopy) {
+    /// wrapped as prose, whatever `options` say for files, marked as
+    /// `prose` says, with a column at its left for ticks by the steps
+    /// done.
+    pub(crate) fn show_lesson(&mut self, options: &Options, copy: &BufferCopy, prose: Prose) {
         if !self.lesson {
             self.lesson = true;
+            self.styling.prose = Some(std::rc::Rc::new(prose));
             self.set_options(options, copy);
         }
+    }
+
+    /// Draws each line in the style `style` gives for its text, if it
+    /// gives one, in place of the syntax's colours, as a folder's listing
+    /// colours its folders as the explorer does.
+    pub(crate) fn style_lines(&mut self, style: fn(&str) -> Option<Style>) {
+        self.styling.line_style = Some(style);
+    }
+
+    /// Writes `note`, faint, under the text while it's nothing but lines
+    /// [`keep_lines`](Self::keep_lines) keeps, or a blank one, as an empty
+    /// folder's listing, a lone `..`, says how to make a file.
+    pub(crate) fn note_when_empty(&mut self, note: &'static str) {
+        self.styling.empty_note = Some(note);
     }
 
     /// Whether it shows one of the tutor's lessons.
@@ -880,7 +930,7 @@ impl Editor {
         self.signs = options.gitsigns;
         self.agent_signs = options.agentsigns;
         self.columns = columns(options);
-        let wrapping = Wrapping::of(options);
+        let wrapping = Wrapping::of(options).for_prose(self.lesson);
         if wrapping.on != self.wrapping.on {
             self.top.cell = 0;
             self.left = 0;
@@ -904,6 +954,7 @@ impl Editor {
             .hiding(self.hide)
             .with_words(copy.words())
             .hinted(hints)
+            .for_lesson(self.styling.prose.clone())
             .wrapping(self.wrapping.at(self.text_width().max(1)), typing)
             .keeping(&self.kept, self.buffer, copy.revision(), copy.line_log())
     }
@@ -4495,9 +4546,10 @@ impl Editor {
     }
 
     /// The cells the signs take, left of the line numbers: one for git's,
-    /// while they're on, and one for the agents', while it's shown.
+    /// while they're on, and one for the agents', while it's shown; or a
+    /// lesson's two, for a tick by each step done.
     fn sign_cells(&self) -> usize {
-        usize::from(self.signs) + usize::from(self.agent_column)
+        usize::from(self.signs) + usize::from(self.agent_column) + 2 * usize::from(self.lesson)
     }
 
     /// Writes who changed each line agents changed after it, or stops, as
@@ -4635,14 +4687,6 @@ impl Editor {
             let cells = shown
                 .next
                 .map_or(room, |next| (next - shown.start).min(room));
-            let moved_spans;
-            let spans = match preview {
-                Some(preview) => {
-                    moved_spans = preview.spans(copy.highlights(), start, end);
-                    &moved_spans[..]
-                }
-                None => copy.highlights().within(start, end),
-            };
             let underlines = Underlines {
                 diagnostics,
                 hovered,
@@ -4651,14 +4695,20 @@ impl Editor {
             let on_row: Vec<text::Inlay<'_>> = (shown.hints(&self.placed).iter())
                 .filter_map(|&placed| text.inlay(placed))
                 .collect();
-            laid.show(
-                &mut builder,
-                (shown.start, cells),
-                spans,
-                &underlines,
-                &on_row,
-                start,
-            );
+            let row = (shown.start, cells);
+            if let Some(styled) = self.styled_line(laid.text(), start, end) {
+                laid.show(&mut builder, row, &styled, &underlines, &on_row, start);
+            } else {
+                let moved_spans;
+                let spans = match preview {
+                    Some(preview) => {
+                        moved_spans = preview.spans(copy.highlights(), start, end);
+                        &moved_spans[..]
+                    }
+                    None => copy.highlights().within(start, end),
+                };
+                laid.show(&mut builder, row, spans, &underlines, &on_row, start);
+            }
             if shown.next.is_none() {
                 let hints: usize = on_row.iter().map(|inlay| inlay.hint.cells).sum();
                 let end =
@@ -4667,19 +4717,79 @@ impl Editor {
             }
             rows.push(builder.finish(false));
         }
+        let mut note = self
+            .styling
+            .empty_note
+            // Not once it's been emptied by hand: `:w` deletes all it had.
+            .filter(|_| copy.loaded() && !copy.modified() && self.only_kept(&text));
         while rows.len() < self.height {
             let mut builder = RowBuilder::new(self.width);
             if copy.loaded() {
                 builder.push("~", &Style::DEFAULT, true);
             }
+            if let Some(note) = note.take() {
+                // Under the text, where it starts.
+                let to = self.gutter.max(2);
+                builder.push(
+                    &" ".repeat(to.saturating_sub(builder.filled())),
+                    &Style::DEFAULT,
+                    true,
+                );
+                builder.push(note, &colors::line_number(false), true);
+            }
             rows.push(builder.finish(false));
         }
+        self.styling.code_lit = self.code_in_view(&text);
         self.rows = rows;
         if let Some(preview) = &mut self.preview {
             preview.light(&text);
         }
         self.place_panels(&text);
         self.place_uses(copy);
+    }
+
+    /// The styles of the editor's own the line from byte `start` to
+    /// `end`, whose text is `line`, is drawn in, if it has any: a lesson's,
+    /// or those [`style_lines`](Self::style_lines) gives.
+    fn styled_line(&self, line: &str, start: usize, end: usize) -> Option<Vec<Stretch>> {
+        if let Some(prose) = &self.styling.prose {
+            let styled = &prose.styled;
+            let from = styled.partition_point(|stretch| stretch.end <= start);
+            let on = styled[from..]
+                .iter()
+                .take_while(|stretch| stretch.start < end);
+            return Some(on.copied().collect());
+        }
+        let style = self.styling.line_style?(line)?;
+        Some(vec![Stretch { start, end, style }])
+    }
+
+    /// Whether the text is nothing but lines [`keep_lines`](Self::keep_lines)
+    /// keeps, or a blank one: a folder's listing with nothing in it but
+    /// `..`.
+    fn only_kept(&self, text: &Text<'_>) -> bool {
+        if text.lines() > 1 {
+            return false;
+        }
+        let line = text.line_text(0);
+        line.trim().is_empty() || self.keep.is_some_and(|keep| keep(&line))
+    }
+
+    /// The lesson's code on the lines in view, each from its first
+    /// character to its last.
+    fn code_in_view(&self, text: &Text<'_>) -> Vec<(Point, Point)> {
+        let (Some(prose), Some(first), Some(last)) =
+            (&self.styling.prose, self.shown.first(), self.shown.last())
+        else {
+            return Vec::new();
+        };
+        let (start, end) = (text.line_start(first.line), text.line_end(last.line));
+        let from = prose.code.partition_point(|&(_, last)| last <= start);
+        (prose.code[from..].iter())
+            .take_while(|&&(first, _)| first < end)
+            .filter(|&&(first, last)| first < last)
+            .map(|&(first, last)| (text.point_of(first), text.point_of(last - 1)))
+            .collect()
     }
 
     /// Places the cursor, and the panels and menus by it, on the rows just
@@ -4735,6 +4845,16 @@ impl Editor {
         copy: &BufferCopy,
     ) {
         let cursor = self.cursor.at.line;
+        if self.gutter > 0 && self.lesson {
+            // A green tick by the title of each step done.
+            let done = (self.lit.iter())
+                .any(|lit| lit.kind == HighlightKind::LessonDone && lit.lines.contains(&line));
+            if done {
+                builder.push("✓ ", &colors::lesson_done(), true);
+            } else {
+                builder.push("  ", &Style::DEFAULT, true);
+            }
+        }
         if self.gutter > 0 && self.signs {
             let at = usize::try_from(line).unwrap_or(usize::MAX);
             match copy.hunks().sign(text.rope(), at) {
@@ -4782,10 +4902,13 @@ impl Editor {
         (self.shown.iter().enumerate())
             .filter(|(_, shown)| shown.line == at.line)
             .find_map(|(row, shown)| {
-                Some((
-                    row,
-                    self.gutter + shown.col_of(at.col, width, &self.placed)?,
-                ))
+                let col = shown.col_of(at.col, width, &self.placed).or_else(|| {
+                    // A blank hanging past a lesson's row, as prose wraps,
+                    // is drawn at its edge.
+                    let on = shown.start <= at.col && at.col < shown.end();
+                    (self.lesson && on).then(|| width.saturating_sub(1))
+                })?;
+                Some((row, self.gutter + col))
             })
     }
 
@@ -4901,6 +5024,10 @@ impl Editor {
             }
         }
         self.use_highlights(&mut highlights);
+        for &(start, last) in &self.styling.code_lit {
+            let kind = Selection::Characters;
+            self.highlight(start, last, kind, HighlightKind::Code, &mut highlights);
+        }
         if let (Some(anchor), Mode::Visual(kind)) = (self.anchor, self.mode) {
             let (start, last) = if anchor <= self.cursor.at {
                 (anchor, self.cursor.at)

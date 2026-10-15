@@ -2272,9 +2272,10 @@ fn renders_an_explorer_pane() {
         clackatoo_protocol::Color::Indexed(4),
         "as a directory"
     );
-    assert!(
-        up.attributes.contains(clackatoo_protocol::Attributes::DIM),
-        "but muted"
+    assert_eq!(
+        up.attributes,
+        clackatoo_protocol::Attributes::BOLD,
+        "at a directory's full contrast"
     );
     assert_eq!(
         fg(lines[2], 4),
@@ -2298,6 +2299,82 @@ fn renders_an_explorer_pane() {
     assert_ne!(at(3, 20), background, "the cursor's line");
     assert_eq!(at(6, 20), background);
     assert_ne!(at(3, 0), background, "the mark");
+}
+
+#[test]
+fn renders_a_lesson_with_a_tick_by_a_step_done_and_its_code_on_a_background() {
+    use clackatoo_protocol::{BufferId, BufferSnapshot, BufferUpdate};
+
+    use crate::editor::{BufferCopy, Editor, Lit, Prose, Stretch};
+
+    let text = "1. Done\n   Type :w now\n";
+    let mut copy = BufferCopy::new(BufferId(1));
+    copy.update(BufferUpdate::Snapshot(BufferSnapshot {
+        path: "/tutor/lesson.txt".into(),
+        text: text.into(),
+        version: 0,
+        modified: false,
+        applied: None,
+        landed: None,
+        daemon: 0,
+    }));
+    let (cols, rows) = (20u16, 3u16);
+    let options = crate::options::Options::default();
+    let mut editor = Editor::new(BufferId(1), &options);
+    editor.resize(Size::new(cols, rows).unwrap());
+    let code = text.find(":w").unwrap();
+    let bold = clackatoo_protocol::Style {
+        attributes: clackatoo_protocol::Attributes::BOLD,
+        ..clackatoo_protocol::Style::DEFAULT
+    };
+    let prose = Prose {
+        styled: vec![Stretch {
+            start: 0,
+            end: 7,
+            style: bold,
+        }],
+        code: vec![(code, code + 2)],
+    };
+    editor.show_lesson(&options, &copy, prose);
+    editor.light(vec![Lit {
+        lines: 0..1,
+        kind: HighlightKind::LessonDone,
+        until: None,
+    }]);
+    editor.settle(&copy);
+    let (lines, _) = editor.scene();
+    let Some((size, pixels)) = render_rows(cols, &lines, None, 2.0, (true, &editor.highlights()))
+    else {
+        eprintln!("no GPU available; skipping");
+        return;
+    };
+    save("lesson", size, &pixels);
+    assert_eq!(lines[1].text(), "     Type :w now");
+    let fonts = fonts(2.0);
+    let padding = 4;
+    // The pixels of the cell at `line` and `col`.
+    let cell = |line: u32, col: u32| -> Vec<&[u8]> {
+        let (width, height) = (fonts.cell.width, fonts.cell.height);
+        let mut cell = Vec::new();
+        for y in padding + line * height..padding + (line + 1) * height {
+            for x in padding + col * width..padding + (col + 1) * width {
+                let start = ((y * size[0] + x) * 4) as usize;
+                cell.push(&pixels[start..start + 4]);
+            }
+        }
+        cell
+    };
+    // The tick is green.
+    let green = cell(0, 0)
+        .iter()
+        .filter(|pixel| u32::from(pixel[1]) > u32::from(pixel[2]) + 60)
+        .count();
+    assert!(green > 4, "a green tick");
+    // Code is on a background of its own, a cell before it isn't.
+    let corner = |line, col| cell(line, col)[0].to_vec();
+    let background = pixels[..4].to_vec();
+    assert_ne!(corner(1, 10), background, "behind the code");
+    assert_eq!(corner(1, 9), background, "before it");
 }
 
 #[test]

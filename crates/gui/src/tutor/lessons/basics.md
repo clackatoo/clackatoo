@@ -40,7 +40,7 @@ exited 0
 
 Go to normal mode with Ctrl+;. The yellow block is normal mode's own cursor, which moves through the terminal's history and screen as one document, with Vim's keys: `h` `j` `k` `l`, `w` `b`, `gg` `G`, `/` to search.
 
-A count before a motion repeats it, as in Vim: `5k` goes up five lines, `3w` three words, and `10G` to line 10; `3yy` copies three lines.
+A count before a motion repeats it, as in Vim: `5k` goes up five lines, `3w` three words, and `10G` to line 10; `3yy` copies three lines. `v` selects by characters and `V` by lines, as in Vim: a selection by characters lights each line to a cell past its text, which is what `y` copies, and one by lines the pane's whole width.
 
 Move it onto the line that says `hello` with `k`, and copy the line with `yy`. What you copy lights up for a moment, and goes on the clipboard.
 
