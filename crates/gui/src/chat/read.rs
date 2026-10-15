@@ -70,6 +70,12 @@ impl ChatView {
         self.read_prefix.is_some()
     }
 
+    /// Forgets a two-key command half typed, as a binding of the window's
+    /// took the key after it.
+    pub(crate) fn forget_prefix(&mut self) {
+        self.read_prefix = None;
+    }
+
     /// Ends what was half done in reading as the focus leaves the chat: a
     /// visual selection, a two-key command half typed, and an answer
     /// armed. The cursor stays where it is.

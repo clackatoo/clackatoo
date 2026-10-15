@@ -13,14 +13,15 @@ use clackatoo_protocol::{Match, Position, Request};
 use winit::keyboard::{Key, NamedKey};
 
 use super::{Copy, Document, Lines, Mode, Pane, Pending, Prefix, Selection};
+use crate::cmdline::{Keyed, Line};
 use crate::input::KeyPress;
-use crate::motion::{Cursor, Motion, Point};
+use crate::motion::{Cursor, Motion, Point, count_with, multiplied};
 use crate::objects::Object;
 
 /// A search being typed.
 #[derive(Debug)]
 pub(super) struct Prompt {
-    pub(super) query: String,
+    pub(super) line: Line,
     pub(super) backward: bool,
 }
 
@@ -30,17 +31,52 @@ impl Pane {
             return self.prompt_key(press);
         }
         self.status = None;
-        let modifiers = press.modifiers;
-        let after_g = prefix == Some(Prefix::G);
-        let height = self.height();
-        let half = i64::try_from((height / 2).max(1)).unwrap_or(1);
-        let page = i64::try_from(height.max(1)).unwrap_or(1);
         let character = match press.key {
             Key::Character(text) => text.chars().next(),
             _ => None,
         };
-        let ctrl = modifiers.ctrl;
-        if !ctrl && let Some(redraw) = self.second_key(press, character, prefix) {
+        // A count, before a command or after `y`, and just after Ctrl+\
+        // left insert mode too. A 0 that doesn't follow a digit is a
+        // motion, as in Vim.
+        let counts = matches!(
+            prefix,
+            None | Some(Prefix::Y { .. } | Prefix::CtrlBackslash)
+        );
+        if counts
+            && !press.modifiers.ctrl
+            && let Some(digit) = character.and_then(|ch| ch.to_digit(10))
+            && (digit != 0 || self.count.is_some())
+        {
+            self.count = Some(count_with(self.count, digit));
+            // `y` still waits for its motion.
+            self.prefix = prefix.filter(|prefix| matches!(prefix, Prefix::Y { .. }));
+            // Drawn again, for the bar to show the count.
+            return true;
+        }
+        let count = self.count.take();
+        let redraw = self.command_key(press, character, prefix, count);
+        // `3g` keeps its count for `3gg`; `3y` keeps it in its prefix.
+        if self.prefix == Some(Prefix::G) {
+            self.count = count;
+        }
+        redraw
+    }
+
+    /// The key `press`, which types `character` if any, after `prefix`,
+    /// in normal or visual mode, with `count` typed before it.
+    fn command_key(
+        &mut self,
+        press: &KeyPress<'_>,
+        character: Option<char>,
+        prefix: Option<Prefix>,
+        count: Option<usize>,
+    ) -> bool {
+        let after_g = prefix == Some(Prefix::G);
+        let height = self.height();
+        let half = i64::try_from((height / 2).max(1)).unwrap_or(1);
+        let page = i64::try_from(height.max(1)).unwrap_or(1);
+        let ctrl = press.modifiers.ctrl;
+        if !ctrl && let Some(redraw) = self.second_key(press, character, prefix, count) {
             return redraw;
         }
         let visual = matches!(self.mode, Mode::Visual(_));
@@ -51,6 +87,12 @@ impl Pane {
             (_, Some('c')) if ctrl => {
                 self.send_keyed(vec![0x03]);
                 return false;
+            }
+            // Ctrl+V would select a block of columns, as in Vim. Ctrl+Shift+V
+            // pastes, and never comes here.
+            (_, Some('v')) if ctrl => {
+                self.status = Some(super::NO_BLOCK_SELECTION.into());
+                return true;
             }
             (Key::Named(NamedKey::Escape), _) => {
                 if visual {
@@ -91,13 +133,13 @@ impl Pane {
             }
             (_, Some('y')) if visual => return self.yank_selection(),
             (_, Some('y')) => {
-                self.prefix = Some(Prefix::Y);
+                self.prefix = Some(Prefix::Y { times: count });
                 return false;
             }
-            (_, Some('Y')) => return self.yank_line(),
+            (_, Some('Y')) => return self.yank_lines(count.unwrap_or(1)),
             (_, Some(slash @ ('/' | '?'))) => {
                 self.prompt = Some(Prompt {
-                    query: String::new(),
+                    line: Line::default(),
                     backward: slash == '?',
                 });
                 return true;
@@ -115,13 +157,16 @@ impl Pane {
                 self.prefix = Some(Prefix::G);
                 return false;
             }
-            // The top, middle and bottom of the view.
+            // The top, middle and bottom of the view, or with a count, so
+            // many lines from its top or bottom.
             (_, Some(view @ ('H' | 'M' | 'L'))) => {
                 let top = self.view_top();
+                let bottom = top + height.saturating_sub(1);
+                let lines = count.map_or(0, |count| count.saturating_sub(1) as u64);
                 let line = match view {
-                    'H' => top,
+                    'H' => top.saturating_add(lines).min(bottom),
                     'M' => top + height.saturating_sub(1) / 2,
-                    _ => top + height.saturating_sub(1),
+                    _ => bottom.saturating_sub(lines).max(top),
                 };
                 return self.move_to_line(line);
             }
@@ -130,21 +175,22 @@ impl Pane {
                 None => return false,
             },
         };
-        self.move_cursor(motion);
-        true
+        self.move_cursor(motion, count)
     }
 
-    /// The second key of `y`, `i`, `[` and their kin, after `prefix`: none
-    /// if there's no such prefix. A key they don't take cancels them.
+    /// The second key of `y`, `i`, `[` and their kin, after `prefix`, with
+    /// `count` typed after it: none if there's no such prefix. A key they
+    /// don't take cancels them.
     fn second_key(
         &mut self,
         press: &KeyPress<'_>,
         character: Option<char>,
         prefix: Option<Prefix>,
+        count: Option<usize>,
     ) -> Option<bool> {
         Some(match prefix? {
-            Prefix::Y => self.after_y(press, character, false),
-            Prefix::YG => self.after_y(press, character, true),
+            Prefix::Y { times } => self.after_y(press, character, false, multiplied(times, count)),
+            Prefix::YG { times } => self.after_y(press, character, true, times),
             Prefix::Object { inner } => character
                 .and_then(Object::of_key)
                 .is_some_and(|object| self.use_object(object, inner)),
@@ -156,21 +202,30 @@ impl Pane {
         })
     }
 
-    /// The key after `y`, or after `yg` if `after_yg`.
-    fn after_y(&mut self, press: &KeyPress<'_>, character: Option<char>, after_yg: bool) -> bool {
+    /// The key after `y`, or after `yg` if `after_yg`, with `count` typed
+    /// before it or after `y`.
+    fn after_y(
+        &mut self,
+        press: &KeyPress<'_>,
+        character: Option<char>,
+        after_yg: bool,
+        count: Option<usize>,
+    ) -> bool {
         match character {
-            Some('g') if after_yg => self.yank_motion(Motion::First),
+            Some('g') if after_yg => self.yank_motion(Motion::First, count),
             _ if after_yg => false,
-            Some('y') => self.yank_line(),
+            Some('y') => self.yank_lines(count.unwrap_or(1)),
             Some('g') => {
-                self.prefix = Some(Prefix::YG);
+                self.prefix = Some(Prefix::YG { times: count });
                 false
             }
             Some(key @ ('i' | 'a')) => {
                 self.prefix = Some(Prefix::Object { inner: key == 'i' });
                 false
             }
-            _ => motion(press.key, character).is_some_and(|motion| self.yank_motion(motion)),
+            _ => {
+                (motion(press.key, character)).is_some_and(|motion| self.yank_motion(motion, count))
+            }
         }
     }
 
@@ -218,39 +273,35 @@ impl Pane {
         Some((start, end, kind))
     }
 
-    /// A key typed into the search prompt.
+    /// A key typed into the search prompt, edited as the command line is
+    /// (see [`crate::cmdline`]); the desk has Up, Down and a register's
+    /// name after Ctrl+R first.
     fn prompt_key(&mut self, press: &KeyPress<'_>) -> bool {
         let Some(prompt) = &mut self.prompt else {
             return false;
         };
         match press.key {
             Key::Named(NamedKey::Enter) => {
-                let prompt = self.prompt.take().expect("a prompt is open");
-                if !prompt.query.is_empty() {
-                    self.search = Some((prompt.query, prompt.backward));
+                let mut prompt = self.prompt.take().expect("a prompt is open");
+                if !prompt.line.is_empty() {
+                    self.search = Some((prompt.line.take(), prompt.backward));
                     self.search_again(false);
                 }
             }
             Key::Named(NamedKey::Escape) => self.prompt = None,
-            Key::Named(NamedKey::Backspace) => {
-                if prompt.query.pop().is_none() {
-                    self.prompt = None;
-                }
-            }
-            _ if press.modifiers.ctrl => {}
             _ => {
-                if let Some(text) = press.text.or(match press.key {
-                    Key::Character(text) => Some(text.as_str()),
-                    Key::Named(NamedKey::Space) => Some(" "),
-                    _ => None,
-                }) {
-                    prompt
-                        .query
-                        .extend(text.chars().filter(|ch| !ch.is_control()));
+                if prompt.line.key(press) == Keyed::Emptied {
+                    self.prompt = None;
                 }
             }
         }
         true
+    }
+
+    /// The search being typed, for the desk to put a register in, or a
+    /// search typed before.
+    pub(crate) fn search_line(&mut self) -> Option<&mut Line> {
+        self.prompt.as_mut().map(|prompt| &mut prompt.line)
     }
 
     /// Searches for the last query again, the same way or, if `reverse`,
@@ -338,12 +389,15 @@ impl Pane {
         true
     }
 
-    /// `yy`: copies the cursor's line.
-    fn yank_line(&mut self) -> bool {
+    /// `yy` and `Y`: copies the cursor's line, and with a count, as many
+    /// lines from it as there are.
+    fn yank_lines(&mut self, lines: usize) -> bool {
         let Some(cursor) = self.cursor else {
             return false;
         };
-        self.copy(cursor.at, cursor.at, Selection::Lines, Copy::Clipboard);
+        let mut last = cursor;
+        last.repeat(Motion::Down(1), lines.saturating_sub(1), &Document(self));
+        self.copy(cursor.at, last.at, Selection::Lines, Copy::Clipboard);
         true
     }
 
@@ -378,14 +432,17 @@ impl Pane {
         self.cursor = Some(Cursor::new(at));
     }
 
-    /// Moves the normal-mode cursor, and the view to keep it in sight.
-    fn move_cursor(&mut self, motion: Motion) {
+    /// Moves the normal-mode cursor by `motion`, as `count` says (see
+    /// [`counted`]), and the view to keep it in sight. Returns whether
+    /// there's a cursor to move.
+    fn move_cursor(&mut self, motion: Motion, count: Option<usize>) -> bool {
         let Some(mut cursor) = self.cursor.take() else {
-            return;
+            return false;
         };
-        cursor.apply(motion, &Document(self));
+        counted(&mut cursor, motion, count, &Document(self));
         self.cursor = Some(cursor);
         self.follow_cursor();
+        true
     }
 
     /// Moves the cursor up or down to `line`.
@@ -395,9 +452,9 @@ impl Pane {
         };
         let from = cursor.at.line;
         if line < from {
-            self.move_cursor(Motion::Up(from - line));
+            self.move_cursor(Motion::Up(from - line), None);
         } else if line > from {
-            self.move_cursor(Motion::Down(line - from));
+            self.move_cursor(Motion::Down(line - from), None);
         }
         true
     }
@@ -411,7 +468,7 @@ impl Pane {
         } else {
             Motion::Up(lines.unsigned_abs())
         };
-        self.move_cursor(motion);
+        self.move_cursor(motion, None);
         true
     }
 
@@ -462,7 +519,22 @@ impl Pane {
     }
 }
 
-/// The motion a key makes, of those that take one key and no count.
+/// Moves `cursor` by `motion` in `lines`, as `count` says: `G` and `gg`
+/// go to line `count`, and other motions go `count` times.
+pub(super) fn counted(
+    cursor: &mut Cursor,
+    motion: Motion,
+    count: Option<usize>,
+    lines: &impl crate::motion::Lines,
+) {
+    match (motion, count) {
+        (Motion::First | Motion::Last, Some(number)) => cursor.go_to_line_number(number, lines),
+        (motion, count) => cursor.repeat(motion, count.unwrap_or(1), lines),
+    }
+}
+
+/// The motion a key makes, of those that take one key; a count before it
+/// repeats it (see [`counted`]).
 fn motion(key: &Key, character: Option<char>) -> Option<Motion> {
     Some(match (key, character) {
         (Key::Named(NamedKey::ArrowLeft), _) | (_, Some('h')) => Motion::Left,

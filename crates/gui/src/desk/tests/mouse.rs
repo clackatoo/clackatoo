@@ -342,7 +342,7 @@ fn a_selection_from_insert_mode_ended_by_a_command_goes_back_to_insert_mode() {
     press(&mut desk, text_point(0, 1), 2);
     release(&mut desk, text_point(0, 1));
     // As a binding or the config's Lua runs it, with no command line.
-    desk.run(command::parse("s/hello/howdy/").unwrap());
+    desk.run(crate::command::parse("s/hello/howdy/").unwrap());
     assert_eq!(editor_text(&desk), "howdy world!\n");
     assert_eq!(editor_mode(&desk), Mode::Insert);
     assert_eq!(bar_mode(&desk), Some(ModeName::Insert));

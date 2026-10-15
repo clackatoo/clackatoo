@@ -21,6 +21,7 @@ mod boxdraw;
 mod browser;
 mod chat;
 mod chrome;
+mod cmdline;
 mod colors;
 mod command;
 mod connect;
@@ -178,8 +179,9 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         .context("could not open a window")?;
     // The GPU thread has finished without it if this fails.
     let _ = display.send(event_loop.owned_display_handle());
-    // A small file read, and a directory or so looked at.
+    // Two small files read, and a directory or so looked at.
     let tutor = tutor::Start::read(options.remote.is_some() || options.pick_remote);
+    let recall = cmdline::recall::Start::read();
     let location = match options.remote {
         Some(remote) => session::Location::Remote(remote),
         None => session::Location::Local(options.runtime.clone()),
@@ -217,6 +219,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         app.start_lua(start);
     }
     app.start_tutor(tutor);
+    app.start_recall(recall);
     event_loop.run_app(&mut app)?;
     app.result
 }

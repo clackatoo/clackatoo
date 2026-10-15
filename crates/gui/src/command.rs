@@ -55,6 +55,7 @@
 use clackatoo_daemon::forward::Spec;
 use clackatoo_protocol::{ReviewScope, Side};
 
+use crate::cmdline::complete::unescape;
 use crate::editor::HunkAction;
 use crate::finder;
 
@@ -461,7 +462,7 @@ fn file_command(word: &str, argument: Option<&str>) -> Option<Result<Command, St
             argument
                 .map(|path| Command::Edit {
                     place: Place::Here,
-                    path: path.to_owned(),
+                    path: unescape(path),
                 })
                 .ok_or_else(|| {
                     "e needs a file or a folder: :e PATH, or :e . for this one's".to_owned()
@@ -499,7 +500,7 @@ fn agent_undo(word: &str, argument: Option<&str>) -> Option<Result<Command, Stri
 /// `:Explore`, typed as `word`, with `argument`: `!` edits as text.
 fn explore(word: &str, argument: Option<&str>) -> Command {
     Command::Explore {
-        dir: argument.map(str::to_owned),
+        dir: argument.map(unescape),
         edit: word.ends_with('!'),
     }
 }
@@ -532,7 +533,7 @@ fn pane_of(rest: &str, place: Place, argument: Option<&str>) -> Option<Result<Co
         // With no path, the folder the focused pane is in, as `:e .`.
         EDITOR => Ok(Command::Edit {
             place,
-            path: argument.unwrap_or(".").to_owned(),
+            path: unescape(argument.unwrap_or(".")),
         }),
         _ => return None,
     })
@@ -555,6 +556,108 @@ fn review_command(word: &str, argument: Option<&str>) -> Option<Result<Command, 
         _ => return None,
     };
     Some(command.map(Command::Review))
+}
+
+/// Every command's name, in full, for Tab to complete the first word with:
+/// the window's own, Vim's for files and lines, and the kinds of pane.
+/// Short names, such as `se` for `set`, aren't offered, as Vim doesn't
+/// offer them, but are still taken.
+pub(crate) const NAMES: &[&str] = &[
+    "workspace",
+    "rename",
+    "close",
+    "reload",
+    "set",
+    "registers",
+    "marks",
+    "messages",
+    "update",
+    "connect",
+    "quit",
+    "write",
+    "wq",
+    "edit",
+    "substitute",
+    "global",
+    "vglobal",
+    "delete",
+    "yank",
+    "move",
+    "copy",
+    "normal",
+    "Explore",
+    "Tutor",
+    "Devices",
+    "PortForward",
+    "Format",
+    "AgentUndo",
+    "AgentRedo",
+    "Review",
+    "ReviewKeep",
+    "ReviewReject",
+    "ReviewSend",
+    "Blame",
+    "Gitsigns",
+    "Files",
+    "Grep",
+    "Buffers",
+    "Diagnostics",
+    "Boards",
+    "Symbols",
+    "ProjectSymbols",
+    "Terminal",
+    "Agent",
+    EDITOR,
+    BOARD,
+    BROWSER,
+];
+
+/// The kinds of pane, which a split's mark can come before: `|Terminal`.
+pub(crate) const PANES: &[&str] = &["Terminal", "Agent", EDITOR, BOARD, BROWSER];
+
+/// What a command takes after it, for Tab to complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Takes {
+    /// Nothing Tab knows.
+    Nothing,
+    /// A file or a folder.
+    Path,
+    /// Options, as `:set` does.
+    Options,
+    /// A workspace's name.
+    Workspace,
+    /// A lesson's name.
+    Lesson,
+    /// One of these words, first.
+    Words(&'static [&'static str]),
+}
+
+/// What the command `word`, typed first, takes after it, with any mark of
+/// a split before it or `!` after it.
+pub(crate) fn takes(word: &str) -> Takes {
+    // `:e!` throws changes away, and takes nothing.
+    if matches!(word, "e!" | "edit!") {
+        return Takes::Nothing;
+    }
+    let (_, word) = place(word);
+    let word = word.strip_suffix('!').unwrap_or(word);
+    match word {
+        "e" | "edit" | EDITOR | "Explore" | "Ex" => Takes::Path,
+        "set" | "se" => Takes::Options,
+        "workspace" | "ws" => Takes::Workspace,
+        "Tutor" => Takes::Lesson,
+        "Gitsigns" => Takes::Words(&[
+            "preview_hunk",
+            "reset_hunk",
+            "stage_hunk",
+            "next_hunk",
+            "prev_hunk",
+        ]),
+        "Devices" => Takes::Words(&["allow", "deny", "revoke", "unlock"]),
+        "Review" => Takes::Words(&["chat", "turn", "base"]),
+        "ReviewKeep" | "ReviewReject" => Takes::Words(&["file", "turn", "all"]),
+        _ => Takes::Nothing,
+    }
 }
 
 /// What `:Review`'s `argument` asks to review.
@@ -604,6 +707,135 @@ mod tests {
             daemon: daemon.map(str::to_owned),
             agent: None,
         }
+    }
+
+    /// Every word `parse` takes as a command's name, as it spells them,
+    /// with what it's short for, if it's a short name.
+    const PARSED: &[(&str, &str)] = &[
+        ("workspace", ""),
+        ("ws", "workspace"),
+        ("rename", ""),
+        ("close", ""),
+        ("reload", ""),
+        ("set", ""),
+        ("se", "set"),
+        ("registers", ""),
+        ("reg", "registers"),
+        ("display", "registers"),
+        ("di", "registers"),
+        ("marks", ""),
+        ("messages", ""),
+        ("mes", "messages"),
+        ("Explore", ""),
+        ("Ex", "Explore"),
+        ("update", ""),
+        ("connect", ""),
+        ("Tutor", ""),
+        ("Devices", ""),
+        ("PortForward", ""),
+        ("q", "quit"),
+        ("quit", ""),
+        ("w", "write"),
+        ("write", ""),
+        ("wq", ""),
+        ("x", "wq"),
+        ("e", "edit"),
+        ("edit", ""),
+        ("Format", ""),
+        ("AgentUndo", ""),
+        ("AgentRedo", ""),
+        ("Review", ""),
+        ("ReviewSend", ""),
+        ("Blame", ""),
+        ("ReviewKeep", ""),
+        ("ReviewReject", ""),
+        ("Gitsigns", ""),
+        ("Files", ""),
+        ("Grep", ""),
+        ("Buffers", ""),
+        ("Diagnostics", ""),
+        ("Boards", ""),
+        ("Symbols", ""),
+        ("ProjectSymbols", ""),
+        ("Terminal", ""),
+        ("Agent", ""),
+        ("Editor", ""),
+        ("Board", ""),
+        ("Browser", ""),
+        ("substitute", ""),
+        ("global", ""),
+        ("vglobal", ""),
+        ("delete", ""),
+        ("yank", ""),
+        ("move", ""),
+        ("copy", ""),
+        ("normal", ""),
+    ];
+
+    #[test]
+    fn every_command_the_parser_takes_is_offered_by_its_name() {
+        for &(word, short_for) in PARSED {
+            let offered = if short_for.is_empty() {
+                word
+            } else {
+                short_for
+            };
+            assert!(NAMES.contains(&offered), "{word} isn't offered");
+            assert!(
+                !parse(word).is_err_and(|why| why.starts_with("no ")),
+                "{word} isn't parsed"
+            );
+        }
+        // And the other way: nothing is offered that isn't here.
+        for name in NAMES {
+            assert!(PARSED.iter().any(|(word, _)| word == name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_path_with_spaces_written_as_tab_writes_them_is_unescaped() {
+        assert_eq!(
+            parse("e my\\ notes.md").unwrap(),
+            Command::Edit {
+                place: Place::Here,
+                path: "my notes.md".into()
+            }
+        );
+        assert_eq!(
+            parse("Explore a\\ b").unwrap(),
+            Command::Explore {
+                dir: Some("a b".into()),
+                edit: false
+            }
+        );
+    }
+
+    #[test]
+    fn every_name_tab_offers_is_a_command_and_every_word_it_takes_too() {
+        // A name means something, though it may want more after it.
+        let unknown = |line: &str| {
+            parse(line)
+                .is_err_and(|why| why.starts_with("no command") || why.starts_with("no kind"))
+        };
+        for name in NAMES.iter().chain(PANES) {
+            assert!(!unknown(name), "{name}");
+        }
+        for name in NAMES {
+            if let Takes::Words(words) = takes(name) {
+                for word in words {
+                    let line = match *word {
+                        "allow" => format!("{name} allow CODE"),
+                        "revoke" => format!("{name} revoke 1"),
+                        _ => format!("{name} {word}"),
+                    };
+                    assert!(parse(&line).is_ok(), "{line}");
+                }
+            }
+        }
+        assert_eq!(takes("e!"), Takes::Nothing);
+        assert_eq!(takes("|<Editor"), Takes::Path);
+        assert_eq!(takes("Explore!"), Takes::Path);
+        assert_eq!(takes("se"), Takes::Options);
     }
 
     #[test]

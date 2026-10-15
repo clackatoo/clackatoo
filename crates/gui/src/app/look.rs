@@ -215,6 +215,7 @@ impl Window {
         let font = start.font_options();
         app.start_options(start, Vec::new());
         app.start_tutor(tutor);
+        app.start_recall(crate::cmdline::recall::Start::read());
         // As the window opens: fonts loaded at a pixel a point, then
         // scaled to the screen's.
         let desktop = crate::desktop::Desktop::read();

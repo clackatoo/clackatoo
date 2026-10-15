@@ -289,11 +289,13 @@ pub(crate) struct Item<T> {
 pub(crate) enum Status {
     /// Something being typed, such as a command or a search, in the
     /// palette, perhaps after a label saying what it's for, and with
-    /// choices listed under it, one of them picked.
+    /// choices listed under it, one of them picked; and what the bottom
+    /// bar shows meanwhile, if anything: the tabs, and the mode.
     Typing {
         label: Option<String>,
         text: String,
         choices: Vec<(String, bool)>,
+        under: Option<Box<Status>>,
     },
     /// The focused pane's mode, the tabs, and on the right a note (how far
     /// the view is scrolled, or a message), what kind of note it is, how
@@ -307,6 +309,17 @@ pub(crate) enum Status {
 }
 
 impl Status {
+    /// What the bottom bar shows: what's under what's typed, if anything,
+    /// or else this.
+    pub(crate) fn bar(&self) -> &Self {
+        match self {
+            Self::Typing {
+                under: Some(under), ..
+            } => under,
+            status => status,
+        }
+    }
+
     /// The tabs, with nothing else to say.
     #[cfg(test)]
     pub(crate) fn tabs() -> Self {
@@ -581,7 +594,7 @@ impl Chrome {
             buttons,
             tabs: bottom.tabs,
             notice: matches!(
-                status,
+                status.bar(),
                 Status::Tabs {
                     kind: NoteKind::Warning { notice: true },
                     ..
@@ -887,6 +900,7 @@ impl Chrome {
                 label,
                 text,
                 choices,
+                ..
             },
         ) = (self.palette, &self.status)
         {
@@ -1102,7 +1116,8 @@ const NOTE_ROOM: (f32, f32, f32) = (16.0, 0.25, 48.0);
 /// Lays out the bottom bar, as `status` has it, in the terminal's font, a
 /// cell per character: the mode at its left, then the `tabs`, scrolled
 /// from `scroll`, and if `shown`, a `+`, and at its right the note, how
-/// many panes the tab has, and a hint. Nothing, while something's typed.
+/// many panes the tab has, and a hint. While something's typed, what's
+/// under it, if anything.
 ///
 /// The tabs come first, with all the bar if they need it. When there are
 /// more than fit, their strip ends short of the bar's end, keeping room for
@@ -1120,12 +1135,15 @@ fn lay_out_bottom(
     shown: bool,
     scroll: Scroll,
 ) -> Bottom {
+    // While something's typed, the mode's hint, of how to type, says
+    // nothing new.
+    let typing = matches!(status, Status::Typing { .. });
     let &Status::Tabs {
         mode,
         ref note,
         kind,
         panes,
-    } = status
+    } = status.bar()
     else {
         return Bottom {
             scroll,
@@ -1156,7 +1174,7 @@ fn lay_out_bottom(
         1 => Some("1 pane".to_owned()),
         panes => Some(format!("{panes} panes")),
     };
-    let hint = mode.map(|(mode, _)| mode.hint().to_owned());
+    let hint = (mode.filter(|_| !typing)).map(|(mode, _)| mode.hint().to_owned());
     let tabs_start = mode.map_or(0.0, |(_, rect)| rect.x + rect.width);
     let right = bottom.width - 3.0 * padding;
     let gap = 4.0 * padding;
@@ -2417,6 +2435,7 @@ mod tests {
                 label: None,
                 text: ":|Terminal".into(),
                 choices: Vec::new(),
+                under: None,
             },
             &ButtonLayout::default(),
         );
@@ -2424,6 +2443,38 @@ mod tests {
         let palette = chrome.palette.expect("a palette");
         assert_eq!(palette.x + palette.width / 2.0, 400.0);
         assert_eq!(palette.y + palette.height / 2.0, 300.0);
+    }
+
+    #[test]
+    fn under_what_is_typed_the_bar_keeps_the_tabs_and_a_notice_but_no_hint() {
+        let under = |kind| {
+            Some(Box::new(Status::Tabs {
+                mode: Some(ModeName::Normal),
+                note: Some("gone wrong".into()),
+                kind,
+                panes: 1,
+            }))
+        };
+        let typing = |kind| Status::Typing {
+            label: None,
+            text: ":".into(),
+            choices: Vec::new(),
+            under: under(kind),
+        };
+        let typed = chrome(typing(NoteKind::Label), &ButtonLayout::default());
+        assert_eq!(typed.tabs.len(), 2);
+        assert!(typed.mode.is_some());
+        let notes: Vec<&str> = typed.notes.iter().map(|note| note.text.as_str()).collect();
+        assert!(!notes.contains(&": command"), "{notes:?}");
+        let warned = chrome(
+            typing(NoteKind::Warning { notice: true }),
+            &ButtonLayout::default(),
+        );
+        assert!(warned.notice);
+        // With nothing typed, the hint is there.
+        let tabs = chrome(*under(NoteKind::Label).unwrap(), &ButtonLayout::default());
+        let notes: Vec<&str> = tabs.notes.iter().map(|note| note.text.as_str()).collect();
+        assert!(notes.contains(&": command"), "{notes:?}");
     }
 
     /// A message longer than any window is wide.

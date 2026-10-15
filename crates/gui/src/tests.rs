@@ -627,6 +627,7 @@ fn the_palette_is_drawn_over_the_panes() {
                 ("dotfiles".into(), true),
                 ("homelab".into(), false),
             ],
+            under: None,
         },
         None,
         None,

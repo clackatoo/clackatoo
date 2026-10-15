@@ -241,11 +241,7 @@ impl Desk {
         at: Option<(clackatoo_protocol::BufferId, u64, usize)>,
     ) {
         let place = CommentPlace { path, line, at };
-        self.input = Some(Input {
-            purpose: Purpose::Comment { chat, place },
-            text: String::new(),
-            selected: 0,
-        });
+        self.input = Some(Input::new(Purpose::Comment { chat, place }, ""));
     }
 
     /// Enter in the palette for a comment: it's sent to the daemon, to go

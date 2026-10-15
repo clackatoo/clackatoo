@@ -291,6 +291,28 @@ pub(crate) fn rows_up(from: RowAt, mut n: u64, first: u64, lines: &impl Lines) -
     }
 }
 
+/// The biggest count a command takes: more digits than this are kept to
+/// it, as Vim keeps them, so no count overflows or takes long to repeat.
+pub(crate) const MOST_COUNT: usize = 99_999_999;
+
+/// `count`, with `digit` typed after it, kept to [`MOST_COUNT`].
+pub(crate) fn count_with(count: Option<usize>, digit: u32) -> usize {
+    (count.unwrap_or(0).saturating_mul(10))
+        .saturating_add(digit as usize)
+        .min(MOST_COUNT)
+}
+
+/// Two counts, one multiplying the other, as in `2d3w`, kept to
+/// [`MOST_COUNT`].
+pub(crate) fn multiplied(first: Option<usize>, second: Option<usize>) -> Option<usize> {
+    match (first, second) {
+        (None, None) => None,
+        (first, second) => {
+            Some((first.unwrap_or(1).saturating_mul(second.unwrap_or(1))).min(MOST_COUNT))
+        }
+    }
+}
+
 /// A way to move the cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Motion {
@@ -531,6 +553,44 @@ impl Cursor {
                 self.want = self.at.col;
             }
         }
+    }
+
+    /// Moves by `motion` `times` times, as a count before it asks (`5k`,
+    /// `3w`, `2}`): up and down that many lines, or rows, at once, and
+    /// anything else again and again. `G` and `gg` with a count go to a
+    /// line instead (see [`go_to_line_number`](Self::go_to_line_number)).
+    pub(crate) fn repeat(&mut self, motion: Motion, times: usize, lines: &impl Lines) {
+        let n = times as u64;
+        match motion {
+            Motion::Up(_) => self.apply(Motion::Up(n), lines),
+            Motion::Down(_) => self.apply(Motion::Down(n), lines),
+            Motion::RowUp(_) => self.apply(Motion::RowUp(n), lines),
+            Motion::RowDown(_) => self.apply(Motion::RowDown(n), lines),
+            // Until it goes nowhere, so a count bigger than the text is
+            // quick.
+            _ => {
+                for _ in 0..times {
+                    let from = self.at;
+                    self.apply(motion, lines);
+                    if self.at == from {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Moves to line `number`, counting the first of `lines` as 1, or to
+    /// the last if there aren't so many, at its first character that isn't
+    /// blank: `10G` and `10gg`, as Vim's.
+    pub(crate) fn go_to_line_number(&mut self, number: usize, lines: &impl Lines) {
+        let (first, last) = lines.bounds();
+        let line = first.saturating_add((number as u64).saturating_sub(1));
+        *self = Self::new(Point {
+            line: line.min(last),
+            col: 0,
+        });
+        self.apply(Motion::FirstNonBlank, lines);
     }
 
     /// Moves to screen row `to`, as `gj` and `gk` do: as far from its left
@@ -846,7 +906,12 @@ fn paragraph_end(line: u64, forward: bool, lines: &impl Lines) -> u64 {
         }
     };
     let mut line = line;
-    while let Some(next) = step(line).filter(|&next| blank(next)) {
+    // From a blank line, past the blank lines first. From a paragraph's
+    // line, the blank line just after it is where it goes, even after a
+    // paragraph of one line.
+    while blank(line)
+        && let Some(next) = step(line)
+    {
         line = next;
     }
     while let Some(next) = step(line) {
@@ -1063,6 +1128,48 @@ pub(crate) mod tests {
         // ");" is one run of punctuation, so one word.
         assert_eq!(moved(&text, at(1, 2), &[Motion::WordBack]), at(0, 15));
         assert_eq!(moved(&text, at(0, 10), &[Motion::WordBack]), at(0, 8));
+    }
+
+    #[test]
+    fn a_count_repeats_a_motion_or_picks_a_line() {
+        let text = Text::new(&["one two", "", "  three", "four", "", "five"]);
+        let repeated = |motion, times, from| {
+            let mut cursor = Cursor::new(from);
+            cursor.repeat(motion, times, &text);
+            cursor.at
+        };
+        assert_eq!(repeated(Motion::Down(1), 3, at(0, 0)), at(3, 0));
+        assert_eq!(repeated(Motion::Up(1), 9, at(3, 0)), at(0, 0));
+        assert_eq!(repeated(Motion::WordStart, 2, at(2, 2)), at(5, 0));
+        let forward = Motion::Paragraph { forward: true };
+        assert_eq!(repeated(forward, 2, at(0, 0)), at(4, 0));
+        let mut cursor = Cursor::new(at(0, 4));
+        cursor.go_to_line_number(3, &text);
+        assert_eq!(cursor.at, at(2, 2), "at its first character");
+        cursor.go_to_line_number(99, &text);
+        assert_eq!(cursor.at, at(5, 0), "or the last line");
+    }
+
+    #[test]
+    fn a_huge_count_stops_where_the_text_does_and_counts_are_kept_small() {
+        let text = Text::new(&["one two", "three"]);
+        let mut cursor = Cursor::new(at(0, 0));
+        // Quick, as it stops once it goes nowhere.
+        cursor.repeat(Motion::WordStart, usize::MAX, &text);
+        assert_eq!(cursor.at.line, 1);
+        cursor.go_to_line_number(usize::MAX, &text);
+        assert_eq!(cursor.at, at(1, 0));
+        let mut count = None;
+        for _ in 0..30 {
+            count = Some(count_with(count, 9));
+        }
+        assert_eq!(count, Some(MOST_COUNT));
+        assert_eq!(
+            multiplied(Some(MOST_COUNT), Some(MOST_COUNT)),
+            Some(MOST_COUNT)
+        );
+        assert_eq!(multiplied(None, Some(3)), Some(3));
+        assert_eq!(multiplied(None, None), None);
     }
 
     #[test]

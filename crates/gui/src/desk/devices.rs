@@ -58,6 +58,7 @@ impl Desk {
             label: None,
             text,
             choices: Vec::new(),
+            under: None,
         })
     }
 

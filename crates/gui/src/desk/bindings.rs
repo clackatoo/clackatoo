@@ -50,8 +50,9 @@ use crate::finder;
 use crate::keymap::{KeyMode, Keymap, parse_keys, parse_modes};
 use crate::layout::Direction;
 
-/// How many workspaces the picker lists.
-const CHOICES: usize = 8;
+/// How many choices the palette lists at once: workspaces, or what Tab
+/// could complete a word with.
+pub(super) const CHOICES: usize = 8;
 
 /// What a key can be bound to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -370,16 +371,18 @@ impl Desk {
     }
 
     fn open_palette(&mut self, purpose: Purpose) {
-        // From a selection in an editor, a command starts with its lines.
-        let text = match &purpose {
-            Purpose::Command => self.editor_command_line(),
+        // From a selection in an editor, a command starts with its lines;
+        // after a count, with as many from the cursor's, as Vim's `5:`
+        // starts `:.,.+4`.
+        let text = match (&purpose, self.bound_count.take()) {
+            (Purpose::Command, Some(count)) if self.focused_editor().is_some() => match count {
+                1 => ".".to_owned(),
+                count => format!(".,.+{}", count - 1),
+            },
+            (Purpose::Command, _) => self.editor_command_line(),
             _ => String::new(),
         };
-        self.input = Some(Input {
-            purpose,
-            text,
-            selected: 0,
-        });
+        self.input = Some(Input::new(purpose, text));
     }
 
     /// Whether the focused pane has a command half typed, which the next
@@ -400,6 +403,31 @@ impl Desk {
         (self.focused_terminal())
             .and_then(|terminal| self.panes.get(&terminal))
             .is_some_and(crate::pane::Pane::pending)
+    }
+
+    /// The count typed in the focused editor or terminal, if that's all
+    /// that's waiting there: the next key is looked up in the bindings, as
+    /// `5:` opens the command line.
+    pub(super) fn pane_counting(&self) -> Option<usize> {
+        if let Some((editor, _)) = self.focused_editor() {
+            return editor.counting();
+        }
+        (self.focused_terminal())
+            .and_then(|terminal| self.panes.get(&terminal))
+            .and_then(crate::pane::Pane::counting)
+    }
+
+    /// Takes a count typed in the focused editor or terminal, as one of
+    /// the bindings took the key after it, for the binding to use.
+    pub(super) fn take_pane_count(&mut self) -> Option<usize> {
+        let count = self.pane_counting()?;
+        if let Some(shown) = self.shown {
+            self.forget_typed_in(shown.pane);
+        }
+        if let Some(pane) = self.focused_pane() {
+            pane.forget_count();
+        }
+        Some(count)
     }
 
     /// The mode bindings are looked up in: the focused pane's.

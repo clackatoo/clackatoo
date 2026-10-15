@@ -40,6 +40,8 @@ exited 0
 
 Go to normal mode with Ctrl+;. The yellow block is normal mode's own cursor, which moves through the terminal's history and screen as one document, with Vim's keys: `h` `j` `k` `l`, `w` `b`, `gg` `G`, `/` to search.
 
+A count before a motion repeats it, as in Vim: `5k` goes up five lines, `3w` three words, and `10G` to line 10; `3yy` copies three lines.
+
 Move it onto the line that says `hello` with `k`, and copy the line with `yy`. What you copy lights up for a moment, and goes on the clipboard.
 
 ```check
@@ -84,6 +86,26 @@ Close the new one, not the practice terminal: closing that ends the lesson.
 
 ```check
 panes 2
+```
+
+## Complete with Tab
+
+On the command line, Tab completes the word before the caret, as in Vim: a command's name, an option after `:set`, a file or folder after `:e`, a lesson after `:Tutor`. With more than one choice, they're listed under the line, and Tab and Shift+Tab go through them.
+
+Type `:set norel`, press Tab to make it `:set norelativenumber`, and press Enter: editors number their lines from the top now, not from the cursor.
+
+```check
+option norelativenumber
+```
+
+## Go back with Up
+
+Up and Down go back through the commands you've typed, in this window and others, keeping to those that start with what's typed. Ctrl+W deletes the word before the caret, and Ctrl+U everything before it; Home, End and the arrows move about, and Ctrl+R and a register puts in what it holds.
+
+Type `:set`, press Up for the command you just ran, press Ctrl+W to delete its option, then type `rnu` and press Enter, to put the numbers back as they were.
+
+```check
+option relativenumber
 ```
 
 ## Open a tab

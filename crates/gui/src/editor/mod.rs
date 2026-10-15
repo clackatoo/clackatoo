@@ -102,6 +102,7 @@ pub(crate) use uses::USES_WAIT;
 use visual::Again;
 use wrap::{Placed, Shown, Top, Wrapping};
 
+use crate::cmdline::{Keyed, Line, recall};
 use crate::colors;
 use crate::input::KeyPress;
 use crate::keymap::Chord;
@@ -111,7 +112,7 @@ use crate::motion::{
 };
 use crate::objects::Object;
 use crate::options::{Case, CompleteAccept, Options};
-use crate::pane::{Mode, Selection, enters_normal_mode};
+use crate::pane::{Mode, NO_BLOCK_SELECTION, Selection, enters_normal_mode};
 use crate::render::{CursorStyle, Highlight, HighlightKind, SceneCursor};
 
 /// How long text copied stays highlighted, as in a terminal's normal mode.
@@ -131,6 +132,9 @@ const MAX_INDENT: usize = 1000;
 
 /// What the bar says when there are no hunks to go to...
 const NO_CHANGES: &str = "nothing's changed since git's index";
+
+/// The most undos or redos one count makes, as Vim's `undolevels` keeps.
+const MOST_UNDOS: usize = 1000;
 
 /// ...and when there's none at the cursor's line.
 const NO_CHANGE_HERE: &str = "nothing's changed here since git's index";
@@ -354,9 +358,9 @@ struct Requested {
 #[derive(Debug)]
 enum Prompt {
     /// A search, backward if `backward`.
-    Search { query: String, backward: bool },
+    Search { line: Line, backward: bool },
     /// A new name for what's under the cursor, which was `was`.
-    Rename { name: String, was: String },
+    Rename { name: Line, was: String },
     /// Whether to replace each match of `:s///c`, in turn.
     Confirm(ex::Confirming),
 }
@@ -365,7 +369,7 @@ impl Prompt {
     /// A search being started, backward if `backward`.
     fn search(backward: bool) -> Self {
         Self::Search {
-            query: String::new(),
+            line: Line::default(),
             backward,
         }
     }
@@ -789,6 +793,22 @@ impl Editor {
         !self.typed.is_empty()
     }
 
+    /// The count typed, if that's all of a command that's been typed: a
+    /// key the editor doesn't take after it is the window's, as `:`.
+    pub(crate) fn counting(&self) -> Option<usize> {
+        let mut count = None;
+        for stroke in &self.typed {
+            let Stroke::Char { ch, ctrl: false } = stroke else {
+                return None;
+            };
+            let digit = ch
+                .to_digit(10)
+                .filter(|&digit| digit > 0 || count.is_some())?;
+            count = Some(crate::motion::count_with(count, digit));
+        }
+        count
+    }
+
     /// The keys of the command half typed, as `g` waiting for its second.
     pub(crate) fn typed_so_far(&self) -> &[Stroke] {
         &self.typed
@@ -959,10 +979,10 @@ impl Editor {
     /// the file and where the cursor is in it.
     pub(crate) fn label(&self, copy: &BufferCopy) -> String {
         match &self.prompt {
-            Some(Prompt::Search { query, backward }) => {
-                return format!("{}{query}▏", if *backward { '?' } else { '/' });
+            Some(Prompt::Search { line, backward }) => {
+                return format!("{}{}", if *backward { '?' } else { '/' }, line.shown());
             }
-            Some(Prompt::Rename { name, .. }) => return format!("rename to: {name}▏"),
+            Some(Prompt::Rename { name, .. }) => return format!("rename to: {}", name.shown()),
             Some(Prompt::Confirm(confirming)) => return confirming.question(),
             None => {}
         }
@@ -971,7 +991,11 @@ impl Editor {
         }
         let modified = if copy.modified() { " [+]" } else { "" };
         let at = self.cursor.at;
-        let label = format!("{}{modified}  {}:{}", copy.name(), at.line + 1, at.col + 1);
+        let mut label = format!("{}{modified}  {}:{}", copy.name(), at.line + 1, at.col + 1);
+        // A count waiting for its command shows first, as Vim's `showcmd`.
+        if let Some(count) = self.counting() {
+            label = format!("{count}  {label}");
+        }
         match self.diagnostic_here(copy) {
             Some(diagnostic) => format!("{label}  {}", diagnostic.described()),
             None => label,
@@ -1126,6 +1150,11 @@ impl Editor {
 
     /// Puts `text` in at the cursor, as typed in insert mode.
     pub(crate) fn paste(&mut self, text: &str, copy: &mut BufferCopy) {
+        // Into a search or a name being typed, if one is.
+        if let Some((line, _)) = self.prompt_line() {
+            line.put(text);
+            return;
+        }
         self.panel = None;
         self.actions = None;
         self.close_completion();
@@ -1381,6 +1410,8 @@ impl Editor {
         self.typed.push(stroke);
         let visual = matches!(self.mode, Mode::Visual(_));
         match keys::parse_with(&self.typed, visual, self.tildeop) {
+            // A count is drawn in the bar while it waits.
+            Parsed::Incomplete if self.counting().is_some() => Done::REDRAW,
             Parsed::Incomplete => Done::default(),
             Parsed::Nothing => {
                 self.typed.clear();
@@ -1438,13 +1469,16 @@ impl Editor {
             Action::Replace(ch) if visual => self.replace_selection(ch, copy),
             Action::Replace(ch) => self.replace_chars(ch, times, copy),
             Action::Insert(entry) => self.insert(entry, times, copy),
+            // No more steps than Vim's `undolevels` keeps, so a huge
+            // count doesn't queue millions.
             Action::Undo | Action::Redo => {
-                for _ in 0..times {
+                for _ in 0..times.min(MOST_UNDOS) {
                     copy.reverse(command.action == Action::Undo);
                 }
             }
             Action::Repeat => return self.repeat(command.count, copy, shared),
             Action::Visual { lines } => self.visual(lines),
+            Action::BlockVisual => self.status = Some(NO_BLOCK_SELECTION.into()),
             Action::Search { backward } => self.prompt = Some(Prompt::search(backward)),
             Action::SearchAgain { reverse } => self.search_again(reverse, copy, shared),
             Action::SearchWord { backward } => self.search_word(backward, copy, shared),
@@ -1727,11 +1761,7 @@ impl Editor {
                     cursor = Cursor::new(Point { line, col });
                 }
             }
-            _ => {
-                for _ in 0..times {
-                    cursor.apply(motion, &text);
-                }
-            }
+            _ => cursor.repeat(motion, times, &text),
         }
         cursor
     }
@@ -2093,11 +2123,7 @@ impl Editor {
                     next.apply(Motion::Right, &text);
                     let at_end = next.at == at || class(next.at.col) != class(at.col);
                     let mut cursor = self.cursor;
-                    for time in 0..times {
-                        if time > 0 || !at_end {
-                            cursor.apply(end, &text);
-                        }
-                    }
+                    cursor.repeat(end, times - usize::from(at_end), &text);
                     return Some(chars(at, cursor.at));
                 }
                 let moved = self.moved(copy, motion, times);
@@ -3242,33 +3268,31 @@ impl Editor {
         self.anchor = None;
     }
 
-    /// A key typed into the bar: a search's, or a new name's. Ctrl+U
-    /// clears it, as in Vim's command line.
+    /// The search or the new name being typed in the bar, if one is, and
+    /// for a search, the lines typed before that Up and Down go through.
+    pub(crate) fn prompt_line(&mut self) -> Option<(&mut Line, Option<recall::Kind>)> {
+        match &mut self.prompt {
+            Some(Prompt::Search { line, .. }) => Some((line, Some(recall::Kind::Search))),
+            Some(Prompt::Rename { name, .. }) => Some((name, None)),
+            Some(Prompt::Confirm(_)) | None => None,
+        }
+    }
+
+    /// A key typed into the bar: a search's, or a new name's, edited as
+    /// the command line is (see [`crate::cmdline`]).
     fn prompt_stroke(&mut self, stroke: Stroke, copy: &mut BufferCopy, shared: &Shared) -> Done {
-        let Some(prompt) = &mut self.prompt else {
+        if let Some(Prompt::Confirm(_)) = self.prompt {
+            self.confirm_stroke(stroke, copy);
+            return Done::REDRAW;
+        }
+        let Some((typed, _)) = self.prompt_line() else {
             return Done::default();
-        };
-        let typed = match prompt {
-            Prompt::Search { query, .. } => query,
-            Prompt::Rename { name, .. } => name,
-            Prompt::Confirm(_) => {
-                self.confirm_stroke(stroke, copy);
-                return Done::REDRAW;
-            }
         };
         match stroke {
             Stroke::Escape => self.prompt = None,
-            Stroke::Backspace => {
-                if typed.pop().is_none() {
-                    self.prompt = None;
-                }
-            }
-            Stroke::Char {
-                ch: 'u',
-                ctrl: true,
-            } => typed.clear(),
             Stroke::Enter => match self.prompt.take() {
-                Some(Prompt::Search { query, backward }) => {
+                Some(Prompt::Search { mut line, backward }) => {
+                    let query = line.take();
                     // Empty, it's the last search again, this way.
                     if !query.is_empty() {
                         self.search = Some(Searched {
@@ -3285,11 +3309,14 @@ impl Editor {
                         self.left_from(from, copy);
                     }
                 }
-                Some(Prompt::Rename { name, was }) => self.rename(name, &was, copy),
+                Some(Prompt::Rename { mut name, was }) => self.rename(name.take(), &was, copy),
                 Some(Prompt::Confirm(_)) | None => {}
             },
-            Stroke::Char { ch, ctrl: false } => typed.push(ch),
-            _ => {}
+            stroke => {
+                if typed.stroke(stroke) == Keyed::Emptied {
+                    self.prompt = None;
+                }
+            }
         }
         Done::REDRAW
     }
@@ -3394,7 +3421,7 @@ impl Editor {
             text.slice(start, end)
         });
         self.prompt = Some(Prompt::Rename {
-            name: was.clone(),
+            name: Line::new(was.clone()),
             was,
         });
     }
@@ -3485,16 +3512,29 @@ impl Editor {
     /// `*`, or `#` if `backward`: searches for the word under the cursor,
     /// as a whole word, and goes to the next place it is, or the one
     /// before, going round the file's ends.
-    fn search_word(&mut self, backward: bool, copy: &BufferCopy, shared: &Shared) {
-        let text = self.text(copy);
-        // The word under the cursor, or the next on its line, as Vim's.
+    /// Where the word under the cursor starts and ends in `text`, or the
+    /// next on its line, as Vim's `*` finds it.
+    fn word_here(&self, text: &Text<'_>) -> Option<(usize, usize)> {
         let here = text.byte_at(self.cursor.at);
         let line_end = text.line_end(self.cursor.at.line);
         let words = text.words();
         let next = (text.slice(here, line_end).char_indices())
             .find(|&(_, ch)| words.is_word(ch))
             .map(|(at, _)| here + at);
-        let Some((start, end)) = next.map(|at| word_at(&text, at)) else {
+        next.map(|at| word_at(text, at))
+    }
+
+    /// The word under the cursor, or the next on its line, as Ctrl+R
+    /// Ctrl+W puts it in the command line.
+    pub(crate) fn word_under_cursor(&self, copy: &BufferCopy) -> Option<String> {
+        let text = self.text(copy);
+        let (start, end) = self.word_here(&text)?;
+        Some(text.slice(start, end))
+    }
+
+    fn search_word(&mut self, backward: bool, copy: &BufferCopy, shared: &Shared) {
+        let text = self.text(copy);
+        let Some((start, end)) = self.word_here(&text) else {
             self.status = Some("no word under the cursor".into());
             self.fail();
             return;

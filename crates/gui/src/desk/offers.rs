@@ -122,6 +122,7 @@ impl Desk {
             label: None,
             text: format!("Install {}? [Y/n]", offer.what()),
             choices: Vec::new(),
+            under: None,
         })
     }
 

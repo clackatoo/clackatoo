@@ -11,7 +11,7 @@ use clackatoo_protocol::{Construct, Query};
 
 use super::case::Recase;
 use crate::keymap::{Base, Chord, Named};
-use crate::motion::Motion;
+use crate::motion::{Motion, count_with, multiplied};
 use crate::objects::Object;
 
 /// One key, as an editor reads it.
@@ -279,6 +279,9 @@ pub(crate) enum Action {
     Visual {
         lines: bool,
     },
+    /// Ctrl+V, which would select a block of columns, as Vim's does, and
+    /// says it can't yet.
+    BlockVisual,
     /// `/`, or `?` if `backward`.
     Search {
         backward: bool,
@@ -525,6 +528,10 @@ pub(crate) fn parse_with(keys: &[Stroke], visual: bool, tildeop: bool) -> Parsed
             ch: 'r',
             ctrl: true,
         } => Action::Redo,
+        Stroke::Char {
+            ch: 'v',
+            ctrl: true,
+        } => Action::BlockVisual,
         // Ctrl+W `d`, or Ctrl+W Ctrl+D, as Neovim's.
         Stroke::Char {
             ch: 'w',
@@ -557,10 +564,7 @@ enum Read<T> {
 
 /// Two counts, one multiplying the other, as in `2d3w`.
 fn times(first: Option<usize>, second: Option<usize>) -> Option<usize> {
-    match (first, second) {
-        (None, None) => None,
-        (a, b) => Some(a.unwrap_or(1).saturating_mul(b.unwrap_or(1))),
-    }
+    multiplied(first, second)
 }
 
 struct Reader<'a> {
@@ -748,12 +752,7 @@ impl Reader<'_> {
             if digit == 0 && count.is_none() {
                 break;
             }
-            count = Some(
-                count
-                    .unwrap_or(0)
-                    .saturating_mul(10)
-                    .saturating_add(digit as usize),
-            );
+            count = Some(count_with(count, digit));
             self.at += 1;
         }
         count
@@ -936,6 +935,19 @@ mod tests {
         assert_eq!(read("1"), Parsed::Incomplete);
         assert_eq!(read("0"), command(None, Action::Move(Motion::LineStart)));
         assert_eq!(read("10G"), command(Some(10), Action::GoToLine));
+        // A count too big is kept to the most there is.
+        let most = Some(crate::motion::MOST_COUNT);
+        assert_eq!(
+            read("999999999999999999999999j"),
+            command(most, Action::Move(Motion::Down(1)))
+        );
+        assert_eq!(
+            read("99999999d99999999w"),
+            command(
+                most,
+                Action::Operate(Operator::Delete, Target::Motion(Motion::WordStart))
+            )
+        );
         assert_eq!(read("G"), command(None, Action::Move(Motion::Last)));
         assert_eq!(read("g"), Parsed::Incomplete);
         assert_eq!(read("gg"), command(None, Action::Move(Motion::First)));

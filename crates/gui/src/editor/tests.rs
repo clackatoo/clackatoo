@@ -1532,6 +1532,31 @@ fn braces_go_to_the_blank_lines_round_paragraphs() {
     // with an operator deletes to the blank line.
     setup.keys("d}");
     assert_eq!(setup.text(), "\nc\nd\n\ne\n");
+    // A paragraph of one line goes to the blank line just after it, as
+    // Vim's does, and a count goes on.
+    let mut short = Setup::new("a\n\nb\n\nc\n");
+    short.keys("}");
+    assert_eq!(short.cursor(), (1, 0));
+    short.keys("gg2}");
+    assert_eq!(short.cursor(), (3, 0));
+}
+
+#[test]
+fn ctrl_v_says_block_selection_isnt_here_yet() {
+    let mut setup = Setup::new("one\ntwo\n");
+    setup.keys("<C-v>");
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some(crate::pane::NO_BLOCK_SELECTION)
+    );
+    assert_eq!(setup.editor.mode, Mode::Normal);
+    // In visual mode too, which goes on.
+    setup.keys("vl<C-v>");
+    assert!(matches!(setup.editor.mode, Mode::Visual(_)));
+    assert_eq!(
+        setup.editor.status.as_deref(),
+        Some(crate::pane::NO_BLOCK_SELECTION)
+    );
 }
 
 #[test]

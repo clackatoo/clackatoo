@@ -29,6 +29,7 @@ use winit::window::{
 use crate::GraphicsApi;
 use crate::chat::{ChatPaint, Pointer};
 use crate::chrome::{self, Chrome, Contents, Geometry, Hit, Metrics, NoteKind, Scrolls, Status};
+use crate::cmdline::CARET;
 use crate::command::Forwarding;
 use crate::connect::{self, HostPicker, Purpose};
 use crate::desk::{Desk, TextTarget};
@@ -459,6 +460,8 @@ pub(crate) struct App {
     updates: updates::Known,
     /// The picker of a machine to connect to, while it's open.
     picker: Option<HostPicker>,
+    /// Writes the commands and searches run, for windows opened later.
+    recall_writer: crate::cmdline::recall::Writer,
     /// How many pickers have opened, which numbers each.
     pickers: u64,
     /// The machine picked for this window, until it's connected to.
@@ -520,6 +523,7 @@ impl App {
             composing_in_chat: false,
             updates: updates::Known::new(),
             picker: None,
+            recall_writer: crate::cmdline::recall::Writer::default(),
             pickers: 0,
             picked: None,
             remote_command,
@@ -1172,6 +1176,11 @@ impl App {
         self.desk.start_tutor(start);
     }
 
+    /// Starts with the commands and searches typed before.
+    pub(crate) fn start_recall(&mut self, start: crate::cmdline::recall::Start) {
+        self.desk.start_recall(start);
+    }
+
     /// Sends what the desk has for the daemon, and tells the config's Lua
     /// what's changed.
     fn send_outbox(&mut self) {
@@ -1193,6 +1202,16 @@ impl App {
         // a few small files in the scratch directory.
         for io in self.desk.take_tutor_io() {
             io.run();
+        }
+        // Commands and searches run, for windows opened later.
+        if let Some(save) = self.desk.take_recall_save() {
+            self.recall_writer.send(save);
+        }
+        // Folders to list for Tab, each on a thread, handed back as an
+        // event.
+        for listing in self.desk.take_listings() {
+            let proxy = self.session.proxy();
+            listing.spawn(move |listed| drop(proxy.send_event(SessionEvent::Listed(listed))));
         }
         let messages = self.desk.take_outbox();
         let Some(sender) = &mut self.sender else {
@@ -2278,9 +2297,6 @@ fn compose(
     (Some(area), composed)
 }
 
-/// The caret at the end of what's typed in the bottom bar.
-const CARET: char = '▏';
-
 /// While the bottom bar is typed in: where the input method's choices go,
 /// at its caret, or where `preedit`, the text it's composing, starts, and
 /// a line under that text, which the bar's text holds already. The text
@@ -2697,6 +2713,9 @@ impl ApplicationHandler<SessionEvent> for App {
         // A lesson goes with the window, and its scratch files with it.
         self.desk.tutor_exiting();
         self.send_outbox();
+        // The last command run is kept, unless the disk is very slow.
+        self.recall_writer
+            .finish(std::time::Duration::from_millis(500));
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -3146,6 +3165,11 @@ impl App {
                 }
                 self.request_redraw();
             }
+            SessionEvent::Listed(listed) => {
+                if self.desk.listed(listed) {
+                    self.request_redraw();
+                }
+            }
             SessionEvent::Hosts(found) => {
                 if let Some(picker) = &mut self.picker
                     && picker.found(found)
@@ -3354,6 +3378,7 @@ mod tests {
                         label: None,
                         text: text.into(),
                         choices: Vec::new(),
+                        under: None,
                     },
                     buttons: &buttons,
                     bottom_shown: true,

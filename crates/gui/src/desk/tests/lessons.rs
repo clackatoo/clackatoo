@@ -141,7 +141,9 @@ fn open(desk: &mut Desk, id: &str, practice: Layout) -> Vec<Request> {
 
 /// The text of each row the finder shows, as many as there are.
 fn all_finder_rows(desk: &mut Desk) -> Vec<String> {
-    let view = desk.finder_view((200, 120), None).expect("the finder");
+    // Room for every row there is: the lines of what's new are the most.
+    let rows = tutor::news::NEWS.len() + 10;
+    let view = desk.finder_view((rows, 120), None).expect("the finder");
     view.rows.into_iter().map(|row| row.text).collect()
 }
 
@@ -324,8 +326,21 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
         "the practice terminal took the mode"
     );
 
-    // A tab of its own, and back.
+    // The command line: Tab completes an option, and Up goes back to it.
     normal_mode(&mut desk);
+    let key = |desk: &mut Desk, key| press(desk, Key::Named(key), None, Modifiers::default());
+    type_keys(&mut desk, ":set norel");
+    key(&mut desk, NamedKey::Tab);
+    enter(&mut desk);
+    assert_eq!(step(&desk), 9);
+    type_keys(&mut desk, ":set");
+    key(&mut desk, NamedKey::ArrowUp);
+    ctrl(&mut desk, "w");
+    type_keys(&mut desk, "rnu");
+    enter(&mut desk);
+    assert_eq!(step(&desk), 10);
+
+    // A tab of its own, and back.
     command(&mut desk, "Terminal");
     assert!(matches!(
         take_requests(&mut desk)[..],
@@ -339,10 +354,10 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     desk.answered(Response::PaneCreated(PaneId(5)));
     answer_all(&mut desk);
     snapshot(&mut desk, 5);
-    assert_eq!(step(&desk), 9);
+    assert_eq!(step(&desk), 11);
     command(&mut desk, "2");
     answer_all(&mut desk);
-    assert_eq!(step(&desk), 10);
+    assert_eq!(step(&desk), 12);
 
     // A workspace of its own, and back.
     command(&mut desk, "ws tutor");
@@ -358,20 +373,20 @@ fn the_basics_lesson_is_done_from_start_to_end_with_the_keys_it_teaches() {
     desk.answered(Response::PaneCreated(PaneId(6)));
     answer_all(&mut desk);
     snapshot(&mut desk, 6);
-    assert_eq!(step(&desk), 11);
+    assert_eq!(step(&desk), 13);
     ctrl_b(&mut desk, "w");
     type_text(&mut desk, "w");
     enter(&mut desk);
     answer_all(&mut desk);
     assert_eq!(desk.shown().unwrap().tab, TabId(2));
-    assert_eq!(step(&desk), 12);
+    assert_eq!(step(&desk), 14);
 
     // What the bar has said.
     command(&mut desk, "messages");
-    assert_eq!(step(&desk), 13);
+    assert_eq!(step(&desk), 15);
     // The last step is to read: `]s` goes on, to the end.
     let lesson = tutor::lesson("basics").unwrap();
-    assert!(lesson.steps[13].checks.is_empty());
+    assert!(lesson.steps[15].checks.is_empty());
     ctrl(&mut desk, "l");
     assert_eq!(shown_pane(&desk), PaneId(2));
     type_keys(&mut desk, "]s");

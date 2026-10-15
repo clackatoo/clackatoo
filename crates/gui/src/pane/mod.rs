@@ -53,10 +53,11 @@ pub(crate) enum Mode {
 enum Prefix {
     /// `g`, and `gg` jumps to the top.
     G,
-    /// `y`, waiting for a motion or an object; `yy` copies the line.
-    Y,
-    /// `yg`, and `ygg` copies up to the first line.
-    YG,
+    /// `y`, waiting for a motion or an object, `times` times if a count
+    /// came before it; `yy` copies the line.
+    Y { times: Option<usize> },
+    /// `yg`, and `ygg` copies up to the first line, or line `times`.
+    YG { times: Option<usize> },
     /// `i` or `a`, after `y` or in visual mode: an object comes next.
     Object { inner: bool },
     /// `[` or `]`, and the same again jumps to the block before or after.
@@ -87,6 +88,11 @@ pub(crate) enum Selection {
     /// Whole lines.
     Lines,
 }
+
+/// What Ctrl+V says in normal and visual mode, in terminals and editors
+/// alike, until selecting a block of columns is built: better than doing
+/// nothing.
+pub(crate) const NO_BLOCK_SELECTION: &str = "block selection isn't here yet";
 
 /// A request sent to the daemon and not yet answered. Answers arrive in
 /// the order requests were sent.
@@ -169,6 +175,9 @@ pub(crate) struct Pane {
     unacknowledged: bool,
     /// The first key of a two-key command, waiting for the second.
     prefix: Option<Prefix>,
+    /// A count typed in normal or visual mode, waiting for the command it
+    /// repeats: `5` of `5k`, or of `3yy`, or `y3w`.
+    count: Option<usize>,
     /// Drawn for history lines still on their way.
     blank: Row,
     /// Where the mouse is over the pane, for the link under it.
@@ -214,6 +223,7 @@ impl Pane {
             pending: VecDeque::new(),
             unacknowledged: false,
             prefix: None,
+            count: None,
             blank: RowBuilder::new(0).finish(false),
             hovered: None,
             opening: None,
@@ -460,12 +470,33 @@ impl Pane {
     }
 
     /// Whether a two-key command is half typed, such as `y` waiting for
-    /// its motion, which the next key is for. Ctrl+\ waiting to be pressed
-    /// again isn't: any other key does what it would.
+    /// its motion, or a count for its command, which the next key is for.
+    /// Ctrl+\ waiting to be pressed again isn't: any other key does what
+    /// it would.
     pub(crate) fn pending(&self) -> bool {
         self.prefix
             .is_some_and(|prefix| prefix != Prefix::CtrlBackslash)
+            || self.count.is_some()
             || self.chat.as_ref().is_some_and(|chat| chat.pending())
+    }
+
+    /// The count typed, if that's all that's waiting: a key the pane
+    /// doesn't take after it is the window's, as `:` is. A chat's `g` or
+    /// `z` half typed counts as a count of one, so `g:` is `:` too.
+    pub(crate) fn counting(&self) -> Option<usize> {
+        if let Some(chat) = &self.chat {
+            return chat.pending().then_some(1);
+        }
+        self.count.filter(|_| self.prefix.is_none())
+    }
+
+    /// Forgets a count typed, or a chat's two-key command half typed, as a
+    /// binding of the window's took the key after it.
+    pub(crate) fn forget_count(&mut self) {
+        self.count = None;
+        if let Some(chat) = &mut self.chat {
+            chat.forget_prefix();
+        }
     }
 
     /// Switches to normal mode, if in insert mode, as when the focus
@@ -546,6 +577,7 @@ impl Pane {
         }
         self.leave_visual();
         self.prefix = None;
+        self.count = None;
         self.prompt = None;
     }
 
@@ -744,6 +776,7 @@ impl Pane {
                 self.leave_visual();
                 self.mode = Mode::Normal;
                 self.prompt = None;
+                self.count = None;
                 true
             }
             _ => self.normal_key(press, prefix),
@@ -973,7 +1006,7 @@ impl Pane {
         }
         if let Some(prompt) = &self.prompt {
             let slash = if prompt.backward { '?' } else { '/' };
-            return Some(format!("{slash}{}▏", prompt.query));
+            return Some(format!("{slash}{}", prompt.line.shown()));
         }
         let mut label = self.status.clone();
         if self.scroll > 0 {
@@ -981,6 +1014,13 @@ impl Pane {
             label = Some(match label {
                 Some(label) => format!("{label}  {up}"),
                 None => up,
+            });
+        }
+        // A count waiting for its command shows first, as Vim's `showcmd`.
+        if let Some(count) = self.count {
+            label = Some(match label {
+                Some(label) => format!("{count}  {label}"),
+                None => count.to_string(),
             });
         }
         label
@@ -992,6 +1032,7 @@ impl Pane {
         self.mode = Mode::Insert;
         self.cursor = None;
         self.prompt = None;
+        self.count = None;
         self.status = None;
         self.scroll = 0;
         true
@@ -1776,6 +1817,118 @@ mod tests {
         assert_eq!(yank("jygg").as_deref(), Some("one two six\nfour five"));
         // Anything else after `y` cancels it.
         assert_eq!(yank("yxw"), None);
+    }
+
+    #[test]
+    fn counts_repeat_motions_and_go_to_lines() {
+        let terminal = terminal(&numbered_lines("line "));
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        // From the screen's bottom line, up five: into history.
+        keys(&mut pane, "5k");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 8".into(), 0, 0));
+        assert!(!pane.pending(), "the count is spent");
+        keys(&mut pane, "2j");
+        assert_eq!(cursor(&pane).0, "line 10");
+        // `G` and `gg` with a count go to that line, from the first.
+        keys(&mut pane, "10G");
+        assert_eq!(cursor(&pane).0, "line 10");
+        keys(&mut pane, "2gg");
+        serve(&mut pane, &terminal);
+        assert_eq!(cursor(&pane), ("line 2".into(), 0, 0));
+        keys(&mut pane, "99G");
+        assert_eq!(cursor(&pane).1, 4, "or the last");
+        // A count waits for its command, and Esc forgets it.
+        keys(&mut pane, "3");
+        assert!(pane.pending());
+        named(&mut pane, NamedKey::Escape);
+        assert!(!pane.pending());
+        keys(&mut pane, "k");
+        assert_eq!(cursor(&pane).1, 3, "one line, not three");
+        // In visual mode too.
+        keys(&mut pane, "Gv3k");
+        assert_eq!(
+            pane.selection()
+                .map(|(start, end, _)| end.line - start.line),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_count_just_after_ctrl_backslash_counts_and_forgets_it() {
+        let terminal = terminal("one\r\ntwo\r\nthree\r\nfour");
+        let mut pane = pane(&terminal);
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        press(&mut pane, Key::Character("\\".into()), ctrl);
+        keys(&mut pane, "2k");
+        assert_eq!(cursor(&pane).0, "two");
+        // Ctrl+\ again is no longer the program's.
+        press(&mut pane, Key::Character("\\".into()), ctrl);
+        assert_eq!(pane.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn counts_repeat_word_and_paragraph_motions() {
+        let terminal = terminal("a b c d\r\n\r\ne f\r\n\r\ng");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        keys(&mut pane, "gg03w");
+        assert_eq!(cursor(&pane), ("a b c d".into(), 0, 6));
+        keys(&mut pane, "2}");
+        assert_eq!(cursor(&pane).1, 3);
+        keys(&mut pane, "2{");
+        assert_eq!(cursor(&pane).1, 0);
+        // A 0 that doesn't follow a digit goes to the line's start.
+        keys(&mut pane, "$0");
+        assert_eq!(cursor(&pane).2, 0);
+    }
+
+    #[test]
+    fn counts_copy_lines_and_motions() {
+        let terminal = terminal("one two six\r\nfour five\r\nseven\r\neight");
+        let mut pane = pane(&terminal);
+        normal_mode(&mut pane);
+        let mut yank = |keys: &str| yanked(&mut pane, &terminal, keys);
+        assert_eq!(
+            yank("gg3yy").as_deref(),
+            Some("one two six\nfour five\nseven")
+        );
+        assert_eq!(yank("2Y").as_deref(), Some("one two six\nfour five"));
+        assert_eq!(yank("y2w").as_deref(), Some("one two "));
+        assert_eq!(yank("2y2w").as_deref(), Some("one two six\nfour "));
+        assert_eq!(
+            yank("y3G").as_deref(),
+            Some("one two six\nfour five\nseven")
+        );
+        // More lines than there are copies those there are.
+        let rest = yank("3G9yy").unwrap_or_default();
+        assert!(rest.starts_with("seven\neight"), "{rest:?}");
+    }
+
+    #[test]
+    fn ctrl_v_says_block_selection_isnt_here_and_insert_mode_sends_it() {
+        let terminal = terminal("one");
+        let mut pane = pane(&terminal);
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        press(&mut pane, Key::Character("v".into()), ctrl);
+        let sent = pane.take_outbox().into_iter().any(|message| {
+            matches!(
+                message,
+                ClientMessage::Request(Request::SendInput { bytes, .. }) if bytes == [0x16]
+            )
+        });
+        assert!(sent, "the program's in insert mode");
+        normal_mode(&mut pane);
+        press(&mut pane, Key::Character("v".into()), ctrl);
+        assert_eq!(pane.label().as_deref(), Some(NO_BLOCK_SELECTION));
+        assert_eq!(pane.mode, Mode::Normal);
     }
 
     #[test]

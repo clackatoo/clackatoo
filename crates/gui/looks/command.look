@@ -6,3 +6,13 @@ type Ex
 shot command-typed
 keys <Tab>
 shot command-tab
+keys <C-u>
+type set nu
+keys <Tab>
+shot command-choices
+keys <Esc>
+keys :set wrap<CR>
+keys :se
+keys <Up>
+shot command-history
+keys <Esc>

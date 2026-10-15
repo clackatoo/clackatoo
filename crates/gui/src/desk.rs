@@ -24,7 +24,8 @@ use winit::keyboard::{Key, NamedKey};
 
 use crate::browser::BrowserPane;
 use crate::chrome::{ModeName, NoteKind, Status, WorkspaceName};
-use crate::command::{self, Command, Kind, Place};
+use crate::cmdline;
+use crate::command::{Command, Kind, Place};
 use crate::finder::Finder;
 use crate::input::{self, KeptPress, KeyPress, Modifiers};
 use crate::keymap::{Chord, Pressed};
@@ -158,6 +159,7 @@ mod reviews;
 mod script;
 mod settings;
 mod starting;
+mod typing;
 mod updating;
 
 pub(crate) use mode::WindowMode;
@@ -167,9 +169,24 @@ pub(crate) use script::LuaStart;
 #[derive(Debug)]
 struct Input {
     purpose: Purpose,
-    text: String,
+    line: cmdline::Line,
     /// Which of the choices listed under it is picked, if it lists any.
     selected: usize,
+    /// The word Tab is completing, and what it could be, until another
+    /// key.
+    completing: Option<cmdline::complete::Completion>,
+}
+
+impl Input {
+    /// `text` typed for `purpose`, with the caret at its end.
+    fn new(purpose: Purpose, text: impl Into<String>) -> Self {
+        Self {
+            purpose,
+            line: cmdline::Line::new(text),
+            selected: 0,
+            completing: None,
+        }
+    }
 }
 
 /// What's typed in the palette is for.
@@ -245,6 +262,13 @@ pub(crate) struct Desk {
     area: Option<Area>,
     /// What's being typed in the palette, such as a command after `:`.
     input: Option<Input>,
+    /// The commands and searches typed before, for Up and Down.
+    recall: typing::Recalling,
+    /// Folders listed for Tab to complete a path with.
+    listings: typing::Listings,
+    /// A count typed before the binding being carried out, as `5:` gives
+    /// an editor's command line `.,.+4`.
+    bound_count: Option<usize>,
     /// A message for the focused pane's label, until the next key, such as
     /// why a command failed.
     message: Option<String>,
@@ -508,7 +532,9 @@ impl Desk {
         let panes = self.panes.values().filter_map(Pane::flash_ends);
         let pointed = (self.pointed)
             .and_then(|(_, until)| (until > std::time::Instant::now()).then_some(until));
-        panes.chain(self.editor_flash_ends()).chain(pointed).min()
+        (panes.chain(self.editor_flash_ends()).chain(pointed))
+            .chain(self.listing_said())
+            .min()
     }
 
     /// Takes text copied, for the window to put on the clipboard or the
@@ -665,32 +691,49 @@ impl Desk {
     }
 
     /// What the status line shows: the command line or a search being
-    /// typed, or else the tabs, with a message or the focused pane's mode
-    /// and scroll position.
+    /// typed, over the tabs and the focused pane's mode, or else the tabs,
+    /// with a message or the focused pane's mode and scroll position.
     pub(crate) fn status(&self) -> Status {
-        if let Some(input) = &self.input {
-            let (label, prefix) = input.purpose.label();
-            let choices = match input.purpose {
-                Purpose::Workspace => {
-                    let mut choices: Vec<(String, bool)> = self
-                        .workspace_choices(&input.text)
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, (_, name))| (name, index == input.selected))
-                        .collect();
-                    let name = input.text.trim();
-                    if choices.is_empty() && !name.is_empty() {
-                        choices.push((format!("New workspace “{name}”"), true));
-                    }
-                    choices
-                }
-                _ => Vec::new(),
-            };
-            return Status::Typing {
+        match self.status_alone() {
+            Status::Typing {
                 label,
-                text: format!("{prefix}{}▏", input.text),
+                text,
                 choices,
-            };
+                ..
+            } => Status::Typing {
+                label,
+                text,
+                choices,
+                under: Some(Box::new(self.bar_under_typing())),
+            },
+            tabs @ Status::Tabs { .. } => tabs,
+        }
+    }
+
+    /// What the bottom bar shows while something's typed: the focused
+    /// pane's mode and the tabs, and a message, if there is one, but not
+    /// the pane's label, whose place a search typed in it takes.
+    fn bar_under_typing(&self) -> Status {
+        let mode = match self.focused_editor() {
+            Some((editor, _)) => Some(editor_mode_name(editor)),
+            None if self.panel_label().is_some() => Some(ModeName::Normal),
+            None => (self.focused_terminal())
+                .and_then(|terminal| self.panes.get(&terminal))
+                .map(|pane| mode_name(pane.mode)),
+        };
+        let (note, kind) = self.note(None, None);
+        Status::Tabs {
+            mode,
+            note,
+            kind,
+            panes: self.shown_tab().map_or(0, |tab| tab.layout.panes().len()),
+        }
+    }
+
+    /// What the status line shows, but with nothing under what's typed.
+    fn status_alone(&self) -> Status {
+        if let Some(input) = &self.input {
+            return self.typing_status(input);
         }
         if let Some(status) = self.offer_status() {
             return status;
@@ -705,6 +748,7 @@ impl Desk {
                     label: None,
                     text: label,
                     choices: Vec::new(),
+                    under: None,
                 };
             }
             let said = editor.said().map(str::to_owned);
@@ -722,6 +766,7 @@ impl Desk {
                     label: None,
                     text: label,
                     choices: Vec::new(),
+                    under: None,
                 };
             }
             let (note, kind) = self.note(None, Some(label));
@@ -743,6 +788,7 @@ impl Desk {
                 label: None,
                 text: prompt,
                 choices: Vec::new(),
+                under: None,
             };
         }
         let mode = pane.map(|pane| mode_name(pane.mode));
@@ -819,11 +865,10 @@ impl Desk {
     /// Opens the palette to rename `workspace`, starting from its name.
     pub(crate) fn rename_workspace(&mut self, workspace: WorkspaceId) {
         if let Some(found) = self.workspaces.get(workspace) {
-            self.input = Some(Input {
-                purpose: Purpose::RenameWorkspace(workspace),
-                text: found.name.clone(),
-                selected: 0,
-            });
+            self.input = Some(Input::new(
+                Purpose::RenameWorkspace(workspace),
+                found.name.clone(),
+            ));
         }
     }
 
@@ -836,11 +881,7 @@ impl Desk {
                 .or_else(|| self.tab_title(found))
                 .unwrap_or_default()
                 .to_owned();
-            self.input = Some(Input {
-                purpose: Purpose::RenameTab(tab),
-                text,
-                selected: 0,
-            });
+            self.input = Some(Input::new(Purpose::RenameTab(tab), text));
         }
     }
 
@@ -1560,6 +1601,10 @@ impl Desk {
     /// config's keypress handlers if not `handlers`, as for a key they've
     /// had already, and without noting it in a macro. Keys a binding types
     /// meet neither them nor the config's bindings, only the window's.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "where a key goes, in order, each step short"
+    )]
     fn key_with(&mut self, press: &KeyPress<'_>, handlers: bool) -> bool {
         // The keyboard reports Shift, Ctrl and the like as keys of their
         // own, on the way to a chord such as Ctrl+Shift+C. They mustn't
@@ -1591,6 +1636,9 @@ impl Desk {
             return true;
         }
         if self.input.is_some() {
+            // A key the command line takes never reaches a chat, so an
+            // answer it armed is dropped, as any other key drops it there.
+            self.disarm_focused_chat();
             // Ctrl+; and its kin close the command line, and go on to the
             // pane, which stays in normal mode.
             if !pane::enters_normal_mode(press) {
@@ -1600,6 +1648,7 @@ impl Desk {
             self.input = None;
         } else if self.finding() {
             // And so the finder.
+            self.disarm_focused_chat();
             if !pane::enters_normal_mode(press) {
                 self.finder_key(press);
                 return true;
@@ -1608,25 +1657,38 @@ impl Desk {
         } else if let Some(chord) = Chord::of(press) {
             // The config's keypress handlers come first, then the bindings.
             if handlers && !self.script.typing && self.keypress_handled(chord, press) {
+                self.disarm_focused_chat();
                 return true;
             }
             // In a lesson's tab, `]s` and `[s` step through the lesson.
             if let Some(redraw) = self.lesson_bracket(press) {
+                self.disarm_focused_chat();
                 return redraw;
             }
             let mode = self.key_mode();
             // A key a half-typed command in the pane waits for is the
             // pane's, as `d<Space>`'s Space is, not a binding's first.
-            let pressed = if self.keymap.waiting().is_empty() && self.pane_pending() {
+            // But a count alone is the bindings' too, and a chat's half
+            // typed `g` or `z`: `5:` is still `:`.
+            let pressed = if self.keymap.waiting().is_empty()
+                && self.pane_pending()
+                && self.pane_counting().is_none()
+            {
                 Pressed::Unbound
             } else {
                 self.keymap.press(mode, chord)
             };
+            // And a key the bindings take, as the command line's.
+            if !matches!(pressed, Pressed::Unbound) {
+                self.disarm_focused_chat();
+            }
             match pressed {
                 Pressed::Bound(Binding::Window(action)) => {
                     self.forget_waiting();
                     self.message = None;
+                    self.bound_count = self.take_pane_count();
                     self.act(action);
+                    self.bound_count = None;
                     return true;
                 }
                 // Keys a binding types are past the config's bindings.
@@ -1636,6 +1698,7 @@ impl Desk {
                 }
                 Pressed::Bound(Binding::Lua(binding)) => {
                     self.message = None;
+                    self.take_pane_count();
                     self.run_lua_binding(binding, chord, press);
                     return true;
                 }
@@ -1665,6 +1728,9 @@ impl Desk {
             self.normal_mode_asked();
         }
         let had_message = self.message.take().is_some() || asked;
+        if let Some(redraw) = self.prompt_line_key(press) {
+            return redraw || had_message;
+        }
         if self.focused_editor().is_some() {
             return self.listing_key(press) || self.editor_key(press) || had_message;
         }
@@ -1679,6 +1745,15 @@ impl Desk {
             self.open_pane_link(terminal);
         }
         redraw || had_message
+    }
+
+    /// Drops the answer the focused chat armed, if it did, as a key that
+    /// doesn't reach it is had elsewhere: only the number again, or Enter,
+    /// in the chat, may give it.
+    fn disarm_focused_chat(&mut self) {
+        if let Some(pane) = self.focused_pane() {
+            pane.disarm();
+        }
     }
 
     /// `:AgentUndo` and `:AgentRedo`: the focused chat undoes turn `turn`,
@@ -1722,9 +1797,8 @@ impl Desk {
             return;
         }
         if let Some(input) = &mut self.input {
-            input
-                .text
-                .extend(text.chars().filter(|ch| !ch.is_control()));
+            input.line.put(text);
+            input.completing = None;
         } else if self.finding() {
             self.paste_into_finder(text);
         } else if !self.paste_into_editor(text)
@@ -2176,74 +2250,6 @@ impl Desk {
         }
     }
 
-    /// Handles a key while the palette is open.
-    fn input_key(&mut self, press: &KeyPress<'_>) {
-        let Some(input) = &mut self.input else {
-            return;
-        };
-        match press.key {
-            Key::Named(NamedKey::Escape) => self.input = None,
-            Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp | NamedKey::Tab)
-                if input.purpose == Purpose::Workspace =>
-            {
-                let up = *press.key == Key::Named(NamedKey::ArrowUp)
-                    || (*press.key == Key::Named(NamedKey::Tab) && press.modifiers.shift);
-                let text = input.text.clone();
-                let count = self.workspace_choices(&text).len();
-                let Some(input) = &mut self.input else { return };
-                input.selected = if up {
-                    input.selected.saturating_sub(1)
-                } else {
-                    (input.selected + 1).min(count.saturating_sub(1))
-                };
-            }
-            Key::Named(NamedKey::Enter) => {
-                let Some(Input {
-                    purpose,
-                    text,
-                    selected,
-                }) = self.input.take()
-                else {
-                    return;
-                };
-                match purpose {
-                    Purpose::Command => match command::parse(&text) {
-                        Ok(command) => self.run(command),
-                        Err(message) => self.refuse(message),
-                    },
-                    Purpose::RenameWorkspace(workspace) => self.request(
-                        Request::RenameWorkspace {
-                            workspace,
-                            name: text,
-                        },
-                        Asked::Command,
-                    ),
-                    Purpose::RenameTab(tab) => {
-                        self.request(Request::RenameTab { tab, name: text }, Asked::Command);
-                    }
-                    Purpose::Workspace => self.pick_workspace(&text, selected),
-                    Purpose::Comment { chat, place } => self.send_comment(chat, place, text),
-                }
-            }
-            Key::Named(NamedKey::Backspace) => {
-                // Deleting past a command's colon closes the palette, as
-                // in Vim.
-                if input.text.pop().is_none() && input.purpose == Purpose::Command {
-                    self.input = None;
-                }
-            }
-            _ if press.modifiers.ctrl => {}
-            _ => {
-                if let Some(text) = press.text {
-                    input
-                        .text
-                        .extend(text.chars().filter(|ch| !ch.is_control()));
-                    input.selected = 0;
-                }
-            }
-        }
-    }
-
     /// Carries out a command.
     #[allow(clippy::too_many_lines, reason = "one arm per command, each short")]
     fn run(&mut self, command: Command) {
@@ -2458,6 +2464,7 @@ mod tests {
     mod messages;
     mod mode;
     mod mouse;
+    mod typing;
 
     use clackatoo_protocol::{ChatState, ChatSummary, Layout, Pane as LayoutPane, View, Workspace};
     use clackatoo_term::mouse::{MouseAction, MouseButton};
@@ -4017,14 +4024,11 @@ mod tests {
             vec![tab(1, pane(1))],
         )]));
         desk.rename_workspace(WorkspaceId(1));
-        assert_eq!(
+        assert!(matches!(
             desk.status(),
-            Status::Typing {
-                label: Some("Rename workspace".into()),
-                text: "work▏".into(),
-                choices: Vec::new(),
-            }
-        );
+            Status::Typing { label: Some(label), text, choices, .. }
+                if label == "Rename workspace" && text == "work▏" && choices.is_empty()
+        ));
         for _ in 0..4 {
             press(
                 &mut desk,
@@ -4961,7 +4965,7 @@ mod tests {
         // terminal's.
         type_keys(&mut desk, "y\r");
         assert!(asked(&desk));
-        desk.devices_command(command::DevicesCommand::Allow("0042".into()));
+        desk.devices_command(crate::command::DevicesCommand::Allow("0042".into()));
         assert_eq!(
             answer_all(&mut desk),
             [Request::AnswerPairing {
@@ -4975,7 +4979,7 @@ mod tests {
         desk.pairing_asked(asking(Vec::new(), true));
         assert!(matches!(desk.status(), Status::Typing { text, .. }
             if text.contains(":Devices unlock")));
-        desk.devices_command(command::DevicesCommand::Unlock);
+        desk.devices_command(crate::command::DevicesCommand::Unlock);
         assert_eq!(answer_all(&mut desk), [Request::UnlockPairing]);
     }
 
@@ -5853,7 +5857,7 @@ mod tests {
         answer_pieces(&mut desk, id, vec![function_b()]);
         assert!(desk.input.is_some(), "the command line opened after");
         // The paste went into the command line, as it would have.
-        assert_eq!(desk.input.as_ref().unwrap().text, "zz");
+        assert_eq!(desk.input.as_ref().unwrap().line.text(), "zz");
         assert_eq!(editor_text(&desk), "fn a() {}\n\n");
     }
 

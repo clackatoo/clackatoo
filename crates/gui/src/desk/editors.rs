@@ -831,6 +831,23 @@ impl Desk {
         &mut self.editors.shared
     }
 
+    /// What every editor shares, to look at.
+    pub(super) fn shared(&self) -> &Shared {
+        &self.editors.shared
+    }
+
+    /// The search or name being typed in the editor `pane`'s bar, if it's
+    /// an editor and one is (see [`Editor::prompt_line`]).
+    pub(super) fn editor_prompt_line(
+        &mut self,
+        pane: PaneId,
+    ) -> Option<(
+        &mut crate::cmdline::Line,
+        Option<crate::cmdline::recall::Kind>,
+    )> {
+        self.editors.panes.get_mut(&pane)?.prompt_line()
+    }
+
     /// Does `act` to each buffer's copy.
     pub(super) fn each_copy(&mut self, act: impl FnMut(&mut BufferCopy)) {
         self.editors.buffers.values_mut().for_each(act);
@@ -1409,7 +1426,7 @@ impl Desk {
         // would do, as `inccommand` says.
         let typing = (self.input.as_ref())
             .filter(|input| input.purpose == Purpose::Command)
-            .map(|input| input.text.as_str());
+            .map(|input| input.line.text());
         let focused = self.shown.map(|shown| shown.pane);
         let editors = &mut self.editors;
         for pane in shown {

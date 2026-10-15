@@ -341,6 +341,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "finder",
         what: "The finder says when nothing matches, and the row picked in lists and menus stands out",
     },
+    News {
+        id: "command-line",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "The command line completes with Tab, goes back through what you've typed with Up and Down, edits with Ctrl+U, Ctrl+W, Ctrl+R and the arrows, and keeps the bottom bar showing",
+    },
+    News {
+        id: "terminal-counts",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "A terminal's normal mode takes counts, as 5k, 3w, 10G and 3yy, and Ctrl+V says block selection isn't here yet",
+    },
 ];
 
 impl News {

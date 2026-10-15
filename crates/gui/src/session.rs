@@ -138,6 +138,9 @@ pub(crate) enum SessionEvent {
     /// A port forwarded ran into something to say. Sent from the QUIC
     /// connection's thread (see [`crate::forwards`]).
     Forwards,
+    /// A folder's files, listed for Tab on the command line. Sent from a
+    /// thread listing them (see [`crate::cmdline::complete::Listing`]).
+    Listed(crate::cmdline::complete::Listed),
 }
 
 /// A way to wake the window with a [`SessionEvent`], from another thread:

@@ -1283,3 +1283,92 @@ fn a_chat_asking_something_is_answered_from_normal_mode_once_its_arrived() {
     assert!(desk.finding());
     assert!(!answers_question(&desk, "1"));
 }
+
+#[test]
+fn an_answer_armed_is_dropped_when_the_command_line_or_a_binding_has_the_next_key() {
+    use clackatoo_protocol::{ChatAction, ChatNode, Choice, ChoiceKind, Node, Question};
+    let mut desk = desk(one_tab(side_by_side(vec![pane(2), pane(1)])));
+    snapshot(&mut desk, 2);
+    let node = ChatNode {
+        question: Some(Question {
+            id: 1,
+            title: "Write notes.txt".into(),
+            choices: vec![Choice {
+                id: "allow".into(),
+                name: "Allow".into(),
+                kind: ChoiceKind::AllowOnce,
+            }],
+            own: false,
+        }),
+        ..ChatNode::default()
+    };
+    desk.view_changed(
+        TerminalId(1),
+        &ViewUpdate::Snapshot(View {
+            title: "chat".into(),
+            cwd: None,
+            root: Node::Chat(Box::new(node)),
+        }),
+    );
+    let mut fonts = crate::chat::fixtures::fonts();
+    let answers = |desk: &mut Desk| {
+        (answer_all(desk).into_iter())
+            .filter(|request| {
+                matches!(
+                    request,
+                    Request::Chat {
+                        action: ChatAction::Answer { .. },
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let set_clock = |desk: &mut Desk, now| {
+        let pane = desk.pane_mut(TerminalId(1)).unwrap();
+        pane.chat_mut().unwrap().set_clock(now);
+    };
+    let later = u64::MAX / 2;
+    set_clock(&mut desk, later);
+    ctrl_b(&mut desk, "l");
+    answer_all(&mut desk);
+    let mut now = later + crate::chat::ANSWER_PAUSE;
+    let mut tick = |desk: &mut Desk| {
+        now += crate::chat::ARMED_FOR.start;
+        set_clock(desk, now);
+    };
+    let named = |desk: &mut Desk, key| press(desk, Key::Named(key), None, Modifiers::default());
+    // `1` arms it; the command line, opened and closed, drops it, so
+    // Enter after doesn't give it.
+    tick(&mut desk);
+    key(&mut desk, "1");
+    key(&mut desk, ":");
+    assert!(desk.input.is_some(), "the command line opens");
+    named(&mut desk, NamedKey::Escape);
+    tick(&mut desk);
+    named(&mut desk, NamedKey::Enter);
+    desk.settle_chats(&mut fonts);
+    assert_eq!(answers(&mut desk), 0, "not given");
+    // Enter, with nothing armed, went to the message box, as ever.
+    assert_eq!(mode(&desk, 1), Mode::Insert);
+    normal_mode(&mut desk);
+    // Nor after a binding, Alt+H, which moves the pane's edge and leaves
+    // the focus where it is.
+    tick(&mut desk);
+    key(&mut desk, "1");
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    press(&mut desk, Key::Character("h".into()), None, alt);
+    assert_eq!(shown_pane(&desk), PaneId(1), "still the chat");
+    tick(&mut desk);
+    key(&mut desk, "1");
+    desk.settle_chats(&mut fonts);
+    assert_eq!(answers(&mut desk), 0, "armed again, not given");
+    // A chat's `g` half typed leaves `:` to the bindings too.
+    key(&mut desk, "g:");
+    assert!(desk.input.is_some(), "the command line opens after g");
+    named(&mut desk, NamedKey::Escape);
+    assert!(!desk.pane_pending(), "and the g is forgotten");
+}
