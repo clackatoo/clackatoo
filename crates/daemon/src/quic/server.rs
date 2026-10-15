@@ -126,6 +126,12 @@ struct Remote {
     /// yet: QUIC may hold it back, as it does anything past three times
     /// what came from an address it hasn't checked yet.
     closing: bool,
+    /// When it opened, which its forwards' slowdowns are counted from
+    /// (see [`Pace`](super::Pace)).
+    opened: Instant,
+    /// Whether its client moved to another address since its forwards
+    /// last asked, so the path they're paced on changed.
+    moved: bool,
 }
 
 /// Setting up the endpoint failed.
@@ -232,6 +238,8 @@ impl QuicServer {
                                 heard: now,
                                 silent: false,
                                 closing: false,
+                                opened: now,
+                                moved: false,
                             },
                         );
                         self.touched.push(handle);
@@ -329,6 +337,7 @@ impl QuicServer {
                     Way(address)
                 );
                 remote.address = address;
+                remote.moved = true;
             }
             if drained {
                 self.connections.remove(&handle);
@@ -407,6 +416,18 @@ impl QuicServer {
         };
         outgoing.drain(..written);
         Some(written)
+    }
+
+    /// What the forwards on the connection with `handle` are paced by:
+    /// its smoothed round trip, when it opened, and whether its client
+    /// moved to another address since last asked.
+    pub(crate) fn pace_inputs(
+        &mut self,
+        handle: ConnectionHandle,
+    ) -> Option<(Duration, Instant, bool)> {
+        let remote = self.connections.get_mut(&handle)?;
+        let moved = std::mem::take(&mut remote.moved);
+        Some((remote.connection.rtt(), remote.opened, moved))
     }
 
     /// Opens another stream to the client on `handle`, if it allows one.

@@ -317,6 +317,12 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "Crowded bars scroll their tabs and workspaces, messages keep off the tabs, and :messages shows them again",
     },
+    News {
+        id: "forward-pace",
+        date: "2026-10-15",
+        lesson: "remote",
+        what: ":PortForward downloads no longer delay your keys on a slow link (:set noforwardpace)",
+    },
 ];
 
 impl News {

@@ -27,7 +27,8 @@ use clackatoo_text::{
 
 use crate::frame::{self, FrameDecoder, FrameError};
 use crate::wire::{
-    EXITED, FALLBACKS, FORWARDS, HOVER, INLAY_HINTS, LIMITS, PHONE_TERMINALS, SYMBOLS, USES, WORDS,
+    EXITED, FALLBACKS, FORWARD_PACE, FORWARDS, HOVER, INLAY_HINTS, LIMITS, PHONE_TERMINALS,
+    SYMBOLS, USES, WORDS,
 };
 use crate::{
     AgentSession, AgentTools, Author, Axis, BoardId, BufferId, BufferSnapshot, BufferUpdate,
@@ -719,6 +720,15 @@ fn tagged(wire: u32) -> Vec<(u32, Sample)> {
         })),
     ));
     samples.extend(forwards().into_iter().map(|sample| (FORWARDS, sample)));
+    // A forwarded connection asked to go as fast as it can.
+    samples.push((
+        FORWARD_PACE,
+        Client(ClientMessage::Request(Request::Forward(Forward {
+            host: "::1".into(),
+            port: 5173,
+            unpaced: true,
+        }))),
+    ));
     samples
 }
 
@@ -730,6 +740,7 @@ fn forwards() -> Vec<Sample> {
         Client(ClientMessage::Request(Request::Forward(Forward {
             host: "localhost".into(),
             port: 8080,
+            unpaced: false,
         }))),
         Server(ServerMessage::Response(Response::Done)),
     ];

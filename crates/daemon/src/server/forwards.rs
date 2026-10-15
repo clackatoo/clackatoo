@@ -19,6 +19,10 @@
 //!   [`PIPE_BUDGET`] for one connection, so many forwarded downloads share
 //!   the turn and a key's echo never waits behind them. What's left waits
 //!   for the next turn, which doesn't wait for an event while any is.
+//! - **Bytes go to the window only as fast as the link takes them**
+//!   without a queue growing (see [`Pace`]): a download never fills a
+//!   slow link's queue ahead of keys. A connection held back waits for a
+//!   timer, which exists only while one is.
 //!
 //! Each side is read only as fast as the other takes it: at most
 //! [`CHUNK`] waits here each way. A browser that reads slowly leaves the
@@ -41,6 +45,7 @@
 //! new build starts, and the sockets with them. The window connects again
 //! and forwards new connections to the new build.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
@@ -56,7 +61,7 @@ use mio::{Interest, Token};
 use quinn_proto::{ConnectionHandle, StreamId};
 
 use super::{Daemon, Source};
-use crate::quic::Forwarded;
+use crate::quic::{End, Forwarded, Pace};
 use lookups::Lookups;
 
 mod lookups;
@@ -97,6 +102,10 @@ pub(super) struct Forwards {
     /// QUIC hasn't had acknowledged: they still count toward their
     /// connection's send window (see [`crate::quic::send_window`]).
     lingering: HashSet<(ConnectionHandle, StreamId)>,
+    /// How fast each QUIC connection with forwards may be written to.
+    paces: HashMap<ConnectionHandle, Pace>,
+    /// The connections waiting for their pace to allow more.
+    parked: Vec<Token>,
 }
 
 /// One forwarded connection.
@@ -114,6 +123,9 @@ pub(super) struct Pipe {
     stage: Stage,
     /// The TCP connection, once one is being made.
     socket: Option<TcpStream>,
+    /// The window asked for what comes from the socket to go as fast as
+    /// it can, rather than as background traffic.
+    unpaced: bool,
     /// What the window sent, waiting for the socket to take it: the
     /// request first, until it's whole.
     to_socket: Vec<u8>,
@@ -162,6 +174,8 @@ enum Next {
     Again(usize),
     /// It used this much, and waits.
     Used(usize),
+    /// It used this much, and waits for its pace to allow more.
+    Paced(usize),
     /// Connect where it asked.
     Connect(Forward),
     /// It's connected: its address's time runs no more, and it's done
@@ -185,6 +199,7 @@ impl Pipe {
             wire,
             stage: Stage::Asking,
             socket: None,
+            unpaced: false,
             to_socket: Vec::new(),
             to_stream: Vec::new(),
             window_done: false,
@@ -270,14 +285,17 @@ impl Pipe {
         }
     }
 
-    /// Passes bytes both ways, up to `budget` of them, using `scratch` to
-    /// read the socket into.
+    /// Passes bytes both ways, up to `budget` of them, those to the
+    /// window as fast as `pace` allows, unless the window asked for them
+    /// not to be paced, using `scratch` to read the socket into.
     fn relay(
         &mut self,
         quic: &mut crate::quic::QuicServer,
         budget: usize,
+        pace: &mut Pace,
         scratch: &mut [u8],
     ) -> Next {
+        let mut pace = (!self.unpaced).then_some(pace);
         // Stopped by the window, it never reads what's sent, however
         // quiet the socket is.
         if !self.stream_done && quic.forward_stopped(self.handle, self.stream) {
@@ -292,6 +310,8 @@ impl Pipe {
             return Next::Abandon;
         }
         let mut used = 0;
+        // Whether the pace held back what's waiting for the window.
+        let mut paced = false;
         loop {
             let before = used;
             // From the window to the socket, each step taking no more
@@ -327,12 +347,21 @@ impl Pipe {
             }
             // From the socket to the window.
             if !self.to_stream.is_empty() && used < budget {
-                let most = self.to_stream.len().min(budget - used);
-                let Some(written) =
-                    quic.write_forwarded(self.handle, self.stream, &self.to_stream[..most])
-                else {
-                    return Next::Abandon;
+                let wanted = self.to_stream.len().min(budget - used);
+                let most = pace.as_deref().map_or(wanted, |pace| pace.most(wanted));
+                let written = if most == 0 {
+                    0
+                } else {
+                    let to = &self.to_stream[..most];
+                    let Some(written) = quic.write_forwarded(self.handle, self.stream, to) else {
+                        return Next::Abandon;
+                    };
+                    written
                 };
+                if let Some(pace) = pace.as_deref_mut() {
+                    pace.wrote(written, wanted);
+                }
+                paced = most < wanted && written == most;
                 self.to_stream.drain(..written);
                 used += written;
             }
@@ -364,7 +393,11 @@ impl Pipe {
                 return Next::Again(used);
             }
             if used == before {
-                return Next::Used(used);
+                return if paced {
+                    Next::Paced(used)
+                } else {
+                    Next::Used(used)
+                };
             }
         }
     }
@@ -475,9 +508,12 @@ impl Daemon {
     }
 
     /// When a connection being made next gives up on the address it's
-    /// trying.
+    /// trying, or one held back by its pace may go on.
     pub(super) fn next_forward_due(&self) -> Option<Instant> {
-        self.forwards.deadlines.iter().map(|&(due, _)| due).min()
+        let paced = self.forwards.paces.values().filter_map(Pace::due);
+        (self.forwards.deadlines.iter().map(|&(due, _)| due))
+            .chain(paced)
+            .min()
     }
 
     /// Does what each forwarded connection queued has to do, within the
@@ -517,11 +553,37 @@ impl Daemon {
             Stage::Resolving { .. } | Stage::Connecting { .. } if pipe.gone(quic) => Next::Abandon,
             Stage::Resolving { .. } => Next::Wait,
             Stage::Connecting { .. } => pipe.check_connected(),
-            Stage::Open => pipe.relay(quic, budget, &mut self.buffer),
+            Stage::Open => match quic.pace_inputs(pipe.handle) {
+                Some((rtt, opened, moved)) => {
+                    let now = Instant::now();
+                    let pace = match self.forwards.paces.entry(pipe.handle) {
+                        Entry::Occupied(entry) => {
+                            let pace = entry.into_mut();
+                            if moved {
+                                pace.path_changed(now, rtt);
+                            }
+                            pace
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert(Pace::new(now, rtt, opened, End::Daemon))
+                        }
+                    };
+                    pace.refresh(now, rtt);
+                    pipe.relay(quic, budget, pace, &mut self.buffer)
+                }
+                // Its connection is gone.
+                None => Next::Abandon,
+            },
         };
         match next {
             Next::Wait => 0,
             Next::Used(used) => used,
+            Next::Paced(used) => {
+                if !self.forwards.parked.contains(&token) {
+                    self.forwards.parked.push(token);
+                }
+                used
+            }
             Next::Again(used) => {
                 self.queue_forward(token);
                 used
@@ -558,7 +620,14 @@ impl Daemon {
     /// `forward` says: at once if its host needs nothing looked up, and
     /// otherwise once it's been.
     fn connect_forward(&mut self, token: Token, forward: Forward) {
-        let Forward { host, port } = forward;
+        let Forward {
+            host,
+            port,
+            unpaced,
+        } = forward;
+        if let Some(Source::Forward(pipe)) = self.sources.get_mut(token.0) {
+            pipe.unpaced = unpaced;
+        }
         if let Some(ips) = known(&host) {
             self.connect_to(token, ips, port);
             return;
@@ -672,6 +741,7 @@ impl Daemon {
     /// found, and moves on from each whose address has taken too long to
     /// answer.
     pub(super) fn time_out_forwards(&mut self) {
+        self.unpark_forwards();
         if self.forwards.deadlines.is_empty() {
             return;
         }
@@ -692,6 +762,37 @@ impl Daemon {
                 self.fail_forward(token, ForwardFailure::TimedOut);
             } else {
                 self.try_next_address(token, Some(ForwardFailure::TimedOut));
+            }
+        }
+    }
+
+    /// Queues again each connection held back by its pace, once the pace
+    /// allows more.
+    fn unpark_forwards(&mut self) {
+        if self
+            .forwards
+            .paces
+            .values()
+            .all(|pace| pace.due().is_none())
+        {
+            return;
+        }
+        let now = Instant::now();
+        let mut woken = Vec::new();
+        for (&handle, pace) in &mut self.forwards.paces {
+            if pace.due().is_some_and(|due| due <= now) {
+                pace.woken();
+                woken.push(handle);
+            }
+        }
+        let parked = std::mem::take(&mut self.forwards.parked);
+        for token in parked {
+            match self.sources.get(token.0) {
+                Some(Source::Forward(pipe)) if woken.contains(&pipe.handle) => {
+                    self.queue_forward(token);
+                }
+                Some(Source::Forward(_)) => self.forwards.parked.push(token),
+                _ => {}
             }
         }
     }
@@ -747,6 +848,7 @@ impl Daemon {
         self.forwards.streams.remove(&(handle, stream));
         self.sources.remove(token.0);
         self.forwards.ready.retain(|&queued| queued != token);
+        self.forwards.parked.retain(|&parked| parked != token);
         self.forwards.deadlines.retain(|&(_, of)| of != token);
         self.forwards.waiting.retain(|_, waiting| {
             waiting.retain(|&waiter| waiter != token);
@@ -778,10 +880,17 @@ impl Daemon {
     /// Sizes the send window of the connection with `handle` for the
     /// connections forwarded through it.
     fn count_forwarded(&mut self, handle: ConnectionHandle) {
-        let count = (self.forwards.streams.keys())
-            .chain(&self.forwards.lingering)
+        let open = (self.forwards.streams.keys())
             .filter(|&&(of, _)| of == handle)
             .count();
+        // With nothing forwarded, nothing is paced.
+        if open == 0 {
+            self.forwards.paces.remove(&handle);
+        }
+        let count = open
+            + (self.forwards.lingering.iter())
+                .filter(|&&(of, _)| of == handle)
+                .count();
         if let Some(quic) = self.quic.as_mut() {
             quic.set_forwarded(handle, count);
         }

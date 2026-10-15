@@ -27,6 +27,7 @@
 
 mod client;
 mod forward;
+mod pace;
 mod path;
 mod server;
 
@@ -40,6 +41,7 @@ use quinn_proto::{TransportConfig, VarInt};
 
 pub(crate) use client::{Carried, carry};
 pub use client::{Contact, Redial, Redialed};
+pub(crate) use pace::{End, Pace};
 pub use path::Route;
 pub(crate) use server::{Forwarded, QuicEvent, QuicServer, Received};
 

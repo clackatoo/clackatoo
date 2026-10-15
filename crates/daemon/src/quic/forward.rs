@@ -9,13 +9,16 @@
 //! is read only as fast as the other takes it, the streams send below
 //! everything else, and the thread moves at most [`TURN_BUDGET`] each
 //! time round, so the keys typed and the views that come back go first.
-//! Nothing here costs anything while no port is forwarded.
+//! What goes to the daemon goes only as fast as the link takes it without
+//! a queue growing (see [`Pace`]), so an upload never fills a slow link's
+//! queue ahead of keys. Nothing here costs anything while no port is
+//! forwarded.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clackatoo_protocol::frame::{self, FrameDecoder};
 use clackatoo_protocol::{
@@ -25,6 +28,7 @@ use mio::{Interest, Registry, Token};
 use quinn_proto::{Connection, Dir, ReadError, StreamId, VarInt, WriteError};
 use slab::Slab;
 
+use super::{End, Pace};
 use crate::forward::{Command, MOST_EACH, Problem, Report, Shared, Spec};
 
 /// The first token of the sockets here: those below are the thread's own.
@@ -61,14 +65,23 @@ pub(super) struct Local {
     lingering: HashSet<StreamId>,
     /// How many streams the connection's send window was last sized for.
     window_for: usize,
+    /// How fast connections may write to the daemon, while any has a
+    /// stream.
+    pace: Option<Pace>,
+    /// Connections waiting for the pace to allow more.
+    parked: Vec<usize>,
+    /// When the connection opened, which slowdowns are counted from.
+    opened: Option<Instant>,
 }
 
 /// One forward.
 #[derive(Debug)]
 struct Port {
     spec: Spec,
-    /// What's asked of the daemon for each connection, in its protocol.
+    /// What's asked of the daemon for each connection, in its protocol:
+    /// to pace it, and not to.
     ask: Vec<u8>,
+    ask_unpaced: Vec<u8>,
     /// The protocol the daemon's answers are in.
     wire: u32,
     /// Its listening sockets.
@@ -127,6 +140,8 @@ struct Pipe {
 enum Next {
     /// Used this much of its budget, and waits.
     Used(usize),
+    /// Used this much, and waits for the pace to allow more.
+    Paced(usize),
     /// Used this much, with more to do.
     Again(usize),
     /// Both sides have finished.
@@ -139,6 +154,24 @@ impl Local {
     /// Whether any socket has something to do now.
     pub(super) fn busy(&self) -> bool {
         !self.ready.is_empty()
+    }
+
+    /// When a connection held back by the pace may go on, if one is.
+    pub(super) fn next_due(&self) -> Option<Instant> {
+        self.pace.as_ref().and_then(Pace::due)
+    }
+
+    /// Notes that the connection opened, `now`.
+    pub(super) fn connected(&mut self, now: Instant) {
+        self.opened = Some(now);
+    }
+
+    /// Notes that the connection's path changed, as it moved between UDP
+    /// and ssh, its round trip being `rtt` now.
+    pub(super) fn path_changed(&mut self, now: Instant, rtt: Duration) {
+        if let Some(pace) = &mut self.pace {
+            pace.path_changed(now, rtt);
+        }
     }
 
     /// Notes that the socket with `token`, one of these, had an event.
@@ -207,13 +240,9 @@ impl Local {
                 wire,
                 shared,
             } => {
-                let request = ClientMessage::Request(Request::Forward(Forward {
-                    host: spec.host.clone(),
-                    port: spec.port,
-                }));
-                let ask = match frame::encode(wire, &request) {
-                    Ok(ask) => ask,
-                    Err(err) => {
+                let (ask, ask_unpaced) = match (ask(&spec, wire, false), ask(&spec, wire, true)) {
+                    (Ok(ask), Ok(ask_unpaced)) => (ask, ask_unpaced),
+                    (Err(err), _) | (_, Err(err)) => {
                         log::error!("encoding a request to forward failed: {err}");
                         return;
                     }
@@ -242,6 +271,7 @@ impl Local {
                     Port {
                         spec,
                         ask,
+                        ask_unpaced,
                         wire,
                         listeners: keys.clone(),
                         open: 0,
@@ -300,8 +330,25 @@ impl Local {
         scratch: &mut [u8],
     ) {
         self.size_window(connection);
+        // With nothing forwarded, nothing is paced.
+        if self.streams.is_empty() {
+            self.pace = None;
+            self.parked.clear();
+        }
+        let now = Instant::now();
+        if let Some(pace) = &mut self.pace
+            && pace.due().is_some_and(|due| due <= now)
+        {
+            pace.woken();
+            for key in std::mem::take(&mut self.parked) {
+                self.queue(key);
+            }
+        }
         if !connected || self.ready.is_empty() {
             return;
+        }
+        if let Some(pace) = &mut self.pace {
+            pace.refresh(now, connection.rtt());
         }
         let mut budget = TURN_BUDGET;
         for _ in 0..self.ready.len() {
@@ -369,7 +416,11 @@ impl Local {
                     return;
                 }
             };
-            let ask = port.ask.clone();
+            let ask = if port.shared.paced() {
+                port.ask.clone()
+            } else {
+                port.ask_unpaced.clone()
+            };
             let entry = self.sockets.vacant_entry();
             let pipe_key = entry.key();
             let mut socket = socket;
@@ -425,15 +476,31 @@ impl Local {
             pipe.stream = Some(stream);
             self.streams.insert(stream, key);
             self.unstreamed.retain(|&waiting| waiting != key);
+            if self.pace.is_none() {
+                let now = Instant::now();
+                let opened = self.opened.unwrap_or(now);
+                self.pace = Some(Pace::new(now, connection.rtt(), opened, End::Window));
+            }
         }
-        let Some(port) = self.forwards.get(&pipe.forward) else {
+        let (Some(port), Some(pace)) = (self.forwards.get(&pipe.forward), self.pace.as_mut())
+        else {
             self.abandon(key, Some(connection));
             return 0;
         };
-        match pipe.relay(connection, port.wire, budget, scratch) {
+        let pace = port.shared.paced().then_some(pace);
+        match pipe.relay(connection, port.wire, budget, pace, scratch) {
             Next::Used(used) => {
                 if pipe.answer.is_none() {
                     self.worked(key);
+                }
+                used
+            }
+            Next::Paced(used) => {
+                if pipe.answer.is_none() {
+                    self.worked(key);
+                }
+                if !self.parked.contains(&key) {
+                    self.parked.push(key);
                 }
                 used
             }
@@ -504,6 +571,7 @@ impl Local {
         }
         self.ready.retain(|&queued| queued != key);
         self.unstreamed.retain(|&waiting| waiting != key);
+        self.parked.retain(|&parked| parked != key);
         if let Some(port) = self.forwards.get_mut(&pipe.forward) {
             let was_full = port.open >= MOST_EACH;
             port.open = port.open.saturating_sub(1);
@@ -519,14 +587,16 @@ impl Local {
 }
 
 impl Pipe {
-    /// Passes bytes both ways, up to `budget` of them, the daemon's
-    /// answer being in protocol `wire`, using `scratch` to read the
-    /// socket into.
+    /// Passes bytes both ways, up to `budget` of them, those to the
+    /// daemon as fast as `pace` allows, if they're paced, the daemon's
+    /// answer being in protocol `wire`, using `scratch` to read the socket
+    /// into.
     fn relay(
         &mut self,
         connection: &mut Connection,
         wire: u32,
         budget: usize,
+        mut pace: Option<&mut Pace>,
         scratch: &mut [u8],
     ) -> Next {
         let Some(stream) = self.stream else {
@@ -543,6 +613,8 @@ impl Pipe {
             return Next::Abandon(None);
         }
         let mut used = 0;
+        // Whether the pace held back what's waiting for the daemon.
+        let mut paced = false;
         loop {
             let before = used;
             // From the daemon to the browser, its answer first, each step
@@ -577,18 +649,26 @@ impl Pipe {
             }
             // From the browser to the daemon.
             if !self.to_stream.is_empty() && used < budget {
-                let most = self.to_stream.len().min(budget - used);
-                match connection
-                    .send_stream(stream)
-                    .write(&self.to_stream[..most])
-                {
-                    Ok(written) => {
-                        self.to_stream.drain(..written);
-                        used += written;
+                let wanted = self.to_stream.len().min(budget - used);
+                let most = pace.as_deref().map_or(wanted, |pace| pace.most(wanted));
+                let written = if most == 0 {
+                    0
+                } else {
+                    match connection
+                        .send_stream(stream)
+                        .write(&self.to_stream[..most])
+                    {
+                        Ok(written) => written,
+                        Err(WriteError::Blocked) => 0,
+                        Err(_) => return Next::Abandon(self.why_stopped(connection, stream, wire)),
                     }
-                    Err(WriteError::Blocked) => {}
-                    Err(_) => return Next::Abandon(self.why_stopped(connection, stream, wire)),
+                };
+                if let Some(pace) = pace.as_deref_mut() {
+                    pace.wrote(written, wanted);
                 }
+                paced = most < wanted && written == most;
+                self.to_stream.drain(..written);
+                used += written;
             }
             if !self.socket_done && self.to_stream.len() < CHUNK && used < budget {
                 let room = (CHUNK - self.to_stream.len())
@@ -618,7 +698,11 @@ impl Pipe {
                 return Next::Again(used);
             }
             if used == before {
-                return Next::Used(used);
+                return if paced {
+                    Next::Paced(used)
+                } else {
+                    Next::Used(used)
+                };
             }
         }
     }
@@ -729,10 +813,55 @@ impl Pipe {
     }
 }
 
+/// What's asked of the daemon for a connection forward `spec` takes, in
+/// protocol `wire`: to connect where it goes, and if `unpaced`, to send
+/// what comes back as fast as it can.
+fn ask(spec: &Spec, wire: u32, unpaced: bool) -> Result<Vec<u8>, frame::FrameError> {
+    let request = ClientMessage::Request(Request::Forward(Forward {
+        host: spec.host.clone(),
+        port: spec.port,
+        unpaced,
+    }));
+    frame::encode(wire, &request)
+}
+
 /// Whether `err` only says to try again later.
 fn is_wait(err: &io::Error) -> bool {
     matches!(
         err.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use clackatoo_protocol::wire;
+
+    use super::*;
+
+    /// The request `bytes` holds, read as the daemon reads it at `wire`.
+    fn asked(bytes: &[u8], wire: u32) -> Forward {
+        let mut decoder = FrameDecoder::new();
+        decoder.push(bytes);
+        match decoder.decode::<ClientMessage>(wire) {
+            Ok(Some(ClientMessage::Request(Request::Forward(forward)))) => forward,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_connection_asks_not_to_be_paced_only_of_a_daemon_that_knows_how() {
+        let spec: Spec = "3000:box:8080".parse().unwrap();
+        for unpaced in [false, true] {
+            let bytes = ask(&spec, wire::FORWARD_PACE, unpaced).unwrap();
+            let forward = asked(&bytes, wire::FORWARD_PACE);
+            assert_eq!((forward.host.as_str(), forward.port), ("box", 8080));
+            assert_eq!(forward.unpaced, unpaced);
+        }
+        // An older daemon is asked as before: it paces nothing anyway.
+        let older = wire::FORWARD_PACE - 1;
+        let unpaced = ask(&spec, older, true).unwrap();
+        assert_eq!(unpaced, ask(&spec, older, false).unwrap());
+        assert!(!asked(&unpaced, older).unpaced);
+    }
 }

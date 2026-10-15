@@ -15,10 +15,16 @@
 //! [`wire::daemon_has`](crate::wire::daemon_has) with
 //! [`wire::FORWARDS`](crate::wire::FORWARDS) before opening one, as an
 //! older daemon stops any stream but the first.
+//!
+//! The daemon sends what comes from the connection only as fast as the
+//! link takes it without a queue growing ahead of keys, unless the window
+//! asks otherwise ([`Forward::unpaced`], protocol 83).
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+
+use crate::wire;
 
 /// Where a forwarded connection goes, on the daemon's machine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +34,16 @@ pub struct Forward {
     pub host: String,
     /// The port there.
     pub port: u16,
+    /// Send what comes from the connection as fast as it goes, even
+    /// filling a slow link's queue ahead of keys, rather than as
+    /// background traffic, as the window's `forwardpace` option off asks.
+    /// `false` from a window older than protocol 83, whose forwards the
+    /// daemon paces.
+    #[serde(
+        skip_serializing_if = "wire::before::<{ wire::FORWARD_PACE }, _>",
+        deserialize_with = "wire::since::<{ wire::FORWARD_PACE }, _, _>"
+    )]
+    pub unpaced: bool,
 }
 
 /// Why the daemon couldn't make a forwarded connection.

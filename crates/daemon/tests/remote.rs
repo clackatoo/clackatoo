@@ -711,65 +711,320 @@ fn a_flood_down_a_narrow_link_skips_to_the_latest_screen() {
 #[test]
 #[ignore = "slow: typing while a forwarded port downloads down a narrow link"]
 fn typing_while_a_forwarded_port_downloads_down_a_narrow_link_stays_quick() {
-    use std::io::{Read, Write};
+    let measured = typing_beside_forwards("download", narrow_link(), &[Transfer::Download]);
+    measured.assert_echoes(Duration::from_millis(30));
+    measured.assert_rates(NARROW_RATE * 7 / 10, NARROW_RATE / 2);
+}
 
-    let daemon = TestDaemon::start();
-    // 20 Mbit/s with 20 ms each way, and a router's queue of 100 ms.
-    let network = Network::new(Conditions::both(Impairment {
+#[test]
+#[ignore = "slow: typing while a forwarded port uploads up a narrow link"]
+fn typing_while_a_forwarded_port_uploads_up_a_narrow_link_stays_quick() {
+    let measured = typing_beside_forwards("upload", narrow_link(), &[Transfer::Upload]);
+    measured.assert_echoes(Duration::from_millis(30));
+    measured.assert_rates(NARROW_RATE * 7 / 10, NARROW_RATE / 2);
+}
+
+#[test]
+#[ignore = "slow: typing while forwarded ports download and upload at once"]
+fn typing_while_forwarded_ports_download_and_upload_at_once_stays_quick() {
+    // A download's acknowledgements wait in the upload's queue, and the
+    // upload's in the download's: each end measures with the other's
+    // queue in place, and keeps only its own short.
+    let both = [Transfer::Download, Transfer::Upload];
+    let measured = typing_beside_forwards("download and upload", narrow_link(), &both);
+    // A key goes up through the upload's queue, and its echo comes down
+    // through the download's: each end keeps its own to the target.
+    measured.assert_echoes(Duration::from_millis(50));
+    measured.assert_rates(NARROW_RATE * 2 / 5, NARROW_RATE * 2 / 5);
+}
+
+#[test]
+#[ignore = "slow: a forwarded upload starting while a download goes"]
+fn an_upload_starting_late_leaves_a_download_its_own_link() {
+    // The download has the link to itself for 20 s, then an upload
+    // starts: once each end has measured with the other's queue in
+    // place, each direction has most of its own link again.
+    let late = Setup {
+        late: Duration::from_secs(20),
+        settle: Duration::from_secs(15),
+        ..Setup::default()
+    };
+    let both = [Transfer::Download, Transfer::Upload];
+    let measured = typing_beside("upload starting late", narrow_link(), &both, &late);
+    measured.assert_echoes(Duration::from_millis(50));
+    measured.assert_rates(NARROW_RATE / 2, NARROW_RATE / 2);
+}
+
+#[test]
+#[ignore = "slow: forwarded ports downloading and uploading over a lopsided link"]
+fn a_lopsided_link_gives_each_way_its_own_speed() {
+    // 20 Mbit/s down and 2 up, as many home links are: the upload mustn't
+    // hold the download to its speed. The download's acknowledgements
+    // take a fifth of the way up, and a packet takes 5 ms to go up, so
+    // the round trip the download goes by jumps by that as the upload's
+    // queue comes and goes: it went at 0.5 to 2 MB/s.
+    let mut conditions = narrow_link();
+    conditions.up.rate = Some(NARROW_RATE / 10);
+    let both = [Transfer::Download, Transfer::Upload];
+    let measured = typing_beside("lopsided", conditions, &both, &Setup::default());
+    measured.assert_echoes(Duration::from_millis(60));
+    let up = NARROW_RATE / 10;
+    for rates in [&measured.quiet_rates, &measured.busy_rates] {
+        assert!(
+            rates[0] > up * 3 / 2 && rates[1] > up * 2 / 5,
+            "down {} B/s, up {} B/s",
+            rates[0],
+            rates[1]
+        );
+    }
+}
+
+#[test]
+#[ignore = "slow: a forwarded port downloading down a narrow link, unpaced"]
+fn a_forwarded_download_told_not_to_pace_takes_the_whole_link() {
+    // `:set noforwardpace`: the download goes as fast as it can, taking
+    // the link whether keys wait behind it or not.
+    let unpaced = Setup {
+        paced: false,
+        ..Setup::default()
+    };
+    let measured = typing_beside(
+        "unpaced download",
+        narrow_link(),
+        &[Transfer::Download],
+        &unpaced,
+    );
+    measured.assert_rates(NARROW_RATE * 85 / 100, NARROW_RATE * 85 / 100);
+}
+
+#[test]
+#[ignore = "slow: a forwarded port downloading down a jittery link"]
+fn a_forwarded_download_down_a_jittery_link_still_gets_through() {
+    // The narrow link, with each packet held up 0 to 60 ms more, in
+    // order, as bad Wi-Fi does: a delay that rises and falls with
+    // nothing queued mustn't be taken for a queue, starving the download.
+    let mut conditions = narrow_link();
+    for way in [&mut conditions.up, &mut conditions.down] {
+        way.jitter = Duration::from_millis(60);
+        way.in_order = true;
+    }
+    let measured = typing_beside_forwards("jittery download", conditions, &[Transfer::Download]);
+    // Busy, the link alone holds each packet up about 30 ms more than
+    // when keys go one at a time, as each waits for the slowest before
+    // it: that's not the download's queue, and keys wait in it whatever
+    // goes.
+    measured.assert_echoes(Duration::from_millis(60));
+    // Unpaced, the download went at about 1.7 MB/s either way, as the
+    // link held up in order carries a third less. Paced: busier, the link
+    // holds packets up longer, which reads as a queue, so each slowdown
+    // finds a little more of that and allows a little more. It went at
+    // 0.25 to 0.35 MB/s in its first six seconds, with nobody typing, as
+    // it climbed, and at 1.3 to 1.95 MB/s by the time typing started.
+    measured.assert_rates(NARROW_RATE / 20, NARROW_RATE / 5);
+}
+
+/// 20 Mbit/s with 20 ms each way, and a router's queue of 100 ms.
+fn narrow_link() -> Conditions {
+    Conditions::both(Impairment {
         delay: Duration::from_millis(20),
-        rate: Some(20_000_000 / 8),
+        rate: Some(NARROW_RATE),
         queue: Duration::from_millis(100),
         ..Impairment::default()
-    }));
+    })
+}
+
+/// How fast [`narrow_link`] goes each way, in bytes a second.
+const NARROW_RATE: u64 = 20_000_000 / 8;
+
+/// Which way a forwarded connection's bytes go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transfer {
+    /// From a server on the daemon's machine to a browser on the window's.
+    Download,
+    /// From the browser to the server.
+    Upload,
+}
+
+/// What [`typing_beside_forwards`] measured.
+struct Beside {
+    /// The echoes before anything was forwarded.
+    before: Latencies,
+    /// How fast each transfer went while nobody typed, in bytes a second.
+    quiet_rates: Vec<u64>,
+    /// The first echo once typing started again, after that pause.
+    first: Duration,
+    /// The echoes while the transfers went on.
+    during: Latencies,
+    /// How fast each went meanwhile.
+    busy_rates: Vec<u64>,
+}
+
+impl Beside {
+    /// Asserts that keys were held up no more than `most` by the
+    /// transfers, at the middle, and not much more at the 95th percentile
+    /// or straight after a pause.
+    fn assert_echoes(&self, most: Duration) {
+        let before = self.before.percentile(0.5);
+        let during = self.during.percentile(0.5);
+        assert!(
+            during < before + most,
+            "echoes went from {before:?} to {during:?}"
+        );
+        let slow = self.during.percentile(0.95);
+        let slow_before = self.before.percentile(0.95);
+        assert!(
+            slow < slow_before + most + most / 2,
+            "the 95th percentile went from {slow_before:?} to {slow:?}"
+        );
+        assert!(
+            self.first < before + most + Duration::from_millis(10),
+            "the first echo after a pause took {:?}",
+            self.first
+        );
+    }
+
+    /// Asserts that each transfer went faster than `quiet` bytes a second
+    /// with nobody typing, and `busy` while typing.
+    fn assert_rates(&self, quiet: u64, busy: u64) {
+        for (&alone, &typing) in self.quiet_rates.iter().zip(&self.busy_rates) {
+            assert!(
+                alone > quiet && typing > busy,
+                "a transfer went at only {alone} B/s with nobody typing, {typing} B/s while \
+                 typing"
+            );
+        }
+    }
+}
+
+/// Types into a terminal over a network of `conditions`, then forwards a
+/// port for each of `transfers` and moves bytes through each as fast as
+/// they go, the way it says: first with nobody typing, then while typing
+/// goes on.
+fn typing_beside_forwards(name: &str, conditions: Conditions, transfers: &[Transfer]) -> Beside {
+    typing_beside(name, conditions, transfers, &Setup::default())
+}
+
+/// How [`typing_beside`] goes, beyond what it moves.
+struct Setup {
+    /// Whether the forwards go as background traffic.
+    paced: bool,
+    /// How long after the first transfer the others start.
+    late: Duration,
+    /// How long after the last starts it's measured.
+    settle: Duration,
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self {
+            paced: true,
+            late: Duration::ZERO,
+            settle: Duration::from_secs(1),
+        }
+    }
+}
+
+/// [`typing_beside_forwards`], as `setup` says.
+fn typing_beside(
+    name: &str,
+    conditions: Conditions,
+    transfers: &[Transfer],
+    setup: &Setup,
+) -> Beside {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let daemon = TestDaemon::start();
+    let network = Network::new(conditions);
     let mut session = Session::open(&daemon, &network);
     wait_for_route(&mut session, Route::Udp, ON_UDP_LIMIT);
     session.type_for(Duration::from_secs(5), TYPING);
-    session.report("before the download");
-    let before = session.echoes.percentile(0.5);
-    session.echoes = Latencies::new();
+    session.report(&format!("{name}, before"));
+    let before = std::mem::take(&mut session.echoes);
 
-    // A server on the daemon's machine sending as fast as it can, and a
-    // browser on the window's reading it all, through a forward.
-    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = server.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        if let Ok((mut stream, _)) = server.accept() {
-            let block = vec![b'x'; 64 * 1024];
-            while stream.write_all(&block).is_ok() {}
-        }
-    });
-    let mut forwards = clackatoo_daemon::forward::Forwards::new(|| {});
-    let spec = clackatoo_daemon::forward::Spec {
-        local: 0,
-        host: "localhost".into(),
-        port,
+    // For each, a server on the daemon's machine and a browser on the
+    // window's, through a forward of its own: one sends as fast as it
+    // can, and the other counts what it reads.
+    let send = |mut stream: TcpStream| {
+        let block = vec![b'x'; 64 * 1024];
+        while stream.write_all(&block).is_ok() {}
     };
-    let local = forwards.add(spec).unwrap().local;
-    assert!(forwards.attach(session.client.forwarder().unwrap()));
-    let read = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let counted = Arc::clone(&read);
-    let mut browser = std::net::TcpStream::connect(("127.0.0.1", local)).unwrap();
-    std::thread::spawn(move || {
+    let count = |mut stream: TcpStream, moved: &AtomicU64| {
         let mut buffer = vec![0; 64 * 1024];
-        while let Ok(n @ 1..) = browser.read(&mut buffer) {
-            counted.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        while let Ok(n @ 1..) = stream.read(&mut buffer) {
+            moved.fetch_add(n as u64, Ordering::Relaxed);
         }
-    });
-    let started = Instant::now();
+    };
+    let mut forwards = clackatoo_daemon::forward::Forwards::new(|| {});
+    forwards.set_paced(setup.paced);
+    assert!(forwards.attach(session.client.forwarder().unwrap()));
+    let mut moved = Vec::new();
+    for (at, &transfer) in transfers.iter().enumerate() {
+        if at == 1 {
+            std::thread::sleep(setup.late);
+        }
+        let tally = Arc::new(AtomicU64::new(0));
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let counted = Arc::clone(&tally);
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = server.accept() {
+                match transfer {
+                    Transfer::Download => send(stream),
+                    Transfer::Upload => count(stream, &counted),
+                }
+            }
+        });
+        let spec = clackatoo_daemon::forward::Spec {
+            local: 0,
+            host: "localhost".into(),
+            port,
+        };
+        let local = forwards.add(spec).unwrap().local;
+        let browser = TcpStream::connect(("127.0.0.1", local)).unwrap();
+        let counted = Arc::clone(&tally);
+        std::thread::spawn(move || match transfer {
+            Transfer::Download => count(browser, &counted),
+            Transfer::Upload => send(browser),
+        });
+        moved.push(tally);
+    }
+    // How much each had moved, and when.
+    let mark = || {
+        let counts: Vec<u64> = moved.iter().map(|c| c.load(Ordering::Relaxed)).collect();
+        (counts, Instant::now())
+    };
+    // How fast each went since a mark.
+    let rates_since = |(from, started): (Vec<u64>, Instant)| -> Vec<u64> {
+        let millis = u64::try_from(started.elapsed().as_millis()).unwrap();
+        (moved.iter().zip(from))
+            .map(|(c, from)| (c.load(Ordering::Relaxed) - from) * 1000 / millis)
+            .collect()
+    };
+
+    // Under way, then alone.
+    std::thread::sleep(setup.settle);
+    let started = mark();
+    std::thread::sleep(Duration::from_secs(5));
+    let quiet_rates = rates_since(started);
+    let first = session.echo();
+    session.echoes = Latencies::new();
+    let started = mark();
     session.type_for(Duration::from_secs(10), TYPING);
-    let rate = read.load(std::sync::atomic::Ordering::Relaxed) / started.elapsed().as_secs();
-    session.report("while a forwarded port downloads");
-    eprintln!("NETEM   the download went at {} kB/s", rate / 1000);
-    let during = session.echoes.percentile(0.5);
-    assert!(rate > 500_000, "the download crawled at {rate} B/s");
-    // A guard on how it goes today, not where it should be: the download
-    // fills the router's queue, which echoes then wait in, as they would
-    // behind any download. Pacing forwards as background traffic would
-    // keep it near empty.
-    assert!(
-        during < before + Duration::from_millis(150),
-        "echoes went from {before:?} to {during:?}"
+    let busy_rates = rates_since(started);
+    session.report(&format!("{name}, while typing"));
+    eprintln!(
+        "NETEM   {name}: {quiet_rates:?} B/s with nobody typing, {busy_rates:?} B/s while \
+         typing; the first echo after the pause took {first:?}"
     );
+    Beside {
+        before,
+        quiet_rates,
+        first,
+        during: std::mem::take(&mut session.echoes),
+        busy_rates,
+    }
 }
 
 /// Attaches to `terminal` and takes its first view, whatever it shows.

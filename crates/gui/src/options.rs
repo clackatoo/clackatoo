@@ -586,6 +586,15 @@ options! {
     /// trip is over 30 ms or a key has just taken a long time; `always`
     /// does it even for a daemon on this machine; `never` doesn't.
     predictecho("pe"): PredictEcho = PredictEcho::Auto;
+    /// Ports forwarded to a daemon on another machine (`:PortForward`)
+    /// send as background traffic: only as fast as the link takes them
+    /// without a queue growing, so keys and screens never wait behind a
+    /// download. Off, they go as fast as they can, taking the whole of a
+    /// slow link at the cost of keys waiting in its queue: worth it on a
+    /// link that's slower whenever it's busy, as some Wi-Fi is, where
+    /// background traffic gets little. A change counts for connections
+    /// made after; what the window sends changes at once.
+    forwardpace("fp"): bool = true;
     /// The font family terminals and editors are drawn in, by its name, as
     /// `fc-list : family` lists them: `JetBrains Mono`, say. Empty is your
     /// system's monospace font. In `:set`, a space is written `\ `. A

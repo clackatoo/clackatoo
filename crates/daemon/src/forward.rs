@@ -23,6 +23,7 @@ use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 use clackatoo_protocol::{ForwardFailure, wire};
@@ -200,14 +201,22 @@ impl Report {
 }
 
 /// What a window's forwards and the QUIC connection's thread share: how
-/// many connections each forward has open, and what to tell the user.
+/// many connections each forward has open, what to tell the user, and
+/// whether forwards are paced.
 pub(crate) struct Shared {
     connections: Mutex<HashMap<u64, usize>>,
     reports: Mutex<Vec<Report>>,
+    paced: AtomicBool,
     notify: Box<dyn Fn() + Send + Sync>,
 }
 
 impl Shared {
+    /// Whether forwards go as background traffic, as they do unless the
+    /// window's `forwardpace` option is off: see [`Forwards::set_paced`].
+    pub(crate) fn paced(&self) -> bool {
+        self.paced.load(Ordering::Relaxed)
+    }
+
     /// Notes that forward `id` has `count` connections open.
     pub(crate) fn set_connections(&self, id: u64, count: usize) {
         let mut connections = (self.connections.lock()).unwrap_or_else(PoisonError::into_inner);
@@ -233,6 +242,7 @@ impl fmt::Debug for Shared {
         f.debug_struct("Shared")
             .field("connections", &self.connections)
             .field("reports", &self.reports)
+            .field("paced", &self.paced)
             .finish_non_exhaustive()
     }
 }
@@ -320,6 +330,7 @@ impl Forwards {
             shared: Arc::new(Shared {
                 connections: Mutex::new(HashMap::new()),
                 reports: Mutex::new(Vec::new()),
+                paced: AtomicBool::new(true),
                 notify: Box::new(notify),
             }),
         }
@@ -395,6 +406,17 @@ impl Forwards {
     /// the connections it had.
     pub fn detach(&mut self) {
         self.forwarder = None;
+    }
+
+    /// Sets whether forwarded connections go as background traffic,
+    /// sending only as fast as the link takes them without a queue growing
+    /// ahead of keys, as they do unless told otherwise; or, `false`, as
+    /// fast as they can, taking the whole link at the cost of keys
+    /// waiting behind them. What this window sends changes at once; what
+    /// the daemon sends changes for connections made after, as it's told
+    /// with each one.
+    pub fn set_paced(&self, paced: bool) {
+        self.shared.paced.store(paced, Ordering::Relaxed);
     }
 
     /// Whether no port is forwarded.
@@ -600,5 +622,23 @@ mod tests {
         let new = Forwarder::new(commands, waker, wire::FORWARDS);
         assert!(forwards.attach(new));
         assert!(matches!(told.try_recv(), Ok(Command::Listen { .. })));
+    }
+
+    #[test]
+    fn forwards_are_paced_until_told_not_to_and_the_thread_sees_it_at_once() {
+        let poll = mio::Poll::new().unwrap();
+        let waker = Arc::new(Waker::new(poll.registry(), mio::Token(0)).unwrap());
+        let (commands, told) = mpsc::channel();
+        let mut forwards = Forwards::new(|| {});
+        forwards.add(spec(0, "localhost", 80)).unwrap();
+        assert!(forwards.attach(Forwarder::new(commands, waker, wire::FORWARD_PACE)));
+        let Ok(Command::Listen { shared, .. }) = told.try_recv() else {
+            panic!("not handed over");
+        };
+        assert!(shared.paced());
+        forwards.set_paced(false);
+        assert!(!shared.paced());
+        forwards.set_paced(true);
+        assert!(shared.paced());
     }
 }

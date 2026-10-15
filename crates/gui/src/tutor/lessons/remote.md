@@ -34,6 +34,8 @@ A dev server on the other machine that listens on `localhost:8080` can't be reac
 
 `:PortForward` alone lists the forwards and how many connections each has open, and `:PortForward! 8080` stops one, or with no port, all of them. They're kept while the window is open: when the connection drops, or the daemon there is upgraded, connections open through them are cut off, and new ones wait until the window has connected again. If nothing listens at the other end, the bar says so once, not for every try. `client.forward(8080)` in your config forwards a port whenever the window opens.
 
+A download through a forward goes as background traffic: only as fast as the link takes it without a queue building up, so what you type and the screens it changes never wait behind it, however slow the link. On a link that's slower whenever it's busy, as some Wi-Fi is, that can leave a download crawling: `:set noforwardpace` lets forwards take the whole link instead, at the cost of keys waiting behind them, for connections made after.
+
 ## From your phone
 
 The daemon can serve a web app, for your phone or any browser: your chats by workspace, with those that need you first, and each chat as a window shows it, with its questions, the box to send a message, Stop, the model, mode and effort menus, and the cards of the chats its agent started. It's off until `~/.config/clackatoo/daemon/web.toml` says `mode = "tailscale"`, which listens on a socket only you can reach, `~/.local/share/clackatoo/web/web.sock`, for `tailscale serve --bg unix:` and that path to give your tailnet, over HTTPS; `mode = "public"` serves it to the network, with your own certificate and a password.

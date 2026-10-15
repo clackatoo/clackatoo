@@ -148,6 +148,10 @@ gates! {
     /// `Request::Forward` (`Forward`), on a QUIC stream of its own, and
     /// `Error::Forward` (`ForwardFailure`).
     FORWARDS = 82,
+    /// Forwarded connections whose window asks for them to go as fast as
+    /// they can, rather than as background traffic: `Forward`'s
+    /// `unpaced`.
+    FORWARD_PACE = 83,
 }
 
 /// The oldest protocol version any peer of this build can speak: older

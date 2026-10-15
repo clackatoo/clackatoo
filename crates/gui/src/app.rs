@@ -957,6 +957,7 @@ impl App {
     /// Carries out what `:PortForward` asked for, if it was typed, or
     /// run from the config.
     fn forward_ports(&mut self) {
+        self.forwards.set_paced(self.desk.options().forwardpace);
         let asked = self.desk.take_forwards_asked();
         if asked.is_empty() {
             return;

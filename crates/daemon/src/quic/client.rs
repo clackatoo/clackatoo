@@ -586,6 +586,7 @@ impl Driver {
             self.transmit(now)?;
             let on_udp = self.path.route() == Route::Udp;
             if self.on_udp.swap(on_udp, Ordering::Relaxed) != on_udp {
+                self.forwards.path_changed(now, self.connection.rtt());
                 log::info!(
                     "the QUIC connection moved {}; {}",
                     if on_udp { "onto UDP" } else { "back into ssh" },
@@ -616,6 +617,7 @@ impl Driver {
                 .chain(self.path.next_tick())
                 .chain([self.stats_due])
                 .chain(redial)
+                .chain(self.forwards.next_due())
                 .min()
                 .map(|due| due.saturating_duration_since(Instant::now()));
             // Forwarded bytes left for next time round don't wait.
@@ -878,6 +880,7 @@ impl Driver {
                         return Ok(false);
                     };
                     self.stream = Some(stream);
+                    self.forwards.connected(now);
                     self.incoming.insert(stream, FrameDecoder::new());
                     let action = self.path.connected(now);
                     self.act(action)?;
