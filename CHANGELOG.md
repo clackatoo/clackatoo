@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.44 (2026-10-15)
+
+### Features
+
+- **gui:** amber kept for focus and action, a faint end of file, an empty chat that says where, and Copy on hover (2c3506a)
+
 ## 2026.10.43 (2026-10-15)
 
 ### Features
