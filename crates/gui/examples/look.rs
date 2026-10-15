@@ -37,6 +37,7 @@
 //! | `theme dark` | The window's colours; it has only the one theme so far |
 //! | `file PATH` | Makes an empty file in the project, the folder the first shell starts in |
 //! | `file PATH <<END`, lines, `END` | Makes a file of those lines |
+//! | `config <<END`, lines, `END` | Makes the window's `init.lua` of those lines, which it runs as it opens |
 //! | `open PATH` | Opens the project's file in an editor, from normal mode: `<C-;>:Editor PATH<CR>` |
 //! | `keys KEYS` | Presses keys, in Vim's notation: `:Explore<CR>`, `<Space>ff`, `<C-w>v` |
 //! | `type TEXT` | Types the text, a key a character |
@@ -230,6 +231,7 @@ enum Command {
     Scale(f64),
     Theme,
     File(PathBuf, String),
+    Config(String),
     Open(String),
     Keys(String),
     Type(String),
@@ -288,7 +290,7 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
             ),
             "theme" if rest == "dark" => Command::Theme,
             "theme" => bail!("line {line_number}: the window has only the dark theme so far"),
-            "file" => {
+            "file" | "config" => {
                 let (path, until) = match rest.split_once("<<") {
                     Some((path, until)) => (path.trim(), Some(until.trim())),
                     None => (rest, None),
@@ -306,11 +308,19 @@ fn parse(script: &str) -> anyhow::Result<Vec<Step>> {
                         contents.push('\n');
                     }
                 }
-                let path = PathBuf::from(path);
-                if path.is_absolute() || path.components().any(|part| part.as_os_str() == "..") {
-                    bail!("line {line_number}: files go in the project");
+                if word == "config" {
+                    if !path.is_empty() || until.is_none() {
+                        bail!("line {line_number}: `config` takes its lines: `config <<END`");
+                    }
+                    Command::Config(contents)
+                } else {
+                    let path = PathBuf::from(path);
+                    if path.is_absolute() || path.components().any(|part| part.as_os_str() == "..")
+                    {
+                        bail!("line {line_number}: files go in the project");
+                    }
+                    Command::File(path, contents)
                 }
-                Command::File(path, contents)
             }
             "open" => Command::Open(rest.to_owned()),
             "keys" => Command::Keys(rest.to_owned()),
@@ -505,6 +515,9 @@ struct Look {
     project: PathBuf,
     out: PathBuf,
     window: Option<Window>,
+    /// The config directory a `config` step wrote `init.lua` in, for the
+    /// window to run; none until one does.
+    config: Option<PathBuf>,
     timings: String,
 }
 
@@ -514,7 +527,8 @@ impl Look {
     fn window(&mut self) -> anyhow::Result<&mut Window> {
         if self.window.is_none() {
             let runtime = RuntimeDir::for_current_user().path().to_owned();
-            let mut window = Window::open(runtime, self.size, self.scale)?;
+            let config = self.config.clone();
+            let mut window = Window::open(runtime, self.size, self.scale, config)?;
             if !window.connect(self.timeout) {
                 bail!(
                     "the window never showed the daemon's workspaces:\n{}",
@@ -528,6 +542,7 @@ impl Look {
     }
 
     /// Carries out `step`.
+    #[allow(clippy::too_many_lines, reason = "one arm per command, each short")]
     fn run(&mut self, step: &Step) -> anyhow::Result<()> {
         let mut timed = true;
         match &step.command {
@@ -553,6 +568,16 @@ impl Look {
                     std::fs::create_dir_all(dir)?;
                 }
                 std::fs::write(&path, contents)?;
+            }
+            Command::Config(contents) => {
+                timed = false;
+                if self.window.is_some() {
+                    bail!("`config` comes before the window opens");
+                }
+                let dir = clackatoo_daemon::config_dir().context("no config directory")?;
+                std::fs::create_dir_all(dir.join("client"))?;
+                std::fs::write(dir.join("client/init.lua"), contents)?;
+                self.config = Some(dir);
             }
             Command::Open(path) => {
                 let notation = format!("<C-;>:Editor {}<CR>", path.replace('<', "<lt>"));
@@ -683,6 +708,7 @@ fn run_script(script: &Path, out: &Path) -> anyhow::Result<()> {
         project,
         out: out.to_owned(),
         window: None,
+        config: None,
         timings: format!(
             "# {}\n\
              # How long each step took to show, in milliseconds, from its first key\n\
@@ -751,4 +777,23 @@ impl log::Log for Stderr {
     }
 
     fn flush(&self) {}
+}
+
+// Run with `cargo test -p clackatoo-gui --example look`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_takes_its_lines_and_nothing_else() {
+        let steps = parse("config <<END\nclient.opt.wrap = false\nEND\nshot a\n").unwrap();
+        assert!(matches!(
+            &steps[0].command,
+            Command::Config(text) if text == "client.opt.wrap = false\n"
+        ));
+        assert!(matches!(&steps[1].command, Command::Shot(_)));
+        assert!(parse("config\n").is_err(), "no lines");
+        assert!(parse("config init.lua <<END\nEND\n").is_err(), "a path");
+        assert!(parse("config <<END\nx\n").is_err(), "no end");
+    }
 }

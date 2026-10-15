@@ -21,7 +21,10 @@
 //! marks it `^B` by the mode, and a panel above the bar lists the keys it
 //! takes and what each does, as which-key.nvim does. The panel is made from
 //! the bindings themselves: each says what it does in its label, so a key
-//! bound again says so, and keys of the config's own are listed too. The
+//! bound again says so, and keys of the config's own are listed too, by
+//! their `desc`. A key that starts several says their group's name, as
+//! `<Space>p` says "project", which the config can name too
+//! (`client.keys.group`). The
 //! panes are numbered meanwhile if there are two or more, and always after
 //! `p`. Other keys that start bindings, as Space does, list theirs only
 //! once `whichkeydelay` has passed, so keys typed quickly never flash the
@@ -260,7 +263,22 @@ fn defaults() -> Keymap<Binding> {
         bind("nivc", keys, action, None);
     }
     bind_review_keys(&mut map);
+    name_groups(&mut map);
     map
+}
+
+/// Names the keys after Space that start several in `map`, as
+/// which-key.nvim's groups are named.
+fn name_groups(map: &mut Keymap<Binding>) {
+    let modes = parse_modes("nv").expect("the defaults' modes are valid");
+    for (keys, name) in [
+        ("<Space>p", "project"),
+        ("<Space>h", "git hunks"),
+        ("<Space>g", "agent changes"),
+    ] {
+        let keys = parse_keys(keys).expect("the defaults' keys are valid");
+        map.name_group(&modes, &keys, Some(name));
+    }
 }
 
 /// The finder's keys, as jack's Telescope keys are: `p` for the project,
@@ -394,7 +412,10 @@ impl Desk {
                 agent: None,
             }),
             Action::Close => self.run(Command::Close),
-            Action::Jump { back, within_tab } => self.jump(back, within_tab),
+            // `3<C-o>` goes back three places, as in Vim.
+            Action::Jump { back, within_tab } => {
+                self.jump(back, within_tab, self.bound_count.unwrap_or(1));
+            }
             Action::PickWorkspace => self.open_palette(Purpose::Workspace),
             Action::CommandLine => self.open_palette(Purpose::Command),
             Action::Connect => self.ask_connect(None),
@@ -428,14 +449,18 @@ impl Desk {
     }
 
     fn open_palette(&mut self, purpose: Purpose) {
-        // From a selection in an editor, a command starts with its lines;
-        // after a count, with as many from the cursor's, as Vim's `5:`
-        // starts `:.,.+4`.
+        // From a selection in an editor, a command starts with its lines,
+        // count or not; after a count, with as many from the cursor's, as
+        // Vim's `5:` starts `:.,.+4`.
+        let visual = (self.focused_editor())
+            .is_some_and(|(editor, _)| matches!(editor.mode, crate::pane::Mode::Visual(_)));
         let text = match (&purpose, self.bound_count.take()) {
-            (Purpose::Command, Some(count)) if self.focused_editor().is_some() => match count {
-                1 => ".".to_owned(),
-                count => format!(".,.+{}", count - 1),
-            },
+            (Purpose::Command, Some(count)) if self.focused_editor().is_some() && !visual => {
+                match count {
+                    1 => ".".to_owned(),
+                    count => format!(".,.+{}", count - 1),
+                }
+            }
             (Purpose::Command, _) => self.editor_command_line(),
             _ => String::new(),
         };

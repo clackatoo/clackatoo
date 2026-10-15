@@ -152,7 +152,10 @@ impl Recalled {
         }
     }
 
-    /// Reads the file's text. A line it doesn't know is passed over.
+    /// Reads the file's text. A line it doesn't know is passed over, and
+    /// so is one that isn't kept (see [`kept`]), as an older build may
+    /// have written one: it's gone from the file the next time it's
+    /// written.
     pub(crate) fn parse(text: &str) -> Self {
         let mut recalled = Self::default();
         for line in text.lines() {
@@ -162,7 +165,9 @@ impl Recalled {
                 Some('/') => Kind::Search,
                 _ => continue,
             };
-            recalled.of_mut(kind).add(chars.as_str());
+            if kept(kind, chars.as_str()) {
+                recalled.of_mut(kind).add(chars.as_str());
+            }
         }
         recalled
     }
@@ -488,5 +493,11 @@ mod tests {
         let mut recall = Recall::default();
         recall.add(&"x".repeat(LONGEST + 1));
         assert_eq!(recall.last(), None);
+        // Nor read from a file an older build wrote them in, so they're
+        // gone from it once it's written again.
+        let recalled = Recalled::parse(":set wrap\n:Devices allow 1234\n: set list\n/ x\n/fn\n");
+        assert_eq!(recalled.commands.lines(), ["set wrap"]);
+        assert_eq!(recalled.searches.lines(), ["fn"]);
+        assert!(!recalled.write().contains("1234"));
     }
 }

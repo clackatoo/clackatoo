@@ -167,11 +167,21 @@ Event.__index = {
 
 local client = {
 	keys = table.freeze({
-		map = function(modes, keys, handler)
-			call(core.map, modes, keys, handler)
+		-- Binds keys to a function, or to keys to type, with options as
+		-- Neovim's `vim.keymap.set` takes them: `{desc = "…"}` says what
+		-- the binding does, in the panel of keys.
+		map = function(modes, keys, handler, options)
+			call(core.map, modes, keys, handler, options)
 		end,
 		unmap = function(modes, keys)
 			call(core.unmap, modes, keys)
+		end,
+		-- Names the bindings some keys start, in the panel of keys, as
+		-- which-key.nvim's `group` does: `client.keys.group("n",
+		-- "<Space>g", "git")`. No name stops naming them. Keys bound to
+		-- something of their own say what that does instead.
+		group = function(modes, keys, name)
+			call(core.group, modes, keys, name)
 		end,
 	}),
 	on = function(event, handler)
@@ -223,6 +233,10 @@ return {
 			mode = info.mode,
 			window = handle(Window, info.window),
 			pane = handle(Pane, info.pane),
+			-- The count typed before a binding's keys, 0 if none, as
+			-- Vim's `v:count`; and 1 if none, as `v:count1`.
+			count = info.count or 0,
+			count1 = info.count or 1,
 		}, Event)
 		stopped[event] = stop
 		return event

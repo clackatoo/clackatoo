@@ -533,6 +533,9 @@ pub(crate) struct Next<'a, T> {
 #[derive(Clone, Debug)]
 pub(crate) struct Keymap<T> {
     modes: [BTreeMap<Vec<Chord>, Entry<T>>; 4],
+    /// The names of the bindings keys start, in each mode, for the panel
+    /// of keys, as which-key.nvim's groups: `<Space>g` "git".
+    groups: [BTreeMap<Vec<Chord>, String>; 4],
     waiting: Vec<Chord>,
     /// The mode the keys waiting were started in.
     waiting_mode: KeyMode,
@@ -545,6 +548,7 @@ impl<T> Default for Keymap<T> {
     fn default() -> Self {
         Self {
             modes: Default::default(),
+            groups: Default::default(),
             waiting: Vec::new(),
             waiting_mode: KeyMode::Normal,
             since: None,
@@ -574,6 +578,19 @@ impl<T: Clone> Keymap<T> {
             );
         }
         self.waiting.clear();
+    }
+
+    /// Names the bindings `keys` start in each of `modes`, for the panel
+    /// of keys, or with no name, stops naming them. Keys that finish a
+    /// binding of their own are said by its label instead.
+    pub(crate) fn name_group(&mut self, modes: &[KeyMode], keys: &[Chord], name: Option<&str>) {
+        for mode in modes {
+            let groups = &mut self.groups[mode.index()];
+            match name {
+                Some(name) => groups.insert(keys.to_vec(), name.to_owned()),
+                None => groups.remove(keys),
+            };
+        }
     }
 
     /// Takes away the binding of `keys` in each of `modes`. Returns
@@ -693,8 +710,9 @@ impl<T: Clone> Keymap<T> {
     /// keys waiting, and a row for each key that can come next, saying
     /// what it does. That's the label of the binding it finishes; a
     /// binding with no label is said by `unlabelled`. A key that starts
-    /// others says `+` and the label they share, or else how many keys
-    /// can come after it. Keys that finish bindings labelled the same
+    /// others says `+` and the name of their group if they're named, or
+    /// the label they share, or else how many keys can come after it.
+    /// Keys that finish bindings labelled the same
     /// share a row, 1 to 9 written `1-9`; every other key has a row of its
     /// own.
     pub(crate) fn which_keys(&self, unlabelled: impl Fn(&T) -> String) -> Option<WhichKeys> {
@@ -703,10 +721,16 @@ impl<T: Clone> Keymap<T> {
         }
         // Each row's keys, what they do, and whether they share a label.
         let mut rows: Vec<(Vec<String>, String, bool)> = Vec::new();
+        let groups = &self.groups[self.waiting_mode.index()];
+        let mut keys = self.waiting.clone();
         for next in self.next() {
+            keys.push(next.key);
+            let group = groups.get(&keys);
+            keys.pop();
             let (does, shares) = match (next.bound, next.further.as_slice()) {
                 (Some((_, Some(label))), _) => (label.to_owned(), true),
                 (Some((action, None)), _) => (unlabelled(action), false),
+                (None, _) if let Some(group) = group => (format!("+{group}"), false),
                 (None, further) => (Self::starts(further, &unlabelled), false),
             };
             let joins = shares
@@ -993,6 +1017,36 @@ mod tests {
             ("Ctrl+B p", Some("^Bp"))
         );
         assert_eq!(which.rows, [("1-9".to_owned(), "pick a pane".to_owned())]);
+    }
+
+    #[test]
+    fn a_group_names_the_keys_that_start_it_in_its_modes() {
+        let mut map = Keymap::default();
+        let nv = parse_modes("nv").unwrap();
+        map.bind(&nv, &keys("<Space>gs"), "stage", Some("stage"));
+        map.bind(&nv, &keys("<Space>gr"), "reset", Some("reset"));
+        map.bind(&nv, &keys("<Space>f"), "find", Some("find"));
+        map.name_group(&[KeyMode::Normal], &keys("<Space>g"), Some("git"));
+        // A group of a key that finishes a binding names nothing.
+        map.name_group(&nv, &keys("<Space>f"), Some("files"));
+        let rows = |map: &mut Keymap<&str>, mode| {
+            map.press(mode, keys("<Space>")[0]);
+            let rows = map.which_keys(|_| String::new()).unwrap().rows;
+            map.cancel();
+            rows
+        };
+        let row = |keys: &str, does: &str| (keys.to_owned(), does.to_owned());
+        assert_eq!(
+            rows(&mut map, KeyMode::Normal),
+            [row("g", "+git"), row("f", "find")]
+        );
+        assert_eq!(
+            rows(&mut map, KeyMode::Visual),
+            [row("g", "+2 keys"), row("f", "find")],
+            "only in the modes it was named in"
+        );
+        map.name_group(&[KeyMode::Normal], &keys("<Space>g"), None);
+        assert_eq!(rows(&mut map, KeyMode::Normal)[0], row("g", "+2 keys"));
     }
 
     #[test]

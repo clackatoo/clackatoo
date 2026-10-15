@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use clackatoo_protocol::Request;
+use clackatoo_protocol::{PaneId, Request};
 use winit::keyboard::{Key, NamedKey};
 
 use super::bindings::CHOICES;
@@ -48,10 +48,13 @@ pub(super) struct Listings {
 }
 
 /// A folder being listed for Tab, and the command line as it was then,
-/// which must be so still when the files come for them to be offered.
+/// and the pane it was typed from, which must be so still when the files
+/// come for them to be offered: the same text typed from another pane
+/// may name a file in another folder.
 #[derive(Debug)]
 pub(super) struct BeingListed {
     id: u64,
+    pane: Option<PaneId>,
     text: String,
     caret: usize,
     /// When it was asked for.
@@ -98,8 +101,7 @@ impl Desk {
         let unchanged = self.input.as_ref().is_some_and(|input| {
             input.purpose == Purpose::Command
                 && input.completing.is_none()
-                && input.line.text() == asked.text
-                && input.line.before_caret().len() == asked.caret
+                && self.listing_for(input, &asked)
         });
         if !unchanged {
             return false;
@@ -119,6 +121,14 @@ impl Desk {
         true
     }
 
+    /// Whether `asked` was listed for the line as `input` has it now, typed
+    /// from the pane focused now.
+    fn listing_for(&self, input: &Input, asked: &BeingListed) -> bool {
+        self.shown.map(|shown| shown.pane) == asked.pane
+            && input.line.text() == asked.text
+            && input.line.before_caret().len() == asked.caret
+    }
+
     /// When the palette is to say a folder's being listed for Tab, if one
     /// is and it hasn't said so yet: the window must be drawn again then.
     pub(super) fn listing_said(&self) -> Option<Instant> {
@@ -129,12 +139,17 @@ impl Desk {
     /// Asks for the folder `listing` names to be listed for Tab, which
     /// went `forward` or back; or while one is being listed for this line
     /// already, notes the way, for when it comes.
+    /// One listed for another pane is let go, as it's for another folder.
     fn ask_listing(&mut self, mut listing: Listing, forward: bool) {
         let Some(input) = &self.input else { return };
+        let pane = self.shown.map(|shown| shown.pane);
+        let same =
+            (self.listings.asked.as_ref()).is_some_and(|asked| self.listing_for(input, asked));
         if let Some(asked) = &mut self.listings.asked
             && asked.at.elapsed() < LISTING_PATIENCE
+            && asked.pane == pane
         {
-            if asked.text == input.line.text() && asked.caret == input.line.before_caret().len() {
+            if same {
                 asked.steps.push(forward);
             }
             return;
@@ -143,6 +158,7 @@ impl Desk {
         self.listings.next += 1;
         self.listings.asked = Some(BeingListed {
             id,
+            pane,
             text: input.line.text().to_owned(),
             caret: input.line.before_caret().len(),
             at: Instant::now(),
@@ -440,7 +456,7 @@ impl Desk {
             (Purpose::Command, None)
                 if (self.listings.asked.as_ref()).is_some_and(|asked| {
                     (LISTING_SAID..LISTING_PATIENCE).contains(&asked.at.elapsed())
-                        && asked.text == input.line.text()
+                        && self.listing_for(input, asked)
                 }) =>
             {
                 vec![("listing…".to_owned(), false)]

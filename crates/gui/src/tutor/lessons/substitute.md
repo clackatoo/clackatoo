@@ -48,7 +48,7 @@ cats and dogs
 
 ## Every line
 
-A range before `s` says which lines: `%` is every line, `2,3` lines 2 to 3, `.,$` from the cursor's to the last, and `'<,'>` the selection's, which `:` in visual mode starts with.
+A range before `s` says which lines: `%` is every line, `2,3` lines 2 to 3, `.,$` from the cursor's to the last, and `'<,'>` the selection's, which `:` in visual mode starts with, count or not.
 
 ```practice pets.txt
 one cat, two cat, red cat

@@ -1739,9 +1739,12 @@ impl Desk {
             // pane's, as `d<Space>`'s Space is, not a binding's first.
             // But a count alone is the bindings' too, and a chat's half
             // typed `g` or `z`: `5:` is still `:`.
+            // And `0` after a count is the count's, as Vim never maps it
+            // then: `10j` is ten, whatever `0` is bound to.
+            let counting = self.pane_counting().is_some();
             let pressed = if self.keymap.waiting().is_empty()
                 && self.pane_pending()
-                && self.pane_counting().is_none()
+                && (!counting || chord == Chord::typed('0'))
             {
                 Pressed::Unbound
             } else {
@@ -1767,8 +1770,10 @@ impl Desk {
                 }
                 Pressed::Bound(Binding::Lua(binding)) => {
                     self.message = None;
-                    self.take_pane_count();
-                    self.run_lua_binding(binding, chord, press);
+                    // A chat's half-typed `g` or `z` is no count.
+                    let chat = self.focused_pane().is_some_and(|pane| pane.is_chat());
+                    let count = self.take_pane_count().filter(|_| !chat);
+                    self.run_lua_binding(binding, count, chord, press);
                     return true;
                 }
                 Pressed::Waiting => {
@@ -2563,7 +2568,7 @@ fn mode_name(mode: Mode) -> ModeName {
 /// one that changes which way text runs (the marks U+200E and U+200F, the
 /// embeddings and overrides U+202A to U+202E, and the isolates U+2066 to
 /// U+2069), which a title or a folder's name could hold.
-fn shown_in_names(ch: char) -> bool {
+pub(super) fn shown_in_names(ch: char) -> bool {
     !ch.is_control()
         && !matches!(ch, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
@@ -4010,18 +4015,105 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("p", "+3 keys"),
+                ("p", "+project"),
                 ("?", "open files"),
                 ("d", "+problems"),
                 ("b", "+file symbols"),
-                ("h", "+3 keys"),
+                ("h", "+git hunks"),
                 ("e", "explorer"),
                 ("t", "+inlay hints"),
-                ("g", "+3 keys"),
+                ("g", "+agent changes"),
                 ("c", "comment"),
             ]
         );
         assert!(!desk.numbering_panes());
+        assert!(desk.cancel_keys());
+        // The config's keys say what its `desc` says, and its groups are
+        // named as it names them, even over the window's own.
+        desk.lua_from(
+            r#"
+            client.keys.map("n", "<Space>ft", function() end, {desc = "find\ntodos"})
+            client.keys.map("n", "<Space>fn", "gri", {desc = "  "})
+            client.keys.group("n", "<Space>f", "my files")
+            client.keys.group("n", "<Space>g", "agents")
+            client.keys.map("n", "<Space>x", function() end, {desc = "explain"})
+            "#,
+        );
+        command(&mut desk, "set whichkeydelay=0");
+        press(
+            &mut desk,
+            Key::Named(NamedKey::Space),
+            None,
+            Modifiers::default(),
+        );
+        let rows = desk.which_keys().unwrap().rows;
+        let row = |keys: &str, does: &str| (keys.to_owned(), does.to_owned());
+        assert!(rows.contains(&row("f", "+my files")), "{rows:?}");
+        assert!(rows.contains(&row("g", "+agents")), "{rows:?}");
+        assert!(rows.contains(&row("x", "explain")), "{rows:?}");
+        type_keys(&mut desk, "f");
+        let rows = desk.which_keys().unwrap().rows;
+        assert_eq!(
+            rows,
+            [row("t", "find todos"), row("n", "types gri")],
+            "on one line, and a blank one is none"
+        );
+    }
+
+    #[test]
+    fn zero_after_a_count_is_the_counts_whatever_it_is_bound_to() {
+        let text = (1..=30)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let mut desk = editing("/t.txt", &text);
+        desk.lua_from(r#"client.keys.map("n", "0", function() client.opt.scrolloff = 9 end)"#);
+        type_text(&mut desk, "0");
+        assert_eq!(desk.options.scrolloff, 9, "bound, alone");
+        command(&mut desk, "set scrolloff=5");
+        type_text(&mut desk, "10j");
+        assert_eq!(note(&desk), "t.txt  11:1");
+        type_text(&mut desk, "gg20j");
+        assert_eq!(note(&desk), "t.txt  21:1");
+        assert_eq!(desk.options.scrolloff, 5, "never the binding's");
+    }
+
+    #[test]
+    fn a_config_binding_hears_the_count_and_passes_it_on_with_its_keys() {
+        let mut desk = editing("/t.txt", "abcdefgh\n");
+        desk.lua_from(
+            r#"
+            client.keys.map("n", "x", function(ev)
+                client.opt.scrolloff = ev.count
+                ev:propagate()
+            end)
+            client.keys.map("n", "s", function(ev)
+                client.opt.tabstop = ev.count1
+            end)
+            "#,
+        );
+        // Let go on, the count goes on with its keys: three deleted.
+        type_text(&mut desk, "3x");
+        assert_eq!(desk.options.scrolloff, 3);
+        assert_eq!(editor_text(&desk), "defgh\n");
+        type_text(&mut desk, "x");
+        assert_eq!(desk.options.scrolloff, 0, "as Vim's v:count");
+        type_text(&mut desk, "s");
+        assert_eq!(desk.options.tabstop, 1, "as Vim's v:count1");
+        // Stopped, the count goes with it.
+        type_text(&mut desk, "12s");
+        assert_eq!(desk.options.tabstop, 12);
+        assert_eq!(editor_text(&desk), "efgh\n");
+        assert_eq!(desk.focused_editor().unwrap().0.counting(), None);
+        // In a terminal too: the count goes on before the keys.
+        let mut desk = self::desk(one_tab(pane(1)));
+        snapshot(&mut desk, 1);
+        normal_mode(&mut desk);
+        desk.lua_from(r#"client.keys.map("n", "j", function(ev) ev:propagate() end)"#);
+        type_keys(&mut desk, "3j");
+        let pane = &desk.panes[&TerminalId(1)];
+        assert_eq!(pane.scene(24).1.map(|cursor| cursor.line), Some(3));
     }
 
     #[test]
@@ -6050,6 +6142,26 @@ mod tests {
             answer_all(&mut desk).is_empty(),
             "nothing opened: it's the file shown"
         );
+    }
+
+    #[test]
+    fn a_count_goes_that_many_places_back_or_forward() {
+        let mut desk = desk(one_tab(file_pane(1, 7)));
+        load(&mut desk, 7, "/t.txt", TEN_LINES);
+        type_text(&mut desk, "3G5G7G9G");
+        type_text(&mut desk, "3");
+        ctrl(&mut desk, "o");
+        assert_eq!(note(&desk), "t.txt  3:1");
+        // More than there are: nowhere, as in Vim.
+        type_text(&mut desk, "9");
+        ctrl(&mut desk, "i");
+        assert_eq!(note(&desk), "t.txt  3:1");
+        type_text(&mut desk, "2");
+        ctrl(&mut desk, "i");
+        assert_eq!(note(&desk), "t.txt  7:1");
+        // The count was the binding's, not the editor's next motion's.
+        type_text(&mut desk, "j");
+        assert_eq!(note(&desk), "t.txt  8:1");
     }
 
     #[test]

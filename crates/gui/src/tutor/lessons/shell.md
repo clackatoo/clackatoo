@@ -40,7 +40,7 @@ copied "three"
 
 ## Commands that failed
 
-A command that fails, exiting with a status other than 0, ends its prompt's line with a dim red `✗` and the status, as `✗ 1`, in history too, so you can find it scrolling back. The mark isn't part of the text: nothing copies it.
+A command that fails, exiting with a status other than 0, ends its prompt's line with a dim red `✗` and the status, as `✗ 1`, in history too, so you can find it scrolling back. The mark isn't part of the text: nothing copies it. The web app on your phone marks them too.
 
 In the terminal, run `false`, which only fails.
 

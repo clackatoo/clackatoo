@@ -112,21 +112,28 @@ impl Jumps {
         self.list.push(place);
     }
 
-    /// Goes to the nearest place back, or forward, that `wanted` accepts,
-    /// from `here`, where you are now, passing places on `here`'s line.
-    /// Going back from the newest end first records `here`, to come
-    /// forward to again. That can leave one place more than [`MAX`] until
-    /// the next jump, so that it never loses the place it goes to.
+    /// Goes to the `count`th place back, or forward, that `wanted`
+    /// accepts, from `here`, where you are now, passing places on
+    /// `here`'s line. With fewer than `count` that way, it goes nowhere,
+    /// as Vim's `3<C-o>` doesn't. Going back from the newest end first
+    /// records `here`, to come forward to again. That can leave one place
+    /// more than [`MAX`] until the next jump, so that it never loses the
+    /// place it goes to.
     pub(super) fn step(
         &mut self,
         back: bool,
+        count: usize,
         here: Jump,
         wanted: impl Fn(&Jump) -> bool,
     ) -> Option<Jump> {
-        let wanted = |place: &Jump| !place.same(&here) && wanted(place);
+        let wanted = |place: &&Jump| !place.same(&here) && wanted(place);
+        let nth = count.max(1) - 1;
         let found = if back {
             let end = self.at.min(self.list.len());
-            let found = self.list[..end].iter().rposition(wanted)?;
+            let (found, _) = (self.list[..end].iter().enumerate())
+                .rev()
+                .filter(|(_, place)| wanted(place))
+                .nth(nth)?;
             if self.at >= self.list.len() {
                 // Only a place on `here`'s line goes, and `found` isn't one.
                 self.push(here);
@@ -136,7 +143,8 @@ impl Jumps {
         } else {
             (self.list.iter().enumerate())
                 .skip(self.at + 1)
-                .find(|(_, place)| wanted(place))
+                .filter(|(_, place)| wanted(place))
+                .nth(nth)
                 .map(|(index, _)| index)
         }?;
         self.at = found;
@@ -192,7 +200,7 @@ impl Jumps {
 impl Desk {
     /// Goes back through the places you've been, or forward again: within
     /// the tab shown, or anywhere.
-    pub(super) fn jump(&mut self, back: bool, within_tab: bool) {
+    pub(super) fn jump(&mut self, back: bool, within_tab: bool, count: usize) {
         let Some(shown) = self.shown else { return };
         let Some(here) = self.place_of(shown.pane, None) else {
             return;
@@ -202,7 +210,7 @@ impl Desk {
             (workspaces.find_pane(place.pane))
                 .is_some_and(|(_, tab, _)| !within_tab || tab.id == shown.tab)
         };
-        let Some(place) = self.jumps.step(back, here, wanted) else {
+        let Some(place) = self.jumps.step(back, count, here, wanted) else {
             return;
         };
         self.move_focus(place.pane, false);
@@ -255,12 +263,12 @@ mod tests {
         let any = |_: &Jump| true;
         jumps.left(at(1));
         jumps.left(at(2));
-        assert_eq!(pane_of(jumps.step(true, at(3), any)), Some(2));
+        assert_eq!(pane_of(jumps.step(true, 1, at(3), any)), Some(2));
         // Off pane 2 to pane 4, and a jump from there.
         jumps.left(at(4));
-        assert_eq!(pane_of(jumps.step(true, at(5), any)), Some(4));
-        assert_eq!(pane_of(jumps.step(true, at(4), any)), Some(2));
-        assert_eq!(pane_of(jumps.step(true, at(2), any)), Some(1));
+        assert_eq!(pane_of(jumps.step(true, 1, at(5), any)), Some(4));
+        assert_eq!(pane_of(jumps.step(true, 1, at(4), any)), Some(2));
+        assert_eq!(pane_of(jumps.step(true, 1, at(2), any)), Some(1));
     }
 
     #[test]
@@ -272,12 +280,12 @@ mod tests {
         }
         assert_eq!(jumps.list.len(), MAX);
         let only_1 = |jump: &Jump| jump.pane == PaneId(1);
-        assert_eq!(pane_of(jumps.step(true, at(4), only_1)), Some(1));
+        assert_eq!(pane_of(jumps.step(true, 1, at(4), only_1)), Some(1));
         let any = |_: &Jump| true;
-        assert_eq!(pane_of(jumps.step(false, at(1), any)), Some(2));
+        assert_eq!(pane_of(jumps.step(false, 1, at(1), any)), Some(2));
         // A jump from the newest place keeps the list to its length.
         for _ in 0..MAX {
-            jumps.step(false, at(1), any);
+            jumps.step(false, 1, at(1), any);
         }
         jumps.left(at(5));
         assert_eq!(jumps.list.len(), MAX);
@@ -290,21 +298,42 @@ mod tests {
         jumps.left(at(1));
         jumps.left(at(2));
         // Back from pane 3, which is recorded to come forward to.
-        assert_eq!(pane_of(jumps.step(true, at(3), any)), Some(2));
+        assert_eq!(pane_of(jumps.step(true, 1, at(3), any)), Some(2));
         // Only to panes 1 and 2, as if pane 3 were in another tab.
         let not_3 = |jump: &Jump| jump.pane != PaneId(3);
-        assert_eq!(pane_of(jumps.step(true, at(2), not_3)), Some(1));
-        assert_eq!(jumps.step(true, at(1), any), None);
-        assert_eq!(pane_of(jumps.step(false, at(1), not_3)), Some(2));
-        assert_eq!(jumps.step(false, at(2), not_3), None);
-        assert_eq!(pane_of(jumps.step(false, at(2), any)), Some(3));
-        assert_eq!(jumps.step(false, at(3), any), None);
+        assert_eq!(pane_of(jumps.step(true, 1, at(2), not_3)), Some(1));
+        assert_eq!(jumps.step(true, 1, at(1), any), None);
+        assert_eq!(pane_of(jumps.step(false, 1, at(1), not_3)), Some(2));
+        assert_eq!(jumps.step(false, 1, at(2), not_3), None);
+        assert_eq!(pane_of(jumps.step(false, 1, at(2), any)), Some(3));
+        assert_eq!(jumps.step(false, 1, at(3), any), None);
         // Back twice, then somewhere new: panes 2 and 3 are forgotten.
-        jumps.step(true, at(3), any);
-        jumps.step(true, at(2), any);
+        jumps.step(true, 1, at(3), any);
+        jumps.step(true, 1, at(2), any);
         jumps.left(at(1));
-        assert_eq!(jumps.step(false, at(4), any), None);
-        assert_eq!(pane_of(jumps.step(true, at(4), any)), Some(1));
+        assert_eq!(jumps.step(false, 1, at(4), any), None);
+        assert_eq!(pane_of(jumps.step(true, 1, at(4), any)), Some(1));
+    }
+
+    /// As checked against Neovim: from line 40, after jumps from lines 1,
+    /// 10, 20 and 30, `3<C-o>` goes to 10, `5<C-o>` nowhere, and then
+    /// `2<C-i>` to 30 and `9<C-i>` nowhere.
+    #[test]
+    fn a_count_steps_that_many_places_or_none() {
+        let mut jumps = Jumps::default();
+        let any = |_: &Jump| true;
+        for pane in [1, 10, 20, 30] {
+            jumps.left(at(pane));
+        }
+        assert_eq!(jumps.step(true, 5, at(40), any), None);
+        assert_eq!(jumps.list.len(), 4, "nothing recorded");
+        assert_eq!(pane_of(jumps.step(true, 3, at(40), any)), Some(10));
+        assert_eq!(jumps.step(false, 9, at(10), any), None);
+        assert_eq!(pane_of(jumps.step(false, 2, at(10), any)), Some(30));
+        // Places passed over count only if wanted.
+        let not_20 = |jump: &Jump| jump.pane != PaneId(20);
+        assert_eq!(pane_of(jumps.step(true, 2, at(30), not_20)), Some(1));
+        assert_eq!(pane_of(jumps.step(false, 2, at(1), not_20)), Some(30));
     }
 
     #[test]

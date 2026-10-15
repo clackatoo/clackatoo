@@ -188,7 +188,8 @@ impl TermPage {
                 col: cursor.col,
                 shape: cursor.shape,
             });
-            dom::element_of(document, &grid::row(&grid.lines[index], cols, on))
+            let failed = u16::try_from(index).ok().and_then(|row| term.failed(row));
+            dom::element_of(document, &grid::row(&grid.lines[index], cols, on, failed))
         };
         if dirty.all || self.screen.child_element_count() as usize != grid.lines.len() {
             self.screen.set_text_content(None);
@@ -221,15 +222,38 @@ impl TermPage {
         if history.cleared {
             self.history.set_text_content(None);
         }
-        let row = |line: &clackatoo_protocol::HistoryLine| {
-            let row = grid::row(&line.line, usize::from(line.width), None);
+        // Line `index` of those held.
+        let row = |index: usize| {
+            let line = &history.lines[index];
+            let failed = history.failed(history.first + index as u64);
+            let row = grid::row(&line.line, usize::from(line.width), None, failed);
             dom::element_of(document, &row)
         };
+        // Lines drawn before whose marks changed, as when a command ends
+        // after its prompt has scrolled into history. Those added since
+        // are drawn as they are now below.
+        let drawn_before = history.added_above..history.lines.len() - history.added_below;
+        if !history.cleared {
+            let children = self.history.children();
+            for &line in &term.dirty.history_marks {
+                let Some(index) = (line.checked_sub(history.first))
+                    .and_then(|index| usize::try_from(index).ok())
+                    .filter(|index| drawn_before.contains(index))
+                else {
+                    continue;
+                };
+                // Among the children as they were, before those added above.
+                let drawn = index - history.added_above;
+                if let Some(old) = children.item(u32::try_from(drawn).unwrap_or(u32::MAX)) {
+                    let _ = self.history.replace_child(&row(index), &old);
+                }
+            }
+        }
         if history.added_above > 0 {
             let before = self.scroller.scroll_height();
             let first = self.history.first_child();
-            for line in history.lines.range(..history.added_above) {
-                let _ = self.history.insert_before(&row(line), first.as_ref());
+            for index in 0..history.added_above {
+                let _ = self.history.insert_before(&row(index), first.as_ref());
             }
             if !at_bottom {
                 let grown = self.scroller.scroll_height() - before;
@@ -238,9 +262,8 @@ impl TermPage {
             }
         }
         if history.added_below > 0 {
-            let from = history.lines.len() - history.added_below;
-            for line in history.lines.range(from..) {
-                let _ = self.history.append_child(&row(line));
+            for index in history.lines.len() - history.added_below..history.lines.len() {
+                let _ = self.history.append_child(&row(index));
             }
         }
     }

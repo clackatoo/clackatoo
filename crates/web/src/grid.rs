@@ -24,8 +24,15 @@ pub struct Cursor {
 /// `line`, as a row `width` cells wide, with `cursor` on it if it's
 /// there: a `div` of the row's runs. Blank cells after the last written
 /// one are left out, unless the cursor is past them.
+///
+/// `failed`, the exit status of a command that failed, if the row ends
+/// its prompt's line, is marked two cells after the row's text, `✗ 2`,
+/// as the window marks it: only where it fits, and only past whatever's
+/// drawn. It's never part of the row's text, as the window's isn't: the
+/// style sheet draws it from the span's `data-mark`, and what a style
+/// sheet draws can't be selected or copied.
 #[must_use]
-pub fn row(line: &Line, width: usize, cursor: Option<Cursor>) -> Element {
+pub fn row(line: &Line, width: usize, cursor: Option<Cursor>, failed: Option<i32>) -> Element {
     let row = line.to_row(width.max(1));
     let cells = row.cells();
     let blank = |col: usize| {
@@ -69,6 +76,16 @@ pub fn row(line: &Line, width: usize, cursor: Option<Cursor>) -> Element {
         row.push_text(col, &mut run);
     }
     flush(&mut element, &mut run, run_style);
+    if let Some(exit) = failed {
+        let mark = format!("✗ {exit}");
+        let col = row.text_end() + 2;
+        if end <= col && col + mark.chars().count() <= cells.len() {
+            // The blanks before it are the mark's too, so neither is
+            // copied.
+            let drawn = format!("{}{mark}", " ".repeat(col - end));
+            element = element.child(el("span").class("xm").attr("data-mark", drawn));
+        }
+    }
     element
 }
 
@@ -204,7 +221,12 @@ mod tests {
 
     #[test]
     fn runs_of_one_style_are_one_span_and_plain_text_is_text() {
-        let row = row(&line(&[(Style::DEFAULT, "ab"), (red(), "cd")]), 10, None);
+        let row = row(
+            &line(&[(Style::DEFAULT, "ab"), (red(), "cd")]),
+            10,
+            None,
+            None,
+        );
         assert_eq!(row.get("class"), Some("r"));
         assert_eq!(row.children.len(), 2);
         assert_eq!(row.children[0], Node::Text("ab".into()));
@@ -223,7 +245,7 @@ mod tests {
             attributes: Attributes::BOLD,
             ..Style::DEFAULT
         };
-        let row = row(&line(&[(style, "x")]), 4, None);
+        let row = row(&line(&[(style, "x")]), 4, None, None);
         let Node::Element(span) = &row.children[0] else {
             panic!("a span");
         };
@@ -245,7 +267,7 @@ mod tests {
             col: 4,
             shape: CursorShape::Block,
         };
-        let row = row(&line(&[(Style::DEFAULT, "ab")]), 10, Some(cursor));
+        let row = row(&line(&[(Style::DEFAULT, "ab")]), 10, Some(cursor), None);
         assert_eq!(row.all_text(), "ab   ");
         let Node::Element(cell) = row.children.last().unwrap() else {
             panic!("the cursor");
@@ -258,7 +280,7 @@ mod tests {
             ..Style::DEFAULT
         };
         let cursor = Cursor { col: 0, ..cursor };
-        let row = super::row(&line(&[(inverse, "z")]), 10, Some(cursor));
+        let row = super::row(&line(&[(inverse, "z")]), 10, Some(cursor), None);
         let Node::Element(cell) = &row.children[0] else {
             panic!("the cursor");
         };
@@ -267,7 +289,7 @@ mod tests {
 
     #[test]
     fn wide_characters_take_two_columns_and_the_cursor_on_either_half() {
-        let row = row(&line(&[(Style::DEFAULT, "字b")]), 6, None);
+        let row = row(&line(&[(Style::DEFAULT, "字b")]), 6, None, None);
         let Node::Element(wide) = &row.children[0] else {
             panic!("a span");
         };
@@ -278,7 +300,7 @@ mod tests {
             col: 1,
             shape: CursorShape::Bar,
         };
-        let row = super::row(&line(&[(Style::DEFAULT, "字b")]), 6, Some(cursor));
+        let row = super::row(&line(&[(Style::DEFAULT, "字b")]), 6, Some(cursor), None);
         let Node::Element(wide) = &row.children[0] else {
             panic!("a span");
         };
@@ -286,8 +308,56 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_command_is_marked_after_its_text_where_it_fits() {
+        // The row's text, and what its mark draws after it, if anything.
+        let marked = |row: &Element| {
+            let mark = match row.children.last() {
+                Some(Node::Element(mark)) if mark.get("class") == Some("xm") => {
+                    mark.get("data-mark").map(str::to_owned)
+                }
+                _ => None,
+            };
+            (row.all_text(), mark)
+        };
+        let said = |text: &str, mark: Option<&str>| (text.to_owned(), mark.map(str::to_owned));
+        let prompt = line(&[(Style::DEFAULT, "$ false")]);
+        assert_eq!(
+            marked(&row(&prompt, 20, None, Some(1))),
+            said("$ false", Some("  ✗ 1")),
+            "the blanks before it are the mark's, and neither is text"
+        );
+        // Exactly as wide as the row, or a cell short.
+        assert_eq!(
+            marked(&row(&prompt, 12, None, Some(1))),
+            said("$ false", Some("  ✗ 1"))
+        );
+        assert_eq!(
+            marked(&row(&prompt, 11, None, Some(1))),
+            said("$ false", None)
+        );
+        assert_eq!(
+            marked(&row(&prompt, 13, None, Some(127))),
+            said("$ false", None)
+        );
+        // The cursor past the text, where it would go, keeps it off.
+        let cursor = Cursor {
+            col: 9,
+            shape: CursorShape::Block,
+        };
+        assert_eq!(
+            marked(&row(&prompt, 20, Some(cursor), Some(1))),
+            said("$ false   ", None)
+        );
+        let cursor = Cursor { col: 8, ..cursor };
+        assert_eq!(
+            marked(&row(&prompt, 20, Some(cursor), Some(1))),
+            said("$ false  ", Some("✗ 1"))
+        );
+    }
+
+    #[test]
     fn a_blank_row_is_empty() {
-        let row = row(&Line::default(), 80, None);
+        let row = row(&Line::default(), 80, None, None);
         assert!(row.children.is_empty());
     }
 }

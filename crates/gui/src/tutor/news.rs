@@ -473,6 +473,24 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "basics",
         what: "Copying from a terminal stops at 100,000 lines or 4 MiB, and says so, so a huge history never holds it up",
     },
+    News {
+        id: "keys-desc",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "Keys your config binds say what their desc says in the panel of keys, and client.keys.group names keys that start several",
+    },
+    News {
+        id: "counted-keys",
+        date: "2026-10-15",
+        lesson: "basics",
+        what: "3 Ctrl+O goes back three places, and a function your config binds to keys hears the count typed before them",
+    },
+    News {
+        id: "web-failed-marks",
+        date: "2026-10-15",
+        lesson: "shell",
+        what: "The web app marks commands that failed, as the window does",
+    },
 ];
 
 impl News {

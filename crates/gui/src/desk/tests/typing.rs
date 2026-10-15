@@ -153,6 +153,45 @@ fn files_listed_are_offered_only_if_the_line_is_as_it_was_and_one_at_a_time() {
 }
 
 #[test]
+fn files_listed_for_one_pane_are_never_offered_in_another() {
+    let scratch = tempfile::tempdir().unwrap();
+    let path = |rest: &str| scratch.path().join(rest).to_str().unwrap().to_owned();
+    for (dir, file) in [("one", "apple"), ("two", "avocado")] {
+        std::fs::create_dir(path(dir)).unwrap();
+        std::fs::write(path(&format!("{dir}/{file}")), "").unwrap();
+    }
+    let layout = side_by_side(vec![file_pane(1, 7), file_pane(2, 8)]);
+    let mut desk = desk(one_tab(layout));
+    load(&mut desk, 7, &path("one/x.rs"), "\n");
+    load(&mut desk, 8, &path("two/y.rs"), "\n");
+    type_keys(&mut desk, ":e a");
+    key(&mut desk, NamedKey::Tab);
+    let first = desk.take_listings();
+    // The same line, typed from the other pane, while pane 1's folder is
+    // listed: that's let go, and pane 2's is listed.
+    key(&mut desk, NamedKey::Escape);
+    desk.show_pane(PaneId(2));
+    type_keys(&mut desk, ":e a");
+    key(&mut desk, NamedKey::Tab);
+    let second = desk.take_listings();
+    assert_eq!(second.len(), 1, "not waiting on pane 1's");
+    assert!(!desk.listed(first[0].run()), "pane 1's folder");
+    assert_eq!(text(&desk), ":e a▏");
+    assert!(desk.listed(second[0].run()));
+    assert_eq!(text(&desk), ":e avocado▏");
+    // And back in pane 1, pane 2's would be too late.
+    key(&mut desk, NamedKey::Escape);
+    type_keys(&mut desk, ":e a");
+    key(&mut desk, NamedKey::Tab);
+    let third = desk.take_listings();
+    key(&mut desk, NamedKey::Escape);
+    desk.show_pane(PaneId(1));
+    type_keys(&mut desk, ":e a");
+    assert!(!desk.listed(third[0].run()));
+    assert_eq!(text(&desk), ":e a▏");
+}
+
+#[test]
 fn tabs_pressed_while_files_are_listed_go_through_them_once_they_come() {
     let scratch = tempfile::tempdir().unwrap();
     let dir = scratch.path().to_owned();
@@ -209,6 +248,10 @@ fn a_count_alone_leaves_the_next_key_to_the_bindings() {
     key(&mut editor, NamedKey::Escape);
     type_keys(&mut editor, "1:");
     assert_eq!(text(&editor), ":.▏");
+    key(&mut editor, NamedKey::Escape);
+    // From a selection, its lines, count or not, as Neovim's `Vj3:`.
+    type_keys(&mut editor, "Vj3:");
+    assert_eq!(text(&editor), ":'<,'>▏");
     key(&mut editor, NamedKey::Escape);
     // A count before a key the editor takes is still the editor's.
     type_keys(&mut editor, "2j");

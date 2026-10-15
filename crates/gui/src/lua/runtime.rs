@@ -241,6 +241,7 @@ impl Runtime {
         info.set("mode", mode_letter(key.mode))?;
         info.set("window", WINDOW)?;
         info.set("pane", key.pane.map(|pane| pane.0))?;
+        info.set("count", key.count)?;
         let event: Function = self.prelude.get("event")?;
         event.call((info, stop))
     }
@@ -401,37 +402,102 @@ fn option_value(option: &options::Info, value: &Value) -> Result<options::Value,
     value.ok_or_else(|| option.wants())
 }
 
-/// `map`, `unmap`, `on` and `off`.
+/// What a binding says it does, from the options `map` was given, as
+/// Neovim's `vim.keymap.set` takes them: `{desc = "…"}`, and what's wrong
+/// with the rest, each said for the binding of `keys`. Options that only
+/// say what clackatoo's bindings do anyway, as `silent` and `noremap` do,
+/// are passed over, so a binding written for Neovim loads as it is; any
+/// other is left out with a warning, and the binding is made all the
+/// same, so the rest of `init.lua` runs.
+fn binding_options(
+    keys: &str,
+    options: Option<Table>,
+) -> mlua::Result<(Option<String>, Vec<String>)> {
+    let mut desc = None;
+    let mut wrong = Vec::new();
+    let Some(options) = options else {
+        return Ok((desc, wrong));
+    };
+    for pair in options.pairs::<Value, Value>() {
+        let (key, value) = pair?;
+        let name = key.as_string().map(mlua::LuaString::to_string_lossy);
+        match (name.as_deref(), value) {
+            (Some("desc"), Value::String(text)) => desc = Some(text.to_string_lossy()),
+            // Neovim's, passed over: bindings here are always quiet and
+            // never set off others, and the rest change nothing that
+            // matters to a binding that loads.
+            (Some("desc"), Value::Nil)
+            | (Some("silent" | "noremap" | "nowait" | "unique"), _)
+            | (Some("remap"), Value::Boolean(false) | Value::Nil) => {}
+            (Some("desc"), _) => wrong.push(format!(
+                "the binding of `{keys}` leaves out its `desc`, which is a string"
+            )),
+            (Some("remap"), _) => wrong.push(format!(
+                "the binding of `{keys}` leaves out `remap`: keys bound to keys never set off other bindings"
+            )),
+            (Some(name), _) => wrong.push(format!(
+                "the binding of `{keys}` leaves out `{name}`, which isn't one of its options: desc"
+            )),
+            (None, _) => wrong.push(format!(
+                "the binding of `{keys}` leaves out options that aren't named, as {{desc = \"…\"}} is"
+            )),
+        }
+    }
+    Ok((desc, wrong))
+}
+
+/// `map`, `unmap`, `group`, `on` and `off`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one core function after another, each short"
+)]
 fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
     let s = state.clone();
     core.set(
         "map",
-        lua.create_function(move |_, (modes, keys, handler): (String, String, Value)| {
-            let modes = parse_modes(&modes).map_err(mlua::Error::runtime)?;
-            let keys = parse_keys(&keys).map_err(mlua::Error::runtime)?;
-            let handler = match handler {
-                Value::Function(handler) => handler,
-                // Keys to type, as Vim's `noremap` maps to.
-                Value::String(to) => {
-                    let to = parse_keys(&to.to_string_lossy()).map_err(mlua::Error::runtime)?;
-                    s.tell(FromLua::Remap { modes, keys, to });
-                    return Ok(());
-                }
-                _ => {
-                    return Err(mlua::Error::runtime(
-                        "keys are bound to a function, or to keys to type, as a string",
-                    ));
-                }
-            };
-            let binding = s.next_id();
-            s.bindings.borrow_mut().insert(binding, handler);
-            s.tell(FromLua::Map {
-                modes,
-                keys,
-                binding,
-            });
-            Ok(())
-        })?,
+        lua.create_function(
+            move |_, (modes, keys, handler, options): (String, String, Value, Option<Table>)| {
+                let modes = parse_modes(&modes).map_err(mlua::Error::runtime)?;
+                let (desc, wrong) = binding_options(&keys, options)?;
+                let keys = parse_keys(&keys).map_err(mlua::Error::runtime)?;
+                // Said once the binding's made, which it is all the same.
+                let warn = |s: &State| {
+                    for warning in wrong {
+                        s.tell(FromLua::Error(warning));
+                    }
+                };
+                let handler = match handler {
+                    Value::Function(handler) => handler,
+                    // Keys to type, as Vim's `noremap` maps to.
+                    Value::String(to) => {
+                        let to = parse_keys(&to.to_string_lossy()).map_err(mlua::Error::runtime)?;
+                        s.tell(FromLua::Remap {
+                            modes,
+                            keys,
+                            to,
+                            desc,
+                        });
+                        warn(&s);
+                        return Ok(());
+                    }
+                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "keys are bound to a function, or to keys to type, as a string",
+                        ));
+                    }
+                };
+                let binding = s.next_id();
+                s.bindings.borrow_mut().insert(binding, handler);
+                s.tell(FromLua::Map {
+                    modes,
+                    keys,
+                    binding,
+                    desc,
+                });
+                warn(&s);
+                Ok(())
+            },
+        )?,
     )?;
     let s = state.clone();
     core.set(
@@ -442,6 +508,18 @@ fn listening(lua: &Lua, state: &Rc<State>, core: &Table) -> mlua::Result<()> {
             s.tell(FromLua::Unmap { modes, keys });
             Ok(())
         })?,
+    )?;
+    let s = state.clone();
+    core.set(
+        "group",
+        lua.create_function(
+            move |_, (modes, keys, name): (String, String, Option<String>)| {
+                let modes = parse_modes(&modes).map_err(mlua::Error::runtime)?;
+                let keys = parse_keys(&keys).map_err(mlua::Error::runtime)?;
+                s.tell(FromLua::Group { modes, keys, name });
+                Ok(())
+            },
+        )?,
     )?;
     let s = state.clone();
     core.set(

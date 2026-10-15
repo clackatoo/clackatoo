@@ -6,8 +6,14 @@
 //! The phone never sizes a terminal by itself: it shows it at its own
 //! size, and fits it only when the user asks (see `Request::Fit`), which
 //! lasts until the daemon puts it back.
+//!
+//! Commands that failed are marked as the window marks them, `✗ 2` after
+//! the text of their prompt's line (see [`clackatoo_protocol::BlockMarks`]
+//! for what the daemon says). How blocks ended is kept apart from where
+//! their prompts are, as a block can finish after its prompt has scrolled
+//! into history. The web app has no options, so only failures are marked.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use clackatoo_protocol::{
     GridNode, HistoryLine, HistoryLines, Patch, Request, Size, TerminalId, View, ViewUpdate,
@@ -20,6 +26,14 @@ pub const HISTORY_PAGE: u16 = 200;
 /// phone needn't hold all of a long scrollback.
 pub const MOST_HISTORY: usize = 5000;
 
+/// The most blocks whose ends are kept: as many as the history held could
+/// show the prompts of. The oldest go first.
+const MOST_EXITS: usize = 4096;
+
+/// The most rows a prompt's line is followed over to its end, for the
+/// mark of how its command ended, as the window follows it.
+const MARKED_ROWS: usize = 16;
+
 /// What changed in the terminal since it was last drawn.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GridDirty {
@@ -30,6 +44,8 @@ pub struct GridDirty {
     /// Its header: title, working directory, size, fit, and whether keys
     /// go.
     pub header: bool,
+    /// Lines of history already drawn whose mark changed, by number.
+    pub history_marks: BTreeSet<u64>,
 }
 
 /// Whether the terminal is fitted to the phone.
@@ -67,6 +83,11 @@ pub struct History {
     /// What was asked for and not answered yet: one past the newest line,
     /// and how many.
     asked: Option<(u64, u16)>,
+    /// The lines held that start a block's prompt, with its number.
+    prompts: BTreeMap<u64, u32>,
+    /// The lines held that end the line of a failed command's prompt,
+    /// with its exit status.
+    marks: BTreeMap<u64, i32>,
 }
 
 impl History {
@@ -86,7 +107,41 @@ impl History {
         self.cleared = true;
         self.start = None;
         self.asked = None;
+        self.prompts.clear();
+        self.marks.clear();
         self.generation += 1;
+    }
+
+    /// The exit status line `line` is marked with, if it ends the line of
+    /// a failed command's prompt.
+    #[must_use]
+    pub fn failed(&self, line: u64) -> Option<i32> {
+        self.marks.get(&line).copied()
+    }
+}
+
+/// The last of `rows`, in order, that a line goes on to: up to and
+/// including the first that isn't `wrapped`, if that's among them.
+fn last_row(
+    mut rows: impl Iterator<Item = usize>,
+    wrapped: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    rows.find(|&row| !wrapped(row))
+}
+
+/// The blocks whose prompts `grid`'s screen shows.
+fn screen_blocks(grid: Option<&GridNode>) -> BTreeSet<u32> {
+    (grid.into_iter())
+        .flat_map(|grid| grid.marks.prompts.iter().map(|&(_, block)| block))
+        .collect()
+}
+
+/// Takes in how blocks ended into `exits`, keeping no more than
+/// [`MOST_EXITS`], the oldest going first.
+fn learn(exits: &mut BTreeMap<u32, i32>, ended: &[(u32, i32)]) {
+    exits.extend(ended.iter().copied());
+    while exits.len() > MOST_EXITS {
+        exits.pop_first();
     }
 }
 
@@ -111,6 +166,11 @@ pub struct OpenTerminal {
     pub(crate) fit_asked: f64,
     /// A view update came that hasn't been acknowledged.
     pub(crate) unacknowledged: bool,
+    /// How blocks ended, by their numbers, as the daemon has said.
+    exits: BTreeMap<u32, i32>,
+    /// The screen's rows that end the line of a failed command's prompt,
+    /// with its exit status.
+    marks: BTreeMap<u16, i32>,
 }
 
 impl OpenTerminal {
@@ -132,6 +192,8 @@ impl OpenTerminal {
             paused: false,
             fit_asked: 0.0,
             unacknowledged: false,
+            exits: BTreeMap::new(),
+            marks: BTreeMap::new(),
         }
     }
 
@@ -149,6 +211,10 @@ impl OpenTerminal {
             ViewUpdate::Snapshot(view) => {
                 // History may have been numbered anew.
                 self.history.clear();
+                self.exits.clear();
+                if let Some(grid) = view.grid() {
+                    learn(&mut self.exits, &grid.marks.exits);
+                }
                 self.dirty.all = true;
                 self.dirty.header = true;
                 let size = view.grid().map(|grid| grid.size);
@@ -159,21 +225,38 @@ impl OpenTerminal {
                     (fit, _) => fit,
                 };
                 self.view = Some(view);
+                self.mark_screen();
                 None
             }
             ViewUpdate::Patch(patches) => {
                 let view = self.view.as_mut()?;
                 let before = view.grid().map(|grid| grid.state);
+                let blocks_before = screen_blocks(view.grid());
+                let mut ended = false;
                 for patch in &patches {
                     match patch {
                         Patch::Title(_) | Patch::Cwd(_) => self.dirty.header = true,
-                        Patch::Grid { lines, .. } => {
+                        Patch::Grid { lines, marks, .. } => {
                             self.dirty.rows.extend(lines.iter().map(|&(row, _)| row));
+                            // Before the view takes them in, as it keeps
+                            // only those of blocks whose prompts it shows.
+                            learn(&mut self.exits, &marks.exits);
+                            ended |= !marks.exits.is_empty();
                         }
                         Patch::Chat(_) => {}
                     }
                 }
                 view.apply(ViewUpdate::Patch(patches));
+                // Only which blocks the screen shows prompts of bears on
+                // history's marks, not on which rows: the screen scrolling
+                // moves its prompts without changing those.
+                let blocks = screen_blocks(view.grid());
+                let blocks_moved = blocks != blocks_before;
+                self.mark_screen();
+                if ended || blocks_moved {
+                    self.mark_history(&blocks);
+                }
+                let view = self.view.as_ref()?;
                 let (Some(before), Some(after)) = (before, view.grid().map(|grid| grid.state))
                 else {
                     return None;
@@ -264,6 +347,12 @@ impl OpenTerminal {
             return;
         }
         let older = history.lines.is_empty() || end == history.first;
+        let prompts =
+            (came.marks.prompts.iter()).map(|&(line, block)| (came.first + u64::from(line), block));
+        if older || came.first == history.end() {
+            history.prompts.extend(prompts);
+            learn(&mut self.exits, &came.marks.exits);
+        }
         if older {
             // Fewer than asked for: the daemon holds no older ones.
             if came.first == 0 || came.lines.len() < usize::from(count) {
@@ -280,6 +369,86 @@ impl OpenTerminal {
         } else {
             history.clear();
         }
+        self.mark_history(&screen_blocks(self.grid()));
+    }
+
+    /// The exit status screen row `row` is marked with, if it ends the
+    /// line of a failed command's prompt.
+    #[must_use]
+    pub fn failed(&self, row: u16) -> Option<i32> {
+        self.marks.get(&row).copied()
+    }
+
+    /// Works out which of the screen's rows are marked, and has those
+    /// whose marks changed drawn again: a block can end without its
+    /// prompt's row changing. Only a block's last prompt is marked, as a
+    /// prompt drawn again before a command ran, after Enter on an empty
+    /// line or Ctrl+C, is the same block's. None on the alternate screen.
+    fn mark_screen(&mut self) {
+        let mut marks = BTreeMap::new();
+        if let Some(grid) = self.grid().filter(|grid| !grid.state.alternate) {
+            let prompts = &grid.marks.prompts;
+            for (at, &(row, block)) in prompts.iter().enumerate() {
+                if prompts.get(at + 1).is_some_and(|&(_, next)| next == block) {
+                    continue;
+                }
+                let Some(exit) = self.exits.get(&block).copied().filter(|&exit| exit != 0) else {
+                    continue;
+                };
+                let rows = (usize::from(row)..grid.lines.len()).take(MARKED_ROWS);
+                let last = last_row(rows, |row| grid.lines[row].wrapped);
+                if let Some(last) = last.and_then(|last| u16::try_from(last).ok()) {
+                    marks.insert(last, exit);
+                }
+            }
+        }
+        let changed = (self.marks.iter())
+            .filter(|(row, exit)| marks.get(row) != Some(exit))
+            .chain(
+                marks
+                    .iter()
+                    .filter(|(row, exit)| self.marks.get(row) != Some(exit)),
+            )
+            .map(|(&row, _)| row);
+        self.dirty.rows.extend(changed);
+        self.marks = marks;
+    }
+
+    /// Works out which lines of the history held are marked, as
+    /// [`mark_screen`](Self::mark_screen) does the screen's, leaving out
+    /// blocks whose prompts the screen shows again, `on_screen`, and notes those whose
+    /// marks changed, to be drawn again.
+    fn mark_history(&mut self, on_screen: &BTreeSet<u32>) {
+        let history = &mut self.history;
+        let mut marks = BTreeMap::new();
+        let mut prompts = history.prompts.iter().peekable();
+        while let Some((&line, &block)) = prompts.next() {
+            if prompts.peek().is_some_and(|&(_, &next)| next == block) || on_screen.contains(&block)
+            {
+                continue;
+            }
+            let Some(exit) = self.exits.get(&block).copied().filter(|&exit| exit != 0) else {
+                continue;
+            };
+            let Some(start) = line.checked_sub(history.first) else {
+                continue;
+            };
+            let start = usize::try_from(start).unwrap_or(usize::MAX);
+            let rows = (start..history.lines.len()).take(MARKED_ROWS);
+            if let Some(last) = last_row(rows, |row| history.lines[row].line.wrapped) {
+                marks.insert(history.first + last as u64, exit);
+            }
+        }
+        let changed = (history.marks.iter())
+            .filter(|(line, exit)| marks.get(line) != Some(exit))
+            .chain(
+                marks
+                    .iter()
+                    .filter(|(line, exit)| history.marks.get(line) != Some(exit)),
+            )
+            .map(|(&line, _)| line);
+        self.dirty.history_marks.extend(changed);
+        history.marks = marks;
     }
 
     /// History asked for while what's held was of `generation` couldn't
@@ -496,5 +665,196 @@ mod tests {
         // A window typed.
         term.apply(snapshot(size(100, 30), 0));
         assert_eq!(term.fit, Fit::Off);
+    }
+
+    use clackatoo_protocol::BlockMarks;
+
+    fn marks(prompts: &[(u16, u32)], exits: &[(u32, i32)]) -> BlockMarks {
+        BlockMarks {
+            prompts: prompts.to_vec(),
+            exits: exits.to_vec(),
+        }
+    }
+
+    /// A screen of `lines`, each wrapped onto the next if it ends with
+    /// `\`, with `marks`.
+    fn screen(lines: &[&str], history_end: u64, marks: BlockMarks) -> ViewUpdate {
+        let ViewUpdate::Snapshot(mut view) = snapshot(size(20, 6), history_end) else {
+            unreachable!();
+        };
+        let Node::Grid(grid) = &mut view.root else {
+            unreachable!();
+        };
+        for (at, text) in lines.iter().enumerate() {
+            grid.lines[at] = wrapped(text);
+        }
+        grid.marks = marks;
+        ViewUpdate::Snapshot(view)
+    }
+
+    fn wrapped(text: &str) -> Line {
+        match text.strip_suffix('\\') {
+            Some(text) => Line {
+                wrapped: true,
+                ..line(text)
+            },
+            None => line(text),
+        }
+    }
+
+    fn failed_rows(term: &OpenTerminal) -> Vec<(u16, i32)> {
+        (0..6)
+            .filter_map(|row| Some((row, term.failed(row)?)))
+            .collect()
+    }
+
+    #[test]
+    fn failed_commands_are_marked_on_their_prompts_last_row() {
+        let mut term = OpenTerminal::new(TerminalId(3));
+        term.apply(screen(
+            &["$ true", "$ false", "$ a long\\", "command", "$", "$ x"],
+            0,
+            // Block 3 was drawn again, after Ctrl+C, before it ran.
+            marks(
+                &[(0, 1), (1, 2), (2, 3), (4, 3), (5, 4)],
+                &[(1, 0), (2, 1), (3, 130)],
+            ),
+        ));
+        assert_eq!(failed_rows(&term), [(1, 1), (4, 130)]);
+        // A daemon that tells nothing marks nothing.
+        term.apply(screen(&["$ false"], 0, BlockMarks::default()));
+        assert_eq!(failed_rows(&term), []);
+        // Nor on the alternate screen.
+        let mut update = screen(&["$ false"], 0, marks(&[(0, 1)], &[(1, 1)]));
+        if let ViewUpdate::Snapshot(view) = &mut update
+            && let Node::Grid(grid) = &mut view.root
+        {
+            grid.state.alternate = true;
+        }
+        term.apply(update);
+        assert_eq!(failed_rows(&term), []);
+    }
+
+    #[test]
+    fn a_command_that_ends_has_its_prompts_row_drawn_again() {
+        let mut term = OpenTerminal::new(TerminalId(3));
+        term.apply(screen(&["$ make", "building"], 0, marks(&[(0, 1)], &[])));
+        term.drawn();
+        let state = GridState::default();
+        // It ended, saying so, with only the next prompt's row sent.
+        term.apply(ViewUpdate::Patch(vec![Patch::Grid {
+            node: NodeId::ROOT,
+            state,
+            lines: vec![(2, line("$"))],
+            links: Vec::new(),
+            marks: marks(&[(2, 2)], &[(1, 2)]),
+        }]));
+        assert_eq!(failed_rows(&term), [(0, 2)]);
+        assert_eq!(term.dirty.rows, BTreeSet::from([0, 2]));
+        // The screen scrolls and the prompt goes off it: its row isn't
+        // marked any more, and is drawn again too.
+        term.drawn();
+        term.apply(ViewUpdate::Patch(vec![Patch::Grid {
+            node: NodeId::ROOT,
+            state,
+            lines: vec![(0, line("x"))],
+            links: Vec::new(),
+            marks: BlockMarks::default(),
+        }]));
+        assert_eq!(failed_rows(&term), []);
+        assert!(term.dirty.rows.contains(&0));
+    }
+
+    /// History of `lines`, from line `first`, each wrapped onto the next
+    /// if it ends with `\`, with `marks`.
+    fn history_of(first: u64, lines: &[&str], marks: BlockMarks) -> HistoryLines {
+        HistoryLines {
+            first,
+            marks,
+            lines: (lines.iter())
+                .map(|text| HistoryLine {
+                    width: 20,
+                    line: wrapped(text),
+                })
+                .collect(),
+            links: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn history_is_marked_and_a_command_ending_later_marks_it_when_it_ends() {
+        let mut term = OpenTerminal::new(TerminalId(3));
+        // Block 5 is still running, its prompt scrolled off.
+        term.apply(screen(&["out", "out"], 4, marks(&[], &[])));
+        term.older();
+        let generation = term.history.generation;
+        term.history_came(
+            generation,
+            history_of(
+                0,
+                &["$ false", "$ long\\", "line", "$ make"],
+                marks(&[(0, 3), (1, 4), (3, 5)], &[(3, 1), (4, 2)]),
+            ),
+        );
+        let failed = |term: &OpenTerminal| {
+            (0..4)
+                .filter_map(|line| Some((line, term.history.failed(line)?)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(failed(&term), [(0, 1), (2, 2)]);
+        term.drawn();
+        // Block 5 ends: its prompt, drawn already, is drawn again marked.
+        term.apply(ViewUpdate::Patch(vec![Patch::Grid {
+            node: NodeId::ROOT,
+            state: GridState {
+                history_end: 4,
+                ..GridState::default()
+            },
+            lines: vec![(2, line("$"))],
+            links: Vec::new(),
+            marks: marks(&[(2, 6)], &[(5, 127)]),
+        }]));
+        assert_eq!(failed(&term), [(0, 1), (2, 2), (3, 127)]);
+        assert_eq!(term.dirty.history_marks, BTreeSet::from([3]));
+    }
+
+    #[test]
+    fn a_prompt_in_history_the_screen_shows_again_is_marked_only_there() {
+        let mut term = OpenTerminal::new(TerminalId(3));
+        term.apply(screen(&["$ false"], 2, marks(&[(0, 7)], &[(7, 1)])));
+        term.older();
+        let generation = term.history.generation;
+        term.history_came(
+            generation,
+            history_of(0, &["$", "$"], marks(&[(0, 6), (1, 7)], &[(7, 1)])),
+        );
+        assert_eq!((term.history.failed(1), term.failed(0)), (None, Some(1)));
+        term.drawn();
+        // The screen's prompts move, the same blocks' still: nothing in
+        // history changes.
+        let state = GridState {
+            history_end: 2,
+            ..GridState::default()
+        };
+        let patch = |lines: Vec<(u16, Line)>, marks| {
+            ViewUpdate::Patch(vec![Patch::Grid {
+                node: NodeId::ROOT,
+                state,
+                lines,
+                links: Vec::new(),
+                marks,
+            }])
+        };
+        term.apply(patch(
+            vec![(0, line("")), (1, line("$ false"))],
+            marks(&[(1, 7)], &[]),
+        ));
+        assert_eq!((term.history.failed(1), term.failed(1)), (None, Some(1)));
+        assert!(term.dirty.history_marks.is_empty());
+        // Once the screen shows it no more, history's prompt is marked.
+        term.drawn();
+        term.apply(patch(vec![(1, line("x"))], BlockMarks::default()));
+        assert_eq!((term.history.failed(1), term.failed(1)), (Some(1), None));
+        assert_eq!(term.dirty.history_marks, BTreeSet::from([1]));
     }
 }

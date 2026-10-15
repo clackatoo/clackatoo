@@ -102,6 +102,8 @@ pub(crate) struct KeyInfo {
     pub(crate) mode: KeyMode,
     /// The pane it was pressed in.
     pub(crate) pane: Option<PaneId>,
+    /// For a binding, the count typed before it, as Vim's `v:count`.
+    pub(crate) count: Option<usize>,
 }
 
 /// What the window tells Lua.
@@ -140,6 +142,8 @@ pub(crate) enum FromLua {
         modes: Vec<KeyMode>,
         keys: Vec<Chord>,
         binding: u64,
+        /// What it does, for the panel of keys.
+        desc: Option<String>,
     },
     Unmap {
         modes: Vec<KeyMode>,
@@ -150,6 +154,15 @@ pub(crate) enum FromLua {
         modes: Vec<KeyMode>,
         keys: Vec<Chord>,
         to: Vec<Chord>,
+        desc: Option<String>,
+    },
+    /// Names the bindings `keys` start in `modes`, for the panel of keys,
+    /// as which-key.nvim's `group` does; or with no name, stops naming
+    /// them.
+    Group {
+        modes: Vec<KeyMode>,
+        keys: Vec<Chord>,
+        name: Option<String>,
     },
     /// Send keypresses in `scope` to a handler of Lua's.
     Subscribe {
@@ -366,6 +379,7 @@ mod tests {
             text: None,
             mode: KeyMode::Normal,
             pane: Some(PaneId(pane)),
+            count: None,
         }
     }
 
@@ -403,11 +417,13 @@ mod tests {
                     modes: vec![KeyMode::Normal],
                     keys: parse_keys("<C-b>t").unwrap(),
                     binding: 1,
+                    desc: None,
                 },
                 FromLua::Map {
                     modes: vec![KeyMode::Normal, KeyMode::Insert],
                     keys: parse_keys("x").unwrap(),
                     binding: 2,
+                    desc: None,
                 },
                 FromLua::Unmap {
                     modes: vec![KeyMode::Normal, KeyMode::Insert, KeyMode::Visual],
@@ -422,6 +438,141 @@ mod tests {
         );
         assert_eq!(bound(&mut lua, 2, 1), (Some(false), vec![]));
         assert_eq!(bound(&mut lua, 2, 2), (Some(true), vec![]), "in a chat");
+    }
+
+    #[test]
+    fn bindings_say_what_they_do_and_hear_the_count() {
+        let (mut lua, said) = start(
+            r#"
+            client.keys.map("n", "gx", function(ev)
+                client.cmd(`count {ev.count} {ev.count1}`)
+            end, {desc = "open the link"})
+            client.keys.map("nv", "gi", "gri", {desc = "go in"})
+            client.keys.map("n", "gy", print, {})
+            client.keys.group("n", "<Space>g", "git")
+            client.keys.group("n", "<Space>g", nil)
+            "#,
+        );
+        assert_eq!(
+            said,
+            [
+                FromLua::Map {
+                    modes: vec![KeyMode::Normal],
+                    keys: parse_keys("gx").unwrap(),
+                    binding: 1,
+                    desc: Some("open the link".into()),
+                },
+                FromLua::Remap {
+                    modes: vec![KeyMode::Normal, KeyMode::Visual],
+                    keys: parse_keys("gi").unwrap(),
+                    to: parse_keys("gri").unwrap(),
+                    desc: Some("go in".into()),
+                },
+                FromLua::Map {
+                    modes: vec![KeyMode::Normal],
+                    keys: parse_keys("gy").unwrap(),
+                    binding: 2,
+                    desc: None,
+                },
+                FromLua::Group {
+                    modes: vec![KeyMode::Normal],
+                    keys: parse_keys("<Space>g").unwrap(),
+                    name: Some("git".into()),
+                },
+                FromLua::Group {
+                    modes: vec![KeyMode::Normal],
+                    keys: parse_keys("<Space>g").unwrap(),
+                    name: None,
+                },
+            ]
+        );
+        let counted = |lua: &mut Lua, count| {
+            lua.decide(|seq| ToLua::Bound {
+                seq,
+                key: KeyInfo {
+                    count,
+                    ..key("gx", 1)
+                },
+                binding: 1,
+            })
+            .1
+        };
+        assert_eq!(
+            counted(&mut lua, Some(3)),
+            [FromLua::Command("count 3 3".into())]
+        );
+        assert_eq!(
+            counted(&mut lua, None),
+            [FromLua::Command("count 0 1".into())],
+            "as Vim's v:count and v:count1"
+        );
+    }
+
+    #[test]
+    fn a_binding_written_for_neovim_loads_and_says_what_it_leaves_out() {
+        // Neovim's options that change nothing here bind quietly, so a
+        // binding written for Neovim loads as it is.
+        let (_, said) = start(
+            "client.keys.map('n', 'a', print, \
+             {silent = true, noremap = true, nowait = true, unique = true, remap = false})",
+        );
+        assert!(
+            matches!(&said[..], [FromLua::Map { desc: None, .. }]),
+            "{said:?}"
+        );
+        // Any other is left out, saying so, and the binding's made all the
+        // same, and the lines after it run.
+        for (options, wanted, kept) in [
+            (
+                "{desc = 3}",
+                "leaves out its `desc`, which is a string",
+                None,
+            ),
+            (
+                "{remap = true, desc = 'go'}",
+                "leaves out `remap`",
+                Some("go"),
+            ),
+            (
+                "{expr = true, desc = 'go'}",
+                "leaves out `expr`",
+                Some("go"),
+            ),
+            ("{buffer = 0}", "leaves out `buffer`", None),
+            ("{callback = print}", "leaves out `callback`", None),
+            (
+                "{replace_keycodes = false}",
+                "leaves out `replace_keycodes`",
+                None,
+            ),
+            (
+                "{dsec = 'x'}",
+                "leaves out `dsec`, which isn't one of its options",
+                None,
+            ),
+            (
+                "{'x', desc = 'go'}",
+                "leaves out options that aren't named",
+                Some("go"),
+            ),
+        ] {
+            let (_, said) = start(&format!(
+                "client.keys.map('n', '<C-b>a', 'gri', {options})\nclient.keys.unmap('n', 'b')"
+            ));
+            assert!(
+                matches!(
+                    &said[..],
+                    [
+                        FromLua::Remap { desc, .. },
+                        FromLua::Error(err),
+                        FromLua::Unmap { .. },
+                    ] if desc.as_deref() == kept
+                        && err.starts_with("the binding of `<C-b>a` ")
+                        && err.contains(wanted)
+                ),
+                "{options}: {said:?}"
+            );
+        }
     }
 
     #[test]
@@ -453,6 +604,7 @@ mod tests {
                     modes: vec![KeyMode::Normal],
                     keys: parse_keys("p").unwrap(),
                     binding: 2,
+                    desc: None,
                 },
                 FromLua::Subscribe {
                     handler: 3,

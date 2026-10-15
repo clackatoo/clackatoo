@@ -407,6 +407,10 @@ details > summary::-webkit-details-marker { display: none; }
 .grid .u4 { text-decoration-style: dotted; }
 .grid .u5 { text-decoration-style: dashed; }
 .grid .st.u1, .grid .st.u2, .grid .st.u3, .grid .st.u4, .grid .st.u5 { text-decoration-line: underline line-through; }
+/* A failed command's mark, as the window draws it: its red, at the
+   contrast of a diagnostic's words. Drawn from the span's data-mark, so
+   it's never text, and nothing selects or copies it. */
+.grid .xm::after { content: attr(data-mark); color: #cc6666; }
 .grid .fb { color: var(--term-bg); }
 .grid .bf { background: var(--term-fg); }
 /* The 16 named colours, as the window has them. */

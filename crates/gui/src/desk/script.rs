@@ -171,6 +171,7 @@ impl Desk {
             text: press.text.map(str::to_owned),
             mode: self.key_mode(),
             pane: self.shown.map(|shown| shown.pane),
+            count: None,
         }
     }
 
@@ -205,20 +206,35 @@ impl Desk {
         self.script.waiting.clear();
     }
 
-    /// A binding to Lua: runs it, and if it lets the keys go on, gives the
-    /// focused pane each of them in order.
-    pub(super) fn run_lua_binding(&mut self, binding: u64, chord: Chord, press: &KeyPress<'_>) {
+    /// A binding to Lua, after `count` if one was typed: runs it, telling
+    /// it the count, and if it lets the keys go on, gives the focused pane
+    /// each of them in order, after the count, so `5x` bound to a function
+    /// that lets it go on still deletes five.
+    pub(super) fn run_lua_binding(
+        &mut self,
+        binding: u64,
+        count: Option<usize>,
+        chord: Chord,
+        press: &KeyPress<'_>,
+    ) {
         let mut pressed = std::mem::take(&mut self.script.waiting);
         pressed.push((KeptPress::of(press), chord));
         let chords: Vec<Chord> = pressed.iter().map(|&(_, chord)| chord).collect();
-        let key = self.key_info(chord, Some(keymap::display(&chords)), press);
+        let key = KeyInfo {
+            count,
+            ..self.key_info(chord, Some(keymap::display(&chords)), press)
+        };
         let stop = self
             .ask_lua(|seq| ToLua::Bound { seq, key, binding })
             .unwrap_or(true);
         if stop {
             return;
         }
-        let kept: Vec<KeptPress> = pressed.into_iter().map(|(press, _)| press).collect();
+        let digits = count.map(|count| count.to_string()).unwrap_or_default();
+        let kept: Vec<KeptPress> = (digits.chars())
+            .map(|digit| Chord::typed(digit).kept())
+            .chain(pressed.into_iter().map(|(press, _)| press))
+            .collect();
         self.type_into_pane(&kept);
     }
 
@@ -315,13 +331,25 @@ impl Desk {
                 modes,
                 keys,
                 binding,
+                desc,
             } => {
-                self.keymap.bind(&modes, &keys, Binding::Lua(binding), None);
+                let desc = desc.as_deref().and_then(said_in_panel);
+                (self.keymap).bind(&modes, &keys, Binding::Lua(binding), desc.as_deref());
                 self.forget_waiting();
             }
-            FromLua::Remap { modes, keys, to } => {
-                self.keymap.bind(&modes, &keys, Binding::Keys(to), None);
+            FromLua::Remap {
+                modes,
+                keys,
+                to,
+                desc,
+            } => {
+                let desc = desc.as_deref().and_then(said_in_panel);
+                (self.keymap).bind(&modes, &keys, Binding::Keys(to), desc.as_deref());
                 self.forget_waiting();
+            }
+            FromLua::Group { modes, keys, name } => {
+                let name = name.as_deref().and_then(said_in_panel);
+                self.keymap.name_group(&modes, &keys, name.as_deref());
             }
             FromLua::Unmap { modes, keys } => {
                 self.keymap.unbind(&modes, &keys);
@@ -377,4 +405,16 @@ impl Desk {
             FromLua::Decided { .. } => {}
         }
     }
+}
+
+/// `text`, from the config, as the panel of keys can show it: on one
+/// line, with nothing that changes which way text runs; or nothing, if
+/// nothing's left.
+fn said_in_panel(text: &str) -> Option<String> {
+    let said: String = (text.chars())
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .filter(|&ch| super::shown_in_names(ch))
+        .collect();
+    let said = said.trim();
+    (!said.is_empty()).then(|| said.to_owned())
 }

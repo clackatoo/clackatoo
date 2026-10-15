@@ -185,13 +185,27 @@ impl Window {
     /// Opens the window on the daemon running in the runtime directory
     /// `runtime`, `size` points big at `scale` pixels to a point, as the
     /// window opens on a desktop, but drawn offscreen. It never starts a
-    /// daemon: one this process started would be this program.
+    /// daemon: one this process started would be this program. With
+    /// `config`, a config directory, it runs the `client/init.lua` there
+    /// as the window does; without, no config, not even the one of
+    /// whoever runs it.
     ///
     /// # Errors
     ///
     /// If there's no GPU or no font to draw with.
-    pub fn open(runtime: PathBuf, size: [u32; 2], scale: f64) -> anyhow::Result<Self> {
-        Self::open_with(runtime, size, scale, crate::tutor::Start::read(false))
+    pub fn open(
+        runtime: PathBuf,
+        size: [u32; 2],
+        scale: f64,
+        config: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
+        Self::open_with(
+            runtime,
+            size,
+            scale,
+            crate::tutor::Start::read(false),
+            config,
+        )
     }
 
     /// Opens the window as [`open`](Self::open) does, with the tutor
@@ -201,6 +215,7 @@ impl Window {
         size: [u32; 2],
         scale: f64,
         tutor: crate::tutor::Start,
+        config: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         let started = Instant::now();
         let (sender, events) = mpsc::channel();
@@ -208,12 +223,22 @@ impl Window {
         let session = Session::start(
             Location::Started(runtime.clone()),
             &runtime,
-            Proxy::Channel(sender),
+            Proxy::Channel(sender.clone()),
         );
         let mut app = App::new(started, None, session, String::new());
         let start = crate::options::Options::drawing_with(&crate::FontOptions::default());
         let font = start.font_options();
         app.start_options(start, Vec::new());
+        // The config, if there's one, as `run` starts it.
+        if let Some(dir) = config {
+            app.start_lua(crate::desk::LuaStart(Box::new(move |options| {
+                let sender = sender.clone();
+                let wake: crate::lua::Wake = Box::new(move || {
+                    let _ = sender.send(SessionEvent::Lua);
+                });
+                crate::lua::Lua::start(crate::lua::Source::Dir(dir.clone()), options.clone(), wake)
+            })));
+        }
         app.start_tutor(tutor);
         app.start_recall(crate::cmdline::recall::Start::read());
         // As the window opens: fonts loaded at a pixel a point, then
@@ -764,6 +789,7 @@ mod tests {
             [640, 400],
             2.0,
             crate::tutor::Start::default(),
+            None,
         )
         .unwrap();
         assert!(window.connect(PATIENCE), "{}", window.text());
@@ -814,6 +840,27 @@ mod tests {
         // Settling again with nothing handed over says nothing took time.
         let idle = window.settle(Duration::from_millis(50), PATIENCE);
         assert_eq!((idle.first, idle.frames), (None, 0), "{idle:?}");
+        drop(window);
+
+        // Given a config, it runs its `init.lua`, as `look`'s `config`
+        // step has it do; given none, as above, it runs nobody's.
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("client")).unwrap();
+        std::fs::write(config.join("client/init.lua"), "client.opt.scrolloff = 7\n").unwrap();
+        let mut window = Window::open_with(
+            runtime.path().to_owned(),
+            [320, 200],
+            1.0,
+            crate::tutor::Start::default(),
+            Some(config),
+        )
+        .unwrap();
+        assert!(window.connect(PATIENCE), "{}", window.text());
+        let until = std::time::Instant::now() + PATIENCE;
+        while window.app.desk.options().scrolloff != 7 && std::time::Instant::now() < until {
+            window.settle(Duration::from_millis(50), PATIENCE);
+        }
+        assert_eq!(window.app.desk.options().scrolloff, 7);
 
         drop(window);
         shutdown.shutdown();

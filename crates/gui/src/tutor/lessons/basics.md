@@ -60,6 +60,15 @@ panes 3
 
 In normal mode, Ctrl+H, Ctrl+J, Ctrl+K and Ctrl+L move to the pane to the left, below, above or right. Ctrl+B and then `h`, `j`, `k` or `l` does the same in either mode, as tmux's prefix does. While Ctrl+B waits, the bar marks it `^B` by the mode, and a panel above the bar lists every key it takes and what each does: Esc puts it away. With two panes or more, each shows its number, for Ctrl+B `p` and the number to go to it.
 
+Keys you bind in your `init.lua` are listed too, saying what their `desc` says, as in Neovim, and `client.keys.group` names keys that start several, as which-key.nvim's groups do:
+
+```lua
+client.keys.map("n", "<Space>ft", function() client.cmd("Files") end, {desc = "find todos"})
+client.keys.group("n", "<Space>f", "my files")
+```
+
+A function bound to keys hears the count typed before them as `ev.count`, 0 if none, as Vim's `v:count`, and `ev.count1`, 1 if none.
+
 Go back to the practice terminal, the one you split.
 
 ```check
@@ -154,6 +163,6 @@ messages
 
 ## Where you've been
 
-Ctrl+O and Ctrl+I go back and forward through the places you've been in the tab, panes and places in files alike, as Vim's jump list does; Ctrl+Shift+O and Ctrl+Shift+I through everywhere: panes, tabs and workspaces.
+Ctrl+O and Ctrl+I go back and forward through the places you've been in the tab, panes and places in files alike, as Vim's jump list does; Ctrl+Shift+O and Ctrl+Shift+I through everywhere: panes, tabs and workspaces. A count goes that many places: `3` and Ctrl+O goes back three, or nowhere if there aren't three.
 
 Everything here is kept by the daemon, so closing the window closes nothing: the next window opens where you left off. A lesson is the exception, and closes with the window.
