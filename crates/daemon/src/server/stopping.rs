@@ -24,7 +24,7 @@ use mio::{Events, Token};
 
 use super::groups::End;
 use super::language::{Pipe, ServerId, ServerSlot};
-use super::{Daemon, OUTPUT_BUDGET, Orphan, Source};
+use super::{Daemon, FIRST_LOOK, Flood, OUTPUT_BUDGET, Orphan, Reading, Source};
 use crate::lsp::{Incoming, LanguageServer};
 
 /// How long a server has to answer `shutdown` before it's told to exit
@@ -55,8 +55,6 @@ pub(super) struct Stopping {
     server: LanguageServer,
     /// Its pipes' registrations, kept as they were while it ran.
     tokens: [Token; 4],
-    /// Its read budget ran out with more of its output waiting.
-    unread: bool,
     /// Its read budget ran out with more of its stderr waiting.
     unread_errors: bool,
     /// What it's called in the log: its command, and its project.
@@ -112,7 +110,6 @@ impl Daemon {
         let stopping = Stopping {
             server,
             tokens,
-            unread: false,
             unread_errors: false,
             name,
             step,
@@ -125,7 +122,10 @@ impl Daemon {
     /// stopping.
     pub(super) fn stopping_event(&mut self, id: ServerId, pipe: Pipe) {
         match pipe {
-            Pipe::Output => self.read_stopping(id),
+            // One already queued is read at the end of the turn, until it's
+            // drained or queued again, which covers whatever this says came.
+            Pipe::Output if self.unread.contains(&Flood::Server(id)) => {}
+            Pipe::Output => self.read_stopping(id, Reading::Look),
             Pipe::Errors => self.read_stopping_errors(id),
             Pipe::Input => {
                 if let Some(stopping) = self.servers.stopping.get_mut(&id) {
@@ -136,23 +136,37 @@ impl Daemon {
         }
     }
 
-    /// Reads what server `id`, which is stopping, sent, for its answer to
-    /// `shutdown`: then it's told to exit. Anything else it says is too
-    /// late to matter.
-    fn read_stopping(&mut self, id: ServerId) {
-        let Some(stopping) = self.servers.stopping.get_mut(&id) else {
+    /// Reads what server `id`, which is stopping, sent, as `reading` says,
+    /// for its answer to `shutdown`: then it's told to exit. Anything else
+    /// it says is too late to matter. It's queued to be read again if
+    /// there may be more.
+    pub(super) fn read_stopping(&mut self, id: ServerId, reading: Reading) {
+        let Some(stopping) = self.servers.stopping.get(&id) else {
             return;
         };
+        // Its stdout's token is the first.
+        let own = Some(stopping.tokens[0]);
+        if self.read_peer(reading, own, |daemon| daemon.read_stopping_once(id)) {
+            self.queue_flood(Flood::Server(id));
+        }
+    }
+
+    /// Reads what server `id`, which is stopping, sent, [`FIRST_LOOK`]
+    /// bytes or a little more if there are that many. Returns how many
+    /// bytes it read, or `None` if it has gone: that's heard of from its
+    /// pidfd.
+    fn read_stopping_once(&mut self, id: ServerId) -> Option<usize> {
+        let stopping = self.servers.stopping.get_mut(&id)?;
         let mut incoming = Vec::new();
-        let read = (stopping.server).read(&mut self.buffer, OUTPUT_BUDGET, &mut incoming);
-        // Gone, it's heard of from its pidfd.
-        stopping.unread = matches!(read, Ok(true));
+        let buffer = &mut self.buffer[..FIRST_LOOK];
+        let read = (stopping.server).read(buffer, FIRST_LOOK, &mut incoming);
         let answered = (incoming.iter()).any(|message| matches!(message, Incoming::ShutDown));
         if answered && stopping.step == Step::ShuttingDown {
             tell_to_exit(stopping);
         }
         // Answers to what it asked meanwhile, such as its settings.
         let _ = stopping.server.flush();
+        read.ok()
     }
 
     /// Reads what server `id`, which is stopping, wrote to stderr, as much
@@ -167,23 +181,50 @@ impl Daemon {
     /// its read budget let be read, or the parser's thread has parsed what
     /// it sent, as its answer to `shutdown` may be behind a big message.
     pub(super) fn stopping_unread(&self) -> bool {
-        (self.servers.stopping.values())
-            .any(|stopping| stopping.unread || stopping.unread_errors || stopping.server.parsed())
+        (self.servers.stopping.iter()).any(|(&id, stopping)| {
+            stopping.unread_errors
+                || stopping.server.parsed()
+                || self.unread.contains(&Flood::Server(id))
+        })
     }
 
-    /// Reads again from servers stopping whose read budget ran out, or
-    /// whose messages have been parsed.
-    pub(super) fn read_stopping_unread(&mut self) {
+    /// Reads again from servers stopping whose stderr read budget ran out,
+    /// and queues those whose messages have been parsed to be read at the
+    /// end of the turn.
+    pub(super) fn take_stopping_unread(&mut self) {
+        let unread: Vec<(ServerId, bool, bool)> = (self.servers.stopping.iter())
+            .map(|(&id, stopping)| (id, stopping.server.parsed(), stopping.unread_errors))
+            .filter(|&(_, parsed, errors)| parsed || errors)
+            .collect();
+        for (id, parsed, errors) in unread {
+            if parsed {
+                self.queue_flood(Flood::Server(id));
+            }
+            if errors {
+                self.read_stopping_errors(id);
+            }
+        }
+    }
+
+    /// Reads again from servers stopping with more waiting than their read
+    /// budget let be read, or whose messages have been parsed, there and
+    /// then: as the daemon stops, nothing else is waiting for the loop.
+    fn read_stopping_unread(&mut self) {
         let unread: Vec<(ServerId, bool, bool)> = (self.servers.stopping.iter())
             .map(|(&id, stopping)| {
-                let output = stopping.unread || stopping.server.parsed();
-                (id, output, stopping.unread_errors)
+                let queued = self.unread.contains(&Flood::Server(id));
+                (
+                    id,
+                    queued || stopping.server.parsed(),
+                    stopping.unread_errors,
+                )
             })
             .filter(|&(_, output, errors)| output || errors)
             .collect();
         for (id, output, errors) in unread {
             if output {
-                self.read_stopping(id);
+                self.unread.retain(|&unread| unread != Flood::Server(id));
+                self.read_stopping(id, Reading::Last);
             }
             if errors {
                 self.read_stopping_errors(id);
@@ -220,7 +261,7 @@ impl Daemon {
         // much as a read budget allows, if something it started holds it
         // open and writes on.
         stopping.server.read_errors(&mut self.buffer, OUTPUT_BUDGET);
-        self.unregister_stopping(&stopping);
+        self.unregister_stopping(id, &stopping);
         let name = &stopping.name;
         let last =
             (stopping.server.last_errors()).map_or_else(String::new, |last| format!(": {last}"));
@@ -235,9 +276,11 @@ impl Daemon {
         }
     }
 
-    /// Takes away the registrations of `stopping`'s pipes, which are to be
-    /// closed: its tokens, and its fds from the poll.
-    fn unregister_stopping(&mut self, stopping: &Stopping) {
+    /// Takes away the registrations of `stopping`'s pipes, server `id`'s,
+    /// which are to be closed: its tokens, its fds from the poll, and its
+    /// place in the queue of those with more to read.
+    fn unregister_stopping(&mut self, id: ServerId, stopping: &Stopping) {
+        self.unread.retain(|&unread| unread != Flood::Server(id));
         for token in stopping.tokens {
             self.sources.remove(token.0);
         }
@@ -338,10 +381,10 @@ impl Daemon {
             }
             self.read_stopping_unread();
         }
-        for (_, stopping) in std::mem::take(&mut self.servers.stopping) {
+        for (id, stopping) in std::mem::take(&mut self.servers.stopping) {
             log::warn!("{}: didn't stop in time: killing it", stopping.name);
             stopping.server.kill();
-            self.unregister_stopping(&stopping);
+            self.unregister_stopping(id, &stopping);
             self.watch_orphan(Orphan::new(stopping.server.stop()));
         }
         self.groups.kill();
@@ -430,11 +473,50 @@ pub(super) mod tests {
         while !done(daemon) {
             let ids: Vec<ServerId> = daemon.servers.slots.keys().copied().collect();
             for id in ids {
-                daemon.read_server(id);
+                daemon.read_server(id, Reading::Last);
             }
             assert!(Instant::now() < deadline, "it never came");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Goes round `daemon`'s loop as far as reading goes, as `run` does:
+    /// what epoll says came is handled, then what's queued is read, until
+    /// `done` says so, failing after a few seconds.
+    fn read_as_the_loop_does_until(daemon: &mut Daemon, done: impl Fn(&Daemon) -> bool) {
+        let mut events = Events::with_capacity(64);
+        let mut stashed = Events::with_capacity(64);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done(daemon) {
+            assert!(Instant::now() < deadline, "it never came");
+            let _ = daemon
+                .poll
+                .poll(&mut events, Some(Duration::from_millis(10)));
+            std::mem::swap(&mut stashed, &mut daemon.waiting);
+            for event in stashed.iter().chain(&events) {
+                daemon.handle(event);
+            }
+            stashed.clear();
+            std::mem::swap(&mut stashed, &mut daemon.waiting);
+            daemon.read_floods();
+        }
+    }
+
+    #[test]
+    fn an_answer_to_shutdown_behind_more_than_a_read_is_heard() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (mut daemon, id) = daemon_with_fake(&root, &["--filler-before-shutdown"]);
+        daemon.stop_server(id);
+        // Most of what comes before the answer is read at the end of a
+        // turn: once the answer is read, the server is told to exit, long
+        // before it would be anyway, which this never gets to.
+        read_as_the_loop_does_until(&mut daemon, |daemon| {
+            (daemon.servers.stopping.get(&id))
+                .is_none_or(|stopping| stopping.step != Step::ShuttingDown)
+        });
+        let stopping = daemon.servers.stopping.get(&id);
+        assert!(stopping.is_none_or(|stopping| stopping.step == Step::Exiting));
     }
 
     #[test]

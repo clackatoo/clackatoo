@@ -78,10 +78,6 @@ pub(crate) const MAX_FAN_OUT: usize = 8;
 const DEFAULT_ENTRIES: usize = 50;
 const MAX_ENTRIES: usize = 200;
 
-/// The most an agent's messages are read in one go, in bytes, before the
-/// rest of the loop gets a turn.
-const READ_BUDGET: usize = 1024 * 1024;
-
 /// The most answers kept waiting for an agent that isn't reading them, in
 /// bytes. Past it, the agent has stopped listening, and the connection
 /// ends.
@@ -328,26 +324,29 @@ impl Connection {
     }
 
     /// Takes what the parser's thread has parsed of what the agent sent,
-    /// then reads on, up to [`READ_BUDGET`] bytes, answering what needs
-    /// nothing of the daemon, and puts the rest in `incoming`. Returns
-    /// whether more may be waiting, as when the budget ran out. Nothing is
-    /// read while the parser's thread is too far behind: once it catches
-    /// up, [`parsed`](Self::parsed) says so.
-    pub(crate) fn read(&mut self, buffer: &mut [u8], incoming: &mut Vec<Incoming>) -> bool {
+    /// then reads on, a `buffer` at a time, until it has taken and read
+    /// `budget` bytes, answering what needs nothing of the daemon, and puts
+    /// the rest in `incoming`. Returns how many bytes it took and read:
+    /// `budget` or more if it stopped there, so more may be waiting, unless
+    /// the connection has finished. Nothing is read while the parser's
+    /// thread is too far behind: once it catches up,
+    /// [`parsed`](Self::parsed) says so.
+    pub(crate) fn read(
+        &mut self,
+        buffer: &mut [u8],
+        budget: usize,
+        incoming: &mut Vec<Incoming>,
+    ) -> usize {
         let mut messages = Vec::new();
-        self.incoming.take(&mut messages);
-        let mut total = 0;
-        let more = loop {
-            if total >= READ_BUDGET {
-                break true;
-            }
-            if self.incoming.full() {
-                break false;
+        let mut total = self.incoming.take(&mut messages, budget);
+        loop {
+            if total >= budget || self.incoming.full() {
+                break;
             }
             match self.stream.read(buffer) {
                 Ok(0) => {
                     self.finished = true;
-                    break false;
+                    break;
                 }
                 Ok(n) => {
                     total += n;
@@ -355,10 +354,10 @@ impl Connection {
                     let pushed = (self.incoming).push(name, &buffer[..n], &mut messages, |_| {});
                     if pushed.is_err() {
                         self.finished = true;
-                        break false;
+                        break;
                     }
                 }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break false,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(err) => {
                     log::debug!(
@@ -366,14 +365,14 @@ impl Connection {
                         self.chat
                     );
                     self.finished = true;
-                    break false;
+                    break;
                 }
             }
-        };
+        }
         for message in messages {
             self.receive(message, incoming);
         }
-        more && !self.finished
+        total
     }
 
     /// Whether the parser's thread has parsed messages the agent sent,
@@ -395,7 +394,7 @@ impl Connection {
     }
 
     /// When the connection, finished, is dropped however much of what the
-    /// agent sent is still being parsed, if it's waiting for that.
+    /// agent sent is still being parsed, once it's found to be finished.
     pub(crate) fn gone_due(&self) -> Option<std::time::Instant> {
         self.incoming.gone_due()
     }
@@ -1720,7 +1719,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_mins(1);
         while connection.outgoing.is_empty() {
             assert!(std::time::Instant::now() < deadline, "never answered");
-            connection.read(&mut buffer, &mut incoming);
+            connection.read(&mut buffer, 1024 * 1024, &mut incoming);
         }
         let _theirs = writing.join().unwrap();
         assert!(incoming.is_empty(), "never called");

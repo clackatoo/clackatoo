@@ -29,7 +29,7 @@ use super::groups::End;
 use super::rename::{Made, Purpose};
 use super::stopping::{EXIT_WAIT, Stopping};
 use super::watched::{Walking, Wanted};
-use super::{Daemon, OUTPUT_BUDGET, Orphan, Source};
+use super::{Daemon, FIRST_LOOK, Flood, OUTPUT_BUDGET, Orphan, Reading, Source};
 use crate::lsp::{self, Incoming, LanguageServer, Prepared, Reported};
 use crate::pty::Process;
 use crate::rpc::{Heavy, Trash};
@@ -64,8 +64,6 @@ const NOT_FOUND: u8 = u8::MAX;
 pub(super) struct ServerSlot {
     pub(super) server: LanguageServer,
     pub(super) tokens: [Token; 4],
-    /// Its read budget ran out with more of its output waiting.
-    unread: bool,
     /// Its read budget ran out with more of its stderr waiting.
     unread_errors: bool,
     pub(super) command: Vec<String>,
@@ -561,7 +559,6 @@ impl Daemon {
             ServerSlot {
                 server,
                 tokens: tokens.try_into().expect("four pipes"),
-                unread: false,
                 unread_errors: false,
                 command: command.to_vec(),
                 root,
@@ -758,30 +755,41 @@ impl Daemon {
             return self.stopping_event(id, pipe);
         }
         match pipe {
-            Pipe::Output => self.read_server(id),
+            // One already queued is read at the end of the turn, until it's
+            // drained or queued again, which covers whatever this says came.
+            Pipe::Output if self.unread.contains(&Flood::Server(id)) => {}
+            Pipe::Output => self.read_server(id, Reading::Look),
             Pipe::Errors => self.read_server_errors(id),
             Pipe::Input => self.flush_server(id),
+            // What it said last comes first: it's let go once that's been
+            // read to the end.
             Pipe::Exit => {
-                self.read_server(id);
-                self.server_ended(id);
+                if let Some(slot) = self.servers.slots.get_mut(&id) {
+                    slot.server.gone();
+                }
+                self.read_server(id, Reading::Last);
             }
         }
     }
 
-    /// Writes what's queued for server `id`.
+    /// Writes what's queued for server `id`. If writing fails, it has gone,
+    /// but what it sent before it went may still be waiting: that's read
+    /// to the end, at the end of the turn, and then it's let go.
     pub(super) fn flush_server(&mut self, id: ServerId) {
         let Some(slot) = self.servers.slots.get_mut(&id) else {
             return;
         };
         if slot.server.has_outgoing() && slot.server.flush().is_err() {
-            self.server_ended(id);
+            slot.server.gone();
+            self.queue_flood(Flood::Server(id));
         }
     }
 
-    /// Server `id` has gone by itself: it's let go once what it sent last
-    /// has been parsed and taken in, or once that has taken too long (see
-    /// [`crate::rpc::Inbox::gone`]), so an answer it sent just before it
-    /// went still comes.
+    /// Server `id` has gone by itself, and what it sent has been read to
+    /// the end, or as far as the parser's thread lets: it's let go once
+    /// what it sent last has been parsed and taken in, or once that has
+    /// taken too long (see [`crate::rpc::Inbox::gone`]), so an answer it
+    /// sent just before it went still comes.
     fn server_ended(&mut self, id: ServerId) {
         let Some(slot) = self.servers.slots.get_mut(&id) else {
             return;
@@ -790,20 +798,21 @@ impl Daemon {
             self.server_gone(id);
         } else {
             // Read again once the rest has been parsed, not before.
-            slot.unread = false;
+            self.unread.retain(|&unread| unread != Flood::Server(id));
         }
     }
 
     /// When the next server that has gone is let go however much of what
-    /// it sent is still being parsed, if one is waiting for that.
+    /// it sent is still being parsed, or still coming, if one has gone.
     pub(super) fn next_gone_server_due(&self) -> Option<Instant> {
         (self.servers.slots.values())
             .filter_map(|slot| slot.server.gone_due())
             .min()
     }
 
-    /// Lets go the servers that went whose last messages have taken too
-    /// long to parse.
+    /// Lets go the servers that went a while ago, whose last messages have
+    /// taken too long to parse, or which something they started keeps
+    /// writing for.
     pub(super) fn let_gone_servers_go(&mut self) {
         let now = Instant::now();
         let due: Vec<ServerId> = (self.servers.slots.iter())
@@ -815,27 +824,43 @@ impl Daemon {
         }
     }
 
-    /// Reads what server `id` sent, and hands it to its buffers.
-    pub(super) fn read_server(&mut self, id: ServerId) {
-        let Some(slot) = self.servers.slots.get_mut(&id) else {
+    /// Reads what server `id` sent, as `reading` says, and hands it to its
+    /// buffers, queueing it to be read again if there may be more. One
+    /// stopping is read for its answer to `shutdown`.
+    pub(super) fn read_server(&mut self, id: ServerId, reading: Reading) {
+        if self.servers.stopping.contains_key(&id) {
+            return self.read_stopping(id, reading);
+        }
+        let Some(slot) = self.servers.slots.get(&id) else {
             return;
         };
-        let mut incoming = Vec::new();
-        let read = slot
-            .server
-            .read(&mut self.buffer, OUTPUT_BUDGET, &mut incoming);
-        if let Ok(more) = read {
-            slot.unread = more;
+        // Its stdout's token is the first.
+        let own = Some(slot.tokens[0]);
+        if self.read_peer(reading, own, |daemon| daemon.read_server_once(id)) {
+            self.queue_flood(Flood::Server(id));
         }
+    }
+
+    /// Reads what server `id` sent, [`FIRST_LOOK`] bytes or a little more
+    /// if there are that many, and hands it to its buffers. Returns how many
+    /// bytes it read, or `None` once it's no longer read: its output ended,
+    /// or it has gone and there's nothing more to read for now.
+    fn read_server_once(&mut self, id: ServerId) -> Option<usize> {
+        let slot = self.servers.slots.get_mut(&id)?;
+        let mut incoming = Vec::new();
+        let buffer = &mut self.buffer[..FIRST_LOOK];
+        let read = slot.server.read(buffer, FIRST_LOOK, &mut incoming);
         for message in incoming {
             self.receive_from_server(id, message);
         }
-        let slot = self.servers.slots.get(&id);
-        if read.is_err() || slot.is_some_and(|slot| slot.server.has_gone()) {
+        let more = read.as_ref().is_ok_and(|&read| read >= FIRST_LOOK);
+        let gone = |slot: &ServerSlot| slot.server.has_gone();
+        if read.is_err() || (!more && self.servers.slots.get(&id).is_some_and(gone)) {
             self.server_ended(id);
-        } else {
-            self.flush_server(id);
+            return None;
         }
+        self.flush_server(id);
+        read.ok().filter(|_| self.servers.slots.contains_key(&id))
     }
 
     /// Reads what server `id` wrote to stderr, for the log, as much as one
@@ -846,30 +871,29 @@ impl Daemon {
         }
     }
 
-    /// Reads again from servers whose read budget ran out, or whose
-    /// messages have been parsed on the parser's thread, those stopping
-    /// too.
+    /// Reads again from servers whose stderr read budget ran out, and
+    /// queues those whose messages have been parsed on the parser's thread
+    /// to be read at the end of the turn, those stopping too.
     pub(super) fn read_servers_unread(&mut self) {
         let unread: Vec<(ServerId, bool, bool)> = (self.servers.slots.iter())
-            .map(|(&id, slot)| (id, slot.unread || slot.server.parsed(), slot.unread_errors))
-            .filter(|&(_, output, errors)| output || errors)
+            .map(|(&id, slot)| (id, slot.server.parsed(), slot.unread_errors))
+            .filter(|&(_, parsed, errors)| parsed || errors)
             .collect();
-        for (id, output, errors) in unread {
-            if output {
-                self.read_server(id);
+        for (id, parsed, errors) in unread {
+            if parsed {
+                self.queue_flood(Flood::Server(id));
             }
             if errors {
                 self.read_server_errors(id);
             }
         }
-        self.read_stopping_unread();
+        self.take_stopping_unread();
     }
 
-    /// Whether a server's read budget ran out with more waiting, or the
-    /// parser's thread has parsed what one sent.
+    /// Whether a server's stderr read budget ran out with more waiting, or
+    /// the parser's thread has parsed what one sent.
     pub(super) fn servers_unread(&self) -> bool {
-        (self.servers.slots.values())
-            .any(|slot| slot.unread || slot.unread_errors || slot.server.parsed())
+        (self.servers.slots.values()).any(|slot| slot.unread_errors || slot.server.parsed())
             || self.stopping_unread()
     }
 
@@ -2041,6 +2065,7 @@ impl Daemon {
         let Some(slot) = self.forget_server(id) else {
             return;
         };
+        self.unread.retain(|&unread| unread != Flood::Server(id));
         for token in slot.tokens {
             self.sources.remove(token.0);
         }

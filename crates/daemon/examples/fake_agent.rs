@@ -20,6 +20,7 @@
 //! | `edit PATH`, a line's end, then text | As `disk`, but asks permission first, as Claude Code does in Manual mode, and writes the file only once it's allowed |
 //! | `disk-spaces PATH`, a line's end, then text | As `disk`, but says the change as Claude Code's adapter says one to a tab-indented file: each line's leading tabs as two spaces, as the tool finishes |
 //! | `run PATH`, a line's end, then text | Writes the text to the file in a command, as `sed -i` would, saying nothing of what it changed, and says `ran` |
+//! | `stream N`, and anything after a space | Says the numbers from 0 to N − 1, each followed by a space, in N updates, all in one write, as an agent streaming fast; then `done` |
 //! | `bounce`, from another chat | Sends that chat `bounce` back with `send_to_chat`, and says what it answered |
 //! | anything else | `echo:` and the message, in two pieces |
 //!
@@ -272,6 +273,36 @@ fn say(session: &str, text: &str) {
         &json!({ "sessionUpdate": "agent_message_chunk",
                              "content": { "type": "text", "text": text } }),
     );
+}
+
+/// Answers `asked`, `stream N` and perhaps more, the message `id` in
+/// `session`: says the numbers from 0 to N − 1, each followed by a space,
+/// an update each, in one write, so they come as fast as they're read,
+/// then `done`.
+fn stream(id: &Value, session: &str, asked: &str) {
+    let count: usize = (asked.split(' ').nth(1))
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0);
+    // The updates differ only in their numbers, so they're written from a
+    // template: building each as JSON would take longer than reading it.
+    let mut before = json!({ "jsonrpc": "2.0", "method": "session/update",
+                             "params": { "sessionId": session,
+                                         "update": { "sessionUpdate": "agent_message_chunk",
+                                                     "content": { "type": "text", "text": "@" } } } })
+    .to_string();
+    let after = before
+        .split_off(before.find('@').unwrap())
+        .replacen('@', " ", 1);
+    let mut out = String::new();
+    for number in 0..count {
+        writeln!(out, "{before}{number}{after}").unwrap();
+    }
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(out.as_bytes()).unwrap();
+    stdout.flush().unwrap();
+    drop(stdout);
+    say(session, "done\n");
+    done(id, "end_turn");
 }
 
 /// Says the account's limits as Claude Code's adapter says a
@@ -746,6 +777,7 @@ impl Fake {
 
     /// Answers a message by the script its words choose. Returns whether
     /// to carry on.
+    #[allow(clippy::too_many_lines, reason = "one arm for each script, most short")]
     fn prompt(&mut self, id: Value, session: String, text: &str) -> bool {
         let (sender, text) = from_chat(text);
         if let (Some(sender), "bounce") = (sender, text) {
@@ -838,6 +870,7 @@ impl Fake {
                 done(&id, "end_turn");
             }
             calls if calls.starts_with("mcp ") => self.call_tools(id, session, calls),
+            asked if asked.starts_with("stream ") => stream(&id, &session, asked),
             "settings" => {
                 let (mode, model) = self.settings.get(&session).cloned().unwrap_or_default();
                 say(&session, &format!("{mode} {model}\n"));

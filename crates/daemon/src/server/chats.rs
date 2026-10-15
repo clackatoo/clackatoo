@@ -34,7 +34,7 @@ use mio::{Interest, Token};
 use super::groups::End;
 use super::language::Pipe;
 use super::stopping::AGENT_STOP_WAIT;
-use super::{Daemon, Hosted, OUTPUT_BUDGET, Orphan, Slot, Source};
+use super::{Daemon, FIRST_LOOK, Flood, Hosted, OUTPUT_BUDGET, Orphan, Reading, Slot, Source};
 use crate::agent::{Agent, Incoming, Listed, Opened, Opening, Refused};
 use crate::agents::{self, AgentSpec, Launch, Start};
 use crate::chat::{Action, HostedChat, Limits, settings_of};
@@ -54,8 +54,6 @@ pub(super) struct AgentSlot {
     command: Vec<OsString>,
     agent: Agent,
     tokens: [Token; 4],
-    /// Its read budget ran out with more of its output waiting.
-    unread: bool,
     /// Its read budget ran out with more of its stderr waiting.
     unread_errors: bool,
 }
@@ -150,10 +148,10 @@ const ASK_AGAIN: Duration = Duration::from_mins(1);
 type Ended = (String, Result<(), String>);
 
 impl Agents {
-    /// Whether any agent's read budget ran out with more of its output
-    /// or stderr waiting, or the parser's thread has parsed what one sent.
+    /// Whether any agent's stderr read budget ran out with more waiting,
+    /// or the parser's thread has parsed what one sent.
     pub(super) fn unread(&self) -> bool {
-        (self.running.values()).any(|slot| slot.unread || slot.unread_errors || slot.agent.parsed())
+        (self.running.values()).any(|slot| slot.unread_errors || slot.agent.parsed())
     }
 
     /// The agent called `name`, if it's running.
@@ -623,7 +621,6 @@ impl Daemon {
                 command,
                 agent,
                 tokens: tokens.try_into().expect("four sources"),
-                unread: false,
                 unread_errors: false,
             },
         );
@@ -633,13 +630,19 @@ impl Daemon {
     /// Acts on an event on one of agent `id`'s pipes.
     pub(super) fn agent_event(&mut self, id: AgentId, pipe: Pipe) {
         match pipe {
-            Pipe::Output => self.read_agent(id),
+            // One already queued is read at the end of the turn, until it's
+            // drained or queued again, which covers whatever this says came.
+            Pipe::Output if self.unread.contains(&Flood::Agent(id)) => {}
+            Pipe::Output => self.read_agent(id, Reading::Look),
             Pipe::Errors => self.read_agent_errors(id),
             Pipe::Input => self.flush_agent(id),
+            // What it said last comes first: it's let go once that's been
+            // read to the end.
             Pipe::Exit => {
-                // What it said last comes first.
-                self.read_agent(id);
-                self.agent_ended(id);
+                if let Some(slot) = self.agents.running.get_mut(&id) {
+                    slot.agent.gone();
+                }
+                self.read_agent(id, Reading::Last);
             }
         }
     }
@@ -707,20 +710,24 @@ impl Daemon {
         }
     }
 
-    /// Writes what's queued for agent `id`.
+    /// Writes what's queued for agent `id`. If writing fails, it has gone,
+    /// but what it sent before it went may still be waiting: that's read
+    /// to the end, at the end of the turn, and then it's let go.
     fn flush_agent(&mut self, id: AgentId) {
         let Some(slot) = self.agents.running.get_mut(&id) else {
             return;
         };
         if slot.agent.has_outgoing() && slot.agent.flush().is_err() {
-            self.agent_ended(id);
+            slot.agent.gone();
+            self.queue_flood(Flood::Agent(id));
         }
     }
 
-    /// Agent `id` has gone by itself: it's let go once what it sent last
-    /// has been parsed and taken in, or once that has taken too long (see
-    /// [`crate::rpc::Inbox::gone`]), so its last words still reach its
-    /// chats.
+    /// Agent `id` has gone by itself, and what it sent has been read to
+    /// the end, or as far as the parser's thread lets: it's let go once
+    /// what it sent last has been parsed and taken in, or once that has
+    /// taken too long (see [`crate::rpc::Inbox::gone`]), so its last words
+    /// still reach its chats.
     fn agent_ended(&mut self, id: AgentId) {
         let Some(slot) = self.agents.running.get_mut(&id) else {
             return;
@@ -729,20 +736,21 @@ impl Daemon {
             self.agent_gone(id);
         } else {
             // Read again once the rest has been parsed, not before.
-            slot.unread = false;
+            self.unread.retain(|&unread| unread != Flood::Agent(id));
         }
     }
 
     /// When the next agent that has gone is let go however much of what
-    /// it sent is still being parsed, if one is waiting for that.
+    /// it sent is still being parsed, or still coming, if one has gone.
     pub(super) fn next_gone_agent_due(&self) -> Option<Instant> {
         (self.agents.running.values())
             .filter_map(|slot| slot.agent.gone_due())
             .min()
     }
 
-    /// Lets go the agents that went whose last messages have taken too
-    /// long to parse.
+    /// Lets go the agents that went a while ago, whose last messages have
+    /// taken too long to parse, or which something they started keeps
+    /// writing for.
     pub(super) fn let_gone_agents_go(&mut self) {
         let now = Instant::now();
         let due: Vec<AgentId> = (self.agents.running.iter())
@@ -754,17 +762,17 @@ impl Daemon {
         }
     }
 
-    /// Reads what every agent whose read budget ran out has sent since,
-    /// or written to stderr, and what the parser's thread has parsed of
-    /// what they sent.
+    /// Reads what every agent whose stderr read budget ran out has written
+    /// since, and queues those whose messages the parser's thread has
+    /// parsed to be read at the end of the turn.
     pub(super) fn read_agents_unread(&mut self) {
         let unread: Vec<(AgentId, bool, bool)> = (self.agents.running.iter())
-            .map(|(&id, slot)| (id, slot.unread || slot.agent.parsed(), slot.unread_errors))
-            .filter(|&(_, output, errors)| output || errors)
+            .map(|(&id, slot)| (id, slot.agent.parsed(), slot.unread_errors))
+            .filter(|&(_, parsed, errors)| parsed || errors)
             .collect();
-        for (id, output, errors) in unread {
-            if output {
-                self.read_agent(id);
+        for (id, parsed, errors) in unread {
+            if parsed {
+                self.queue_flood(Flood::Agent(id));
             }
             if errors {
                 self.read_agent_errors(id);
@@ -780,29 +788,41 @@ impl Daemon {
         }
     }
 
-    /// Reads what agent `id` sent, and hands it to its chats.
-    fn read_agent(&mut self, id: AgentId) {
-        let Some(slot) = self.agents.running.get_mut(&id) else {
+    /// Reads what agent `id` sent, as `reading` says, and hands it to its
+    /// chats, queueing it to be read again if there may be more.
+    pub(super) fn read_agent(&mut self, id: AgentId, reading: Reading) {
+        let Some(slot) = self.agents.running.get(&id) else {
             return;
         };
-        let mut incoming = std::mem::take(&mut self.agents.incoming);
-        let read = slot
-            .agent
-            .read(&mut self.buffer, OUTPUT_BUDGET, &mut incoming);
-        if let Ok(more) = read {
-            slot.unread = more;
+        // Its stdout's token is the first.
+        let own = Some(slot.tokens[0]);
+        if self.read_peer(reading, own, |daemon| daemon.read_agent_once(id)) {
+            self.queue_flood(Flood::Agent(id));
         }
+    }
+
+    /// Reads what agent `id` sent, [`FIRST_LOOK`] bytes or a little more if
+    /// there are that many, and hands it to its chats. Returns how many
+    /// bytes it read, or `None` once it's no longer read: its output ended,
+    /// or it has gone and there's nothing more to read for now.
+    fn read_agent_once(&mut self, id: AgentId) -> Option<usize> {
+        let slot = self.agents.running.get_mut(&id)?;
+        let mut incoming = std::mem::take(&mut self.agents.incoming);
+        let buffer = &mut self.buffer[..FIRST_LOOK];
+        let read = slot.agent.read(buffer, FIRST_LOOK, &mut incoming);
         let name = slot.spec.name.clone();
         for message in incoming.drain(..) {
             self.receive_from_agent(id, &name, message);
         }
         self.agents.incoming = incoming;
-        let slot = self.agents.running.get(&id);
-        if read.is_err() || slot.is_some_and(|slot| slot.agent.has_gone()) {
+        let more = read.as_ref().is_ok_and(|&read| read >= FIRST_LOOK);
+        let gone = |slot: &AgentSlot| slot.agent.has_gone();
+        if read.is_err() || (!more && self.agents.running.get(&id).is_some_and(gone)) {
             self.agent_ended(id);
-        } else {
-            self.flush_agent(id);
+            return None;
         }
+        self.flush_agent(id);
+        read.ok().filter(|_| self.agents.running.contains_key(&id))
     }
 
     /// Takes in what agent `name` said of its account's limits in `meta`,
@@ -1707,6 +1727,7 @@ impl Daemon {
         // What it was asked to list goes unanswered.
         let name = slot.spec.name.clone();
         self.fail_listings(&name, "it was stopped");
+        self.unread.retain(|&unread| unread != Flood::Agent(id));
         for token in slot.tokens {
             self.sources.remove(token.0);
         }

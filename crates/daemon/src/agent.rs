@@ -476,7 +476,7 @@ impl Agent {
     }
 
     /// When it's let go, gone, however much of what it sent is still
-    /// being parsed, if it's waiting for that.
+    /// being parsed, or still coming, if it has gone.
     pub(crate) fn gone_due(&self) -> Option<std::time::Instant> {
         self.peer.gone_due()
     }
@@ -486,15 +486,15 @@ impl Agent {
         self.peer.has_outgoing()
     }
 
-    /// Reads what the agent sent, up to `budget` bytes, into `incoming`.
-    /// Returns whether more may be waiting, as when the budget ran out, or
-    /// an error if the agent has gone.
+    /// Reads what the agent sent, until `budget` bytes, into `incoming`.
+    /// Returns how many bytes it read, as [`Peer::read`] does, or an error
+    /// if the agent has gone.
     pub(crate) fn read(
         &mut self,
         buffer: &mut [u8],
         budget: usize,
         incoming: &mut Vec<Incoming>,
-    ) -> io::Result<bool> {
+    ) -> io::Result<usize> {
         let mut messages = Vec::new();
         let read = self.peer.read(buffer, budget, &mut messages);
         for message in messages {

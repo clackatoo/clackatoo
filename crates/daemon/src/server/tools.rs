@@ -40,7 +40,7 @@ use mio::event::Event;
 use mio::{Interest, Token};
 use serde_json::Value;
 
-use super::{Broadcast, Daemon, Link, Source, write_out};
+use super::{Broadcast, Daemon, FIRST_LOOK, Flood, Link, Reading, Source, write_out};
 use crate::browser::Act;
 use crate::chat::Choices;
 use crate::mcp::{self, Connection, Incoming, Tool};
@@ -83,9 +83,6 @@ pub(super) struct Tools {
     next_call: u64,
     /// The terminals agents have run commands in.
     commanded: BTreeMap<TerminalId, Commanded>,
-    /// The connections with more of the agent's messages waiting than
-    /// one read took.
-    unread: Vec<Token>,
     /// The connections with messages on the parser's thread, read again
     /// once they've been parsed.
     parsing: Vec<Token>,
@@ -241,7 +238,7 @@ impl Daemon {
         self.flush_tools(new);
         // The agent waits for the answer before it sends anything, but
         // anything already here is for the tools.
-        self.read_tools(new);
+        self.read_tools(new, Reading::Look);
     }
 
     /// What the chat `chat`'s agent is told about its tools when it
@@ -404,21 +401,36 @@ impl Daemon {
         if event.is_writable() {
             self.flush_tools(token);
         }
-        if event.is_readable() || event.is_read_closed() || event.is_error() {
-            self.read_tools(token);
+        // One already queued is read at the end of the turn, until it's
+        // drained or queued again, which covers whatever this says came.
+        if (event.is_readable() || event.is_read_closed() || event.is_error())
+            && !self.unread.contains(&Flood::Tools(token))
+        {
+            self.read_tools(token, Reading::Look);
         }
     }
 
-    fn read_tools(&mut self, token: Token) {
+    /// Reads what an agent sent its tools on the connection at `token`, as
+    /// `reading` says, and writes what it can of the answers, queueing the
+    /// connection to be read again if there may be more.
+    pub(super) fn read_tools(&mut self, token: Token, reading: Reading) {
+        if self.read_peer(reading, Some(token), |daemon| daemon.read_tools_once(token)) {
+            self.queue_flood(Flood::Tools(token));
+        }
+    }
+
+    /// Reads what an agent sent its tools on the connection at `token`,
+    /// [`FIRST_LOOK`] bytes or a little more if there are that many, and
+    /// writes what it can of the answers. Returns how many bytes it read,
+    /// or `None` once the connection has finished.
+    fn read_tools_once(&mut self, token: Token) -> Option<usize> {
         let Some(Source::Tools(connection)) = self.sources.get_mut(token.0) else {
-            return;
+            return None;
         };
         let chat = connection.chat;
         let mut incoming = Vec::new();
-        let more = connection.read(&mut self.buffer, &mut incoming);
-        if more && !self.tools.unread.contains(&token) {
-            self.tools.unread.push(token);
-        }
+        let read = connection.read(&mut self.buffer[..FIRST_LOOK], FIRST_LOOK, &mut incoming);
+        let finished = connection.finished;
         if connection.parsing() && !self.tools.parsing.contains(&token) {
             self.tools.parsing.push(token);
         }
@@ -429,12 +441,15 @@ impl Daemon {
             }
         }
         self.flush_tools(token);
+        // Dropped once it's finished and flushed, or if writing to it failed.
+        let open = matches!(self.sources.get(token.0), Some(Source::Tools(_)));
+        (open && !finished).then_some(read)
     }
 
-    /// Whether an agent sent its tools more than one read took, or what
-    /// it sent has been parsed on the parser's thread.
+    /// Whether what an agent sent its tools has been parsed on the
+    /// parser's thread.
     pub(super) fn tools_unread(&self) -> bool {
-        !self.tools.unread.is_empty() || self.tools.parsing.iter().any(|&token| self.parsed(token))
+        self.tools.parsing.iter().any(|&token| self.parsed(token))
     }
 
     /// Whether the connection at `token` has messages the parser's thread
@@ -443,8 +458,8 @@ impl Daemon {
         matches!(self.sources.get(token.0), Some(Source::Tools(connection)) if connection.parsed())
     }
 
-    /// Reads on from where the last read of each connection stopped, and
-    /// takes what the parser's thread has parsed.
+    /// Queues the connections whose messages the parser's thread has
+    /// parsed to be read at the end of the turn.
     pub(super) fn read_tools_unread(&mut self) {
         let mut parsing = std::mem::take(&mut self.tools.parsing);
         parsing.retain(|&token| match self.sources.get(token.0) {
@@ -455,11 +470,8 @@ impl Daemon {
             .filter(|&token| self.parsed(token))
             .collect();
         self.tools.parsing = parsing;
-        for token in std::mem::take(&mut self.tools.unread) {
-            self.read_tools(token);
-        }
         for token in parsed {
-            self.read_tools(token);
+            self.queue_flood(Flood::Tools(token));
         }
     }
 
@@ -489,7 +501,7 @@ impl Daemon {
         let Some(Source::Tools(connection)) = self.sources.try_remove(token.0) else {
             return;
         };
-        self.tools.unread.retain(|&unread| unread != token);
+        self.unread.retain(|&unread| unread != Flood::Tools(token));
         log::info!(
             "chat {}: its agent's tools are no longer served",
             connection.chat

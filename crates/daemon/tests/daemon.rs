@@ -1,5 +1,6 @@
 //! End-to-end tests: a real daemon, real PTYs, real programs.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -4522,6 +4523,43 @@ fn a_language_server_stopped_when_idle_leaves_nothing_it_started_running() {
 }
 
 #[test]
+fn a_language_server_gone_while_what_it_started_writes_on_is_let_go_with_it() {
+    let daemon = with_fake_language_server(|dir| {
+        vec![
+            "--big-hints".into(),
+            dir.join("size").display().to_string(),
+            "--exit-after-hints".into(),
+            "--chatty-grandchild".into(),
+            dir.join("grandchild").display().to_string(),
+        ]
+    });
+    std::fs::write(daemon.dir.path().join("size"), "100").unwrap();
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    let pid = (std::fs::read_to_string(daemon.dir.path().join("grandchild")).unwrap())
+        .parse::<u32>()
+        .unwrap();
+    // Running: there, and not a zombie.
+    let running = || {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        (stat.rsplit_once(") ")).is_some_and(|(_, rest)| !rest.starts_with('Z'))
+    };
+    assert!(running());
+    // The server answers, then exits, and what it started writes to its
+    // output on and on, as fast as it's read, so reading it never comes
+    // to an end. It's let go two seconds after it went, its pipes closed
+    // and its process group ended, and what it started goes with it.
+    ask_hints(&mut client, buffer, 1, (0, 3));
+    let (id, answer) = next_answer(&mut client);
+    assert_eq!(id, 1);
+    assert!(matches!(answer, Answer::InlayHints { .. }), "{answer:?}");
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while running() {
+        assert!(Instant::now() < deadline, "what it started writes on");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn the_daemon_stopping_leaves_nothing_agents_or_language_servers_started_running() {
     let daemon = TestDaemon::start_with(|dir, config| {
         let grandchild = dir.join("server child").display().to_string();
@@ -6233,42 +6271,28 @@ fn a_flood_of_inlay_hints_is_cut_to_a_few_screens_of_short_labels() {
     assert!(hints.iter().all(|hint| hint.label == cut), "{:?}", hints[0]);
 }
 
-/// A daemon whose fake language server answers what to write inline with
-/// as many bytes as the file `size` in its directory says, a project open
-/// in it, and a terminal in a client of its own that echoes each key, in
-/// raw mode, ready for [`BigHints::worst_echo_while_hinting`].
-struct BigHints {
-    daemon: TestDaemon,
-    asker: Option<Client>,
-    buffer: BufferId,
-    typing: Client,
+/// A terminal in a client of its own that echoes each key, in raw mode,
+/// for timing how long keys take to echo while something else keeps the
+/// daemon busy.
+struct Typist {
+    client: Client,
     terminal: TerminalId,
     view: View,
     letter: u8,
 }
 
-impl BigHints {
-    fn start() -> Self {
-        let daemon = with_fake_language_server(|dir| {
-            vec![
-                "--big-hints".to_owned(),
-                dir.join("size").display().to_string(),
-            ]
-        });
-        let (asker, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
-        let mut typing = daemon.client();
+impl Typist {
+    fn start(daemon: &TestDaemon) -> Self {
+        let mut client = daemon.client();
         let terminal = spawn(
-            &mut typing,
+            &mut client,
             &["sh", "-c", "stty raw -echo; printf ready; exec cat"],
         );
-        wait_for_screen(&mut typing, terminal, |text| text.starts_with("ready"));
-        let view = attach(&mut typing, terminal);
-        typing.frame_done(terminal).unwrap();
+        wait_for_screen(&mut client, terminal, |text| text.starts_with("ready"));
+        let view = attach(&mut client, terminal);
+        client.frame_done(terminal).unwrap();
         Self {
-            daemon,
-            asker: Some(asker),
-            buffer,
-            typing,
+            client,
             terminal,
             view,
             letter: b'a',
@@ -6280,16 +6304,62 @@ impl BigHints {
         let started = Instant::now();
         let letter = self.letter;
         self.letter = if letter == b'z' { b'a' } else { letter + 1 };
-        self.typing
+        self.client
             .send_input(self.terminal, &[b'\r', letter])
             .unwrap();
         loop {
             self.view
-                .apply(next_update(&mut self.typing, self.terminal));
-            self.typing.frame_done(self.terminal).unwrap();
+                .apply(next_update(&mut self.client, self.terminal));
+            self.client.frame_done(self.terminal).unwrap();
             if screen_text(&self.view).starts_with(char::from(letter)) {
                 return started.elapsed();
             }
+        }
+    }
+
+    /// How long each key took to echo while `busy` ran, on a thread of its
+    /// own, the longest first, and what it returned: keys are typed one
+    /// after another until it's finished.
+    fn echoes_while<T: Send + 'static>(
+        &mut self,
+        busy: impl FnOnce() -> T + Send + 'static,
+    ) -> (Vec<Duration>, T) {
+        let busy = std::thread::spawn(busy);
+        let mut echoes = Vec::new();
+        while !busy.is_finished() {
+            echoes.push(self.echo());
+        }
+        echoes.sort_unstable_by(|a, b| b.cmp(a));
+        (echoes, busy.join().unwrap())
+    }
+}
+
+/// A daemon whose fake language server answers what to write inline with
+/// as many bytes as the file `size` in its directory says, a project open
+/// in it, and a [`Typist`], ready for
+/// [`BigHints::worst_echo_while_hinting`].
+struct BigHints {
+    daemon: TestDaemon,
+    asker: Option<Client>,
+    buffer: BufferId,
+    typist: Typist,
+}
+
+impl BigHints {
+    fn start() -> Self {
+        let daemon = with_fake_language_server(|dir| {
+            vec![
+                "--big-hints".to_owned(),
+                dir.join("size").display().to_string(),
+            ]
+        });
+        let (asker, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+        let typist = Typist::start(&daemon);
+        Self {
+            daemon,
+            asker: Some(asker),
+            buffer,
+            typist,
         }
     }
 
@@ -6300,19 +6370,15 @@ impl BigHints {
         std::fs::write(self.daemon.dir.path().join("size"), size.to_string()).unwrap();
         let mut asker = self.asker.take().unwrap();
         let buffer = self.buffer;
-        let asking = std::thread::spawn(move || {
+        let (echoes, asker) = self.typist.echoes_while(move || {
             ask_hints(&mut asker, buffer, id, (0, 3));
             let (answered, answer) = next_answer(&mut asker);
             assert_eq!(answered, id);
             assert!(matches!(answer, Answer::InlayHints { .. }), "{answer:?}");
             asker
         });
-        let mut worst = Duration::ZERO;
-        while !asking.is_finished() {
-            worst = worst.max(self.echo());
-        }
-        self.asker = Some(asking.join().unwrap());
-        worst
+        self.asker = Some(asker);
+        echoes.first().copied().unwrap_or_default()
     }
 }
 
@@ -6338,6 +6404,192 @@ fn keys_echo_at_once_while_a_language_server_sends_a_huge_answer() {
     assert!(big < allowed, "{small:?} for 2 MB, {big:?} for 32");
 }
 
+/// How many agents stream at once in [`Streaming`]. Read a MiB at a time,
+/// each one's flood held the loop that much longer every turn; read a
+/// little at a time, giving way, they hold it no longer than one does.
+const STREAMERS: usize = 4;
+
+/// A daemon with [`STREAMERS`] agents, each the fake agent, a chat with
+/// each that a client of its own shows, as a window would, and a
+/// [`Typist`], ready for [`Streaming::echoes_while_streaming`].
+struct Streaming {
+    asker: Option<(Client, BTreeMap<TerminalId, View>)>,
+    typist: Typist,
+    asked: u32,
+    _daemon: TestDaemon,
+}
+
+impl Streaming {
+    fn start() -> Self {
+        let daemon = TestDaemon::start_with(|_, config| {
+            config.agents.custom = (0..STREAMERS)
+                .map(|agent| custom_agent(&format!("agent{agent}"), vec![fake_agent().into()]))
+                .collect();
+        });
+        let mut asker = daemon.client();
+        let first = (asker.new_workspace(None, new_chat_with(Some("agent0")))).unwrap();
+        for agent in 1..STREAMERS {
+            let chat = new_chat_with(Some(&format!("agent{agent}")));
+            asker.split_pane(first, Side::Right, chat).unwrap();
+        }
+        let chats = asker.watch_workspaces().unwrap().list[0].terminals();
+        assert_eq!(chats.len(), STREAMERS);
+        for &chat in &chats {
+            wait_for_chat(&mut asker, chat, |node| node.state == ChatState::Ready);
+            asker.attach(chat).unwrap();
+        }
+        // Each chat's snapshot, which may come after another's patches.
+        let mut views: BTreeMap<TerminalId, View> = BTreeMap::new();
+        asker
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        while views.len() < STREAMERS {
+            if let Event::View { terminal, update } = asker.next_event().unwrap() {
+                match (views.get_mut(&terminal), update) {
+                    (Some(view), update) => view.apply(update),
+                    (None, ViewUpdate::Snapshot(view)) => drop(views.insert(terminal, view)),
+                    (None, ViewUpdate::Patch(patch)) => panic!("a patch first: {patch:?}"),
+                }
+                asker.frame_done(terminal).unwrap();
+            }
+        }
+        let typist = Typist::start(&daemon);
+        Self {
+            asker: Some((asker, views)),
+            typist,
+            asked: 0,
+            _daemon: daemon,
+        }
+    }
+
+    /// How long each key took to echo while every agent streamed `count`
+    /// updates, each a number, into its chat, the longest first: keys are
+    /// typed one after another, from asking until every answer ends.
+    fn echoes_while_streaming(&mut self, count: usize) -> Vec<Duration> {
+        let (mut asker, mut views) = self.asker.take().unwrap();
+        self.asked += 1;
+        // Each message its own, so the answer to an earlier one doesn't count.
+        let text = format!("stream {count} {}", self.asked);
+        let (echoes, asker) = self.typist.echoes_while(move || {
+            for &chat in views.keys() {
+                asker.chat(chat, ChatAction::Send(text.clone())).unwrap();
+            }
+            let answered = |view: &View| {
+                view.chat().is_some_and(|node| {
+                    node.turns.last().is_some_and(|turn| turn.prompt == text)
+                        && last_outcome(node).is_some()
+                })
+            };
+            asker
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            while !views.values().all(answered) {
+                if let Event::View { terminal, update } = asker.next_event().unwrap() {
+                    views.get_mut(&terminal).unwrap().apply(update);
+                    asker.frame_done(terminal).unwrap();
+                }
+            }
+            (asker, views)
+        });
+        self.asker = Some(asker);
+        echoes
+    }
+}
+
+#[test]
+fn keys_echo_at_once_while_agents_stream() {
+    let mut streaming = Streaming::start();
+    // The worst echo of each of three runs, and the middle one of those,
+    // so a hiccup on a busy machine, however long, spoils one run at most.
+    // The middle of three is used, not the third worst echo of one run, as
+    // reading a MiB at a time held only one or two keys, each for long.
+    let mut middle_worst = |count| {
+        let mut worst: Vec<Duration> = (0..3)
+            .map(|_| {
+                let echoes = streaming.echoes_while_streaming(count);
+                echoes.first().copied().unwrap_or_default()
+            })
+            .collect();
+        worst.sort_unstable();
+        worst[1]
+    };
+    // A few updates from each agent, read in one go, and a hundred or
+    // four hundred times as many. Read a MiB at a time, each read's
+    // updates parsed and taken in before anything else, the agents' floods
+    // held a key 140-160 ms in a release build, with 40,000 each, and
+    // 320-470 ms in a debug one, with 10,000. Read a little at a time,
+    // giving way to anything else ready, about a millisecond or two in
+    // either, as for a few.
+    let small = middle_worst(100);
+    let count = if cfg!(debug_assertions) {
+        10_000
+    } else {
+        40_000
+    };
+    let big = middle_worst(count);
+    // As in the language server's test above, what's compared is how the
+    // wait grows, not how long it is.
+    let allowed = small.max(Duration::from_millis(25)) * 4;
+    assert!(
+        big < allowed,
+        "{small:?} for 100 updates each, {big:?} for {count}"
+    );
+}
+
+#[test]
+fn what_an_agent_streams_comes_whole_and_in_order() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    // Far more than one read takes, so most is read at the ends of turns,
+    // a little at a time.
+    let node = ask(&mut client, chat, "stream 20000");
+    let streamed = (0..20_000).fold(String::new(), |mut streamed, number| {
+        write!(streamed, "{number} ").unwrap();
+        streamed
+    });
+    assert_eq!(last_words(&node), streamed + "done\n");
+}
+
+#[test]
+fn a_streamed_answer_s_end_is_told_at_once_to_those_watching_the_chats() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    let chat = start_chat(&mut client);
+    let mut watcher = daemon.client();
+    let Response::Chats(_) = watcher.request(&Request::WatchChats).unwrap() else {
+        panic!("not watching the chats");
+    };
+    // The answer's end is read at the end of a turn, after the turn's
+    // chores, one of which tells those watching the chats: the next turn
+    // mustn't wait for something else to happen. No one shows the chat,
+    // so no window's acknowledgements come to start one.
+    client
+        .chat(chat, ChatAction::Send("stream 2000".to_owned()))
+        .unwrap();
+    watcher
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut answering = false;
+    loop {
+        match watcher.next_event() {
+            Ok(Event::Chats(chats)) => {
+                let state = &chats
+                    .iter()
+                    .find(|summary| summary.chat == chat)
+                    .unwrap()
+                    .state;
+                answering |= *state == ChatState::Answering;
+                if answering && *state == ChatState::Ready {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(err) => panic!("the answer's end wasn't told: {err}"),
+        }
+    }
+}
+
 #[test]
 fn a_huge_answer_sent_just_before_its_server_stops_still_comes() {
     let daemon = with_fake_language_server(|dir| {
@@ -6355,6 +6607,47 @@ fn a_huge_answer_sent_just_before_its_server_stops_still_comes() {
     let (id, answer) = next_answer(&mut client);
     assert_eq!(id, 1);
     assert!(matches!(answer, Answer::InlayHints { .. }), "{answer:?}");
+}
+
+/// A daemon whose fake language server, run with `args` too, answers what
+/// to write inline with about `size` bytes, then exits; and whether that
+/// answer comes.
+fn hints_come_from_a_server_that_exits(size: usize, args: &[&str]) {
+    let daemon = with_fake_language_server(|dir| {
+        let size = dir.join("size").display().to_string();
+        let args = args.iter().map(|&arg| arg.to_owned());
+        [
+            "--big-hints".to_owned(),
+            size,
+            "--exit-after-hints".to_owned(),
+        ]
+        .into_iter()
+        .chain(args)
+        .collect()
+    });
+    std::fs::write(daemon.dir.path().join("size"), size.to_string()).unwrap();
+    let (mut client, buffer) = fake_project(&daemon, &[("a.fk", "bad\n")]);
+    ask_hints(&mut client, buffer, 1, (0, 3));
+    let (id, answer) = next_answer(&mut client);
+    assert_eq!(id, 1);
+    assert!(matches!(answer, Answer::InlayHints { .. }), "{answer:?}");
+}
+
+#[test]
+fn an_answer_behind_all_that_may_wait_for_parsing_comes_though_its_server_exits() {
+    // Before it, a message of 64 MiB, as much as may wait for the parser's
+    // thread: nothing more is read until it's parsed, and the server exits
+    // meanwhile. Then the answer, more than one read takes, is read to the
+    // end before the server is let go.
+    hints_come_from_a_server_that_exits(20_000, &["--filler-before-hints"]);
+}
+
+#[test]
+fn an_answer_sent_as_its_server_hangs_up_still_comes() {
+    // The server closes its input, then asks for settings in the same
+    // write as the answer: answering fails, but what it sent is read to
+    // the end before it's let go.
+    hints_come_from_a_server_that_exits(200_000, &["--hang-up-before-hints"]);
 }
 
 #[test]
@@ -10132,6 +10425,20 @@ fn the_tools_speak_mcp_over_the_relays_stdio() {
     // Hanging up ends the relay.
     drop(input);
     assert!(relay.wait().unwrap().success());
+}
+
+#[test]
+fn a_tool_call_longer_than_one_read_comes_whole() {
+    let daemon = TestDaemon::with_tools();
+    let mut client = daemon.client();
+    let chat = start_tooled_chat(&mut client, AgentTools::Ask);
+    // A path of 20 KB, more than a read takes: the rest of the call is
+    // read at the end of the turn. The answer names the path.
+    let path = format!("{}.rs", "y".repeat(20_000));
+    let prompt = format!("mcp get_diagnostics {{\"path\":\"{path}\"}}\nmcp list_panes");
+    let words = last_words(&ask(&mut client, chat, &prompt));
+    assert!(words.contains(&format!("wrong in {path}.")), "{words}");
+    assert!(words.contains("list_panes: "), "{words}");
 }
 
 #[test]

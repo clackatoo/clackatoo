@@ -113,6 +113,14 @@ const OUTPUT_BUDGET: usize = 1024 * 1024;
 /// Reading a MiB of a flood takes milliseconds, mostly in the kernel, and
 /// that mustn't stand between a terminal being typed in and the update
 /// showing what was typed (CLACKA-13).
+///
+/// It's also how much an agent, a language server or an agent's tools are
+/// read at a time (CLACKA-105). A flood of what they send gives way only
+/// between reads, and what came is parsed and taken in after each:
+/// 4 KiB of small messages, such as an agent's streamed words, costs about
+/// 35 µs, and a MiB of them 9 ms. A big message's bytes are only copied
+/// until it's whole, at a few microseconds a read, so reading them a
+/// little at a time costs next to nothing.
 const FIRST_LOOK: usize = 4 * 1024;
 
 /// How long a flood, while it has the loop, reads before asking epoll
@@ -431,35 +439,52 @@ fn seconds(now: Instant) -> u16 {
     u16::try_from(seconds % 65_536).expect("less than 65,536")
 }
 
-/// How much of a terminal's output a read takes, and when it stops.
+/// How much of a terminal's output, or of what a peer sent, a read takes,
+/// and when it stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reading {
     /// A first look, as epoll says output came: up to [`FIRST_LOOK`]. If
-    /// there's more, what was read is shown once the rest is read too.
+    /// there's more, a terminal's is shown once the rest is read too.
     Look,
     /// A flood's turn, at the end of the loop's: up to [`OUTPUT_BUDGET`],
     /// giving way as soon as anything else is ready.
     Flood,
     /// What's left as the program exits: up to [`OUTPUT_BUDGET`], so its
-    /// last output is shown before anyone hears that it ended.
+    /// last output is shown, or its last messages taken in, before anyone
+    /// hears that it ended.
     Last,
 }
 
-/// Whether anything but a flood has become ready while a terminal's flood
-/// is read: a key from a client, the echo in a terminal being typed in, a
-/// thread's result. Asked between reads, so the flood gives way within one.
+/// Something with more to read than one read took, queued to be read at
+/// the end of each turn, after the turn's view updates have gone out,
+/// until it's drained (CLACKA-13, CLACKA-105).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flood {
+    /// A terminal's output.
+    Terminal(TerminalId),
+    /// What a language server sent, whether it's running or stopping.
+    Server(ServerId),
+    /// What an agent sent.
+    Agent(AgentId),
+    /// What an agent sent its tools, on the connection at this token.
+    Tools(Token),
+}
+
+/// Whether anything but a flood has become ready while a flood is read: a
+/// key from a client, the echo in a terminal being typed in, a thread's
+/// result. Asked between reads, so the flood gives way within one.
 ///
 /// Epoll is asked without waiting, and what it says is kept in `waiting`,
-/// to be handled first next turn. Only that the terminal being read
-/// (`own`), or one already queued in `unread`, has more to read is let go:
-/// both are read until drained, or queued again, whatever epoll says, as
+/// to be handled first next turn. Only that what's being read (`own`), or
+/// a flood already queued in `unread`, has more to read is let go: both
+/// are read until drained, or queued again, whatever epoll says, as
 /// edge-triggered readiness allows. Their readiness to write is kept, as
 /// queued input waits on it.
 fn others_ready(
     poll: &mut Poll,
     waiting: &mut Events,
     sources: &Slab<Source>,
-    unread: &VecDeque<TerminalId>,
+    unread: &VecDeque<Flood>,
     own: Option<Token>,
 ) -> bool {
     if !waiting.is_empty() {
@@ -471,10 +496,16 @@ fn others_ready(
         return false;
     }
     let flood = |event: &Event| {
+        let token = event.token();
+        let queued = match sources.get(token.0) {
+            Some(&Source::Output(id)) => Some(Flood::Terminal(id)),
+            Some(&Source::Server(id, Pipe::Output)) => Some(Flood::Server(id)),
+            Some(&Source::Agent(id, Pipe::Output)) => Some(Flood::Agent(id)),
+            Some(Source::Tools(_)) => Some(Flood::Tools(token)),
+            _ => None,
+        };
         !event.is_writable()
-            && (Some(event.token()) == own
-                || matches!(sources.get(event.token().0),
-                    Some(Source::Output(id)) if unread.contains(id)))
+            && (Some(token) == own || queued.is_some_and(|flood| unread.contains(&flood)))
     };
     if waiting.iter().all(flood) {
         waiting.clear();
@@ -798,9 +829,14 @@ pub struct Daemon {
     /// Where QUIC connections that have moved off their carriers send and
     /// receive, set up along with the QUIC endpoint.
     udp: Option<UdpSocket>,
-    /// Terminals whose output budget ran out with more output waiting, each
-    /// once, read at the end of each turn.
-    unread: VecDeque<TerminalId>,
+    /// Terminals and peers whose read budget ran out with more waiting,
+    /// each once, read at the end of each turn.
+    unread: VecDeque<Flood>,
+    /// What a peer sent was read at the end of the last turn. Taking it in
+    /// may have left work for the chores earlier in the turn, such as a
+    /// message to relay to another chat, so the next turn doesn't wait for
+    /// an event.
+    peers_flooded: bool,
     /// Events that came while a terminal's flood was being read, taken so
     /// the read could stop for them. Handled first next turn.
     waiting: Events,
@@ -925,6 +961,7 @@ impl Daemon {
             carriers_made: 0,
             udp: None,
             unread: VecDeque::new(),
+            peers_flooded: false,
             waiting: Events::with_capacity(EVENTS),
             typed: None,
             compactions: BTreeMap::new(),
@@ -1149,15 +1186,18 @@ impl Daemon {
                 return Ok(Some(upgrade));
             }
             // With output still waiting, view updates due (as for floods
-            // read after this turn's went out), or events taken while a
-            // flood was read, poll without blocking so they're handled right
+            // read after this turn's went out), what peers sent taken in
+            // after this turn's chores, or events taken while a flood was
+            // read, poll without blocking so they're handled right
             // after anything else that's ready. Otherwise wait for the
             // next compaction or QUIC timer, if there is one.
             let agent_unread = self.agents.unread();
             let servers_unread = self.servers_unread();
             let tools_unread = self.tools_unread();
             let web_unread = !self.web_unread.is_empty();
+            let peers_flooded = std::mem::take(&mut self.peers_flooded);
             let timeout = if self.unread.is_empty()
+                && !peers_flooded
                 && !self.forwards_ready()
                 && !self.views_pending
                 && self.waiting.is_empty()
@@ -1409,7 +1449,7 @@ impl Daemon {
                     // of the turn, until it's drained or queued again, which
                     // covers whatever this event says came.
                     if (event.is_readable() || event.is_read_closed() || event.is_error())
-                        && !self.unread.contains(&id)
+                        && !self.unread.contains(&Flood::Terminal(id))
                     {
                         self.read_output(id, Reading::Look);
                     }
@@ -1438,8 +1478,8 @@ impl Daemon {
 
     // --- Terminals --------------------------------------------------------
 
-    /// Reads each terminal queued with more output waiting, in turn, for up
-    /// to [`OUTPUT_BUDGET`] each. A read stops as soon as anything else
+    /// Reads each terminal and peer queued with more waiting, in turn, for
+    /// up to [`OUTPUT_BUDGET`] each. A read stops as soon as anything else
     /// becomes ready, and the rest wait for the next turn, so a flood only
     /// ever has the loop while nothing else wants it.
     ///
@@ -1450,13 +1490,88 @@ impl Daemon {
             if !self.waiting.is_empty() {
                 break;
             }
-            let Some(id) = self.unread.pop_front() else {
+            let Some(flood) = self.unread.pop_front() else {
                 break;
             };
-            self.read_output(id, Reading::Flood);
+            match flood {
+                Flood::Terminal(id) => self.read_output(id, Reading::Flood),
+                Flood::Server(id) => self.read_server(id, Reading::Flood),
+                Flood::Agent(id) => self.read_agent(id, Reading::Flood),
+                Flood::Tools(token) => self.read_tools(token, Reading::Flood),
+            }
+            self.peers_flooded |= !matches!(flood, Flood::Terminal(_));
             read = true;
         }
         read
+    }
+
+    /// Queues `flood` to be read at the end of the turn, unless it is
+    /// already.
+    fn queue_flood(&mut self, flood: Flood) {
+        if !self.unread.contains(&flood) {
+            self.unread.push_back(flood);
+        }
+    }
+
+    /// How long a flood reads, while it has the loop, before asking epoll
+    /// whether anything else is ready. While keys have lately gone to a
+    /// terminal other than `reading`, the one being read if it's a
+    /// terminal's, it asks after every read, so their echo goes out as
+    /// soon as it comes.
+    fn yield_every(&self, reading: Option<TerminalId>, now: Instant) -> Duration {
+        match self.typed {
+            Some((typed, at)) if Some(typed) != reading && now.duration_since(at) < TYPING => {
+                Duration::ZERO
+            }
+            _ => YIELD_EVERY,
+        }
+    }
+
+    /// Reads what a peer sent as `reading` says, `read` at a time, until
+    /// there's nothing more for now or the reading's budget is spent.
+    ///
+    /// `read` takes and reads [`FIRST_LOOK`] bytes of what the peer sent,
+    /// or a little more, and takes in the messages they finish. It returns
+    /// how many bytes that was, fewer than [`FIRST_LOOK`] once there was
+    /// nothing more for now, or `None` once the peer is no longer read.
+    /// Each call holds the loop for one such step, messages taken in
+    /// included. A flood asks epoll between steps whether anything else
+    /// is ready, as a terminal's does, and gives way if so. `own` is the
+    /// token of what's read, whose readiness a flood lets go.
+    ///
+    /// Returns whether more may be waiting, for the caller to queue it.
+    fn read_peer(
+        &mut self,
+        reading: Reading,
+        own: Option<Token>,
+        mut read: impl FnMut(&mut Self) -> Option<usize>,
+    ) -> bool {
+        let start = Instant::now();
+        let every = self.yield_every(None, start);
+        let mut next = start + every;
+        let mut total = 0;
+        loop {
+            let Some(bytes) = read(self) else {
+                return false;
+            };
+            if bytes < FIRST_LOOK {
+                return false;
+            }
+            total += bytes;
+            if reading == Reading::Look || total >= OUTPUT_BUDGET {
+                return true;
+            }
+            if reading == Reading::Flood {
+                let now = Instant::now();
+                if now >= next {
+                    next = now + every;
+                    let (poll, waiting) = (&mut self.poll, &mut self.waiting);
+                    if others_ready(poll, waiting, &self.sources, &self.unread, own) {
+                        return true;
+                    }
+                }
+            }
+        }
     }
 
     /// Reads terminal `id`'s output as `reading` says, queueing it to be
@@ -1467,6 +1582,9 @@ impl Daemon {
             Reading::Flood => (OUTPUT_BUDGET, true),
             Reading::Last => (OUTPUT_BUDGET, false),
         };
+        let now = Instant::now();
+        let every = self.yield_every(Some(id), now);
+        let mut next = now + every;
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
@@ -1474,12 +1592,6 @@ impl Daemon {
         let Some(terminal) = slot.terminal.pty() else {
             return;
         };
-        let now = Instant::now();
-        let every = match self.typed {
-            Some((typed, at)) if typed != id && now.duration_since(at) < TYPING => Duration::ZERO,
-            _ => YIELD_EVERY,
-        };
-        let mut next = now + every;
         let (poll, waiting, sources, unread) = (
             &mut self.poll,
             &mut self.waiting,
@@ -1500,11 +1612,7 @@ impl Daemon {
         let outcome = terminal.read_output(&mut self.buffer, budget, stop);
         match outcome {
             ReadOutcome::Drained => {}
-            ReadOutcome::BudgetExhausted => {
-                if !self.unread.contains(&id) {
-                    self.unread.push_back(id);
-                }
-            }
+            ReadOutcome::BudgetExhausted => self.queue_flood(Flood::Terminal(id)),
             ReadOutcome::Closed => {
                 if let Some(token) = slot.output.take() {
                     self.sources.remove(token.0);
@@ -1791,7 +1899,7 @@ impl Daemon {
             .remove(&id)
             .ok_or(Error::NoSuchTerminal(id))?;
         self.tools_closed(id);
-        self.unread.retain(|&unread| unread != id);
+        self.unread.retain(|&unread| unread != Flood::Terminal(id));
         self.compactions.remove(&id);
         for token in &slot.viewers {
             if let Some(Source::Client(client)) = self.sources.get_mut(token.0) {

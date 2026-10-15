@@ -67,9 +67,11 @@
 //! | `--apply-unasked` | Asks its client to edit a file whenever it has `unasked` in it, writing how that went to the `--log` file |
 //! | `--watch JSON` | Asks its client, once it's ready, to tell it of changes to the files JSON, a list of `FileSystemWatcher`s, says, writing each change told to the `--log` file; and to stop telling it once a file open has `unwatch` in it |
 //! | `--slow-shutdown` | Never answers `shutdown` |
+//! | `--filler-before-shutdown` | Sends 20 KB its client takes no notice of just before it answers `shutdown` |
 //! | `--stay` | Takes no notice of `exit`, so it has to be killed |
 //! | `--last-words TEXT` | Writes TEXT to stderr as it exits |
 //! | `--grandchild FILE` | Starts a process that sleeps, holding its stdout and stderr, as `npx` starts node, and writes its pid to FILE, an absolute path |
+//! | `--chatty-grandchild FILE` | Starts a process holding its stdout, and writes its pid to FILE, an absolute path; with `--exit-after-hints`, before it exits, has that process write notifications to its stdout without end, as fast as they're read, and gives it a moment to fill the pipe |
 //! | `--flat-symbols` | Lists a file's symbols as a flat list of `SymbolInformation`s, not a tree |
 //! | `--hold-symbols FILE` | Answers what symbols are in a file or the project only once FILE exists, taking nothing else in meanwhile |
 //! | `--queue-symbols FILE` | Holds questions of what symbols are in a file or the project until FILE exists, taking everything else in meanwhile, then answers them in order |
@@ -78,6 +80,8 @@
 //! | `--hint-flood` | Answers what to write inline with 10,000 hints with labels of 300 characters, then one whose label has 10,000 parts: more of each than its client looks at |
 //! | `--big-hints FILE` | Answers what to write inline with as many bytes of hints, all at the file's start, as FILE says when asked, in one write |
 //! | `--exit-after-hints` | Exits, as if it crashed, as soon as it has sent its first answer of what to write inline |
+//! | `--filler-before-hints` | Sends a notification of exactly 64 MiB, the most its client takes, just before each answer of `--big-hints`: as much as its client lets wait for parsing |
+//! | `--hang-up-before-hints` | Closes its input as it answers what to write inline with `--big-hints`, then, in the same write as the answer, asks its client for its settings, sends 200 KB it takes no notice of, and asks again, so answering the second time fails |
 //! | `--refresh-hints` | Asks its client to ask for inlay hints again, fifty times at once, after it's answered the first question of them |
 //! | `--format-error` | Answers formatting a file, or part of one, with an error, `RequestFailed`, as `gcsl lsp` does for a file with a syntax error |
 //! | `--prepare HOW` | Checks a rename first, answering as HOW says: `range` with the word's range, `placeholder` with its range and the word in capitals, `default` leaving it to its client, `error` with an error; and with `null` where there's no word |
@@ -118,6 +122,11 @@ use serde_json::{Value, json};
 #[allow(clippy::too_many_lines, reason = "a line for each flag, most short")]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let [_, flag, go] = args.as_slice()
+        && flag == "--write-forever"
+    {
+        write_forever(go);
+    }
     let flag = |name: &str| args.iter().any(|arg| arg == name);
     // What follows a flag, if it's given.
     let value = |name: &str| {
@@ -159,6 +168,9 @@ fn main() {
         hint_flood: flag("--hint-flood"),
         big_hints: value("--big-hints"),
         exit_after_hints: flag("--exit-after-hints"),
+        chatty: value("--chatty-grandchild"),
+        filler_before_hints: flag("--filler-before-hints"),
+        hang_up_before_hints: flag("--hang-up-before-hints"),
         refresh_hints: flag("--refresh-hints"),
         format_error: flag("--format-error"),
         prepare: value("--prepare"),
@@ -169,6 +181,7 @@ fn main() {
         watch: (args.iter().position(|arg| arg == "--watch"))
             .and_then(|at| serde_json::from_str(args.get(at + 1)?).ok()),
         slow_shutdown: flag("--slow-shutdown"),
+        filler_before_shutdown: flag("--filler-before-shutdown"),
         stay: flag("--stay"),
         last_words: value("--last-words"),
         may_watch: false,
@@ -184,6 +197,9 @@ fn main() {
         (args.iter().position(|arg| arg == "--grandchild")).and_then(|at| args.get(at + 1))
     {
         grandchild(file);
+    }
+    if let Some(file) = &server.chatty {
+        chatty_grandchild(file);
     }
     // Read on a thread of its own, so questions held can be answered
     // while nothing more comes.
@@ -245,6 +261,39 @@ fn grandchild(file: &str) {
     std::fs::rename(&new, file).unwrap();
 }
 
+/// Starts this program again, to write on, holding its stdout, once
+/// `file` with `.go` after it is there (see [`write_forever`]), and writes
+/// its pid to `file`.
+#[allow(
+    clippy::zombie_processes,
+    reason = "it's meant to outlive this one, and be stopped with it"
+)]
+fn chatty_grandchild(file: &str) {
+    let chatty = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--write-forever", &format!("{file}.go")])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let new = format!("{file}.new");
+    std::fs::write(&new, chatty.id().to_string()).unwrap();
+    std::fs::rename(&new, file).unwrap();
+}
+
+/// Once the file `go` is there, writes notifications its client takes no
+/// notice of to its stdout, which it shares with the program that started
+/// it, as fast as they're read, until that fails.
+fn write_forever(go: &str) -> ! {
+    while !std::path::Path::new(go).exists() {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let body = r#"{"jsonrpc":"2.0","method":"$/chat"}"#;
+    let message = format!("Content-Length: {}\r\n\r\n{body}", body.len()).into_bytes();
+    let messages = message.repeat(4096 / message.len());
+    let mut out = std::io::stdout().lock();
+    while out.write_all(&messages).is_ok() {}
+    std::process::exit(0);
+}
+
 #[allow(clippy::struct_excessive_bools, reason = "each flag is on or off")]
 struct Fake {
     utf16: bool,
@@ -290,6 +339,10 @@ struct Fake {
     hint_flood: bool,
     big_hints: Option<String>,
     exit_after_hints: bool,
+    /// Where the pid of the process it starts to write on is written.
+    chatty: Option<String>,
+    filler_before_hints: bool,
+    hang_up_before_hints: bool,
     /// It's yet to ask its client to ask for inlay hints again.
     refresh_hints: bool,
     format_error: bool,
@@ -302,6 +355,7 @@ struct Fake {
     /// The `FileSystemWatcher`s to ask its client for.
     watch: Option<Value>,
     slow_shutdown: bool,
+    filler_before_shutdown: bool,
     stay: bool,
     last_words: Option<String>,
     /// Its client said it can be asked to watch files.
@@ -346,8 +400,9 @@ fn read(input: &mut impl BufRead) -> Option<Value> {
 /// Answers `message`, a question of what to write inline, with about as
 /// many bytes of hints as the file at `size` says, all at the file's
 /// start: built as text and sent in one write, so that even a debug build
-/// sends tens of megabytes quickly.
-fn big_hints(message: &Value, size: &str) {
+/// sends tens of megabytes quickly. What's in `before`, framed, goes in
+/// the same write, first.
+fn big_hints(message: &Value, size: &str, before: Vec<u8>) {
     let size: usize = (std::fs::read_to_string(size).ok())
         .and_then(|size| size.trim().parse().ok())
         .unwrap_or(0);
@@ -361,11 +416,32 @@ fn big_hints(message: &Value, size: &str) {
         body.push_str(hint);
     }
     body.push_str("]}");
-    let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    let mut framed = before;
+    write!(framed, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
     framed.extend_from_slice(body.as_bytes());
     let mut out = std::io::stdout().lock();
     out.write_all(&framed).unwrap();
     out.flush().unwrap();
+}
+
+/// A notification of exactly `length` bytes, framed: one long string,
+/// quick to parse, which its client takes no notice of.
+fn filler(length: usize) -> Vec<u8> {
+    let start = br#"{"jsonrpc":"2.0","method":"$/filler","params":""#;
+    let end = br#""}"#;
+    let mut framed = format!("Content-Length: {length}\r\n\r\n").into_bytes();
+    framed.extend_from_slice(start);
+    framed.resize(framed.len() + length - start.len() - end.len(), b'x');
+    framed.extend_from_slice(end);
+    framed
+}
+
+/// A request for its client's settings, numbered `id`, framed.
+fn ask_settings(id: &str) -> Vec<u8> {
+    let body = json!({ "jsonrpc": "2.0", "id": id, "method": "workspace/configuration",
+                       "params": { "items": [{ "section": "fake" }] } })
+    .to_string();
+    format!("Content-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
 }
 
 fn send(message: &Value) {
@@ -423,6 +499,11 @@ impl Fake {
             "shutdown" => {
                 self.note("shutdown");
                 self.shut_down = true;
+                if self.filler_before_shutdown {
+                    let mut out = std::io::stdout().lock();
+                    out.write_all(&filler(20_000)).unwrap();
+                    out.flush().unwrap();
+                }
                 if !self.slow_shutdown {
                     send(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": Value::Null }));
                 }
@@ -554,8 +635,29 @@ impl Fake {
                 }
             }
             "textDocument/inlayHint" if self.big_hints.is_some() => {
-                big_hints(message, self.big_hints.as_deref().unwrap_or_default());
+                let mut before = Vec::new();
+                if self.filler_before_hints {
+                    before.extend(filler(64 * 1024 * 1024));
+                }
+                if self.hang_up_before_hints {
+                    // The thread reading its input, waiting in a read, holds
+                    // the pipe open until something comes: the answer to the
+                    // first question. Answering the second, past a filler
+                    // that takes a while to read, fails.
+                    let nothing = std::fs::File::open("/dev/null").unwrap();
+                    rustix::stdio::dup2_stdin(&nothing).unwrap();
+                    before.extend(ask_settings("settings 1"));
+                    before.extend(filler(200_000));
+                    before.extend(ask_settings("settings 2"));
+                }
+                let size = self.big_hints.as_deref().unwrap_or_default();
+                big_hints(message, size, before);
                 if self.exit_after_hints {
+                    if let Some(file) = &self.chatty {
+                        // Its pipe full when it exits, and kept full.
+                        std::fs::write(format!("{file}.go"), "").unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
                     std::process::exit(1);
                 }
             }
