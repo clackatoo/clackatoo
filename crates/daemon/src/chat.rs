@@ -303,6 +303,11 @@ pub(crate) struct HostedChat {
     size: Size,
     title: String,
     cwd: String,
+    /// `cwd` as people write it, from `~` under the home folder, which
+    /// its view carries for windows to show: a new chat says which
+    /// folder its agent works in. Set by [`show_cwd`](Self::show_cwd)
+    /// once the server has it; until then, `cwd` as it is.
+    shown_cwd: Option<String>,
     /// The agent's name, which the server finds it by.
     agent: String,
     /// The agent's session, once it has made one.
@@ -501,6 +506,7 @@ impl HostedChat {
             size,
             title: agent.title.clone(),
             cwd,
+            shown_cwd: None,
             agent: agent.name.clone(),
             session: None,
             link: Link::Opening,
@@ -777,10 +783,16 @@ impl HostedChat {
         self.session.as_deref()
     }
 
+    /// Has its view say the folder it works in as `shown`: its working
+    /// directory as people write it.
+    pub(crate) fn show_cwd(&mut self, shown: String) {
+        self.shown_cwd = Some(shown);
+    }
+
     pub(crate) fn view(&self) -> View {
         View {
             title: self.title.clone(),
-            cwd: None,
+            cwd: Some(self.shown_cwd.clone().unwrap_or_else(|| self.cwd.clone())),
             root: Node::Chat(Box::new(self.node.clone())),
         }
     }

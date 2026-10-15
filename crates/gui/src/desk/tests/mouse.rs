@@ -61,6 +61,46 @@ fn numbered(lines: usize) -> String {
 }
 
 #[test]
+fn leaving_a_chat_for_a_bar_takes_away_its_copy_button() {
+    use clackatoo_protocol::{ChatNode, ChatState, Item, Node, Outcome, Turn, TurnEnd};
+    let mut desk = desk(one_tab(pane(1)));
+    let node = ChatNode {
+        state: ChatState::Ready,
+        turns: vec![Turn {
+            from: None,
+            prompt: "how?".into(),
+            sent: 0,
+            items: vec![Item::Words("Like this.".into())],
+            end: Some(TurnEnd {
+                at: 1,
+                outcome: Outcome::Done,
+            }),
+            files: None,
+            switch: None,
+        }],
+        ..ChatNode::default()
+    };
+    desk.view_changed(
+        TerminalId(1),
+        &ViewUpdate::Snapshot(View {
+            title: "chat".into(),
+            cwd: None,
+            root: Node::Chat(Box::new(node)),
+        }),
+    );
+    let mut fonts = crate::chat::fixtures::fonts();
+    let pane = desk.pane_mut(TerminalId(1)).expect("the chat's pane");
+    pane.paint_chat(&mut fonts, [0.0; 2], [800.0, 470.0], true);
+    // Over its one turn: its button shows.
+    assert!(moved(&mut desk, [100.0, 60.0], false).redraw);
+    // Up onto the top bar, over no pane: it goes.
+    assert!(moved(&mut desk, [100.0, -10.0], false).redraw);
+    assert_eq!(desk.mouse_cell, None);
+    // Nothing more to take away.
+    assert!(!moved(&mut desk, [100.0, -12.0], false).redraw);
+}
+
+#[test]
 fn a_drag_selects_in_visual_mode_and_letting_go_puts_it_on_the_primary_selection() {
     let mut desk = editing("/t.txt", "hello world\nsecond line\n");
     normal_mode(&mut desk);

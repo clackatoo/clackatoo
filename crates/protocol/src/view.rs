@@ -20,7 +20,15 @@ pub struct View {
     /// The pane's title: for a terminal, the one its program set, or empty.
     pub title: String,
     /// For a terminal, the working directory its shell last reported
-    /// (OSC 7), which paths it prints are relative to.
+    /// (OSC 7), which paths it prints are relative to. For a chat, the
+    /// folder its agent works in, for showing: as people write it, from
+    /// `~` under the home folder, with anything that could go unseen
+    /// shown; an older daemon sends none for a chat.
+    ///
+    /// A chat's is never a path: never resolve one against it, and take
+    /// a chat's real directory from [`crate::TerminalInfo::cwd`]. It
+    /// isn't gated, as no client reads a chat's as a path, and one that
+    /// doesn't know it's there leaves it be.
     pub cwd: Option<String>,
     /// The view's content.
     pub root: Node,

@@ -233,8 +233,13 @@ pub(crate) enum Ink {
     Warning,
     /// In amber, for what's getting close to going wrong.
     Caution,
-    /// In clackatoo's own colour, as links are.
+    /// In clackatoo's own colour, for focus and what to act on, such as a
+    /// chat waiting for you.
     Accent,
+    /// In the links' colour, the accent blue.
+    Link,
+    /// In the colour of letters what's typed matched, as in the finder.
+    Matched,
     /// Green, for what's added to a file...
     Added,
     /// ...and red, for what's removed.
@@ -1011,6 +1016,8 @@ impl Renderer {
             Ink::Warning => self.theme.warning,
             Ink::Caution => self.theme.caution,
             Ink::Accent => self.theme.accent,
+            Ink::Link => self.theme.link,
+            Ink::Matched => self.theme.matched,
             Ink::Added => self.theme.added,
             Ink::Removed => self.theme.removed,
             Ink::Color(color) => self.theme.resolve(color).unwrap_or(self.theme.foreground),

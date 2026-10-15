@@ -795,7 +795,7 @@ impl Finder {
                 let picked = accents.binary_search(&char_index).is_ok()
                     || (entry.matched.iter()).any(|&(start, end)| (start..end).contains(&at));
                 match &severity {
-                    _ if picked => Ink::Accent,
+                    _ if picked => Ink::Matched,
                     Some((word, ink)) if word.contains(&at) => *ink,
                     _ if at < quiet_to || (entry.at.is_none() && at >= modified_from) => Ink::Muted,
                     _ => Ink::Plain,
@@ -870,7 +870,7 @@ fn symbol_row(text: &str, accents: &[u32], (depth, name_len): (u8, usize), cols:
         .chain(
             (text.char_indices().zip(0_u32..)).map(|((at, _), char_index)| {
                 if accents.binary_search(&char_index).is_ok() {
-                    Ink::Accent
+                    Ink::Matched
                 } else if at < name_len {
                     Ink::Plain
                 } else {

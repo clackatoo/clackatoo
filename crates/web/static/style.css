@@ -8,7 +8,10 @@
   --line: #3a3d45;
   --text: #ecebe6;
   --muted: #9a9890;
+  /* For focus and what to act on: the button to press, a chat waiting. */
   --accent: #f8ce57;
+  /* Links: the accent blue, apart from the accent, as the window has. */
+  --link: #7cb7f5;
   --on-accent: #1a1b1f;
   --danger: #ef7d6d;
   --caution: #e89a3c;
@@ -56,7 +59,7 @@ input, select, textarea {
   padding: 10px 12px;
 }
 
-a { color: var(--accent); }
+a { color: var(--link); }
 
 .boot { text-align: center; margin-top: 40vh; color: var(--muted); }
 .muted { color: var(--muted); }

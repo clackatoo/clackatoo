@@ -1909,6 +1909,8 @@ impl Desk {
         }
         let dragging = self.dragging.map(|(terminal, _)| terminal);
         let Some((terminal, cell, pixel)) = self.cell_at(point, dragging) else {
+            // Over a bar, or a gap: the pane it was over has it no more.
+            outcome.redraw |= self.mouse_left();
             return outcome;
         };
         let action = match action {

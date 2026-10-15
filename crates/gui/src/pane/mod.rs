@@ -615,7 +615,7 @@ impl Pane {
             && let Some(node) = view.chat()
             && self.chat.is_none()
         {
-            self.chat = Some(Box::new(ChatView::new(view.title.clone(), node.clone())));
+            self.chat = Some(Box::new(ChatView::of_view(view, node)));
             self.unacknowledged = true;
             return true;
         }

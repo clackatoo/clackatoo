@@ -515,10 +515,7 @@ impl BoardPane {
     /// entries it has.
     fn heading(&self) -> Row {
         let mut row = RowBuilder::new(self.width);
-        let heading = Style {
-            attributes: Attributes::BOLD,
-            ..colors::line_number(true)
-        };
+        let heading = colors::heading();
         let faint = colors::line_number(false);
         match &self.summary {
             Some(summary) => {

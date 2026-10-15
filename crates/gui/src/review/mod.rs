@@ -697,10 +697,7 @@ impl Review {
                     heading.push_str(" · ");
                     heading.push_str(&self.list.chat_name);
                 }
-                let style = Style {
-                    attributes: Attributes::BOLD,
-                    ..colors::line_number(true)
-                };
+                let style = colors::heading();
                 builder.push(&heading, &style, true);
             }
             Line::Keys => {

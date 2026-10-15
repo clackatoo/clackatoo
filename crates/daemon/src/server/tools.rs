@@ -1696,7 +1696,7 @@ fn asked_each(verb: &str, texts: &[&str], then: &str) -> (String, Option<String>
 /// tabs as `⇥`, control characters as `^U` (Esc as `^[`), characters that
 /// change how text around them shows, such as the right-to-left
 /// override, as `<U+202E>`, and runs of four or more spaces as `␣×N`.
-fn visible(text: &str) -> String {
+pub(super) fn visible(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
     let mut spaces = 0;
     let flush = |shown: &mut String, spaces: &mut usize| {

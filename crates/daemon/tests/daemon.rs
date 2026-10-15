@@ -2066,6 +2066,50 @@ fn a_chat_answers_what_is_sent() {
 }
 
 #[test]
+fn a_chats_view_says_the_folder_it_works_in_as_people_write_it() {
+    let daemon = TestDaemon::start();
+    let mut client = daemon.client();
+    // Started beside nothing, it works in the home folder.
+    let chat = start_chat(&mut client);
+    assert_eq!(attach(&mut client, chat).cwd.as_deref(), Some("~"));
+    // Under it, from `~`.
+    let folder = daemon.dir.path().join("proj");
+    std::fs::create_dir(&folder).unwrap();
+    let PaneTerminal::Agent(mut new) = new_chat() else {
+        unreachable!("a chat")
+    };
+    new.cwd = Some(folder.to_str().unwrap().to_owned());
+    // Another client, as the first watches the workspaces.
+    let mut other = daemon.client();
+    other
+        .new_workspace(Some("other".to_owned()), PaneTerminal::Agent(new))
+        .unwrap();
+    let terminals = other.list_terminals().unwrap();
+    let second = terminals.iter().find(|info| info.id != chat).unwrap().id;
+    assert_eq!(attach(&mut other, second).cwd.as_deref(), Some("~/proj"));
+    // A folder an agent could have chosen hides nothing in the line it's
+    // shown on: a line break, or text turned right to left.
+    let odd = daemon.dir.path().join("a\nb\u{202e}c");
+    std::fs::create_dir(&odd).unwrap();
+    let PaneTerminal::Agent(mut new) = new_chat() else {
+        unreachable!("a chat")
+    };
+    new.cwd = Some(odd.to_str().unwrap().to_owned());
+    other
+        .new_workspace(Some("odd".to_owned()), PaneTerminal::Agent(new))
+        .unwrap();
+    let terminals = other.list_terminals().unwrap();
+    let third = (terminals.iter())
+        .find(|info| info.id != chat && info.id != second)
+        .unwrap()
+        .id;
+    assert_eq!(
+        attach(&mut other, third).cwd.as_deref(),
+        Some("~/a⏎b<U+202E>c")
+    );
+}
+
+#[test]
 fn a_chat_is_kept_current_by_patches() {
     let daemon = TestDaemon::start();
     let mut client = daemon.client();

@@ -4725,7 +4725,7 @@ impl Editor {
         while rows.len() < self.height {
             let mut builder = RowBuilder::new(self.width);
             if copy.loaded() {
-                builder.push("~", &Style::DEFAULT, true);
+                builder.push("~", &colors::end_of_buffer(), true);
             }
             if let Some(note) = note.take() {
                 // Under the text, where it starts.

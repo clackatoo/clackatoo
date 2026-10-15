@@ -143,7 +143,7 @@ fn numbered_line(
     let mut spans = spans.iter().peekable();
     for (at, ch) in text.char_indices() {
         let ink = if (picked.iter()).any(|&(start, end)| (start..end).contains(&at)) {
-            Ink::Accent
+            Ink::Matched
         } else {
             while spans.next_if(|span| span.end <= from + at).is_some() {}
             match spans.peek() {

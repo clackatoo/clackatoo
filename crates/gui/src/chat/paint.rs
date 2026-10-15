@@ -352,6 +352,7 @@ impl Canvas<'_> {
                     Tone::Plain => Ink::Plain,
                     Tone::Muted => Ink::Muted,
                     Tone::Accent => Ink::Accent,
+                    Tone::Link => Ink::Link,
                     Tone::Warning => Ink::Warning,
                     Tone::Caution => Ink::Caution,
                     Tone::Added => Ink::Added,
@@ -520,6 +521,9 @@ impl ChatView {
             over: false,
         };
         let top = [origin[0] + left, origin[1] - self.scroll];
+        // The turns may have moved under the mouse, as when the wheel
+        // scrolls them or one grows as the agent writes.
+        self.hovered_turn = self.mouse.and_then(|at| self.turn_to_copy_at(at));
         self.draw_turns(&mut canvas, m, shown, top, origin);
         self.pick_past_edge();
         self.note_live();
@@ -531,15 +535,12 @@ impl ChatView {
         let label = self.copy_label(canvas.fonts, m);
         self.draw_reading(&mut canvas, m, origin, (caret, label));
         if self.node.turns.is_empty() && matches!(self.node.state, ChatState::Ready) {
-            let laid = self.note(canvas.fonts, m, EMPTY, Tone::Muted, column);
-            let x = origin[0] + left + (column - laid.width) / 2.0;
-            let y = origin[1] + (view_height - laid.height) / 2.0;
-            for block in &laid.blocks {
-                canvas.text(&block.layout, [x, y + block.top]);
-            }
-            self.cache
-                .notes
-                .insert((EMPTY.to_owned(), Tone::Muted), laid);
+            self.draw_empty(
+                &mut canvas,
+                m,
+                [origin[0] + left, origin[1]],
+                [column, view_height],
+            );
         }
         // The menu goes over everything, the box included, and the
         // meter's detail too, unless the menu's open.
@@ -904,7 +905,9 @@ impl ChatView {
         }
         if let Some(from) = &turns[index].from {
             let text = format!("From chat {} · {} · {}", from.chat, from.agent, from.title);
-            let look = Look::Plain(Tone::Accent);
+            // Quiet: it says where the message came from, which is
+            // neither focus nor something to act on.
+            let look = Look::Plain(Tone::Muted);
             let badge = lay_out(&mut self.layout_cx, fonts, m, &text, look, column * 0.78);
             laid.spans.push(Span::of(Piece::Badge, y, badge.height));
             y += badge.height + m.em(0.3);
@@ -1084,6 +1087,50 @@ impl ChatView {
         }
     }
 
+    /// Draws what a chat with no turns says (see [`empty_note`]) in the
+    /// middle of the view, whose left and top are `origin`, `size` wide
+    /// and high.
+    fn draw_empty(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        m: Measures,
+        origin: [f32; 2],
+        size: [f32; 2],
+    ) {
+        let [with, start] = empty_note(self.agent(), self.folder.as_deref(), self.reading);
+        let lines = [(with, Tone::Plain), (start, Tone::Muted)];
+        let laid =
+            (lines.each_ref()).map(|(text, tone)| self.note(canvas.fonts, m, text, *tone, size[0]));
+        let gap = m.em(0.4);
+        let height = laid[0].height + gap + laid[1].height;
+        let mut y = origin[1] + (size[1] - height) / 2.0;
+        for (laid, (text, tone)) in laid.into_iter().zip(lines) {
+            let x = origin[0] + (size[0] - laid.width) / 2.0;
+            for block in &laid.blocks {
+                canvas.text(&block.layout, [x, y + block.top]);
+            }
+            y += laid.height + gap;
+            self.cache.notes.insert((text, tone), laid);
+        }
+    }
+
+    /// The turn under `at`, from the pane's top left, if its answer has a
+    /// button to copy it: from its top to the next turn's, so the button
+    /// stays while the mouse crosses the gap under it.
+    pub(super) fn turn_to_copy_at(&self, at: [f32; 2]) -> Option<usize> {
+        if at[1] < 0.0 || at[1] >= self.view_height {
+            return None;
+        }
+        let y = at[1] + self.scroll;
+        let bounds = &self.cache.bounds;
+        let turn = bounds
+            .partition_point(|bound| bound[0] <= y)
+            .checked_sub(1)?;
+        let bottom = bounds.get(turn + 1).map_or(bounds[turn][1], |next| next[0]);
+        let copies = (self.node.turns.get(turn)).is_some_and(|turn| answer_to_copy(turn).is_some());
+        (y < bottom && copies && self.menu.is_none()).then_some(turn)
+    }
+
     /// Draws turn `index` with the column's left and the turn's top at
     /// `origin`: what of it is in view.
     fn draw_turn(
@@ -1153,8 +1200,10 @@ impl ChatView {
                 }
                 Piece::Divider => self.draw_divider(canvas, m, index, [origin[0], top]),
                 Piece::Footer => {
-                    if laid.copy {
-                        let copied = self.copied_answer == Some(index);
+                    // Only while the mouse is over the turn, or it says it
+                    // copied: its place is kept, so nothing moves.
+                    let copied = self.copied_answer == Some(index);
+                    if laid.copy && (copied || self.hovered_turn == Some(index)) {
                         let label = &drawn.copy[usize::from(copied)];
                         draw_laid(canvas, m, label, [origin[0], top], label.width);
                         let rect = [origin[0], top, label.width, span.bottom - span.top];
@@ -1912,8 +1961,21 @@ impl MenuRow {
     }
 }
 
-/// What a chat with no turns says.
-const EMPTY: &str = "Send a message to start.";
+/// What a chat with no turns says, in two lines: who it's with and
+/// where, as "Claude Code in ~/project", and how to start, which in normal
+/// mode, where typing does nothing, is the key that does.
+pub(super) fn empty_note(agent: &str, folder: Option<&str>, reading: bool) -> [String; 2] {
+    let with = match folder {
+        Some(folder) if !folder.is_empty() => format!("{agent} in {folder}"),
+        _ => agent.to_owned(),
+    };
+    let start = if reading {
+        "Press i to write a message · Shift+Enter for a new line"
+    } else {
+        "Send a message to start."
+    };
+    [with, start.to_owned()]
+}
 
 /// Where a chat is drawn: its pane, and the column of turns in it.
 #[derive(Clone, Copy)]
@@ -2647,7 +2709,7 @@ fn lay_out_block(
             );
         } else if style.link {
             let brush = Brush {
-                tone: Tone::Accent,
+                tone: Tone::Link,
                 code: false,
                 syntax: None,
             };
@@ -2782,6 +2844,50 @@ fn escape(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::fonts::FontOptions;
+
+    #[test]
+    fn an_empty_chat_says_who_and_where_and_how_to_start_in_either_mode() {
+        let press = "Press i to write a message · Shift+Enter for a new line";
+        assert_eq!(
+            empty_note("Claude Code", Some("~/project"), true),
+            ["Claude Code in ~/project", press]
+        );
+        assert_eq!(
+            empty_note("Claude Code", Some("~/project"), false),
+            ["Claude Code in ~/project", "Send a message to start."]
+        );
+        // A daemon too old to say where: who alone.
+        assert_eq!(empty_note("Codex", None, true)[0], "Codex");
+        assert_eq!(empty_note("Codex", Some(""), true)[0], "Codex");
+        // The folder comes with the daemon's first view of the chat, and
+        // both lines are drawn, as the mode says.
+        let view = clackatoo_protocol::View {
+            title: "Claude Code".into(),
+            cwd: Some("~/project".into()),
+            root: clackatoo_protocol::Node::Chat(Box::new(clackatoo_protocol::ChatNode {
+                agent: "Claude Code".into(),
+                state: ChatState::Ready,
+                ..clackatoo_protocol::ChatNode::default()
+            })),
+        };
+        let mut chat = ChatView::of_view(&view, view.chat().unwrap());
+        let mut fonts = crate::chat::fixtures::fonts();
+        for (reading, start) in [(true, press), (false, "Send a message to start.")] {
+            chat.reading = reading;
+            crate::chat::fixtures::paint(&mut chat, &mut fonts);
+            let notes = &chat.cache.notes;
+            assert!(notes.contains_key(&("Claude Code in ~/project".to_owned(), Tone::Plain)));
+            assert!(
+                notes.contains_key(&(start.to_owned(), Tone::Muted)),
+                "{reading}"
+            );
+        }
+        // Not once it has turns.
+        chat.node.turns = crate::chat::fixtures::talk(&[("one", "two")]).turns;
+        chat.cache.notes.clear();
+        crate::chat::fixtures::paint(&mut chat, &mut fonts);
+        assert!(!(chat.cache.notes.keys()).any(|(text, _)| text.starts_with("Claude Code in")));
+    }
 
     #[test]
     fn a_key_lays_the_message_out_once_and_drawing_it_again_lays_out_nothing() {

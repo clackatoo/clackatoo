@@ -421,6 +421,21 @@ fn lines_are_numbered_from_the_cursors() {
 }
 
 #[test]
+fn the_lines_past_the_end_are_marked_faintly() {
+    let mut setup = Setup::new("a\n");
+    setup.editor.settle(&setup.copy);
+    let (rows, _) = setup.editor.scene();
+    let past = &rows[1..];
+    assert!(!past.is_empty());
+    for row in past {
+        assert_eq!(row.text(), "~");
+        let style = row.style(row.cells()[0]);
+        assert_eq!(*style, crate::colors::end_of_buffer());
+        assert_ne!(style.fg, crate::colors::line_number(false).fg);
+    }
+}
+
+#[test]
 fn the_numbers_widen_with_the_file_and_go_in_a_narrow_pane() {
     let text = "x\n".repeat(12_345);
     let mut setup = Setup::new(&text);

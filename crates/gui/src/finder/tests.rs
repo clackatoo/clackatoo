@@ -53,7 +53,7 @@ fn picked_out(finder: &mut Finder) -> String {
     let mut start = 0;
     let mut out = String::new();
     for &(end, ink) in &row.runs {
-        if ink == Ink::Accent {
+        if ink == Ink::Matched {
             out.push_str(&row.text[start..end]);
         }
         start = end;
@@ -538,7 +538,7 @@ fn a_projects_symbols_have_the_letters_searched_for_picked_out_in_their_names() 
     assert!(
         inked(&view.rows[1])
             .iter()
-            .all(|&(_, ink)| ink != Ink::Accent)
+            .all(|&(_, ink)| ink != Ink::Matched)
     );
     // Typed but not yet searched for: what was searched for stays lit.
     assert_eq!(type_text(&mut finder, "s"), Outcome::Search);
@@ -580,7 +580,7 @@ fn whats_wrong_is_coloured_by_how_much_it_matters() {
     // What's typed is picked out over it.
     type_text(&mut finder, "err");
     let view = finder.view((10, 60), None);
-    assert_eq!(inked(&view.rows[0])[1], ("err", Ink::Accent));
+    assert_eq!(inked(&view.rows[0])[1], ("err", Ink::Matched));
     assert_eq!(inked(&view.rows[0])[2], ("or", red));
 }
 
@@ -628,9 +628,9 @@ fn a_preview_is_coloured_as_its_buffer_and_a_greps_matches_picked_out_in_its_lin
             ("    ", Ink::Plain),
             ("let", keyword),
             (" ", Ink::Plain),
-            ("finder", Ink::Accent),
+            ("finder", Ink::Matched),
             (" = ", Ink::Plain),
-            ("finder", Ink::Accent),
+            ("finder", Ink::Matched),
             ("();", Ink::Plain),
         ]
     );
@@ -678,7 +678,7 @@ fn an_indented_greps_match_is_picked_out_in_a_preview_coloured_by_bytes() {
             ("    ", Ink::Plain),
             ("é", crate::colors::syntax_ink(clackatoo_text::Kind::String)),
             (" ", Ink::Plain),
-            ("x", Ink::Accent),
+            ("x", Ink::Matched),
         ]
     );
 }

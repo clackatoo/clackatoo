@@ -774,7 +774,7 @@ fn described(diagnostic: &Diagnostic) -> Vec<Block> {
 
 /// Markdown, simply: headings and strong text bold, code in its box or
 /// band, coloured as `spans`, bytes of `text` in order, say, lists with
-/// their marks, links' text in the accent colour, and everything else as
+/// their marks, links' text in the links' colour, and everything else as
 /// plain text.
 ///
 /// The daemon finds the code it colours with the same parser and options,
@@ -900,7 +900,7 @@ impl Markdown<'_> {
     /// `code`.
     fn push(&mut self, text: String, code: bool) {
         let ink = if self.links > 0 {
-            Ink::Accent
+            Ink::Link
         } else if self.strong > 0 {
             Ink::Bold
         } else {

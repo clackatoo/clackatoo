@@ -401,6 +401,18 @@ pub(crate) const NEWS: &[News] = &[
         lesson: "finder",
         what: "The finder picks out what's typed in every list, colours what's wrong, and colours open files' previews",
     },
+    News {
+        id: "quieter-look",
+        date: "2026-10-15",
+        lesson: "agents",
+        what: "Amber is kept for focus and what to act on: links and matched letters are blue, headings bold, Copy shows on hover, and the ~ past a file's end is faint",
+    },
+    News {
+        id: "empty-chat",
+        date: "2026-10-15",
+        lesson: "agents",
+        what: "A new chat says which agent and folder it has, and in normal mode, to press i to write",
+    },
 ];
 
 impl News {

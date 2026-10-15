@@ -53,7 +53,10 @@ pub(crate) enum Tone {
     #[default]
     Plain,
     Muted,
+    /// In clackatoo's own colour: focus and what to act on.
     Accent,
+    /// A link, in the links' colour.
+    Link,
     Warning,
     /// Amber: getting close to what [`Tone::Warning`] says.
     Caution,
@@ -208,6 +211,9 @@ impl Menu {
 pub(crate) struct ChatView {
     pub(crate) node: ChatNode,
     pub(crate) title: String,
+    /// The folder its agent works in, as people write it, which a new
+    /// chat says: `None` from a daemon too old to say.
+    folder: Option<String>,
     /// The message being typed.
     editor: PlainEditor<Brush>,
     /// The size the editor's text was last styled at, and the fonts'
@@ -317,6 +323,13 @@ pub(crate) struct ChatView {
     /// The turn whose answer was just copied with the button under it,
     /// which says so until the mouse leaves it.
     copied_answer: Option<usize>,
+    /// The turn under the mouse, if its answer has a button to copy it,
+    /// which shows only then.
+    hovered_turn: Option<usize>,
+    /// Where the mouse is, from the pane's top left, while it's over the
+    /// pane and no button is held: what's under it is worked out again
+    /// when the conversation moves under a mouse that stays still.
+    mouse: Option<[f32; 2]>,
     /// Where the mouse is, from the pane's top left, while a drag selects
     /// the conversation's text.
     drag_to: Option<[f32; 2]>,
@@ -383,10 +396,19 @@ impl std::fmt::Debug for ChatView {
 }
 
 impl ChatView {
+    /// The chat `view`, the daemon's first of it, shows: `node`, with its
+    /// title and folder.
+    pub(crate) fn of_view(view: &clackatoo_protocol::View, node: &ChatNode) -> Self {
+        let mut chat = Self::new(view.title.clone(), node.clone());
+        chat.folder.clone_from(&view.cwd);
+        chat
+    }
+
     pub(crate) fn new(title: String, node: ChatNode) -> Self {
         let mut view = Self {
             node,
             title,
+            folder: None,
             editor: PlainEditor::new(16.0),
             editor_size: 0.0,
             editor_fonts: 0,
@@ -430,6 +452,8 @@ impl ChatView {
             hovered_code: None,
             copied_code: None,
             copied_answer: None,
+            hovered_turn: None,
+            mouse: None,
             drag_to: None,
             edge_step: None,
             column_right: 0.0,
@@ -455,6 +479,7 @@ impl ChatView {
                     chat.clone_into(&mut self.node);
                 }
                 view.title.clone_into(&mut self.title);
+                view.cwd.clone_into(&mut self.folder);
                 for slot in &mut self.cache.turns {
                     slot.stale = true;
                 }
@@ -637,6 +662,9 @@ impl ChatView {
     pub(crate) fn press(&mut self, at: [f32; 2], clicks: u8, shift: bool) {
         // Clicking drops an answer armed, as a key does.
         self.armed = None;
+        // A held button isn't hovering: the turns a drag's scrolling
+        // brings under it don't show their buttons in turn.
+        self.mouse = None;
         self.queued.push(Input::Press { at, clicks, shift });
     }
 
@@ -679,8 +707,8 @@ impl ChatView {
     }
 
     /// The mouse moved to `at` with no button held: over a menu, its
-    /// choice or slider there lights up. Returns whether the chat must be
-    /// redrawn.
+    /// choice or slider there lights up, and over a turn, the button that
+    /// copies its answer shows. Returns whether the chat must be redrawn.
     pub(crate) fn hover(&mut self, at: [f32; 2]) -> bool {
         // A block of code under the mouse shows a button to copy it.
         let code = self.code_at(at).filter(|_| self.menu.is_none());
@@ -696,6 +724,14 @@ impl ChatView {
                 .any(|(hit, rect)| *hit == Hit::CopyAnswer(turn) && contains(*rect, at))
         {
             self.copied_answer = None;
+            redraw = true;
+        }
+        // The button under an answer shows only while the mouse is over
+        // its turn, so a long chat isn't a column of them.
+        self.mouse = Some(at);
+        let turn = self.turn_to_copy_at(at);
+        if turn != self.hovered_turn {
+            self.hovered_turn = turn;
             redraw = true;
         }
         redraw |= self.hover_menu(at);
@@ -735,16 +771,18 @@ impl ChatView {
             .is_some()
     }
 
-    /// The mouse left the pane: the button that copies a block of code
-    /// goes, and the one under an answer stops saying it copied. Returns
-    /// whether the chat must be redrawn.
+    /// The mouse left the pane: the buttons that copy a block of code and
+    /// an answer go, and the one under an answer stops saying it copied.
+    /// Returns whether the chat must be redrawn.
     pub(crate) fn unhover(&mut self) -> bool {
         self.copied_code = None;
         let copied = self.copied_answer.take().is_some();
+        self.mouse = None;
+        let over_turn = self.hovered_turn.take().is_some();
         let detail = (self.detail)
             .take_if(|detail| *detail == paint::Detail::Hovered)
             .is_some();
-        self.hovered_code.take().is_some() || copied || detail
+        self.hovered_code.take().is_some() || copied || over_turn || detail
     }
 
     /// The mouse moved to `at` with no button held, over the menu, if
@@ -2489,11 +2527,112 @@ mod tests {
         Some([x + width / 2.0, y + height / 2.0])
     }
 
+    /// Somewhere over turn `turn`'s text, as last drawn.
+    fn over_turn(view: &ChatView, turn: usize) -> [f32; 2] {
+        let shown = (view.shown.iter())
+            .find(|shown| shown.key.turn == turn)
+            .expect("the turn's text");
+        [shown.at[0] + 1.0, shown.at[1] + shown.size[1] / 2.0]
+    }
+
+    #[test]
+    fn the_button_under_an_answer_shows_only_while_the_mouse_is_over_its_turn() {
+        let mut fonts = fonts();
+        let node = fixtures::talk(&[("one", "first"), ("two", "second")]);
+        let mut view = ChatView::new(String::new(), node);
+        fixtures::paint(&mut view, &mut fonts);
+        // Not at first: a long chat isn't a column of them.
+        assert_eq!(drawn_at(&view, &Hit::CopyAnswer(0)), None);
+        assert_eq!(drawn_at(&view, &Hit::CopyAnswer(1)), None);
+        // Over the first turn, its button, and only its.
+        assert!(view.hover(over_turn(&view, 0)));
+        fixtures::paint(&mut view, &mut fonts);
+        let button = drawn_at(&view, &Hit::CopyAnswer(0)).expect("the button");
+        assert_eq!(drawn_at(&view, &Hit::CopyAnswer(1)), None);
+        // It stays over the button itself, and moving within the turn
+        // draws nothing again.
+        assert!(!view.hover(button));
+        assert!(!view.hover(over_turn(&view, 0)));
+        // Over the second, it goes with the mouse.
+        assert!(view.hover(over_turn(&view, 1)));
+        fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(drawn_at(&view, &Hit::CopyAnswer(0)), None);
+        assert!(drawn_at(&view, &Hit::CopyAnswer(1)).is_some());
+        // Its place is kept while it's hidden: the turns don't move.
+        let tops: Vec<f32> = view.shown.iter().map(|shown| shown.at[1]).collect();
+        assert!(view.unhover());
+        fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(drawn_at(&view, &Hit::CopyAnswer(1)), None);
+        let again: Vec<f32> = view.shown.iter().map(|shown| shown.at[1]).collect();
+        assert_eq!(tops, again);
+        // Nor over the box, below the conversation.
+        assert!(!view.hover([1.0, view.view_height + 5.0]));
+    }
+
+    #[test]
+    fn the_button_follows_a_still_mouse_as_the_conversation_scrolls_under_it() {
+        let mut fonts = fonts();
+        let pairs: Vec<(String, String)> = (0..30)
+            .map(|turn| (format!("question {turn}"), format!("answer {turn}")))
+            .collect();
+        let pairs: Vec<(&str, &str)> = (pairs.iter())
+            .map(|(prompt, answer)| (prompt.as_str(), answer.as_str()))
+            .collect();
+        let mut view = ChatView::new(String::new(), fixtures::talk(&pairs));
+        fixtures::paint(&mut view, &mut fonts);
+        // The mouse rests over a turn in the middle of the view.
+        let shown: Vec<usize> = (view.shown.iter()).map(|shown| shown.key.turn).collect();
+        let first = shown[shown.len() / 2];
+        let at = over_turn(&view, first);
+        view.hover(at);
+        fixtures::paint(&mut view, &mut fonts);
+        assert!(drawn_at(&view, &Hit::CopyAnswer(first)).is_some());
+        // The wheel takes the conversation up under it, by three turns'
+        // worth: the button goes with the turn now under the mouse.
+        let height = |turn: usize| over_turn(&view, turn)[1];
+        let step = height(first) - height(first - 3);
+        assert!(view.scroll_by(-step));
+        fixtures::paint(&mut view, &mut fonts);
+        let under = view.turn_to_copy_at(at).expect("a turn under the mouse");
+        assert_ne!(under, first);
+        assert_eq!(drawn_at(&view, &Hit::CopyAnswer(first)), None);
+        assert!(drawn_at(&view, &Hit::CopyAnswer(under)).is_some());
+    }
+
+    #[test]
+    fn a_held_button_shows_no_turns_button_as_it_drags_over_them() {
+        let mut fonts = fonts();
+        let node = fixtures::talk(&[("one", "first answer"), ("two", "second answer")]);
+        let mut view = ChatView::new(String::new(), node);
+        fixtures::paint(&mut view, &mut fonts);
+        let at = over_turn(&view, 0);
+        view.hover(at);
+        fixtures::paint(&mut view, &mut fonts);
+        assert!(drawn_at(&view, &Hit::CopyAnswer(0)).is_some());
+        // Pressed on the answer's text to select it, and dragged on: no
+        // button shows, here or under the drag.
+        view.press(at, 1, false);
+        view.settle(&mut fonts);
+        view.drag(over_turn(&view, 1));
+        view.settle(&mut fonts);
+        fixtures::paint(&mut view, &mut fonts);
+        assert_eq!(drawn_at(&view, &Hit::CopyAnswer(0)), None);
+        assert_eq!(drawn_at(&view, &Hit::CopyAnswer(1)), None);
+        view.release();
+        view.settle(&mut fonts);
+        // Moved again with nothing held, it's back.
+        view.hover(over_turn(&view, 1));
+        fixtures::paint(&mut view, &mut fonts);
+        assert!(drawn_at(&view, &Hit::CopyAnswer(1)).is_some());
+    }
+
     #[test]
     fn the_button_under_an_answer_copies_it_as_y_does() {
         let mut fonts = fonts();
         let node = fixtures::talk(&[("one", "**bold** answer"), ("two", "second")]);
         let mut view = ChatView::new(String::new(), node);
+        fixtures::paint(&mut view, &mut fonts);
+        view.hover(over_turn(&view, 0));
         fixtures::paint(&mut view, &mut fonts);
         let at = drawn_at(&view, &Hit::CopyAnswer(0)).expect("the button");
         assert_eq!(view.pointer(at), Pointer::Hand);
@@ -2511,7 +2650,13 @@ mod tests {
         );
         // It says so until the mouse leaves it.
         assert_eq!(view.copied_answer, Some(0));
+        fixtures::paint(&mut view, &mut fonts);
+        assert!(drawn_at(&view, &Hit::CopyAnswer(0)).is_some(), "Copied");
+        // The press let go of the hover; moving over it again takes it
+        // back, and still says it copied.
+        view.hover(at);
         assert!(!view.hover(at));
+        assert_eq!(view.copied_answer, Some(0));
         assert!(view.hover([1.0, 1.0]));
         assert_eq!(view.copied_answer, None);
     }
@@ -2541,9 +2686,13 @@ mod tests {
         let mut view = ChatView::new(String::new(), node);
         fixtures::paint(&mut view, &mut fonts);
         for turn in 0..3 {
+            view.hover(over_turn(&view, turn));
+            fixtures::paint(&mut view, &mut fonts);
             assert_eq!(drawn_at(&view, &Hit::CopyAnswer(turn)), None, "{turn}");
         }
         // Done, ending in words: it has.
+        view.hover(over_turn(&view, 3));
+        fixtures::paint(&mut view, &mut fonts);
         assert!(drawn_at(&view, &Hit::CopyAnswer(3)).is_some());
     }
 
@@ -2556,6 +2705,8 @@ mod tests {
         let mut view = with_files(&[Made]);
         view.node.turns[0].items.push(Item::Words("Done.".into()));
         let mut alone = with_files(&[Made]);
+        view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
+        view.hover(over_turn(&view, 0));
         view.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
         alone.paint(&mut fonts, [0.0, 0.0], [600.0, 800.0], false);
         let copy = drawn_at(&view, &Hit::CopyAnswer(0)).expect("the button");

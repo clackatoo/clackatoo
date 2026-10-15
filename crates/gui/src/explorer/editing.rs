@@ -26,7 +26,7 @@
 use std::collections::HashSet;
 
 use clackatoo_protocol::{
-    Attributes, Color, Entry, EntryKind, Expect, FileOp, FileOpError, FilesAction, Style,
+    Color, Entry, EntryKind, Expect, FileOp, FileOpError, FilesAction, Style,
 };
 use clackatoo_term::RowBuilder;
 
@@ -915,10 +915,7 @@ impl Explorer {
         };
         let mut rows = Vec::with_capacity(self.height);
         let mut header = RowBuilder::new(self.width);
-        let heading = Style {
-            attributes: Attributes::BOLD,
-            ..colors::line_number(true)
-        };
+        let heading = colors::heading();
         let stage = match &plan.stage {
             Stage::Asking if plan.changed => {
                 "to do (a folder has changed since its listing was made)"

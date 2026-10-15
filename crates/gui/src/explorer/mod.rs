@@ -1554,10 +1554,7 @@ impl Explorer {
         self.top = self.top.min(self.rows_len().saturating_sub(1));
         let mut rows = Vec::with_capacity(self.height);
         let mut header = RowBuilder::new(self.width);
-        let heading = Style {
-            attributes: Attributes::BOLD,
-            ..colors::line_number(true)
-        };
+        let heading = colors::heading();
         header.push(&self.heading(), &heading, true);
         rows.push(header.finish(false));
         self.name_cols.clear();

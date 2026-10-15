@@ -432,8 +432,13 @@ impl Daemon {
         })
     }
 
-    pub(super) fn add_chat(&mut self, chat: HostedChat) {
+    pub(super) fn add_chat(&mut self, mut chat: HostedChat) {
         let id = chat.info().id;
+        let cwd = std::path::Path::new(chat.working_directory());
+        // The agent's folder can be one an agent chose, so nothing in it
+        // may pass unseen in the line a new chat shows it on.
+        let shown = super::tools::visible(&super::tools::homely(cwd, &self.config.home));
+        chat.show_cwd(shown);
         self.terminals.insert(
             id,
             Slot {

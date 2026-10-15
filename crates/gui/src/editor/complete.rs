@@ -584,7 +584,7 @@ impl Completion {
             }
             used += cells;
             let ink = if matched.binary_search(&index).is_ok() {
-                Ink::Accent
+                Ink::Matched
             } else {
                 Ink::Plain
             };
@@ -826,7 +826,7 @@ mod tests {
         completion.narrow("pl");
         let line = completion.line(0, 40, true);
         let lit: Vec<&str> = (line.runs.iter())
-            .filter(|run| run.ink == Ink::Accent)
+            .filter(|run| run.ink == Ink::Matched)
             .map(|run| run.text.as_str())
             .collect();
         assert_eq!(lit, ["p", "l"]);

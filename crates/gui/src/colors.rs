@@ -9,6 +9,16 @@ pub(crate) type Rgba = [f32; 4];
 /// clackatoo's own colour, the cockatoo's crest.
 const ACCENT: u32 = 0xd9_b2_4a;
 
+/// The background text is drawn on.
+const BACKGROUND: u32 = 0x0c_0e_10;
+
+/// The accent blue, which links are drawn in: the visual mode's and the
+/// second workspace's colour.
+const LINK: u32 = 0x7c_b7_f5;
+
+/// How opaque the focused pane's edge is, in the accent.
+const FOCUS_EDGE: f32 = 0.6;
+
 /// White, `alpha` opaque, for faint lines that lighten what's behind them.
 const fn white(alpha: f32) -> Rgba {
     [1.0, 1.0, 1.0, alpha]
@@ -20,9 +30,17 @@ pub(crate) struct Theme {
     pub(crate) foreground: Rgba,
     pub(crate) background: Rgba,
     pub(crate) cursor: Rgba,
-    /// clackatoo's own colour, the cockatoo's crest, for the window's own
-    /// marks such as highlights and the focused pane's edge.
+    /// clackatoo's own colour, the cockatoo's crest, for focus and for
+    /// what to act on: the normal-mode cursor, the focused pane's edge,
+    /// the button to press, a chat waiting for you. Kept to those, so it
+    /// still says "here" when it shows.
     pub(crate) accent: Rgba,
+    /// Links, in a chat, a hover or a terminal: the accent blue, apart
+    /// from the accent, as a link is something to follow, not focus.
+    pub(crate) link: Rgba,
+    /// The letters of a name what's typed matched, as in the finder or a
+    /// completion menu.
+    pub(crate) matched: Rgba,
     /// The bars' background, and the window's.
     pub(crate) bar: Rgba,
     /// The lines between the panes, and between them and the bars.
@@ -94,9 +112,14 @@ impl Default for Theme {
         }
         Self {
             foreground: hex_rgba(0xdd_e1_e6),
-            background: hex_rgba(0x0c_0e_10),
+            background: hex_rgba(BACKGROUND),
             cursor: hex_rgba(0xdd_e1_e6),
             accent: hex_rgba(ACCENT),
+            link: hex_rgba(LINK),
+            // As links are: they read as well as amber against both the
+            // palette and its picked row (6.0:1 there, against amber's
+            // 6.3:1), and leave amber to focus and what to act on.
+            matched: hex_rgba(LINK),
             bar: hex_rgba(0x0012_1416),
             divider: hex_rgba(0x25_26_2c),
             picked: hex_rgba(0x1f_20_27),
@@ -361,10 +384,48 @@ pub(crate) const fn line_number(cursor: bool) -> Style {
         let [_, r, g, b] = ACCENT.to_be_bytes();
         Color::Rgb(r, g, b)
     } else {
-        Color::Rgb(0x4f, 0x54, 0x5c)
+        let [r, g, b] = NUMBER_GREY;
+        Color::Rgb(r, g, b)
     };
     Style {
         fg,
+        ..Style::DEFAULT
+    }
+}
+
+/// The line-number grey, as bytes, which [`line_number`] draws numbers in.
+const NUMBER_GREY: [u8; 3] = [0x4f, 0x54, 0x5c];
+
+/// How a pane's heading is drawn, such as an explorer's root, a board's
+/// name or a review's: bold, in the text colour, as the chat's headings
+/// are. Not in the accent, which is kept for focus and what to act on.
+#[must_use]
+pub(crate) const fn heading() -> Style {
+    Style {
+        attributes: Attributes::BOLD,
+        ..Style::DEFAULT
+    }
+}
+
+/// How the `~` on an editor's lines past the end of its file is drawn:
+/// half as strong as a line number, taken halfway from [`NUMBER_GREY`] to
+/// the background, so it says where the file ends without competing with
+/// it.
+#[must_use]
+pub(crate) const fn end_of_buffer() -> Style {
+    /// Halfway from `a` to `b`, which never overflows: the larger less
+    /// half the gap.
+    const fn half(a: u8, b: u8) -> u8 {
+        if a > b {
+            a - (a - b) / 2
+        } else {
+            b - (b - a) / 2
+        }
+    }
+    let [_, br, bg, bb] = BACKGROUND.to_be_bytes();
+    let [r, g, b] = NUMBER_GREY;
+    Style {
+        fg: Color::Rgb(half(r, br), half(g, bg), half(b, bb)),
         ..Style::DEFAULT
     }
 }
@@ -381,7 +442,11 @@ impl Theme {
             Paint::Shadow => [0.0, 0.0, 0.0, 0.25],
             Paint::Tile => self.background,
             Paint::Divider => self.divider,
-            Paint::FocusEdge | Paint::Selected => faint(self.accent, 0.35),
+            // Strong enough to find at a glance at any scale, where a
+            // fainter edge all but vanished at 2× (lines are two device
+            // pixels there, as they're scaled; it was the faintness).
+            Paint::FocusEdge => faint(self.accent, FOCUS_EDGE),
+            Paint::Selected => faint(self.accent, 0.35),
             Paint::Accent => self.accent,
             Paint::Picked => self.picked,
             Paint::PickedEdge => self.picked_edge,
@@ -418,7 +483,7 @@ impl Theme {
             HighlightKind::Added => faint(self.added, 0.13),
             HighlightKind::Removed => faint(self.removed, 0.13),
             HighlightKind::ColorColumn => white(0.05),
-            HighlightKind::Link => self.accent,
+            HighlightKind::Link => self.link,
             HighlightKind::LessonStep => white(0.04),
             HighlightKind::LessonDone => faint(self.added, 0.14),
             // As the chat's code is, a little stronger, to show on the
@@ -578,6 +643,57 @@ mod tests {
             ..Style::DEFAULT
         });
         assert!(contrast(dimmed.foreground, theme.background) < 3.0);
+    }
+
+    #[test]
+    fn amber_is_kept_for_focus_and_what_to_act_on() {
+        use crate::render::{HighlightKind, Paint};
+        let theme = Theme::default();
+        let rgb = |[r, g, b, _]: Rgba| [r, g, b];
+        // Focus and action: the button to press, the cursor's line, the
+        // focused pane's edge.
+        assert_eq!(theme.paint(Paint::Accent), theme.accent);
+        assert_eq!(rgb(theme.paint(Paint::FocusEdge)), rgb(theme.accent));
+        let cursor_line = theme.cell(&line_number(true)).foreground;
+        assert_eq!(rgb(cursor_line), rgb(theme.accent));
+        // Links and matched letters are the accent blue, apart from it.
+        assert_eq!(theme.highlight(HighlightKind::Link), theme.link);
+        assert_ne!(rgb(theme.link), rgb(theme.accent));
+        assert_ne!(rgb(theme.matched), rgb(theme.accent));
+        // Both read on the palette's picked row and on the background.
+        for colour in [theme.link, theme.matched] {
+            assert!(contrast(colour, theme.chosen) >= 4.5);
+            assert!(contrast(colour, theme.background) >= 4.5);
+        }
+        // Headings are bold, in the text colour.
+        let heading = theme.cell(&heading());
+        assert_eq!(heading.foreground, theme.foreground);
+        assert!(super::heading().attributes.contains(Attributes::BOLD));
+    }
+
+    #[test]
+    fn the_focused_panes_edge_stands_out_as_a_line_should() {
+        let theme = Theme::default();
+        let [r, g, b, alpha] = theme.paint(crate::render::Paint::FocusEdge);
+        let over = mix(theme.background, [r, g, b, 1.0], alpha);
+        // The Web's guidelines ask 3:1 of what marks a control's state;
+        // at 0.35 it was 2.1:1, which all but vanished at 2×.
+        assert!(contrast(over, theme.background) >= 3.0);
+    }
+
+    #[test]
+    fn the_end_of_a_file_is_marked_at_half_a_line_numbers_strength() {
+        let theme = Theme::default();
+        let number = theme.cell(&line_number(false)).foreground;
+        let tilde = theme.cell(&end_of_buffer()).foreground;
+        // Each channel halfway between the number's and the background's.
+        for channel in 0..3 {
+            let halfway = f32::midpoint(number[channel], theme.background[channel]);
+            assert!((tilde[channel] - halfway).abs() < 1.0 / 255.0, "{channel}");
+        }
+        let above = |colour| contrast(colour, theme.background) - 1.0;
+        assert!(above(tilde) < above(number) * 0.6);
+        assert!(above(tilde) > 0.0);
     }
 
     #[test]

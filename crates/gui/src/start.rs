@@ -659,7 +659,7 @@ impl StartPage {
             .map(|at| {
                 let at_u32 = u32::try_from(at).unwrap_or(u32::MAX);
                 if accents.binary_search(&at_u32).is_ok() {
-                    Ink::Accent
+                    Ink::Matched
                 } else if at < title_chars {
                     Ink::Plain
                 } else {
